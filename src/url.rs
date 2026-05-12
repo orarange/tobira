@@ -17,9 +17,9 @@ impl Url {
             .split_once("://")
             .ok_or_else(|| BrowserError::message("URL must include a scheme such as http://"))?;
 
-        if scheme != "http" {
+        if scheme != "http" && scheme != "https" {
             return Err(BrowserError::message(format!(
-                "unsupported scheme: {scheme} (only http:// is supported for now)"
+                "unsupported scheme: {scheme} (only http:// and https:// are supported)"
             )));
         }
 
@@ -39,7 +39,7 @@ impl Url {
             return Err(BrowserError::message("URL is missing a host"));
         }
 
-        let (host, port) = parse_authority(authority)?;
+        let (host, port) = parse_authority(authority, scheme)?;
 
         Ok(Self {
             scheme: scheme.to_string(),
@@ -80,7 +80,9 @@ impl Url {
     }
 
     pub fn host_header(&self) -> String {
-        if self.port == 80 {
+        if (self.scheme == "http" && self.port == 80)
+            || (self.scheme == "https" && self.port == 443)
+        {
             self.host.clone()
         } else {
             format!("{}:{}", self.host, self.port)
@@ -90,7 +92,9 @@ impl Url {
 
 impl fmt::Display for Url {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.port == 80 {
+        if (self.scheme == "http" && self.port == 80)
+            || (self.scheme == "https" && self.port == 443)
+        {
             write!(f, "{}://{}{}", self.scheme, self.host, self.path)
         } else {
             write!(
@@ -102,7 +106,7 @@ impl fmt::Display for Url {
     }
 }
 
-fn parse_authority(authority: &str) -> Result<(String, u16)> {
+fn parse_authority(authority: &str, scheme: &str) -> Result<(String, u16)> {
     if let Some((host, port)) = authority.rsplit_once(':') {
         if !host.is_empty() && port.chars().all(|char| char.is_ascii_digit()) {
             let parsed_port = port
@@ -112,7 +116,8 @@ fn parse_authority(authority: &str) -> Result<(String, u16)> {
         }
     }
 
-    Ok((authority.to_string(), 80))
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    Ok((authority.to_string(), default_port))
 }
 
 fn normalize_path(input: &str) -> String {
@@ -166,6 +171,15 @@ mod tests {
         assert_eq!(url.host, "localhost");
         assert_eq!(url.port, 8080);
         assert_eq!(url.path, "/test");
+    }
+
+    #[test]
+    fn parses_https_url() {
+        let url = Url::parse("https://www.google.com/search?q=rust").unwrap();
+
+        assert_eq!(url.host, "www.google.com");
+        assert_eq!(url.port, 443);
+        assert_eq!(url.path, "/search?q=rust");
     }
 
     #[test]

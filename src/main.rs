@@ -1,6 +1,7 @@
 mod browser;
 mod css;
 mod error;
+mod font;
 mod gui;
 mod html;
 mod http;

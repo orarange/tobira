@@ -84,6 +84,12 @@ pub enum WhiteSpaceMode {
     Pre,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontFamilyKind {
+    Sans,
+    Monospace,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EdgeSizes {
     pub top: u32,
@@ -120,6 +126,7 @@ pub struct ComputedStyle {
     pub margin: EdgeSizes,
     pub padding: EdgeSizes,
     pub font_size_px: u32,
+    pub font_family: FontFamilyKind,
     pub text_align: TextAlign,
     pub font_weight: bool,
     pub underline: bool,
@@ -138,6 +145,9 @@ impl ComputedStyle {
             margin: default_margin(tag_name),
             padding: EdgeSizes::default(),
             font_size_px: parent_font_size,
+            font_family: parent
+                .map(|style| style.font_family)
+                .unwrap_or(FontFamilyKind::Sans),
             text_align: parent
                 .map(|style| style.text_align)
                 .unwrap_or(TextAlign::Left),
@@ -187,12 +197,14 @@ impl ComputedStyle {
                 style.underline = true;
             }
             "pre" => {
+                style.font_family = FontFamilyKind::Monospace;
                 style.white_space = WhiteSpaceMode::Pre;
                 style.margin = EdgeSizes::vertical(12, 12);
                 style.padding = EdgeSizes::all(8);
                 style.background_color = Some(0xF2EEE7);
             }
             "code" => {
+                style.font_family = FontFamilyKind::Monospace;
                 style.padding = EdgeSizes::all(2);
                 style.background_color = Some(0xF2EEE7);
             }
@@ -209,10 +221,6 @@ impl ComputedStyle {
         }
 
         style
-    }
-
-    pub fn font_scale(&self) -> u32 {
-        font_scale_from_px(self.font_size_px)
     }
 }
 
@@ -294,10 +302,6 @@ pub fn parse_inline_declarations(input: &str) -> Vec<Declaration> {
 pub fn build_styled_tree(document: &Node, stylesheet: &Stylesheet) -> StyledNode {
     let ancestors = Vec::new();
     build_node(document, stylesheet, None, &ancestors)
-}
-
-pub fn font_scale_from_px(font_size_px: u32) -> u32 {
-    ((font_size_px.saturating_add(3)) / 8).max(1)
 }
 
 fn build_node(
@@ -399,6 +403,11 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         "font-size" => {
             if let Some(font_size) = parse_font_size(&declaration.value, parent_font_size) {
                 style.font_size_px = font_size.max(8);
+            }
+        }
+        "font-family" => {
+            if let Some(font_family) = parse_font_family(&declaration.value) {
+                style.font_family = font_family;
             }
         }
         "font-weight" => {
@@ -802,6 +811,17 @@ fn parse_font_size(input: &str, parent_font_size: u32) -> Option<u32> {
         "smaller" => Some(parent_font_size.saturating_sub(2).max(8)),
         "larger" => Some(parent_font_size.saturating_add(2)),
         _ => parse_length(&value, parent_font_size),
+    }
+}
+
+fn parse_font_family(input: &str) -> Option<FontFamilyKind> {
+    let value = input.trim().to_ascii_lowercase();
+    if value.contains("mono") || value.contains("code") || value.contains("console") {
+        Some(FontFamilyKind::Monospace)
+    } else if !value.is_empty() {
+        Some(FontFamilyKind::Sans)
+    } else {
+        None
     }
 }
 

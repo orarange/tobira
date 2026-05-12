@@ -1,10 +1,6 @@
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
-use font8x8::{
-    BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, HIRAGANA_FONTS, LATIN_FONTS, MISC_FONTS,
-    UnicodeFonts,
-};
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -14,18 +10,18 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
 use crate::browser::{BrowserPage, load_page};
-use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR};
+use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind};
 use crate::error::{BrowserError, Result};
+use crate::font::{FontContext, estimated_line_height_px};
 use crate::layout::{LayoutDocument, TextCommand, layout_styled_document};
 use crate::url::Url;
 
 const WINDOW_WIDTH: u32 = 1100;
 const WINDOW_HEIGHT: u32 = 760;
 const FRAME_PADDING: u32 = 18;
-const TITLE_SCALE: u32 = 2;
-const FONT_WIDTH: u32 = 8;
-const FONT_HEIGHT: u32 = 8;
-const TITLE_HEIGHT: u32 = FONT_HEIGHT * TITLE_SCALE;
+const TITLE_FONT_SIZE: u32 = 28;
+const HEADER_FONT_SIZE: u32 = 14;
+const TITLE_HEIGHT: u32 = 36;
 const HEADER_HEIGHT: u32 = 92;
 
 const COLOR_WINDOW_BACKGROUND: Color = 0xE7E0D4;
@@ -53,6 +49,7 @@ pub fn run(initial_url: Url) -> Result<()> {
 struct BrowserApp {
     current_url: Url,
     document: DocumentView,
+    fonts: FontContext,
     context: Context<OwnedDisplayHandle>,
     window: Option<WindowHandle>,
     surface: Option<SurfaceHandle>,
@@ -66,6 +63,7 @@ impl BrowserApp {
         Self {
             current_url: document.url.clone(),
             document,
+            fonts: FontContext::load(),
             context,
             window: None,
             surface: None,
@@ -142,6 +140,7 @@ impl BrowserApp {
             layout.background_color,
         );
         paint_header(
+            &mut self.fonts,
             &mut buffer,
             size.width,
             size.height,
@@ -150,6 +149,7 @@ impl BrowserApp {
             max_scroll_y,
         );
         paint_layout(
+            &mut self.fonts,
             &mut buffer,
             size.width,
             size.height,
@@ -383,7 +383,8 @@ fn layout_error_document(document: &ErrorDocument, _width: u32) -> LayoutDocumen
         } else {
             DEFAULT_TEXT_COLOR
         };
-        let height = FONT_HEIGHT * scale + 6;
+        let font_size_px = if scale >= 3 { 28 } else { 18 };
+        let height = estimated_line_height_px(font_size_px);
 
         if line.is_empty() {
             cursor_y = cursor_y.saturating_add(height / 2);
@@ -393,9 +394,10 @@ fn layout_error_document(document: &ErrorDocument, _width: u32) -> LayoutDocumen
         texts.push(TextCommand {
             x: 0,
             y: cursor_y,
-            width: line.chars().count() as u32 * FONT_WIDTH * scale,
+            width: crate::font::estimated_text_width_px(line, font_size_px, FontFamilyKind::Sans),
             text: line.clone(),
-            scale,
+            font_size_px,
+            font_family: FontFamilyKind::Sans,
             color,
             underline: false,
             bold: scale >= 3,
@@ -438,6 +440,7 @@ fn paint_background(buffer: &mut [u32], width: u32, height: u32, content_backgro
 }
 
 fn paint_header(
+    fonts: &mut FontContext,
     buffer: &mut [u32],
     width: u32,
     height: u32,
@@ -466,26 +469,27 @@ fn paint_header(
         COLOR_ACCENT,
     );
 
-    draw_text(
+    fonts.draw_text(
         buffer,
         width,
         height,
         FRAME_PADDING,
         16,
         "SCRATCH BROWSER",
-        TITLE_SCALE,
+        TITLE_FONT_SIZE,
         COLOR_HEADER_TEXT,
         true,
         false,
+        FontFamilyKind::Sans,
     );
-    draw_text(
+    fonts.draw_text(
         buffer,
         width,
         height,
         FRAME_PADDING,
         16 + TITLE_HEIGHT + 10,
         &document.status_line,
-        1,
+        HEADER_FONT_SIZE,
         if document.is_error() {
             COLOR_ACCENT
         } else {
@@ -493,39 +497,43 @@ fn paint_header(
         },
         false,
         false,
+        FontFamilyKind::Sans,
     );
-    draw_text(
+    fonts.draw_text(
         buffer,
         width,
         height,
         FRAME_PADDING,
         16 + TITLE_HEIGHT + 28,
         &document.subtitle,
-        1,
+        HEADER_FONT_SIZE,
         COLOR_HEADER_TEXT,
         false,
         false,
+        FontFamilyKind::Sans,
     );
 
     let controls = format!(
         "Keys: R reload | Esc quit | scroll: {} / {} px",
         scroll_y, max_scroll_y
     );
-    draw_text(
+    fonts.draw_text(
         buffer,
         width,
         height,
         FRAME_PADDING,
         HEADER_HEIGHT - 18,
         &controls,
-        1,
+        HEADER_FONT_SIZE,
         COLOR_HEADER_TEXT,
         false,
         false,
+        FontFamilyKind::Sans,
     );
 }
 
 fn paint_layout(
+    fonts: &mut FontContext,
     buffer: &mut [u32],
     width: u32,
     height: u32,
@@ -558,147 +566,29 @@ fn paint_layout(
     for text in &layout.texts {
         let text_bottom = text
             .y
-            .saturating_add(FONT_HEIGHT * text.scale)
-            .saturating_add(6);
+            .saturating_add(estimated_line_height_px(text.font_size_px));
         if text_bottom < scroll_y || text.y > viewport_bottom {
             continue;
         }
 
-        draw_text(
+        fonts.draw_text(
             buffer,
             width,
             height,
             offset_x.saturating_add(text.x),
             offset_y.saturating_add(text.y.saturating_sub(scroll_y)),
             &text.text,
-            text.scale,
+            text.font_size_px,
             text.color,
             text.bold,
             text.underline,
+            text.font_family,
         );
     }
 }
 
 fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {
     content_height.saturating_sub(viewport_height)
-}
-
-fn draw_text(
-    buffer: &mut [u32],
-    width: u32,
-    height: u32,
-    x: u32,
-    y: u32,
-    text: &str,
-    scale: u32,
-    color: Color,
-    bold: bool,
-    underline: bool,
-) {
-    let mut cursor_x = x;
-    let step = FONT_WIDTH * scale;
-
-    for character in text.chars() {
-        if character == '\n' {
-            continue;
-        }
-        draw_glyph(buffer, width, height, cursor_x, y, character, scale, color);
-        if bold {
-            draw_glyph(
-                buffer,
-                width,
-                height,
-                cursor_x.saturating_add(1),
-                y,
-                character,
-                scale,
-                color,
-            );
-        }
-        cursor_x = cursor_x.saturating_add(step);
-    }
-
-    if underline && !text.is_empty() {
-        let underline_y = y
-            .saturating_add(FONT_HEIGHT * scale)
-            .saturating_add(scale / 2);
-        draw_rect(
-            buffer,
-            width,
-            height,
-            x,
-            underline_y,
-            text.chars().count() as u32 * step,
-            scale.max(1),
-            color,
-        );
-    }
-}
-
-fn draw_glyph(
-    buffer: &mut [u32],
-    width: u32,
-    height: u32,
-    x: u32,
-    y: u32,
-    character: char,
-    scale: u32,
-    color: Color,
-) {
-    let glyph = lookup_glyph(character).unwrap_or_else(|| {
-        lookup_glyph('?').unwrap_or([
-            0b00111100, 0b01000010, 0b00000100, 0b00001000, 0b00010000, 0, 0b00010000, 0,
-        ])
-    });
-
-    draw_bitmap_glyph(buffer, width, height, x, y, glyph, scale, color);
-}
-
-fn draw_bitmap_glyph(
-    buffer: &mut [u32],
-    width: u32,
-    height: u32,
-    x: u32,
-    y: u32,
-    glyph: [u8; 8],
-    scale: u32,
-    color: Color,
-) {
-    for (row_index, row) in glyph.into_iter().enumerate() {
-        for column in 0..8 {
-            let bit = (row >> column) & 1;
-            if bit == 0 {
-                continue;
-            }
-
-            let draw_x = x + (column * scale);
-            let draw_y = y + (row_index as u32 * scale);
-
-            for offset_y in 0..scale {
-                for offset_x in 0..scale {
-                    put_pixel(
-                        buffer,
-                        width,
-                        height,
-                        draw_x + offset_x,
-                        draw_y + offset_y,
-                        color,
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn lookup_glyph(character: char) -> Option<[u8; 8]> {
-    BASIC_FONTS
-        .get(character)
-        .or_else(|| LATIN_FONTS.get(character))
-        .or_else(|| GREEK_FONTS.get(character))
-        .or_else(|| BOX_FONTS.get(character))
-        .or_else(|| BLOCK_FONTS.get(character))
-        .or_else(|| HIRAGANA_FONTS.get(character))
-        .or_else(|| MISC_FONTS.get(character))
 }
 
 fn draw_rect(
@@ -722,36 +612,9 @@ fn draw_rect(
     }
 }
 
-fn put_pixel(buffer: &mut [u32], width: u32, height: u32, x: u32, y: u32, color: Color) {
-    if x >= width || y >= height {
-        return;
-    }
-
-    buffer[y as usize * width as usize + x as usize] = color;
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{draw_bitmap_glyph, layout_error_document, max_scroll};
-
-    #[test]
-    fn glyph_bits_draw_left_to_right() {
-        let mut buffer = vec![0_u32; 8 * 8];
-
-        draw_bitmap_glyph(
-            &mut buffer,
-            8,
-            8,
-            0,
-            0,
-            [0b0000_0001, 0, 0, 0, 0, 0, 0, 0],
-            1,
-            0x00FF_FFFF,
-        );
-
-        assert_eq!(buffer[0], 0x00FF_FFFF);
-        assert_eq!(buffer[7], 0);
-    }
+    use super::{layout_error_document, max_scroll};
 
     #[test]
     fn max_scroll_stops_at_zero() {

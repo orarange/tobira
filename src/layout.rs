@@ -1,10 +1,8 @@
 use crate::css::{
-    Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, StyledElement, StyledNode, TextAlign,
-    WhiteSpaceMode,
+    Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, StyledElement,
+    StyledNode, TextAlign, WhiteSpaceMode,
 };
-
-const FONT_BITMAP_SIZE: u32 = 8;
-const LINE_GAP: u32 = 6;
+use crate::font::{estimated_glyph_advance_px, estimated_line_height_px, estimated_text_width_px};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutDocument {
@@ -29,7 +27,8 @@ pub struct TextCommand {
     pub y: u32,
     pub width: u32,
     pub text: String,
-    pub scale: u32,
+    pub font_size_px: u32,
+    pub font_family: FontFamilyKind,
     pub color: Color,
     pub underline: bool,
     pub bold: bool,
@@ -86,7 +85,7 @@ impl LineBuilder {
             return;
         }
 
-        let width = text.chars().count() as u32 * char_width(style);
+        let width = text_width(style, text);
         self.width = self.width.saturating_add(width);
         self.line_height = self.line_height.max(text_line_height(style));
 
@@ -375,7 +374,7 @@ fn layout_normal_fragments(
 
                 for word in text.split_whitespace() {
                     if pending_space && !line.is_empty() {
-                        let space_width = char_width(style);
+                        let space_width = char_width(style, ' ');
                         if line.width.saturating_add(space_width) > width {
                             emit_line(&mut line, container_style, x, width, cursor_y, context);
                         } else {
@@ -428,7 +427,7 @@ fn layout_preformatted_fragments(
                         continue;
                     }
 
-                    let character_width = char_width(style);
+                    let character_width = char_width(style, character);
                     if !line.is_empty() && line.width.saturating_add(character_width) > width {
                         emit_line(&mut line, container_style, x, width, cursor_y, context);
                     }
@@ -453,7 +452,7 @@ fn push_wrapped_word(
     context: &mut LayoutContext,
     line: &mut LineBuilder,
 ) {
-    let word_width = word.chars().count() as u32 * char_width(style);
+    let word_width = text_width(style, word);
     if word_width <= width {
         if !line.is_empty() && line.width.saturating_add(word_width) > width {
             emit_line(line, container_style, x, width, cursor_y, context);
@@ -462,7 +461,8 @@ fn push_wrapped_word(
         return;
     }
 
-    let max_chars = (width / char_width(style)).max(1) as usize;
+    let avg_char_width = char_width(style, 'M').max(1);
+    let max_chars = (width / avg_char_width).max(1) as usize;
     let mut chunk = String::new();
 
     for character in word.chars() {
@@ -478,12 +478,7 @@ fn push_wrapped_word(
     }
 
     if !chunk.is_empty() {
-        if !line.is_empty()
-            && line
-                .width
-                .saturating_add(chunk.chars().count() as u32 * char_width(style))
-                > width
-        {
+        if !line.is_empty() && line.width.saturating_add(text_width(style, &chunk)) > width {
             emit_line(line, container_style, x, width, cursor_y, context);
         }
         line.push_span(&chunk, style);
@@ -529,7 +524,8 @@ fn emit_line(
             y: *cursor_y,
             width: span.width,
             text: span.text.clone(),
-            scale: span.style.font_scale(),
+            font_size_px: span.style.font_size_px,
+            font_family: span.style.font_family,
             color: span.style.color,
             underline: span.style.underline,
             bold: span.style.font_weight,
@@ -570,12 +566,16 @@ fn is_hidden(node: &StyledNode) -> bool {
     )
 }
 
-fn char_width(style: &ComputedStyle) -> u32 {
-    FONT_BITMAP_SIZE * style.font_scale()
+fn char_width(style: &ComputedStyle, character: char) -> u32 {
+    estimated_glyph_advance_px(character, style.font_size_px, style.font_family)
 }
 
 fn text_line_height(style: &ComputedStyle) -> u32 {
-    FONT_BITMAP_SIZE * style.font_scale() + LINE_GAP
+    estimated_line_height_px(style.font_size_px)
+}
+
+fn text_width(style: &ComputedStyle, text: &str) -> u32 {
+    estimated_text_width_px(text, style.font_size_px, style.font_family)
 }
 
 fn find_document_background(node: &StyledNode) -> Option<Color> {

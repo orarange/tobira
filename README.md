@@ -4,12 +4,14 @@ Scratch Browser is a from-scratch browser experiment built without Chromium, Web
 
 Current capabilities:
 
-- Hand-rolled `http://` client
+- Hand-rolled `http://` and `https://` client
+- TLS with platform certificate verification
+- Response decoding for `gzip`, `deflate`, and `br`
 - Hand-rolled HTML tokenizer and DOM-like tree
 - CSS parsing for:
   - embedded `<style>` blocks
   - `style=""` inline declarations
-  - `link rel="stylesheet"` over `http://`
+  - `link rel="stylesheet"` over `http://` and `https://`
 - Selector support for:
   - tag selectors
   - `.class`
@@ -29,11 +31,11 @@ Current capabilities:
   - `white-space`
 - Lightweight GUI window with `winit`
 - Software rendering with `softbuffer`
+- System font rendering with TrueType / OpenType fonts via `fontdue`
 - Plain text CLI renderer with `--cli`
 
 Still missing:
 
-- `https://`
 - full CSS layout coverage
 - JavaScript execution
 - address bar, tabs, history, navigation UI
@@ -45,6 +47,7 @@ GUI mode:
 
 ```bash
 cargo run -- http://example.com
+cargo run -- https://www.google.com
 ```
 
 CLI mode:
@@ -78,6 +81,8 @@ cargo run -- http://127.0.0.1:8765/demo/index.html
   HTML tokenization and DOM-like tree building
 - `src/css.rs`
   CSS parsing, selector matching, cascade, and computed styles
+- `src/font.rs`
+  System font loading, glyph rasterization, and text measurement helpers
 - `src/layout.rs`
   Styled text layout and block rendering model
 - `src/browser.rs`
@@ -91,8 +96,8 @@ cargo run -- http://127.0.0.1:8765/demo/index.html
 
 ## Next Steps
 
-1. Add `https://` support with `rustls`
-2. Expand CSS coverage for more layout properties
-3. Add better block layout and inline formatting behavior
-4. Add address bar and navigation controls
-5. Add image loading and richer page rendering
+1. Expand CSS coverage for more layout properties
+2. Add better block layout and inline formatting behavior
+3. Add address bar and navigation controls
+4. Add image loading and richer page rendering
+5. Add JavaScript execution for highly dynamic pages
