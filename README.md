@@ -1,69 +1,98 @@
 # Scratch Browser
 
-Chromium も WebView も使わずに、ブラウザの基本部品を自前で組み立てていくための最小実装です。
+Scratch Browser is a from-scratch browser experiment built without Chromium, WebView, or a browser SDK.
 
-今あるもの:
+Current capabilities:
 
-- 手書きの `http://` クライアント
-- 手書きの HTML トークナイザと DOM 風ツリー
-- `winit` ベースの軽量 GUI ウィンドウ
-- `softbuffer` を使った GPU なしのソフトウェア描画
-- 端末向けのテキストレンダラ (`--cli`)
+- Hand-rolled `http://` client
+- Hand-rolled HTML tokenizer and DOM-like tree
+- CSS parsing for:
+  - embedded `<style>` blocks
+  - `style=""` inline declarations
+  - `link rel="stylesheet"` over `http://`
+- Selector support for:
+  - tag selectors
+  - `.class`
+  - `#id`
+  - descendant selectors
+  - child selectors with `>`
+- Style support for:
+  - `display`
+  - `color`
+  - `background-color`
+  - `margin`
+  - `padding`
+  - `font-size`
+  - `font-weight`
+  - `text-align`
+  - `text-decoration`
+  - `white-space`
+- Lightweight GUI window with `winit`
+- Software rendering with `softbuffer`
+- Plain text CLI renderer with `--cli`
 
-まだないもの:
+Still missing:
 
-- `https://` 対応
-- CSS パーサ / レイアウトエンジン
-- JavaScript 実行
-- タブ、履歴、アドレスバー
-- GUI ウィンドウ描画
+- `https://`
+- full CSS layout coverage
+- JavaScript execution
+- address bar, tabs, history, navigation UI
+- images, forms, and modern page features
 
 ## Run
+
+GUI mode:
 
 ```bash
 cargo run -- http://example.com
 ```
 
-GUI 操作:
-
-- `Up` / `Down`: スクロール
-- `PageUp` / `PageDown`: 大きく移動
-- `Home` / `End`: 先頭 / 末尾
-- `R`: 再読込
-- `Esc`: 終了
-
-CLI 表示:
+CLI mode:
 
 ```bash
 cargo run -- --cli http://example.com
 ```
 
-## Structure
+Local CSS demo:
+
+```bash
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/index.html
+```
+
+## GUI Controls
+
+- `Up` / `Down`: scroll
+- `PageUp` / `PageDown`: page scroll
+- `Home` / `End`: jump to top or bottom
+- `R`: reload
+- `Esc`: quit
+
+## Project Structure
 
 - `src/url.rs`
-  URL 解析と相対パス解決
+  URL parsing and relative URL resolution
 - `src/http.rs`
-  HTTP 通信、レスポンス解析、chunked 転送、リダイレクト追跡
+  HTTP fetch, response parsing, chunked decoding, redirect handling
 - `src/html.rs`
-  HTML をトークン化して木構造へ変換
+  HTML tokenization and DOM-like tree building
+- `src/css.rs`
+  CSS parsing, selector matching, cascade, and computed styles
+- `src/layout.rs`
+  Styled text layout and block rendering model
 - `src/browser.rs`
-  読み込み済みページの共通モデル
+  Page loading, stylesheet collection, and browser page model
 - `src/gui.rs`
-  `winit` イベントループとソフトウェア描画
+  `winit` event loop and software drawing
 - `src/render.rs`
-  DOM 風ツリーを端末で読めるテキストへ変換
+  Plain text fallback renderer for CLI mode
 - `src/main.rs`
-  アプリの入口
+  Application entry point
 
 ## Next Steps
 
-1. `https://` を `rustls` などで追加する
-2. CSS パーサを作って `display`, `margin`, `font-size` あたりから対応する
-3. レイアウトツリーを導入する
-4. アドレスバーや戻る/進むを追加する
-5. クリックとスクロールを扱う
-
-## Why This Shape
-
-“ゼロからブラウザを作る”って言っても、いきなり全部やるのはだいぶやばいです。  
-なので最初は「通信する」「読む」「描く」を分離して、あとから本物のブラウザっぽく育てられる形にしています。
+1. Add `https://` support with `rustls`
+2. Expand CSS coverage for more layout properties
+3. Add better block layout and inline formatting behavior
+4. Add address bar and navigation controls
+5. Add image loading and richer page rendering

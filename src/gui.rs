@@ -14,27 +14,25 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
 use crate::browser::{BrowserPage, load_page};
+use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR};
 use crate::error::{BrowserError, Result};
+use crate::layout::{LayoutDocument, TextCommand, layout_styled_document};
 use crate::url::Url;
 
 const WINDOW_WIDTH: u32 = 1100;
 const WINDOW_HEIGHT: u32 = 760;
 const FRAME_PADDING: u32 = 18;
 const TITLE_SCALE: u32 = 2;
-const BODY_SCALE: u32 = 2;
 const FONT_WIDTH: u32 = 8;
 const FONT_HEIGHT: u32 = 8;
 const TITLE_HEIGHT: u32 = FONT_HEIGHT * TITLE_SCALE;
-const BODY_LINE_HEIGHT: u32 = FONT_HEIGHT * BODY_SCALE + 6;
 const HEADER_HEIGHT: u32 = 92;
 
-const COLOR_BACKGROUND: u32 = 0xF5F1E8;
-const COLOR_SURFACE: u32 = 0xFFFDF8;
-const COLOR_HEADER: u32 = 0x1F3A5F;
-const COLOR_TEXT: u32 = 0x1D232E;
-const COLOR_HEADER_TEXT: u32 = 0xF6F7FB;
-const COLOR_ACCENT: u32 = 0xE6A53A;
-const COLOR_ERROR: u32 = 0x8C2F39;
+const COLOR_WINDOW_BACKGROUND: Color = 0xE7E0D4;
+const COLOR_HEADER: Color = 0x1F3A5F;
+const COLOR_HEADER_TEXT: Color = 0xF6F7FB;
+const COLOR_ACCENT: Color = 0xE6A53A;
+const COLOR_ERROR: Color = 0x8C2F39;
 
 type WindowHandle = Rc<Window>;
 type SurfaceHandle = Surface<OwnedDisplayHandle, WindowHandle>;
@@ -58,7 +56,7 @@ struct BrowserApp {
     context: Context<OwnedDisplayHandle>,
     window: Option<WindowHandle>,
     surface: Option<SurfaceHandle>,
-    scroll_lines: usize,
+    scroll_y: u32,
 }
 
 impl BrowserApp {
@@ -71,14 +69,14 @@ impl BrowserApp {
             context,
             window: None,
             surface: None,
-            scroll_lines: 0,
+            scroll_y: 0,
         }
     }
 
     fn reload(&mut self) {
         self.document = DocumentView::load(self.current_url.clone());
         self.current_url = self.document.url.clone();
-        self.scroll_lines = 0;
+        self.scroll_y = 0;
         self.sync_window_title();
         self.request_redraw();
     }
@@ -95,38 +93,14 @@ impl BrowserApp {
         }
     }
 
-    fn scroll_by(&mut self, delta: isize, viewport_lines: usize) {
-        let max_scroll = self.max_scroll(viewport_lines);
-        if max_scroll == 0 {
-            self.scroll_lines = 0;
-            return;
-        }
-
+    fn scroll_by(&mut self, delta: i32, viewport_height: u32, content_height: u32) {
+        let max_scroll = max_scroll(viewport_height, content_height);
         let next = if delta.is_negative() {
-            self.scroll_lines.saturating_sub(delta.unsigned_abs())
+            self.scroll_y.saturating_sub(delta.unsigned_abs())
         } else {
-            self.scroll_lines.saturating_add(delta as usize)
+            self.scroll_y.saturating_add(delta as u32)
         };
-
-        self.scroll_lines = next.min(max_scroll);
-    }
-
-    fn max_scroll(&self, viewport_lines: usize) -> usize {
-        let total = self.document.body_lines.len();
-        total.saturating_sub(viewport_lines)
-    }
-
-    fn visible_body_lines(&self, width: u32, height: u32) -> (Vec<String>, usize) {
-        let body_top = HEADER_HEIGHT + FRAME_PADDING;
-        let available_height = height.saturating_sub(body_top + FRAME_PADDING);
-        let visible_lines = (available_height / BODY_LINE_HEIGHT).max(1) as usize;
-        let max_chars = body_columns(width);
-        let wrapped = wrap_lines(&self.document.body_lines, max_chars);
-        let max_scroll = wrapped.len().saturating_sub(visible_lines);
-        let scroll = self.scroll_lines.min(max_scroll);
-        let end = (scroll + visible_lines).min(wrapped.len());
-
-        (wrapped[scroll..end].to_vec(), visible_lines)
+        self.scroll_y = next.min(max_scroll);
     }
 
     fn draw(&mut self) -> Result<()> {
@@ -139,9 +113,12 @@ impl BrowserApp {
             return Ok(());
         }
 
-        let (body_lines, visible_lines) = self.visible_body_lines(size.width, size.height);
-        let max_scroll = self.max_scroll(visible_lines);
-        self.scroll_lines = self.scroll_lines.min(max_scroll);
+        let body_top = HEADER_HEIGHT + FRAME_PADDING;
+        let content_width = size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let viewport_height = size.height.saturating_sub(body_top + FRAME_PADDING).max(1);
+        let layout = self.document.layout(content_width);
+        let max_scroll_y = max_scroll(viewport_height, layout.content_height);
+        self.scroll_y = self.scroll_y.min(max_scroll_y);
 
         let Some(surface) = self.surface.as_mut() else {
             return Ok(());
@@ -157,20 +134,30 @@ impl BrowserApp {
         let mut buffer = surface
             .buffer_mut()
             .map_err(|error| BrowserError::message(error.to_string()))?;
-        paint_background(&mut buffer, size.width, size.height);
+
+        paint_background(
+            &mut buffer,
+            size.width,
+            size.height,
+            layout.background_color,
+        );
         paint_header(
             &mut buffer,
             size.width,
             size.height,
             &self.document,
-            self.scroll_lines,
+            self.scroll_y,
+            max_scroll_y,
         );
-        paint_body(
+        paint_layout(
             &mut buffer,
             size.width,
             size.height,
-            &body_lines,
-            self.document.is_error,
+            FRAME_PADDING,
+            body_top,
+            viewport_height,
+            self.scroll_y,
+            &layout,
         );
 
         buffer
@@ -178,16 +165,36 @@ impl BrowserApp {
             .map_err(|error| BrowserError::message(error.to_string()))
     }
 
+    fn content_metrics(&self, window_size: PhysicalSize<u32>) -> (u32, u32) {
+        let body_top = HEADER_HEIGHT + FRAME_PADDING;
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let viewport_height = window_size
+            .height
+            .saturating_sub(body_top + FRAME_PADDING)
+            .max(1);
+        let content_height = self.document.layout(content_width).content_height;
+
+        (viewport_height, content_height)
+    }
+
     fn handle_key(&mut self, key_code: KeyCode, window_size: PhysicalSize<u32>) -> bool {
-        let viewport_lines = estimate_viewport_lines(window_size.height);
+        let (viewport_height, content_height) = self.content_metrics(window_size);
         match key_code {
             KeyCode::Escape => return true,
-            KeyCode::ArrowDown => self.scroll_by(1, viewport_lines),
-            KeyCode::ArrowUp => self.scroll_by(-1, viewport_lines),
-            KeyCode::PageDown => self.scroll_by(viewport_lines as isize, viewport_lines),
-            KeyCode::PageUp => self.scroll_by(-(viewport_lines as isize), viewport_lines),
-            KeyCode::Home => self.scroll_lines = 0,
-            KeyCode::End => self.scroll_lines = self.max_scroll(viewport_lines),
+            KeyCode::ArrowDown => self.scroll_by(24, viewport_height, content_height),
+            KeyCode::ArrowUp => self.scroll_by(-24, viewport_height, content_height),
+            KeyCode::PageDown => self.scroll_by(
+                viewport_height.saturating_sub(32) as i32,
+                viewport_height,
+                content_height,
+            ),
+            KeyCode::PageUp => self.scroll_by(
+                -(viewport_height.saturating_sub(32) as i32),
+                viewport_height,
+                content_height,
+            ),
+            KeyCode::Home => self.scroll_y = 0,
+            KeyCode::End => self.scroll_y = max_scroll(viewport_height, content_height),
             KeyCode::KeyR => self.reload(),
             _ => return false,
         }
@@ -197,16 +204,17 @@ impl BrowserApp {
     }
 
     fn handle_wheel(&mut self, delta: MouseScrollDelta, window_size: PhysicalSize<u32>) {
-        let viewport_lines = estimate_viewport_lines(window_size.height);
+        let (viewport_height, content_height) = self.content_metrics(window_size);
         match delta {
             MouseScrollDelta::LineDelta(_, y) => {
-                self.scroll_by(-(y.round() as isize), viewport_lines);
+                self.scroll_by((-(y.round() as i32)) * 24, viewport_height, content_height);
             }
             MouseScrollDelta::PixelDelta(position) => {
-                let lines = (position.y / BODY_LINE_HEIGHT as f64).round() as isize;
-                if lines != 0 {
-                    self.scroll_by(-lines, viewport_lines);
-                }
+                self.scroll_by(
+                    -(position.y.round() as i32),
+                    viewport_height,
+                    content_height,
+                );
             }
         }
 
@@ -263,7 +271,7 @@ impl ApplicationHandler for BrowserApp {
                         format!("drawing failed: {error}"),
                     );
                     self.current_url = self.document.url.clone();
-                    self.scroll_lines = 0;
+                    self.scroll_y = 0;
                     self.sync_window_title();
                     let _ = self.draw();
                 }
@@ -290,8 +298,18 @@ struct DocumentView {
     title: String,
     status_line: String,
     subtitle: String,
-    body_lines: Vec<String>,
-    is_error: bool,
+    content: DocumentContent,
+}
+
+#[derive(Debug, Clone)]
+enum DocumentContent {
+    Loaded(BrowserPage),
+    Error(ErrorDocument),
+}
+
+#[derive(Debug, Clone)]
+struct ErrorDocument {
+    lines: Vec<String>,
 }
 
 impl DocumentView {
@@ -303,62 +321,108 @@ impl DocumentView {
     }
 
     fn from_page(page: BrowserPage) -> Self {
-        let title = first_non_empty_line(page.body_text())
-            .unwrap_or_else(|| "Scratch Browser".to_string())
-            .trim_start_matches('#')
-            .trim()
-            .to_string();
-
-        let status_line = format!("Status: {}", page.status_text());
         let content_type = page
             .content_type
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
-        let subtitle = format!("{} | {}", page.url, content_type);
-        let body_lines = page
-            .body_text()
-            .lines()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>();
 
         Self {
-            url: page.url,
-            title,
-            status_line,
-            subtitle,
-            body_lines,
-            is_error: false,
+            url: page.url.clone(),
+            title: page.title.clone(),
+            status_line: format!("Status: {}", page.status_text()),
+            subtitle: format!("{} | {}", page.url, content_type),
+            content: DocumentContent::Loaded(page),
         }
     }
 
     fn error(url: Url, message: impl Into<String>) -> Self {
-        let message = message.into();
         Self {
             url,
             title: "Load Error".to_string(),
             status_line: "Status: request failed".to_string(),
             subtitle: "The browser core could not load this page.".to_string(),
-            body_lines: vec![
-                "# Load Error".to_string(),
-                String::new(),
-                message,
-                String::new(),
-                "Hints:".to_string(),
-                "- only http:// is supported right now".to_string(),
-                "- https:// is the next big milestone".to_string(),
-                "- press R after you change the URL argument and restart".to_string(),
-            ],
-            is_error: true,
+            content: DocumentContent::Error(ErrorDocument {
+                lines: vec![
+                    "# Load Error".to_string(),
+                    String::new(),
+                    message.into(),
+                    String::new(),
+                    "Hints:".to_string(),
+                    "- CSS support now works, but networking is still http:// only".to_string(),
+                    "- https:// is still the next big milestone".to_string(),
+                    "- press R to try the same URL again".to_string(),
+                ],
+            }),
         }
     }
 
     fn window_title(&self) -> String {
         format!("Scratch Browser - {}", self.title)
     }
+
+    fn is_error(&self) -> bool {
+        matches!(self.content, DocumentContent::Error(_))
+    }
+
+    fn layout(&self, width: u32) -> LayoutDocument {
+        match &self.content {
+            DocumentContent::Loaded(page) => layout_styled_document(&page.styled_document, width),
+            DocumentContent::Error(error) => layout_error_document(error, width),
+        }
+    }
 }
 
-fn paint_background(buffer: &mut [u32], width: u32, height: u32) {
-    draw_rect(buffer, width, height, 0, 0, width, height, COLOR_BACKGROUND);
+fn layout_error_document(document: &ErrorDocument, _width: u32) -> LayoutDocument {
+    let mut texts = Vec::new();
+    let mut cursor_y: u32 = 0;
+
+    for line in &document.lines {
+        let scale = if line.starts_with('#') { 3 } else { 2 };
+        let color = if line.starts_with('#') {
+            COLOR_ERROR
+        } else {
+            DEFAULT_TEXT_COLOR
+        };
+        let height = FONT_HEIGHT * scale + 6;
+
+        if line.is_empty() {
+            cursor_y = cursor_y.saturating_add(height / 2);
+            continue;
+        }
+
+        texts.push(TextCommand {
+            x: 0,
+            y: cursor_y,
+            width: line.chars().count() as u32 * FONT_WIDTH * scale,
+            text: line.clone(),
+            scale,
+            color,
+            underline: false,
+            bold: scale >= 3,
+        });
+
+        cursor_y = cursor_y.saturating_add(height);
+    }
+
+    LayoutDocument {
+        background_color: DEFAULT_BACKGROUND_COLOR,
+        content_height: cursor_y,
+        rects: Vec::new(),
+        texts,
+    }
+}
+
+fn paint_background(buffer: &mut [u32], width: u32, height: u32, content_background: Color) {
+    draw_rect(
+        buffer,
+        width,
+        height,
+        0,
+        0,
+        width,
+        height,
+        COLOR_WINDOW_BACKGROUND,
+    );
     draw_rect(
         buffer,
         width,
@@ -369,7 +433,7 @@ fn paint_background(buffer: &mut [u32], width: u32, height: u32) {
         height
             .saturating_sub(HEADER_HEIGHT / 2)
             .saturating_sub(FRAME_PADDING / 2),
-        COLOR_SURFACE,
+        content_background,
     );
 }
 
@@ -378,7 +442,8 @@ fn paint_header(
     width: u32,
     height: u32,
     document: &DocumentView,
-    scroll_lines: usize,
+    scroll_y: u32,
+    max_scroll_y: u32,
 ) {
     draw_rect(
         buffer,
@@ -410,6 +475,8 @@ fn paint_header(
         "SCRATCH BROWSER",
         TITLE_SCALE,
         COLOR_HEADER_TEXT,
+        true,
+        false,
     );
     draw_text(
         buffer,
@@ -419,11 +486,13 @@ fn paint_header(
         16 + TITLE_HEIGHT + 10,
         &document.status_line,
         1,
-        if document.is_error {
+        if document.is_error() {
             COLOR_ACCENT
         } else {
             COLOR_HEADER_TEXT
         },
+        false,
+        false,
     );
     draw_text(
         buffer,
@@ -434,9 +503,14 @@ fn paint_header(
         &document.subtitle,
         1,
         COLOR_HEADER_TEXT,
+        false,
+        false,
     );
 
-    let controls = format!("Keys: R reload | Esc quit | scroll lines: {scroll_lines}");
+    let controls = format!(
+        "Keys: R reload | Esc quit | scroll: {} / {} px",
+        scroll_y, max_scroll_y
+    );
     draw_text(
         buffer,
         width,
@@ -446,18 +520,67 @@ fn paint_header(
         &controls,
         1,
         COLOR_HEADER_TEXT,
+        false,
+        false,
     );
 }
 
-fn paint_body(buffer: &mut [u32], width: u32, height: u32, lines: &[String], is_error: bool) {
-    let x = FRAME_PADDING;
-    let mut y = HEADER_HEIGHT + FRAME_PADDING;
-    let color = if is_error { COLOR_ERROR } else { COLOR_TEXT };
+fn paint_layout(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    offset_x: u32,
+    offset_y: u32,
+    viewport_height: u32,
+    scroll_y: u32,
+    layout: &LayoutDocument,
+) {
+    let viewport_bottom = scroll_y.saturating_add(viewport_height);
 
-    for line in lines {
-        draw_text(buffer, width, height, x, y, line, BODY_SCALE, color);
-        y = y.saturating_add(BODY_LINE_HEIGHT);
+    for rect in &layout.rects {
+        let rect_bottom = rect.y.saturating_add(rect.height);
+        if rect_bottom < scroll_y || rect.y > viewport_bottom {
+            continue;
+        }
+
+        draw_rect(
+            buffer,
+            width,
+            height,
+            offset_x.saturating_add(rect.x),
+            offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
+            rect.width,
+            rect.height,
+            rect.color,
+        );
     }
+
+    for text in &layout.texts {
+        let text_bottom = text
+            .y
+            .saturating_add(FONT_HEIGHT * text.scale)
+            .saturating_add(6);
+        if text_bottom < scroll_y || text.y > viewport_bottom {
+            continue;
+        }
+
+        draw_text(
+            buffer,
+            width,
+            height,
+            offset_x.saturating_add(text.x),
+            offset_y.saturating_add(text.y.saturating_sub(scroll_y)),
+            &text.text,
+            text.scale,
+            text.color,
+            text.bold,
+            text.underline,
+        );
+    }
+}
+
+fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {
+    content_height.saturating_sub(viewport_height)
 }
 
 fn draw_text(
@@ -468,7 +591,9 @@ fn draw_text(
     y: u32,
     text: &str,
     scale: u32,
-    color: u32,
+    color: Color,
+    bold: bool,
+    underline: bool,
 ) {
     let mut cursor_x = x;
     let step = FONT_WIDTH * scale;
@@ -478,7 +603,35 @@ fn draw_text(
             continue;
         }
         draw_glyph(buffer, width, height, cursor_x, y, character, scale, color);
+        if bold {
+            draw_glyph(
+                buffer,
+                width,
+                height,
+                cursor_x.saturating_add(1),
+                y,
+                character,
+                scale,
+                color,
+            );
+        }
         cursor_x = cursor_x.saturating_add(step);
+    }
+
+    if underline && !text.is_empty() {
+        let underline_y = y
+            .saturating_add(FONT_HEIGHT * scale)
+            .saturating_add(scale / 2);
+        draw_rect(
+            buffer,
+            width,
+            height,
+            x,
+            underline_y,
+            text.chars().count() as u32 * step,
+            scale.max(1),
+            color,
+        );
     }
 }
 
@@ -490,7 +643,7 @@ fn draw_glyph(
     y: u32,
     character: char,
     scale: u32,
-    color: u32,
+    color: Color,
 ) {
     let glyph = lookup_glyph(character).unwrap_or_else(|| {
         lookup_glyph('?').unwrap_or([
@@ -509,7 +662,7 @@ fn draw_bitmap_glyph(
     y: u32,
     glyph: [u8; 8],
     scale: u32,
-    color: u32,
+    color: Color,
 ) {
     for (row_index, row) in glyph.into_iter().enumerate() {
         for column in 0..8 {
@@ -556,7 +709,7 @@ fn draw_rect(
     y: u32,
     rect_width: u32,
     rect_height: u32,
-    color: u32,
+    color: Color,
 ) {
     let max_x = x.saturating_add(rect_width).min(width);
     let max_y = y.saturating_add(rect_height).min(height);
@@ -569,7 +722,7 @@ fn draw_rect(
     }
 }
 
-fn put_pixel(buffer: &mut [u32], width: u32, height: u32, x: u32, y: u32, color: u32) {
+fn put_pixel(buffer: &mut [u32], width: u32, height: u32, x: u32, y: u32, color: Color) {
     if x >= width || y >= height {
         return;
     }
@@ -577,110 +730,9 @@ fn put_pixel(buffer: &mut [u32], width: u32, height: u32, x: u32, y: u32, color:
     buffer[y as usize * width as usize + x as usize] = color;
 }
 
-fn body_columns(width: u32) -> usize {
-    let available = width.saturating_sub(FRAME_PADDING * 2);
-    (available / (FONT_WIDTH * BODY_SCALE)).max(1) as usize
-}
-
-fn estimate_viewport_lines(height: u32) -> usize {
-    let body_top = HEADER_HEIGHT + FRAME_PADDING;
-    let available_height = height.saturating_sub(body_top + FRAME_PADDING);
-    (available_height / BODY_LINE_HEIGHT).max(1) as usize
-}
-
-fn first_non_empty_line(text: &str) -> Option<String> {
-    text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-}
-
-fn wrap_lines(lines: &[String], max_chars: usize) -> Vec<String> {
-    let mut wrapped = Vec::new();
-
-    for line in lines {
-        if line.trim().is_empty() {
-            wrapped.push(String::new());
-            continue;
-        }
-
-        let mut current = String::new();
-        for word in line.split_whitespace() {
-            let word_len = word.chars().count();
-
-            if current.is_empty() {
-                append_or_split_word(word, max_chars, &mut current, &mut wrapped);
-                continue;
-            }
-
-            let current_len = current.chars().count();
-            if current_len + 1 + word_len <= max_chars {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                wrapped.push(current);
-                current = String::new();
-                append_or_split_word(word, max_chars, &mut current, &mut wrapped);
-            }
-        }
-
-        if !current.is_empty() {
-            wrapped.push(current);
-        }
-    }
-
-    wrapped
-}
-
-fn append_or_split_word(
-    word: &str,
-    max_chars: usize,
-    current: &mut String,
-    wrapped: &mut Vec<String>,
-) {
-    if word.chars().count() <= max_chars {
-        current.push_str(word);
-        return;
-    }
-
-    let mut chunk = String::new();
-    for character in word.chars() {
-        chunk.push(character);
-        if chunk.chars().count() == max_chars {
-            wrapped.push(chunk);
-            chunk = String::new();
-        }
-    }
-
-    if !chunk.is_empty() {
-        current.push_str(&chunk);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{body_columns, draw_bitmap_glyph, wrap_lines};
-
-    #[test]
-    fn wraps_long_lines_at_word_boundaries() {
-        let lines = vec!["alpha beta gamma delta".to_string()];
-        let wrapped = wrap_lines(&lines, 10);
-
-        assert_eq!(wrapped, vec!["alpha beta", "gamma", "delta"]);
-    }
-
-    #[test]
-    fn splits_single_long_words() {
-        let lines = vec!["supercalifragilistic".to_string()];
-        let wrapped = wrap_lines(&lines, 6);
-
-        assert_eq!(wrapped, vec!["superc", "alifra", "gilist", "ic"]);
-    }
-
-    #[test]
-    fn body_column_count_never_drops_below_one() {
-        assert_eq!(body_columns(0), 1);
-    }
+    use super::{draw_bitmap_glyph, layout_error_document, max_scroll};
 
     #[test]
     fn glyph_bits_draw_left_to_right() {
@@ -699,5 +751,23 @@ mod tests {
 
         assert_eq!(buffer[0], 0x00FF_FFFF);
         assert_eq!(buffer[7], 0);
+    }
+
+    #[test]
+    fn max_scroll_stops_at_zero() {
+        assert_eq!(max_scroll(400, 100), 0);
+        assert_eq!(max_scroll(100, 400), 300);
+    }
+
+    #[test]
+    fn error_layout_contains_text_commands() {
+        let layout = layout_error_document(
+            &super::ErrorDocument {
+                lines: vec!["# Oops".to_string(), "hello".to_string()],
+            },
+            320,
+        );
+
+        assert!(layout.texts.len() >= 2);
     }
 }

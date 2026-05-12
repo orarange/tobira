@@ -1,0 +1,25 @@
+body {
+  background: #f6efe4;
+  color: #223043;
+  margin: 20px;
+}
+
+.hero {
+  background-color: #fffaf2;
+  padding: 18px;
+}
+
+h1 {
+  color: #1f3a5f;
+  text-align: center;
+}
+
+.card {
+  background-color: #f0e5d2;
+  margin-top: 18px;
+  padding: 14px;
+}
+
+#callout {
+  font-size: 24px;
+}
