@@ -498,6 +498,19 @@ fn draw_glyph(
         ])
     });
 
+    draw_bitmap_glyph(buffer, width, height, x, y, glyph, scale, color);
+}
+
+fn draw_bitmap_glyph(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    glyph: [u8; 8],
+    scale: u32,
+    color: u32,
+) {
     for (row_index, row) in glyph.into_iter().enumerate() {
         for column in 0..8 {
             let bit = (row >> column) & 1;
@@ -505,7 +518,7 @@ fn draw_glyph(
                 continue;
             }
 
-            let draw_x = x + ((7 - column) * scale);
+            let draw_x = x + (column * scale);
             let draw_y = y + (row_index as u32 * scale);
 
             for offset_y in 0..scale {
@@ -646,7 +659,7 @@ fn append_or_split_word(
 
 #[cfg(test)]
 mod tests {
-    use super::{body_columns, wrap_lines};
+    use super::{body_columns, draw_bitmap_glyph, wrap_lines};
 
     #[test]
     fn wraps_long_lines_at_word_boundaries() {
@@ -667,5 +680,24 @@ mod tests {
     #[test]
     fn body_column_count_never_drops_below_one() {
         assert_eq!(body_columns(0), 1);
+    }
+
+    #[test]
+    fn glyph_bits_draw_left_to_right() {
+        let mut buffer = vec![0_u32; 8 * 8];
+
+        draw_bitmap_glyph(
+            &mut buffer,
+            8,
+            8,
+            0,
+            0,
+            [0b0000_0001, 0, 0, 0, 0, 0, 0, 0],
+            1,
+            0x00FF_FFFF,
+        );
+
+        assert_eq!(buffer[0], 0x00FF_FFFF);
+        assert_eq!(buffer[7], 0);
     }
 }
