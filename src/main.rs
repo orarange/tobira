@@ -1,13 +1,13 @@
+mod browser;
 mod error;
+mod gui;
 mod html;
 mod http;
 mod render;
 mod url;
 
+use browser::load_page;
 use error::Result;
-use html::parse_document;
-use http::fetch;
-use render::render_document;
 use url::Url;
 
 fn main() {
@@ -20,31 +20,33 @@ fn main() {
 fn run() -> Result<()> {
     let mut args = std::env::args();
     let program = args.next().unwrap_or_else(|| "scratch_browser".to_string());
+    let mut cli_mode = false;
+    let mut raw_url = None;
 
-    let Some(raw_url) = args.next() else {
+    for arg in args {
+        match arg.as_str() {
+            "--cli" => cli_mode = true,
+            "--gui" => cli_mode = false,
+            _ if raw_url.is_none() => raw_url = Some(arg),
+            _ => {
+                print_usage(&program);
+                return Ok(());
+            }
+        }
+    }
+
+    let Some(raw_url) = raw_url else {
         print_usage(&program);
         return Ok(());
     };
 
     let url = Url::parse(&raw_url)?;
-    let response = fetch(&url)?;
-    let document = parse_document(&String::from_utf8_lossy(&response.body));
-    let rendered = render_document(&document);
 
-    println!("URL: {}", response.final_url);
-    println!(
-        "Status: {} {}",
-        response.status_code, response.reason_phrase
-    );
-    if let Some(content_type) = response.header("content-type") {
-        println!("Content-Type: {content_type}");
-    }
-    println!();
-
-    if rendered.trim().is_empty() {
-        println!("[empty document]");
+    if cli_mode {
+        let page = load_page(&url)?;
+        println!("{}", page.to_cli_output().trim_end());
     } else {
-        println!("{}", rendered.trim_end());
+        gui::run(url)?;
     }
 
     Ok(())
@@ -55,11 +57,13 @@ fn print_usage(program: &str) {
     println!();
     println!("Usage:");
     println!("  {program} http://example.com");
+    println!("  {program} --cli http://example.com");
     println!();
     println!("What it does right now:");
     println!("  - Downloads a page with a hand-rolled HTTP client");
     println!("  - Parses HTML into a tiny DOM tree");
-    println!("  - Renders readable text in the terminal");
+    println!("  - Opens a lightweight GUI window with winit + software rendering");
+    println!("  - Keeps the terminal renderer behind --cli");
     println!();
     println!("No Chromium. No WebView. No browser SDK.");
 }
