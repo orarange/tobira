@@ -61,7 +61,7 @@ fn run() -> Result<()> {
 }
 
 fn print_usage(program: &str) {
-    println!("Scratch Browser");
+    println!("Tobira");
     println!();
     println!("Usage:");
     println!("  {program}");

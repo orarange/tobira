@@ -845,9 +845,9 @@ impl DocumentView {
 
     fn window_title(&self) -> String {
         if self.title.is_empty() {
-            "Scratch Browser".to_string()
+            "Tobira".to_string()
         } else {
-            format!("Scratch Browser - {}", self.title)
+            format!("Tobira - {}", self.title)
         }
     }
 
@@ -1636,7 +1636,7 @@ fn paint_chrome(
         height,
         chrome.title_bar.x,
         title_y,
-        "SCRATCH BROWSER",
+        "TOBIRA",
         APP_FONT_SIZE,
         COLOR_HEADER_TEXT,
         true,
@@ -1644,7 +1644,7 @@ fn paint_chrome(
         FontFamilyKind::Sans,
     );
 
-    let app_width = fonts.text_width_px("SCRATCH BROWSER", APP_FONT_SIZE, FontFamilyKind::Sans);
+    let app_width = fonts.text_width_px("TOBIRA", APP_FONT_SIZE, FontFamilyKind::Sans);
     let page_title_x = chrome
         .title_bar
         .x

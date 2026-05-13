@@ -165,7 +165,7 @@ fn load_document_source(url: &Url, frame_depth: usize) -> Result<LoadedDocumentS
     let title = original_title
         .or_else(|| document_title(&document))
         .or_else(|| first_heading(&document))
-        .unwrap_or_else(|| "Scratch Browser".to_string());
+        .unwrap_or_else(|| "Tobira".to_string());
 
     Ok(LoadedDocumentSource {
         final_url: response.final_url,
@@ -228,7 +228,7 @@ fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<
         body_children.pop();
     }
 
-    let title = document_title(document).unwrap_or_else(|| "Scratch Browser".to_string());
+    let title = document_title(document).unwrap_or_else(|| "Tobira".to_string());
     Ok(Some(synthetic_document(&title, body_children)))
 }
 
@@ -269,7 +269,7 @@ fn expand_frameset(
         return Ok(None);
     }
 
-    let title = document_title(document).unwrap_or_else(|| "Scratch Browser".to_string());
+    let title = document_title(document).unwrap_or_else(|| "Tobira".to_string());
     let cols = frameset
         .attribute("cols")
         .map(|value| parse_frame_tracks(value, frames.len()));
@@ -376,7 +376,7 @@ fn frame_section_title(frame: &FrameSpec, frame_document: &LoadedDocumentSource)
         return None;
     }
 
-    if !frame_document.title.trim().is_empty() && frame_document.title != "Scratch Browser" {
+    if !frame_document.title.trim().is_empty() && frame_document.title != "Tobira" {
         return Some(frame_document.title.clone());
     }
 
@@ -1206,7 +1206,7 @@ fn build_youtube_generic_document(document: &Node, html: &str, url: &Url) -> Nod
     let description = find_meta_content(document, "name", "description")
         .or_else(|| find_meta_content(document, "property", "og:description"))
         .unwrap_or_else(|| {
-            "This YouTube page relies on a large app shell. Scratch Browser currently renders specific watch URLs more accurately than the full home feed.".to_string()
+            "This YouTube page relies on a large app shell. Tobira currently renders specific watch URLs more accurately than the full home feed.".to_string()
         });
 
     let mut body_children = vec![
@@ -1264,7 +1264,7 @@ fn build_youtube_generic_document_from_html(html: &str, url: &Url) -> Node {
     let description = extract_meta_content_from_html(html, "name", "description")
         .or_else(|| extract_meta_content_from_html(html, "property", "og:description"))
         .unwrap_or_else(|| {
-            "This YouTube page relies on a large app shell. Scratch Browser currently renders specific watch URLs more accurately than the full home feed.".to_string()
+            "This YouTube page relies on a large app shell. Tobira currently renders specific watch URLs more accurately than the full home feed.".to_string()
         });
 
     let mut body_children = vec![
@@ -1563,7 +1563,7 @@ fn build_youtube_home_document(data: &YouTubeHomeData, url: &Url) -> Node {
 
     let sidebar_children = sidebar_labels
         .into_iter()
-        .map(|label| simple_text_element("p", label))
+        .map(|(label, href)| link_element(href, label))
         .collect::<Vec<_>>();
 
     let mut main_children = vec![simple_text_element("h1", &data.section_title)];
@@ -1581,7 +1581,7 @@ fn build_youtube_home_document(data: &YouTubeHomeData, url: &Url) -> Node {
         main_children.push(hr_node());
         main_children.push(simple_text_element("h2", "Quick Links"));
         for href in data.quick_links.iter().take(6) {
-            main_children.push(simple_text_element("p", href));
+            main_children.push(link_element(href, href));
         }
     }
 
@@ -1728,9 +1728,9 @@ fn build_youtube_nudge_card(data: &YouTubeHomeData) -> Node {
     if let Some(subtitle) = data.nudge_subtitle.as_deref() {
         content.push(simple_text_element("p", subtitle));
     }
-    content.push(simple_text_element(
-        "p",
-        "Tip: open a watch URL or search results page to populate richer YouTube cards.",
+    content.push(link_element(
+        "https://www.youtube.com/feed/trending",
+        "→ トレンド動画を見る (View Trending)",
     ));
 
     Node::Element(Element {
@@ -1835,17 +1835,28 @@ fn default_youtube_sidebar_labels<'a>(
 fn default_youtube_sidebar_labels<'a>(
     search_placeholder: Option<&'a str>,
     section_title: &'a str,
-) -> Vec<&'a str> {
-    let _ = looks_like_japanese(search_placeholder.unwrap_or(section_title));
-    vec![
-        "Home",
-        "Shorts",
-        "Subscriptions",
-        "History",
-        "Playlists",
-        "Watch later",
-        "Liked videos",
-    ]
+) -> Vec<(&'a str, &'a str)> {
+    if looks_like_japanese(search_placeholder.unwrap_or(section_title)) {
+        vec![
+            ("ホーム", "https://www.youtube.com/"),
+            ("ショート", "https://www.youtube.com/shorts"),
+            ("登録チャンネル", "https://www.youtube.com/feed/subscriptions"),
+            ("トレンド", "https://www.youtube.com/feed/trending"),
+            ("履歴", "https://www.youtube.com/feed/history"),
+            ("後で見る", "https://www.youtube.com/playlist?list=WL"),
+            ("高く評価した動画", "https://www.youtube.com/playlist?list=LL"),
+        ]
+    } else {
+        vec![
+            ("Home", "https://www.youtube.com/"),
+            ("Shorts", "https://www.youtube.com/shorts"),
+            ("Subscriptions", "https://www.youtube.com/feed/subscriptions"),
+            ("Trending", "https://www.youtube.com/feed/trending"),
+            ("History", "https://www.youtube.com/feed/history"),
+            ("Watch later", "https://www.youtube.com/playlist?list=WL"),
+            ("Liked videos", "https://www.youtube.com/playlist?list=LL"),
+        ]
+    }
 }
 
 fn build_google_document_from_html(html: &str, url: &Url) -> Node {
@@ -1853,7 +1864,7 @@ fn build_google_document_from_html(html: &str, url: &Url) -> Node {
     let description = extract_meta_content_from_html(html, "name", "description")
         .or_else(|| extract_meta_content_from_html(html, "property", "og:description"))
         .unwrap_or_else(|| {
-            "This Google page uses a large interactive shell. Scratch Browser keeps it lightweight instead of trying to execute the full app.".to_string()
+            "This Google page uses a large interactive shell. Tobira keeps it lightweight instead of trying to execute the full app.".to_string()
         });
 
     synthetic_document(
@@ -1947,6 +1958,18 @@ fn simple_text_element(tag_name: &str, text: &str) -> Node {
         tag_name: tag_name.to_string(),
         attributes: BTreeMap::new(),
         children: vec![Node::Text(text.to_string())],
+    })
+}
+
+fn link_element(href: &str, text: &str) -> Node {
+    Node::Element(Element {
+        tag_name: "p".to_string(),
+        attributes: BTreeMap::new(),
+        children: vec![Node::Element(Element {
+            tag_name: "a".to_string(),
+            attributes: BTreeMap::from([("href".to_string(), href.to_string())]),
+            children: vec![Node::Text(text.to_string())],
+        })],
     })
 }
 
