@@ -79,6 +79,13 @@ pub enum TextAlign {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerticalAlign {
+    Top,
+    Middle,
+    Bottom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhiteSpaceMode {
     Normal,
     Pre,
@@ -88,6 +95,12 @@ pub enum WhiteSpaceMode {
 pub enum FontFamilyKind {
     Sans,
     Monospace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LengthValue {
+    Pixels(u32),
+    Percent(u32),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -125,9 +138,12 @@ pub struct ComputedStyle {
     pub background_color: Option<Color>,
     pub margin: EdgeSizes,
     pub padding: EdgeSizes,
+    pub width: Option<LengthValue>,
+    pub height: Option<LengthValue>,
     pub font_size_px: u32,
     pub font_family: FontFamilyKind,
     pub text_align: TextAlign,
+    pub vertical_align: VerticalAlign,
     pub font_weight: bool,
     pub underline: bool,
     pub white_space: WhiteSpaceMode,
@@ -144,6 +160,8 @@ impl ComputedStyle {
             background_color: None,
             margin: default_margin(tag_name),
             padding: EdgeSizes::default(),
+            width: None,
+            height: None,
             font_size_px: parent_font_size,
             font_family: parent
                 .map(|style| style.font_family)
@@ -151,6 +169,7 @@ impl ComputedStyle {
             text_align: parent
                 .map(|style| style.text_align)
                 .unwrap_or(TextAlign::Left),
+            vertical_align: VerticalAlign::Top,
             font_weight: parent.map(|style| style.font_weight).unwrap_or(false),
             underline: parent.map(|style| style.underline).unwrap_or(false),
             white_space: parent
@@ -414,9 +433,20 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         "font-weight" => {
             style.font_weight = parse_font_weight(&declaration.value).unwrap_or(style.font_weight);
         }
+        "width" => {
+            style.width = parse_length_value(&declaration.value, parent_font_size);
+        }
+        "height" => {
+            style.height = parse_length_value(&declaration.value, parent_font_size);
+        }
         "text-align" => {
             if let Some(text_align) = parse_text_align(&declaration.value) {
                 style.text_align = text_align;
+            }
+        }
+        "vertical-align" => {
+            if let Some(vertical_align) = parse_vertical_align(&declaration.value) {
+                style.vertical_align = vertical_align;
             }
         }
         "text-decoration" => {
@@ -517,8 +547,26 @@ fn default_margin(tag_name: &str) -> EdgeSizes {
 }
 
 fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_font_size: u32) {
+    if let Some(width) = element
+        .attribute("width")
+        .and_then(|value| parse_length_value(value, parent_font_size))
+    {
+        style.width = Some(width);
+    }
+
+    if let Some(height) = element
+        .attribute("height")
+        .and_then(|value| parse_length_value(value, parent_font_size))
+    {
+        style.height = Some(height);
+    }
+
     if let Some(text_align) = element.attribute("align").and_then(parse_text_align) {
         style.text_align = text_align;
+    }
+
+    if let Some(vertical_align) = element.attribute("valign").and_then(parse_vertical_align) {
+        style.vertical_align = vertical_align;
     }
 
     if let Some(background_color) = element.attribute("bgcolor").and_then(parse_color) {
@@ -780,6 +828,15 @@ fn parse_text_align(input: &str) -> Option<TextAlign> {
     }
 }
 
+fn parse_vertical_align(input: &str) -> Option<VerticalAlign> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "top" | "text-top" => Some(VerticalAlign::Top),
+        "middle" | "center" => Some(VerticalAlign::Middle),
+        "bottom" | "text-bottom" => Some(VerticalAlign::Bottom),
+        _ => None,
+    }
+}
+
 fn parse_underline(input: &str) -> Option<bool> {
     let value = input.trim().to_ascii_lowercase();
     if value.contains("underline") {
@@ -900,6 +957,16 @@ fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
     parse_float(&value).map(|parsed| parsed.round().max(0.0) as u32)
 }
 
+fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue> {
+    let value = input.trim().to_ascii_lowercase();
+    if let Some(number) = value.strip_suffix('%') {
+        return parse_float(number)
+            .map(|parsed| LengthValue::Percent(parsed.round().max(0.0) as u32));
+    }
+
+    parse_length(&value, parent_font_size).map(LengthValue::Pixels)
+}
+
 fn parse_float(input: &str) -> Option<f32> {
     input.trim().parse::<f32>().ok()
 }
@@ -994,7 +1061,8 @@ fn strip_comments(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Display, StyledNode, WhiteSpaceMode, build_styled_tree, parse_color, parse_stylesheet,
+        Display, LengthValue, StyledNode, VerticalAlign, WhiteSpaceMode, build_styled_tree,
+        parse_color, parse_stylesheet,
     };
     use crate::html::{Node, parse_document};
 
@@ -1086,6 +1154,20 @@ mod tests {
         assert_eq!(body.style.background_color, Some(0xF0F0FF));
         assert_eq!(heading.style.text_align, super::TextAlign::Center);
         assert_eq!(font.style.color, 0xFF0000);
+    }
+
+    #[test]
+    fn applies_css_and_legacy_width_height_and_valign() {
+        let document = parse_document(
+            "<table><tr><td width=\"120\" height=\"40\" valign=\"bottom\" style=\"width: 60%;\">Hello</td></tr></table>",
+        );
+        let stylesheet = parse_stylesheet("td { vertical-align: middle; }");
+        let styled = build_styled_tree(&document, &stylesheet);
+        let cell = find_first_element(&styled, "td").expect("cell should exist");
+
+        assert_eq!(cell.style.width, Some(LengthValue::Percent(60)));
+        assert_eq!(cell.style.height, Some(LengthValue::Pixels(40)));
+        assert_eq!(cell.style.vertical_align, VerticalAlign::Middle);
     }
 
     fn find_second_paragraph<'a>(node: &'a StyledNode) -> Option<&'a super::StyledElement> {

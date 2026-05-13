@@ -1,6 +1,6 @@
 use crate::css::{
-    Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, StyledElement,
-    StyledNode, TextAlign, WhiteSpaceMode,
+    Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, LengthValue,
+    StyledElement, StyledNode, TextAlign, VerticalAlign, WhiteSpaceMode,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
@@ -347,8 +347,11 @@ fn image_dimensions(
     intrinsic_height: u32,
     max_width: u32,
 ) -> (u32, u32) {
-    let width_attr = parse_dimension_attribute(element.attributes.get("width"));
-    let height_attr = parse_dimension_attribute(element.attributes.get("height"));
+    let width_spec = specified_length(element, element.style.width, "width");
+    let height_spec = specified_length(element, element.style.height, "height");
+    let width_attr = width_spec.map(|length| resolve_length_value(length, max_width.max(1)));
+    let height_attr =
+        height_spec.map(|length| resolve_length_value(length, intrinsic_height.max(1)));
 
     let mut width = width_attr.unwrap_or(intrinsic_width.max(1));
     let mut height = height_attr.unwrap_or_else(|| {
@@ -411,11 +414,22 @@ fn layout_table_element(
 
     let spacing = parse_dimension_attribute(element.attributes.get("cellspacing")).unwrap_or(0);
     let padding = parse_dimension_attribute(element.attributes.get("cellpadding")).unwrap_or(0);
-    let available_width = resolve_table_width(element, width).max(1).min(width.max(1));
+    let available_width = width.max(1);
     let track_total_spacing = spacing.saturating_mul(column_count.saturating_sub(1) as u32);
-    let content_width = available_width.saturating_sub(track_total_spacing).max(1);
-    let column_widths =
-        compute_column_widths(element, &placements, content_width, padding, images, fonts);
+    let content_limit = available_width.saturating_sub(track_total_spacing).max(1);
+    let mut sizing =
+        compute_column_widths(element, &placements, content_limit, padding, images, fonts);
+    let preferred_content_width = sizing.widths.iter().sum::<u32>();
+    let preferred_table_width = preferred_content_width
+        .saturating_add(track_total_spacing)
+        .max(1);
+    let table_width = resolve_table_width(element, available_width, preferred_table_width);
+    let target_content_width = table_width.saturating_sub(track_total_spacing).max(1);
+    expand_column_widths(
+        &mut sizing,
+        target_content_width.saturating_sub(preferred_content_width),
+    );
+    let column_widths = sizing.widths;
     let table_width = column_widths
         .iter()
         .sum::<u32>()
@@ -490,11 +504,20 @@ fn layout_table_element(
             });
         }
 
+        let content_area_height = cell_height.saturating_sub(padding.saturating_mul(2));
+        let vertical_offset = match placement.cell.style.vertical_align {
+            VerticalAlign::Top => 0,
+            VerticalAlign::Middle => content_area_height.saturating_sub(layout.content_height) / 2,
+            VerticalAlign::Bottom => content_area_height.saturating_sub(layout.content_height),
+        };
+
         merge_fragment(
             context,
             layout,
             cell_x.saturating_add(padding),
-            cell_y.saturating_add(padding),
+            cell_y
+                .saturating_add(padding)
+                .saturating_add(vertical_offset),
         );
     }
 
@@ -519,6 +542,12 @@ struct FragmentLayout {
     rects: Vec<RectCommand>,
     texts: Vec<TextCommand>,
     images: Vec<ImageCommand>,
+}
+
+#[derive(Debug, Clone)]
+struct TableColumnSizing {
+    widths: Vec<u32>,
+    locked: Vec<bool>,
 }
 
 fn collect_table_rows(element: &StyledElement) -> Vec<&StyledElement> {
@@ -593,13 +622,13 @@ fn build_table_placements<'a>(rows: &[&'a StyledElement]) -> Vec<TablePlacement<
 }
 
 fn compute_column_widths(
-    table: &StyledElement,
+    _table: &StyledElement,
     placements: &[TablePlacement<'_>],
     available_width: u32,
     padding: u32,
     images: &ImageStore,
     fonts: &mut FontContext,
-) -> Vec<u32> {
+) -> TableColumnSizing {
     let column_count = placements
         .iter()
         .map(|placement| placement.column_index + placement.colspan)
@@ -614,8 +643,9 @@ fn compute_column_widths(
         }
 
         let column = placement.column_index;
-        if let Some(length) = parse_length_spec(placement.cell.attributes.get("width")) {
-            let resolved = resolve_length_spec(length, available_width);
+        if let Some(length) = specified_length(placement.cell, placement.cell.style.width, "width")
+        {
+            let resolved = resolve_length_value(length, available_width);
             widths[column] = widths[column].max(resolved);
             locked[column] = true;
             continue;
@@ -625,21 +655,23 @@ fn compute_column_widths(
         widths[column] = widths[column].max(measured);
     }
 
-    let table_width = parse_length_spec(table.attributes.get("width"))
-        .map(|length| resolve_length_spec(length, available_width))
-        .unwrap_or(available_width);
-    let total_width = widths.iter().sum::<u32>();
-    if total_width >= table_width {
-        return widths.into_iter().map(|value| value.max(1)).collect();
+    TableColumnSizing {
+        widths: widths.into_iter().map(|value| value.max(1)).collect(),
+        locked,
+    }
+}
+
+fn expand_column_widths(sizing: &mut TableColumnSizing, extra: u32) {
+    if extra == 0 || sizing.widths.is_empty() {
+        return;
     }
 
-    let extra = table_width - total_width;
-    let flex_columns = locked.iter().filter(|&&value| !value).count().max(1) as u32;
+    let flex_columns = sizing.locked.iter().filter(|&&value| !value).count().max(1) as u32;
     let flex_share = (extra / flex_columns).max(1);
     let mut remaining = extra;
 
-    for (index, width) in widths.iter_mut().enumerate() {
-        if locked[index] {
+    for (index, width) in sizing.widths.iter_mut().enumerate() {
+        if sizing.locked[index] {
             continue;
         }
         let add = flex_share.min(remaining);
@@ -647,12 +679,14 @@ fn compute_column_widths(
         remaining = remaining.saturating_sub(add);
     }
 
-    if remaining > 0 && !widths.is_empty() {
-        let last = widths.len() - 1;
-        widths[last] = widths[last].saturating_add(remaining);
+    if remaining > 0 {
+        let target_index = sizing
+            .locked
+            .iter()
+            .position(|locked| !locked)
+            .unwrap_or(sizing.widths.len() - 1);
+        sizing.widths[target_index] = sizing.widths[target_index].saturating_add(remaining);
     }
-
-    widths.into_iter().map(|value| value.max(1)).collect()
 }
 
 fn layout_table_cell(
@@ -1176,32 +1210,10 @@ fn text_width(style: &ComputedStyle, text: &str, fonts: &mut FontContext) -> u32
     fonts.text_width_px(text, style.font_size_px, style.font_family)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LengthSpec {
-    Pixels(u32),
-    Percent(u32),
-}
-
 fn parse_dimension_attribute(value: Option<&String>) -> Option<u32> {
     value
         .map(String::as_str)
         .and_then(|raw| raw.trim_end_matches('%').parse::<u32>().ok())
-}
-
-fn parse_length_spec(value: Option<&String>) -> Option<LengthSpec> {
-    let raw = value?.trim();
-    if let Some(percent) = raw.strip_suffix('%') {
-        return percent.parse::<u32>().ok().map(LengthSpec::Percent);
-    }
-
-    raw.parse::<u32>().ok().map(LengthSpec::Pixels)
-}
-
-fn resolve_length_spec(length: LengthSpec, available_width: u32) -> u32 {
-    match length {
-        LengthSpec::Pixels(value) => value,
-        LengthSpec::Percent(value) => available_width.saturating_mul(value) / 100,
-    }
 }
 
 fn parse_span_attribute(value: Option<&String>) -> usize {
@@ -1211,10 +1223,12 @@ fn parse_span_attribute(value: Option<&String>) -> usize {
         .max(1)
 }
 
-fn resolve_table_width(element: &StyledElement, available_width: u32) -> u32 {
-    parse_length_spec(element.attributes.get("width"))
-        .map(|length| resolve_length_spec(length, available_width))
-        .unwrap_or(available_width)
+fn resolve_table_width(element: &StyledElement, available_width: u32, preferred_width: u32) -> u32 {
+    specified_length(element, element.style.width, "width")
+        .map(|length| resolve_length_value(length, available_width))
+        .map(|resolved| resolved.max(preferred_width))
+        .unwrap_or(preferred_width)
+        .min(available_width.max(1))
 }
 
 fn measure_cell_preferred_width(
@@ -1223,10 +1237,8 @@ fn measure_cell_preferred_width(
     images: &ImageStore,
     fonts: &mut FontContext,
 ) -> u32 {
-    if let Some(length) = parse_length_spec(cell.attributes.get("width"))
-        && matches!(length, LengthSpec::Pixels(_))
-    {
-        return resolve_length_spec(length, 0);
+    if let Some(LengthValue::Pixels(width)) = specified_length(cell, cell.style.width, "width") {
+        return width.max(1);
     }
 
     let mut max_width = 1_u32;
@@ -1253,10 +1265,10 @@ fn measure_node_preferred_width(
             }
 
             if element.tag_name == "table" {
-                return parse_length_spec(element.attributes.get("width"))
+                return specified_length(element, element.style.width, "width")
                     .map(|length| match length {
-                        LengthSpec::Pixels(value) => value,
-                        LengthSpec::Percent(value) => value.saturating_mul(8),
+                        LengthValue::Pixels(value) => value,
+                        LengthValue::Percent(value) => value.saturating_mul(8),
                     })
                     .unwrap_or_else(|| {
                         collect_table_rows(element)
@@ -1279,6 +1291,30 @@ fn measure_node_preferred_width(
                 .saturating_add(element.style.padding.left + element.style.padding.right)
                 .max(1)
         }
+    }
+}
+
+fn specified_length(
+    element: &StyledElement,
+    from_style: Option<LengthValue>,
+    attribute_name: &str,
+) -> Option<LengthValue> {
+    from_style.or_else(|| parse_attribute_length_value(element.attributes.get(attribute_name)))
+}
+
+fn parse_attribute_length_value(value: Option<&String>) -> Option<LengthValue> {
+    let raw = value?.trim();
+    if let Some(percent) = raw.strip_suffix('%') {
+        return percent.parse::<u32>().ok().map(LengthValue::Percent);
+    }
+
+    raw.parse::<u32>().ok().map(LengthValue::Pixels)
+}
+
+fn resolve_length_value(length: LengthValue, available_width: u32) -> u32 {
+    match length {
+        LengthValue::Pixels(value) => value,
+        LengthValue::Percent(value) => available_width.saturating_mul(value) / 100,
     }
 }
 
@@ -1408,6 +1444,45 @@ mod tests {
         assert_eq!(layout.images.len(), 1);
         assert_eq!(layout.images[0].width, 40);
         assert_eq!(layout.images[0].height, 20);
+    }
+
+    #[test]
+    fn auto_width_tables_do_not_expand_to_full_container() {
+        let document =
+            parse_document("<table align=\"center\"><tr><td>Hello</td><td>World</td></tr></table>");
+        let styled = build_styled_tree(&document, &parse_stylesheet(""));
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 500, &mut fonts);
+        let hello = layout
+            .texts
+            .iter()
+            .find(|text| text.text.contains("Hello"))
+            .expect("hello text should exist");
+        let world = layout
+            .texts
+            .iter()
+            .find(|text| text.text.contains("World"))
+            .expect("world text should exist");
+
+        assert!(hello.x > 40);
+        assert!(world.x.saturating_sub(hello.x) < 220);
+    }
+
+    #[test]
+    fn vertical_align_middle_offsets_cell_content() {
+        let document = parse_document(
+            "<table><tr><td valign=\"middle\">short</td><td><br><br><br><br><br>tall</td></tr></table>",
+        );
+        let styled = build_styled_tree(&document, &parse_stylesheet(""));
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
+        let short = layout
+            .texts
+            .iter()
+            .find(|text| text.text.contains("short"))
+            .expect("short text should exist");
+
+        assert!(short.y > 0);
     }
 
     #[test]
