@@ -781,6 +781,20 @@ struct YouTubeWatchData {
     featured_comments: Vec<YouTubeCommentPreview>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct YouTubeHomeData {
+    title: String,
+    section_title: String,
+    search_placeholder: Option<String>,
+    settings_label: Option<String>,
+    login_label: Option<String>,
+    nudge_title: Option<String>,
+    nudge_subtitle: Option<String>,
+    category_chips: Vec<String>,
+    featured_videos: Vec<YouTubeRelatedVideo>,
+    quick_links: Vec<String>,
+}
+
 fn build_site_specific_document(document: &Node, html: &str, url: &Url) -> Option<Node> {
     if is_youtube_watch_url(url) {
         let data = extract_youtube_watch_data(document, html, url)?;
@@ -1174,6 +1188,10 @@ fn build_youtube_watch_document(data: &YouTubeWatchData) -> Node {
 }
 
 fn build_youtube_generic_document(document: &Node, html: &str, url: &Url) -> Node {
+    if let Some(data) = extract_youtube_home_data_from_html(html, url) {
+        return build_youtube_home_document(&data, url);
+    }
+
     let title = document_title(document).unwrap_or_else(|| "YouTube".to_string());
     let description = find_meta_content(document, "name", "description")
         .or_else(|| find_meta_content(document, "property", "og:description"))
@@ -1228,6 +1246,10 @@ fn build_youtube_generic_document(document: &Node, html: &str, url: &Url) -> Nod
 }
 
 fn build_youtube_generic_document_from_html(html: &str, url: &Url) -> Node {
+    if let Some(data) = extract_youtube_home_data_from_html(html, url) {
+        return build_youtube_home_document(&data, url);
+    }
+
     let title = extract_html_tag_text(html, "title").unwrap_or_else(|| "YouTube".to_string());
     let description = extract_meta_content_from_html(html, "name", "description")
         .or_else(|| extract_meta_content_from_html(html, "property", "og:description"))
@@ -1273,6 +1295,540 @@ fn build_youtube_generic_document_from_html(html: &str, url: &Url) -> Node {
     synthetic_document(&title, body_children)
 }
 
+fn extract_youtube_home_data_from_html(html: &str, _url: &Url) -> Option<YouTubeHomeData> {
+    let initial_data = extract_assigned_json_object(
+        html,
+        &[
+            "var ytInitialData =",
+            "window['ytInitialData'] =",
+            "window[\"ytInitialData\"] =",
+        ],
+    )
+    .and_then(|json| serde_json::from_str::<Value>(&json).ok())?;
+
+    let title = extract_html_tag_text(html, "title")
+        .or_else(|| extract_meta_content_from_html(html, "property", "og:title"))
+        .unwrap_or_else(|| "YouTube".to_string());
+    let section_title = initial_data
+        .pointer("/header/feedTabbedHeaderRenderer/title")
+        .and_then(json_text)
+        .unwrap_or_else(|| title.clone());
+    let search_placeholder = initial_data
+        .pointer("/topbar/desktopTopbarRenderer/searchbox/fusionSearchboxRenderer/placeholderText")
+        .and_then(json_text);
+    let topbar_buttons = initial_data
+        .pointer("/topbar/desktopTopbarRenderer/topbarButtons")
+        .and_then(Value::as_array);
+    let settings_label = topbar_buttons.and_then(|buttons| {
+        buttons.iter().find_map(|button| {
+            button.get("topbarMenuButtonRenderer").and_then(|renderer| {
+                renderer
+                    .get("tooltip")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        renderer
+                            .pointer("/accessibility/accessibilityData/label")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+            })
+        })
+    });
+    let login_label = topbar_buttons.and_then(|buttons| {
+        buttons.iter().find_map(|button| {
+            button
+                .get("buttonRenderer")
+                .and_then(|renderer| renderer.get("text"))
+                .and_then(json_text)
+        })
+    });
+    let feed_nudge = find_first_object_by_key(&initial_data, "feedNudgeRenderer");
+    let nudge_title = feed_nudge
+        .and_then(|renderer| renderer.get("title"))
+        .and_then(json_text);
+    let nudge_subtitle = feed_nudge
+        .and_then(|renderer| renderer.get("subtitle"))
+        .and_then(json_text);
+    let category_chips = find_first_object_by_key(&initial_data, "feedFilterChipBarRenderer")
+        .and_then(|renderer| renderer.get("contents"))
+        .and_then(Value::as_array)
+        .map(|chips| {
+            chips
+                .iter()
+                .filter_map(|chip| chip.get("chipCloudChipRenderer"))
+                .filter_map(|chip| chip.get("text"))
+                .filter_map(json_text)
+                .take(8)
+                .collect()
+        })
+        .unwrap_or_default();
+    let featured_videos = extract_youtube_home_feed_videos(&initial_data);
+    let quick_links = extract_html_attribute_values(html, "href=\"/watch?v=", '"', 10)
+        .into_iter()
+        .map(|path| format!("https://www.youtube.com{path}"))
+        .collect();
+
+    Some(YouTubeHomeData {
+        title,
+        section_title,
+        search_placeholder,
+        settings_label,
+        login_label,
+        nudge_title,
+        nudge_subtitle,
+        category_chips,
+        featured_videos,
+        quick_links,
+    })
+}
+
+fn extract_youtube_home_feed_videos(initial_data: &Value) -> Vec<YouTubeRelatedVideo> {
+    let contents = initial_data
+        .pointer("/contents/twoColumnBrowseResultsRenderer/tabs")
+        .and_then(Value::as_array)
+        .and_then(|tabs| {
+            tabs.iter().find_map(|tab| {
+                tab.get("tabRenderer")
+                    .filter(|renderer| {
+                        renderer
+                            .get("selected")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                    })
+                    .and_then(|renderer| renderer.pointer("/content/richGridRenderer/contents"))
+                    .and_then(Value::as_array)
+            })
+        });
+    let Some(contents) = contents else {
+        return Vec::new();
+    };
+
+    let mut videos = Vec::new();
+    for item in contents {
+        if let Some(video) = item
+            .pointer("/richItemRenderer/content/videoRenderer")
+            .and_then(parse_home_feed_video)
+        {
+            videos.push(video);
+        } else {
+            for renderer in collect_objects_by_key(item, "videoRenderer", 12 - videos.len()) {
+                if let Some(video) = parse_home_feed_video(renderer) {
+                    videos.push(video);
+                    if videos.len() >= 12 {
+                        break;
+                    }
+                }
+            }
+        }
+        if videos.len() >= 12 {
+            break;
+        }
+    }
+
+    videos
+}
+
+fn parse_home_feed_video(value: &Value) -> Option<YouTubeRelatedVideo> {
+    let title = value.get("title").and_then(json_text)?;
+    let channel = value
+        .get("ownerText")
+        .and_then(json_text)
+        .or_else(|| value.get("shortBylineText").and_then(json_text));
+    let views = value
+        .get("viewCountText")
+        .and_then(json_text)
+        .or_else(|| value.get("shortViewCountText").and_then(json_text));
+    let published = value.get("publishedTimeText").and_then(json_text);
+    let duration = value
+        .pointer("/lengthText/simpleText")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| value.get("lengthText").and_then(json_text));
+    let thumbnail_url = value
+        .pointer("/thumbnail/thumbnails")
+        .and_then(Value::as_array)
+        .and_then(|items| items.last())
+        .and_then(|item| item.get("url"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let url = value
+        .pointer("/navigationEndpoint/commandMetadata/webCommandMetadata/url")
+        .and_then(Value::as_str)
+        .map(|path| format!("https://www.youtube.com{path}"))
+        .or_else(|| {
+            value
+                .pointer("/navigationEndpoint/watchEndpoint/videoId")
+                .and_then(Value::as_str)
+                .map(|video_id| format!("https://www.youtube.com/watch?v={video_id}"))
+        });
+
+    Some(YouTubeRelatedVideo {
+        title,
+        channel,
+        views,
+        published,
+        duration,
+        url,
+        thumbnail_url,
+    })
+}
+
+fn build_youtube_home_document(data: &YouTubeHomeData, url: &Url) -> Node {
+    let sidebar_labels =
+        default_youtube_sidebar_labels(data.search_placeholder.as_deref(), &data.section_title);
+
+    let mut topbar_actions = Vec::new();
+    if let Some(settings) = data.settings_label.as_deref() {
+        topbar_actions.push(simple_text_element("p", settings));
+    }
+    if let Some(login) = data.login_label.as_deref() {
+        topbar_actions.push(simple_text_element("p", login));
+    }
+
+    let topbar = Node::Element(Element {
+        tag_name: "table".to_string(),
+        attributes: BTreeMap::from([
+            ("width".to_string(), "100%".to_string()),
+            ("border".to_string(), "0".to_string()),
+            ("cellpadding".to_string(), "10".to_string()),
+            ("cellspacing".to_string(), "0".to_string()),
+            ("bgcolor".to_string(), "#ffffff".to_string()),
+        ]),
+        children: vec![Node::Element(Element {
+            tag_name: "tr".to_string(),
+            attributes: BTreeMap::new(),
+            children: vec![
+                Node::Element(Element {
+                    tag_name: "td".to_string(),
+                    attributes: BTreeMap::from([
+                        ("width".to_string(), "18%".to_string()),
+                        ("valign".to_string(), "middle".to_string()),
+                    ]),
+                    children: vec![simple_text_element("h2", "YouTube")],
+                }),
+                Node::Element(Element {
+                    tag_name: "td".to_string(),
+                    attributes: BTreeMap::from([
+                        ("width".to_string(), "60%".to_string()),
+                        ("valign".to_string(), "middle".to_string()),
+                    ]),
+                    children: vec![Node::Element(Element {
+                        tag_name: "table".to_string(),
+                        attributes: BTreeMap::from([
+                            ("width".to_string(), "100%".to_string()),
+                            ("border".to_string(), "0".to_string()),
+                            ("cellpadding".to_string(), "8".to_string()),
+                            ("cellspacing".to_string(), "0".to_string()),
+                            ("bgcolor".to_string(), "#f1f1f1".to_string()),
+                        ]),
+                        children: vec![Node::Element(Element {
+                            tag_name: "tr".to_string(),
+                            attributes: BTreeMap::new(),
+                            children: vec![Node::Element(Element {
+                                tag_name: "td".to_string(),
+                                attributes: BTreeMap::new(),
+                                children: vec![simple_text_element(
+                                    "p",
+                                    data.search_placeholder
+                                        .as_deref()
+                                        .unwrap_or("Search YouTube"),
+                                )],
+                            })],
+                        })],
+                    })],
+                }),
+                Node::Element(Element {
+                    tag_name: "td".to_string(),
+                    attributes: BTreeMap::from([
+                        ("width".to_string(), "22%".to_string()),
+                        ("valign".to_string(), "middle".to_string()),
+                        ("align".to_string(), "right".to_string()),
+                    ]),
+                    children: topbar_actions,
+                }),
+            ],
+        })],
+    });
+
+    let sidebar_children = sidebar_labels
+        .into_iter()
+        .map(|label| simple_text_element("p", label))
+        .collect::<Vec<_>>();
+
+    let mut main_children = vec![simple_text_element("h1", &data.section_title)];
+    if !data.category_chips.is_empty() {
+        main_children.push(build_youtube_chip_bar(&data.category_chips));
+    }
+
+    if !data.featured_videos.is_empty() {
+        main_children.push(build_youtube_feed_grid(&data.featured_videos));
+    } else if data.nudge_title.is_some() || data.nudge_subtitle.is_some() {
+        main_children.push(build_youtube_nudge_card(data));
+    }
+
+    if !data.quick_links.is_empty() {
+        main_children.push(hr_node());
+        main_children.push(simple_text_element("h2", "Quick Links"));
+        for href in data.quick_links.iter().take(6) {
+            main_children.push(simple_text_element("p", href));
+        }
+    }
+
+    main_children.push(hr_node());
+    main_children.push(simple_text_element("p", &format!("URL: {url}")));
+
+    synthetic_document(
+        &data.title,
+        vec![
+            topbar,
+            hr_node(),
+            Node::Element(Element {
+                tag_name: "table".to_string(),
+                attributes: BTreeMap::from([
+                    ("width".to_string(), "100%".to_string()),
+                    ("border".to_string(), "0".to_string()),
+                    ("cellpadding".to_string(), "0".to_string()),
+                    ("cellspacing".to_string(), "20".to_string()),
+                ]),
+                children: vec![Node::Element(Element {
+                    tag_name: "tr".to_string(),
+                    attributes: BTreeMap::new(),
+                    children: vec![
+                        Node::Element(Element {
+                            tag_name: "td".to_string(),
+                            attributes: BTreeMap::from([
+                                ("width".to_string(), "18%".to_string()),
+                                ("valign".to_string(), "top".to_string()),
+                                ("bgcolor".to_string(), "#f8f8f8".to_string()),
+                            ]),
+                            children: sidebar_children,
+                        }),
+                        Node::Element(Element {
+                            tag_name: "td".to_string(),
+                            attributes: BTreeMap::from([
+                                ("width".to_string(), "82%".to_string()),
+                                ("valign".to_string(), "top".to_string()),
+                            ]),
+                            children: main_children,
+                        }),
+                    ],
+                })],
+            }),
+        ],
+    )
+}
+
+fn build_youtube_feed_grid(videos: &[YouTubeRelatedVideo]) -> Node {
+    let mut rows = Vec::new();
+    for chunk in videos.chunks(3) {
+        let mut cells = Vec::new();
+        for video in chunk {
+            cells.push(Node::Element(Element {
+                tag_name: "td".to_string(),
+                attributes: BTreeMap::from([
+                    ("width".to_string(), "33%".to_string()),
+                    ("valign".to_string(), "top".to_string()),
+                ]),
+                children: vec![build_youtube_feed_card(video)],
+            }));
+        }
+        rows.push(Node::Element(Element {
+            tag_name: "tr".to_string(),
+            attributes: BTreeMap::new(),
+            children: cells,
+        }));
+    }
+
+    Node::Element(Element {
+        tag_name: "table".to_string(),
+        attributes: BTreeMap::from([
+            ("width".to_string(), "100%".to_string()),
+            ("border".to_string(), "0".to_string()),
+            ("cellpadding".to_string(), "8".to_string()),
+            ("cellspacing".to_string(), "8".to_string()),
+        ]),
+        children: rows,
+    })
+}
+
+fn build_youtube_feed_card(video: &YouTubeRelatedVideo) -> Node {
+    let mut children = Vec::new();
+    if let Some(thumbnail_url) = &video.thumbnail_url {
+        children.push(Node::Element(Element {
+            tag_name: "img".to_string(),
+            attributes: BTreeMap::from([
+                ("src".to_string(), thumbnail_url.clone()),
+                ("data-scratch-src".to_string(), thumbnail_url.clone()),
+                ("width".to_string(), "320".to_string()),
+                ("alt".to_string(), video.title.clone()),
+            ]),
+            children: Vec::new(),
+        }));
+    }
+    children.push(simple_text_element("h3", &video.title));
+    push_detail(&mut children, "Channel", video.channel.as_deref());
+    push_detail(&mut children, "Views", video.views.as_deref());
+    push_detail(&mut children, "Published", video.published.as_deref());
+    push_detail(&mut children, "Length", video.duration.as_deref());
+    push_detail(&mut children, "URL", video.url.as_deref());
+
+    Node::Element(Element {
+        tag_name: "div".to_string(),
+        attributes: BTreeMap::new(),
+        children: vec![
+            Node::Element(Element {
+                tag_name: "table".to_string(),
+                attributes: BTreeMap::from([
+                    ("width".to_string(), "100%".to_string()),
+                    ("border".to_string(), "0".to_string()),
+                    ("cellpadding".to_string(), "6".to_string()),
+                    ("cellspacing".to_string(), "0".to_string()),
+                    ("bgcolor".to_string(), "#ffffff".to_string()),
+                ]),
+                children: vec![Node::Element(Element {
+                    tag_name: "tr".to_string(),
+                    attributes: BTreeMap::new(),
+                    children: vec![Node::Element(Element {
+                        tag_name: "td".to_string(),
+                        attributes: BTreeMap::from([("valign".to_string(), "top".to_string())]),
+                        children,
+                    })],
+                })],
+            }),
+            hr_node(),
+        ],
+    })
+}
+
+fn build_youtube_nudge_card(data: &YouTubeHomeData) -> Node {
+    let mut content = Vec::new();
+    if let Some(title) = data.nudge_title.as_deref() {
+        content.push(simple_text_element("h2", title));
+    }
+    if let Some(subtitle) = data.nudge_subtitle.as_deref() {
+        content.push(simple_text_element("p", subtitle));
+    }
+    content.push(simple_text_element(
+        "p",
+        "Tip: open a watch URL or search results page to populate richer YouTube cards.",
+    ));
+
+    Node::Element(Element {
+        tag_name: "table".to_string(),
+        attributes: BTreeMap::from([
+            ("width".to_string(), "100%".to_string()),
+            ("border".to_string(), "0".to_string()),
+            ("cellpadding".to_string(), "0".to_string()),
+            ("cellspacing".to_string(), "0".to_string()),
+        ]),
+        children: vec![Node::Element(Element {
+            tag_name: "tr".to_string(),
+            attributes: BTreeMap::new(),
+            children: vec![
+                Node::Element(Element {
+                    tag_name: "td".to_string(),
+                    attributes: BTreeMap::from([("width".to_string(), "20%".to_string())]),
+                    children: Vec::new(),
+                }),
+                Node::Element(Element {
+                    tag_name: "td".to_string(),
+                    attributes: BTreeMap::from([
+                        ("width".to_string(), "60%".to_string()),
+                        ("valign".to_string(), "top".to_string()),
+                        ("bgcolor".to_string(), "#f9f9f9".to_string()),
+                    ]),
+                    children: content,
+                }),
+                Node::Element(Element {
+                    tag_name: "td".to_string(),
+                    attributes: BTreeMap::from([("width".to_string(), "20%".to_string())]),
+                    children: Vec::new(),
+                }),
+            ],
+        })],
+    })
+}
+
+fn build_youtube_chip_bar(chips: &[String]) -> Node {
+    let children = chips
+        .iter()
+        .take(6)
+        .map(|chip| {
+            Node::Element(Element {
+                tag_name: "td".to_string(),
+                attributes: BTreeMap::from([
+                    ("bgcolor".to_string(), "#f1f1f1".to_string()),
+                    ("align".to_string(), "center".to_string()),
+                    ("valign".to_string(), "middle".to_string()),
+                ]),
+                children: vec![simple_text_element("p", chip)],
+            })
+        })
+        .collect();
+
+    Node::Element(Element {
+        tag_name: "table".to_string(),
+        attributes: BTreeMap::from([
+            ("width".to_string(), "100%".to_string()),
+            ("border".to_string(), "0".to_string()),
+            ("cellpadding".to_string(), "6".to_string()),
+            ("cellspacing".to_string(), "8".to_string()),
+        ]),
+        children: vec![Node::Element(Element {
+            tag_name: "tr".to_string(),
+            attributes: BTreeMap::new(),
+            children,
+        })],
+    })
+}
+
+/*
+fn default_youtube_sidebar_labels<'a>(
+    search_placeholder: Option<&'a str>,
+    section_title: &'a str,
+) -> Vec<&'a str> {
+    if looks_like_japanese(search_placeholder.unwrap_or(section_title)) {
+        vec![
+            "ホーム",
+            "ショート",
+            "登録チャンネル",
+            "履歴",
+            "再生リスト",
+            "後で見る",
+            "高く評価した動画",
+        ]
+    } else {
+        vec![
+            "Home",
+            "Shorts",
+            "Subscriptions",
+            "History",
+            "Playlists",
+            "Watch later",
+            "Liked videos",
+        ]
+    }
+}
+
+*/
+
+fn default_youtube_sidebar_labels<'a>(
+    search_placeholder: Option<&'a str>,
+    section_title: &'a str,
+) -> Vec<&'a str> {
+    let _ = looks_like_japanese(search_placeholder.unwrap_or(section_title));
+    vec![
+        "Home",
+        "Shorts",
+        "Subscriptions",
+        "History",
+        "Playlists",
+        "Watch later",
+        "Liked videos",
+    ]
+}
+
 fn build_google_document_from_html(html: &str, url: &Url) -> Node {
     let title = extract_html_tag_text(html, "title").unwrap_or_else(|| "Google".to_string());
     let description = extract_meta_content_from_html(html, "name", "description")
@@ -1301,7 +1857,11 @@ fn build_related_video_node(video: &YouTubeRelatedVideo) -> Node {
     detail_children.push(simple_text_element("h3", &video.title));
     push_detail(&mut detail_children, "Channel", video.channel.as_deref());
     push_detail(&mut detail_children, "Views", video.views.as_deref());
-    push_detail(&mut detail_children, "Published", video.published.as_deref());
+    push_detail(
+        &mut detail_children,
+        "Published",
+        video.published.as_deref(),
+    );
     push_detail(&mut detail_children, "Length", video.duration.as_deref());
     push_detail(&mut detail_children, "URL", video.url.as_deref());
 
@@ -1550,7 +2110,8 @@ fn extract_related_videos(initial_data: &Value) -> Vec<YouTubeRelatedVideo> {
         .and_then(Value::as_array)
         .and_then(|results| {
             results.iter().find_map(|entry| {
-                entry.get("itemSectionRenderer")
+                entry
+                    .get("itemSectionRenderer")
                     .and_then(|renderer| renderer.get("contents"))
                     .and_then(Value::as_array)
             })
@@ -1602,7 +2163,9 @@ fn parse_related_lockup_video(value: &Value) -> Option<YouTubeRelatedVideo> {
         .and_then(|overlays| {
             overlays.iter().find_map(|overlay| {
                 overlay
-                    .pointer("/thumbnailBottomOverlayViewModel/badges/0/thumbnailBadgeViewModel/text")
+                    .pointer(
+                        "/thumbnailBottomOverlayViewModel/badges/0/thumbnailBadgeViewModel/text",
+                    )
                     .and_then(Value::as_str)
                     .map(str::to_string)
             })
@@ -1696,7 +2259,9 @@ fn extract_featured_comments_from_ld_json(value: &Value) -> Vec<YouTubeCommentPr
 
     let array = match items {
         Value::Array(array) => array,
-        single => return extract_featured_comments_from_ld_json(&Value::Array(vec![single.clone()])),
+        single => {
+            return extract_featured_comments_from_ld_json(&Value::Array(vec![single.clone()]));
+        }
     };
 
     array
@@ -1705,17 +2270,82 @@ fn extract_featured_comments_from_ld_json(value: &Value) -> Vec<YouTubeCommentPr
             let author = item
                 .pointer("/author/name")
                 .and_then(Value::as_str)
-                .or_else(|| item.pointer("/author/alternateName").and_then(Value::as_str))?;
+                .or_else(|| {
+                    item.pointer("/author/alternateName")
+                        .and_then(Value::as_str)
+                })?;
             let body = item.get("text").and_then(Value::as_str)?;
             Some(YouTubeCommentPreview {
                 author: author.to_string(),
                 body: body.to_string(),
-                likes: item
-                    .get("upvoteCount")
-                    .and_then(|value| value.as_i64().map(|number| number.to_string()).or_else(|| value.as_str().map(str::to_string))),
+                likes: item.get("upvoteCount").and_then(|value| {
+                    value
+                        .as_i64()
+                        .map(|number| number.to_string())
+                        .or_else(|| value.as_str().map(str::to_string))
+                }),
             })
         })
         .collect()
+}
+
+fn find_first_object_by_key<'a>(root: &'a Value, key: &str) -> Option<&'a Value> {
+    let mut stack = vec![root];
+    while let Some(value) = stack.pop() {
+        match value {
+            Value::Object(map) => {
+                if let Some(found) = map.get(key) {
+                    return Some(found);
+                }
+                for child in map.values() {
+                    stack.push(child);
+                }
+            }
+            Value::Array(items) => {
+                for child in items.iter().rev() {
+                    stack.push(child);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn collect_objects_by_key<'a>(root: &'a Value, key: &str, limit: usize) -> Vec<&'a Value> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+    let mut stack = vec![root];
+    while let Some(value) = stack.pop() {
+        if results.len() >= limit {
+            break;
+        }
+        match value {
+            Value::Object(map) => {
+                if let Some(found) = map.get(key) {
+                    results.push(found);
+                    if results.len() >= limit {
+                        break;
+                    }
+                }
+                for child in map.values() {
+                    stack.push(child);
+                }
+            }
+            Value::Array(items) => {
+                for child in items.iter().rev() {
+                    stack.push(child);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    results
 }
 
 fn json_text(value: &Value) -> Option<String> {
@@ -1898,6 +2528,13 @@ fn format_duration_seconds(raw: &str) -> Option<String> {
     })
 }
 
+fn looks_like_japanese(text: &str) -> bool {
+    text.chars().any(|character| {
+        ('\u{3040}'..='\u{30ff}').contains(&character)
+            || ('\u{4e00}'..='\u{9faf}').contains(&character)
+    })
+}
+
 fn parse_iso8601_duration(raw: String) -> Option<String> {
     if !raw.starts_with("PT") {
         return None;
@@ -2022,8 +2659,9 @@ fn collect_raw_text_into(node: &Node, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserPage, build_site_specific_document, collect_frame_specs, collect_stylesheet,
-        document_title, extract_body_children, synthetic_document,
+        BrowserPage, build_site_specific_document, build_youtube_generic_document_from_html,
+        collect_frame_specs, collect_stylesheet, document_title, extract_body_children,
+        synthetic_document,
     };
     use crate::css::StyledNode;
     use crate::html::{Node, parse_document};
@@ -2186,6 +2824,113 @@ mod tests {
         assert!(rendered.contains("1,234,567"));
         assert!(rendered.contains("3:34"));
         assert!(rendered.contains("2026-05-13"));
+    }
+
+    #[test]
+    fn rewrites_youtube_home_pages_into_shell_ui() {
+        let html = r#"
+            <html>
+              <head>
+                <title>YouTube</title>
+              </head>
+              <body>
+                <script>
+                  var ytInitialData = {
+                    "contents": {
+                      "twoColumnBrowseResultsRenderer": {
+                        "tabs": [
+                          {
+                            "tabRenderer": {
+                              "selected": true,
+                              "content": {
+                                "richGridRenderer": {
+                                  "contents": [
+                                    {
+                                      "richItemRenderer": {
+                                        "content": {
+                                          "videoRenderer": {
+                                            "title": {"runs": [{"text": "Demo Home Video"}]},
+                                            "ownerText": {"runs": [{"text": "Demo Creator"}]},
+                                            "viewCountText": {"simpleText": "1,234 views"},
+                                            "publishedTimeText": {"simpleText": "2 days ago"},
+                                            "lengthText": {"simpleText": "12:34"},
+                                            "thumbnail": {
+                                              "thumbnails": [
+                                                {"url": "https://i.ytimg.com/vi/demo/hqdefault.jpg"}
+                                              ]
+                                            },
+                                            "navigationEndpoint": {
+                                              "commandMetadata": {
+                                                "webCommandMetadata": {"url": "/watch?v=demo123"}
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    },
+                                    {
+                                      "richSectionRenderer": {
+                                        "content": {
+                                          "feedNudgeRenderer": {
+                                            "title": {"runs": [{"text": "Start by searching"}]},
+                                            "subtitle": {"runs": [{"text": "Watch a few videos to build recommendations."}]}
+                                          }
+                                        }
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    "header": {
+                      "feedTabbedHeaderRenderer": {
+                        "title": {"runs": [{"text": "Home"}]}
+                      }
+                    },
+                    "topbar": {
+                      "desktopTopbarRenderer": {
+                        "searchbox": {
+                          "fusionSearchboxRenderer": {
+                            "placeholderText": {"runs": [{"text": "Search"}]}
+                          }
+                        },
+                        "topbarButtons": [
+                          {
+                            "topbarMenuButtonRenderer": {
+                              "tooltip": "Settings"
+                            }
+                          },
+                          {
+                            "buttonRenderer": {
+                              "text": {"runs": [{"text": "Sign in"}]}
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  };
+                </script>
+              </body>
+            </html>
+        "#;
+
+        let document = build_youtube_generic_document_from_html(
+            html,
+            &Url::parse("https://www.youtube.com/").unwrap(),
+        );
+        let rendered = crate::render::render_document(&document);
+
+        assert!(rendered.contains("YouTube"));
+        assert!(rendered.contains("Home"));
+        assert!(rendered.contains("Search"));
+        assert!(rendered.contains("Settings"));
+        assert!(rendered.contains("Sign in"));
+        assert!(rendered.contains("Demo Home Video"));
+        assert!(rendered.contains("Demo Creator"));
     }
 
     fn parse_styled_text(text: &str) -> StyledNode {
