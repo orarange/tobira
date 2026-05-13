@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::mem;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use boa_engine::object::{ObjectInitializer, builtins::JsFunction};
 use boa_engine::property::Attribute;
@@ -14,8 +15,8 @@ use crate::text::decode_text_response;
 use crate::url::Url;
 
 const MAX_SCRIPT_RECURSION: usize = 8;
-const MAX_SCRIPT_SOURCE_BYTES: usize = 8 * 1024;
-const MAX_TOTAL_SCRIPT_BYTES: usize = 16 * 1024;
+const MAX_SCRIPT_SOURCE_BYTES: usize = 48 * 1024;
+const MAX_TOTAL_SCRIPT_BYTES: usize = 192 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessedScriptHtml {
@@ -60,6 +61,7 @@ pub fn process_document_scripts(html: &str, base_url: &Url) -> ProcessedScriptHt
 struct JavaScriptRuntime {
     context: Context,
     executed_bytes: usize,
+    host: String,
 }
 
 impl JavaScriptRuntime {
@@ -80,6 +82,7 @@ impl JavaScriptRuntime {
         Self {
             context,
             executed_bytes: 0,
+            host: base_url.host.to_ascii_lowercase(),
         }
     }
 
@@ -88,7 +91,7 @@ impl JavaScriptRuntime {
             return;
         }
 
-        if !is_supported_script_source(source) {
+        if !is_supported_script_source(source, &self.host) {
             self.push_log(format!(
                 "js skip: unsupported script pattern ({} bytes)",
                 source.len()
@@ -149,12 +152,68 @@ fn install_browser_globals(context: &mut Context) {
         NativeFunction::from_fn_ptr(js_location_get_href).to_js_function(context.realm());
     let href_setter =
         NativeFunction::from_fn_ptr(js_location_set_href).to_js_function(context.realm());
+    let search_getter =
+        NativeFunction::from_fn_ptr(js_location_get_search).to_js_function(context.realm());
+    let hash_getter =
+        NativeFunction::from_fn_ptr(js_location_get_hash).to_js_function(context.realm());
+    let pathname_getter =
+        NativeFunction::from_fn_ptr(js_location_get_pathname).to_js_function(context.realm());
+    let origin_getter =
+        NativeFunction::from_fn_ptr(js_location_get_origin).to_js_function(context.realm());
+    let host_getter =
+        NativeFunction::from_fn_ptr(js_location_get_host).to_js_function(context.realm());
+    let hostname_getter =
+        NativeFunction::from_fn_ptr(js_location_get_hostname).to_js_function(context.realm());
+    let protocol_getter =
+        NativeFunction::from_fn_ptr(js_location_get_protocol).to_js_function(context.realm());
 
     let location = ObjectInitializer::new(context)
         .accessor(
             js_string!("href"),
             Some(href_getter),
             Some(href_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("search"),
+            Some(search_getter),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("hash"),
+            Some(hash_getter),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("pathname"),
+            Some(pathname_getter),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("origin"),
+            Some(origin_getter),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("host"),
+            Some(host_getter),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("hostname"),
+            Some(hostname_getter),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("protocol"),
+            Some(protocol_getter),
+            None,
             Attribute::all(),
         )
         .function(
@@ -169,6 +228,13 @@ fn install_browser_globals(context: &mut Context) {
         )
         .build();
 
+    let dom_stub = build_dom_stub(context);
+    let node_list_stub = build_node_list_stub(context);
+    let document_fonts = ObjectInitializer::new(context)
+        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("load"), 2)
+        .build();
+
+    let global_object = context.global_object();
     let document = ObjectInitializer::new(context)
         .function(
             NativeFunction::from_fn_ptr(js_document_write),
@@ -186,7 +252,66 @@ fn install_browser_globals(context: &mut Context) {
             Some(title_setter),
             Attribute::all(),
         )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_dom_stub),
+            js_string!("querySelector"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_node_list_stub),
+            js_string!("querySelectorAll"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_dom_stub),
+            js_string!("getElementById"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_dom_stub),
+            js_string!("createElement"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_add_event_listener),
+            js_string!("addEventListener"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("removeEventListener"),
+            2,
+        )
         .property(js_string!("location"), location.clone(), Attribute::all())
+        .property(js_string!("body"), dom_stub.clone(), Attribute::all())
+        .property(js_string!("head"), dom_stub.clone(), Attribute::all())
+        .property(
+            js_string!("documentElement"),
+            dom_stub.clone(),
+            Attribute::all(),
+        )
+        .property(js_string!("fonts"), document_fonts, Attribute::all())
+        .property(
+            js_string!("readyState"),
+            js_string!("complete"),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("compatMode"),
+            js_string!("CSS1Compat"),
+            Attribute::all(),
+        )
+        .property(js_string!("hidden"), false, Attribute::all())
+        .property(
+            js_string!("visibilityState"),
+            js_string!("visible"),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("defaultView"),
+            global_object.clone(),
+            Attribute::all(),
+        )
         .build();
 
     let console = ObjectInitializer::new(context)
@@ -224,26 +349,112 @@ fn install_browser_globals(context: &mut Context) {
     let navigator = ObjectInitializer::new(context)
         .property(
             js_string!("userAgent"),
-            js_string!("ScratchBrowser/0.1 (Boa)"),
+            js_string!(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+            ),
             Attribute::all(),
+        )
+        .property(js_string!("language"), js_string!("ja-JP"), Attribute::all())
+        .property(js_string!("languages"), node_list_stub.clone(), Attribute::all())
+        .property(js_string!("platform"), js_string!("Win32"), Attribute::all())
+        .property(js_string!("vendor"), js_string!("Google Inc."), Attribute::all())
+        .build();
+    let performance_timing = ObjectInitializer::new(context)
+        .property(js_string!("navigationStart"), 0, Attribute::all())
+        .build();
+    let performance = ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_performance_now),
+            js_string!("now"),
+            0,
+        )
+        .property(js_string!("timing"), performance_timing, Attribute::all())
+        .build();
+    let history = ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("pushState"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("replaceState"),
+            3,
+        )
+        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("back"), 0)
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("forward"),
+            0,
+        )
+        .build();
+    let storage = build_storage_stub(context);
+    let ytcfg = ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_ytcfg_data),
+            js_string!("d"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_ytcfg_get),
+            js_string!("get"),
+            2,
+        )
+        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("set"), 2)
+        .build();
+    let ytcsi = ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_return_dom_stub),
+            js_string!("gt"),
+            1,
+        )
+        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("tick"), 3)
+        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("info"), 3)
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("infoGel"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("setStart"),
+            2,
         )
         .build();
     context
         .register_global_property(js_string!("navigator"), navigator, Attribute::all())
         .expect("navigator should be installable");
     context
+        .register_global_property(js_string!("performance"), performance, Attribute::all())
+        .expect("performance should be installable");
+    context
+        .register_global_property(js_string!("history"), history, Attribute::all())
+        .expect("history should be installable");
+    context
+        .register_global_property(
+            js_string!("localStorage"),
+            storage.clone(),
+            Attribute::all(),
+        )
+        .expect("localStorage should be installable");
+    context
+        .register_global_property(js_string!("sessionStorage"), storage, Attribute::all())
+        .expect("sessionStorage should be installable");
+    context
+        .register_global_property(js_string!("ytcfg"), ytcfg, Attribute::all())
+        .expect("ytcfg should be installable");
+    context
+        .register_global_property(js_string!("ytcsi"), ytcsi, Attribute::all())
+        .expect("ytcsi should be installable");
+    context
         .register_global_property(
             js_string!("window"),
-            context.global_object(),
+            global_object.clone(),
             Attribute::all(),
         )
         .expect("window should be installable");
     context
-        .register_global_property(
-            js_string!("self"),
-            context.global_object(),
-            Attribute::all(),
-        )
+        .register_global_property(js_string!("self"), global_object, Attribute::all())
         .expect("self should be installable");
     context
         .register_global_builtin_callable(
@@ -254,11 +465,67 @@ fn install_browser_globals(context: &mut Context) {
         .expect("setTimeout should be installable");
     context
         .register_global_builtin_callable(
+            js_string!("setInterval"),
+            2,
+            NativeFunction::from_fn_ptr(js_set_timeout),
+        )
+        .expect("setInterval should be installable");
+    context
+        .register_global_builtin_callable(
             js_string!("clearTimeout"),
             1,
             NativeFunction::from_fn_ptr(js_clear_timeout),
         )
         .expect("clearTimeout should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("clearInterval"),
+            1,
+            NativeFunction::from_fn_ptr(js_clear_timeout),
+        )
+        .expect("clearInterval should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("requestAnimationFrame"),
+            1,
+            NativeFunction::from_fn_ptr(js_request_animation_frame),
+        )
+        .expect("requestAnimationFrame should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("cancelAnimationFrame"),
+            1,
+            NativeFunction::from_fn_ptr(js_clear_timeout),
+        )
+        .expect("cancelAnimationFrame should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("queueMicrotask"),
+            1,
+            NativeFunction::from_fn_ptr(js_queue_microtask),
+        )
+        .expect("queueMicrotask should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("matchMedia"),
+            1,
+            NativeFunction::from_fn_ptr(js_match_media),
+        )
+        .expect("matchMedia should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("addEventListener"),
+            2,
+            NativeFunction::from_fn_ptr(js_add_event_listener),
+        )
+        .expect("addEventListener should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("removeEventListener"),
+            2,
+            NativeFunction::from_fn_ptr(js_noop),
+        )
+        .expect("removeEventListener should be installable");
     context
         .register_global_builtin_callable(
             js_string!("alert"),
@@ -280,6 +547,191 @@ fn install_browser_globals(context: &mut Context) {
             NativeFunction::from_fn_ptr(js_prompt),
         )
         .expect("prompt should be installable");
+    context
+        .register_global_property(js_string!("innerWidth"), 1280, Attribute::all())
+        .expect("innerWidth should be installable");
+    context
+        .register_global_property(js_string!("innerHeight"), 720, Attribute::all())
+        .expect("innerHeight should be installable");
+}
+
+fn build_dom_stub(context: &mut Context) -> boa_engine::object::JsObject {
+    let node_list = build_node_list_stub(context);
+    let style = ObjectInitializer::new(context).build();
+    let class_list = ObjectInitializer::new(context)
+        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("add"), 1)
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("remove"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_false),
+            js_string!("contains"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_false),
+            js_string!("toggle"),
+            1,
+        )
+        .build();
+
+    ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_return_dom_stub),
+            js_string!("querySelector"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_node_list_stub),
+            js_string!("querySelectorAll"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_dom_stub),
+            js_string!("appendChild"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_dom_stub),
+            js_string!("insertBefore"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_null),
+            js_string!("getAttribute"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("setAttribute"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("removeAttribute"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_add_event_listener),
+            js_string!("addEventListener"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("removeEventListener"),
+            2,
+        )
+        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("focus"), 0)
+        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("blur"), 0)
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("remove"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_dom_rect_stub),
+            js_string!("getBoundingClientRect"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_get_video_aspect_ratio),
+            js_string!("getVideoAspectRatio"),
+            0,
+        )
+        .property(js_string!("style"), style, Attribute::all())
+        .property(js_string!("classList"), class_list, Attribute::all())
+        .property(js_string!("children"), node_list.clone(), Attribute::all())
+        .property(js_string!("childNodes"), node_list, Attribute::all())
+        .property(js_string!("textContent"), js_string!(""), Attribute::all())
+        .property(js_string!("innerHTML"), js_string!(""), Attribute::all())
+        .property(js_string!("value"), js_string!(""), Attribute::all())
+        .property(js_string!("checked"), false, Attribute::all())
+        .property(js_string!("hidden"), false, Attribute::all())
+        .property(js_string!("clientWidth"), 1280, Attribute::all())
+        .property(js_string!("clientHeight"), 720, Attribute::all())
+        .property(js_string!("scrollWidth"), 1280, Attribute::all())
+        .property(js_string!("scrollHeight"), 720, Attribute::all())
+        .build()
+}
+
+fn build_node_list_stub(context: &mut Context) -> boa_engine::object::JsObject {
+    ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("forEach"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_undefined),
+            js_string!("item"),
+            1,
+        )
+        .property(js_string!("length"), 0, Attribute::all())
+        .build()
+}
+
+fn build_storage_stub(context: &mut Context) -> boa_engine::object::JsObject {
+    ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_return_null),
+            js_string!("getItem"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("setItem"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("removeItem"),
+            1,
+        )
+        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("clear"), 0)
+        .property(js_string!("length"), 0, Attribute::all())
+        .build()
+}
+
+fn build_match_media_stub(context: &mut Context, media: String) -> boa_engine::object::JsObject {
+    ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_add_event_listener),
+            js_string!("addEventListener"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("removeEventListener"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("addListener"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("removeListener"),
+            1,
+        )
+        .property(js_string!("matches"), false, Attribute::all())
+        .property(js_string!("media"), js_string!(media), Attribute::all())
+        .build()
+}
+
+fn build_dom_rect_stub(context: &mut Context) -> boa_engine::object::JsObject {
+    ObjectInitializer::new(context)
+        .property(js_string!("x"), 0, Attribute::all())
+        .property(js_string!("y"), 0, Attribute::all())
+        .property(js_string!("top"), 0, Attribute::all())
+        .property(js_string!("left"), 0, Attribute::all())
+        .property(js_string!("right"), 1280, Attribute::all())
+        .property(js_string!("bottom"), 720, Attribute::all())
+        .property(js_string!("width"), 1280, Attribute::all())
+        .property(js_string!("height"), 720, Attribute::all())
+        .build()
 }
 
 fn expand_scripts_in_html(
@@ -389,20 +841,24 @@ fn should_execute_script(attributes: &BTreeMap<String, String>) -> bool {
     }
 }
 
-fn is_supported_script_source(source: &str) -> bool {
+fn is_supported_script_source(source: &str, host: &str) -> bool {
     if source.len() > MAX_SCRIPT_SOURCE_BYTES {
         return false;
     }
 
     let lowered = source.to_ascii_lowercase();
-    if contains_any(&lowered, UNSUPPORTED_SCRIPT_PATTERNS) {
+    if contains_any(&lowered, BLOCKED_SCRIPT_PATTERNS) {
         return false;
     }
 
-    contains_any(&lowered, SUPPORTED_SCRIPT_PATTERNS)
+    if is_youtube_host_name(host) {
+        return true;
+    }
+
+    contains_any(&lowered, CONSERVATIVE_SCRIPT_PATTERNS)
 }
 
-const SUPPORTED_SCRIPT_PATTERNS: &[&str] = &[
+const CONSERVATIVE_SCRIPT_PATTERNS: &[&str] = &[
     "document.write",
     "document.writeln",
     "document.title",
@@ -419,31 +875,28 @@ const SUPPORTED_SCRIPT_PATTERNS: &[&str] = &[
     "console.error",
 ];
 
-const UNSUPPORTED_SCRIPT_PATTERNS: &[&str] = &[
-    "document.body",
+const BLOCKED_SCRIPT_PATTERNS: &[&str] = &[
     "document.cookie",
-    "document.forms",
-    "document.images",
-    "document.getelementbyid",
-    "document.queryselector",
-    "document.queryselectorall",
-    "document.createelement",
-    "document.addeventlistener",
-    "document.removeeventlistener",
-    "document.documentelement",
     "xmlhttprequest",
     "fetch(",
+    "websocket(",
+    "eventsource(",
+    "sharedworker(",
+    "serviceworker",
+    "indexeddb",
+    "navigator.serviceworker",
     "new image",
-    ".appendchild",
-    ".insertbefore",
-    ".classlist",
-    ".style.",
-    "location.search",
-    "location.hash",
+    "eval(",
+    "new function",
+    "import(",
 ];
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn is_youtube_host_name(host: &str) -> bool {
+    host == "youtube.com" || host.ends_with(".youtube.com")
 }
 
 fn parse_tag_attributes(tag: &str) -> BTreeMap<String, String> {
@@ -692,6 +1145,75 @@ fn js_location_set_href(_: &JsValue, args: &[JsValue], context: &mut Context) ->
     Ok(JsValue::undefined())
 }
 
+fn js_location_get_search(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let search = current_location_url(context)
+        .map(|url| {
+            url.path
+                .split_once('?')
+                .map(|(_, query)| format!("?{query}"))
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(search)))
+}
+
+fn js_location_get_hash(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::from(js_string!("")))
+}
+
+fn js_location_get_pathname(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let pathname = current_location_url(context)
+        .map(|url| {
+            url.path
+                .split(['?', '#'])
+                .next()
+                .unwrap_or(url.path.as_str())
+                .to_string()
+        })
+        .unwrap_or_else(|| "/".to_string());
+    Ok(JsValue::from(js_string!(pathname)))
+}
+
+fn js_location_get_origin(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let origin = current_location_url(context)
+        .map(|url| format!("{}://{}", url.scheme, url.host_header()))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(origin)))
+}
+
+fn js_location_get_host(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let host = current_location_url(context)
+        .map(|url| url.host_header())
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(host)))
+}
+
+fn js_location_get_hostname(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let hostname = current_location_url(context)
+        .map(|url| url.host)
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(hostname)))
+}
+
+fn js_location_get_protocol(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let protocol = current_location_url(context)
+        .map(|url| format!("{}:", url.scheme))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(protocol)))
+}
+
 fn js_location_assign(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let href = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
     set_location_href(&href, context);
@@ -710,6 +1232,13 @@ fn set_location_href(href: &str, context: &mut Context) {
     }
 }
 
+fn current_location_url(context: &mut Context) -> Option<Url> {
+    let href = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().location_href.clone())?;
+    Url::parse(&href).ok()
+}
+
 fn js_console_log(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let mut parts = Vec::new();
     for value in args {
@@ -723,12 +1252,28 @@ fn js_console_log(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     Ok(JsValue::undefined())
 }
 
+fn js_request_animation_frame(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if let Some(callback) = args.first() {
+        call_js_callback(callback, &[JsValue::new(performance_now_ms())], context)?;
+    }
+    Ok(JsValue::new(1))
+}
+
+fn js_queue_microtask(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if let Some(callback) = args.first() {
+        call_js_callback(callback, &[], context)?;
+    }
+    Ok(JsValue::undefined())
+}
+
 fn js_set_timeout(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(callback) = args.first() {
-        if let Some(object) = callback.as_object() {
-            if let Some(function) = JsFunction::from_object(object.clone()) {
-                let _ = function.call(&JsValue::undefined(), &[], context)?;
-            }
+        if callback.as_object().is_some() {
+            call_js_callback(callback, &[], context)?;
         } else if callback.is_string() {
             let script = js_value_to_string(callback, context)?;
             let _ = context.eval(Source::from_bytes(script.as_str()));
@@ -739,6 +1284,28 @@ fn js_set_timeout(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
 }
 
 fn js_clear_timeout(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
+fn js_add_event_listener(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let event_name = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        event_name.as_str(),
+        "load" | "domcontentloaded" | "readystatechange" | "script-load-dpj"
+    ) && let Some(callback) = args.get(1)
+    {
+        call_js_callback(callback, &[], context)?;
+    }
+
     Ok(JsValue::undefined())
 }
 
@@ -755,6 +1322,80 @@ fn js_confirm(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<
 fn js_prompt(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     js_console_log(&JsValue::undefined(), args, context)?;
     Ok(JsValue::null())
+}
+
+fn js_match_media(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let media = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    Ok(JsValue::from(build_match_media_stub(context, media)))
+}
+
+fn js_performance_now(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::new(performance_now_ms()))
+}
+
+fn js_return_dom_stub(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::from(build_dom_stub(context)))
+}
+
+fn js_return_node_list_stub(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::from(build_node_list_stub(context)))
+}
+
+fn js_return_dom_rect_stub(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::from(build_dom_rect_stub(context)))
+}
+
+fn js_get_video_aspect_ratio(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::new(16.0 / 9.0))
+}
+
+fn js_return_false(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::new(false))
+}
+
+fn js_return_null(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::null())
+}
+
+fn js_return_undefined(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
+fn js_noop(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
+}
+
+fn js_ytcfg_data(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::from(build_dom_stub(context)))
+}
+
+fn js_ytcfg_get(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(args.get(1).cloned().unwrap_or_else(JsValue::undefined))
+}
+
+fn call_js_callback(
+    callback: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if let Some(object) = callback.as_object()
+        && let Some(function) = JsFunction::from_object(object.clone())
+    {
+        return function.call(&JsValue::undefined(), args, context);
+    }
+
+    Ok(JsValue::undefined())
+}
+
+fn performance_now_ms() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
 }
 
 fn js_value_to_string(value: &JsValue, context: &mut Context) -> JsResult<String> {
@@ -839,7 +1480,7 @@ mod tests {
     #[test]
     fn skips_scripts_that_touch_unsupported_dom_apis() {
         let processed = process_document_scripts(
-            "<script>document.body.onload=function(){document.write('<p>Nope</p>')};</script>",
+            "<script>fetch('/api/demo').then(function(){ document.write('<p>Nope</p>'); });</script>",
             &Url::parse("https://example.com").unwrap(),
         );
 
@@ -850,5 +1491,15 @@ mod tests {
                 .iter()
                 .any(|entry| entry.contains("unsupported script pattern"))
         );
+    }
+
+    #[test]
+    fn supports_lightweight_dom_like_scripts() {
+        let processed = process_document_scripts(
+            "<script>document.addEventListener('DOMContentLoaded', function () { var el = document.querySelector('#demo'); if (el) { document.write('<p>Ready</p>'); } });</script>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("<p>Ready</p>"));
     }
 }

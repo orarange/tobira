@@ -2241,6 +2241,7 @@ dependencies = [
  "image",
  "rustls",
  "rustls-platform-verifier",
+ "serde_json",
  "softbuffer",
  "unicode-width",
  "winit",

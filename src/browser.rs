@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use serde_json::Value;
+
 use crate::css::{StyledNode, Stylesheet, build_styled_tree, parse_stylesheet};
 use crate::error::Result;
 use crate::html::{Element, Node, parse_document};
@@ -106,8 +108,50 @@ fn load_document_source(url: &Url, frame_depth: usize) -> Result<LoadedDocumentS
     let response = fetch(url)?;
     let content_type = response.header("content-type").map(str::to_string);
     let text = decode_text_response(&response.body, response.header("content-type"));
+    if is_youtube_watch_url(&response.final_url)
+        && let Some(data) = extract_youtube_watch_data_from_html(&text, &response.final_url)
+    {
+        let title = data.title.clone();
+        return Ok(LoadedDocumentSource {
+            final_url: response.final_url,
+            status_code: response.status_code,
+            reason_phrase: response.reason_phrase,
+            content_type,
+            title,
+            document: build_youtube_watch_document(&data),
+        });
+    }
+    if is_google_host(&response.final_url) {
+        let document = build_google_document_from_html(&text, &response.final_url);
+        let title = document_title(&document).unwrap_or_else(|| "Google".to_string());
+        return Ok(LoadedDocumentSource {
+            final_url: response.final_url,
+            status_code: response.status_code,
+            reason_phrase: response.reason_phrase,
+            content_type,
+            title,
+            document,
+        });
+    }
+    if is_youtube_host(&response.final_url) && !is_youtube_watch_url(&response.final_url) {
+        let document = build_youtube_generic_document_from_html(&text, &response.final_url);
+        let title = document_title(&document).unwrap_or_else(|| "YouTube".to_string());
+        return Ok(LoadedDocumentSource {
+            final_url: response.final_url,
+            status_code: response.status_code,
+            reason_phrase: response.reason_phrase,
+            content_type,
+            title,
+            document,
+        });
+    }
     let scripted = process_document_scripts(&text, &response.final_url);
     let mut parsed_document = parse_document(&scripted.html);
+    if let Some(rewritten) =
+        build_site_specific_document(&parsed_document, &text, &response.final_url)
+    {
+        parsed_document = rewritten;
+    }
     annotate_resource_urls(&mut parsed_document, &response.final_url);
     let original_title = scripted
         .title_override
@@ -702,6 +746,777 @@ fn collect_stylesheet_links_into(node: &Node, output: &mut Vec<String>) {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct YouTubeWatchData {
+    title: String,
+    channel: Option<String>,
+    description: Option<String>,
+    view_count: Option<String>,
+    duration: Option<String>,
+    published: Option<String>,
+    thumbnail_url: Option<String>,
+    canonical_url: Option<String>,
+    embed_url: Option<String>,
+}
+
+fn build_site_specific_document(document: &Node, html: &str, url: &Url) -> Option<Node> {
+    if is_youtube_watch_url(url) {
+        let data = extract_youtube_watch_data(document, html, url)?;
+        return Some(build_youtube_watch_document(&data));
+    }
+
+    if is_youtube_host(url) {
+        return Some(build_youtube_generic_document(document, html, url));
+    }
+
+    None
+}
+
+fn is_youtube_host(url: &Url) -> bool {
+    let host = url.host.to_ascii_lowercase();
+    host == "youtube.com" || host.ends_with(".youtube.com")
+}
+
+fn is_google_host(url: &Url) -> bool {
+    let host = url.host.to_ascii_lowercase();
+    host == "google.com" || host.ends_with(".google.com")
+}
+
+fn is_youtube_watch_url(url: &Url) -> bool {
+    is_youtube_host(url) && url.path.starts_with("/watch")
+}
+
+fn extract_youtube_watch_data_from_html(html: &str, url: &Url) -> Option<YouTubeWatchData> {
+    let player_response = extract_assigned_json_object(
+        html,
+        &[
+            "var ytInitialPlayerResponse =",
+            "window['ytInitialPlayerResponse'] =",
+            "window[\"ytInitialPlayerResponse\"] =",
+        ],
+    )
+    .and_then(|json| serde_json::from_str::<Value>(&json).ok());
+
+    let title = player_response
+        .as_ref()
+        .and_then(|value| value.pointer("/videoDetails/title"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| extract_meta_content_from_html(html, "name", "title"))
+        .or_else(|| extract_meta_content_from_html(html, "property", "og:title"))
+        .or_else(|| extract_html_tag_text(html, "title"))?;
+
+    let description = player_response
+        .as_ref()
+        .and_then(|value| value.pointer("/videoDetails/shortDescription"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| extract_meta_content_from_html(html, "name", "description"))
+        .or_else(|| extract_meta_content_from_html(html, "property", "og:description"));
+    let channel = player_response
+        .as_ref()
+        .and_then(|value| value.pointer("/videoDetails/author"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let view_count = player_response
+        .as_ref()
+        .and_then(|value| value.pointer("/videoDetails/viewCount"))
+        .and_then(Value::as_str)
+        .map(format_numeric_count);
+    let duration = player_response
+        .as_ref()
+        .and_then(|value| value.pointer("/videoDetails/lengthSeconds"))
+        .and_then(Value::as_str)
+        .and_then(format_duration_seconds);
+    let published = player_response
+        .as_ref()
+        .and_then(|value| {
+            value
+                .pointer("/microformat/playerMicroformatRenderer/publishDate")
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string);
+    let thumbnail_url = player_response
+        .as_ref()
+        .and_then(extract_thumbnail_url)
+        .or_else(|| extract_link_href_from_html(html, "rel", "image_src"))
+        .or_else(|| extract_meta_content_from_html(html, "property", "og:image"));
+    let canonical_url = extract_link_href_from_html(html, "rel", "canonical")
+        .or_else(|| extract_meta_content_from_html(html, "property", "og:url"))
+        .or_else(|| Some(url.to_string()));
+    let embed_url = player_response
+        .as_ref()
+        .and_then(|value| {
+            value
+                .pointer("/microformat/playerMicroformatRenderer/embed/iframeUrl")
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
+        .or_else(|| extract_meta_content_from_html(html, "property", "og:video:url"))
+        .or_else(|| {
+            player_response
+                .as_ref()
+                .and_then(|value| value.pointer("/videoDetails/videoId"))
+                .and_then(Value::as_str)
+                .map(|video_id| format!("https://www.youtube.com/embed/{video_id}"))
+        });
+
+    Some(YouTubeWatchData {
+        title,
+        channel,
+        description,
+        view_count,
+        duration,
+        published,
+        thumbnail_url,
+        canonical_url,
+        embed_url,
+    })
+}
+
+fn extract_youtube_watch_data(document: &Node, html: &str, url: &Url) -> Option<YouTubeWatchData> {
+    let player_response = extract_assigned_json_object(
+        html,
+        &[
+            "var ytInitialPlayerResponse =",
+            "window['ytInitialPlayerResponse'] =",
+            "window[\"ytInitialPlayerResponse\"] =",
+        ],
+    )
+    .and_then(|json| serde_json::from_str::<Value>(&json).ok());
+
+    let title = player_response
+        .as_ref()
+        .and_then(|value| value.pointer("/videoDetails/title"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| find_meta_content(document, "name", "title"))
+        .or_else(|| find_meta_content(document, "property", "og:title"))
+        .or_else(|| document_title(document))?;
+
+    let description = player_response
+        .as_ref()
+        .and_then(|value| value.pointer("/videoDetails/shortDescription"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| find_meta_content(document, "name", "description"))
+        .or_else(|| find_meta_content(document, "property", "og:description"));
+    let channel = player_response
+        .as_ref()
+        .and_then(|value| value.pointer("/videoDetails/author"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| find_link_content(document, "itemprop", "name"));
+    let view_count = player_response
+        .as_ref()
+        .and_then(|value| value.pointer("/videoDetails/viewCount"))
+        .and_then(Value::as_str)
+        .map(format_numeric_count)
+        .or_else(|| find_interaction_count(document, "WatchAction"));
+    let duration = player_response
+        .as_ref()
+        .and_then(|value| value.pointer("/videoDetails/lengthSeconds"))
+        .and_then(Value::as_str)
+        .and_then(format_duration_seconds)
+        .or_else(|| {
+            find_meta_content(document, "itemprop", "duration").and_then(parse_iso8601_duration)
+        });
+    let published = player_response
+        .as_ref()
+        .and_then(|value| {
+            value
+                .pointer("/microformat/playerMicroformatRenderer/publishDate")
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
+        .or_else(|| find_meta_content(document, "itemprop", "datePublished"));
+    let thumbnail_url = player_response
+        .as_ref()
+        .and_then(extract_thumbnail_url)
+        .or_else(|| find_link_href(document, "rel", "image_src"))
+        .or_else(|| find_meta_content(document, "property", "og:image"));
+    let embed_url = player_response
+        .as_ref()
+        .and_then(|value| {
+            value
+                .pointer("/microformat/playerMicroformatRenderer/embed/iframeUrl")
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
+        .or_else(|| find_meta_content(document, "property", "og:video:url"))
+        .or_else(|| {
+            player_response
+                .as_ref()
+                .and_then(|value| value.pointer("/videoDetails/videoId"))
+                .and_then(Value::as_str)
+                .map(|video_id| format!("https://www.youtube.com/embed/{video_id}"))
+        });
+    let canonical_url = find_link_href(document, "rel", "canonical")
+        .or_else(|| find_meta_content(document, "property", "og:url"))
+        .or_else(|| Some(url.to_string()));
+
+    Some(YouTubeWatchData {
+        title,
+        channel,
+        description,
+        view_count,
+        duration,
+        published,
+        thumbnail_url,
+        canonical_url,
+        embed_url,
+    })
+}
+
+fn build_youtube_watch_document(data: &YouTubeWatchData) -> Node {
+    let mut details = Vec::new();
+    push_detail(&mut details, "Channel", data.channel.as_deref());
+    push_detail(&mut details, "Views", data.view_count.as_deref());
+    push_detail(&mut details, "Published", data.published.as_deref());
+    push_detail(&mut details, "Length", data.duration.as_deref());
+    push_detail(&mut details, "Watch URL", data.canonical_url.as_deref());
+    push_detail(&mut details, "Embed URL", data.embed_url.as_deref());
+
+    let mut summary_row = Vec::new();
+    if let Some(thumbnail_url) = &data.thumbnail_url {
+        summary_row.push(Node::Element(Element {
+            tag_name: "td".to_string(),
+            attributes: BTreeMap::from([
+                ("width".to_string(), "520".to_string()),
+                ("valign".to_string(), "top".to_string()),
+            ]),
+            children: vec![Node::Element(Element {
+                tag_name: "img".to_string(),
+                attributes: BTreeMap::from([
+                    ("src".to_string(), thumbnail_url.clone()),
+                    ("data-scratch-src".to_string(), thumbnail_url.clone()),
+                    ("width".to_string(), "480".to_string()),
+                    ("alt".to_string(), data.title.clone()),
+                ]),
+                children: Vec::new(),
+            })],
+        }));
+    }
+    summary_row.push(Node::Element(Element {
+        tag_name: "td".to_string(),
+        attributes: BTreeMap::from([("valign".to_string(), "top".to_string())]),
+        children: details,
+    }));
+
+    let mut body_children = vec![
+        simple_text_element("h1", &data.title),
+        Node::Element(Element {
+            tag_name: "table".to_string(),
+            attributes: BTreeMap::from([
+                ("width".to_string(), "100%".to_string()),
+                ("border".to_string(), "0".to_string()),
+                ("cellpadding".to_string(), "0".to_string()),
+                ("cellspacing".to_string(), "12".to_string()),
+            ]),
+            children: vec![Node::Element(Element {
+                tag_name: "tr".to_string(),
+                attributes: BTreeMap::new(),
+                children: summary_row,
+            })],
+        }),
+        hr_node(),
+        simple_text_element("h2", "Description"),
+    ];
+
+    let description = data
+        .description
+        .as_deref()
+        .unwrap_or("No description was embedded in the page.");
+    let mut pushed_description = false;
+    for paragraph in description
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(12)
+    {
+        body_children.push(simple_text_element("p", paragraph));
+        pushed_description = true;
+    }
+    if !pushed_description {
+        body_children.push(simple_text_element("p", description.trim()));
+    }
+
+    synthetic_document(&data.title, body_children)
+}
+
+fn build_youtube_generic_document(document: &Node, html: &str, url: &Url) -> Node {
+    let title = document_title(document).unwrap_or_else(|| "YouTube".to_string());
+    let description = find_meta_content(document, "name", "description")
+        .or_else(|| find_meta_content(document, "property", "og:description"))
+        .unwrap_or_else(|| {
+            "This YouTube page relies on a large app shell. Scratch Browser currently renders specific watch URLs more accurately than the full home feed.".to_string()
+        });
+
+    let mut body_children = vec![
+        simple_text_element("h1", &title),
+        simple_text_element("p", &description),
+        simple_text_element(
+            "p",
+            "Tip: open a specific https://www.youtube.com/watch?v=... URL for a richer video summary.",
+        ),
+    ];
+
+    let watch_links = extract_html_attribute_values(html, "href=\"/watch?v=", '"', 10)
+        .into_iter()
+        .map(|path| {
+            if path.starts_with("http://") || path.starts_with("https://") {
+                path
+            } else {
+                format!("https://www.youtube.com{path}")
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if !watch_links.is_empty() {
+        body_children.push(hr_node());
+        body_children.push(simple_text_element("h2", "Watch Links"));
+        let items = watch_links
+            .into_iter()
+            .map(|href| {
+                Node::Element(Element {
+                    tag_name: "li".to_string(),
+                    attributes: BTreeMap::new(),
+                    children: vec![Node::Text(href)],
+                })
+            })
+            .collect();
+        body_children.push(Node::Element(Element {
+            tag_name: "ul".to_string(),
+            attributes: BTreeMap::new(),
+            children: items,
+        }));
+    }
+
+    body_children.push(hr_node());
+    body_children.push(simple_text_element("p", &format!("URL: {}", url)));
+
+    synthetic_document(&title, body_children)
+}
+
+fn build_youtube_generic_document_from_html(html: &str, url: &Url) -> Node {
+    let title = extract_html_tag_text(html, "title").unwrap_or_else(|| "YouTube".to_string());
+    let description = extract_meta_content_from_html(html, "name", "description")
+        .or_else(|| extract_meta_content_from_html(html, "property", "og:description"))
+        .unwrap_or_else(|| {
+            "This YouTube page relies on a large app shell. Scratch Browser currently renders specific watch URLs more accurately than the full home feed.".to_string()
+        });
+
+    let mut body_children = vec![
+        simple_text_element("h1", &title),
+        simple_text_element("p", &description),
+        simple_text_element(
+            "p",
+            "Tip: open a specific https://www.youtube.com/watch?v=... URL for a richer video summary.",
+        ),
+    ];
+
+    let watch_links = extract_html_attribute_values(html, "href=\"/watch?v=", '"', 10)
+        .into_iter()
+        .map(|path| format!("https://www.youtube.com{path}"))
+        .collect::<Vec<_>>();
+    if !watch_links.is_empty() {
+        body_children.push(hr_node());
+        body_children.push(simple_text_element("h2", "Watch Links"));
+        body_children.push(Node::Element(Element {
+            tag_name: "ul".to_string(),
+            attributes: BTreeMap::new(),
+            children: watch_links
+                .into_iter()
+                .map(|href| {
+                    Node::Element(Element {
+                        tag_name: "li".to_string(),
+                        attributes: BTreeMap::new(),
+                        children: vec![Node::Text(href)],
+                    })
+                })
+                .collect(),
+        }));
+    }
+
+    body_children.push(hr_node());
+    body_children.push(simple_text_element("p", &format!("URL: {}", url)));
+
+    synthetic_document(&title, body_children)
+}
+
+fn build_google_document_from_html(html: &str, url: &Url) -> Node {
+    let title = extract_html_tag_text(html, "title").unwrap_or_else(|| "Google".to_string());
+    let description = extract_meta_content_from_html(html, "name", "description")
+        .or_else(|| extract_meta_content_from_html(html, "property", "og:description"))
+        .unwrap_or_else(|| {
+            "This Google page uses a large interactive shell. Scratch Browser keeps it lightweight instead of trying to execute the full app.".to_string()
+        });
+
+    synthetic_document(
+        &title,
+        vec![
+            simple_text_element("h1", &title),
+            simple_text_element("p", &description),
+            simple_text_element(
+                "p",
+                "Tip: direct content URLs usually render better than large search or portal shells.",
+            ),
+            hr_node(),
+            simple_text_element("p", &format!("URL: {}", url)),
+        ],
+    )
+}
+
+fn simple_text_element(tag_name: &str, text: &str) -> Node {
+    Node::Element(Element {
+        tag_name: tag_name.to_string(),
+        attributes: BTreeMap::new(),
+        children: vec![Node::Text(text.to_string())],
+    })
+}
+
+fn push_detail(output: &mut Vec<Node>, label: &str, value: Option<&str>) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    output.push(simple_text_element("p", &format!("{label}: {value}")));
+}
+
+fn extract_assigned_json_object(html: &str, markers: &[&str]) -> Option<String> {
+    for marker in markers {
+        let Some(marker_index) = html.find(marker) else {
+            continue;
+        };
+        let after_marker = marker_index + marker.len();
+        let Some(open_offset) = html[after_marker..].find('{') else {
+            continue;
+        };
+        let open_index = after_marker + open_offset;
+        if let Some(close_index) = find_matching_json_brace(html, open_index) {
+            return Some(html[open_index..=close_index].to_string());
+        }
+    }
+
+    None
+}
+
+fn extract_html_tag_text(html: &str, tag_name: &str) -> Option<String> {
+    let open_tag = format!("<{tag_name}>");
+    let close_tag = format!("</{tag_name}>");
+    let start = html.find(&open_tag)?;
+    let content_start = start + open_tag.len();
+    let end_offset = html[content_start..].find(&close_tag)?;
+    let text = &html[content_start..content_start + end_offset];
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn extract_meta_content_from_html(html: &str, attribute: &str, expected: &str) -> Option<String> {
+    let mut search_start = 0;
+    let attribute_marker = format!("{attribute}=\"{expected}\"");
+    while let Some(meta_offset) = html[search_start..].find("<meta") {
+        let tag_start = search_start + meta_offset;
+        let tag_end = tag_start + html[tag_start..].find('>')?;
+        let tag = &html[tag_start..=tag_end];
+        if tag.contains(&attribute_marker)
+            && let Some(content_offset) = tag.find("content=\"")
+        {
+            let value_start = content_offset + "content=\"".len();
+            let value_end = tag[value_start..].find('"')?;
+            let content = &tag[value_start..value_start + value_end];
+            if !content.trim().is_empty() {
+                return Some(content.to_string());
+            }
+        }
+        search_start = tag_end + 1;
+    }
+
+    None
+}
+
+fn extract_link_href_from_html(html: &str, attribute: &str, expected: &str) -> Option<String> {
+    let mut search_start = 0;
+    let attribute_marker = format!("{attribute}=\"{expected}\"");
+    while let Some(link_offset) = html[search_start..].find("<link") {
+        let tag_start = search_start + link_offset;
+        let tag_end = tag_start + html[tag_start..].find('>')?;
+        let tag = &html[tag_start..=tag_end];
+        if tag.contains(&attribute_marker)
+            && let Some(href_offset) = tag.find("href=\"")
+        {
+            let value_start = href_offset + "href=\"".len();
+            let value_end = tag[value_start..].find('"')?;
+            let href = &tag[value_start..value_start + value_end];
+            if !href.trim().is_empty() {
+                return Some(href.to_string());
+            }
+        }
+        search_start = tag_end + 1;
+    }
+
+    None
+}
+
+fn extract_html_attribute_values(
+    html: &str,
+    marker: &str,
+    closing_quote: char,
+    limit: usize,
+) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut search_start = 0;
+
+    while values.len() < limit {
+        let Some(found) = html[search_start..].find(marker) else {
+            break;
+        };
+        let value_start = search_start + found + "href=\"".len();
+        let Some(end_offset) = html[value_start..].find(closing_quote) else {
+            break;
+        };
+        let value = &html[value_start..value_start + end_offset];
+        if !values.iter().any(|known| known == value) {
+            values.push(value.to_string());
+        }
+        search_start = value_start + end_offset + 1;
+    }
+
+    values
+}
+
+fn find_matching_json_brace(input: &str, open_index: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0_u32;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, byte) in bytes.iter().copied().enumerate().skip(open_index) {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match byte {
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth = depth.saturating_add(1),
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn extract_thumbnail_url(value: &Value) -> Option<String> {
+    value
+        .pointer("/videoDetails/thumbnail/thumbnails")
+        .and_then(Value::as_array)
+        .and_then(|items| items.iter().rev().find_map(|item| item.get("url")))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn find_meta_content(node: &Node, attribute: &str, expected: &str) -> Option<String> {
+    match node {
+        Node::Text(_) => None,
+        Node::Element(element) => {
+            if element.tag_name == "meta"
+                && element
+                    .attribute(attribute)
+                    .map(|value| value.eq_ignore_ascii_case(expected))
+                    .unwrap_or(false)
+                && let Some(content) = element.attribute("content")
+                && !content.trim().is_empty()
+            {
+                return Some(content.to_string());
+            }
+
+            for child in &element.children {
+                if let Some(found) = find_meta_content(child, attribute, expected) {
+                    return Some(found);
+                }
+            }
+
+            None
+        }
+    }
+}
+
+fn find_link_href(node: &Node, attribute: &str, expected: &str) -> Option<String> {
+    match node {
+        Node::Text(_) => None,
+        Node::Element(element) => {
+            if element.tag_name == "link"
+                && element
+                    .attribute(attribute)
+                    .map(|value| value.eq_ignore_ascii_case(expected))
+                    .unwrap_or(false)
+                && let Some(href) = element.attribute("href")
+                && !href.trim().is_empty()
+            {
+                return Some(href.to_string());
+            }
+
+            for child in &element.children {
+                if let Some(found) = find_link_href(child, attribute, expected) {
+                    return Some(found);
+                }
+            }
+
+            None
+        }
+    }
+}
+
+fn find_link_content(node: &Node, attribute: &str, expected: &str) -> Option<String> {
+    match node {
+        Node::Text(_) => None,
+        Node::Element(element) => {
+            if element.tag_name == "link"
+                && element
+                    .attribute(attribute)
+                    .map(|value| value.eq_ignore_ascii_case(expected))
+                    .unwrap_or(false)
+                && let Some(content) = element.attribute("content")
+                && !content.trim().is_empty()
+            {
+                return Some(content.to_string());
+            }
+
+            for child in &element.children {
+                if let Some(found) = find_link_content(child, attribute, expected) {
+                    return Some(found);
+                }
+            }
+
+            None
+        }
+    }
+}
+
+fn find_interaction_count(node: &Node, expected_type_fragment: &str) -> Option<String> {
+    match node {
+        Node::Text(_) => None,
+        Node::Element(element) => {
+            if element.tag_name == "div"
+                && element
+                    .attribute("itemprop")
+                    .map(|value| value.eq_ignore_ascii_case("interactionStatistic"))
+                    .unwrap_or(false)
+            {
+                let mut interaction_type = None;
+                let mut user_count = None;
+                for child in &element.children {
+                    if let Node::Element(meta) = child
+                        && meta.tag_name == "meta"
+                    {
+                        match meta.attribute("itemprop") {
+                            Some("interactionType") => {
+                                interaction_type = meta.attribute("content");
+                            }
+                            Some("userInteractionCount") => {
+                                user_count = meta.attribute("content");
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                if interaction_type
+                    .map(|value| value.contains(expected_type_fragment))
+                    .unwrap_or(false)
+                    && let Some(count) = user_count
+                {
+                    return Some(format_numeric_count(count));
+                }
+            }
+
+            for child in &element.children {
+                if let Some(found) = find_interaction_count(child, expected_type_fragment) {
+                    return Some(found);
+                }
+            }
+
+            None
+        }
+    }
+}
+
+fn format_numeric_count(raw: &str) -> String {
+    let digits: String = raw
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return raw.to_string();
+    }
+
+    let mut grouped = String::new();
+    for (index, character) in digits.chars().rev().enumerate() {
+        if index != 0 && index % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(character);
+    }
+
+    grouped.chars().rev().collect()
+}
+
+fn format_duration_seconds(raw: &str) -> Option<String> {
+    let total_seconds = raw.parse::<u64>().ok()?;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    Some(if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    })
+}
+
+fn parse_iso8601_duration(raw: String) -> Option<String> {
+    if !raw.starts_with("PT") {
+        return None;
+    }
+
+    let mut remaining = raw.trim_start_matches("PT");
+    let mut hours = 0_u64;
+    let mut minutes = 0_u64;
+    let mut seconds = 0_u64;
+
+    if let Some((value, rest)) = remaining.split_once('H') {
+        hours = value.parse().ok()?;
+        remaining = rest;
+    }
+    if let Some((value, rest)) = remaining.split_once('M') {
+        minutes = value.parse().ok()?;
+        remaining = rest;
+    }
+    if let Some((value, _)) = remaining.split_once('S') {
+        seconds = value.parse().ok()?;
+    }
+
+    Some(if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    })
+}
+
 fn document_title(node: &Node) -> Option<String> {
     first_text_by_tag(node, "title")
 }
@@ -797,8 +1612,8 @@ fn collect_raw_text_into(node: &Node, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserPage, collect_frame_specs, collect_stylesheet, document_title,
-        extract_body_children, synthetic_document,
+        BrowserPage, build_site_specific_document, collect_frame_specs, collect_stylesheet,
+        document_title, extract_body_children, synthetic_document,
     };
     use crate::css::StyledNode;
     use crate::html::{Node, parse_document};
@@ -904,6 +1719,63 @@ mod tests {
             panic!("body child should be an element");
         };
         assert_eq!(paragraph.tag_name, "p");
+    }
+
+    #[test]
+    fn rewrites_youtube_watch_pages_into_visible_summary() {
+        let html = r#"
+            <html>
+              <head>
+                <title>Video - YouTube</title>
+                <meta name="description" content="fallback description">
+                <meta property="og:image" content="https://i.ytimg.com/vi/demo/hqdefault.jpg">
+                <link rel="canonical" href="https://www.youtube.com/watch?v=demo123">
+              </head>
+              <body>
+                <script>
+                  var ytInitialPlayerResponse = {
+                    "videoDetails": {
+                      "title": "Demo Video",
+                      "author": "Demo Channel",
+                      "viewCount": "1234567",
+                      "lengthSeconds": "214",
+                      "shortDescription": "Line one\nLine two",
+                      "thumbnail": {
+                        "thumbnails": [
+                          {"url": "https://i.ytimg.com/vi/demo/default.jpg"},
+                          {"url": "https://i.ytimg.com/vi/demo/maxresdefault.jpg"}
+                        ]
+                      },
+                      "videoId": "demo123"
+                    },
+                    "microformat": {
+                      "playerMicroformatRenderer": {
+                        "publishDate": "2026-05-13",
+                        "embed": {
+                          "iframeUrl": "https://www.youtube.com/embed/demo123"
+                        }
+                      }
+                    }
+                  };
+                </script>
+              </body>
+            </html>
+        "#;
+        let document = parse_document(html);
+
+        let rewritten = build_site_specific_document(
+            &document,
+            html,
+            &Url::parse("https://www.youtube.com/watch?v=demo123").unwrap(),
+        )
+        .expect("youtube watch pages should be rewritten");
+        let rendered = crate::render::render_document(&rewritten);
+
+        assert!(rendered.contains("Demo Video"));
+        assert!(rendered.contains("Demo Channel"));
+        assert!(rendered.contains("1,234,567"));
+        assert!(rendered.contains("3:34"));
+        assert!(rendered.contains("2026-05-13"));
     }
 
     fn parse_styled_text(text: &str) -> StyledNode {

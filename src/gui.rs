@@ -53,6 +53,7 @@ const COLOR_ADDRESS_BAR: Color = 0xF5F8FC;
 const COLOR_ADDRESS_BAR_BORDER: Color = 0x91A6C6;
 const COLOR_ADDRESS_BAR_FOCUS: Color = 0xE6A53A;
 const COLOR_ADDRESS_BAR_TEXT: Color = 0x122033;
+const COLOR_ADDRESS_BAR_SELECTION: Color = 0xBBD5F7;
 const COLOR_PANEL_BORDER: Color = 0xD4C7B2;
 
 type WindowHandle = Rc<Window>;
@@ -173,6 +174,14 @@ impl BrowserApp {
         self.address_bar.focus_at(char_index);
         self.sync_input_method();
         self.request_redraw();
+    }
+
+    fn focus_address_bar_select_all(&mut self) {
+        if self.address_bar.select_all() || !self.address_bar.focused {
+            self.address_bar.focused = true;
+            self.sync_input_method();
+            self.request_redraw();
+        }
     }
 
     fn blur_address_bar(&mut self) {
@@ -388,6 +397,8 @@ impl BrowserApp {
         repeat: bool,
     ) -> bool {
         if self.address_bar.focused {
+            let control = self.modifiers.control_key();
+            let shift = self.modifiers.shift_key();
             match key_code {
                 KeyCode::Escape if !repeat => {
                     self.blur_address_bar();
@@ -398,54 +409,81 @@ impl BrowserApp {
                     return false;
                 }
                 KeyCode::Backspace => {
-                    if self.address_bar.backspace() {
+                    let changed = if control {
+                        self.address_bar.delete_word_backward()
+                    } else {
+                        self.address_bar.backspace()
+                    };
+                    if changed {
                         self.sync_input_method();
                         self.request_redraw();
                     }
                     return false;
                 }
                 KeyCode::Delete => {
-                    if self.address_bar.delete_forward() {
+                    let changed = if control {
+                        self.address_bar.delete_word_forward()
+                    } else {
+                        self.address_bar.delete_forward()
+                    };
+                    if changed {
                         self.sync_input_method();
                         self.request_redraw();
                     }
                     return false;
                 }
                 KeyCode::ArrowLeft => {
-                    if self.address_bar.move_left() {
+                    let changed = if control {
+                        self.address_bar.move_word_left(shift)
+                    } else {
+                        self.address_bar.move_left(shift)
+                    };
+                    if changed {
                         self.sync_input_method();
                         self.request_redraw();
                     }
                     return false;
                 }
                 KeyCode::ArrowRight => {
-                    if self.address_bar.move_right() {
+                    let changed = if control {
+                        self.address_bar.move_word_right(shift)
+                    } else {
+                        self.address_bar.move_right(shift)
+                    };
+                    if changed {
                         self.sync_input_method();
                         self.request_redraw();
                     }
                     return false;
                 }
                 KeyCode::Home => {
-                    if self.address_bar.move_home() {
+                    if self.address_bar.move_home(shift) {
                         self.sync_input_method();
                         self.request_redraw();
                     }
                     return false;
                 }
                 KeyCode::End => {
-                    if self.address_bar.move_end() {
+                    if self.address_bar.move_end(shift) {
                         self.sync_input_method();
                         self.request_redraw();
                     }
                     return false;
                 }
-                KeyCode::KeyL if self.modifiers.control_key() && !repeat => {
-                    self.address_bar.move_end();
+                KeyCode::KeyA if control && !repeat => {
+                    if self.address_bar.select_all() {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::KeyL if control && !repeat => {
+                    self.address_bar.select_all();
                     self.sync_input_method();
                     self.request_redraw();
                     return false;
                 }
-                KeyCode::KeyR if self.modifiers.control_key() && !repeat => {
+                KeyCode::KeyR if control && !repeat => {
                     self.reload();
                     return false;
                 }
@@ -476,7 +514,7 @@ impl BrowserApp {
             KeyCode::End => self.scroll_y = max_scroll(viewport_height, content_height),
             KeyCode::KeyR | KeyCode::F5 if !repeat => self.reload(),
             KeyCode::KeyL if self.modifiers.control_key() && !repeat => {
-                self.focus_address_bar(self.address_bar.char_len());
+                self.focus_address_bar_select_all();
                 return false;
             }
             _ => return false,
@@ -840,6 +878,7 @@ fn layout_error_document(
 struct AddressBarState {
     text: String,
     cursor_chars: usize,
+    selection_anchor: Option<usize>,
     focused: bool,
 }
 
@@ -849,6 +888,7 @@ impl AddressBarState {
         Self {
             text,
             cursor_chars,
+            selection_anchor: None,
             focused: false,
         }
     }
@@ -860,6 +900,7 @@ impl AddressBarState {
     fn set_text(&mut self, text: String) {
         self.text = text;
         self.cursor_chars = self.text.chars().count();
+        self.selection_anchor = None;
     }
 
     fn char_len(&self) -> usize {
@@ -869,10 +910,43 @@ impl AddressBarState {
     fn focus_at(&mut self, char_index: usize) {
         self.focused = true;
         self.cursor_chars = char_index.min(self.char_len());
+        self.selection_anchor = None;
     }
 
     fn blur(&mut self) {
         self.focused = false;
+        self.selection_anchor = None;
+    }
+
+    fn selection_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.selection_anchor?;
+        if anchor == self.cursor_chars {
+            return None;
+        }
+
+        Some((anchor.min(self.cursor_chars), anchor.max(self.cursor_chars)))
+    }
+
+    fn select_all(&mut self) -> bool {
+        let end = self.char_len();
+        let changed = self.cursor_chars != end || self.selection_range() != Some((0, end));
+        self.focused = true;
+        self.cursor_chars = end;
+        self.selection_anchor = Some(0);
+        changed
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection_range() else {
+            return false;
+        };
+
+        let start_byte = self.byte_index_for_char(start);
+        let end_byte = self.byte_index_for_char(end);
+        self.text.replace_range(start_byte..end_byte, "");
+        self.cursor_chars = start;
+        self.selection_anchor = None;
+        true
     }
 
     fn insert_text(&mut self, input: &str) -> bool {
@@ -884,13 +958,19 @@ impl AddressBarState {
             return false;
         }
 
+        self.delete_selection();
         let byte_index = self.byte_index_for_char(self.cursor_chars);
         self.text.insert_str(byte_index, &filtered);
         self.cursor_chars = self.cursor_chars.saturating_add(filtered.chars().count());
+        self.selection_anchor = None;
         true
     }
 
     fn backspace(&mut self) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+
         if self.cursor_chars == 0 {
             return false;
         }
@@ -899,10 +979,15 @@ impl AddressBarState {
         let start = self.byte_index_for_char(self.cursor_chars - 1);
         self.text.replace_range(start..end, "");
         self.cursor_chars -= 1;
+        self.selection_anchor = None;
         true
     }
 
     fn delete_forward(&mut self) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+
         if self.cursor_chars >= self.char_len() {
             return false;
         }
@@ -910,39 +995,89 @@ impl AddressBarState {
         let start = self.byte_index_for_char(self.cursor_chars);
         let end = self.byte_index_for_char(self.cursor_chars + 1);
         self.text.replace_range(start..end, "");
+        self.selection_anchor = None;
         true
     }
 
-    fn move_left(&mut self) -> bool {
+    fn move_left(&mut self, extend_selection: bool) -> bool {
         if self.cursor_chars == 0 {
             return false;
         }
-        self.cursor_chars -= 1;
-        true
+
+        self.set_cursor(self.cursor_chars - 1, extend_selection)
     }
 
-    fn move_right(&mut self) -> bool {
+    fn move_right(&mut self, extend_selection: bool) -> bool {
         if self.cursor_chars >= self.char_len() {
             return false;
         }
-        self.cursor_chars += 1;
-        true
+
+        self.set_cursor(self.cursor_chars + 1, extend_selection)
     }
 
-    fn move_home(&mut self) -> bool {
+    fn move_word_left(&mut self, extend_selection: bool) -> bool {
+        let target = self.previous_word_boundary();
+        if target == self.cursor_chars {
+            return false;
+        }
+
+        self.set_cursor(target, extend_selection)
+    }
+
+    fn move_word_right(&mut self, extend_selection: bool) -> bool {
+        let target = self.next_word_boundary();
+        if target == self.cursor_chars {
+            return false;
+        }
+
+        self.set_cursor(target, extend_selection)
+    }
+
+    fn move_home(&mut self, extend_selection: bool) -> bool {
         if self.cursor_chars == 0 {
             return false;
         }
-        self.cursor_chars = 0;
-        true
+        self.set_cursor(0, extend_selection)
     }
 
-    fn move_end(&mut self) -> bool {
+    fn move_end(&mut self, extend_selection: bool) -> bool {
         let end = self.char_len();
         if self.cursor_chars == end {
             return false;
         }
-        self.cursor_chars = end;
+        self.set_cursor(end, extend_selection)
+    }
+
+    fn delete_word_backward(&mut self) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        let target = self.previous_word_boundary();
+        if target == self.cursor_chars {
+            return false;
+        }
+
+        let start = self.byte_index_for_char(target);
+        let end = self.byte_index_for_char(self.cursor_chars);
+        self.text.replace_range(start..end, "");
+        self.cursor_chars = target;
+        self.selection_anchor = None;
+        true
+    }
+
+    fn delete_word_forward(&mut self) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        let target = self.next_word_boundary();
+        if target == self.cursor_chars {
+            return false;
+        }
+
+        let start = self.byte_index_for_char(self.cursor_chars);
+        let end = self.byte_index_for_char(target);
+        self.text.replace_range(start..end, "");
+        self.selection_anchor = None;
         true
     }
 
@@ -956,6 +1091,53 @@ impl AddressBarState {
             .nth(char_index)
             .map(|(index, _)| index)
             .unwrap_or(self.text.len())
+    }
+
+    fn set_cursor(&mut self, target: usize, extend_selection: bool) -> bool {
+        let target = target.min(self.char_len());
+        let previous_cursor = self.cursor_chars;
+        let previous_anchor = self.selection_anchor;
+
+        if extend_selection {
+            self.selection_anchor.get_or_insert(previous_cursor);
+        } else {
+            self.selection_anchor = None;
+        }
+
+        self.cursor_chars = target;
+        if self.selection_anchor == Some(self.cursor_chars) {
+            self.selection_anchor = None;
+        }
+
+        previous_cursor != self.cursor_chars || previous_anchor != self.selection_anchor
+    }
+
+    fn previous_word_boundary(&self) -> usize {
+        if self.cursor_chars == 0 {
+            return 0;
+        }
+
+        let characters: Vec<char> = self.text.chars().collect();
+        let mut index = self.cursor_chars.min(characters.len());
+        while index > 0 && characters[index - 1].is_whitespace() {
+            index -= 1;
+        }
+        while index > 0 && !characters[index - 1].is_whitespace() {
+            index -= 1;
+        }
+        index
+    }
+
+    fn next_word_boundary(&self) -> usize {
+        let characters: Vec<char> = self.text.chars().collect();
+        let mut index = self.cursor_chars.min(characters.len());
+        while index < characters.len() && characters[index].is_whitespace() {
+            index += 1;
+        }
+        while index < characters.len() && !characters[index].is_whitespace() {
+            index += 1;
+        }
+        index
     }
 }
 
@@ -1018,6 +1200,8 @@ struct AddressBarView {
     start_char: usize,
     end_char: usize,
     caret_x: u32,
+    selection_start_x: Option<u32>,
+    selection_end_x: Option<u32>,
 }
 
 fn chrome_layout_metrics(fonts: &mut FontContext, window_width: u32) -> ChromeLayoutMetrics {
@@ -1106,6 +1290,8 @@ fn address_bar_view(
             start_char: 0,
             end_char: 0,
             caret_x: 0,
+            selection_start_x: None,
+            selection_end_x: None,
         };
     }
 
@@ -1154,11 +1340,46 @@ fn address_bar_view(
         })
         .sum();
 
+    let mut selection_start_x = None;
+    let mut selection_end_x = None;
+    if let Some((selection_start, selection_end)) = state.selection_range() {
+        let visible_start = selection_start.max(start).min(end);
+        let visible_end = selection_end.max(start).min(end);
+        if visible_start < visible_end {
+            selection_start_x = Some(
+                characters[start..visible_start]
+                    .iter()
+                    .map(|character| {
+                        fonts.glyph_advance_px(
+                            *character,
+                            ADDRESS_BAR_FONT_SIZE,
+                            FontFamilyKind::Sans,
+                        )
+                    })
+                    .sum(),
+            );
+            selection_end_x = Some(
+                characters[start..visible_end]
+                    .iter()
+                    .map(|character| {
+                        fonts.glyph_advance_px(
+                            *character,
+                            ADDRESS_BAR_FONT_SIZE,
+                            FontFamilyKind::Sans,
+                        )
+                    })
+                    .sum(),
+            );
+        }
+    }
+
     AddressBarView {
         text,
         start_char: start,
         end_char: end,
         caret_x,
+        selection_start_x,
+        selection_end_x,
     }
 }
 
@@ -1508,6 +1729,40 @@ fn paint_chrome(
         FontFamilyKind::Sans,
     );
     if address_bar.focused {
+        if let (Some(selection_start_x), Some(selection_end_x)) =
+            (address_view.selection_start_x, address_view.selection_end_x)
+        {
+            let selection_x = chrome
+                .address_bar
+                .x
+                .saturating_add(ADDRESS_BAR_PADDING_X)
+                .saturating_add(selection_start_x);
+            let selection_width = selection_end_x.saturating_sub(selection_start_x).max(1);
+            draw_rect(
+                buffer,
+                width,
+                height,
+                selection_x,
+                chrome.address_bar.y.saturating_add(6),
+                selection_width,
+                chrome.address_bar.height.saturating_sub(12).max(1),
+                COLOR_ADDRESS_BAR_SELECTION,
+            );
+            fonts.draw_text(
+                buffer,
+                width,
+                height,
+                chrome.address_bar.x.saturating_add(ADDRESS_BAR_PADDING_X),
+                address_text_y,
+                &address_view.text,
+                ADDRESS_BAR_FONT_SIZE,
+                COLOR_ADDRESS_BAR_TEXT,
+                false,
+                false,
+                FontFamilyKind::Sans,
+            );
+        }
+
         let caret_height = chrome.address_bar.height.saturating_sub(14);
         let caret_y = chrome.address_bar.y.saturating_add(7);
         let caret_x = chrome
@@ -1528,7 +1783,7 @@ fn paint_chrome(
     }
 
     let meta_right = format!(
-        "Enter go | Ctrl+L focus | scroll: {} / {} px",
+        "Enter go | Ctrl+L focus | Ctrl+A select | scroll: {} / {} px",
         scroll_y, max_scroll_y
     );
     let meta_right_width = fonts.text_width_px(&meta_right, INFO_FONT_SIZE, FontFamilyKind::Sans);
@@ -1936,6 +2191,29 @@ mod tests {
         assert!(!state.insert_text("\u{8}"));
         assert!(!state.insert_text("\r"));
         assert_eq!(state.text(), "https://google.com");
+    }
+
+    #[test]
+    fn address_bar_select_all_replaces_text() {
+        let mut state = AddressBarState::new("https://google.com".to_string());
+
+        assert!(state.select_all());
+        assert!(state.selection_range().is_some());
+        assert!(state.insert_text("https://youtube.com"));
+        assert_eq!(state.text(), "https://youtube.com");
+        assert!(state.selection_range().is_none());
+    }
+
+    #[test]
+    fn address_bar_shift_navigation_creates_selection() {
+        let mut state = AddressBarState::new("google.com".to_string());
+        state.focus_at(state.char_len());
+
+        assert!(state.move_left(true));
+        assert!(state.selection_range().is_some());
+        assert!(state.backspace());
+        assert_eq!(state.text(), "google.co");
+        assert!(state.selection_range().is_none());
     }
 
     #[test]
