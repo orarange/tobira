@@ -58,7 +58,7 @@ const COLOR_PANEL_BORDER: Color = 0xD4C7B2;
 type WindowHandle = Rc<Window>;
 type SurfaceHandle = Surface<OwnedDisplayHandle, WindowHandle>;
 
-pub fn run(initial_url: Url) -> Result<()> {
+pub fn run(initial_url: Option<Url>) -> Result<()> {
     let event_loop = EventLoop::new().map_err(|error| BrowserError::message(error.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
@@ -72,7 +72,7 @@ pub fn run(initial_url: Url) -> Result<()> {
 }
 
 struct BrowserApp {
-    current_url: Url,
+    current_url: Option<Url>,
     document: DocumentView,
     fonts: FontContext,
     context: Context<OwnedDisplayHandle>,
@@ -87,10 +87,19 @@ struct BrowserApp {
 }
 
 impl BrowserApp {
-    fn new(initial_url: Url, context: Context<OwnedDisplayHandle>) -> Self {
-        let document = DocumentView::load(initial_url);
-        let current_url = document.url.clone();
-        let address_bar = AddressBarState::new(current_url.to_string());
+    fn new(initial_url: Option<Url>, context: Context<OwnedDisplayHandle>) -> Self {
+        let (current_url, document, address_bar) = match initial_url {
+            Some(url) => {
+                let document = DocumentView::load(url.clone());
+                let address_bar = AddressBarState::new(url.to_string());
+                (Some(url), document, address_bar)
+            }
+            None => {
+                let mut address_bar = AddressBarState::new(String::new());
+                address_bar.focus_at(0);
+                (None, DocumentView::blank(), address_bar)
+            }
+        };
 
         Self {
             current_url,
@@ -109,9 +118,9 @@ impl BrowserApp {
     }
 
     fn load_url(&mut self, url: Url) {
-        self.document = DocumentView::load(url);
-        self.current_url = self.document.url.clone();
-        self.address_bar.set_text(self.current_url.to_string());
+        self.document = DocumentView::load(url.clone());
+        self.current_url = Some(url.clone());
+        self.address_bar.set_text(url.to_string());
         self.address_bar.blur();
         self.scroll_y = 0;
         self.sync_window_title();
@@ -120,9 +129,17 @@ impl BrowserApp {
     }
 
     fn reload(&mut self) {
-        self.document = DocumentView::load(self.current_url.clone());
-        self.current_url = self.document.url.clone();
-        self.address_bar.set_text(self.current_url.to_string());
+        let Some(url) = self.current_url.clone() else {
+            self.document = DocumentView::blank();
+            self.scroll_y = 0;
+            self.sync_window_title();
+            self.request_redraw();
+            return;
+        };
+
+        self.document = DocumentView::load(url.clone());
+        self.current_url = Some(url.clone());
+        self.address_bar.set_text(url.to_string());
         self.scroll_y = 0;
         self.sync_window_title();
         self.sync_input_method();
@@ -132,8 +149,8 @@ impl BrowserApp {
     fn navigate_to_address(&mut self) {
         let entered = self.address_bar.text().trim().to_string();
         if entered.is_empty() {
-            self.document =
-                DocumentView::error(self.current_url.clone(), "address bar is empty".to_string());
+            self.current_url = None;
+            self.document = DocumentView::blank();
             self.scroll_y = 0;
             self.sync_window_title();
             self.request_redraw();
@@ -143,10 +160,8 @@ impl BrowserApp {
         match parse_address_input(&entered) {
             Ok(url) => self.load_url(url),
             Err(error) => {
-                self.document = DocumentView::error(
-                    self.current_url.clone(),
-                    format!("could not navigate to `{entered}`: {error}"),
-                );
+                self.document =
+                    DocumentView::error(format!("could not navigate to `{entered}`: {error}"));
                 self.scroll_y = 0;
                 self.sync_window_title();
                 self.request_redraw();
@@ -618,11 +633,7 @@ impl ApplicationHandler for BrowserApp {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
                 if let Err(error) = self.draw() {
-                    self.document = DocumentView::error(
-                        self.current_url.clone(),
-                        format!("drawing failed: {error}"),
-                    );
-                    self.current_url = self.document.url.clone();
+                    self.document = DocumentView::error(format!("drawing failed: {error}"));
                     self.scroll_y = 0;
                     self.sync_window_title();
                     let _ = self.draw();
@@ -680,7 +691,6 @@ impl ApplicationHandler for BrowserApp {
 
 #[derive(Debug, Clone)]
 struct DocumentView {
-    url: Url,
     title: String,
     status_line: String,
     subtitle: String,
@@ -689,6 +699,7 @@ struct DocumentView {
 
 #[derive(Debug, Clone)]
 enum DocumentContent {
+    Blank,
     Loaded(BrowserPage),
     Error(ErrorDocument),
 }
@@ -699,10 +710,19 @@ struct ErrorDocument {
 }
 
 impl DocumentView {
+    fn blank() -> Self {
+        Self {
+            title: "New Tab".to_string(),
+            status_line: "Status: ready".to_string(),
+            subtitle: "Type a URL in the address bar and press Enter.".to_string(),
+            content: DocumentContent::Blank,
+        }
+    }
+
     fn load(url: Url) -> Self {
         match load_page(&url) {
             Ok(page) => Self::from_page(page),
-            Err(error) => Self::error(url, error.to_string()),
+            Err(error) => Self::error(error.to_string()),
         }
     }
 
@@ -713,7 +733,6 @@ impl DocumentView {
             .unwrap_or_else(|| "unknown".to_string());
 
         Self {
-            url: page.url.clone(),
             title: page.title.clone(),
             status_line: format!("Status: {}", page.status_text()),
             subtitle: format!("{} | {}", page.url, content_type),
@@ -721,9 +740,8 @@ impl DocumentView {
         }
     }
 
-    fn error(url: Url, message: impl Into<String>) -> Self {
+    fn error(message: impl Into<String>) -> Self {
         Self {
-            url,
             title: "Load Error".to_string(),
             status_line: "Status: request failed".to_string(),
             subtitle: "The browser core could not load this page.".to_string(),
@@ -743,7 +761,11 @@ impl DocumentView {
     }
 
     fn window_title(&self) -> String {
-        format!("Scratch Browser - {}", self.title)
+        if self.title.is_empty() {
+            "Scratch Browser".to_string()
+        } else {
+            format!("Scratch Browser - {}", self.title)
+        }
     }
 
     fn is_error(&self) -> bool {
@@ -752,6 +774,13 @@ impl DocumentView {
 
     fn layout(&self, width: u32, fonts: &mut FontContext) -> LayoutDocument {
         match &self.content {
+            DocumentContent::Blank => LayoutDocument {
+                background_color: DEFAULT_BACKGROUND_COLOR,
+                content_height: 0,
+                rects: Vec::new(),
+                texts: Vec::new(),
+                images: Vec::new(),
+            },
             DocumentContent::Loaded(page) => {
                 layout_styled_document(&page.styled_document, &page.images, width, fonts)
             }

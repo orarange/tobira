@@ -41,18 +41,20 @@ fn run() -> Result<()> {
         }
     }
 
-    let Some(raw_url) = raw_url else {
-        print_usage(&program);
-        return Ok(());
-    };
-
-    let url = Url::parse(&raw_url)?;
-
     if cli_mode {
+        let Some(raw_url) = raw_url else {
+            print_usage(&program);
+            return Ok(());
+        };
+        let url = Url::parse(&raw_url)?;
         let page = load_page(&url)?;
         println!("{}", page.to_cli_output().trim_end());
     } else {
-        gui::run(url)?;
+        let initial_url = match raw_url {
+            Some(raw_url) => Some(Url::parse(&raw_url)?),
+            None => None,
+        };
+        gui::run(initial_url)?;
     }
 
     Ok(())
@@ -62,6 +64,7 @@ fn print_usage(program: &str) {
     println!("Scratch Browser");
     println!();
     println!("Usage:");
+    println!("  {program}");
     println!("  {program} http://example.com");
     println!("  {program} --cli http://example.com");
     println!();
