@@ -12,7 +12,7 @@ use winit::window::Window;
 use crate::browser::{BrowserPage, load_page};
 use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind};
 use crate::error::{BrowserError, Result};
-use crate::font::{FontContext, estimated_line_height_px};
+use crate::font::FontContext;
 use crate::layout::{LayoutDocument, TextCommand, layout_styled_document};
 use crate::url::Url;
 
@@ -21,8 +21,11 @@ const WINDOW_HEIGHT: u32 = 760;
 const FRAME_PADDING: u32 = 18;
 const TITLE_FONT_SIZE: u32 = 28;
 const HEADER_FONT_SIZE: u32 = 14;
-const TITLE_HEIGHT: u32 = 36;
-const HEADER_HEIGHT: u32 = 92;
+const HEADER_TOP_PADDING: u32 = 14;
+const HEADER_BOTTOM_PADDING: u32 = 14;
+const HEADER_TITLE_GAP: u32 = 6;
+const HEADER_LINE_GAP: u32 = 3;
+const HEADER_BORDER_HEIGHT: u32 = 5;
 
 const COLOR_WINDOW_BACKGROUND: Color = 0xE7E0D4;
 const COLOR_HEADER: Color = 0x1F3A5F;
@@ -111,10 +114,11 @@ impl BrowserApp {
             return Ok(());
         }
 
-        let body_top = HEADER_HEIGHT + FRAME_PADDING;
+        let header = header_layout_metrics(&mut self.fonts);
+        let body_top = header.height + FRAME_PADDING;
         let content_width = size.width.saturating_sub(FRAME_PADDING * 2).max(1);
         let viewport_height = size.height.saturating_sub(body_top + FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width);
+        let layout = self.document.layout(content_width, &mut self.fonts);
         let max_scroll_y = max_scroll(viewport_height, layout.content_height);
         self.scroll_y = self.scroll_y.min(max_scroll_y);
 
@@ -137,6 +141,7 @@ impl BrowserApp {
             &mut buffer,
             size.width,
             size.height,
+            header.height,
             layout.background_color,
         );
         paint_header(
@@ -144,6 +149,7 @@ impl BrowserApp {
             &mut buffer,
             size.width,
             size.height,
+            &header,
             &self.document,
             self.scroll_y,
             max_scroll_y,
@@ -165,14 +171,18 @@ impl BrowserApp {
             .map_err(|error| BrowserError::message(error.to_string()))
     }
 
-    fn content_metrics(&self, window_size: PhysicalSize<u32>) -> (u32, u32) {
-        let body_top = HEADER_HEIGHT + FRAME_PADDING;
+    fn content_metrics(&mut self, window_size: PhysicalSize<u32>) -> (u32, u32) {
+        let header = header_layout_metrics(&mut self.fonts);
+        let body_top = header.height + FRAME_PADDING;
         let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
         let viewport_height = window_size
             .height
             .saturating_sub(body_top + FRAME_PADDING)
             .max(1);
-        let content_height = self.document.layout(content_width).content_height;
+        let content_height = self
+            .document
+            .layout(content_width, &mut self.fonts)
+            .content_height;
 
         (viewport_height, content_height)
     }
@@ -364,15 +374,21 @@ impl DocumentView {
         matches!(self.content, DocumentContent::Error(_))
     }
 
-    fn layout(&self, width: u32) -> LayoutDocument {
+    fn layout(&self, width: u32, fonts: &mut FontContext) -> LayoutDocument {
         match &self.content {
-            DocumentContent::Loaded(page) => layout_styled_document(&page.styled_document, width),
-            DocumentContent::Error(error) => layout_error_document(error, width),
+            DocumentContent::Loaded(page) => {
+                layout_styled_document(&page.styled_document, width, fonts)
+            }
+            DocumentContent::Error(error) => layout_error_document(error, width, fonts),
         }
     }
 }
 
-fn layout_error_document(document: &ErrorDocument, _width: u32) -> LayoutDocument {
+fn layout_error_document(
+    document: &ErrorDocument,
+    _width: u32,
+    fonts: &mut FontContext,
+) -> LayoutDocument {
     let mut texts = Vec::new();
     let mut cursor_y: u32 = 0;
 
@@ -384,7 +400,7 @@ fn layout_error_document(document: &ErrorDocument, _width: u32) -> LayoutDocumen
             DEFAULT_TEXT_COLOR
         };
         let font_size_px = if scale >= 3 { 28 } else { 18 };
-        let height = estimated_line_height_px(font_size_px);
+        let height = fonts.line_height_px(font_size_px, FontFamilyKind::Sans);
 
         if line.is_empty() {
             cursor_y = cursor_y.saturating_add(height / 2);
@@ -394,7 +410,7 @@ fn layout_error_document(document: &ErrorDocument, _width: u32) -> LayoutDocumen
         texts.push(TextCommand {
             x: 0,
             y: cursor_y,
-            width: crate::font::estimated_text_width_px(line, font_size_px, FontFamilyKind::Sans),
+            width: fonts.text_width_px(line, font_size_px, FontFamilyKind::Sans),
             text: line.clone(),
             font_size_px,
             font_family: FontFamilyKind::Sans,
@@ -414,7 +430,41 @@ fn layout_error_document(document: &ErrorDocument, _width: u32) -> LayoutDocumen
     }
 }
 
-fn paint_background(buffer: &mut [u32], width: u32, height: u32, content_background: Color) {
+#[derive(Debug, Clone, Copy)]
+struct HeaderLayoutMetrics {
+    height: u32,
+    title_y: u32,
+    status_y: u32,
+    subtitle_y: u32,
+    controls_y: u32,
+}
+
+fn header_layout_metrics(fonts: &mut FontContext) -> HeaderLayoutMetrics {
+    let title_height = fonts.line_height_px(TITLE_FONT_SIZE, FontFamilyKind::Sans);
+    let header_line_height = fonts.line_height_px(HEADER_FONT_SIZE, FontFamilyKind::Sans);
+    let title_y = HEADER_TOP_PADDING;
+    let status_y = title_y.saturating_add(title_height + HEADER_TITLE_GAP);
+    let subtitle_y = status_y.saturating_add(header_line_height + HEADER_LINE_GAP);
+    let controls_y = subtitle_y.saturating_add(header_line_height + HEADER_LINE_GAP);
+    let height = controls_y
+        .saturating_add(header_line_height + HEADER_BOTTOM_PADDING + HEADER_BORDER_HEIGHT);
+
+    HeaderLayoutMetrics {
+        height,
+        title_y,
+        status_y,
+        subtitle_y,
+        controls_y,
+    }
+}
+
+fn paint_background(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    header_height: u32,
+    content_background: Color,
+) {
     draw_rect(
         buffer,
         width,
@@ -430,10 +480,10 @@ fn paint_background(buffer: &mut [u32], width: u32, height: u32, content_backgro
         width,
         height,
         FRAME_PADDING / 2,
-        HEADER_HEIGHT / 2,
+        header_height / 2,
         width.saturating_sub(FRAME_PADDING),
         height
-            .saturating_sub(HEADER_HEIGHT / 2)
+            .saturating_sub(header_height / 2)
             .saturating_sub(FRAME_PADDING / 2),
         content_background,
     );
@@ -444,6 +494,7 @@ fn paint_header(
     buffer: &mut [u32],
     width: u32,
     height: u32,
+    header: &HeaderLayoutMetrics,
     document: &DocumentView,
     scroll_y: u32,
     max_scroll_y: u32,
@@ -455,7 +506,7 @@ fn paint_header(
         0,
         0,
         width,
-        HEADER_HEIGHT,
+        header.height,
         COLOR_HEADER,
     );
     draw_rect(
@@ -463,9 +514,9 @@ fn paint_header(
         width,
         height,
         0,
-        HEADER_HEIGHT - 5,
+        header.height.saturating_sub(HEADER_BORDER_HEIGHT),
         width,
-        5,
+        HEADER_BORDER_HEIGHT,
         COLOR_ACCENT,
     );
 
@@ -474,7 +525,7 @@ fn paint_header(
         width,
         height,
         FRAME_PADDING,
-        16,
+        header.title_y,
         "SCRATCH BROWSER",
         TITLE_FONT_SIZE,
         COLOR_HEADER_TEXT,
@@ -487,7 +538,7 @@ fn paint_header(
         width,
         height,
         FRAME_PADDING,
-        16 + TITLE_HEIGHT + 10,
+        header.status_y,
         &document.status_line,
         HEADER_FONT_SIZE,
         if document.is_error() {
@@ -504,7 +555,7 @@ fn paint_header(
         width,
         height,
         FRAME_PADDING,
-        16 + TITLE_HEIGHT + 28,
+        header.subtitle_y,
         &document.subtitle,
         HEADER_FONT_SIZE,
         COLOR_HEADER_TEXT,
@@ -522,7 +573,7 @@ fn paint_header(
         width,
         height,
         FRAME_PADDING,
-        HEADER_HEIGHT - 18,
+        header.controls_y,
         &controls,
         HEADER_FONT_SIZE,
         COLOR_HEADER_TEXT,
@@ -566,7 +617,7 @@ fn paint_layout(
     for text in &layout.texts {
         let text_bottom = text
             .y
-            .saturating_add(estimated_line_height_px(text.font_size_px));
+            .saturating_add(fonts.line_height_px(text.font_size_px, text.font_family));
         if text_bottom < scroll_y || text.y > viewport_bottom {
             continue;
         }
@@ -615,6 +666,7 @@ fn draw_rect(
 #[cfg(test)]
 mod tests {
     use super::{layout_error_document, max_scroll};
+    use crate::font::FontContext;
 
     #[test]
     fn max_scroll_stops_at_zero() {
@@ -624,11 +676,13 @@ mod tests {
 
     #[test]
     fn error_layout_contains_text_commands() {
+        let mut fonts = FontContext::load();
         let layout = layout_error_document(
             &super::ErrorDocument {
                 lines: vec!["# Oops".to_string(), "hello".to_string()],
             },
             320,
+            &mut fonts,
         );
 
         assert!(layout.texts.len() >= 2);

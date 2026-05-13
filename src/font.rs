@@ -148,11 +148,41 @@ impl FontContext {
                 height,
                 x,
                 underline_y,
-                estimated_text_width_px(text, font_size_px, font_family),
+                self.text_width_px(text, font_size_px, font_family),
                 (font_size_px / 12).max(1),
                 color,
             );
         }
+    }
+
+    pub fn glyph_advance_px(
+        &mut self,
+        character: char,
+        font_size_px: u32,
+        font_family: FontFamilyKind,
+    ) -> u32 {
+        self.cached_glyph(character, font_size_px, font_family)
+            .advance_px
+    }
+
+    pub fn text_width_px(
+        &mut self,
+        text: &str,
+        font_size_px: u32,
+        font_family: FontFamilyKind,
+    ) -> u32 {
+        text.chars()
+            .map(|character| self.glyph_advance_px(character, font_size_px, font_family))
+            .sum()
+    }
+
+    pub fn line_height_px(&mut self, font_size_px: u32, font_family: FontFamilyKind) -> u32 {
+        let ascent = self
+            .line_metrics(font_size_px, font_family)
+            .ascent_px
+            .max(font_size_px as i32);
+        let gap = (font_size_px / 3).max(4);
+        ascent.max(0) as u32 + gap
     }
 
     fn line_metrics(
@@ -210,7 +240,7 @@ impl FontContext {
         font_size_px: u32,
         font_family: FontFamilyKind,
     ) -> CachedGlyph {
-        let advance_px = estimated_glyph_advance_px(character, font_size_px, font_family);
+        let fallback_advance = estimated_glyph_advance_px(character, font_size_px, font_family);
         let ascent_px = self.line_metrics(font_size_px, font_family).ascent_px;
 
         for font in self.fonts_for(font_family) {
@@ -219,6 +249,12 @@ impl FontContext {
             }
 
             let (metrics, bitmap) = font.rasterize(character, font_size_px as f32);
+            let advance_px = if metrics.advance_width > 0.0 {
+                metrics.advance_width.ceil() as u32
+            } else {
+                fallback_advance
+            }
+            .max(MIN_ADVANCE_PX);
             if metrics.width == 0 || metrics.height == 0 {
                 return CachedGlyph {
                     advance_px,
@@ -254,7 +290,7 @@ impl FontContext {
         });
 
         CachedGlyph {
-            advance_px,
+            advance_px: fallback_advance,
             ascent_px,
             mode: GlyphMode::Bitmap { glyph, scale },
         }
@@ -268,14 +304,11 @@ impl FontContext {
     }
 }
 
+#[cfg(test)]
 pub fn estimated_text_width_px(text: &str, font_size_px: u32, font_family: FontFamilyKind) -> u32 {
     text.chars()
         .map(|character| estimated_glyph_advance_px(character, font_size_px, font_family))
         .sum()
-}
-
-pub fn estimated_line_height_px(font_size_px: u32) -> u32 {
-    font_size_px + (font_size_px / 3).max(4)
 }
 
 pub fn estimated_glyph_advance_px(
@@ -356,9 +389,7 @@ fn draw_cached_glyph(
         } => {
             let baseline_y = y + glyph.ascent_px;
             let draw_y = baseline_y - *glyph_height as i32 - *ymin;
-            let horizontal_padding =
-                ((glyph.advance_px as i32 - *glyph_width as i32).max(0) / 2).max(0);
-            let draw_x = x + horizontal_padding + *xmin;
+            let draw_x = x + *xmin;
 
             blend_bitmap(
                 buffer,
