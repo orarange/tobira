@@ -3,11 +3,11 @@ use std::rc::Rc;
 
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
-use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::Window;
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+use winit::window::{CursorIcon, ResizeDirection, Window};
 
 use crate::browser::{BrowserPage, load_page};
 use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind};
@@ -20,19 +20,40 @@ use crate::url::Url;
 const WINDOW_WIDTH: u32 = 1100;
 const WINDOW_HEIGHT: u32 = 760;
 const FRAME_PADDING: u32 = 18;
-const TITLE_FONT_SIZE: u32 = 28;
-const HEADER_FONT_SIZE: u32 = 14;
-const HEADER_TOP_PADDING: u32 = 14;
-const HEADER_BOTTOM_PADDING: u32 = 14;
-const HEADER_TITLE_GAP: u32 = 6;
-const HEADER_LINE_GAP: u32 = 3;
-const HEADER_BORDER_HEIGHT: u32 = 5;
+const CHROME_TOP_PADDING: u32 = 10;
+const CHROME_BOTTOM_PADDING: u32 = 10;
+const CHROME_ROW_GAP: u32 = 10;
+const TITLE_BAR_HEIGHT: u32 = 38;
+const ADDRESS_BAR_HEIGHT: u32 = 42;
+const BUTTON_WIDTH: u32 = 46;
+const BUTTON_HEIGHT: u32 = 30;
+const BUTTON_GAP: u32 = 2;
+const TOOL_BUTTON_WIDTH: u32 = 52;
+const ADDRESS_BAR_PADDING_X: u32 = 12;
+const INFO_FONT_SIZE: u32 = 12;
+const ADDRESS_BAR_FONT_SIZE: u32 = 16;
+const APP_FONT_SIZE: u32 = 18;
+const TITLE_FONT_SIZE: u32 = 14;
+const TITLE_META_GAP: u32 = 18;
+const HEADER_BORDER_HEIGHT: u32 = 4;
+const RESIZE_BORDER: u32 = 6;
 
 const COLOR_WINDOW_BACKGROUND: Color = 0xE7E0D4;
 const COLOR_HEADER: Color = 0x1F3A5F;
+const COLOR_HEADER_ROW: Color = 0x28466F;
 const COLOR_HEADER_TEXT: Color = 0xF6F7FB;
+const COLOR_HEADER_MUTED: Color = 0xC7D2E5;
 const COLOR_ACCENT: Color = 0xE6A53A;
 const COLOR_ERROR: Color = 0x8C2F39;
+const COLOR_TOOL_BUTTON: Color = 0x35527C;
+const COLOR_TOOL_BUTTON_HOVER: Color = 0x416392;
+const COLOR_CLOSE_BUTTON: Color = 0x5D2A37;
+const COLOR_CLOSE_BUTTON_HOVER: Color = 0xC64F5B;
+const COLOR_ADDRESS_BAR: Color = 0xF5F8FC;
+const COLOR_ADDRESS_BAR_BORDER: Color = 0x91A6C6;
+const COLOR_ADDRESS_BAR_FOCUS: Color = 0xE6A53A;
+const COLOR_ADDRESS_BAR_TEXT: Color = 0x122033;
+const COLOR_PANEL_BORDER: Color = 0xD4C7B2;
 
 type WindowHandle = Rc<Window>;
 type SurfaceHandle = Surface<OwnedDisplayHandle, WindowHandle>;
@@ -58,28 +79,95 @@ struct BrowserApp {
     window: Option<WindowHandle>,
     surface: Option<SurfaceHandle>,
     scroll_y: u32,
+    modifiers: ModifiersState,
+    cursor_position: PhysicalPosition<f64>,
+    address_bar: AddressBarState,
+    hovered_target: HitTarget,
+    ime_composing: bool,
 }
 
 impl BrowserApp {
     fn new(initial_url: Url, context: Context<OwnedDisplayHandle>) -> Self {
-        let document = DocumentView::load(initial_url.clone());
+        let document = DocumentView::load(initial_url);
+        let current_url = document.url.clone();
+        let address_bar = AddressBarState::new(current_url.to_string());
 
         Self {
-            current_url: document.url.clone(),
+            current_url,
             document,
             fonts: FontContext::load(),
             context,
             window: None,
             surface: None,
             scroll_y: 0,
+            modifiers: ModifiersState::default(),
+            cursor_position: PhysicalPosition::new(0.0, 0.0),
+            address_bar,
+            hovered_target: HitTarget::None,
+            ime_composing: false,
         }
+    }
+
+    fn load_url(&mut self, url: Url) {
+        self.document = DocumentView::load(url);
+        self.current_url = self.document.url.clone();
+        self.address_bar.set_text(self.current_url.to_string());
+        self.address_bar.blur();
+        self.scroll_y = 0;
+        self.sync_window_title();
+        self.sync_input_method();
+        self.request_redraw();
     }
 
     fn reload(&mut self) {
         self.document = DocumentView::load(self.current_url.clone());
         self.current_url = self.document.url.clone();
+        self.address_bar.set_text(self.current_url.to_string());
         self.scroll_y = 0;
         self.sync_window_title();
+        self.sync_input_method();
+        self.request_redraw();
+    }
+
+    fn navigate_to_address(&mut self) {
+        let entered = self.address_bar.text().trim().to_string();
+        if entered.is_empty() {
+            self.document =
+                DocumentView::error(self.current_url.clone(), "address bar is empty".to_string());
+            self.scroll_y = 0;
+            self.sync_window_title();
+            self.request_redraw();
+            return;
+        }
+
+        match parse_address_input(&entered) {
+            Ok(url) => self.load_url(url),
+            Err(error) => {
+                self.document = DocumentView::error(
+                    self.current_url.clone(),
+                    format!("could not navigate to `{entered}`: {error}"),
+                );
+                self.scroll_y = 0;
+                self.sync_window_title();
+                self.request_redraw();
+            }
+        }
+    }
+
+    fn focus_address_bar(&mut self, char_index: usize) {
+        self.address_bar.focus_at(char_index);
+        self.sync_input_method();
+        self.request_redraw();
+    }
+
+    fn blur_address_bar(&mut self) {
+        if !self.address_bar.focused {
+            return;
+        }
+
+        self.address_bar.blur();
+        self.ime_composing = false;
+        self.sync_input_method();
         self.request_redraw();
     }
 
@@ -93,6 +181,46 @@ impl BrowserApp {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    fn sync_input_method(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+
+        window.set_ime_allowed(self.address_bar.focused);
+
+        if !self.address_bar.focused {
+            return;
+        }
+
+        let size = window.inner_size();
+        let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
+        let view = address_bar_view(
+            &self.address_bar,
+            &mut self.fonts,
+            chrome
+                .address_bar
+                .width
+                .saturating_sub(ADDRESS_BAR_PADDING_X * 2),
+        );
+        let line_height = self
+            .fonts
+            .line_height_px(ADDRESS_BAR_FONT_SIZE, FontFamilyKind::Sans);
+        let text_y = chrome
+            .address_bar
+            .y
+            .saturating_add(chrome.address_bar.height.saturating_sub(line_height) / 2);
+        let caret_x = chrome
+            .address_bar
+            .x
+            .saturating_add(ADDRESS_BAR_PADDING_X)
+            .saturating_add(view.caret_x);
+
+        window.set_ime_cursor_area(
+            PhysicalPosition::new(caret_x as i32, text_y as i32),
+            PhysicalSize::new(1, line_height.max(1)),
+        );
     }
 
     fn scroll_by(&mut self, delta: i32, viewport_height: u32, content_height: u32) {
@@ -115,8 +243,8 @@ impl BrowserApp {
             return Ok(());
         }
 
-        let header = header_layout_metrics(&mut self.fonts);
-        let body_top = header.height + FRAME_PADDING;
+        let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
+        let body_top = chrome.height + FRAME_PADDING;
         let content_width = size.width.saturating_sub(FRAME_PADDING * 2).max(1);
         let viewport_height = size.height.saturating_sub(body_top + FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
@@ -142,16 +270,18 @@ impl BrowserApp {
             &mut buffer,
             size.width,
             size.height,
-            header.height,
+            chrome.height,
             layout.background_color,
         );
-        paint_header(
+        paint_chrome(
             &mut self.fonts,
             &mut buffer,
             size.width,
             size.height,
-            &header,
+            &chrome,
             &self.document,
+            &self.address_bar,
+            self.hovered_target,
             self.scroll_y,
             max_scroll_y,
         );
@@ -174,8 +304,8 @@ impl BrowserApp {
     }
 
     fn content_metrics(&mut self, window_size: PhysicalSize<u32>) -> (u32, u32) {
-        let header = header_layout_metrics(&mut self.fonts);
-        let body_top = header.height + FRAME_PADDING;
+        let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
+        let body_top = chrome.height + FRAME_PADDING;
         let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
         let viewport_height = window_size
             .height
@@ -189,10 +319,132 @@ impl BrowserApp {
         (viewport_height, content_height)
     }
 
-    fn handle_key(&mut self, key_code: KeyCode, window_size: PhysicalSize<u32>) -> bool {
+    fn update_hover(&mut self, window_size: PhysicalSize<u32>) {
+        let next = self.hit_test(window_size, self.cursor_position);
+        if next != self.hovered_target {
+            self.hovered_target = next;
+            self.request_redraw();
+        }
+
+        if let Some(window) = &self.window {
+            window.set_cursor(cursor_icon_for_target(next));
+        }
+    }
+
+    fn hit_test(
+        &mut self,
+        window_size: PhysicalSize<u32>,
+        position: PhysicalPosition<f64>,
+    ) -> HitTarget {
+        let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
+
+        if chrome.minimize_button.contains(position) {
+            return HitTarget::Button(ChromeButton::Minimize);
+        }
+        if chrome.maximize_button.contains(position) {
+            return HitTarget::Button(ChromeButton::ToggleMaximize);
+        }
+        if chrome.close_button.contains(position) {
+            return HitTarget::Button(ChromeButton::Close);
+        }
+        if chrome.reload_button.contains(position) {
+            return HitTarget::Button(ChromeButton::Reload);
+        }
+        if chrome.go_button.contains(position) {
+            return HitTarget::Button(ChromeButton::Navigate);
+        }
+        if chrome.address_bar.contains(position) {
+            return HitTarget::AddressBar;
+        }
+        if let Some(direction) = resize_direction_at(window_size, position) {
+            return HitTarget::Resize(direction);
+        }
+        if chrome.drag_region.contains(position) {
+            return HitTarget::TitleBar;
+        }
+
+        HitTarget::None
+    }
+
+    fn handle_key(
+        &mut self,
+        key_code: KeyCode,
+        window_size: PhysicalSize<u32>,
+        repeat: bool,
+    ) -> bool {
+        if self.address_bar.focused {
+            match key_code {
+                KeyCode::Escape if !repeat => {
+                    self.blur_address_bar();
+                    return false;
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter if !repeat => {
+                    self.navigate_to_address();
+                    return false;
+                }
+                KeyCode::Backspace => {
+                    if self.address_bar.backspace() {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::Delete => {
+                    if self.address_bar.delete_forward() {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::ArrowLeft => {
+                    if self.address_bar.move_left() {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::ArrowRight => {
+                    if self.address_bar.move_right() {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::Home => {
+                    if self.address_bar.move_home() {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::End => {
+                    if self.address_bar.move_end() {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::KeyL if self.modifiers.control_key() && !repeat => {
+                    self.address_bar.move_end();
+                    self.sync_input_method();
+                    self.request_redraw();
+                    return false;
+                }
+                KeyCode::KeyR if self.modifiers.control_key() && !repeat => {
+                    self.reload();
+                    return false;
+                }
+                KeyCode::F5 if !repeat => {
+                    self.reload();
+                    return false;
+                }
+                _ => return false,
+            }
+        }
+
         let (viewport_height, content_height) = self.content_metrics(window_size);
         match key_code {
-            KeyCode::Escape => return true,
+            KeyCode::Escape if !repeat => return true,
             KeyCode::ArrowDown => self.scroll_by(24, viewport_height, content_height),
             KeyCode::ArrowUp => self.scroll_by(-24, viewport_height, content_height),
             KeyCode::PageDown => self.scroll_by(
@@ -207,12 +459,44 @@ impl BrowserApp {
             ),
             KeyCode::Home => self.scroll_y = 0,
             KeyCode::End => self.scroll_y = max_scroll(viewport_height, content_height),
-            KeyCode::KeyR => self.reload(),
+            KeyCode::KeyR | KeyCode::F5 if !repeat => self.reload(),
+            KeyCode::KeyL if self.modifiers.control_key() && !repeat => {
+                self.focus_address_bar(self.address_bar.char_len());
+                return false;
+            }
             _ => return false,
         }
 
         self.request_redraw();
         false
+    }
+
+    fn handle_text_input(&mut self, text: &str) {
+        if !self.address_bar.focused || self.ime_composing {
+            return;
+        }
+
+        if self.address_bar.insert_text(text) {
+            self.sync_input_method();
+            self.request_redraw();
+        }
+    }
+
+    fn handle_ime(&mut self, ime: Ime) {
+        match ime {
+            Ime::Enabled => {}
+            Ime::Disabled => self.ime_composing = false,
+            Ime::Preedit(text, _) => {
+                self.ime_composing = !text.is_empty();
+            }
+            Ime::Commit(text) => {
+                self.ime_composing = false;
+                if self.address_bar.focused && self.address_bar.insert_text(&text) {
+                    self.sync_input_method();
+                    self.request_redraw();
+                }
+            }
+        }
     }
 
     fn handle_wheel(&mut self, delta: MouseScrollDelta, window_size: PhysicalSize<u32>) {
@@ -232,6 +516,58 @@ impl BrowserApp {
 
         self.request_redraw();
     }
+
+    fn handle_left_click(&mut self, window_size: PhysicalSize<u32>) -> bool {
+        let hit = self.hit_test(window_size, self.cursor_position);
+        let Some(window) = self.window.as_ref().cloned() else {
+            return false;
+        };
+
+        match hit {
+            HitTarget::Button(button) => return self.handle_button(button),
+            HitTarget::AddressBar => {
+                let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
+                let char_index = cursor_index_for_address_x(
+                    &self.address_bar,
+                    &mut self.fonts,
+                    chrome
+                        .address_bar
+                        .width
+                        .saturating_sub(ADDRESS_BAR_PADDING_X * 2),
+                    self.cursor_position.x.max(chrome.address_bar.x as f64)
+                        - (chrome.address_bar.x + ADDRESS_BAR_PADDING_X) as f64,
+                );
+                self.focus_address_bar(char_index);
+            }
+            HitTarget::Resize(direction) => {
+                self.blur_address_bar();
+                let _ = window.drag_resize_window(direction);
+            }
+            HitTarget::TitleBar => {
+                self.blur_address_bar();
+                let _ = window.drag_window();
+            }
+            HitTarget::None => self.blur_address_bar(),
+        }
+
+        false
+    }
+
+    fn handle_button(&mut self, button: ChromeButton) -> bool {
+        self.blur_address_bar();
+        let Some(window) = self.window.as_ref().cloned() else {
+            return false;
+        };
+        match button {
+            ChromeButton::Reload => self.reload(),
+            ChromeButton::Navigate => self.navigate_to_address(),
+            ChromeButton::Minimize => window.set_minimized(true),
+            ChromeButton::ToggleMaximize => window.set_maximized(!window.is_maximized()),
+            ChromeButton::Close => return true,
+        }
+
+        false
+    }
 }
 
 impl ApplicationHandler for BrowserApp {
@@ -246,17 +582,21 @@ impl ApplicationHandler for BrowserApp {
             .create_window(
                 Window::default_attributes()
                     .with_title(self.document.window_title())
+                    .with_decorations(false)
                     .with_inner_size(LogicalSize::new(WINDOW_WIDTH as f64, WINDOW_HEIGHT as f64))
                     .with_min_inner_size(LogicalSize::new(720.0, 480.0)),
             )
             .expect("window creation should succeed");
 
         let window = Rc::new(window);
+        window.set_ime_allowed(false);
         let surface =
             Surface::new(&self.context, window.clone()).expect("surface creation should succeed");
 
         self.surface = Some(surface);
         self.window = Some(window);
+        self.sync_window_title();
+        self.sync_input_method();
         self.request_redraw();
     }
 
@@ -288,14 +628,48 @@ impl ApplicationHandler for BrowserApp {
                     let _ = self.draw();
                 }
             }
-            WindowEvent::Resized(_) => self.request_redraw(),
+            WindowEvent::Resized(size) => {
+                self.update_hover(size);
+                self.sync_input_method();
+                self.request_redraw();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_position = position;
+                self.update_hover(window.inner_size());
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.hovered_target = HitTarget::None;
+                window.set_cursor(CursorIcon::Default);
+                self.request_redraw();
+            }
             WindowEvent::MouseWheel { delta, .. } => self.handle_wheel(delta, window.inner_size()),
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed && !event.repeat =>
-            {
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state: ElementState::Pressed,
+                ..
+            } => {
+                if self.handle_left_click(window.inner_size()) {
+                    event_loop.exit();
+                }
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
+            WindowEvent::Ime(ime) => self.handle_ime(ime),
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if let PhysicalKey::Code(key_code) = event.physical_key {
-                    if self.handle_key(key_code, window.inner_size()) {
+                    if self.handle_key(key_code, window.inner_size(), event.repeat) {
                         event_loop.exit();
+                        return;
+                    }
+                }
+
+                if let Some(text) = event.text.as_deref() {
+                    if !self.modifiers.control_key()
+                        && !self.modifiers.alt_key()
+                        && !self.modifiers.super_key()
+                    {
+                        self.handle_text_input(text);
                     }
                 }
             }
@@ -360,9 +734,9 @@ impl DocumentView {
                     message.into(),
                     String::new(),
                     "Hints:".to_string(),
-                    "- CSS support now works, but networking is still http:// only".to_string(),
-                    "- https:// is still the next big milestone".to_string(),
-                    "- press R to try the same URL again".to_string(),
+                    "- press Enter in the address bar to try a new URL".to_string(),
+                    "- press R or the reload button to fetch the current page again".to_string(),
+                    "- some modern CSS and JavaScript features are still incomplete".to_string(),
                 ],
             }),
         }
@@ -433,31 +807,418 @@ fn layout_error_document(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct HeaderLayoutMetrics {
-    height: u32,
-    title_y: u32,
-    status_y: u32,
-    subtitle_y: u32,
-    controls_y: u32,
+#[derive(Debug, Clone)]
+struct AddressBarState {
+    text: String,
+    cursor_chars: usize,
+    focused: bool,
 }
 
-fn header_layout_metrics(fonts: &mut FontContext) -> HeaderLayoutMetrics {
-    let title_height = fonts.line_height_px(TITLE_FONT_SIZE, FontFamilyKind::Sans);
-    let header_line_height = fonts.line_height_px(HEADER_FONT_SIZE, FontFamilyKind::Sans);
-    let title_y = HEADER_TOP_PADDING;
-    let status_y = title_y.saturating_add(title_height + HEADER_TITLE_GAP);
-    let subtitle_y = status_y.saturating_add(header_line_height + HEADER_LINE_GAP);
-    let controls_y = subtitle_y.saturating_add(header_line_height + HEADER_LINE_GAP);
-    let height = controls_y
-        .saturating_add(header_line_height + HEADER_BOTTOM_PADDING + HEADER_BORDER_HEIGHT);
+impl AddressBarState {
+    fn new(text: String) -> Self {
+        let cursor_chars = text.chars().count();
+        Self {
+            text,
+            cursor_chars,
+            focused: false,
+        }
+    }
 
-    HeaderLayoutMetrics {
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn set_text(&mut self, text: String) {
+        self.text = text;
+        self.cursor_chars = self.text.chars().count();
+    }
+
+    fn char_len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    fn focus_at(&mut self, char_index: usize) {
+        self.focused = true;
+        self.cursor_chars = char_index.min(self.char_len());
+    }
+
+    fn blur(&mut self) {
+        self.focused = false;
+    }
+
+    fn insert_text(&mut self, input: &str) -> bool {
+        let filtered: String = input
+            .chars()
+            .filter(|character| !matches!(character, '\r' | '\n' | '\t'))
+            .collect();
+        if filtered.is_empty() {
+            return false;
+        }
+
+        let byte_index = self.byte_index_for_char(self.cursor_chars);
+        self.text.insert_str(byte_index, &filtered);
+        self.cursor_chars = self.cursor_chars.saturating_add(filtered.chars().count());
+        true
+    }
+
+    fn backspace(&mut self) -> bool {
+        if self.cursor_chars == 0 {
+            return false;
+        }
+
+        let end = self.byte_index_for_char(self.cursor_chars);
+        let start = self.byte_index_for_char(self.cursor_chars - 1);
+        self.text.replace_range(start..end, "");
+        self.cursor_chars -= 1;
+        true
+    }
+
+    fn delete_forward(&mut self) -> bool {
+        if self.cursor_chars >= self.char_len() {
+            return false;
+        }
+
+        let start = self.byte_index_for_char(self.cursor_chars);
+        let end = self.byte_index_for_char(self.cursor_chars + 1);
+        self.text.replace_range(start..end, "");
+        true
+    }
+
+    fn move_left(&mut self) -> bool {
+        if self.cursor_chars == 0 {
+            return false;
+        }
+        self.cursor_chars -= 1;
+        true
+    }
+
+    fn move_right(&mut self) -> bool {
+        if self.cursor_chars >= self.char_len() {
+            return false;
+        }
+        self.cursor_chars += 1;
+        true
+    }
+
+    fn move_home(&mut self) -> bool {
+        if self.cursor_chars == 0 {
+            return false;
+        }
+        self.cursor_chars = 0;
+        true
+    }
+
+    fn move_end(&mut self) -> bool {
+        let end = self.char_len();
+        if self.cursor_chars == end {
+            return false;
+        }
+        self.cursor_chars = end;
+        true
+    }
+
+    fn byte_index_for_char(&self, char_index: usize) -> usize {
+        if char_index == 0 {
+            return 0;
+        }
+
+        self.text
+            .char_indices()
+            .nth(char_index)
+            .map(|(index, _)| index)
+            .unwrap_or(self.text.len())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HitTarget {
+    None,
+    TitleBar,
+    AddressBar,
+    Button(ChromeButton),
+    Resize(ResizeDirection),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChromeButton {
+    Reload,
+    Navigate,
+    Minimize,
+    ToggleMaximize,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Rect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl Rect {
+    fn right(&self) -> u32 {
+        self.x.saturating_add(self.width)
+    }
+
+    fn contains(&self, position: PhysicalPosition<f64>) -> bool {
+        position.x >= self.x as f64
+            && position.y >= self.y as f64
+            && position.x < self.right() as f64
+            && position.y < self.y.saturating_add(self.height) as f64
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChromeLayoutMetrics {
+    height: u32,
+    title_bar: Rect,
+    drag_region: Rect,
+    reload_button: Rect,
+    address_bar: Rect,
+    go_button: Rect,
+    minimize_button: Rect,
+    maximize_button: Rect,
+    close_button: Rect,
+    info_y: u32,
+}
+
+#[derive(Debug, Clone)]
+struct AddressBarView {
+    text: String,
+    start_char: usize,
+    end_char: usize,
+    caret_x: u32,
+}
+
+fn chrome_layout_metrics(fonts: &mut FontContext, window_width: u32) -> ChromeLayoutMetrics {
+    let info_height = fonts.line_height_px(INFO_FONT_SIZE, FontFamilyKind::Sans);
+    let title_y = CHROME_TOP_PADDING;
+    let button_y = title_y.saturating_add(TITLE_BAR_HEIGHT.saturating_sub(BUTTON_HEIGHT) / 2);
+    let right_edge = window_width.saturating_sub(FRAME_PADDING);
+    let close_button = Rect {
+        x: right_edge.saturating_sub(BUTTON_WIDTH),
+        y: button_y,
+        width: BUTTON_WIDTH,
+        height: BUTTON_HEIGHT,
+    };
+    let maximize_button = Rect {
+        x: close_button.x.saturating_sub(BUTTON_GAP + BUTTON_WIDTH),
+        y: button_y,
+        width: BUTTON_WIDTH,
+        height: BUTTON_HEIGHT,
+    };
+    let minimize_button = Rect {
+        x: maximize_button.x.saturating_sub(BUTTON_GAP + BUTTON_WIDTH),
+        y: button_y,
+        width: BUTTON_WIDTH,
+        height: BUTTON_HEIGHT,
+    };
+
+    let address_y = title_y.saturating_add(TITLE_BAR_HEIGHT + CHROME_ROW_GAP);
+    let reload_button = Rect {
+        x: FRAME_PADDING,
+        y: address_y,
+        width: TOOL_BUTTON_WIDTH,
+        height: ADDRESS_BAR_HEIGHT,
+    };
+    let go_button = Rect {
+        x: right_edge.saturating_sub(TOOL_BUTTON_WIDTH),
+        y: address_y,
+        width: TOOL_BUTTON_WIDTH,
+        height: ADDRESS_BAR_HEIGHT,
+    };
+    let address_bar = Rect {
+        x: reload_button.right().saturating_add(CHROME_ROW_GAP),
+        y: address_y,
+        width: go_button
+            .x
+            .saturating_sub(reload_button.right().saturating_add(CHROME_ROW_GAP * 2)),
+        height: ADDRESS_BAR_HEIGHT,
+    };
+
+    let info_y = address_bar.y.saturating_add(address_bar.height + 6);
+    let height = info_y.saturating_add(info_height + CHROME_BOTTOM_PADDING + HEADER_BORDER_HEIGHT);
+
+    ChromeLayoutMetrics {
         height,
-        title_y,
-        status_y,
-        subtitle_y,
-        controls_y,
+        title_bar: Rect {
+            x: FRAME_PADDING,
+            y: title_y,
+            width: window_width.saturating_sub(FRAME_PADDING * 2),
+            height: TITLE_BAR_HEIGHT,
+        },
+        drag_region: Rect {
+            x: FRAME_PADDING,
+            y: title_y,
+            width: minimize_button.x.saturating_sub(FRAME_PADDING + 8),
+            height: TITLE_BAR_HEIGHT,
+        },
+        reload_button,
+        address_bar,
+        go_button,
+        minimize_button,
+        maximize_button,
+        close_button,
+        info_y,
+    }
+}
+
+fn address_bar_view(
+    state: &AddressBarState,
+    fonts: &mut FontContext,
+    available_width: u32,
+) -> AddressBarView {
+    let characters: Vec<char> = state.text.chars().collect();
+    let cursor = state.cursor_chars.min(characters.len());
+    if characters.is_empty() || available_width == 0 {
+        return AddressBarView {
+            text: String::new(),
+            start_char: 0,
+            end_char: 0,
+            caret_x: 0,
+        };
+    }
+
+    let mut start = cursor;
+    let mut end = cursor;
+    let mut width: u32 = 0;
+
+    while end < characters.len() {
+        let advance =
+            fonts.glyph_advance_px(characters[end], ADDRESS_BAR_FONT_SIZE, FontFamilyKind::Sans);
+        if width.saturating_add(advance) > available_width && end > start {
+            break;
+        }
+        width = width.saturating_add(advance);
+        end += 1;
+        if width >= available_width {
+            break;
+        }
+    }
+
+    while start > 0 {
+        let advance = fonts.glyph_advance_px(
+            characters[start - 1],
+            ADDRESS_BAR_FONT_SIZE,
+            FontFamilyKind::Sans,
+        );
+        if width.saturating_add(advance) > available_width && end > start {
+            break;
+        }
+        width = width.saturating_add(advance);
+        start -= 1;
+        if width >= available_width {
+            break;
+        }
+    }
+
+    if start == end && end < characters.len() {
+        end += 1;
+    }
+
+    let text: String = characters[start..end].iter().collect();
+    let caret_x = characters[start..cursor]
+        .iter()
+        .map(|character| {
+            fonts.glyph_advance_px(*character, ADDRESS_BAR_FONT_SIZE, FontFamilyKind::Sans)
+        })
+        .sum();
+
+    AddressBarView {
+        text,
+        start_char: start,
+        end_char: end,
+        caret_x,
+    }
+}
+
+fn cursor_index_for_address_x(
+    state: &AddressBarState,
+    fonts: &mut FontContext,
+    available_width: u32,
+    local_x: f64,
+) -> usize {
+    let view = address_bar_view(state, fonts, available_width);
+    let characters: Vec<char> = view.text.chars().collect();
+    let mut cursor_x = 0_u32;
+    let target_x = local_x.max(0.0) as u32;
+
+    for (index, character) in characters.iter().enumerate() {
+        let advance =
+            fonts.glyph_advance_px(*character, ADDRESS_BAR_FONT_SIZE, FontFamilyKind::Sans);
+        let midpoint = cursor_x.saturating_add(advance / 2);
+        if target_x < midpoint {
+            return view.start_char + index;
+        }
+        cursor_x = cursor_x.saturating_add(advance);
+    }
+
+    view.end_char
+}
+
+fn parse_address_input(input: &str) -> Result<Url> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(BrowserError::message("address bar is empty"));
+    }
+
+    if trimmed.contains("://") {
+        return Url::parse(trimmed);
+    }
+
+    let scheme = if looks_like_local_address(trimmed) {
+        "http"
+    } else {
+        "https"
+    };
+    Url::parse(&format!("{scheme}://{trimmed}"))
+}
+
+fn looks_like_local_address(input: &str) -> bool {
+    let host = input
+        .split('/')
+        .next()
+        .unwrap_or(input)
+        .split('?')
+        .next()
+        .unwrap_or(input);
+
+    host.eq_ignore_ascii_case("localhost")
+        || host.starts_with("localhost:")
+        || host.starts_with("127.")
+        || host.starts_with("0.0.0.0")
+        || host.starts_with("[::1]")
+}
+
+fn resize_direction_at(
+    window_size: PhysicalSize<u32>,
+    position: PhysicalPosition<f64>,
+) -> Option<ResizeDirection> {
+    let left = position.x <= RESIZE_BORDER as f64;
+    let right = position.x >= window_size.width.saturating_sub(RESIZE_BORDER) as f64;
+    let top = position.y <= RESIZE_BORDER as f64;
+    let bottom = position.y >= window_size.height.saturating_sub(RESIZE_BORDER) as f64;
+
+    match (left, right, top, bottom) {
+        (true, _, true, _) => Some(ResizeDirection::NorthWest),
+        (_, true, true, _) => Some(ResizeDirection::NorthEast),
+        (true, _, _, true) => Some(ResizeDirection::SouthWest),
+        (_, true, _, true) => Some(ResizeDirection::SouthEast),
+        (true, _, _, _) => Some(ResizeDirection::West),
+        (_, true, _, _) => Some(ResizeDirection::East),
+        (_, _, true, _) => Some(ResizeDirection::North),
+        (_, _, _, true) => Some(ResizeDirection::South),
+        _ => None,
+    }
+}
+
+fn cursor_icon_for_target(target: HitTarget) -> CursorIcon {
+    match target {
+        HitTarget::AddressBar => CursorIcon::Text,
+        HitTarget::Button(_) => CursorIcon::Pointer,
+        HitTarget::Resize(direction) => direction.into(),
+        HitTarget::TitleBar | HitTarget::None => CursorIcon::Default,
     }
 }
 
@@ -465,7 +1226,7 @@ fn paint_background(
     buffer: &mut [u32],
     width: u32,
     height: u32,
-    header_height: u32,
+    chrome_height: u32,
     content_background: Color,
 ) {
     draw_rect(
@@ -478,27 +1239,44 @@ fn paint_background(
         height,
         COLOR_WINDOW_BACKGROUND,
     );
+
+    let panel_y = chrome_height.saturating_sub(HEADER_BORDER_HEIGHT / 2);
     draw_rect(
         buffer,
         width,
         height,
         FRAME_PADDING / 2,
-        header_height / 2,
+        panel_y,
         width.saturating_sub(FRAME_PADDING),
         height
-            .saturating_sub(header_height / 2)
+            .saturating_sub(panel_y)
             .saturating_sub(FRAME_PADDING / 2),
         content_background,
     );
+    draw_rect_outline(
+        buffer,
+        width,
+        height,
+        FRAME_PADDING / 2,
+        panel_y,
+        width.saturating_sub(FRAME_PADDING),
+        height
+            .saturating_sub(panel_y)
+            .saturating_sub(FRAME_PADDING / 2),
+        COLOR_PANEL_BORDER,
+    );
+    draw_rect_outline(buffer, width, height, 0, 0, width, height, COLOR_HEADER);
 }
 
-fn paint_header(
+fn paint_chrome(
     fonts: &mut FontContext,
     buffer: &mut [u32],
     width: u32,
     height: u32,
-    header: &HeaderLayoutMetrics,
+    chrome: &ChromeLayoutMetrics,
     document: &DocumentView,
+    address_bar: &AddressBarState,
+    hovered_target: HitTarget,
     scroll_y: u32,
     max_scroll_y: u32,
 ) {
@@ -509,7 +1287,7 @@ fn paint_header(
         0,
         0,
         width,
-        header.height,
+        chrome.height,
         COLOR_HEADER,
     );
     draw_rect(
@@ -517,23 +1295,238 @@ fn paint_header(
         width,
         height,
         0,
-        header.height.saturating_sub(HEADER_BORDER_HEIGHT),
+        chrome
+            .title_bar
+            .y
+            .saturating_add(chrome.title_bar.height + 4),
+        width,
+        ADDRESS_BAR_HEIGHT + 8,
+        COLOR_HEADER_ROW,
+    );
+    draw_rect(
+        buffer,
+        width,
+        height,
+        0,
+        chrome.height.saturating_sub(HEADER_BORDER_HEIGHT),
         width,
         HEADER_BORDER_HEIGHT,
         COLOR_ACCENT,
     );
 
+    let title_y = chrome.title_bar.y.saturating_add(
+        chrome
+            .title_bar
+            .height
+            .saturating_sub(fonts.line_height_px(APP_FONT_SIZE, FontFamilyKind::Sans))
+            / 2,
+    );
     fonts.draw_text(
         buffer,
         width,
         height,
-        FRAME_PADDING,
-        header.title_y,
+        chrome.title_bar.x,
+        title_y,
         "SCRATCH BROWSER",
-        TITLE_FONT_SIZE,
+        APP_FONT_SIZE,
         COLOR_HEADER_TEXT,
         true,
         false,
+        FontFamilyKind::Sans,
+    );
+
+    let app_width = fonts.text_width_px("SCRATCH BROWSER", APP_FONT_SIZE, FontFamilyKind::Sans);
+    let page_title_x = chrome
+        .title_bar
+        .x
+        .saturating_add(app_width + TITLE_META_GAP);
+    let page_title_max_width = chrome
+        .minimize_button
+        .x
+        .saturating_sub(page_title_x.saturating_add(12));
+    let page_title = fit_text_to_width(
+        fonts,
+        &document.title,
+        page_title_max_width,
+        TITLE_FONT_SIZE,
+        FontFamilyKind::Sans,
+    );
+    if !page_title.is_empty() {
+        let page_title_y = chrome.title_bar.y.saturating_add(
+            chrome
+                .title_bar
+                .height
+                .saturating_sub(fonts.line_height_px(TITLE_FONT_SIZE, FontFamilyKind::Sans))
+                / 2,
+        );
+        fonts.draw_text(
+            buffer,
+            width,
+            height,
+            page_title_x,
+            page_title_y,
+            &page_title,
+            TITLE_FONT_SIZE,
+            COLOR_HEADER_MUTED,
+            false,
+            false,
+            FontFamilyKind::Sans,
+        );
+    }
+
+    paint_button(
+        fonts,
+        buffer,
+        width,
+        height,
+        chrome.reload_button,
+        "R",
+        hovered_target == HitTarget::Button(ChromeButton::Reload),
+        false,
+    );
+    paint_button(
+        fonts,
+        buffer,
+        width,
+        height,
+        chrome.go_button,
+        "GO",
+        hovered_target == HitTarget::Button(ChromeButton::Navigate),
+        false,
+    );
+    paint_button(
+        fonts,
+        buffer,
+        width,
+        height,
+        chrome.minimize_button,
+        "-",
+        hovered_target == HitTarget::Button(ChromeButton::Minimize),
+        false,
+    );
+    paint_button(
+        fonts,
+        buffer,
+        width,
+        height,
+        chrome.maximize_button,
+        "[]",
+        hovered_target == HitTarget::Button(ChromeButton::ToggleMaximize),
+        false,
+    );
+    paint_button(
+        fonts,
+        buffer,
+        width,
+        height,
+        chrome.close_button,
+        "X",
+        hovered_target == HitTarget::Button(ChromeButton::Close),
+        true,
+    );
+
+    draw_rect(
+        buffer,
+        width,
+        height,
+        chrome.address_bar.x,
+        chrome.address_bar.y,
+        chrome.address_bar.width,
+        chrome.address_bar.height,
+        COLOR_ADDRESS_BAR,
+    );
+    draw_rect_outline(
+        buffer,
+        width,
+        height,
+        chrome.address_bar.x,
+        chrome.address_bar.y,
+        chrome.address_bar.width,
+        chrome.address_bar.height,
+        if address_bar.focused {
+            COLOR_ADDRESS_BAR_FOCUS
+        } else {
+            COLOR_ADDRESS_BAR_BORDER
+        },
+    );
+
+    let address_view = address_bar_view(
+        address_bar,
+        fonts,
+        chrome
+            .address_bar
+            .width
+            .saturating_sub(ADDRESS_BAR_PADDING_X * 2),
+    );
+    let address_text_y = chrome.address_bar.y.saturating_add(
+        chrome
+            .address_bar
+            .height
+            .saturating_sub(fonts.line_height_px(ADDRESS_BAR_FONT_SIZE, FontFamilyKind::Sans))
+            / 2,
+    );
+    fonts.draw_text(
+        buffer,
+        width,
+        height,
+        chrome.address_bar.x.saturating_add(ADDRESS_BAR_PADDING_X),
+        address_text_y,
+        &address_view.text,
+        ADDRESS_BAR_FONT_SIZE,
+        COLOR_ADDRESS_BAR_TEXT,
+        false,
+        false,
+        FontFamilyKind::Sans,
+    );
+    if address_bar.focused {
+        let caret_height = chrome.address_bar.height.saturating_sub(14);
+        let caret_y = chrome.address_bar.y.saturating_add(7);
+        let caret_x = chrome
+            .address_bar
+            .x
+            .saturating_add(ADDRESS_BAR_PADDING_X)
+            .saturating_add(address_view.caret_x);
+        draw_rect(
+            buffer,
+            width,
+            height,
+            caret_x,
+            caret_y,
+            1,
+            caret_height.max(1),
+            COLOR_ADDRESS_BAR_TEXT,
+        );
+    }
+
+    let meta_right = format!(
+        "Enter go | Ctrl+L focus | scroll: {} / {} px",
+        scroll_y, max_scroll_y
+    );
+    let meta_right_width = fonts.text_width_px(&meta_right, INFO_FONT_SIZE, FontFamilyKind::Sans);
+    let meta_right_x = width
+        .saturating_sub(FRAME_PADDING)
+        .saturating_sub(meta_right_width);
+    fonts.draw_text(
+        buffer,
+        width,
+        height,
+        meta_right_x,
+        chrome.info_y,
+        &meta_right,
+        INFO_FONT_SIZE,
+        COLOR_HEADER_MUTED,
+        false,
+        false,
+        FontFamilyKind::Sans,
+    );
+
+    let meta_left = format!("{} | {}", document.status_line, document.subtitle);
+    let meta_left_max_width = meta_right_x.saturating_sub(FRAME_PADDING.saturating_mul(2));
+    let meta_left_text = fit_text_to_width(
+        fonts,
+        &meta_left,
+        meta_left_max_width,
+        INFO_FONT_SIZE,
         FontFamilyKind::Sans,
     );
     fonts.draw_text(
@@ -541,9 +1534,9 @@ fn paint_header(
         width,
         height,
         FRAME_PADDING,
-        header.status_y,
-        &document.status_line,
-        HEADER_FONT_SIZE,
+        chrome.info_y,
+        &meta_left_text,
+        INFO_FONT_SIZE,
         if document.is_error() {
             COLOR_ACCENT
         } else {
@@ -553,34 +1546,110 @@ fn paint_header(
         false,
         FontFamilyKind::Sans,
     );
-    fonts.draw_text(
+}
+
+fn fit_text_to_width(
+    fonts: &mut FontContext,
+    text: &str,
+    max_width: u32,
+    font_size_px: u32,
+    font_family: FontFamilyKind,
+) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    if fonts.text_width_px(text, font_size_px, font_family) <= max_width {
+        return text.to_string();
+    }
+
+    let ellipsis = "...";
+    let ellipsis_width = fonts.text_width_px(ellipsis, font_size_px, font_family);
+    if ellipsis_width >= max_width {
+        return ellipsis.to_string();
+    }
+
+    let mut fitted = String::new();
+    let mut current_width: u32 = 0;
+    for character in text.chars() {
+        let advance = fonts.glyph_advance_px(character, font_size_px, font_family);
+        if current_width
+            .saturating_add(advance)
+            .saturating_add(ellipsis_width)
+            > max_width
+        {
+            break;
+        }
+        fitted.push(character);
+        current_width = current_width.saturating_add(advance);
+    }
+
+    fitted.push_str(ellipsis);
+    fitted
+}
+
+fn paint_button(
+    fonts: &mut FontContext,
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    rect: Rect,
+    label: &str,
+    hovered: bool,
+    destructive: bool,
+) {
+    let color = if destructive {
+        if hovered {
+            COLOR_CLOSE_BUTTON_HOVER
+        } else {
+            COLOR_CLOSE_BUTTON
+        }
+    } else if hovered {
+        COLOR_TOOL_BUTTON_HOVER
+    } else {
+        COLOR_TOOL_BUTTON
+    };
+
+    draw_rect(
         buffer,
         width,
         height,
-        FRAME_PADDING,
-        header.subtitle_y,
-        &document.subtitle,
-        HEADER_FONT_SIZE,
-        COLOR_HEADER_TEXT,
-        false,
-        false,
-        FontFamilyKind::Sans,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        color,
+    );
+    draw_rect_outline(
+        buffer,
+        width,
+        height,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        COLOR_ADDRESS_BAR_BORDER,
     );
 
-    let controls = format!(
-        "Keys: R reload | Esc quit | scroll: {} / {} px",
-        scroll_y, max_scroll_y
-    );
+    let font_size = if label.len() > 1 { 14 } else { 18 };
+    let text_width = fonts.text_width_px(label, font_size, FontFamilyKind::Sans);
+    let text_height = fonts.line_height_px(font_size, FontFamilyKind::Sans);
+    let text_x = rect
+        .x
+        .saturating_add(rect.width.saturating_sub(text_width) / 2);
+    let text_y = rect
+        .y
+        .saturating_add(rect.height.saturating_sub(text_height) / 2);
     fonts.draw_text(
         buffer,
         width,
         height,
-        FRAME_PADDING,
-        header.controls_y,
-        &controls,
-        HEADER_FONT_SIZE,
+        text_x,
+        text_y,
+        label,
+        font_size,
         COLOR_HEADER_TEXT,
-        false,
+        true,
         false,
         FontFamilyKind::Sans,
     );
@@ -691,6 +1760,44 @@ fn draw_rect(
     }
 }
 
+fn draw_rect_outline(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    rect_width: u32,
+    rect_height: u32,
+    color: Color,
+) {
+    if rect_width == 0 || rect_height == 0 {
+        return;
+    }
+
+    draw_rect(buffer, width, height, x, y, rect_width, 1, color);
+    draw_rect(
+        buffer,
+        width,
+        height,
+        x,
+        y.saturating_add(rect_height.saturating_sub(1)),
+        rect_width,
+        1,
+        color,
+    );
+    draw_rect(buffer, width, height, x, y, 1, rect_height, color);
+    draw_rect(
+        buffer,
+        width,
+        height,
+        x.saturating_add(rect_width.saturating_sub(1)),
+        y,
+        1,
+        rect_height,
+        color,
+    );
+}
+
 fn draw_scaled_image(
     buffer: &mut [u32],
     width: u32,
@@ -742,7 +1849,10 @@ fn draw_scaled_image(
 
 #[cfg(test)]
 mod tests {
-    use super::{layout_error_document, max_scroll};
+    use super::{
+        AddressBarState, cursor_index_for_address_x, layout_error_document,
+        looks_like_local_address, max_scroll, parse_address_input,
+    };
     use crate::font::FontContext;
 
     #[test]
@@ -763,5 +1873,39 @@ mod tests {
         );
 
         assert!(layout.texts.len() >= 2);
+    }
+
+    #[test]
+    fn bare_addresses_default_to_https() {
+        let url = parse_address_input("google.com").unwrap();
+        assert_eq!(url.to_string(), "https://google.com/");
+    }
+
+    #[test]
+    fn localhost_defaults_to_http() {
+        let url = parse_address_input("localhost:8000/demo").unwrap();
+        assert_eq!(url.to_string(), "http://localhost:8000/demo");
+        assert!(looks_like_local_address("127.0.0.1:3000"));
+    }
+
+    #[test]
+    fn address_bar_backspace_handles_unicode() {
+        let mut state = AddressBarState::new("阿部A".to_string());
+        state.focus_at(state.char_len());
+
+        assert!(state.backspace());
+        assert_eq!(state.text(), "阿部");
+        assert!(state.backspace());
+        assert_eq!(state.text(), "阿");
+    }
+
+    #[test]
+    fn clicking_text_x_resolves_cursor_position() {
+        let mut fonts = FontContext::load();
+        let mut state = AddressBarState::new("google.com".to_string());
+        state.focus_at(state.char_len());
+
+        let cursor = cursor_index_for_address_x(&state, &mut fonts, 300, 0.0);
+        assert_eq!(cursor, 0);
     }
 }
