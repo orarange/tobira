@@ -348,6 +348,7 @@ fn compute_style(
     let parent_font_size = parent_style
         .map(|computed| computed.font_size_px)
         .unwrap_or(16);
+    apply_legacy_attributes(&mut style, element, parent_font_size);
     let mut applicable = Vec::new();
     let identity = ElementIdentity::from(element);
 
@@ -484,7 +485,8 @@ fn default_display(tag_name: &str) -> Display {
     match tag_name {
         "document" | "html" | "body" | "main" | "section" | "article" | "div" | "header"
         | "footer" | "nav" | "aside" | "p" | "ul" | "ol" | "li" | "pre" | "blockquote" | "h1"
-        | "h2" | "h3" | "h4" | "h5" | "h6" => {
+        | "h2" | "h3" | "h4" | "h5" | "h6" | "table" | "tbody" | "thead" | "tfoot" | "tr"
+        | "td" | "th" | "center" | "frameset" | "hr" => {
             if tag_name == "li" {
                 Display::ListItem
             } else {
@@ -501,6 +503,9 @@ fn default_margin(tag_name: &str) -> EdgeSizes {
         "p" => EdgeSizes::vertical(0, 12),
         "ul" | "ol" => EdgeSizes::vertical(0, 12),
         "li" => EdgeSizes::vertical(0, 4),
+        "table" | "tr" => EdgeSizes::vertical(0, 8),
+        "td" | "th" => EdgeSizes::vertical(0, 6),
+        "hr" => EdgeSizes::vertical(10, 10),
         "blockquote" => EdgeSizes {
             top: 0,
             right: 0,
@@ -508,6 +513,32 @@ fn default_margin(tag_name: &str) -> EdgeSizes {
             left: 18,
         },
         _ => EdgeSizes::default(),
+    }
+}
+
+fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_font_size: u32) {
+    if let Some(text_align) = element.attribute("align").and_then(parse_text_align) {
+        style.text_align = text_align;
+    }
+
+    if let Some(background_color) = element.attribute("bgcolor").and_then(parse_color) {
+        style.background_color = Some(background_color);
+    }
+
+    if let Some(color) = element.attribute("text").and_then(parse_color) {
+        style.color = color;
+    }
+
+    if element.tag_name == "font" {
+        if let Some(color) = element.attribute("color").and_then(parse_color) {
+            style.color = color;
+        }
+
+        if let Some(size) = element.attribute("size")
+            && let Some(font_size_px) = parse_legacy_font_size(size, parent_font_size)
+        {
+            style.font_size_px = font_size_px;
+        }
     }
 }
 
@@ -814,6 +845,24 @@ fn parse_font_size(input: &str, parent_font_size: u32) -> Option<u32> {
     }
 }
 
+fn parse_legacy_font_size(input: &str, parent_font_size: u32) -> Option<u32> {
+    match input.trim() {
+        "1" => Some(10),
+        "2" => Some(13),
+        "3" => Some(16),
+        "4" => Some(18),
+        "5" => Some(24),
+        "6" => Some(32),
+        "7" => Some(48),
+        value if value.starts_with('+') || value.starts_with('-') => {
+            let delta = value.parse::<i32>().ok()?;
+            let adjusted = parent_font_size as i32 + delta * 2;
+            Some(adjusted.max(8) as u32)
+        }
+        _ => parse_font_size(input, parent_font_size),
+    }
+}
+
 fn parse_font_family(input: &str) -> Option<FontFamilyKind> {
     let value = input.trim().to_ascii_lowercase();
     if value.contains("mono") || value.contains("code") || value.contains("console") {
@@ -1021,6 +1070,22 @@ mod tests {
         };
 
         assert_eq!(second.style.color, 0xFF0000);
+    }
+
+    #[test]
+    fn applies_legacy_html_attributes() {
+        let document = parse_document(
+            "<body bgcolor=\"#f0f0ff\"><h1 align=\"center\">Title</h1><font color=\"#ff0000\">red</font></body>",
+        );
+        let styled = build_styled_tree(&document, &super::Stylesheet::default());
+
+        let body = find_first_element(&styled, "body").expect("body should exist");
+        let heading = find_first_element(&styled, "h1").expect("heading should exist");
+        let font = find_first_element(&styled, "font").expect("font should exist");
+
+        assert_eq!(body.style.background_color, Some(0xF0F0FF));
+        assert_eq!(heading.style.text_align, super::TextAlign::Center);
+        assert_eq!(font.style.color, 0xFF0000);
     }
 
     fn find_second_paragraph<'a>(node: &'a StyledNode) -> Option<&'a super::StyledElement> {

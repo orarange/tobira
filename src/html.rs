@@ -116,7 +116,7 @@ fn tokenize(input: &str) -> Vec<Token> {
                 .find('<')
                 .map(|offset| index + offset)
                 .unwrap_or(bytes.len());
-            tokens.push(Token::Text(input[index..next].to_string()));
+            tokens.push(Token::Text(decode_html_entities(&input[index..next])));
             index = next;
             continue;
         }
@@ -241,7 +241,7 @@ fn parse_attribute_value(input: &str, index: &mut usize) -> String {
         while *index < bytes.len() && bytes[*index] != quote {
             *index += 1;
         }
-        let value = input[start..*index].to_string();
+        let value = decode_html_entities(&input[start..*index]);
         if *index < bytes.len() {
             *index += 1;
         }
@@ -253,7 +253,7 @@ fn parse_attribute_value(input: &str, index: &mut usize) -> String {
         {
             *index += 1;
         }
-        input[start..*index].to_string()
+        decode_html_entities(&input[start..*index])
     }
 }
 
@@ -288,6 +288,61 @@ fn is_void_element(name: &str) -> bool {
     )
 }
 
+fn decode_html_entities(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut remaining = input;
+
+    while let Some(entity_start) = remaining.find('&') {
+        output.push_str(&remaining[..entity_start]);
+        remaining = &remaining[entity_start + 1..];
+
+        let Some(entity_end) = remaining.find(';') else {
+            output.push('&');
+            output.push_str(remaining);
+            return output;
+        };
+
+        let entity = &remaining[..entity_end];
+        remaining = &remaining[entity_end + 1..];
+
+        if let Some(character) = decode_entity(entity) {
+            output.push(character);
+        } else {
+            output.push('&');
+            output.push_str(entity);
+            output.push(';');
+        }
+    }
+
+    output.push_str(remaining);
+    output
+}
+
+fn decode_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some('\u{00A0}'),
+        _ => decode_numeric_entity(entity),
+    }
+}
+
+fn decode_numeric_entity(entity: &str) -> Option<char> {
+    if let Some(hex) = entity
+        .strip_prefix("#x")
+        .or_else(|| entity.strip_prefix("#X"))
+    {
+        u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+    } else if let Some(decimal) = entity.strip_prefix('#') {
+        decimal.parse::<u32>().ok().and_then(char::from_u32)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Node, parse_document};
@@ -316,5 +371,27 @@ mod tests {
 
         assert_eq!(anchor.attribute("href"), Some("/docs"));
         assert_eq!(anchor.attribute("data-kind"), Some("nav"));
+    }
+
+    #[test]
+    fn decodes_named_and_numeric_entities() {
+        let document = parse_document("<p title=\"Tom &amp; Jerry\">A&nbsp;B &#x263A; &#9731;</p>");
+        let Node::Element(root) = document else {
+            panic!("root should be an element");
+        };
+
+        let Node::Element(paragraph) = &root.children[0] else {
+            panic!("first child should be an element");
+        };
+
+        assert_eq!(paragraph.attribute("title"), Some("Tom & Jerry"));
+
+        let Node::Text(text) = &paragraph.children[0] else {
+            panic!("paragraph should contain text");
+        };
+
+        assert!(text.contains('\u{00A0}'));
+        assert!(text.contains('☺'));
+        assert!(text.contains('☃'));
     }
 }

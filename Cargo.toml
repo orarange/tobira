@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 brotli = "8.0.2"
+encoding_rs = "0.8.35"
 flate2 = "1.1.5"
 fontdb = "0.23.0"
 fontdue = "0.9.3"
