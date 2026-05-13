@@ -477,7 +477,7 @@ fn row_attributes(track: &FrameTrack) -> BTreeMap<String, String> {
 
 fn extract_body_children(node: &Node) -> Vec<Node> {
     match node {
-        Node::Text(text) => vec![Node::Text(text.clone())],
+        Node::Text(_) => Vec::new(),
         Node::Element(element) => {
             if element.tag_name == "body" {
                 return element.children.clone();
@@ -490,7 +490,7 @@ fn extract_body_children(node: &Node) -> Vec<Node> {
                 }
             }
 
-            element.children.clone()
+            Vec::new()
         }
     }
 }
@@ -784,7 +784,8 @@ fn collect_raw_text_into(node: &Node, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserPage, collect_frame_specs, collect_stylesheet, document_title, synthetic_document,
+        BrowserPage, collect_frame_specs, collect_stylesheet, document_title,
+        extract_body_children, synthetic_document,
     };
     use crate::css::StyledNode;
     use crate::html::{Node, parse_document};
@@ -872,6 +873,21 @@ mod tests {
 
         assert!(rendered.contains("# Demo"));
         assert!(rendered.contains("hello"));
+    }
+
+    #[test]
+    fn extracts_only_body_children_from_document() {
+        let document = parse_document(
+            "<html><head><title>Demo</title></head><body><p>Hello</p></body></html>",
+        );
+
+        let children = extract_body_children(&document);
+
+        assert_eq!(children.len(), 1);
+        let Node::Element(paragraph) = &children[0] else {
+            panic!("body child should be an element");
+        };
+        assert_eq!(paragraph.tag_name, "p");
     }
 
     fn parse_styled_text(text: &str) -> StyledNode {

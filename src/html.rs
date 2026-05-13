@@ -273,6 +273,7 @@ fn is_void_element(name: &str) -> bool {
         name,
         "area"
             | "base"
+            | "frame"
             | "br"
             | "col"
             | "embed"
@@ -393,5 +394,22 @@ mod tests {
         assert!(text.contains('\u{00A0}'));
         assert!(text.contains('☺'));
         assert!(text.contains('☃'));
+    }
+
+    #[test]
+    fn treats_frame_as_void_element() {
+        let document = parse_document(
+            "<frameset cols=\"18,82\"><frame src=\"menu.htm\"><frame src=\"top.htm\"></frameset>",
+        );
+        let Node::Element(root) = document else {
+            panic!("root should be an element");
+        };
+
+        let Node::Element(frameset) = &root.children[0] else {
+            panic!("first child should be a frameset");
+        };
+
+        assert_eq!(frameset.tag_name, "frameset");
+        assert_eq!(frameset.children.len(), 2);
     }
 }
