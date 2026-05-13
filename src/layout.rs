@@ -1,6 +1,7 @@
 use crate::css::{
     Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, LengthValue,
-    StyledElement, StyledNode, TextAlign, VerticalAlign, WhiteSpaceMode,
+    StyledElement, StyledNode, TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode,
+    apply_text_transform,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
@@ -35,6 +36,7 @@ pub struct TextCommand {
     pub color: Color,
     pub underline: bool,
     pub bold: bool,
+    pub italic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,7 +233,11 @@ fn layout_block_element(
     *cursor_y = cursor_y.saturating_add(element.style.margin.top);
 
     let outer_x = x.saturating_add(element.style.margin.left);
-    let outer_width = width.saturating_sub(element.style.margin.left + element.style.margin.right);
+    let raw_outer_width = width.saturating_sub(element.style.margin.left + element.style.margin.right);
+    // Apply min/max-width
+    let outer_width = raw_outer_width
+        .min(element.style.max_width.unwrap_or(u32::MAX))
+        .max(element.style.min_width);
     let background_top = *cursor_y;
     let background_index = if let Some(background_color) = element.style.background_color {
         context.rects.push(RectCommand {
@@ -254,11 +260,15 @@ fn layout_block_element(
         0
     };
 
+    let border_left = if !element.style.border_style_none { element.style.border.left } else { 0 };
+    let border_right = if !element.style.border_style_none { element.style.border.right } else { 0 };
+
     let content_x = outer_x
+        .saturating_add(border_left)
         .saturating_add(element.style.padding.left)
         .saturating_add(bullet_indent);
     let content_width = outer_width
-        .saturating_sub(element.style.padding.left + element.style.padding.right + bullet_indent)
+        .saturating_sub(border_left + border_right + element.style.padding.left + element.style.padding.right + bullet_indent)
         .max(1);
 
     if element.tag_name == "hr" {
@@ -289,6 +299,52 @@ fn layout_block_element(
     if let Some(background_index) = background_index {
         if let Some(rect) = context.rects.get_mut(background_index) {
             rect.height = background_height;
+        }
+    }
+
+    // Draw borders if present
+    if !element.style.border_style_none {
+        let bc = element.style.border_color;
+        let border_top_h = element.style.border.top;
+        let border_bottom_h = element.style.border.bottom;
+        let border_left_w = element.style.border.left;
+        let border_right_w = element.style.border.right;
+
+        if border_top_h > 0 {
+            context.rects.push(RectCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: border_top_h,
+                color: bc,
+            });
+        }
+        if border_bottom_h > 0 {
+            context.rects.push(RectCommand {
+                x: outer_x,
+                y: cursor_y.saturating_sub(border_bottom_h),
+                width: outer_width.max(1),
+                height: border_bottom_h,
+                color: bc,
+            });
+        }
+        if border_left_w > 0 {
+            context.rects.push(RectCommand {
+                x: outer_x,
+                y: background_top,
+                width: border_left_w,
+                height: background_height,
+                color: bc,
+            });
+        }
+        if border_right_w > 0 {
+            context.rects.push(RectCommand {
+                x: outer_x.saturating_add(outer_width).saturating_sub(border_right_w),
+                y: background_top,
+                width: border_right_w,
+                height: background_height,
+                color: bc,
+            });
         }
     }
 
@@ -777,6 +833,7 @@ fn merge_fragment(
             color: text.color,
             underline: text.underline,
             bold: text.bold,
+            italic: text.italic,
         }));
     context
         .images
@@ -985,11 +1042,13 @@ fn layout_normal_fragments(
 ) {
     let mut line = LineBuilder::default();
     let mut pending_space = false;
+    let text_indent = container_style.text_indent;
+    let mut first_line = true;
 
     for fragment in fragments {
         match fragment {
             InlineFragment::LineBreak => {
-                emit_line(
+                emit_line_with_indent(
                     &mut line,
                     container_style,
                     x,
@@ -997,17 +1056,25 @@ fn layout_normal_fragments(
                     cursor_y,
                     context,
                     fonts,
+                    if first_line { text_indent } else { 0 },
                 );
+                first_line = false;
                 pending_space = false;
             }
             InlineFragment::Text { text, style, link_href } => {
                 let had_whitespace = text.chars().any(char::is_whitespace);
 
                 for word in text.split_whitespace() {
+                    let effective_width = if first_line && line.is_empty() {
+                        width.saturating_sub(text_indent)
+                    } else {
+                        width
+                    };
+
                     if pending_space && !line.is_empty() {
                         let space_width = char_width(style, ' ', fonts);
-                        if line.width.saturating_add(space_width) > width {
-                            emit_line(
+                        if line.width.saturating_add(space_width) > effective_width {
+                            emit_line_with_indent(
                                 &mut line,
                                 container_style,
                                 x,
@@ -1015,11 +1082,19 @@ fn layout_normal_fragments(
                                 cursor_y,
                                 context,
                                 fonts,
+                                if first_line { text_indent } else { 0 },
                             );
+                            first_line = false;
                         } else {
                             line.push_span(" ", style, fonts, link_href.as_deref());
                         }
                     }
+
+                    let effective_width2 = if first_line && line.is_empty() {
+                        width.saturating_sub(text_indent)
+                    } else {
+                        width
+                    };
 
                     push_wrapped_word(
                         word,
@@ -1027,7 +1102,7 @@ fn layout_normal_fragments(
                         link_href.as_deref(),
                         container_style,
                         x,
-                        width,
+                        effective_width2,
                         cursor_y,
                         context,
                         &mut line,
@@ -1043,7 +1118,7 @@ fn layout_normal_fragments(
         }
     }
 
-    emit_line(
+    emit_line_with_indent(
         &mut line,
         container_style,
         x,
@@ -1051,6 +1126,7 @@ fn layout_normal_fragments(
         cursor_y,
         context,
         fonts,
+        if first_line { text_indent } else { 0 },
     );
 }
 
@@ -1167,6 +1243,19 @@ fn push_wrapped_word(
     }
 }
 
+fn emit_line_with_indent(
+    line: &mut LineBuilder,
+    container_style: &ComputedStyle,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    fonts: &mut FontContext,
+    indent: u32,
+) {
+    emit_line_impl(line, container_style, x, width, cursor_y, context, fonts, indent);
+}
+
 fn emit_line(
     line: &mut LineBuilder,
     container_style: &ComputedStyle,
@@ -1176,19 +1265,35 @@ fn emit_line(
     context: &mut LayoutContext,
     fonts: &mut FontContext,
 ) {
+    emit_line_impl(line, container_style, x, width, cursor_y, context, fonts, 0);
+}
+
+fn emit_line_impl(
+    line: &mut LineBuilder,
+    container_style: &ComputedStyle,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    fonts: &mut FontContext,
+    indent: u32,
+) {
     if line.is_empty() {
         *cursor_y = cursor_y.saturating_add(text_line_height(container_style, fonts));
         return;
     }
 
-    let line_width = line.width.min(width);
+    let effective_x = x.saturating_add(indent);
+    let effective_width = width.saturating_sub(indent);
+
+    let line_width = line.width.min(effective_width);
     let offset_x = match container_style.text_align {
         TextAlign::Left => 0,
-        TextAlign::Center => width.saturating_sub(line_width) / 2,
-        TextAlign::Right => width.saturating_sub(line_width),
+        TextAlign::Center => effective_width.saturating_sub(line_width) / 2,
+        TextAlign::Right => effective_width.saturating_sub(line_width),
     };
 
-    let mut cursor_x = x.saturating_add(offset_x);
+    let mut cursor_x = effective_x.saturating_add(offset_x);
     let line_height = line
         .line_height
         .max(text_line_height(container_style, fonts));
@@ -1204,16 +1309,22 @@ fn emit_line(
             });
         }
 
+        let display_text = if span.style.text_transform != TextTransform::None {
+            apply_text_transform(&span.text, span.style.text_transform)
+        } else {
+            span.text.clone()
+        };
         context.texts.push(TextCommand {
             x: cursor_x,
             y: *cursor_y,
             width: span.width,
-            text: span.text.clone(),
+            text: display_text,
             font_size_px: span.style.font_size_px,
             font_family: span.style.font_family,
             color: span.style.color,
             underline: span.style.underline,
             bold: span.style.font_weight,
+            italic: span.style.font_style_italic,
         });
 
         if let Some(href) = &span.link_href {
@@ -1273,11 +1384,22 @@ fn char_width(style: &ComputedStyle, character: char, fonts: &mut FontContext) -
 }
 
 fn text_line_height(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
-    fonts.line_height_px(style.font_size_px, style.font_family)
+    if style.line_height > 0 {
+        (style.font_size_px as u64 * style.line_height as u64 / 1000) as u32
+    } else {
+        fonts.line_height_px(style.font_size_px, style.font_family)
+    }
 }
 
 fn text_width(style: &ComputedStyle, text: &str, fonts: &mut FontContext) -> u32 {
-    fonts.text_width_px(text, style.font_size_px, style.font_family)
+    let base = fonts.text_width_px(text, style.font_size_px, style.font_family);
+    let char_count = text.chars().count() as i32;
+    let spacing = style.letter_spacing as i32 * char_count;
+    if spacing >= 0 {
+        base.saturating_add(spacing as u32)
+    } else {
+        base.saturating_sub((-spacing) as u32)
+    }
 }
 
 fn parse_dimension_attribute(value: Option<&String>) -> Option<u32> {
@@ -1415,7 +1537,7 @@ mod tests {
     fn hides_display_none_content() {
         let document = parse_document("<div><p>Hello</p><span class=\"hide\">Nope</span></div>");
         let stylesheet = parse_stylesheet(".hide { display: none; } p { color: #ff0000; }");
-        let styled = build_styled_tree(&document, &stylesheet);
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -1428,7 +1550,7 @@ mod tests {
     fn centers_text_when_requested() {
         let document = parse_document("<p>Hello</p>");
         let stylesheet = parse_stylesheet("p { text-align: center; font-size: 16px; }");
-        let styled = build_styled_tree(&document, &stylesheet);
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 200, &mut fonts);
 
@@ -1442,7 +1564,7 @@ mod tests {
     fn wraps_text_across_multiple_lines() {
         let document = parse_document("<p>alpha beta gamma delta epsilon</p>");
         let stylesheet = parse_stylesheet("p { font-size: 16px; }");
-        let styled = build_styled_tree(&document, &stylesheet);
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 90, &mut fonts);
 
@@ -1459,7 +1581,7 @@ mod tests {
     fn keeps_text_align_inherited() {
         let document = parse_document("<div><p>Hello</p></div>");
         let stylesheet = parse_stylesheet("div { text-align: right; }");
-        let styled = build_styled_tree(&document, &stylesheet);
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
 
         let paragraph = match styled {
             crate::css::StyledNode::Element(ref root) => {
@@ -1474,7 +1596,7 @@ mod tests {
     #[test]
     fn places_table_cells_side_by_side() {
         let document = parse_document("<table><tr><td>Left</td><td>Right</td></tr></table>");
-        let styled = build_styled_tree(&document, &parse_stylesheet(""));
+        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
         let left = layout
@@ -1497,7 +1619,7 @@ mod tests {
         let document = parse_document(
             "<div><img src=\"https://example.com/pic.jpg\" data-scratch-src=\"https://example.com/pic.jpg\" width=\"40\" height=\"20\"></div>",
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""));
+        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
         let mut fonts = FontContext::load();
         let mut images = ImageStore::default();
         images.insert(
@@ -1520,7 +1642,7 @@ mod tests {
     fn auto_width_tables_do_not_expand_to_full_container() {
         let document =
             parse_document("<table align=\"center\"><tr><td>Hello</td><td>World</td></tr></table>");
-        let styled = build_styled_tree(&document, &parse_stylesheet(""));
+        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 500, &mut fonts);
         let hello = layout
@@ -1543,7 +1665,7 @@ mod tests {
         let document = parse_document(
             "<table><tr><td valign=\"middle\">short</td><td><br><br><br><br><br>tall</td></tr></table>",
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""));
+        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
         let short = layout
@@ -1560,7 +1682,7 @@ mod tests {
         let document = parse_document(
             "<table><tr><td rowspan=\"2\">Left</td><td>Top</td></tr><tr><td>Bottom</td></tr></table>",
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""));
+        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
         let top = layout
