@@ -1,0 +1,100 @@
+# Handoff
+
+This file is the canonical handoff note for this repo.
+Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fresh session after a context reset.
+
+## Handoff Rules
+
+- Read this file, `git status --short`, and the latest `git log --oneline -n 20` before making assumptions.
+- Update the `Current Snapshot` section when the high-level state changes.
+- Append a short entry to `Session Log` whenever you hand off or resume meaningful work.
+- Do not stage unrelated local helper artifacts unless the user explicitly asks for them.
+  Current local artifacts that are present but not part of the tracked repo are:
+  `.claude/`, `.repomix/`, `copilot.md`, `gemini.md`, `repomix-output.xmlbrowser.xml`
+
+## Current Snapshot
+
+- Date: `2026-05-14`
+- Repo / package name: `tobira`
+- App identity in code:
+  - Cargo package: `tobira`
+  - window title prefix: `Tobira`
+  - README was previously under the old `Scratch Browser` name
+- Verification status:
+  - `cargo test` passes: `74` tests green on `2026-05-14`
+- Current implementation highlights:
+  - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
+  - custom HTML parser and DOM-like tree
+  - CSS engine with broader selector and expression support than the original README says
+    - descendant / child selectors
+    - attribute selectors
+    - `:first-child`, `:last-child`, `:nth-child(...)`, `:not(...)`
+    - `@media` handling
+    - `calc(...)`
+    - `rgba(...)` blending
+  - software-rendered GUI with custom title bar and address bar
+  - blank startup page and direct URL entry
+  - address bar editing shortcuts including `Ctrl+A`
+  - clickable links in the rendered page with hit-testing in the GUI
+  - image loading / rendering for supported formats
+  - guarded JavaScript execution through `boa_engine` with a growing set of stubs
+  - site-specific rendering paths for:
+    - YouTube watch pages
+    - YouTube home shell / cards / nudge UI
+    - lightweight Google shell
+    - legacy frame/table-heavy pages such as the Abe Hiroshi site
+
+## Important Modules
+
+- `src/browser.rs`
+  Main page-loading pipeline, site-specific rewrites, legacy page handling, YouTube/Google synthetic documents.
+- `src/css.rs`
+  CSS parser, selector matching, computed styles, `@media`, `calc(...)`, color parsing.
+- `src/layout.rs`
+  Layout pipeline, text flow, tables, image placement, background drawing, link hitbox generation.
+- `src/gui.rs`
+  Custom chrome, address bar state, input handling, hover/click navigation, rendering integration.
+- `src/js.rs`
+  Sandboxed JS execution policy and browser-ish stubs.
+- `src/http.rs`
+  HTTP/TLS fetch layer and browser-like request headers.
+
+## Recent Commit Landmarks
+
+- `91cc671` Merge branch `claude/modest-pascal-9bf652`
+- `7fda6c9` fix `@media` brace parsing, `calc()` precedence, `rgba` blending, add 15 tests
+- `9c2e24b` comprehensive CSS support implementation complete
+- `373dd0c` step 1: relax JS filter to block-list, add crypto/cookie/URLSearchParams stubs
+- `ba0df47` tobira rename and youtube UI improvements complete
+- `9e69220` link click navigation and youtube card interactivity implementation complete
+- `4be7625` youtube home ui rendering implementation complete
+
+## Known Gaps / Likely Next Work
+
+- README capability list is partially stale; prefer this file for the latest snapshot.
+- JS support is still far from a full browser DOM / framework runtime.
+- History / back-forward behavior is not yet called out as complete.
+- Modern app-shell sites may still need more DOM APIs, events, storage behavior, and CSS coverage.
+- Actual media playback and a true YouTube watch experience are still incomplete.
+
+## Useful Commands
+
+```powershell
+cargo run
+cargo run -- https://www.youtube.com/
+cargo run -- --cli https://www.youtube.com/
+cargo test
+cargo build
+git status --short
+git log --oneline -n 20
+```
+
+## Session Log
+
+### 2026-05-14 - Codex
+
+- Inspected the repo after user said Claude had advanced implementation during a context gap.
+- Confirmed the repo has moved to the `tobira` name and the current branch head is `91cc671`.
+- Confirmed `cargo test` is green with `74` passing tests.
+- Added this handoff file and linked it from `README.md`.
+- Established the rule that this file should be updated on every handoff / resume.

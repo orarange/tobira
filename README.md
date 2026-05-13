@@ -1,6 +1,9 @@
-# Scratch Browser
+# Tobira
 
-Scratch Browser is a from-scratch browser experiment built without Chromium, WebView, or a browser SDK.
+Tobira is a from-scratch browser experiment built without Chromium, WebView, or a browser SDK.
+
+For the most current implementation snapshot and handoff notes, see [HANDOFF.md](HANDOFF.md).
+When work switches between Codex, Claude, Gemini, Copilot, or a fresh session, update `HANDOFF.md` so the next person can resume quickly.
 
 Current capabilities:
 
