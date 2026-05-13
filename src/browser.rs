@@ -4,6 +4,7 @@ use crate::css::{StyledNode, Stylesheet, build_styled_tree, parse_stylesheet};
 use crate::error::Result;
 use crate::html::{Element, Node, parse_document};
 use crate::http::fetch;
+use crate::image::{ImageStore, decode_image};
 use crate::js::process_document_scripts;
 use crate::render::render_document;
 use crate::text::decode_text_response;
@@ -19,6 +20,7 @@ pub struct BrowserPage {
     pub content_type: Option<String>,
     pub title: String,
     pub styled_document: StyledNode,
+    pub images: ImageStore,
     pub rendered: String,
 }
 
@@ -71,6 +73,7 @@ struct FrameSpec {
 pub fn load_page(url: &Url) -> Result<BrowserPage> {
     let source = load_document_source(url, 0)?;
     let stylesheet = collect_stylesheet(&source.document, &source.final_url);
+    let images = collect_image_resources(&source.document);
     let rendered = render_document(&source.document);
     let styled_document = build_styled_tree(&source.document, &stylesheet);
 
@@ -81,6 +84,7 @@ pub fn load_page(url: &Url) -> Result<BrowserPage> {
         content_type: source.content_type,
         title: source.title,
         styled_document,
+        images,
         rendered,
     })
 }
@@ -90,7 +94,8 @@ fn load_document_source(url: &Url, frame_depth: usize) -> Result<LoadedDocumentS
     let content_type = response.header("content-type").map(str::to_string);
     let text = decode_text_response(&response.body, response.header("content-type"));
     let scripted = process_document_scripts(&text, &response.final_url);
-    let parsed_document = parse_document(&scripted.html);
+    let mut parsed_document = parse_document(&scripted.html);
+    annotate_resource_urls(&mut parsed_document, &response.final_url);
     let original_title = scripted
         .title_override
         .or_else(|| document_title(&parsed_document));
@@ -116,6 +121,12 @@ fn load_document_source(url: &Url, frame_depth: usize) -> Result<LoadedDocumentS
 }
 
 fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<Option<Node>> {
+    if let Some(frameset) = first_frameset(document)
+        && let Some(layout) = expand_frameset(document, frameset, base_url, frame_depth)?
+    {
+        return Ok(Some(layout));
+    }
+
     let mut frames = collect_frame_specs(document);
     if frames.is_empty() {
         return Ok(None);
@@ -161,6 +172,104 @@ fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<
     }
 
     let title = document_title(document).unwrap_or_else(|| "Scratch Browser".to_string());
+    Ok(Some(synthetic_document(&title, body_children)))
+}
+
+fn first_frameset(node: &Node) -> Option<&Element> {
+    match node {
+        Node::Text(_) => None,
+        Node::Element(element) => {
+            if element.tag_name == "frameset" {
+                return Some(element);
+            }
+
+            for child in &element.children {
+                if let Some(found) = first_frameset(child) {
+                    return Some(found);
+                }
+            }
+
+            None
+        }
+    }
+}
+
+fn expand_frameset(
+    document: &Node,
+    frameset: &Element,
+    base_url: &Url,
+    frame_depth: usize,
+) -> Result<Option<Node>> {
+    let frames = frameset
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            Node::Element(element) if element.tag_name == "frame" => Some(element),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if frames.is_empty() {
+        return Ok(None);
+    }
+
+    let title = document_title(document).unwrap_or_else(|| "Scratch Browser".to_string());
+    let cols = frameset
+        .attribute("cols")
+        .map(|value| parse_frame_tracks(value, frames.len()));
+    let rows = frameset
+        .attribute("rows")
+        .map(|value| parse_frame_tracks(value, frames.len()));
+
+    let mut frame_nodes = Vec::new();
+    for frame in frames {
+        let Some(src) = frame.attribute("src") else {
+            continue;
+        };
+        let Ok(frame_url) = base_url.resolve(src) else {
+            continue;
+        };
+        let Ok(frame_document) = load_document_source(&frame_url, frame_depth) else {
+            continue;
+        };
+        frame_nodes.push(extract_body_children(&frame_document.document));
+    }
+
+    if frame_nodes.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(cols) = cols
+        && cols.len() == frame_nodes.len()
+    {
+        return Ok(Some(synthetic_frameset_columns_document(
+            &title,
+            &cols,
+            frame_nodes,
+        )));
+    }
+
+    if let Some(rows) = rows
+        && rows.len() == frame_nodes.len()
+    {
+        return Ok(Some(synthetic_frameset_rows_document(
+            &title,
+            &rows,
+            frame_nodes,
+        )));
+    }
+
+    let mut body_children = Vec::new();
+    for children in frame_nodes {
+        body_children.extend(children);
+        body_children.push(hr_node());
+    }
+    if matches!(
+        body_children.last(),
+        Some(Node::Element(element)) if element.tag_name == "hr"
+    ) {
+        body_children.pop();
+    }
+
     Ok(Some(synthetic_document(&title, body_children)))
 }
 
@@ -269,6 +378,237 @@ fn synthetic_document(title: &str, body_children: Vec<Node>) -> Node {
             ],
         })],
     })
+}
+
+fn synthetic_frameset_columns_document(
+    title: &str,
+    tracks: &[FrameTrack],
+    frame_nodes: Vec<Vec<Node>>,
+) -> Node {
+    let cells = frame_nodes
+        .into_iter()
+        .zip(tracks.iter())
+        .map(|(children, track)| {
+            Node::Element(Element {
+                tag_name: "td".to_string(),
+                attributes: table_cell_attributes(track),
+                children,
+            })
+        })
+        .collect();
+
+    synthetic_document(
+        title,
+        vec![Node::Element(Element {
+            tag_name: "table".to_string(),
+            attributes: full_width_table_attributes(),
+            children: vec![Node::Element(Element {
+                tag_name: "tr".to_string(),
+                attributes: BTreeMap::new(),
+                children: cells,
+            })],
+        })],
+    )
+}
+
+fn synthetic_frameset_rows_document(
+    title: &str,
+    tracks: &[FrameTrack],
+    frame_nodes: Vec<Vec<Node>>,
+) -> Node {
+    let rows = frame_nodes
+        .into_iter()
+        .zip(tracks.iter())
+        .map(|(children, track)| {
+            Node::Element(Element {
+                tag_name: "tr".to_string(),
+                attributes: row_attributes(track),
+                children: vec![Node::Element(Element {
+                    tag_name: "td".to_string(),
+                    attributes: BTreeMap::new(),
+                    children,
+                })],
+            })
+        })
+        .collect();
+
+    synthetic_document(
+        title,
+        vec![Node::Element(Element {
+            tag_name: "table".to_string(),
+            attributes: full_width_table_attributes(),
+            children: rows,
+        })],
+    )
+}
+
+fn full_width_table_attributes() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("width".to_string(), "100%".to_string()),
+        ("border".to_string(), "0".to_string()),
+        ("cellpadding".to_string(), "0".to_string()),
+        ("cellspacing".to_string(), "0".to_string()),
+    ])
+}
+
+fn table_cell_attributes(track: &FrameTrack) -> BTreeMap<String, String> {
+    let mut attributes = BTreeMap::from([("valign".to_string(), "top".to_string())]);
+    match track {
+        FrameTrack::Percent(value) => {
+            attributes.insert("width".to_string(), format!("{value}%"));
+        }
+        FrameTrack::Pixels(value) if *value > 0 => {
+            attributes.insert("width".to_string(), value.to_string());
+        }
+        FrameTrack::Flex(_) | FrameTrack::Pixels(_) => {}
+    }
+    attributes
+}
+
+fn row_attributes(track: &FrameTrack) -> BTreeMap<String, String> {
+    match track {
+        FrameTrack::Percent(value) => BTreeMap::from([("height".to_string(), format!("{value}%"))]),
+        FrameTrack::Pixels(value) if *value > 0 => {
+            BTreeMap::from([("height".to_string(), value.to_string())])
+        }
+        FrameTrack::Flex(_) | FrameTrack::Pixels(_) => BTreeMap::new(),
+    }
+}
+
+fn extract_body_children(node: &Node) -> Vec<Node> {
+    match node {
+        Node::Text(text) => vec![Node::Text(text.clone())],
+        Node::Element(element) => {
+            if element.tag_name == "body" {
+                return element.children.clone();
+            }
+
+            for child in &element.children {
+                let extracted = extract_body_children(child);
+                if !extracted.is_empty() {
+                    return extracted;
+                }
+            }
+
+            element.children.clone()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameTrack {
+    Percent(u32),
+    Pixels(u32),
+    Flex(u32),
+}
+
+fn parse_frame_tracks(input: &str, count: usize) -> Vec<FrameTrack> {
+    let tokens = input
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return vec![FrameTrack::Flex(1); count];
+    }
+
+    let all_numeric = tokens
+        .iter()
+        .all(|value| value.chars().all(|character| character.is_ascii_digit()));
+    let numeric_sum = tokens
+        .iter()
+        .filter_map(|value| value.parse::<u32>().ok())
+        .sum::<u32>();
+
+    tokens
+        .into_iter()
+        .map(|token| {
+            if let Some(percent) = token.strip_suffix('%')
+                && let Ok(value) = percent.parse::<u32>()
+            {
+                return FrameTrack::Percent(value);
+            }
+
+            if let Some(flex) = token.strip_suffix('*') {
+                let weight = flex.parse::<u32>().unwrap_or(1).max(1);
+                return FrameTrack::Flex(weight);
+            }
+
+            if all_numeric && numeric_sum == 100 {
+                return FrameTrack::Percent(token.parse::<u32>().unwrap_or(0));
+            }
+
+            FrameTrack::Pixels(token.parse::<u32>().unwrap_or(0))
+        })
+        .collect()
+}
+
+fn annotate_resource_urls(document: &mut Node, base_url: &Url) {
+    match document {
+        Node::Text(_) => {}
+        Node::Element(element) => {
+            if element.tag_name == "img"
+                && let Some(src) = element.attribute("src")
+                && let Ok(url) = base_url.resolve(src)
+            {
+                element
+                    .attributes
+                    .insert("data-scratch-src".to_string(), url.to_string());
+            }
+
+            if element.tag_name == "body"
+                && let Some(background) = element.attribute("background")
+                && let Ok(url) = base_url.resolve(background)
+            {
+                element
+                    .attributes
+                    .insert("data-scratch-background".to_string(), url.to_string());
+            }
+
+            for child in &mut element.children {
+                annotate_resource_urls(child, base_url);
+            }
+        }
+    }
+}
+
+fn collect_image_resources(document: &Node) -> ImageStore {
+    let mut sources = Vec::new();
+    collect_image_sources_into(document, &mut sources);
+
+    let mut images = ImageStore::default();
+    for source in sources {
+        let Ok(url) = Url::parse(&source) else {
+            continue;
+        };
+        let Ok(response) = fetch(&url) else {
+            continue;
+        };
+        let Ok(image) = decode_image(&response.body) else {
+            continue;
+        };
+        images.insert(source, image);
+    }
+
+    images
+}
+
+fn collect_image_sources_into(node: &Node, output: &mut Vec<String>) {
+    match node {
+        Node::Text(_) => {}
+        Node::Element(element) => {
+            if element.tag_name == "img"
+                && let Some(src) = element.attribute("data-scratch-src")
+                && !output.iter().any(|known| known == src)
+            {
+                output.push(src.to_string());
+            }
+
+            for child in &element.children {
+                collect_image_sources_into(child, output);
+            }
+        }
+    }
 }
 
 fn collect_stylesheet(document: &Node, base_url: &Url) -> Stylesheet {
@@ -474,6 +814,7 @@ mod tests {
                     white_space: crate::css::WhiteSpaceMode::Normal,
                 },
             }),
+            images: crate::image::ImageStore::default(),
             rendered: "   ".to_string(),
         };
 
@@ -489,6 +830,7 @@ mod tests {
             content_type: Some("text/html".to_string()),
             title: "Hello".to_string(),
             styled_document: parse_styled_text("Hello"),
+            images: crate::image::ImageStore::default(),
             rendered: "# Hello".to_string(),
         };
 

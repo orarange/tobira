@@ -5,6 +5,7 @@ mod font;
 mod gui;
 mod html;
 mod http;
+mod image;
 mod js;
 mod layout;
 mod render;

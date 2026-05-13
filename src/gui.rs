@@ -13,6 +13,7 @@ use crate::browser::{BrowserPage, load_page};
 use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind};
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
+use crate::image::DecodedImage;
 use crate::layout::{LayoutDocument, TextCommand, layout_styled_document};
 use crate::url::Url;
 
@@ -155,6 +156,7 @@ impl BrowserApp {
             max_scroll_y,
         );
         paint_layout(
+            &self.document,
             &mut self.fonts,
             &mut buffer,
             size.width,
@@ -377,7 +379,7 @@ impl DocumentView {
     fn layout(&self, width: u32, fonts: &mut FontContext) -> LayoutDocument {
         match &self.content {
             DocumentContent::Loaded(page) => {
-                layout_styled_document(&page.styled_document, width, fonts)
+                layout_styled_document(&page.styled_document, &page.images, width, fonts)
             }
             DocumentContent::Error(error) => layout_error_document(error, width, fonts),
         }
@@ -427,6 +429,7 @@ fn layout_error_document(
         content_height: cursor_y,
         rects: Vec::new(),
         texts,
+        images: Vec::new(),
     }
 }
 
@@ -584,6 +587,7 @@ fn paint_header(
 }
 
 fn paint_layout(
+    document: &DocumentView,
     fonts: &mut FontContext,
     buffer: &mut [u32],
     width: u32,
@@ -612,6 +616,30 @@ fn paint_layout(
             rect.height,
             rect.color,
         );
+    }
+
+    if let DocumentContent::Loaded(page) = &document.content {
+        for image in &layout.images {
+            let image_bottom = image.y.saturating_add(image.height);
+            if image_bottom < scroll_y || image.y > viewport_bottom {
+                continue;
+            }
+
+            let Some(decoded) = page.images.get(&image.src) else {
+                continue;
+            };
+
+            draw_scaled_image(
+                buffer,
+                width,
+                height,
+                offset_x.saturating_add(image.x),
+                offset_y.saturating_add(image.y.saturating_sub(scroll_y)),
+                image.width,
+                image.height,
+                decoded,
+            );
+        }
     }
 
     for text in &layout.texts {
@@ -659,6 +687,55 @@ fn draw_rect(
         let row_offset = row as usize * width as usize;
         for column in x..max_x {
             buffer[row_offset + column as usize] = color;
+        }
+    }
+}
+
+fn draw_scaled_image(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    draw_width: u32,
+    draw_height: u32,
+    image: &DecodedImage,
+) {
+    if draw_width == 0 || draw_height == 0 || image.width == 0 || image.height == 0 {
+        return;
+    }
+
+    let max_x = x.saturating_add(draw_width).min(width);
+    let max_y = y.saturating_add(draw_height).min(height);
+
+    for dest_y in y..max_y {
+        let source_y = ((dest_y - y) as u64 * image.height as u64 / draw_height as u64) as u32;
+        let row_offset = dest_y as usize * width as usize;
+
+        for dest_x in x..max_x {
+            let source_x = ((dest_x - x) as u64 * image.width as u64 / draw_width as u64) as u32;
+            let source_index = ((source_y * image.width + source_x) * 4) as usize;
+            let source = &image.rgba[source_index..source_index + 4];
+            let alpha = source[3] as u32;
+
+            let pixel_index = row_offset + dest_x as usize;
+            if alpha == 255 {
+                buffer[pixel_index] =
+                    ((source[0] as u32) << 16) | ((source[1] as u32) << 8) | source[2] as u32;
+                continue;
+            }
+
+            let destination = buffer[pixel_index];
+            let destination_r = (destination >> 16) & 0xFF;
+            let destination_g = (destination >> 8) & 0xFF;
+            let destination_b = destination & 0xFF;
+            let inverse_alpha = 255 - alpha;
+
+            let blended_r = (source[0] as u32 * alpha + destination_r * inverse_alpha) / 255;
+            let blended_g = (source[1] as u32 * alpha + destination_g * inverse_alpha) / 255;
+            let blended_b = (source[2] as u32 * alpha + destination_b * inverse_alpha) / 255;
+
+            buffer[pixel_index] = (blended_r << 16) | (blended_g << 8) | blended_b;
         }
     }
 }

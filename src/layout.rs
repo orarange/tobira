@@ -3,6 +3,7 @@ use crate::css::{
     StyledNode, TextAlign, WhiteSpaceMode,
 };
 use crate::font::FontContext;
+use crate::image::ImageStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutDocument {
@@ -10,6 +11,7 @@ pub struct LayoutDocument {
     pub content_height: u32,
     pub rects: Vec<RectCommand>,
     pub texts: Vec<TextCommand>,
+    pub images: Vec<ImageCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,8 +36,18 @@ pub struct TextCommand {
     pub bold: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageCommand {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub src: String,
+}
+
 pub fn layout_styled_document(
     document: &StyledNode,
+    images: &ImageStore,
     viewport_width: u32,
     fonts: &mut FontContext,
 ) -> LayoutDocument {
@@ -49,6 +61,7 @@ pub fn layout_styled_document(
         viewport_width,
         &mut cursor_y,
         &mut context,
+        images,
         fonts,
     );
 
@@ -57,6 +70,7 @@ pub fn layout_styled_document(
         content_height: cursor_y,
         rects: context.rects,
         texts: context.texts,
+        images: context.images,
     }
 }
 
@@ -64,6 +78,7 @@ pub fn layout_styled_document(
 struct LayoutContext {
     rects: Vec<RectCommand>,
     texts: Vec<TextCommand>,
+    images: Vec<ImageCommand>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +137,7 @@ fn layout_node(
     width: u32,
     cursor_y: &mut u32,
     context: &mut LayoutContext,
+    images: &ImageStore,
     fonts: &mut FontContext,
 ) {
     match node {
@@ -132,24 +148,31 @@ fn layout_node(
             }];
             layout_inline_fragments(&fragments, &text.style, x, width, cursor_y, context, fonts);
         }
-        StyledNode::Element(element) => match element.style.display {
-            Display::None => {}
-            Display::Inline => {
-                let fragments = flatten_inline_fragments(node);
-                layout_inline_fragments(
-                    &fragments,
-                    &element.style,
-                    x,
-                    width,
-                    cursor_y,
-                    context,
-                    fonts,
-                );
+        StyledNode::Element(element) => {
+            if element.tag_name == "img" {
+                layout_image_element(element, x, width, cursor_y, context, images, fonts);
+                return;
             }
-            Display::Block | Display::ListItem => {
-                layout_block_element(element, x, width, cursor_y, context, fonts);
+
+            match element.style.display {
+                Display::None => {}
+                Display::Inline => {
+                    let fragments = flatten_inline_fragments(node);
+                    layout_inline_fragments(
+                        &fragments,
+                        &element.style,
+                        x,
+                        width,
+                        cursor_y,
+                        context,
+                        fonts,
+                    );
+                }
+                Display::Block | Display::ListItem => {
+                    layout_block_element(element, x, width, cursor_y, context, images, fonts);
+                }
             }
-        },
+        }
     }
 }
 
@@ -159,6 +182,7 @@ fn layout_block_element(
     width: u32,
     cursor_y: &mut u32,
     context: &mut LayoutContext,
+    images: &ImageStore,
     fonts: &mut FontContext,
 ) {
     if element.tag_name == "br" {
@@ -166,27 +190,8 @@ fn layout_block_element(
         return;
     }
 
-    if element.tag_name == "img" {
-        let alt = element
-            .attributes
-            .get("alt")
-            .filter(|text| !text.trim().is_empty())
-            .cloned()
-            .unwrap_or_else(|| "[image]".to_string());
-        let fragments = [InlineFragment::Text {
-            text: alt,
-            style: element.style.clone(),
-        }];
-        layout_inline_fragments(
-            &fragments,
-            &element.style,
-            x,
-            width,
-            cursor_y,
-            context,
-            fonts,
-        );
-        *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+    if element.tag_name == "table" {
+        layout_table_element(element, x, width, cursor_y, context, images, fonts);
         return;
     }
 
@@ -195,6 +200,18 @@ fn layout_block_element(
     let outer_x = x.saturating_add(element.style.margin.left);
     let outer_width = width.saturating_sub(element.style.margin.left + element.style.margin.right);
     let background_top = *cursor_y;
+    let background_index = if let Some(background_color) = element.style.background_color {
+        context.rects.push(RectCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1,
+            color: background_color,
+        });
+        Some(context.rects.len() - 1)
+    } else {
+        None
+    };
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.top);
 
@@ -228,6 +245,7 @@ fn layout_block_element(
             cursor_y,
             context,
             bullet_indent > 0,
+            images,
             fonts,
         );
     }
@@ -235,17 +253,478 @@ fn layout_block_element(
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     let background_height = cursor_y.saturating_sub(background_top).max(1);
 
-    if let Some(background_color) = element.style.background_color {
-        context.rects.push(RectCommand {
-            x: outer_x,
-            y: background_top,
-            width: outer_width.max(1),
-            height: background_height,
-            color: background_color,
-        });
+    if let Some(background_index) = background_index {
+        if let Some(rect) = context.rects.get_mut(background_index) {
+            rect.height = background_height;
+        }
     }
 
     *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+}
+
+fn layout_image_element(
+    element: &StyledElement,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) {
+    *cursor_y = cursor_y.saturating_add(element.style.margin.top);
+
+    let Some(src) = resolved_image_source(element) else {
+        layout_image_fallback(element, x, width, cursor_y, context, fonts);
+        return;
+    };
+
+    let Some(image) = images.get(src) else {
+        layout_image_fallback(element, x, width, cursor_y, context, fonts);
+        return;
+    };
+
+    let (draw_width, draw_height) =
+        image_dimensions(element, image.width, image.height, width.max(1));
+    let draw_x = match element.style.text_align {
+        TextAlign::Center => x.saturating_add(width.saturating_sub(draw_width) / 2),
+        TextAlign::Right => x.saturating_add(width.saturating_sub(draw_width)),
+        TextAlign::Left => x,
+    };
+
+    context.images.push(ImageCommand {
+        x: draw_x,
+        y: *cursor_y,
+        width: draw_width,
+        height: draw_height,
+        src: src.to_string(),
+    });
+
+    *cursor_y = cursor_y.saturating_add(draw_height);
+    *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+}
+
+fn layout_image_fallback(
+    element: &StyledElement,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    fonts: &mut FontContext,
+) {
+    let alt = element
+        .attributes
+        .get("alt")
+        .filter(|text| !text.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| "[image]".to_string());
+    let fragments = [InlineFragment::Text {
+        text: alt,
+        style: element.style.clone(),
+    }];
+    layout_inline_fragments(
+        &fragments,
+        &element.style,
+        x,
+        width,
+        cursor_y,
+        context,
+        fonts,
+    );
+    *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+}
+
+fn resolved_image_source(element: &StyledElement) -> Option<&str> {
+    element
+        .attributes
+        .get("data-scratch-src")
+        .map(String::as_str)
+        .or_else(|| element.attributes.get("src").map(String::as_str))
+}
+
+fn image_dimensions(
+    element: &StyledElement,
+    intrinsic_width: u32,
+    intrinsic_height: u32,
+    max_width: u32,
+) -> (u32, u32) {
+    let width_attr = parse_dimension_attribute(element.attributes.get("width"));
+    let height_attr = parse_dimension_attribute(element.attributes.get("height"));
+
+    let mut width = width_attr.unwrap_or(intrinsic_width.max(1));
+    let mut height = height_attr.unwrap_or_else(|| {
+        scaled_dimension(intrinsic_height.max(1), width, intrinsic_width.max(1))
+    });
+
+    if width > max_width && width > 0 {
+        height = scaled_dimension(height.max(1), max_width.max(1), width);
+        width = max_width.max(1);
+    }
+
+    if height_attr.is_some() && width_attr.is_none() {
+        width = scaled_dimension(
+            intrinsic_width.max(1),
+            height.max(1),
+            intrinsic_height.max(1),
+        );
+    }
+
+    (width.max(1), height.max(1))
+}
+
+fn scaled_dimension(source: u32, target_basis: u32, source_basis: u32) -> u32 {
+    if source_basis == 0 {
+        return source.max(1);
+    }
+    ((source as u64 * target_basis as u64) / source_basis as u64)
+        .max(1)
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
+fn layout_table_element(
+    element: &StyledElement,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) {
+    *cursor_y = cursor_y.saturating_add(element.style.margin.top);
+
+    let rows = collect_table_rows(element);
+    if rows.is_empty() {
+        *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+        return;
+    }
+
+    let placements = build_table_placements(&rows);
+    let column_count = placements
+        .iter()
+        .map(|placement| placement.column_index + placement.colspan)
+        .max()
+        .unwrap_or(0);
+    if column_count == 0 {
+        *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+        return;
+    }
+
+    let spacing = parse_dimension_attribute(element.attributes.get("cellspacing")).unwrap_or(0);
+    let padding = parse_dimension_attribute(element.attributes.get("cellpadding")).unwrap_or(0);
+    let available_width = resolve_table_width(element, width).max(1).min(width.max(1));
+    let track_total_spacing = spacing.saturating_mul(column_count.saturating_sub(1) as u32);
+    let content_width = available_width.saturating_sub(track_total_spacing).max(1);
+    let column_widths =
+        compute_column_widths(element, &placements, content_width, padding, images, fonts);
+    let table_width = column_widths
+        .iter()
+        .sum::<u32>()
+        .saturating_add(track_total_spacing);
+    let table_x = match element
+        .attributes
+        .get("align")
+        .map(|value| value.to_ascii_lowercase())
+    {
+        Some(value) if value == "center" => x.saturating_add(width.saturating_sub(table_width) / 2),
+        Some(value) if value == "right" => x.saturating_add(width.saturating_sub(table_width)),
+        _ => x,
+    };
+
+    let cell_layouts = placements
+        .iter()
+        .map(|placement| {
+            let span_width = span_width(&column_widths, placement.column_index, placement.colspan)
+                .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
+            let inner_width = span_width.saturating_sub(padding.saturating_mul(2)).max(1);
+            layout_table_cell(placement.cell, inner_width, images, fonts)
+        })
+        .collect::<Vec<_>>();
+
+    let row_count = rows.len();
+    let mut row_heights = vec![0_u32; row_count];
+    for (placement, layout) in placements.iter().zip(cell_layouts.iter()) {
+        if placement.rowspan == 1 {
+            row_heights[placement.row_index] =
+                row_heights[placement.row_index].max(layout.content_height);
+        }
+    }
+    for (placement, layout) in placements.iter().zip(cell_layouts.iter()) {
+        if placement.rowspan > 1 {
+            let start = placement.row_index;
+            let end = (placement.row_index + placement.rowspan).min(row_heights.len());
+            let current = row_heights[start..end].iter().sum::<u32>();
+            if current < layout.content_height && end > start {
+                row_heights[end - 1] =
+                    row_heights[end - 1].saturating_add(layout.content_height - current);
+            }
+        }
+    }
+    for height in &mut row_heights {
+        *height = (*height).max(1);
+    }
+
+    let mut row_offsets = vec![0_u32; row_count];
+    for index in 1..row_count {
+        row_offsets[index] = row_offsets[index - 1]
+            .saturating_add(row_heights[index - 1])
+            .saturating_add(spacing);
+    }
+
+    for (placement, layout) in placements.iter().zip(cell_layouts.iter()) {
+        let cell_x = table_x
+            .saturating_add(span_width(&column_widths, 0, placement.column_index))
+            .saturating_add(spacing.saturating_mul(placement.column_index as u32));
+        let cell_y = cursor_y.saturating_add(row_offsets[placement.row_index]);
+        let cell_width = span_width(&column_widths, placement.column_index, placement.colspan)
+            .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
+        let cell_height = cell_span_height(&row_heights, placement.row_index, placement.rowspan)
+            .saturating_add(spacing.saturating_mul(placement.rowspan.saturating_sub(1) as u32));
+
+        if let Some(background_color) = placement.cell.style.background_color {
+            context.rects.push(RectCommand {
+                x: cell_x,
+                y: cell_y,
+                width: cell_width.max(1),
+                height: cell_height.max(1),
+                color: background_color,
+            });
+        }
+
+        merge_fragment(
+            context,
+            layout,
+            cell_x.saturating_add(padding),
+            cell_y.saturating_add(padding),
+        );
+    }
+
+    let table_height = row_heights.iter().sum::<u32>()
+        + spacing.saturating_mul(row_count.saturating_sub(1) as u32);
+    *cursor_y = cursor_y.saturating_add(table_height);
+    *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+}
+
+#[derive(Debug, Clone)]
+struct TablePlacement<'a> {
+    row_index: usize,
+    column_index: usize,
+    colspan: usize,
+    rowspan: usize,
+    cell: &'a StyledElement,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FragmentLayout {
+    content_height: u32,
+    rects: Vec<RectCommand>,
+    texts: Vec<TextCommand>,
+    images: Vec<ImageCommand>,
+}
+
+fn collect_table_rows(element: &StyledElement) -> Vec<&StyledElement> {
+    let mut rows = Vec::new();
+    collect_table_rows_into(element, &mut rows);
+    rows
+}
+
+fn collect_table_rows_into<'a>(element: &'a StyledElement, output: &mut Vec<&'a StyledElement>) {
+    for child in &element.children {
+        if let StyledNode::Element(child_element) = child {
+            match child_element.tag_name.as_str() {
+                "tr" => output.push(child_element),
+                "tbody" | "thead" | "tfoot" => collect_table_rows_into(child_element, output),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn build_table_placements<'a>(rows: &[&'a StyledElement]) -> Vec<TablePlacement<'a>> {
+    let mut placements = Vec::new();
+    let mut row_spans = Vec::<usize>::new();
+
+    for (row_index, row) in rows.iter().enumerate() {
+        for span in &mut row_spans {
+            *span = span.saturating_sub(1);
+        }
+
+        let cells = row
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                StyledNode::Element(element)
+                    if matches!(element.tag_name.as_str(), "td" | "th") =>
+                {
+                    Some(element)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let mut column_index = 0;
+        for cell in cells {
+            while row_spans.get(column_index).copied().unwrap_or(0) > 0 {
+                column_index += 1;
+            }
+
+            let colspan = parse_span_attribute(cell.attributes.get("colspan"));
+            let rowspan = parse_span_attribute(cell.attributes.get("rowspan"));
+
+            if row_spans.len() < column_index + colspan {
+                row_spans.resize(column_index + colspan, 0);
+            }
+
+            for span in row_spans.iter_mut().skip(column_index).take(colspan) {
+                *span = rowspan;
+            }
+
+            placements.push(TablePlacement {
+                row_index,
+                column_index,
+                colspan,
+                rowspan,
+                cell,
+            });
+            column_index += colspan;
+        }
+    }
+
+    placements
+}
+
+fn compute_column_widths(
+    table: &StyledElement,
+    placements: &[TablePlacement<'_>],
+    available_width: u32,
+    padding: u32,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) -> Vec<u32> {
+    let column_count = placements
+        .iter()
+        .map(|placement| placement.column_index + placement.colspan)
+        .max()
+        .unwrap_or(0);
+    let mut widths = vec![0_u32; column_count];
+    let mut locked = vec![false; column_count];
+
+    for placement in placements {
+        if placement.colspan != 1 {
+            continue;
+        }
+
+        let column = placement.column_index;
+        if let Some(length) = parse_length_spec(placement.cell.attributes.get("width")) {
+            let resolved = resolve_length_spec(length, available_width);
+            widths[column] = widths[column].max(resolved);
+            locked[column] = true;
+            continue;
+        }
+
+        let measured = measure_cell_preferred_width(placement.cell, padding, images, fonts);
+        widths[column] = widths[column].max(measured);
+    }
+
+    let table_width = parse_length_spec(table.attributes.get("width"))
+        .map(|length| resolve_length_spec(length, available_width))
+        .unwrap_or(available_width);
+    let total_width = widths.iter().sum::<u32>();
+    if total_width >= table_width {
+        return widths.into_iter().map(|value| value.max(1)).collect();
+    }
+
+    let extra = table_width - total_width;
+    let flex_columns = locked.iter().filter(|&&value| !value).count().max(1) as u32;
+    let flex_share = (extra / flex_columns).max(1);
+    let mut remaining = extra;
+
+    for (index, width) in widths.iter_mut().enumerate() {
+        if locked[index] {
+            continue;
+        }
+        let add = flex_share.min(remaining);
+        *width = width.saturating_add(add);
+        remaining = remaining.saturating_sub(add);
+    }
+
+    if remaining > 0 && !widths.is_empty() {
+        let last = widths.len() - 1;
+        widths[last] = widths[last].saturating_add(remaining);
+    }
+
+    widths.into_iter().map(|value| value.max(1)).collect()
+}
+
+fn layout_table_cell(
+    cell: &StyledElement,
+    width: u32,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) -> FragmentLayout {
+    let mut context = LayoutContext::default();
+    let mut cursor_y = 0_u32;
+
+    for child in &cell.children {
+        if is_hidden(child) {
+            continue;
+        }
+
+        layout_node(child, 0, width, &mut cursor_y, &mut context, images, fonts);
+    }
+
+    FragmentLayout {
+        content_height: cursor_y.max(1),
+        rects: context.rects,
+        texts: context.texts,
+        images: context.images,
+    }
+}
+
+fn merge_fragment(
+    context: &mut LayoutContext,
+    fragment: &FragmentLayout,
+    offset_x: u32,
+    offset_y: u32,
+) {
+    context
+        .rects
+        .extend(fragment.rects.iter().map(|rect| RectCommand {
+            x: rect.x.saturating_add(offset_x),
+            y: rect.y.saturating_add(offset_y),
+            width: rect.width,
+            height: rect.height,
+            color: rect.color,
+        }));
+    context
+        .texts
+        .extend(fragment.texts.iter().map(|text| TextCommand {
+            x: text.x.saturating_add(offset_x),
+            y: text.y.saturating_add(offset_y),
+            width: text.width,
+            text: text.text.clone(),
+            font_size_px: text.font_size_px,
+            font_family: text.font_family,
+            color: text.color,
+            underline: text.underline,
+            bold: text.bold,
+        }));
+    context
+        .images
+        .extend(fragment.images.iter().map(|image| ImageCommand {
+            x: image.x.saturating_add(offset_x),
+            y: image.y.saturating_add(offset_y),
+            width: image.width,
+            height: image.height,
+            src: image.src.clone(),
+        }));
+}
+
+fn span_width(widths: &[u32], start: usize, span: usize) -> u32 {
+    widths.iter().skip(start).take(span).sum()
+}
+
+fn cell_span_height(heights: &[u32], start: usize, span: usize) -> u32 {
+    heights.iter().skip(start).take(span).sum()
 }
 
 fn layout_mixed_children(
@@ -255,6 +734,7 @@ fn layout_mixed_children(
     cursor_y: &mut u32,
     context: &mut LayoutContext,
     needs_bullet: bool,
+    images: &ImageStore,
     fonts: &mut FontContext,
 ) {
     let mut inline_fragments = Vec::new();
@@ -289,7 +769,7 @@ fn layout_mixed_children(
                 bullet_pending = false;
             }
 
-            layout_node(child, x, width, cursor_y, context, fonts);
+            layout_node(child, x, width, cursor_y, context, images, fonts);
         } else {
             if bullet_pending {
                 inline_fragments.push(InlineFragment::Text {
@@ -652,6 +1132,13 @@ fn emit_line(
 }
 
 fn is_block_level(node: &StyledNode) -> bool {
+    if matches!(
+        node,
+        StyledNode::Element(StyledElement { tag_name, .. }) if tag_name == "img"
+    ) {
+        return true;
+    }
+
     matches!(
         node,
         StyledNode::Element(StyledElement {
@@ -689,6 +1176,112 @@ fn text_width(style: &ComputedStyle, text: &str, fonts: &mut FontContext) -> u32
     fonts.text_width_px(text, style.font_size_px, style.font_family)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LengthSpec {
+    Pixels(u32),
+    Percent(u32),
+}
+
+fn parse_dimension_attribute(value: Option<&String>) -> Option<u32> {
+    value
+        .map(String::as_str)
+        .and_then(|raw| raw.trim_end_matches('%').parse::<u32>().ok())
+}
+
+fn parse_length_spec(value: Option<&String>) -> Option<LengthSpec> {
+    let raw = value?.trim();
+    if let Some(percent) = raw.strip_suffix('%') {
+        return percent.parse::<u32>().ok().map(LengthSpec::Percent);
+    }
+
+    raw.parse::<u32>().ok().map(LengthSpec::Pixels)
+}
+
+fn resolve_length_spec(length: LengthSpec, available_width: u32) -> u32 {
+    match length {
+        LengthSpec::Pixels(value) => value,
+        LengthSpec::Percent(value) => available_width.saturating_mul(value) / 100,
+    }
+}
+
+fn parse_span_attribute(value: Option<&String>) -> usize {
+    value
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn resolve_table_width(element: &StyledElement, available_width: u32) -> u32 {
+    parse_length_spec(element.attributes.get("width"))
+        .map(|length| resolve_length_spec(length, available_width))
+        .unwrap_or(available_width)
+}
+
+fn measure_cell_preferred_width(
+    cell: &StyledElement,
+    padding: u32,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) -> u32 {
+    if let Some(length) = parse_length_spec(cell.attributes.get("width"))
+        && matches!(length, LengthSpec::Pixels(_))
+    {
+        return resolve_length_spec(length, 0);
+    }
+
+    let mut max_width = 1_u32;
+    for child in &cell.children {
+        max_width = max_width.max(measure_node_preferred_width(child, images, fonts));
+    }
+
+    max_width.saturating_add(padding.saturating_mul(2))
+}
+
+fn measure_node_preferred_width(
+    node: &StyledNode,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) -> u32 {
+    match node {
+        StyledNode::Text(text) => text_width(&text.style, text.text.trim(), fonts).max(1),
+        StyledNode::Element(element) => {
+            if element.tag_name == "img"
+                && let Some(src) = resolved_image_source(element)
+                && let Some(image) = images.get(src)
+            {
+                return image_dimensions(element, image.width, image.height, u32::MAX / 2).0;
+            }
+
+            if element.tag_name == "table" {
+                return parse_length_spec(element.attributes.get("width"))
+                    .map(|length| match length {
+                        LengthSpec::Pixels(value) => value,
+                        LengthSpec::Percent(value) => value.saturating_mul(8),
+                    })
+                    .unwrap_or_else(|| {
+                        collect_table_rows(element)
+                            .into_iter()
+                            .flat_map(|row| row.children.iter())
+                            .map(|child| measure_node_preferred_width(child, images, fonts))
+                            .sum::<u32>()
+                            .max(1)
+                    });
+            }
+
+            let child_width = element
+                .children
+                .iter()
+                .map(|child| measure_node_preferred_width(child, images, fonts))
+                .max()
+                .unwrap_or(1);
+
+            child_width
+                .saturating_add(element.style.padding.left + element.style.padding.right)
+                .max(1)
+        }
+    }
+}
+
 fn find_document_background(node: &StyledNode) -> Option<Color> {
     match node {
         StyledNode::Text(_) => None,
@@ -710,6 +1303,7 @@ mod tests {
     use crate::css::{TextAlign, build_styled_tree, parse_stylesheet};
     use crate::font::FontContext;
     use crate::html::parse_document;
+    use crate::image::{DecodedImage, ImageStore};
 
     #[test]
     fn hides_display_none_content() {
@@ -717,7 +1311,7 @@ mod tests {
         let stylesheet = parse_stylesheet(".hide { display: none; } p { color: #ff0000; }");
         let styled = build_styled_tree(&document, &stylesheet);
         let mut fonts = FontContext::load();
-        let layout = layout_styled_document(&styled, 320, &mut fonts);
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
         assert!(layout.texts.iter().any(|text| text.text.contains("Hello")));
         assert!(layout.texts.iter().all(|text| !text.text.contains("Nope")));
@@ -730,7 +1324,7 @@ mod tests {
         let stylesheet = parse_stylesheet("p { text-align: center; font-size: 16px; }");
         let styled = build_styled_tree(&document, &stylesheet);
         let mut fonts = FontContext::load();
-        let layout = layout_styled_document(&styled, 200, &mut fonts);
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 200, &mut fonts);
 
         let text = layout.texts.first().expect("text command should exist");
         let expected_left_offset = (200 - text.width) / 2;
@@ -744,7 +1338,7 @@ mod tests {
         let stylesheet = parse_stylesheet("p { font-size: 16px; }");
         let styled = build_styled_tree(&document, &stylesheet);
         let mut fonts = FontContext::load();
-        let layout = layout_styled_document(&styled, 90, &mut fonts);
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 90, &mut fonts);
 
         let distinct_rows = layout
             .texts
@@ -769,6 +1363,74 @@ mod tests {
         };
 
         assert_eq!(paragraph.style.text_align, TextAlign::Right);
+    }
+
+    #[test]
+    fn places_table_cells_side_by_side() {
+        let document = parse_document("<table><tr><td>Left</td><td>Right</td></tr></table>");
+        let styled = build_styled_tree(&document, &parse_stylesheet(""));
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
+        let left = layout
+            .texts
+            .iter()
+            .find(|text| text.text.contains("Left"))
+            .expect("left cell text should exist");
+        let right = layout
+            .texts
+            .iter()
+            .find(|text| text.text.contains("Right"))
+            .expect("right cell text should exist");
+
+        assert_eq!(left.y, right.y);
+        assert!(right.x > left.x);
+    }
+
+    #[test]
+    fn emits_image_commands_for_loaded_images() {
+        let document = parse_document(
+            "<div><img src=\"https://example.com/pic.jpg\" data-scratch-src=\"https://example.com/pic.jpg\" width=\"40\" height=\"20\"></div>",
+        );
+        let styled = build_styled_tree(&document, &parse_stylesheet(""));
+        let mut fonts = FontContext::load();
+        let mut images = ImageStore::default();
+        images.insert(
+            "https://example.com/pic.jpg".to_string(),
+            DecodedImage {
+                width: 80,
+                height: 40,
+                rgba: vec![255; 80 * 40 * 4],
+            },
+        );
+
+        let layout = layout_styled_document(&styled, &images, 320, &mut fonts);
+
+        assert_eq!(layout.images.len(), 1);
+        assert_eq!(layout.images[0].width, 40);
+        assert_eq!(layout.images[0].height, 20);
+    }
+
+    #[test]
+    fn keeps_rowspan_cells_from_colliding_with_next_row() {
+        let document = parse_document(
+            "<table><tr><td rowspan=\"2\">Left</td><td>Top</td></tr><tr><td>Bottom</td></tr></table>",
+        );
+        let styled = build_styled_tree(&document, &parse_stylesheet(""));
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
+        let top = layout
+            .texts
+            .iter()
+            .find(|text| text.text.contains("Top"))
+            .expect("top cell text should exist");
+        let bottom = layout
+            .texts
+            .iter()
+            .find(|text| text.text.contains("Bottom"))
+            .expect("bottom cell text should exist");
+
+        assert!(bottom.y > top.y);
+        assert_eq!(top.x, bottom.x);
     }
 
     fn find_paragraph(element: &crate::css::StyledElement) -> Option<&crate::css::StyledElement> {

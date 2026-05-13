@@ -12,6 +12,7 @@ flate2 = "1.1.5"
 fontdb = "0.23.0"
 fontdue = "0.9.3"
 font8x8 = "0.3.1"
+image = { version = "0.25.8", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "webp"] }
 rustls = "0.23.35"
 rustls-platform-verifier = "0.6.2"
 softbuffer = "0.4.8"
