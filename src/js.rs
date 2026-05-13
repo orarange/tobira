@@ -291,6 +291,7 @@ fn install_browser_globals(context: &mut Context) {
             Attribute::all(),
         )
         .property(js_string!("fonts"), document_fonts, Attribute::all())
+        .property(js_string!("cookie"), js_string!(""), Attribute::all())
         .property(
             js_string!("readyState"),
             js_string!("complete"),
@@ -553,6 +554,77 @@ fn install_browser_globals(context: &mut Context) {
     context
         .register_global_property(js_string!("innerHeight"), 720, Attribute::all())
         .expect("innerHeight should be installable");
+
+    let crypto_subtle = ObjectInitializer::new(context)
+        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("digest"), 2)
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("encrypt"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("decrypt"),
+            3,
+        )
+        .build();
+    let crypto = ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_crypto_get_random_values),
+            js_string!("getRandomValues"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_crypto_random_uuid),
+            js_string!("randomUUID"),
+            0,
+        )
+        .property(js_string!("subtle"), crypto_subtle, Attribute::all())
+        .build();
+    context
+        .register_global_property(js_string!("crypto"), crypto, Attribute::all())
+        .expect("crypto should be installable");
+
+    let url_search_params = ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_return_null),
+            js_string!("get"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("set"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("append"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("delete"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_return_false),
+            js_string!("has"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("forEach"),
+            1,
+        )
+        .property(js_string!("toString"), js_string!(""), Attribute::all())
+        .build();
+    context
+        .register_global_property(
+            js_string!("URLSearchParams"),
+            url_search_params,
+            Attribute::all(),
+        )
+        .expect("URLSearchParams should be installable");
 }
 
 fn build_dom_stub(context: &mut Context) -> boa_engine::object::JsObject {
@@ -841,42 +913,15 @@ fn should_execute_script(attributes: &BTreeMap<String, String>) -> bool {
     }
 }
 
-fn is_supported_script_source(source: &str, host: &str) -> bool {
+fn is_supported_script_source(source: &str, _host: &str) -> bool {
     if source.len() > MAX_SCRIPT_SOURCE_BYTES {
         return false;
     }
-
     let lowered = source.to_ascii_lowercase();
-    if contains_any(&lowered, BLOCKED_SCRIPT_PATTERNS) {
-        return false;
-    }
-
-    if is_youtube_host_name(host) {
-        return true;
-    }
-
-    contains_any(&lowered, CONSERVATIVE_SCRIPT_PATTERNS)
+    !contains_any(&lowered, BLOCKED_SCRIPT_PATTERNS)
 }
 
-const CONSERVATIVE_SCRIPT_PATTERNS: &[&str] = &[
-    "document.write",
-    "document.writeln",
-    "document.title",
-    "settimeout",
-    "alert(",
-    "confirm(",
-    "prompt(",
-    "location.href",
-    "location.assign",
-    "location.replace",
-    "console.log",
-    "console.info",
-    "console.warn",
-    "console.error",
-];
-
 const BLOCKED_SCRIPT_PATTERNS: &[&str] = &[
-    "document.cookie",
     "xmlhttprequest",
     "fetch(",
     "websocket(",
@@ -885,18 +930,14 @@ const BLOCKED_SCRIPT_PATTERNS: &[&str] = &[
     "serviceworker",
     "indexeddb",
     "navigator.serviceworker",
-    "new image",
+    "new image(",
     "eval(",
-    "new function",
+    "new function(",
     "import(",
 ];
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
-}
-
-fn is_youtube_host_name(host: &str) -> bool {
-    host == "youtube.com" || host.ends_with(".youtube.com")
 }
 
 fn parse_tag_attributes(tag: &str) -> BTreeMap<String, String> {
@@ -1367,6 +1408,20 @@ fn js_return_undefined(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<
 
 fn js_noop(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::undefined())
+}
+
+fn js_crypto_get_random_values(
+    _: &JsValue,
+    args: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(args.first().cloned().unwrap_or_else(JsValue::undefined))
+}
+
+fn js_crypto_random_uuid(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::from(js_string!(
+        "00000000-0000-4000-8000-000000000000"
+    )))
 }
 
 fn js_ytcfg_data(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
