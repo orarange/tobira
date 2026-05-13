@@ -240,12 +240,13 @@ fn layout_block_element(
         .max(element.style.min_width);
     let background_top = *cursor_y;
     let background_index = if let Some(background_color) = element.style.background_color {
+        let blended_bg = apply_opacity(background_color, DEFAULT_BACKGROUND_COLOR, element.style.opacity);
         context.rects.push(RectCommand {
             x: outer_x,
             y: background_top,
             width: outer_width.max(1),
             height: 1,
-            color: background_color,
+            color: blended_bg,
         });
         Some(context.rects.len() - 1)
     } else {
@@ -304,7 +305,7 @@ fn layout_block_element(
 
     // Draw borders if present
     if !element.style.border_style_none {
-        let bc = element.style.border_color;
+        let bc = apply_opacity(element.style.border_color, DEFAULT_BACKGROUND_COLOR, element.style.opacity);
         let border_top_h = element.style.border.top;
         let border_bottom_h = element.style.border.bottom;
         let border_left_w = element.style.border.left;
@@ -585,12 +586,13 @@ fn layout_table_element(
             .saturating_add(spacing.saturating_mul(placement.rowspan.saturating_sub(1) as u32));
 
         if let Some(background_color) = placement.cell.style.background_color {
+            let blended = apply_opacity(background_color, DEFAULT_BACKGROUND_COLOR, placement.cell.style.opacity);
             context.rects.push(RectCommand {
                 x: cell_x,
                 y: cell_y,
                 width: cell_width.max(1),
                 height: cell_height.max(1),
-                color: background_color,
+                color: blended,
             });
         }
 
@@ -1299,13 +1301,15 @@ fn emit_line_impl(
         .max(text_line_height(container_style, fonts));
 
     for span in &line.spans {
+        let span_opacity = span.style.opacity;
         if let Some(background_color) = span.style.background_color {
+            let blended_bg = apply_opacity(background_color, DEFAULT_BACKGROUND_COLOR, span_opacity);
             context.rects.push(RectCommand {
                 x: cursor_x,
                 y: *cursor_y,
                 width: span.width,
                 height: line_height,
-                color: background_color,
+                color: blended_bg,
             });
         }
 
@@ -1314,6 +1318,7 @@ fn emit_line_impl(
         } else {
             span.text.clone()
         };
+        let text_bg = span.style.background_color.unwrap_or(DEFAULT_BACKGROUND_COLOR);
         context.texts.push(TextCommand {
             x: cursor_x,
             y: *cursor_y,
@@ -1321,7 +1326,7 @@ fn emit_line_impl(
             text: display_text,
             font_size_px: span.style.font_size_px,
             font_family: span.style.font_family,
-            color: span.style.color,
+            color: apply_opacity(span.style.color, text_bg, span_opacity),
             underline: span.style.underline,
             bold: span.style.font_weight,
             italic: span.style.font_style_italic,
@@ -1508,6 +1513,25 @@ fn resolve_length_value(length: LengthValue, available_width: u32) -> u32 {
         LengthValue::Pixels(value) => value,
         LengthValue::Percent(value) => available_width.saturating_mul(value) / 100,
     }
+}
+
+/// Blend `color` with `background` using `opacity` (255 = fully opaque).
+fn apply_opacity(color: Color, background: Color, opacity: u8) -> Color {
+    if opacity == 255 {
+        return color;
+    }
+    if opacity == 0 {
+        return background;
+    }
+    let a = opacity as u32;
+    let blend = |fg: u32, bg: u32| -> u32 { (fg * a + bg * (255 - a)) / 255 };
+    let fr = (color >> 16) & 0xFF;
+    let fg = (color >> 8) & 0xFF;
+    let fb = color & 0xFF;
+    let br = (background >> 16) & 0xFF;
+    let bg_g = (background >> 8) & 0xFF;
+    let bb = background & 0xFF;
+    (blend(fr, br) << 16) | (blend(fg, bg_g) << 8) | blend(fb, bb)
 }
 
 fn find_document_background(node: &StyledNode) -> Option<Color> {

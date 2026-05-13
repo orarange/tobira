@@ -421,6 +421,48 @@ pub struct StyledText {
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Split `input` on `delimiter` but only at depth 0 (ignoring delimiters inside
+/// parentheses/brackets and quoted strings).  This prevents `:not(.a, .b)` from
+/// being split on the inner comma.
+fn split_at_top_level(input: &str, delimiter: char) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut depth: u32 = 0;
+    let mut in_string: Option<char> = None;
+    let mut current = String::new();
+    for ch in input.chars() {
+        match ch {
+            q @ ('"' | '\'') if in_string.is_none() => {
+                in_string = Some(q);
+                current.push(ch);
+            }
+            q if in_string == Some(q) => {
+                in_string = None;
+                current.push(ch);
+            }
+            _ if in_string.is_some() => {
+                current.push(ch);
+            }
+            '(' | '[' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' | ']' if depth > 0 => {
+                depth -= 1;
+                current.push(ch);
+            }
+            c if c == delimiter && depth == 0 => {
+                result.push(current.clone());
+                current.clear();
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+    result.push(current);
+    result
+}
+
 fn find_matching_close_brace(source: &str) -> Option<usize> {
     let mut depth: u32 = 1;
     for (i, ch) in source.char_indices() {
@@ -484,9 +526,9 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
             continue;
         }
 
-        let selectors = selector_text
-            .split(',')
-            .filter_map(parse_selector)
+        let selectors = split_at_top_level(selector_text, ',')
+            .iter()
+            .filter_map(|s| parse_selector(s.trim()))
             .collect::<Vec<_>>();
         let declarations = parse_inline_declarations(block_text);
 
@@ -530,8 +572,9 @@ fn parse_media_condition(query: &str) -> MediaCondition {
 }
 
 pub fn parse_inline_declarations(input: &str) -> Vec<Declaration> {
-    strip_comments(input)
-        .split(';')
+    let stripped = strip_comments(input);
+    split_at_top_level(&stripped, ';')
+        .into_iter()
         .filter_map(|entry| {
             let (property, value) = entry.split_once(':')?;
             let property = property.trim().to_ascii_lowercase();
@@ -2501,7 +2544,7 @@ pub fn apply_text_transform(text: &str, transform: TextTransform) -> String {
 mod tests {
     use super::{
         Display, LengthValue, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
-        build_styled_tree, parse_color, parse_stylesheet,
+        build_styled_tree, parse_color, parse_stylesheet, split_at_top_level,
     };
     use crate::html::{Node, parse_document};
 
@@ -2843,5 +2886,33 @@ mod tests {
         assert!((r as i32 - 128).abs() <= 1, "r should be ~128, got {r}");
         assert!((g as i32 - 128).abs() <= 1, "g should be ~128, got {g}");
         assert!((b as i32 - 128).abs() <= 1, "b should be ~128, got {b}");
+    }
+
+    // ── split_at_top_level tests ──────────────────────────────────────────────
+
+    #[test]
+    fn split_comma_at_top_level_ignores_parens() {
+        // :not(.a, .b) must NOT be split on the inner comma
+        let result = split_at_top_level(":not(.a, .b), .c", ',');
+        assert_eq!(result, vec![":not(.a, .b)".to_string(), " .c".to_string()]);
+    }
+
+    #[test]
+    fn split_semicolon_at_top_level_ignores_string() {
+        // content: "a; b" must NOT be split inside the string
+        let result = split_at_top_level(r#"color: red; content: "a; b""#, ';');
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].trim(), "color: red");
+        assert_eq!(result[1].trim(), r#"content: "a; b""#);
+    }
+
+    #[test]
+    fn not_pseudo_class_selector_matches() {
+        let document = parse_document("<p class=\"a\">A</p><p class=\"b\">B</p>");
+        let stylesheet = parse_stylesheet("p:not(.a) { color: #ff0000; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let pa = find_first_element(&styled, "p").unwrap();
+        // first p has class "a" so :not(.a) should NOT match it
+        assert_ne!(pa.style.color, 0xFF0000, "p.a should not match :not(.a)");
     }
 }
