@@ -421,6 +421,23 @@ pub struct StyledText {
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn find_matching_close_brace(source: &str) -> Option<usize> {
+    let mut depth: u32 = 1;
+    for (i, ch) in source.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 pub fn parse_stylesheet(input: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let source = strip_comments(input);
@@ -431,9 +448,8 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         let selector_end = cursor + open_offset;
         let block_start = selector_end + 1;
 
-        // We must find the matching closing brace (possibly nested for @media)
         let block_text_raw = &source[block_start..];
-        let Some(close_offset) = block_text_raw.find('}') else {
+        let Some(close_offset) = find_matching_close_brace(block_text_raw) else {
             break;
         };
         let block_end = block_start + close_offset;
@@ -2017,78 +2033,102 @@ fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i16> {
 /// Simple calc() evaluator: left-to-right, no precedence.
 fn parse_calc(expr: &str, parent_font_size: u32) -> Option<u32> {
     let expr = expr.trim();
-    // Tokenize into numbers and operators
-    let mut tokens: Vec<CalcToken> = Vec::new();
+
+    // Tokenize: collect (operator, f32_value) pairs.
+    // The first token has no operator (treated as +).
+    let mut values: Vec<f32> = Vec::new();
+    let mut ops: Vec<char> = Vec::new();
     let mut buf = String::new();
 
     let chars: Vec<char> = expr.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         let ch = chars[i];
-        if ch == '+' || ch == '*' || ch == '/' {
-            if !buf.trim().is_empty() {
-                let num = resolve_calc_operand(buf.trim(), parent_font_size)?;
-                tokens.push(CalcToken::Value(num));
-                buf.clear();
+        match ch {
+            '+' | '*' | '/' => {
+                if !buf.trim().is_empty() {
+                    values.push(resolve_calc_operand_f32(buf.trim(), parent_font_size)?);
+                    buf.clear();
+                }
+                ops.push(ch);
+                i += 1;
             }
-            tokens.push(CalcToken::Op(ch));
-            i += 1;
-        } else if ch == '-' && !buf.trim().is_empty() {
-            // minus between operands
-            let num = resolve_calc_operand(buf.trim(), parent_font_size)?;
-            tokens.push(CalcToken::Value(num));
-            buf.clear();
-            tokens.push(CalcToken::Op('-'));
-            i += 1;
-        } else {
-            buf.push(ch);
-            i += 1;
+            '-' if !buf.trim().is_empty() => {
+                values.push(resolve_calc_operand_f32(buf.trim(), parent_font_size)?);
+                buf.clear();
+                ops.push('-');
+                i += 1;
+            }
+            _ => {
+                buf.push(ch);
+                i += 1;
+            }
         }
     }
     if !buf.trim().is_empty() {
-        let num = resolve_calc_operand(buf.trim(), parent_font_size)?;
-        tokens.push(CalcToken::Value(num));
+        values.push(resolve_calc_operand_f32(buf.trim(), parent_font_size)?);
     }
 
-    // Evaluate left-to-right
-    let mut result: f32 = 0.0;
-    let mut pending_op = '+';
-    for token in &tokens {
-        match token {
-            CalcToken::Value(v) => {
-                let f = *v as f32;
-                match pending_op {
-                    '+' => result += f,
-                    '-' => result -= f,
-                    '*' => result *= f,
-                    '/' => {
-                        if f != 0.0 {
-                            result /= f;
-                        }
-                    }
-                    _ => {}
-                }
+    if values.is_empty() {
+        return None;
+    }
+
+    // Pass 1: collapse * and / (higher precedence than + and -)
+    let mut i = 0;
+    while i < ops.len() {
+        match ops[i] {
+            '*' => {
+                values[i] *= values[i + 1];
+                values.remove(i + 1);
+                ops.remove(i);
             }
-            CalcToken::Op(op) => {
-                pending_op = *op;
+            '/' if values[i + 1] != 0.0 => {
+                values[i] /= values[i + 1];
+                values.remove(i + 1);
+                ops.remove(i);
             }
+            _ => i += 1,
+        }
+    }
+
+    // Pass 2: evaluate + and -
+    let mut result = values[0];
+    for (op, val) in ops.iter().zip(values[1..].iter()) {
+        match op {
+            '+' => result += val,
+            '-' => result -= val,
+            _ => {}
         }
     }
 
     Some(result.round().max(0.0) as u32)
 }
 
-enum CalcToken {
-    Value(u32),
-    Op(char),
-}
-
-fn resolve_calc_operand(token: &str, parent_font_size: u32) -> Option<u32> {
-    // numbers without units (used in multiplication/division)
-    if let Ok(f) = token.parse::<f32>() {
-        return Some(f.round().max(0.0) as u32);
+fn resolve_calc_operand_f32(token: &str, parent_font_size: u32) -> Option<f32> {
+    let t = token.trim().to_ascii_lowercase();
+    // Plain number used as multiplier in * or /
+    if let Ok(f) = t.parse::<f32>() {
+        return Some(f);
     }
-    parse_length(token, parent_font_size)
+    if let Some(n) = t.strip_suffix("px") {
+        return parse_float(n);
+    }
+    if let Some(n) = t.strip_suffix("em") {
+        return parse_float(n).map(|f| f * parent_font_size as f32);
+    }
+    if let Some(n) = t.strip_suffix("rem") {
+        return parse_float(n).map(|f| f * 16.0);
+    }
+    if let Some(n) = t.strip_suffix("vw") {
+        return parse_float(n).map(|f| f * 12.8); // viewport 1280px
+    }
+    if let Some(n) = t.strip_suffix("vh") {
+        return parse_float(n).map(|f| f * 7.2); // viewport 720px
+    }
+    if let Some(n) = t.strip_suffix('%') {
+        return parse_float(n).map(|f| f * parent_font_size as f32 / 100.0);
+    }
+    None
 }
 
 fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue> {
@@ -2131,11 +2171,11 @@ pub fn parse_color(input: &str) -> Option<Color> {
             let r = parts[0].trim().parse::<u8>().ok()?;
             let g = parts[1].trim().parse::<u8>().ok()?;
             let b = parts[2].trim().parse::<u8>().ok()?;
-            let a = parts[3].trim().parse::<f32>().ok()?;
-            if a < 0.5 {
+            let a = parts[3].trim().parse::<f32>().ok()?.clamp(0.0, 1.0);
+            if a == 0.0 {
                 return None;
             }
-            return Some(rgb(r, g, b));
+            return Some(blend_with_white(r, g, b, a));
         }
     }
 
@@ -2161,12 +2201,12 @@ pub fn parse_color(input: &str) -> Option<Color> {
             let h = parts[0].trim().parse::<f32>().ok()?;
             let s = parts[1].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
             let l = parts[2].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
-            let a = parts[3].trim().parse::<f32>().ok()?;
-            if a < 0.5 {
+            let a = parts[3].trim().parse::<f32>().ok()?.clamp(0.0, 1.0);
+            if a == 0.0 {
                 return None;
             }
             let (r, g, b) = hsl_to_rgb(h, s, l);
-            return Some(rgb(r, g, b));
+            return Some(blend_with_white(r, g, b, a));
         }
     }
 
@@ -2239,6 +2279,13 @@ fn parse_hex_color(value: &str) -> Option<Color> {
         }
         _ => None,
     }
+}
+
+fn blend_with_white(r: u8, g: u8, b: u8, alpha: f32) -> Color {
+    let blend = |channel: u8| -> u8 {
+        (channel as f32 * alpha + 255.0 * (1.0 - alpha)).round() as u8
+    };
+    rgb(blend(r), blend(g), blend(b))
 }
 
 fn rgb(red: u8, green: u8, blue: u8) -> Color {
@@ -2453,8 +2500,8 @@ pub fn apply_text_transform(text: &str, transform: TextTransform) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Display, LengthValue, StyledNode, VerticalAlign, WhiteSpaceMode, build_styled_tree,
-        parse_color, parse_stylesheet,
+        Display, LengthValue, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
+        build_styled_tree, parse_color, parse_stylesheet,
     };
     use crate::html::{Node, parse_document};
 
@@ -2580,5 +2627,221 @@ mod tests {
         let mut paragraphs = Vec::new();
         collect(node, &mut paragraphs);
         paragraphs.get(1).copied()
+    }
+
+    // ── Attribute selector tests ──────────────────────────────────────────────
+
+    #[test]
+    fn attribute_exists_selector_matches() {
+        let document = parse_document("<div><a href=\"#\">link</a><span>plain</span></div>");
+        let stylesheet = parse_stylesheet("[href] { color: #ff0000; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let a = find_first_element(&styled, "a").expect("a should exist");
+        let span = find_first_element(&styled, "span").expect("span should exist");
+        assert_eq!(a.style.color, 0xFF0000);
+        assert_ne!(span.style.color, 0xFF0000);
+    }
+
+    #[test]
+    fn attribute_equals_selector_matches() {
+        let document = parse_document(
+            "<input type=\"text\"><input type=\"checkbox\">",
+        );
+        let stylesheet = parse_stylesheet("[type=text] { color: #00ff00; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let inputs: Vec<_> = {
+            fn collect_inputs<'a>(node: &'a StyledNode, out: &mut Vec<&'a StyledElement>) {
+                if let StyledNode::Element(el) = node {
+                    if el.tag_name == "input" { out.push(el); }
+                    for c in &el.children { collect_inputs(c, out); }
+                }
+            }
+            let mut v = Vec::new();
+            collect_inputs(&styled, &mut v);
+            v
+        };
+        assert_eq!(inputs[0].style.color, 0x00FF00);
+        assert_ne!(inputs[1].style.color, 0x00FF00);
+    }
+
+    #[test]
+    fn attribute_starts_with_selector_matches() {
+        let document = parse_document("<a href=\"https://example.com\">A</a><a href=\"http://x.com\">B</a>");
+        let stylesheet = parse_stylesheet("[href^=\"https\"] { color: #0000ff; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        fn nth_a(node: &StyledNode, n: usize) -> Option<&StyledElement> {
+            let mut found = Vec::new();
+            fn collect<'a>(node: &'a StyledNode, out: &mut Vec<&'a StyledElement>) {
+                if let StyledNode::Element(el) = node {
+                    if el.tag_name == "a" { out.push(el); }
+                    for c in &el.children { collect(c, out); }
+                }
+            }
+            collect(node, &mut found);
+            found.into_iter().nth(n)
+        }
+        assert_eq!(nth_a(&styled, 0).unwrap().style.color, 0x0000FF);
+        assert_ne!(nth_a(&styled, 1).unwrap().style.color, 0x0000FF);
+    }
+
+    // ── Pseudo-class tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn first_child_selector_matches() {
+        let document = parse_document("<ul><li>first</li><li>second</li><li>third</li></ul>");
+        let stylesheet = parse_stylesheet("li:first-child { color: #ff0000; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
+            if let StyledNode::Element(el) = node {
+                if el.tag_name == "li" { out.push(el.style.color); }
+                for c in &el.children { collect_li(c, out); }
+            }
+        }
+        let mut colors = Vec::new();
+        collect_li(&styled, &mut colors);
+        assert_eq!(colors[0], 0xFF0000, "first-child should be red");
+        assert_ne!(colors[1], 0xFF0000, "second child should not be red");
+    }
+
+    #[test]
+    fn last_child_selector_matches() {
+        let document = parse_document("<ul><li>first</li><li>second</li><li>last</li></ul>");
+        let stylesheet = parse_stylesheet("li:last-child { color: #0000ff; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
+            if let StyledNode::Element(el) = node {
+                if el.tag_name == "li" { out.push(el.style.color); }
+                for c in &el.children { collect_li(c, out); }
+            }
+        }
+        let mut colors = Vec::new();
+        collect_li(&styled, &mut colors);
+        assert_ne!(colors[0], 0x0000FF, "first should not be blue");
+        assert_eq!(*colors.last().unwrap(), 0x0000FF, "last-child should be blue");
+    }
+
+    #[test]
+    fn nth_child_odd_even_matches() {
+        let document = parse_document("<ul><li>1</li><li>2</li><li>3</li><li>4</li></ul>");
+        let stylesheet = parse_stylesheet("li:nth-child(odd) { color: #ff0000; } li:nth-child(even) { color: #0000ff; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
+            if let StyledNode::Element(el) = node {
+                if el.tag_name == "li" { out.push(el.style.color); }
+                for c in &el.children { collect_li(c, out); }
+            }
+        }
+        let mut colors = Vec::new();
+        collect_li(&styled, &mut colors);
+        assert_eq!(colors[0], 0xFF0000, "1st (odd) should be red");
+        assert_eq!(colors[1], 0x0000FF, "2nd (even) should be blue");
+        assert_eq!(colors[2], 0xFF0000, "3rd (odd) should be red");
+        assert_eq!(colors[3], 0x0000FF, "4th (even) should be blue");
+    }
+
+    #[test]
+    fn not_selector_excludes_matching_elements() {
+        let document = parse_document("<ul><li class=\"skip\">A</li><li>B</li><li>C</li></ul>");
+        let stylesheet = parse_stylesheet("li:not(.skip) { color: #00ff00; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
+            if let StyledNode::Element(el) = node {
+                if el.tag_name == "li" { out.push(el.style.color); }
+                for c in &el.children { collect_li(c, out); }
+            }
+        }
+        let mut colors = Vec::new();
+        collect_li(&styled, &mut colors);
+        assert_ne!(colors[0], 0x00FF00, ".skip li should not match :not(.skip)");
+        assert_eq!(colors[1], 0x00FF00, "plain li should match :not(.skip)");
+    }
+
+    // ── @media tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn media_max_width_filters_rules_by_viewport() {
+        let document = parse_document("<p>Hello</p>");
+        // Base rule first, then media rule — at narrow viewport the media rule
+        // comes later in source order so it wins (same specificity).
+        let stylesheet = parse_stylesheet(
+            "p { color: #0000ff; } @media (max-width: 600px) { p { color: #ff0000; } }",
+        );
+        // Viewport 1280 → max-width 600 rule should NOT apply, base rule wins
+        let styled_wide = build_styled_tree(&document, &stylesheet, 1280);
+        let p_wide = find_first_element(&styled_wide, "p").unwrap();
+        assert_eq!(p_wide.style.color, 0x0000FF, "wide viewport: plain rule wins");
+
+        // Viewport 400 → max-width 600 rule SHOULD apply and wins (later in source)
+        let styled_narrow = build_styled_tree(&document, &stylesheet, 400);
+        let p_narrow = find_first_element(&styled_narrow, "p").unwrap();
+        assert_eq!(p_narrow.style.color, 0xFF0000, "narrow viewport: media rule wins");
+    }
+
+    #[test]
+    fn media_nested_braces_are_parsed_correctly() {
+        // @media with multiple rules inside — previously the first } broke the parse
+        let document = parse_document("<p class=\"a\">A</p><p class=\"b\">B</p>");
+        let stylesheet = parse_stylesheet(
+            "@media screen { .a { color: #ff0000; } .b { color: #0000ff; } }",
+        );
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let a = find_first_element(&styled, "p").unwrap();
+        // Both rules inside @media screen should be parsed (screen always applies)
+        assert_eq!(a.style.color, 0xFF0000, "first rule inside @media should apply");
+    }
+
+    // ── calc() tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn calc_addition_and_subtraction() {
+        let document = parse_document("<p>text</p>");
+        let stylesheet = parse_stylesheet("p { font-size: calc(10px + 6px); }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let p = find_first_element(&styled, "p").unwrap();
+        assert_eq!(p.style.font_size_px, 16);
+    }
+
+    #[test]
+    fn calc_multiplication_has_higher_precedence_than_addition() {
+        // calc(2px + 3 * 4px) should be 2 + 12 = 14, NOT (2+3)*4 = 20
+        let document = parse_document("<p>text</p>");
+        let stylesheet = parse_stylesheet("p { font-size: calc(2px + 3 * 4px); }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let p = find_first_element(&styled, "p").unwrap();
+        assert_eq!(p.style.font_size_px, 14, "multiplication must bind tighter than addition");
+    }
+
+    #[test]
+    fn calc_em_multiplication() {
+        // calc(1.5 * 1em) at 16px parent → 24px
+        let document = parse_document("<p>text</p>");
+        let stylesheet = parse_stylesheet("p { font-size: calc(1.5 * 1em); }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let p = find_first_element(&styled, "p").unwrap();
+        assert_eq!(p.style.font_size_px, 24);
+    }
+
+    // ── rgba() blending tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn rgba_fully_opaque_returns_color() {
+        assert_eq!(parse_color("rgba(255, 0, 0, 1.0)"), Some(0xFF0000));
+    }
+
+    #[test]
+    fn rgba_fully_transparent_returns_none() {
+        assert_eq!(parse_color("rgba(255, 0, 0, 0.0)"), None);
+    }
+
+    #[test]
+    fn rgba_half_transparent_blends_with_white() {
+        // rgba(0, 0, 0, 0.5) should blend 50% black with white → rgb(128, 128, 128)
+        let color = parse_color("rgba(0, 0, 0, 0.5)").expect("should return a color");
+        let r = (color >> 16) & 0xFF;
+        let g = (color >> 8) & 0xFF;
+        let b = color & 0xFF;
+        assert!((r as i32 - 128).abs() <= 1, "r should be ~128, got {r}");
+        assert!((g as i32 - 128).abs() <= 1, "g should be ~128, got {g}");
+        assert!((b as i32 - 128).abs() <= 1, "b should be ~128, got {b}");
     }
 }
