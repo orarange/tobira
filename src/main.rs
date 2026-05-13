@@ -5,8 +5,10 @@ mod font;
 mod gui;
 mod html;
 mod http;
+mod js;
 mod layout;
 mod render;
+mod text;
 mod url;
 
 use browser::load_page;

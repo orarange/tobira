@@ -33,11 +33,12 @@ Current capabilities:
 - Software rendering with `softbuffer`
 - System font rendering with TrueType / OpenType fonts via `fontdue`
 - Plain text CLI renderer with `--cli`
+- Basic JavaScript execution with `boa_engine`
 
 Still missing:
 
 - full CSS layout coverage
-- JavaScript execution
+- DOM APIs beyond the basics
 - address bar, tabs, history, navigation UI
 - images, forms, and modern page features
 
@@ -61,6 +62,13 @@ Local CSS demo:
 ```bash
 python -m http.server 8765
 cargo run -- http://127.0.0.1:8765/demo/index.html
+```
+
+Local JavaScript demo:
+
+```bash
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/js-demo.html
 ```
 
 ## GUI Controls
@@ -101,3 +109,17 @@ cargo run -- http://127.0.0.1:8765/demo/index.html
 3. Add address bar and navigation controls
 4. Add image loading and richer page rendering
 5. Add JavaScript execution for highly dynamic pages
+
+## JavaScript Scope
+
+Current JS support is intentionally small:
+
+- inline `<script>`
+- external `<script src>`
+- `document.write()` / `document.writeln()`
+- `document.title`
+- `location.href`
+- `console.log()` / `warn()` / `error()`
+- immediate `setTimeout(...)` fallback
+
+It does not yet implement a real DOM, query selectors, events, async networking, or framework-level browser APIs.

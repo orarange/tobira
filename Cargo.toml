@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+boa_engine = "0.21.1"
+boa_gc = "0.21.1"
 brotli = "8.0.2"
 encoding_rs = "0.8.35"
 flate2 = "1.1.5"

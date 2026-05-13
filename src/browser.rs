@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
-use encoding_rs::Encoding;
-
 use crate::css::{StyledNode, Stylesheet, build_styled_tree, parse_stylesheet};
 use crate::error::Result;
 use crate::html::{Element, Node, parse_document};
-use crate::http::{HttpResponse, fetch};
+use crate::http::fetch;
+use crate::js::process_document_scripts;
 use crate::render::render_document;
+use crate::text::decode_text_response;
 use crate::url::Url;
 
 const MAX_FRAME_DEPTH: usize = 3;
@@ -88,9 +88,12 @@ pub fn load_page(url: &Url) -> Result<BrowserPage> {
 fn load_document_source(url: &Url, frame_depth: usize) -> Result<LoadedDocumentSource> {
     let response = fetch(url)?;
     let content_type = response.header("content-type").map(str::to_string);
-    let text = decode_response_text(&response);
-    let parsed_document = parse_document(&text);
-    let original_title = document_title(&parsed_document);
+    let text = decode_text_response(&response.body, response.header("content-type"));
+    let scripted = process_document_scripts(&text, &response.final_url);
+    let parsed_document = parse_document(&scripted.html);
+    let original_title = scripted
+        .title_override
+        .or_else(|| document_title(&parsed_document));
     let document = if frame_depth < MAX_FRAME_DEPTH {
         expand_frames(&parsed_document, &response.final_url, frame_depth + 1)?
             .unwrap_or(parsed_document)
@@ -161,61 +164,6 @@ fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<
     Ok(Some(synthetic_document(&title, body_children)))
 }
 
-fn decode_response_text(response: &HttpResponse) -> String {
-    let charset = response
-        .header("content-type")
-        .and_then(charset_from_content_type)
-        .or_else(|| sniff_html_charset(&response.body));
-
-    let Some(charset) = charset else {
-        return String::from_utf8_lossy(&response.body).into_owned();
-    };
-
-    let Some(encoding) = Encoding::for_label(charset.as_bytes()) else {
-        return String::from_utf8_lossy(&response.body).into_owned();
-    };
-
-    let (decoded, _, _) = encoding.decode(&response.body);
-    decoded.into_owned()
-}
-
-fn charset_from_content_type(content_type: &str) -> Option<String> {
-    content_type.split(';').find_map(|segment| {
-        let (name, value) = segment.trim().split_once('=')?;
-        if !name.trim().eq_ignore_ascii_case("charset") {
-            return None;
-        }
-
-        let value = value.trim().trim_matches('"').trim_matches('\'');
-        (!value.is_empty()).then(|| value.to_string())
-    })
-}
-
-fn sniff_html_charset(body: &[u8]) -> Option<String> {
-    let sample = body
-        .iter()
-        .take(4096)
-        .map(|byte| if byte.is_ascii() { *byte as char } else { ' ' })
-        .collect::<String>()
-        .to_ascii_lowercase();
-
-    if let Some(index) = sample.find("charset=") {
-        let rest = &sample[index + "charset=".len()..];
-        let charset = rest
-            .trim_start_matches(['"', '\'', ' '])
-            .chars()
-            .take_while(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-            })
-            .collect::<String>();
-        if !charset.is_empty() {
-            return Some(charset);
-        }
-    }
-
-    None
-}
-
 fn collect_frame_specs(document: &Node) -> Vec<FrameSpec> {
     let mut frames = Vec::new();
     collect_frame_specs_into(document, &mut frames);
@@ -283,8 +231,6 @@ fn frame_display_priority(frame: &FrameSpec) -> u8 {
 
     if hint.contains("menu") || hint.contains("left") || hint.contains("nav") {
         1
-    } else if hint.contains("main") || hint.contains("right") || hint.contains("content") {
-        0
     } else {
         0
     }
@@ -339,7 +285,7 @@ fn collect_stylesheet(document: &Node, base_url: &Url) -> Stylesheet {
         let Ok(response) = fetch(&url) else {
             continue;
         };
-        let css_text = decode_response_text(&response);
+        let css_text = decode_text_response(&response.body, response.header("content-type"));
         stylesheet.extend(parse_stylesheet(&css_text));
     }
 
@@ -498,14 +444,11 @@ fn collect_raw_text_into(node: &Node, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserPage, charset_from_content_type, collect_frame_specs, collect_stylesheet,
-        decode_response_text, document_title, synthetic_document,
+        BrowserPage, collect_frame_specs, collect_stylesheet, document_title, synthetic_document,
     };
     use crate::css::StyledNode;
     use crate::html::{Node, parse_document};
-    use crate::http::HttpResponse;
     use crate::url::Url;
-    use std::collections::HashMap;
 
     #[test]
     fn falls_back_when_document_is_empty() {
@@ -565,36 +508,6 @@ mod tests {
 
         assert_eq!(stylesheet.rules.len(), 1);
         assert_eq!(document_title(&document), Some("Demo".to_string()));
-    }
-
-    #[test]
-    fn decodes_shift_jis_from_meta_charset() {
-        let (encoded_title, _, _) = encoding_rs::SHIFT_JIS.encode("阿部寛");
-        let mut body =
-            b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=Shift_JIS\"><title>"
-                .to_vec();
-        body.extend_from_slice(&encoded_title);
-        body.extend_from_slice(b"</title>");
-        let response = HttpResponse {
-            final_url: Url::parse("https://example.com").unwrap(),
-            status_code: 200,
-            reason_phrase: "OK".to_string(),
-            headers: HashMap::new(),
-            body,
-        };
-
-        let decoded = decode_response_text(&response);
-
-        assert!(decoded.contains("阿部寛"));
-    }
-
-    #[test]
-    fn extracts_charset_from_content_type() {
-        assert_eq!(
-            charset_from_content_type("text/html; charset=Shift_JIS"),
-            Some("Shift_JIS".to_string())
-        );
-        assert_eq!(charset_from_content_type("text/html"), None);
     }
 
     #[test]

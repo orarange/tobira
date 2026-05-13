@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Scratch Browser JS Demo</title>
+  <style>
+    body {
+      margin: 24px;
+      font-family: "Segoe UI", sans-serif;
+      background: #f7f2e7;
+      color: #22314a;
+    }
+
+    .card {
+      background: #fff8ee;
+      padding: 16px 20px;
+      margin-top: 18px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Scratch Browser JS Demo</h1>
+  <p>This page mixes inline and external JavaScript.</p>
+
+  <script>
+    document.title = "Scratch Browser JS Ready";
+    document.write('<div class="card"><strong>inline script:</strong> document.write worked.</div>');
+  </script>
+
+  <script src="js-demo.js"></script>
+</body>
+</html>
