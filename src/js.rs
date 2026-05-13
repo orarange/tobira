@@ -14,6 +14,8 @@ use crate::text::decode_text_response;
 use crate::url::Url;
 
 const MAX_SCRIPT_RECURSION: usize = 8;
+const MAX_SCRIPT_SOURCE_BYTES: usize = 8 * 1024;
+const MAX_TOTAL_SCRIPT_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessedScriptHtml {
@@ -57,6 +59,7 @@ pub fn process_document_scripts(html: &str, base_url: &Url) -> ProcessedScriptHt
 
 struct JavaScriptRuntime {
     context: Context,
+    executed_bytes: usize,
 }
 
 impl JavaScriptRuntime {
@@ -74,7 +77,10 @@ impl JavaScriptRuntime {
 
         install_browser_globals(&mut context);
 
-        Self { context }
+        Self {
+            context,
+            executed_bytes: 0,
+        }
     }
 
     fn execute(&mut self, source: &str) {
@@ -82,13 +88,26 @@ impl JavaScriptRuntime {
             return;
         }
 
+        if !is_supported_script_source(source) {
+            self.push_log(format!(
+                "js skip: unsupported script pattern ({} bytes)",
+                source.len()
+            ));
+            return;
+        }
+
+        if self.executed_bytes.saturating_add(source.len()) > MAX_TOTAL_SCRIPT_BYTES {
+            self.push_log(format!(
+                "js skip: script budget exceeded at {} bytes",
+                self.executed_bytes.saturating_add(source.len())
+            ));
+            return;
+        }
+
+        self.executed_bytes = self.executed_bytes.saturating_add(source.len());
+
         if let Err(error) = self.context.eval(Source::from_bytes(source)) {
-            if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
-                host.state
-                    .borrow_mut()
-                    .console_logs
-                    .push(format!("js error: {error}"));
-            }
+            self.push_log(format!("js error: {error}"));
         }
     }
 
@@ -112,6 +131,12 @@ impl JavaScriptRuntime {
         };
 
         mem::take(&mut host.state.borrow_mut().console_logs)
+    }
+
+    fn push_log(&self, message: String) {
+        if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+            host.state.borrow_mut().console_logs.push(message);
+        }
     }
 }
 
@@ -362,6 +387,63 @@ fn should_execute_script(attributes: &BTreeMap<String, String>) -> bool {
         Some(other) if other.ends_with("javascript") || other.ends_with("ecmascript") => true,
         Some(_) => false,
     }
+}
+
+fn is_supported_script_source(source: &str) -> bool {
+    if source.len() > MAX_SCRIPT_SOURCE_BYTES {
+        return false;
+    }
+
+    let lowered = source.to_ascii_lowercase();
+    if contains_any(&lowered, UNSUPPORTED_SCRIPT_PATTERNS) {
+        return false;
+    }
+
+    contains_any(&lowered, SUPPORTED_SCRIPT_PATTERNS)
+}
+
+const SUPPORTED_SCRIPT_PATTERNS: &[&str] = &[
+    "document.write",
+    "document.writeln",
+    "document.title",
+    "settimeout",
+    "alert(",
+    "confirm(",
+    "prompt(",
+    "location.href",
+    "location.assign",
+    "location.replace",
+    "console.log",
+    "console.info",
+    "console.warn",
+    "console.error",
+];
+
+const UNSUPPORTED_SCRIPT_PATTERNS: &[&str] = &[
+    "document.body",
+    "document.cookie",
+    "document.forms",
+    "document.images",
+    "document.getelementbyid",
+    "document.queryselector",
+    "document.queryselectorall",
+    "document.createelement",
+    "document.addeventlistener",
+    "document.removeeventlistener",
+    "document.documentelement",
+    "xmlhttprequest",
+    "fetch(",
+    "new image",
+    ".appendchild",
+    ".insertbefore",
+    ".classlist",
+    ".style.",
+    "location.search",
+    "location.hash",
+];
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 fn parse_tag_attributes(tag: &str) -> BTreeMap<String, String> {
@@ -734,5 +816,39 @@ mod tests {
         );
 
         assert!(processed.html.contains("<p>Later</p>"));
+    }
+
+    #[test]
+    fn skips_large_scripts_even_if_they_reference_supported_apis() {
+        let large_script = format!(
+            "<script>{}document.write('<p>Nope</p>')</script>",
+            "x".repeat(super::MAX_SCRIPT_SOURCE_BYTES)
+        );
+        let processed =
+            process_document_scripts(&large_script, &Url::parse("https://example.com").unwrap());
+
+        assert!(!processed.html.contains("<p>Nope</p>"));
+        assert!(
+            processed
+                .console_logs
+                .iter()
+                .any(|entry| entry.contains("unsupported script pattern"))
+        );
+    }
+
+    #[test]
+    fn skips_scripts_that_touch_unsupported_dom_apis() {
+        let processed = process_document_scripts(
+            "<script>document.body.onload=function(){document.write('<p>Nope</p>')};</script>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(!processed.html.contains("<p>Nope</p>"));
+        assert!(
+            processed
+                .console_logs
+                .iter()
+                .any(|entry| entry.contains("unsupported script pattern"))
+        );
     }
 }
