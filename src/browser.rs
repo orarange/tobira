@@ -747,9 +747,28 @@ fn collect_stylesheet_links_into(node: &Node, output: &mut Vec<String>) {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct YouTubeRelatedVideo {
+    title: String,
+    channel: Option<String>,
+    views: Option<String>,
+    published: Option<String>,
+    duration: Option<String>,
+    url: Option<String>,
+    thumbnail_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct YouTubeCommentPreview {
+    author: String,
+    body: String,
+    likes: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct YouTubeWatchData {
     title: String,
     channel: Option<String>,
+    subscribers: Option<String>,
     description: Option<String>,
     view_count: Option<String>,
     duration: Option<String>,
@@ -757,6 +776,9 @@ struct YouTubeWatchData {
     thumbnail_url: Option<String>,
     canonical_url: Option<String>,
     embed_url: Option<String>,
+    comment_count: Option<String>,
+    related_videos: Vec<YouTubeRelatedVideo>,
+    featured_comments: Vec<YouTubeCommentPreview>,
 }
 
 fn build_site_specific_document(document: &Node, html: &str, url: &Url) -> Option<Node> {
@@ -796,6 +818,16 @@ fn extract_youtube_watch_data_from_html(html: &str, url: &Url) -> Option<YouTube
         ],
     )
     .and_then(|json| serde_json::from_str::<Value>(&json).ok());
+    let initial_data = extract_assigned_json_object(
+        html,
+        &[
+            "var ytInitialData =",
+            "window['ytInitialData'] =",
+            "window[\"ytInitialData\"] =",
+        ],
+    )
+    .and_then(|json| serde_json::from_str::<Value>(&json).ok());
+    let ld_json = extract_first_ld_json_video_object(html);
 
     let title = player_response
         .as_ref()
@@ -817,17 +849,49 @@ fn extract_youtube_watch_data_from_html(html: &str, url: &Url) -> Option<YouTube
         .as_ref()
         .and_then(|value| value.pointer("/videoDetails/author"))
         .and_then(Value::as_str)
-        .map(str::to_string);
+        .map(str::to_string)
+        .or_else(|| {
+            initial_data
+                .as_ref()
+                .and_then(extract_owner_renderer)
+                .and_then(|owner| json_text(owner.get("title")?))
+        })
+        .or_else(|| {
+            ld_json
+                .as_ref()
+                .and_then(|value| value.pointer("/author/name"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let subscribers = initial_data
+        .as_ref()
+        .and_then(extract_owner_renderer)
+        .and_then(|owner| json_text(owner.get("subscriberCountText")?));
     let view_count = player_response
         .as_ref()
         .and_then(|value| value.pointer("/videoDetails/viewCount"))
         .and_then(Value::as_str)
-        .map(format_numeric_count);
+        .map(format_numeric_count)
+        .or_else(|| {
+            ld_json
+                .as_ref()
+                .and_then(|value| value.pointer("/interactionStatistic/1/userInteractionCount"))
+                .and_then(Value::as_str)
+                .map(format_numeric_count)
+        });
     let duration = player_response
         .as_ref()
         .and_then(|value| value.pointer("/videoDetails/lengthSeconds"))
         .and_then(Value::as_str)
-        .and_then(format_duration_seconds);
+        .and_then(format_duration_seconds)
+        .or_else(|| {
+            ld_json
+                .as_ref()
+                .and_then(|value| value.get("duration"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .and_then(parse_iso8601_duration)
+        });
     let published = player_response
         .as_ref()
         .and_then(|value| {
@@ -835,7 +899,14 @@ fn extract_youtube_watch_data_from_html(html: &str, url: &Url) -> Option<YouTube
                 .pointer("/microformat/playerMicroformatRenderer/publishDate")
                 .and_then(Value::as_str)
         })
-        .map(str::to_string);
+        .map(str::to_string)
+        .or_else(|| {
+            ld_json
+                .as_ref()
+                .and_then(|value| value.get("uploadDate"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
     let thumbnail_url = player_response
         .as_ref()
         .and_then(extract_thumbnail_url)
@@ -860,10 +931,23 @@ fn extract_youtube_watch_data_from_html(html: &str, url: &Url) -> Option<YouTube
                 .and_then(Value::as_str)
                 .map(|video_id| format!("https://www.youtube.com/embed/{video_id}"))
         });
+    let comment_count = initial_data
+        .as_ref()
+        .and_then(extract_comments_panel_header)
+        .and_then(|header| json_text(header.get("contextualInfo")?));
+    let related_videos = initial_data
+        .as_ref()
+        .map(extract_related_videos)
+        .unwrap_or_default();
+    let featured_comments = ld_json
+        .as_ref()
+        .map(extract_featured_comments_from_ld_json)
+        .unwrap_or_default();
 
     Some(YouTubeWatchData {
         title,
         channel,
+        subscribers,
         description,
         view_count,
         duration,
@@ -871,10 +955,14 @@ fn extract_youtube_watch_data_from_html(html: &str, url: &Url) -> Option<YouTube
         thumbnail_url,
         canonical_url,
         embed_url,
+        comment_count,
+        related_videos,
+        featured_comments,
     })
 }
 
 fn extract_youtube_watch_data(document: &Node, html: &str, url: &Url) -> Option<YouTubeWatchData> {
+    let html_data = extract_youtube_watch_data_from_html(html, url)?;
     let player_response = extract_assigned_json_object(
         html,
         &[
@@ -892,7 +980,8 @@ fn extract_youtube_watch_data(document: &Node, html: &str, url: &Url) -> Option<
         .map(str::to_string)
         .or_else(|| find_meta_content(document, "name", "title"))
         .or_else(|| find_meta_content(document, "property", "og:title"))
-        .or_else(|| document_title(document))?;
+        .or_else(|| document_title(document))
+        .unwrap_or(html_data.title);
 
     let description = player_response
         .as_ref()
@@ -900,19 +989,22 @@ fn extract_youtube_watch_data(document: &Node, html: &str, url: &Url) -> Option<
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| find_meta_content(document, "name", "description"))
-        .or_else(|| find_meta_content(document, "property", "og:description"));
+        .or_else(|| find_meta_content(document, "property", "og:description"))
+        .or(html_data.description);
     let channel = player_response
         .as_ref()
         .and_then(|value| value.pointer("/videoDetails/author"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| find_link_content(document, "itemprop", "name"));
+        .or_else(|| find_link_content(document, "itemprop", "name"))
+        .or(html_data.channel);
     let view_count = player_response
         .as_ref()
         .and_then(|value| value.pointer("/videoDetails/viewCount"))
         .and_then(Value::as_str)
         .map(format_numeric_count)
-        .or_else(|| find_interaction_count(document, "WatchAction"));
+        .or_else(|| find_interaction_count(document, "WatchAction"))
+        .or(html_data.view_count);
     let duration = player_response
         .as_ref()
         .and_then(|value| value.pointer("/videoDetails/lengthSeconds"))
@@ -920,7 +1012,8 @@ fn extract_youtube_watch_data(document: &Node, html: &str, url: &Url) -> Option<
         .and_then(format_duration_seconds)
         .or_else(|| {
             find_meta_content(document, "itemprop", "duration").and_then(parse_iso8601_duration)
-        });
+        })
+        .or(html_data.duration);
     let published = player_response
         .as_ref()
         .and_then(|value| {
@@ -929,12 +1022,14 @@ fn extract_youtube_watch_data(document: &Node, html: &str, url: &Url) -> Option<
                 .and_then(Value::as_str)
         })
         .map(str::to_string)
-        .or_else(|| find_meta_content(document, "itemprop", "datePublished"));
+        .or_else(|| find_meta_content(document, "itemprop", "datePublished"))
+        .or(html_data.published);
     let thumbnail_url = player_response
         .as_ref()
         .and_then(extract_thumbnail_url)
         .or_else(|| find_link_href(document, "rel", "image_src"))
-        .or_else(|| find_meta_content(document, "property", "og:image"));
+        .or_else(|| find_meta_content(document, "property", "og:image"))
+        .or(html_data.thumbnail_url);
     let embed_url = player_response
         .as_ref()
         .and_then(|value| {
@@ -953,11 +1048,13 @@ fn extract_youtube_watch_data(document: &Node, html: &str, url: &Url) -> Option<
         });
     let canonical_url = find_link_href(document, "rel", "canonical")
         .or_else(|| find_meta_content(document, "property", "og:url"))
+        .or(html_data.canonical_url)
         .or_else(|| Some(url.to_string()));
 
     Some(YouTubeWatchData {
         title,
         channel,
+        subscribers: html_data.subscribers,
         description,
         view_count,
         duration,
@@ -965,63 +1062,39 @@ fn extract_youtube_watch_data(document: &Node, html: &str, url: &Url) -> Option<
         thumbnail_url,
         canonical_url,
         embed_url,
+        comment_count: html_data.comment_count,
+        related_videos: html_data.related_videos,
+        featured_comments: html_data.featured_comments,
     })
 }
 
 fn build_youtube_watch_document(data: &YouTubeWatchData) -> Node {
-    let mut details = Vec::new();
-    push_detail(&mut details, "Channel", data.channel.as_deref());
-    push_detail(&mut details, "Views", data.view_count.as_deref());
-    push_detail(&mut details, "Published", data.published.as_deref());
-    push_detail(&mut details, "Length", data.duration.as_deref());
-    push_detail(&mut details, "Watch URL", data.canonical_url.as_deref());
-    push_detail(&mut details, "Embed URL", data.embed_url.as_deref());
-
-    let mut summary_row = Vec::new();
+    let mut left_column = vec![simple_text_element("h1", &data.title)];
     if let Some(thumbnail_url) = &data.thumbnail_url {
-        summary_row.push(Node::Element(Element {
-            tag_name: "td".to_string(),
+        left_column.push(Node::Element(Element {
+            tag_name: "img".to_string(),
             attributes: BTreeMap::from([
-                ("width".to_string(), "520".to_string()),
-                ("valign".to_string(), "top".to_string()),
+                ("src".to_string(), thumbnail_url.clone()),
+                ("data-scratch-src".to_string(), thumbnail_url.clone()),
+                ("width".to_string(), "720".to_string()),
+                ("alt".to_string(), data.title.clone()),
             ]),
-            children: vec![Node::Element(Element {
-                tag_name: "img".to_string(),
-                attributes: BTreeMap::from([
-                    ("src".to_string(), thumbnail_url.clone()),
-                    ("data-scratch-src".to_string(), thumbnail_url.clone()),
-                    ("width".to_string(), "480".to_string()),
-                    ("alt".to_string(), data.title.clone()),
-                ]),
-                children: Vec::new(),
-            })],
+            children: Vec::new(),
         }));
     }
-    summary_row.push(Node::Element(Element {
-        tag_name: "td".to_string(),
-        attributes: BTreeMap::from([("valign".to_string(), "top".to_string())]),
-        children: details,
-    }));
 
-    let mut body_children = vec![
-        simple_text_element("h1", &data.title),
-        Node::Element(Element {
-            tag_name: "table".to_string(),
-            attributes: BTreeMap::from([
-                ("width".to_string(), "100%".to_string()),
-                ("border".to_string(), "0".to_string()),
-                ("cellpadding".to_string(), "0".to_string()),
-                ("cellspacing".to_string(), "12".to_string()),
-            ]),
-            children: vec![Node::Element(Element {
-                tag_name: "tr".to_string(),
-                attributes: BTreeMap::new(),
-                children: summary_row,
-            })],
-        }),
-        hr_node(),
-        simple_text_element("h2", "Description"),
-    ];
+    if let Some(channel) = data.channel.as_deref() {
+        left_column.push(simple_text_element("h2", channel));
+    }
+    push_detail(&mut left_column, "Subscribers", data.subscribers.as_deref());
+    push_detail(&mut left_column, "Views", data.view_count.as_deref());
+    push_detail(&mut left_column, "Published", data.published.as_deref());
+    push_detail(&mut left_column, "Length", data.duration.as_deref());
+    push_detail(&mut left_column, "Comments", data.comment_count.as_deref());
+    push_detail(&mut left_column, "Watch URL", data.canonical_url.as_deref());
+    push_detail(&mut left_column, "Embed URL", data.embed_url.as_deref());
+    left_column.push(hr_node());
+    left_column.push(simple_text_element("h2", "Description"));
 
     let description = data
         .description
@@ -1034,14 +1107,70 @@ fn build_youtube_watch_document(data: &YouTubeWatchData) -> Node {
         .filter(|line| !line.is_empty())
         .take(12)
     {
-        body_children.push(simple_text_element("p", paragraph));
+        left_column.push(simple_text_element("p", paragraph));
         pushed_description = true;
     }
     if !pushed_description {
-        body_children.push(simple_text_element("p", description.trim()));
+        left_column.push(simple_text_element("p", description.trim()));
+    }
+    if !data.featured_comments.is_empty() {
+        left_column.push(hr_node());
+        left_column.push(simple_text_element("h2", "Featured Comments"));
+        for comment in data.featured_comments.iter().take(3) {
+            left_column.push(simple_text_element("h3", &comment.author));
+            if let Some(likes) = comment.likes.as_deref() {
+                left_column.push(simple_text_element("p", &format!("Likes: {likes}")));
+            }
+            left_column.push(simple_text_element("p", &comment.body));
+        }
     }
 
-    synthetic_document(&data.title, body_children)
+    let mut right_column = vec![simple_text_element("h2", "Up Next")];
+    if data.related_videos.is_empty() {
+        right_column.push(simple_text_element(
+            "p",
+            "Related videos were not embedded in this response.",
+        ));
+    } else {
+        for related in data.related_videos.iter().take(8) {
+            right_column.push(build_related_video_node(related));
+        }
+    }
+
+    synthetic_document(
+        &data.title,
+        vec![Node::Element(Element {
+            tag_name: "table".to_string(),
+            attributes: BTreeMap::from([
+                ("width".to_string(), "100%".to_string()),
+                ("border".to_string(), "0".to_string()),
+                ("cellpadding".to_string(), "0".to_string()),
+                ("cellspacing".to_string(), "16".to_string()),
+            ]),
+            children: vec![Node::Element(Element {
+                tag_name: "tr".to_string(),
+                attributes: BTreeMap::new(),
+                children: vec![
+                    Node::Element(Element {
+                        tag_name: "td".to_string(),
+                        attributes: BTreeMap::from([
+                            ("width".to_string(), "70%".to_string()),
+                            ("valign".to_string(), "top".to_string()),
+                        ]),
+                        children: left_column,
+                    }),
+                    Node::Element(Element {
+                        tag_name: "td".to_string(),
+                        attributes: BTreeMap::from([
+                            ("width".to_string(), "30%".to_string()),
+                            ("valign".to_string(), "top".to_string()),
+                        ]),
+                        children: right_column,
+                    }),
+                ],
+            })],
+        })],
+    )
 }
 
 fn build_youtube_generic_document(document: &Node, html: &str, url: &Url) -> Node {
@@ -1165,6 +1294,64 @@ fn build_google_document_from_html(html: &str, url: &Url) -> Node {
             simple_text_element("p", &format!("URL: {}", url)),
         ],
     )
+}
+
+fn build_related_video_node(video: &YouTubeRelatedVideo) -> Node {
+    let mut detail_children = Vec::new();
+    detail_children.push(simple_text_element("h3", &video.title));
+    push_detail(&mut detail_children, "Channel", video.channel.as_deref());
+    push_detail(&mut detail_children, "Views", video.views.as_deref());
+    push_detail(&mut detail_children, "Published", video.published.as_deref());
+    push_detail(&mut detail_children, "Length", video.duration.as_deref());
+    push_detail(&mut detail_children, "URL", video.url.as_deref());
+
+    let mut row_children = Vec::new();
+    if let Some(thumbnail_url) = &video.thumbnail_url {
+        row_children.push(Node::Element(Element {
+            tag_name: "td".to_string(),
+            attributes: BTreeMap::from([
+                ("width".to_string(), "180".to_string()),
+                ("valign".to_string(), "top".to_string()),
+            ]),
+            children: vec![Node::Element(Element {
+                tag_name: "img".to_string(),
+                attributes: BTreeMap::from([
+                    ("src".to_string(), thumbnail_url.clone()),
+                    ("data-scratch-src".to_string(), thumbnail_url.clone()),
+                    ("width".to_string(), "168".to_string()),
+                    ("alt".to_string(), video.title.clone()),
+                ]),
+                children: Vec::new(),
+            })],
+        }));
+    }
+    row_children.push(Node::Element(Element {
+        tag_name: "td".to_string(),
+        attributes: BTreeMap::from([("valign".to_string(), "top".to_string())]),
+        children: detail_children,
+    }));
+
+    Node::Element(Element {
+        tag_name: "div".to_string(),
+        attributes: BTreeMap::new(),
+        children: vec![
+            Node::Element(Element {
+                tag_name: "table".to_string(),
+                attributes: BTreeMap::from([
+                    ("width".to_string(), "100%".to_string()),
+                    ("border".to_string(), "0".to_string()),
+                    ("cellpadding".to_string(), "0".to_string()),
+                    ("cellspacing".to_string(), "8".to_string()),
+                ]),
+                children: vec![Node::Element(Element {
+                    tag_name: "tr".to_string(),
+                    attributes: BTreeMap::new(),
+                    children: row_children,
+                })],
+            }),
+            hr_node(),
+        ],
+    })
 }
 
 fn simple_text_element(tag_name: &str, text: &str) -> Node {
@@ -1327,6 +1514,229 @@ fn extract_thumbnail_url(value: &Value) -> Option<String> {
         .and_then(|items| items.iter().rev().find_map(|item| item.get("url")))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+fn extract_owner_renderer(initial_data: &Value) -> Option<&Value> {
+    initial_data
+        .pointer("/contents/twoColumnWatchNextResults/results/results/contents")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                item.get("videoSecondaryInfoRenderer")
+                    .and_then(|renderer| renderer.pointer("/owner/videoOwnerRenderer"))
+            })
+        })
+}
+
+fn extract_comments_panel_header(initial_data: &Value) -> Option<&Value> {
+    initial_data
+        .get("engagementPanels")
+        .and_then(Value::as_array)
+        .and_then(|panels| {
+            panels.iter().find_map(|panel| {
+                let section = panel.get("engagementPanelSectionListRenderer")?;
+                let identifier = section.get("panelIdentifier")?.as_str()?;
+                (identifier == "engagement-panel-comments-section")
+                    .then(|| section.get("header"))
+                    .flatten()
+                    .and_then(|header| header.get("engagementPanelTitleHeaderRenderer"))
+            })
+        })
+}
+
+fn extract_related_videos(initial_data: &Value) -> Vec<YouTubeRelatedVideo> {
+    let contents = initial_data
+        .pointer("/contents/twoColumnWatchNextResults/secondaryResults/secondaryResults/results")
+        .and_then(Value::as_array)
+        .and_then(|results| {
+            results.iter().find_map(|entry| {
+                entry.get("itemSectionRenderer")
+                    .and_then(|renderer| renderer.get("contents"))
+                    .and_then(Value::as_array)
+            })
+        });
+
+    let Some(contents) = contents else {
+        return Vec::new();
+    };
+
+    contents
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("lockupViewModel")
+                .and_then(parse_related_lockup_video)
+                .or_else(|| {
+                    entry
+                        .get("compactVideoRenderer")
+                        .and_then(parse_related_compact_video)
+                })
+        })
+        .collect()
+}
+
+fn parse_related_lockup_video(value: &Value) -> Option<YouTubeRelatedVideo> {
+    let title = value.pointer("/metadata/lockupMetadataViewModel/title/content")?;
+    let title = title.as_str()?.to_string();
+    let rows = value
+        .pointer("/metadata/lockupMetadataViewModel/metadata/contentMetadataViewModel/metadataRows")
+        .and_then(Value::as_array);
+    let channel = rows
+        .and_then(|items| items.first())
+        .and_then(|row| row.pointer("/metadataParts/0/text/content"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let views = rows
+        .and_then(|items| items.get(1))
+        .and_then(|row| row.pointer("/metadataParts/0/text/content"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let published = rows
+        .and_then(|items| items.get(1))
+        .and_then(|row| row.pointer("/metadataParts/1/text/content"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let duration = value
+        .pointer("/contentImage/thumbnailViewModel/overlays")
+        .and_then(Value::as_array)
+        .and_then(|overlays| {
+            overlays.iter().find_map(|overlay| {
+                overlay
+                    .pointer("/thumbnailBottomOverlayViewModel/badges/0/thumbnailBadgeViewModel/text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+        });
+    let thumbnail_url = value
+        .pointer("/contentImage/thumbnailViewModel/image/sources")
+        .and_then(Value::as_array)
+        .and_then(|sources| sources.last())
+        .and_then(|source| source.get("url"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let url = value
+        .pointer("/rendererContext/commandContext/onTap/innertubeCommand/commandMetadata/webCommandMetadata/url")
+        .and_then(Value::as_str)
+        .map(|path| format!("https://www.youtube.com{path}"));
+
+    Some(YouTubeRelatedVideo {
+        title,
+        channel,
+        views,
+        published,
+        duration,
+        url,
+        thumbnail_url,
+    })
+}
+
+fn parse_related_compact_video(value: &Value) -> Option<YouTubeRelatedVideo> {
+    let title = json_text(value.get("title")?)?;
+    let channel = json_text(value.get("shortBylineText")?);
+    let views = json_text(value.get("viewCountText")?);
+    let published = json_text(value.get("publishedTimeText")?);
+    let duration = value
+        .pointer("/lengthText/simpleText")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| json_text(value.get("lengthText")?));
+    let thumbnail_url = value
+        .pointer("/thumbnail/thumbnails")
+        .and_then(Value::as_array)
+        .and_then(|sources| sources.last())
+        .and_then(|source| source.get("url"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let url = value
+        .pointer("/navigationEndpoint/commandMetadata/webCommandMetadata/url")
+        .and_then(Value::as_str)
+        .map(|path| format!("https://www.youtube.com{path}"));
+
+    Some(YouTubeRelatedVideo {
+        title,
+        channel,
+        views,
+        published,
+        duration,
+        url,
+        thumbnail_url,
+    })
+}
+
+fn extract_first_ld_json_video_object(html: &str) -> Option<Value> {
+    let mut search_start = 0;
+    while let Some(script_offset) = html[search_start..].find("<script") {
+        let tag_start = search_start + script_offset;
+        let tag_end = tag_start + html[tag_start..].find('>')?;
+        let open_tag = &html[tag_start..=tag_end];
+        if open_tag.contains("application/ld+json") {
+            let close_offset = html[tag_end + 1..].find("</script>")?;
+            let json_text = &html[tag_end + 1..tag_end + 1 + close_offset];
+            if let Ok(value) = serde_json::from_str::<Value>(json_text)
+                && value
+                    .get("@type")
+                    .and_then(Value::as_str)
+                    .map(|kind| kind == "VideoObject")
+                    .unwrap_or(false)
+            {
+                return Some(value);
+            }
+        }
+        search_start = tag_end + 1;
+    }
+
+    None
+}
+
+fn extract_featured_comments_from_ld_json(value: &Value) -> Vec<YouTubeCommentPreview> {
+    let comments = value.get("comment");
+    let Some(items) = comments else {
+        return Vec::new();
+    };
+
+    let array = match items {
+        Value::Array(array) => array,
+        single => return extract_featured_comments_from_ld_json(&Value::Array(vec![single.clone()])),
+    };
+
+    array
+        .iter()
+        .filter_map(|item| {
+            let author = item
+                .pointer("/author/name")
+                .and_then(Value::as_str)
+                .or_else(|| item.pointer("/author/alternateName").and_then(Value::as_str))?;
+            let body = item.get("text").and_then(Value::as_str)?;
+            Some(YouTubeCommentPreview {
+                author: author.to_string(),
+                body: body.to_string(),
+                likes: item
+                    .get("upvoteCount")
+                    .and_then(|value| value.as_i64().map(|number| number.to_string()).or_else(|| value.as_str().map(str::to_string))),
+            })
+        })
+        .collect()
+}
+
+fn json_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+    if let Some(text) = value.get("simpleText").and_then(Value::as_str) {
+        return Some(text.to_string());
+    }
+    if let Some(text) = value.get("content").and_then(Value::as_str) {
+        return Some(text.to_string());
+    }
+    value
+        .get("runs")
+        .and_then(Value::as_array)
+        .map(|runs| {
+            runs.iter()
+                .filter_map(|run| run.get("text").and_then(Value::as_str))
+                .collect::<String>()
+        })
+        .filter(|text| !text.trim().is_empty())
 }
 
 fn find_meta_content(node: &Node, attribute: &str, expected: &str) -> Option<String> {
