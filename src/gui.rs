@@ -906,6 +906,7 @@ fn layout_error_document(
             color,
             underline: false,
             bold: scale >= 3,
+            italic: false,
         });
 
         cursor_y = cursor_y.saturating_add(height);
