@@ -1,10 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, VecDeque};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use font8x8::{
     BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, HIRAGANA_FONTS, LATIN_FONTS, MISC_FONTS,
     UnicodeFonts,
 };
-use fontdb::{Database, Family, Query};
 use fontdue::{Font, FontSettings};
 use unicode_width::UnicodeWidthChar;
 
@@ -12,9 +13,35 @@ use crate::css::{Color, FontFamilyKind};
 
 const MIN_ADVANCE_PX: u32 = 4;
 
+const WINDOWS_SANS_FONT_FILES: &[&str] = &["segoeui.ttf", "YuGothR.ttc", "meiryo.ttc", "arial.ttf"];
+
+const WINDOWS_MONOSPACE_FONT_FILES: &[&str] = &[
+    "consola.ttf",
+    "CascadiaMono.ttf",
+    "msgothic.ttc",
+    "cour.ttf",
+];
+
+const UNIX_SANS_FONT_PATHS: &[&str] = &[
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+];
+
+const UNIX_MONOSPACE_FONT_PATHS: &[&str] = &[
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
+    "/Library/Fonts/Courier New.ttf",
+    "/System/Library/Fonts/Supplemental/Courier New.ttf",
+];
+
 pub struct FontContext {
     sans_fonts: Vec<Font>,
     monospace_fonts: Vec<Font>,
+    sans_pending: VecDeque<PathBuf>,
+    monospace_pending: VecDeque<PathBuf>,
     glyph_cache: HashMap<GlyphKey, CachedGlyph>,
     line_metrics_cache: HashMap<(FontFamilyKind, u32), CachedLineMetrics>,
 }
@@ -55,29 +82,10 @@ struct CachedLineMetrics {
 
 impl FontContext {
     pub fn load() -> Self {
-        let mut database = Database::new();
-        database.load_system_fonts();
-
-        let sans_fonts = load_font_chain(
-            &database,
-            &[
-                Family::Name("Segoe UI"),
-                Family::Name("Yu Gothic UI"),
-                Family::Name("Meiryo"),
-                Family::Name("Arial"),
-                Family::SansSerif,
-            ],
-        );
-        let mut monospace_fonts = load_font_chain(
-            &database,
-            &[
-                Family::Name("Consolas"),
-                Family::Name("Cascadia Mono"),
-                Family::Name("MS Gothic"),
-                Family::Name("Courier New"),
-                Family::Monospace,
-            ],
-        );
+        let mut sans_pending = VecDeque::from(font_candidates(FontFamilyKind::Sans));
+        let sans_fonts = load_initial_fonts(&mut sans_pending, 1);
+        let mut monospace_pending = VecDeque::from(font_candidates(FontFamilyKind::Monospace));
+        let mut monospace_fonts = load_initial_fonts(&mut monospace_pending, 1);
 
         if monospace_fonts.is_empty() {
             monospace_fonts = sans_fonts.clone();
@@ -86,6 +94,8 @@ impl FontContext {
         Self {
             sans_fonts,
             monospace_fonts,
+            sans_pending,
+            monospace_pending,
             glyph_cache: HashMap::new(),
             line_metrics_cache: HashMap::new(),
         }
@@ -240,6 +250,8 @@ impl FontContext {
         font_size_px: u32,
         font_family: FontFamilyKind,
     ) -> CachedGlyph {
+        self.ensure_font_for(character, font_family);
+
         let fallback_advance = estimated_glyph_advance_px(character, font_size_px, font_family);
         let ascent_px = self.line_metrics(font_size_px, font_family).ascent_px;
 
@@ -302,6 +314,28 @@ impl FontContext {
             FontFamilyKind::Monospace => &self.monospace_fonts,
         }
     }
+
+    fn ensure_font_for(&mut self, character: char, font_family: FontFamilyKind) {
+        let (fonts, pending) = match font_family {
+            FontFamilyKind::Sans => (&mut self.sans_fonts, &mut self.sans_pending),
+            FontFamilyKind::Monospace => (&mut self.monospace_fonts, &mut self.monospace_pending),
+        };
+
+        if fonts.iter().any(|font| font.has_glyph(character)) {
+            return;
+        }
+
+        while let Some(path) = pending.pop_front() {
+            let Some(font) = load_font_file(&path) else {
+                continue;
+            };
+            let supports_glyph = font.has_glyph(character);
+            fonts.push(font);
+            if supports_glyph {
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -332,42 +366,69 @@ pub fn estimated_glyph_advance_px(
     }
 }
 
-fn load_font_chain(database: &Database, families: &[Family<'_>]) -> Vec<Font> {
-    let mut loaded_ids = HashSet::new();
+fn load_initial_fonts(paths: &mut VecDeque<PathBuf>, limit: usize) -> Vec<Font> {
     let mut fonts = Vec::new();
-
-    for family in families {
-        let query = Query {
-            families: std::slice::from_ref(family),
-            ..Query::default()
+    while fonts.len() < limit {
+        let Some(candidate) = paths.pop_front() else {
+            break;
         };
-
-        let Some(id) = database.query(&query) else {
-            continue;
-        };
-        if !loaded_ids.insert(id) {
-            continue;
-        }
-
-        if let Some(font) = load_font(database, id) {
+        if let Some(font) = load_font_file(&candidate) {
             fonts.push(font);
         }
     }
-
     fonts
 }
 
-fn load_font(database: &Database, id: fontdb::ID) -> Option<Font> {
-    database.with_face_data(id, |data, face_index| {
-        Font::from_bytes(
-            data.to_vec(),
-            FontSettings {
-                collection_index: face_index,
-                ..FontSettings::default()
-            },
-        )
-        .ok()
-    })?
+fn font_candidates(font_family: FontFamilyKind) -> Vec<PathBuf> {
+    if cfg!(target_os = "windows") {
+        let windows_root = std::env::var_os("WINDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("C:\\Windows"));
+        let fonts_dir = windows_root.join("Fonts");
+        let files = match font_family {
+            FontFamilyKind::Sans => WINDOWS_SANS_FONT_FILES,
+            FontFamilyKind::Monospace => WINDOWS_MONOSPACE_FONT_FILES,
+        };
+
+        return files.iter().map(|file| fonts_dir.join(file)).collect();
+    }
+
+    let files = match font_family {
+        FontFamilyKind::Sans => UNIX_SANS_FONT_PATHS,
+        FontFamilyKind::Monospace => UNIX_MONOSPACE_FONT_PATHS,
+    };
+
+    files.iter().map(PathBuf::from).collect()
+}
+
+fn load_font_file(path: &Path) -> Option<Font> {
+    if !path.is_file() {
+        return None;
+    }
+
+    let bytes = fs::read(path).ok()?;
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if matches!(extension.as_str(), "ttc" | "otc") {
+        for collection_index in 0..4 {
+            if let Ok(font) = Font::from_bytes(
+                bytes.clone(),
+                FontSettings {
+                    collection_index,
+                    ..FontSettings::default()
+                },
+            ) {
+                return Some(font);
+            }
+        }
+        return None;
+    }
+
+    Font::from_bytes(bytes, FontSettings::default()).ok()
 }
 
 fn draw_cached_glyph(
@@ -547,7 +608,7 @@ mod tests {
     #[test]
     fn wide_characters_take_more_space() {
         let latin = estimated_glyph_advance_px('A', 20, FontFamilyKind::Sans);
-        let wide = estimated_glyph_advance_px('あ', 20, FontFamilyKind::Sans);
+        let wide = estimated_glyph_advance_px('漢', 20, FontFamilyKind::Sans);
 
         assert!(wide >= latin * 2);
     }

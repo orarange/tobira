@@ -21,7 +21,7 @@ pub struct BrowserPage {
     pub title: String,
     pub styled_document: StyledNode,
     pub images: ImageStore,
-    pub rendered: String,
+    pub rendered: Option<String>,
 }
 
 impl BrowserPage {
@@ -32,11 +32,16 @@ impl BrowserPage {
     }
 
     pub fn body_text(&self) -> &str {
-        let trimmed = self.rendered.trim();
-        if trimmed.is_empty() {
-            "[empty document]"
-        } else {
-            trimmed
+        match &self.rendered {
+            Some(rendered) => {
+                let trimmed = rendered.trim();
+                if trimmed.is_empty() {
+                    "[empty document]"
+                } else {
+                    trimmed
+                }
+            }
+            None => "[render unavailable]",
         }
     }
 
@@ -71,10 +76,18 @@ struct FrameSpec {
 }
 
 pub fn load_page(url: &Url) -> Result<BrowserPage> {
+    load_page_with_options(url, false)
+}
+
+pub fn load_page_for_cli(url: &Url) -> Result<BrowserPage> {
+    load_page_with_options(url, true)
+}
+
+fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<BrowserPage> {
     let source = load_document_source(url, 0)?;
     let stylesheet = collect_stylesheet(&source.document, &source.final_url);
     let images = collect_image_resources(&source.document);
-    let rendered = render_document(&source.document);
+    let rendered = include_rendered_output.then(|| render_document(&source.document));
     let styled_document = build_styled_tree(&source.document, &stylesheet);
 
     Ok(BrowserPage {
@@ -819,7 +832,7 @@ mod tests {
                 },
             }),
             images: crate::image::ImageStore::default(),
-            rendered: "   ".to_string(),
+            rendered: Some("   ".to_string()),
         };
 
         assert_eq!(page.body_text(), "[empty document]");
@@ -835,7 +848,7 @@ mod tests {
             title: "Hello".to_string(),
             styled_document: parse_styled_text("Hello"),
             images: crate::image::ImageStore::default(),
-            rendered: "# Hello".to_string(),
+            rendered: Some("# Hello".to_string()),
         };
 
         let output = page.to_cli_output();

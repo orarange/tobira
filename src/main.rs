@@ -12,7 +12,7 @@ mod render;
 mod text;
 mod url;
 
-use browser::load_page;
+use browser::load_page_for_cli;
 use error::Result;
 use url::Url;
 
@@ -47,7 +47,7 @@ fn run() -> Result<()> {
             return Ok(());
         };
         let url = Url::parse(&raw_url)?;
-        let page = load_page(&url)?;
+        let page = load_page_for_cli(&url)?;
         println!("{}", page.to_cli_output().trim_end());
     } else {
         let initial_url = match raw_url {
