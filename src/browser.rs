@@ -113,10 +113,12 @@ fn load_document_source(url: &Url, frame_depth: usize) -> Result<LoadedDocumentS
 }
 
 fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<Option<Node>> {
-    let frames = collect_frame_specs(document);
+    let mut frames = collect_frame_specs(document);
     if frames.is_empty() {
         return Ok(None);
     }
+
+    frames.sort_by_key(frame_display_priority);
 
     let mut body_children = Vec::new();
     let multiple_frames = frames.len() > 1;
@@ -269,6 +271,23 @@ fn frame_section_title(frame: &FrameSpec, frame_document: &LoadedDocumentSource)
         .clone()
         .or_else(|| Some(frame.src.clone()))
         .filter(|title| !title.trim().is_empty())
+}
+
+fn frame_display_priority(frame: &FrameSpec) -> u8 {
+    let hint = format!(
+        "{} {}",
+        frame.title.as_deref().unwrap_or_default(),
+        frame.src
+    )
+    .to_ascii_lowercase();
+
+    if hint.contains("menu") || hint.contains("left") || hint.contains("nav") {
+        1
+    } else if hint.contains("main") || hint.contains("right") || hint.contains("content") {
+        0
+    } else {
+        0
+    }
 }
 
 fn hr_node() -> Node {
