@@ -12,6 +12,7 @@ pub struct LayoutDocument {
     pub rects: Vec<RectCommand>,
     pub texts: Vec<TextCommand>,
     pub images: Vec<ImageCommand>,
+    pub links: Vec<LinkCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +46,15 @@ pub struct ImageCommand {
     pub src: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkCommand {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub href: String,
+}
+
 pub fn layout_styled_document(
     document: &StyledNode,
     images: &ImageStore,
@@ -71,6 +81,7 @@ pub fn layout_styled_document(
         rects: context.rects,
         texts: context.texts,
         images: context.images,
+        links: context.links,
     }
 }
 
@@ -79,11 +90,12 @@ struct LayoutContext {
     rects: Vec<RectCommand>,
     texts: Vec<TextCommand>,
     images: Vec<ImageCommand>,
+    links: Vec<LinkCommand>,
 }
 
 #[derive(Debug, Clone)]
 enum InlineFragment {
-    Text { text: String, style: ComputedStyle },
+    Text { text: String, style: ComputedStyle, link_href: Option<String> },
     LineBreak,
 }
 
@@ -92,6 +104,7 @@ struct LineSpan {
     text: String,
     width: u32,
     style: ComputedStyle,
+    link_href: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -106,7 +119,7 @@ impl LineBuilder {
         self.spans.is_empty()
     }
 
-    fn push_span(&mut self, text: &str, style: &ComputedStyle, fonts: &mut FontContext) {
+    fn push_span(&mut self, text: &str, style: &ComputedStyle, fonts: &mut FontContext, link_href: Option<&str>) {
         if text.is_empty() {
             return;
         }
@@ -116,7 +129,7 @@ impl LineBuilder {
         self.line_height = self.line_height.max(text_line_height(style, fonts));
 
         if let Some(last) = self.spans.last_mut() {
-            if last.style == *style {
+            if last.style == *style && last.link_href.as_deref() == link_href {
                 last.text.push_str(text);
                 last.width = last.width.saturating_add(width);
                 return;
@@ -127,6 +140,7 @@ impl LineBuilder {
             text: text.to_string(),
             width,
             style: style.clone(),
+            link_href: link_href.map(str::to_string),
         });
     }
 }
@@ -145,6 +159,7 @@ fn layout_node(
             let fragments = [InlineFragment::Text {
                 text: text.text.clone(),
                 style: text.style.clone(),
+                link_href: None,
             }];
             layout_inline_fragments(&fragments, &text.style, x, width, cursor_y, context, fonts);
         }
@@ -169,7 +184,25 @@ fn layout_node(
                     );
                 }
                 Display::Block | Display::ListItem => {
+                    let link_href = if element.tag_name == "a" {
+                        element.attributes.get("href").cloned()
+                    } else {
+                        None
+                    };
+                    let y_before = *cursor_y;
                     layout_block_element(element, x, width, cursor_y, context, images, fonts);
+                    if let Some(href) = link_href {
+                        let link_height = cursor_y.saturating_sub(y_before);
+                        if link_height > 0 {
+                            context.links.push(LinkCommand {
+                                x,
+                                y: y_before,
+                                width,
+                                height: link_height,
+                                href,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -320,6 +353,7 @@ fn layout_image_fallback(
     let fragments = [InlineFragment::Text {
         text: alt,
         style: element.style.clone(),
+        link_href: None,
     }];
     layout_inline_fragments(
         &fragments,
@@ -542,6 +576,7 @@ struct FragmentLayout {
     rects: Vec<RectCommand>,
     texts: Vec<TextCommand>,
     images: Vec<ImageCommand>,
+    links: Vec<LinkCommand>,
 }
 
 #[derive(Debug, Clone)]
@@ -711,6 +746,7 @@ fn layout_table_cell(
         rects: context.rects,
         texts: context.texts,
         images: context.images,
+        links: context.links,
     }
 }
 
@@ -751,6 +787,15 @@ fn merge_fragment(
             height: image.height,
             src: image.src.clone(),
         }));
+    context
+        .links
+        .extend(fragment.links.iter().map(|link| LinkCommand {
+            x: link.x.saturating_add(offset_x),
+            y: link.y.saturating_add(offset_y),
+            width: link.width,
+            height: link.height,
+            href: link.href.clone(),
+        }));
 }
 
 fn span_width(widths: &[u32], start: usize, span: usize) -> u32 {
@@ -787,6 +832,7 @@ fn layout_mixed_children(
                         InlineFragment::Text {
                             text: "- ".to_string(),
                             style: element.style.clone(),
+                            link_href: None,
                         },
                     );
                 }
@@ -809,10 +855,11 @@ fn layout_mixed_children(
                 inline_fragments.push(InlineFragment::Text {
                     text: "- ".to_string(),
                     style: element.style.clone(),
+                    link_href: None,
                 });
                 bullet_pending = false;
             }
-            collect_inline_fragments(child, &mut inline_fragments);
+            collect_inline_fragments(child, &mut inline_fragments, None);
         }
     }
 
@@ -821,6 +868,7 @@ fn layout_mixed_children(
             inline_fragments.push(InlineFragment::Text {
                 text: "- ".to_string(),
                 style: element.style.clone(),
+                link_href: None,
             });
         }
         layout_inline_fragments(
@@ -835,48 +883,58 @@ fn layout_mixed_children(
     }
 }
 
-fn collect_inline_fragments(node: &StyledNode, output: &mut Vec<InlineFragment>) {
+fn collect_inline_fragments(node: &StyledNode, output: &mut Vec<InlineFragment>, link_href: Option<&str>) {
     match node {
         StyledNode::Text(text) => {
             output.push(InlineFragment::Text {
                 text: text.text.clone(),
                 style: text.style.clone(),
+                link_href: link_href.map(str::to_string),
             });
         }
-        StyledNode::Element(element) => match element.style.display {
-            Display::None => {}
-            Display::Inline => {
-                if element.tag_name == "br" {
-                    output.push(InlineFragment::LineBreak);
-                    return;
-                }
+        StyledNode::Element(element) => {
+            let current_link = if element.tag_name == "a" {
+                element.attributes.get("href").map(String::as_str).or(link_href)
+            } else {
+                link_href
+            };
 
-                if element.tag_name == "img" {
-                    let alt = element
-                        .attributes
-                        .get("alt")
-                        .filter(|text| !text.trim().is_empty())
-                        .cloned()
-                        .unwrap_or_else(|| "[image]".to_string());
-                    output.push(InlineFragment::Text {
-                        text: alt,
-                        style: element.style.clone(),
-                    });
-                    return;
-                }
+            match element.style.display {
+                Display::None => {}
+                Display::Inline => {
+                    if element.tag_name == "br" {
+                        output.push(InlineFragment::LineBreak);
+                        return;
+                    }
 
-                for child in &element.children {
-                    collect_inline_fragments(child, output);
+                    if element.tag_name == "img" {
+                        let alt = element
+                            .attributes
+                            .get("alt")
+                            .filter(|text| !text.trim().is_empty())
+                            .cloned()
+                            .unwrap_or_else(|| "[image]".to_string());
+                        output.push(InlineFragment::Text {
+                            text: alt,
+                            style: element.style.clone(),
+                            link_href: current_link.map(str::to_string),
+                        });
+                        return;
+                    }
+
+                    for child in &element.children {
+                        collect_inline_fragments(child, output, current_link);
+                    }
                 }
+                Display::Block | Display::ListItem => {}
             }
-            Display::Block | Display::ListItem => {}
-        },
+        }
     }
 }
 
 fn flatten_inline_fragments(node: &StyledNode) -> Vec<InlineFragment> {
     let mut fragments = Vec::new();
-    collect_inline_fragments(node, &mut fragments);
+    collect_inline_fragments(node, &mut fragments, None);
     fragments
 }
 
@@ -942,7 +1000,7 @@ fn layout_normal_fragments(
                 );
                 pending_space = false;
             }
-            InlineFragment::Text { text, style } => {
+            InlineFragment::Text { text, style, link_href } => {
                 let had_whitespace = text.chars().any(char::is_whitespace);
 
                 for word in text.split_whitespace() {
@@ -959,13 +1017,14 @@ fn layout_normal_fragments(
                                 fonts,
                             );
                         } else {
-                            line.push_span(" ", style, fonts);
+                            line.push_span(" ", style, fonts, link_href.as_deref());
                         }
                     }
 
                     push_wrapped_word(
                         word,
                         style,
+                        link_href.as_deref(),
                         container_style,
                         x,
                         width,
@@ -1017,7 +1076,7 @@ fn layout_preformatted_fragments(
                 context,
                 fonts,
             ),
-            InlineFragment::Text { text, style } => {
+            InlineFragment::Text { text, style, link_href } => {
                 for character in text.chars() {
                     if character == '\n' {
                         emit_line(
@@ -1046,7 +1105,7 @@ fn layout_preformatted_fragments(
                     }
 
                     let mut buffer = [0_u8; 4];
-                    line.push_span(character.encode_utf8(&mut buffer), style, fonts);
+                    line.push_span(character.encode_utf8(&mut buffer), style, fonts, link_href.as_deref());
                 }
             }
         }
@@ -1066,6 +1125,7 @@ fn layout_preformatted_fragments(
 fn push_wrapped_word(
     word: &str,
     style: &ComputedStyle,
+    link_href: Option<&str>,
     container_style: &ComputedStyle,
     x: u32,
     width: u32,
@@ -1079,7 +1139,7 @@ fn push_wrapped_word(
         if !line.is_empty() && line.width.saturating_add(word_width) > width {
             emit_line(line, container_style, x, width, cursor_y, context, fonts);
         }
-        line.push_span(word, style, fonts);
+        line.push_span(word, style, fonts, link_href);
         return;
     }
 
@@ -1093,7 +1153,7 @@ fn push_wrapped_word(
             if !line.is_empty() {
                 emit_line(line, container_style, x, width, cursor_y, context, fonts);
             }
-            line.push_span(&chunk, style, fonts);
+            line.push_span(&chunk, style, fonts, link_href);
             emit_line(line, container_style, x, width, cursor_y, context, fonts);
             chunk.clear();
         }
@@ -1103,7 +1163,7 @@ fn push_wrapped_word(
         if !line.is_empty() && line.width.saturating_add(text_width(style, &chunk, fonts)) > width {
             emit_line(line, container_style, x, width, cursor_y, context, fonts);
         }
-        line.push_span(&chunk, style, fonts);
+        line.push_span(&chunk, style, fonts, link_href);
     }
 }
 
@@ -1155,6 +1215,16 @@ fn emit_line(
             underline: span.style.underline,
             bold: span.style.font_weight,
         });
+
+        if let Some(href) = &span.link_href {
+            context.links.push(LinkCommand {
+                x: cursor_x,
+                y: *cursor_y,
+                width: span.width,
+                height: line_height,
+                href: href.clone(),
+            });
+        }
 
         cursor_x = cursor_x.saturating_add(span.width);
     }

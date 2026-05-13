@@ -84,6 +84,7 @@ struct BrowserApp {
     cursor_position: PhysicalPosition<f64>,
     address_bar: AddressBarState,
     hovered_target: HitTarget,
+    hovered_link_url: Option<String>,
     ime_composing: bool,
 }
 
@@ -114,6 +115,7 @@ impl BrowserApp {
             cursor_position: PhysicalPosition::new(0.0, 0.0),
             address_bar,
             hovered_target: HitTarget::None,
+            hovered_link_url: None,
             ime_composing: false,
         }
     }
@@ -343,15 +345,50 @@ impl BrowserApp {
         (viewport_height, content_height)
     }
 
+    fn find_hovered_link(&mut self, window_size: PhysicalSize<u32>) -> Option<String> {
+        let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
+        let body_top = chrome.height + FRAME_PADDING;
+        let pos_x = self.cursor_position.x;
+        let pos_y = self.cursor_position.y;
+        if pos_y < body_top as f64 {
+            return None;
+        }
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let layout = self.document.layout(content_width, &mut self.fonts);
+        let content_y = (pos_y as u32).saturating_sub(body_top).saturating_add(self.scroll_y);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        for link in &layout.links {
+            if content_x >= link.x
+                && content_x < link.x.saturating_add(link.width)
+                && content_y >= link.y
+                && content_y < link.y.saturating_add(link.height)
+            {
+                return Some(link.href.clone());
+            }
+        }
+        None
+    }
+
     fn update_hover(&mut self, window_size: PhysicalSize<u32>) {
         let next = self.hit_test(window_size, self.cursor_position);
-        if next != self.hovered_target {
-            self.hovered_target = next;
+        let link_url = if next == HitTarget::None {
+            self.find_hovered_link(window_size)
+        } else {
+            None
+        };
+        let changed = next != self.hovered_target || link_url != self.hovered_link_url;
+        self.hovered_target = next;
+        self.hovered_link_url = link_url;
+        if changed {
             self.request_redraw();
         }
-
         if let Some(window) = &self.window {
-            window.set_cursor(cursor_icon_for_target(next));
+            let icon = if self.hovered_link_url.is_some() {
+                CursorIcon::Pointer
+            } else {
+                cursor_icon_for_target(next)
+            };
+            window.set_cursor(icon);
         }
     }
 
@@ -600,7 +637,15 @@ impl BrowserApp {
                 self.blur_address_bar();
                 let _ = window.drag_window();
             }
-            HitTarget::None => self.blur_address_bar(),
+            HitTarget::None => {
+                self.blur_address_bar();
+                if let Some(href) = self.hovered_link_url.clone() {
+                    let resolved = resolve_content_href(&href, self.current_url.as_ref());
+                    if let Ok(url) = parse_address_input(&resolved) {
+                        self.load_url(url);
+                    }
+                }
+            }
         }
 
         false
@@ -818,6 +863,7 @@ impl DocumentView {
                 rects: Vec::new(),
                 texts: Vec::new(),
                 images: Vec::new(),
+                links: Vec::new(),
             },
             DocumentContent::Loaded(page) => {
                 layout_styled_document(&page.styled_document, &page.images, width, fonts)
@@ -871,6 +917,7 @@ fn layout_error_document(
         rects: Vec::new(),
         texts,
         images: Vec::new(),
+        links: Vec::new(),
     }
 }
 
@@ -1405,6 +1452,18 @@ fn cursor_index_for_address_x(
     }
 
     view.end_char
+}
+
+fn resolve_content_href(href: &str, base: Option<&Url>) -> String {
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return href.to_string();
+    }
+    if let Some(base) = base {
+        if let Ok(resolved) = base.resolve(href) {
+            return resolved.to_string();
+        }
+    }
+    href.to_string()
 }
 
 fn parse_address_input(input: &str) -> Result<Url> {

@@ -622,6 +622,16 @@ fn annotate_resource_urls(document: &mut Node, base_url: &Url) {
                     .insert("data-scratch-background".to_string(), url.to_string());
             }
 
+            if element.tag_name == "a"
+                && let Some(href) = element.attribute("href")
+                && !href.starts_with('#')
+                && let Ok(url) = base_url.resolve(href)
+            {
+                element
+                    .attributes
+                    .insert("href".to_string(), url.to_string());
+            }
+
             for child in &mut element.children {
                 annotate_resource_urls(child, base_url);
             }
@@ -1671,34 +1681,43 @@ fn build_youtube_feed_card(video: &YouTubeRelatedVideo) -> Node {
     push_detail(&mut children, "Views", video.views.as_deref());
     push_detail(&mut children, "Published", video.published.as_deref());
     push_detail(&mut children, "Length", video.duration.as_deref());
-    push_detail(&mut children, "URL", video.url.as_deref());
 
-    Node::Element(Element {
-        tag_name: "div".to_string(),
-        attributes: BTreeMap::new(),
-        children: vec![
-            Node::Element(Element {
-                tag_name: "table".to_string(),
-                attributes: BTreeMap::from([
-                    ("width".to_string(), "100%".to_string()),
-                    ("border".to_string(), "0".to_string()),
-                    ("cellpadding".to_string(), "6".to_string()),
-                    ("cellspacing".to_string(), "0".to_string()),
-                    ("bgcolor".to_string(), "#ffffff".to_string()),
-                ]),
-                children: vec![Node::Element(Element {
-                    tag_name: "tr".to_string(),
-                    attributes: BTreeMap::new(),
-                    children: vec![Node::Element(Element {
-                        tag_name: "td".to_string(),
-                        attributes: BTreeMap::from([("valign".to_string(), "top".to_string())]),
-                        children,
-                    })],
-                })],
-            }),
-            hr_node(),
-        ],
-    })
+    let card = Node::Element(Element {
+        tag_name: "table".to_string(),
+        attributes: BTreeMap::from([
+            ("width".to_string(), "100%".to_string()),
+            ("border".to_string(), "0".to_string()),
+            ("cellpadding".to_string(), "6".to_string()),
+            ("cellspacing".to_string(), "0".to_string()),
+            ("bgcolor".to_string(), "#ffffff".to_string()),
+        ]),
+        children: vec![Node::Element(Element {
+            tag_name: "tr".to_string(),
+            attributes: BTreeMap::new(),
+            children: vec![Node::Element(Element {
+                tag_name: "td".to_string(),
+                attributes: BTreeMap::from([("valign".to_string(), "top".to_string())]),
+                children,
+            })],
+        })],
+    });
+
+    if let Some(url) = &video.url {
+        Node::Element(Element {
+            tag_name: "a".to_string(),
+            attributes: BTreeMap::from([
+                ("href".to_string(), url.clone()),
+                ("style".to_string(), "display: block;".to_string()),
+            ]),
+            children: vec![card, hr_node()],
+        })
+    } else {
+        Node::Element(Element {
+            tag_name: "div".to_string(),
+            attributes: BTreeMap::new(),
+            children: vec![card, hr_node()],
+        })
+    }
 }
 
 fn build_youtube_nudge_card(data: &YouTubeHomeData) -> Node {
@@ -1863,7 +1882,6 @@ fn build_related_video_node(video: &YouTubeRelatedVideo) -> Node {
         video.published.as_deref(),
     );
     push_detail(&mut detail_children, "Length", video.duration.as_deref());
-    push_detail(&mut detail_children, "URL", video.url.as_deref());
 
     let mut row_children = Vec::new();
     if let Some(thumbnail_url) = &video.thumbnail_url {
@@ -1891,27 +1909,37 @@ fn build_related_video_node(video: &YouTubeRelatedVideo) -> Node {
         children: detail_children,
     }));
 
-    Node::Element(Element {
-        tag_name: "div".to_string(),
-        attributes: BTreeMap::new(),
-        children: vec![
-            Node::Element(Element {
-                tag_name: "table".to_string(),
-                attributes: BTreeMap::from([
-                    ("width".to_string(), "100%".to_string()),
-                    ("border".to_string(), "0".to_string()),
-                    ("cellpadding".to_string(), "0".to_string()),
-                    ("cellspacing".to_string(), "8".to_string()),
-                ]),
-                children: vec![Node::Element(Element {
-                    tag_name: "tr".to_string(),
-                    attributes: BTreeMap::new(),
-                    children: row_children,
-                })],
-            }),
-            hr_node(),
-        ],
-    })
+    let card = Node::Element(Element {
+        tag_name: "table".to_string(),
+        attributes: BTreeMap::from([
+            ("width".to_string(), "100%".to_string()),
+            ("border".to_string(), "0".to_string()),
+            ("cellpadding".to_string(), "0".to_string()),
+            ("cellspacing".to_string(), "8".to_string()),
+        ]),
+        children: vec![Node::Element(Element {
+            tag_name: "tr".to_string(),
+            attributes: BTreeMap::new(),
+            children: row_children,
+        })],
+    });
+
+    if let Some(url) = &video.url {
+        Node::Element(Element {
+            tag_name: "a".to_string(),
+            attributes: BTreeMap::from([
+                ("href".to_string(), url.clone()),
+                ("style".to_string(), "display: block;".to_string()),
+            ]),
+            children: vec![card, hr_node()],
+        })
+    } else {
+        Node::Element(Element {
+            tag_name: "div".to_string(),
+            attributes: BTreeMap::new(),
+            children: vec![card, hr_node()],
+        })
+    }
 }
 
 fn simple_text_element(tag_name: &str, text: &str) -> Node {
