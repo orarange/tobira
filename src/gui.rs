@@ -878,7 +878,7 @@ impl AddressBarState {
     fn insert_text(&mut self, input: &str) -> bool {
         let filtered: String = input
             .chars()
-            .filter(|character| !matches!(character, '\r' | '\n' | '\t'))
+            .filter(|character| !character.is_control())
             .collect();
         if filtered.is_empty() {
             return false;
@@ -1926,6 +1926,16 @@ mod tests {
         assert_eq!(state.text(), "阿部");
         assert!(state.backspace());
         assert_eq!(state.text(), "阿");
+    }
+
+    #[test]
+    fn address_bar_ignores_control_characters() {
+        let mut state = AddressBarState::new("https://google.com".to_string());
+        state.focus_at(state.char_len());
+
+        assert!(!state.insert_text("\u{8}"));
+        assert!(!state.insert_text("\r"));
+        assert_eq!(state.text(), "https://google.com");
     }
 
     #[test]
