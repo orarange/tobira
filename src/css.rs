@@ -93,7 +93,7 @@ enum PseudoClass {
     FirstChild,
     LastChild,
     NthChild(i32, i32), // (a, b) → matches when (index - b) % a == 0 (1-based index)
-    Not(Box<SimpleSelector>),
+    Not(Vec<SimpleSelector>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,7 +141,7 @@ struct AncestorSlot {
     element: ElementIdentity,
     sibling_index: usize,
     sibling_count: usize,
-    preceding_siblings: Vec<AncestorSlot>,
+    preceding_siblings: Vec<ElementIdentity>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,6 +278,7 @@ pub struct ComputedStyle {
     pub line_height: u32,
     /// opacity 0–255; 255 = opaque
     pub opacity: u8,
+    pub effective_opacity: u8,
     pub font_style_italic: bool,
     pub text_transform: TextTransform,
     pub text_indent: u32,
@@ -324,6 +325,7 @@ impl ComputedStyle {
             outline_color: None,
             line_height: parent.map(|s| s.line_height).unwrap_or(0),
             opacity: 255,
+            effective_opacity: 255,
             font_style_italic: parent.map(|s| s.font_style_italic).unwrap_or(false),
             text_transform: parent
                 .map(|s| s.text_transform)
@@ -442,38 +444,30 @@ fn split_at_top_level(input: &str, delimiter: char) -> Vec<String> {
     let mut result = Vec::new();
     let mut depth: u32 = 0;
     let mut in_string: Option<char> = None;
-    let mut current = String::new();
-    for ch in input.chars() {
+    let mut segment_start = 0;
+    for (index, ch) in input.char_indices() {
         match ch {
             q @ ('"' | '\'') if in_string.is_none() => {
                 in_string = Some(q);
-                current.push(ch);
             }
             q if in_string == Some(q) => {
                 in_string = None;
-                current.push(ch);
             }
-            _ if in_string.is_some() => {
-                current.push(ch);
-            }
+            _ if in_string.is_some() => {}
             '(' | '[' => {
                 depth += 1;
-                current.push(ch);
             }
             ')' | ']' if depth > 0 => {
                 depth -= 1;
-                current.push(ch);
             }
             c if c == delimiter && depth == 0 => {
-                result.push(current.clone());
-                current.clear();
+                result.push(input[segment_start..index].to_string());
+                segment_start = index + ch.len_utf8();
             }
-            _ => {
-                current.push(ch);
-            }
+            _ => {}
         }
     }
-    result.push(current);
+    result.push(input[segment_start..].to_string());
     result
 }
 
@@ -626,7 +620,7 @@ fn build_node(
     ancestors: &[AncestorSlot],
     sibling_index: usize,
     sibling_count: usize,
-    preceding_siblings: &[AncestorSlot],
+    preceding_siblings: &[ElementIdentity],
     viewport_width: u32,
 ) -> StyledNode {
     match node {
@@ -665,7 +659,7 @@ fn build_node(
             let child_element_count = element_children.len();
 
             let mut elem_sibling_idx = 0;
-            let mut preceding: Vec<AncestorSlot> = Vec::new();
+            let mut preceding: Vec<ElementIdentity> = Vec::new();
 
             let children = element
                 .children
@@ -675,12 +669,7 @@ fn build_node(
                         let idx = elem_sibling_idx;
                         let prec_snap = preceding.clone();
                         if let Node::Element(e) = child {
-                            preceding.push(AncestorSlot {
-                                element: ElementIdentity::from(e),
-                                sibling_index: idx,
-                                sibling_count: child_element_count,
-                                preceding_siblings: prec_snap.clone(),
-                            });
+                            preceding.push(ElementIdentity::from(e));
                         }
                         elem_sibling_idx += 1;
                         (idx, child_element_count, prec_snap)
@@ -718,7 +707,7 @@ fn compute_style(
     ancestors: &[AncestorSlot],
     sibling_index: usize,
     sibling_count: usize,
-    preceding_siblings: &[AncestorSlot],
+    preceding_siblings: &[ElementIdentity],
     viewport_width: u32,
 ) -> ComputedStyle {
     let mut style = ComputedStyle::for_element(&element.tag_name, parent_style);
@@ -793,6 +782,10 @@ fn compute_style(
         }
         apply_declaration(&mut style, &declaration, parent_font_size);
     }
+
+    style.effective_opacity = parent_style
+        .map(|parent| ((parent.effective_opacity as u16 * style.opacity as u16) / 255) as u8)
+        .unwrap_or(style.opacity);
 
     style
 }
@@ -1465,8 +1458,15 @@ fn parse_pseudo_class(name: &str, args: Option<&str>) -> Option<PseudoClass> {
         }
         "not" => {
             let arg = args.unwrap_or("").trim();
-            let inner = parse_simple_selector(arg)?;
-            Some(PseudoClass::Not(Box::new(inner)))
+            let selectors = split_at_top_level(arg, ',')
+                .into_iter()
+                .map(|part| parse_simple_selector(part.trim()))
+                .collect::<Option<Vec<_>>>()?;
+            if selectors.is_empty() {
+                None
+            } else {
+                Some(PseudoClass::Not(selectors))
+            }
         }
         // Ignored pseudo-classes (no-op)
         "hover" | "focus" | "active" | "visited" | "checked" | "disabled" | "enabled" | "link"
@@ -1604,7 +1604,7 @@ impl Selector {
         ancestors: &[AncestorSlot],
         sibling_index: usize,
         sibling_count: usize,
-        preceding_siblings: &[AncestorSlot],
+        preceding_siblings: &[ElementIdentity],
     ) -> bool {
         let Some(last_index) = self.parts.len().checked_sub(1) else {
             return false;
@@ -1613,9 +1613,9 @@ impl Selector {
             element: element.clone(),
             sibling_index,
             sibling_count,
-            preceding_siblings: preceding_siblings.to_vec(),
+            preceding_siblings: Vec::new(),
         };
-        self.matches_part(last_index, &current, ancestors)
+        self.matches_part(last_index, &current, ancestors, preceding_siblings)
     }
 
     fn matches_part(
@@ -1623,6 +1623,7 @@ impl Selector {
         part_index: usize,
         current: &AncestorSlot,
         ancestors: &[AncestorSlot],
+        current_preceding_siblings: &[ElementIdentity],
     ) -> bool {
         if !self.parts[part_index].simple.matches_slot(current) {
             return false;
@@ -1638,21 +1639,57 @@ impl Selector {
         {
             Combinator::Descendant => {
                 ancestors.iter().enumerate().rev().any(|(index, ancestor)| {
-                    self.matches_part(part_index - 1, ancestor, &ancestors[..index])
+                    self.matches_part(
+                        part_index - 1,
+                        ancestor,
+                        &ancestors[..index],
+                        &ancestor.preceding_siblings,
+                    )
                 })
             }
             Combinator::Child => ancestors.last().is_some_and(|parent| {
-                self.matches_part(part_index - 1, parent, &ancestors[..ancestors.len() - 1])
+                self.matches_part(
+                    part_index - 1,
+                    parent,
+                    &ancestors[..ancestors.len() - 1],
+                    &parent.preceding_siblings,
+                )
             }),
-            Combinator::AdjacentSibling => current
-                .preceding_siblings
+            Combinator::AdjacentSibling => current_preceding_siblings
                 .last()
-                .is_some_and(|sibling| self.matches_part(part_index - 1, sibling, ancestors)),
-            Combinator::GeneralSibling => current
-                .preceding_siblings
+                .is_some_and(|sibling| {
+                    let sibling_index = current.sibling_index.saturating_sub(1);
+                    let sibling_slot = AncestorSlot {
+                        element: sibling.clone(),
+                        sibling_index,
+                        sibling_count: current.sibling_count,
+                        preceding_siblings: Vec::new(),
+                    };
+                    self.matches_part(
+                        part_index - 1,
+                        &sibling_slot,
+                        ancestors,
+                        &current_preceding_siblings[..sibling_index],
+                    )
+                }),
+            Combinator::GeneralSibling => current_preceding_siblings
                 .iter()
+                .enumerate()
                 .rev()
-                .any(|sibling| self.matches_part(part_index - 1, sibling, ancestors)),
+                .any(|(sibling_index, sibling)| {
+                    let sibling_slot = AncestorSlot {
+                        element: sibling.clone(),
+                        sibling_index,
+                        sibling_count: current.sibling_count,
+                        preceding_siblings: Vec::new(),
+                    };
+                    self.matches_part(
+                        part_index - 1,
+                        &sibling_slot,
+                        ancestors,
+                        &current_preceding_siblings[..sibling_index],
+                    )
+                }),
         }
     }
 }
@@ -1723,7 +1760,9 @@ impl SimpleSelector {
                         rem == 0 && (idx - b) / a >= 0
                     }
                 }
-                PseudoClass::Not(inner) => !inner.matches_slot(slot),
+                PseudoClass::Not(selectors) => {
+                    !selectors.iter().any(|selector| selector.matches_slot(slot))
+                }
             };
             if !matched {
                 return false;
@@ -2964,6 +3003,29 @@ mod tests {
         collect_li(&styled, &mut colors);
         assert_ne!(colors[0], 0x00FF00, ".skip li should not match :not(.skip)");
         assert_eq!(colors[1], 0x00FF00, "plain li should match :not(.skip)");
+    }
+
+    #[test]
+    fn not_selector_list_excludes_any_matching_selector() {
+        let document =
+            parse_document("<ul><li class=\"skip\">A</li><li class=\"omit\">B</li><li>C</li></ul>");
+        let stylesheet = parse_stylesheet("li:not(.skip, .omit) { color: #00ff00; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
+            if let StyledNode::Element(el) = node {
+                if el.tag_name == "li" {
+                    out.push(el.style.color);
+                }
+                for c in &el.children {
+                    collect_li(c, out);
+                }
+            }
+        }
+        let mut colors = Vec::new();
+        collect_li(&styled, &mut colors);
+        assert_ne!(colors[0], 0x00FF00, ".skip li should not match selector list in :not()");
+        assert_ne!(colors[1], 0x00FF00, ".omit li should not match selector list in :not()");
+        assert_eq!(colors[2], 0x00FF00, "plain li should match selector list in :not()");
     }
 
     // ── @media tests ─────────────────────────────────────────────────────────

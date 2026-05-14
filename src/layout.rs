@@ -63,8 +63,11 @@ pub fn layout_styled_document(
     viewport_width: u32,
     fonts: &mut FontContext,
 ) -> LayoutDocument {
-    let mut context = LayoutContext::default();
     let background_color = find_document_background(document).unwrap_or(DEFAULT_BACKGROUND_COLOR);
+    let mut context = LayoutContext {
+        background_color,
+        ..LayoutContext::default()
+    };
     let mut cursor_y = 0;
 
     layout_node(
@@ -89,6 +92,7 @@ pub fn layout_styled_document(
 
 #[derive(Default)]
 struct LayoutContext {
+    background_color: Color,
     rects: Vec<RectCommand>,
     texts: Vec<TextCommand>,
     images: Vec<ImageCommand>,
@@ -253,8 +257,8 @@ fn layout_block_element(
     let background_index = if let Some(background_color) = element.style.background_color {
         let blended_bg = apply_opacity(
             background_color,
-            DEFAULT_BACKGROUND_COLOR,
-            element.style.opacity,
+            context.background_color,
+            element.style.effective_opacity,
         );
         context.rects.push(RectCommand {
             x: outer_x,
@@ -336,8 +340,8 @@ fn layout_block_element(
     if !element.style.border_style_none {
         let bc = apply_opacity(
             element.style.border_color,
-            DEFAULT_BACKGROUND_COLOR,
-            element.style.opacity,
+            context.background_color,
+            element.style.effective_opacity,
         );
         let border_top_h = element.style.border.top;
         let border_bottom_h = element.style.border.bottom;
@@ -623,8 +627,8 @@ fn layout_table_element(
         if let Some(background_color) = placement.cell.style.background_color {
             let blended = apply_opacity(
                 background_color,
-                DEFAULT_BACKGROUND_COLOR,
-                placement.cell.style.opacity,
+                context.background_color,
+                placement.cell.style.effective_opacity,
             );
             context.rects.push(RectCommand {
                 x: cell_x,
@@ -1370,10 +1374,9 @@ fn emit_line_impl(
         .max(text_line_height(container_style, fonts));
 
     for span in &line.spans {
-        let span_opacity = span.style.opacity;
-        if let Some(background_color) = span.style.background_color {
-            let blended_bg =
-                apply_opacity(background_color, DEFAULT_BACKGROUND_COLOR, span_opacity);
+        let span_opacity = span.style.effective_opacity;
+        let text_bg = if let Some(background_color) = span.style.background_color {
+            let blended_bg = apply_opacity(background_color, context.background_color, span_opacity);
             context.rects.push(RectCommand {
                 x: cursor_x,
                 y: *cursor_y,
@@ -1381,17 +1384,16 @@ fn emit_line_impl(
                 height: line_height,
                 color: blended_bg,
             });
-        }
+            blended_bg
+        } else {
+            context.background_color
+        };
 
         let display_text = if span.style.text_transform != TextTransform::None {
             apply_text_transform(&span.text, span.style.text_transform)
         } else {
             span.text.clone()
         };
-        let text_bg = span
-            .style
-            .background_color
-            .unwrap_or(DEFAULT_BACKGROUND_COLOR);
         context.texts.push(TextCommand {
             x: cursor_x,
             y: *cursor_y,
@@ -1613,7 +1615,11 @@ fn find_document_background(node: &StyledNode) -> Option<Color> {
         StyledNode::Element(element) => {
             if matches!(element.tag_name.as_str(), "body" | "html" | "document") {
                 if let Some(background_color) = element.style.background_color {
-                    return Some(background_color);
+                    return Some(apply_opacity(
+                        background_color,
+                        DEFAULT_BACKGROUND_COLOR,
+                        element.style.effective_opacity,
+                    ));
                 }
             }
 
@@ -1795,6 +1801,35 @@ mod tests {
 
         assert!(bottom.y > top.y);
         assert_eq!(top.x, bottom.x);
+    }
+
+    #[test]
+    fn uses_document_background_for_opacity_blending() {
+        let document = parse_document("<body><div>Hi</div></body>");
+        let stylesheet =
+            parse_stylesheet("body { background-color: #000000; } div { background-color: #ff0000; opacity: 0.5; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
+
+        assert!(
+            layout.rects.iter().any(|rect| rect.color == 0x800000),
+            "semi-transparent red should blend against the document background, not the default page color"
+        );
+    }
+
+    #[test]
+    fn accumulates_parent_opacity_for_text() {
+        let document = parse_document("<body><div><span>Hi</span></div></body>");
+        let stylesheet = parse_stylesheet(
+            "body { background-color: #000000; } div { opacity: 0.5; } span { opacity: 0.5; color: #ffffff; }",
+        );
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
+        let text = layout.texts.first().expect("text command should exist");
+
+        assert_eq!(text.color, 0x404040);
     }
 
     fn find_paragraph(element: &crate::css::StyledElement) -> Option<&crate::css::StyledElement> {
