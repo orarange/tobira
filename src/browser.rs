@@ -13,6 +13,7 @@ use crate::text::decode_text_response;
 use crate::url::Url;
 
 const MAX_FRAME_DEPTH: usize = 3;
+const MAX_SCRIPT_NAVIGATION_DEPTH: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct BrowserPage {
@@ -105,6 +106,14 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
 }
 
 fn load_document_source(url: &Url, frame_depth: usize) -> Result<LoadedDocumentSource> {
+    load_document_source_with_script_navigation(url, frame_depth, 0)
+}
+
+fn load_document_source_with_script_navigation(
+    url: &Url,
+    frame_depth: usize,
+    script_navigation_depth: usize,
+) -> Result<LoadedDocumentSource> {
     let response = fetch(url)?;
     let content_type = response.header("content-type").map(str::to_string);
     let text = decode_text_response(&response.body, response.header("content-type"));
@@ -146,6 +155,17 @@ fn load_document_source(url: &Url, frame_depth: usize) -> Result<LoadedDocumentS
         });
     }
     let scripted = process_document_scripts(&text, &response.final_url);
+    if let Some(target) = scripted.navigation_target.as_deref()
+        && target != response.final_url.to_string()
+        && script_navigation_depth < MAX_SCRIPT_NAVIGATION_DEPTH
+        && let Ok(next_url) = Url::parse(target)
+    {
+        return load_document_source_with_script_navigation(
+            &next_url,
+            frame_depth,
+            script_navigation_depth + 1,
+        );
+    }
     let mut parsed_document = parse_document(&scripted.html);
     if let Some(rewritten) =
         build_site_specific_document(&parsed_document, &text, &response.final_url)
