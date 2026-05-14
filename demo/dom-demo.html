@@ -1,0 +1,118 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Tobira DOM Demo</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 28px;
+      font-family: "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #f5efe2 0%, #efe7d5 100%);
+      color: #1f2d3d;
+    }
+
+    .shell {
+      max-width: 980px;
+      margin: 0 auto;
+      background: rgba(255, 252, 245, 0.92);
+      padding: 28px 32px 36px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: 38px;
+    }
+
+    .lede {
+      margin: 0 0 20px;
+      font-size: 18px;
+      color: #43556a;
+    }
+
+    .stack {
+      margin-top: 22px;
+    }
+
+    .card {
+      background: #fffaf1;
+      padding: 16px 18px;
+      margin: 12px 0;
+    }
+
+    .card.pass {
+      border-left: 6px solid #2f8f46;
+    }
+
+    .card.info {
+      border-left: 6px solid #2a5db0;
+    }
+
+    .card.warn {
+      border-left: 6px solid #c67b20;
+    }
+
+    .inline {
+      color: #1b4d8f;
+      font-weight: 700;
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 4px 10px;
+      margin-right: 8px;
+      background: #eadfca;
+      color: #59452d;
+      font-size: 14px;
+    }
+
+    #write-log p {
+      margin: 8px 0 0;
+      color: #7f2a1d;
+    }
+  </style>
+</head>
+<body>
+  <main class="shell" id="app-shell">
+    <h1>Tobira DOM Demo</h1>
+    <p class="lede">
+      This page exercises the lightweight DOM bridge added to the JavaScript runtime.
+    </p>
+
+    <section class="stack" id="results">
+      <div class="card info" id="summary-card">
+        <strong>Boot:</strong>
+        <span class="inline">inline script + external script + recursive document.write</span>
+      </div>
+    </section>
+
+    <section class="stack" id="tags">
+      <span class="tag">querySelector</span>
+      <span class="tag">classList</span>
+      <span class="tag">innerHTML</span>
+    </section>
+
+    <section class="stack" id="playground"></section>
+    <section class="stack" id="write-log"></section>
+
+    <script>
+      document.title = "Tobira DOM Ready";
+
+      var tags = document.querySelector("#tags");
+      tags.classList.add("card");
+      tags.classList.add("pass");
+
+      var summary = document.getElementById("summary-card");
+      summary.classList.add("pass");
+
+      var playground = document.getElementById("playground");
+      playground.className = "card info";
+      playground.innerHTML = "<strong>Initial DOM state:</strong> waiting for external script...";
+
+      document.write("<script>document.write('<p>Recursive document.write script executed.</p>')</" + "script>");
+    </script>
+
+    <script src="dom-demo.js"></script>
+  </main>
+</body>
+</html>

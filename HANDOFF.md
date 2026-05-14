@@ -46,6 +46,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `innerHTML`, `textContent`, `classList`, `id`, `className`
     - `document.write(...)` with recursive script expansion
     - DOM mutations serialized back into the HTML pipeline after JS runs
+  - local test pages for CSS, basic JS, and DOM mutation coverage under `demo/`
   - site-specific rendering paths for:
     - YouTube watch pages
     - YouTube home shell / cards / nudge UI
@@ -117,3 +118,8 @@ git log --oneline -n 20
 - Changed `document.write(...)` handling to mutate the DOM and recursively execute script tags written by scripts.
 - Fixed a parsing correctness bug by teaching `src/html.rs` to keep raw-text contents for `script`, `style`, `title`, and `textarea`.
 - Verified the current state with `cargo test` (`77` passing tests) and `cargo build`.
+
+### 2026-05-14 - Codex (DOM demo follow-up)
+
+- Added `demo/dom-demo.html` and `demo/dom-demo.js` to exercise the new DOM-backed JS path locally.
+- Updated `README.md` so the documented JS scope matches the current implementation better and includes the new DOM demo command.

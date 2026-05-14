@@ -37,6 +37,14 @@ Current capabilities:
 - System font rendering with TrueType / OpenType fonts via `fontdue`
 - Plain text CLI renderer with `--cli`
 - Basic JavaScript execution with `boa_engine`
+- Lightweight mutable DOM support for:
+  - `document.querySelector(...)`
+  - `document.querySelectorAll(...)`
+  - `document.getElementById(...)`
+  - `document.createElement(...)`
+  - `appendChild(...)`, `insertBefore(...)`, `remove()`
+  - `innerHTML`, `textContent`, `classList`, `id`, `className`
+  - recursive `document.write(...)`
 
 Still missing:
 
@@ -72,6 +80,13 @@ Local JavaScript demo:
 ```bash
 python -m http.server 8765
 cargo run -- http://127.0.0.1:8765/demo/js-demo.html
+```
+
+Local DOM demo:
+
+```bash
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/dom-demo.html
 ```
 
 ## GUI Controls
@@ -121,8 +136,13 @@ Current JS support is intentionally small:
 - external `<script src>`
 - `document.write()` / `document.writeln()`
 - `document.title`
+- `document.querySelector(...)` / `querySelectorAll(...)`
+- `document.getElementById(...)`
+- `document.createElement(...)`
+- `appendChild(...)` / `insertBefore(...)` / `remove()`
+- `innerHTML`, `textContent`, `classList`, `id`, `className`
 - `location.href`
 - `console.log()` / `warn()` / `error()`
 - immediate `setTimeout(...)` fallback
 
-It does not yet implement a real DOM, query selectors, events, async networking, or framework-level browser APIs.
+It still does not implement a full browser DOM, robust events, async networking, or framework-level browser APIs.
