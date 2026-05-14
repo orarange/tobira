@@ -95,6 +95,9 @@ cargo run -- http://127.0.0.1:8765/demo/dom-demo.html
 - `PageUp` / `PageDown`: page scroll
 - `Home` / `End`: jump to top or bottom
 - `R`: reload
+- `Ctrl+L`: focus the address bar
+- `Ctrl+A`: select all text in the address bar
+- `Ctrl+C` / `Ctrl+X` / `Ctrl+V`: copy, cut, and paste inside the address bar
 - `Esc`: quit
 
 ## Project Structure

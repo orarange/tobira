@@ -34,7 +34,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `rgba(...)` blending
   - software-rendered GUI with custom title bar and address bar
   - blank startup page and direct URL entry
-  - address bar editing shortcuts including `Ctrl+A`
+  - address bar editing shortcuts including `Ctrl+A`, `Ctrl+C`, `Ctrl+X`, and `Ctrl+V`
   - clickable links in the rendered page with hit-testing in the GUI
   - image loading / rendering for supported formats
   - guarded JavaScript execution through `boa_engine` with a growing set of stubs
@@ -123,3 +123,9 @@ git log --oneline -n 20
 
 - Added `demo/dom-demo.html` and `demo/dom-demo.js` to exercise the new DOM-backed JS path locally.
 - Updated `README.md` so the documented JS scope matches the current implementation better and includes the new DOM demo command.
+
+### 2026-05-14 - Codex (clipboard fix)
+
+- Added address-bar clipboard support backed by the OS clipboard via `arboard`.
+- `Ctrl+C`, `Ctrl+X`, and `Ctrl+V` now work against the current address-bar selection / insertion point.
+- Added focused tests for selected-text and cut-selection behavior in `src/gui.rs`.

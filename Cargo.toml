@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arboard = "3.6.1"
 boa_engine = "0.21.1"
 boa_gc = "0.21.1"
 brotli = "8.0.2"

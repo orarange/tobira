@@ -1,6 +1,7 @@
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
+use arboard::Clipboard;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -509,15 +510,29 @@ impl BrowserApp {
                 }
                 KeyCode::KeyA if control && !repeat => {
                     if self.address_bar.select_all() {
-                        self.sync_input_method();
-                        self.request_redraw();
+                        self.refresh_address_bar_input();
+                    }
+                    return false;
+                }
+                KeyCode::KeyC if control && !repeat => {
+                    self.copy_address_selection();
+                    return false;
+                }
+                KeyCode::KeyX if control && !repeat => {
+                    if self.cut_address_selection() {
+                        self.refresh_address_bar_input();
+                    }
+                    return false;
+                }
+                KeyCode::KeyV if control && !repeat => {
+                    if self.paste_into_address_bar() {
+                        self.refresh_address_bar_input();
                     }
                     return false;
                 }
                 KeyCode::KeyL if control && !repeat => {
                     self.address_bar.select_all();
-                    self.sync_input_method();
-                    self.request_redraw();
+                    self.refresh_address_bar_input();
                     return false;
                 }
                 KeyCode::KeyR if control && !repeat => {
@@ -567,8 +582,7 @@ impl BrowserApp {
         }
 
         if self.address_bar.insert_text(text) {
-            self.sync_input_method();
-            self.request_redraw();
+            self.refresh_address_bar_input();
         }
     }
 
@@ -582,11 +596,42 @@ impl BrowserApp {
             Ime::Commit(text) => {
                 self.ime_composing = false;
                 if self.address_bar.focused && self.address_bar.insert_text(&text) {
-                    self.sync_input_method();
-                    self.request_redraw();
+                    self.refresh_address_bar_input();
                 }
             }
         }
+    }
+
+    fn refresh_address_bar_input(&mut self) {
+        self.sync_input_method();
+        self.request_redraw();
+    }
+
+    fn copy_address_selection(&self) -> bool {
+        let Some(text) = self.address_bar.selected_text() else {
+            return false;
+        };
+
+        write_clipboard_text(&text)
+    }
+
+    fn cut_address_selection(&mut self) -> bool {
+        let Some(text) = self.address_bar.selected_text() else {
+            return false;
+        };
+        if !write_clipboard_text(&text) {
+            return false;
+        }
+
+        self.address_bar.cut_selection_text().is_some()
+    }
+
+    fn paste_into_address_bar(&mut self) -> bool {
+        let Some(text) = read_clipboard_text() else {
+            return false;
+        };
+
+        self.address_bar.insert_text(&text)
     }
 
     fn handle_wheel(&mut self, delta: MouseScrollDelta, window_size: PhysicalSize<u32>) {
@@ -995,6 +1040,17 @@ impl AddressBarState {
         self.cursor_chars = start;
         self.selection_anchor = None;
         true
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        Some(self.text.chars().skip(start).take(end - start).collect())
+    }
+
+    fn cut_selection_text(&mut self) -> Option<String> {
+        let text = self.selected_text()?;
+        self.delete_selection();
+        Some(text)
     }
 
     fn insert_text(&mut self, input: &str) -> bool {
@@ -1843,7 +1899,7 @@ fn paint_chrome(
     }
 
     let meta_right = format!(
-        "Enter go | Ctrl+L focus | Ctrl+A select | scroll: {} / {} px",
+        "Enter go | Ctrl+L focus | Ctrl+A/C/X/V edit | scroll: {} / {} px",
         scroll_y, max_scroll_y
     );
     let meta_right_width = fonts.text_width_px(&meta_right, INFO_FONT_SIZE, FontFamilyKind::Sans);
@@ -2083,6 +2139,17 @@ fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {
     content_height.saturating_sub(viewport_height)
 }
 
+fn read_clipboard_text() -> Option<String> {
+    let mut clipboard = Clipboard::new().ok()?;
+    clipboard.get_text().ok()
+}
+
+fn write_clipboard_text(text: &str) -> bool {
+    Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text.to_string()))
+        .is_ok()
+}
+
 fn draw_rect(
     buffer: &mut [u32],
     width: u32,
@@ -2273,6 +2340,28 @@ mod tests {
         assert!(state.selection_range().is_some());
         assert!(state.backspace());
         assert_eq!(state.text(), "google.co");
+        assert!(state.selection_range().is_none());
+    }
+
+    #[test]
+    fn address_bar_selected_text_returns_current_selection() {
+        let mut state = AddressBarState::new("阿部寛 homepage".to_string());
+        state.focus_at(state.char_len());
+
+        assert!(state.move_word_left(true));
+        assert_eq!(state.selected_text().as_deref(), Some("homepage"));
+    }
+
+    #[test]
+    fn address_bar_cut_selection_returns_text_and_removes_it() {
+        let mut state = AddressBarState::new("https://google.com".to_string());
+        assert!(state.select_all());
+
+        assert_eq!(
+            state.cut_selection_text().as_deref(),
+            Some("https://google.com")
+        );
+        assert_eq!(state.text(), "");
         assert!(state.selection_range().is_none());
     }
 
