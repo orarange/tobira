@@ -42,9 +42,13 @@ Current capabilities:
   - `document.querySelectorAll(...)`
   - `document.getElementById(...)`
   - `document.createElement(...)`
+  - `document.createTextNode(...)`
   - `appendChild(...)`, `insertBefore(...)`, `remove()`
   - `innerHTML`, `textContent`, `classList`, `id`, `className`
+  - reflected DOM properties such as `src`, `href`, `type`, and `value`
   - recursive `document.write(...)`
+  - Promise-backed `fetch(...)`
+  - minimal `XMLHttpRequest`
 
 Still missing:
 
@@ -142,10 +146,14 @@ Current JS support is intentionally small:
 - `document.querySelector(...)` / `querySelectorAll(...)`
 - `document.getElementById(...)`
 - `document.createElement(...)`
+- `document.createTextNode(...)`
 - `appendChild(...)` / `insertBefore(...)` / `remove()`
 - `innerHTML`, `textContent`, `classList`, `id`, `className`
+- reflected properties such as `src`, `href`, `type`, `name`, `value`
 - `location.href`
+- Promise-backed `fetch(...)`
+- minimal `XMLHttpRequest`
 - `console.log()` / `warn()` / `error()`
 - immediate `setTimeout(...)` fallback
 
-It still does not implement a full browser DOM, robust events, async networking, or framework-level browser APIs.
+It still does not implement a full browser DOM, robust events, complete async networking, or framework-level browser APIs.
