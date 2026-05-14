@@ -556,7 +556,11 @@ fn install_browser_globals(context: &mut Context) {
         .expect("innerHeight should be installable");
 
     let crypto_subtle = ObjectInitializer::new(context)
-        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("digest"), 2)
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("digest"),
+            2,
+        )
         .function(
             NativeFunction::from_fn_ptr(js_noop),
             js_string!("encrypt"),
@@ -591,11 +595,7 @@ fn install_browser_globals(context: &mut Context) {
             js_string!("get"),
             1,
         )
-        .function(
-            NativeFunction::from_fn_ptr(js_noop),
-            js_string!("set"),
-            2,
-        )
+        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("set"), 2)
         .function(
             NativeFunction::from_fn_ptr(js_noop),
             js_string!("append"),

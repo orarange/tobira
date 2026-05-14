@@ -136,6 +136,14 @@ struct ElementIdentity {
     attributes: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AncestorSlot {
+    element: ElementIdentity,
+    sibling_index: usize,
+    sibling_count: usize,
+    preceding_siblings: Vec<AncestorSlot>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Enums used in ComputedStyle
 // ─────────────────────────────────────────────────────────────────────────────
@@ -297,12 +305,16 @@ impl ComputedStyle {
             width: None,
             height: None,
             font_size_px: parent_font_size,
-            font_family: parent.map(|s| s.font_family).unwrap_or(FontFamilyKind::Sans),
+            font_family: parent
+                .map(|s| s.font_family)
+                .unwrap_or(FontFamilyKind::Sans),
             text_align: parent.map(|s| s.text_align).unwrap_or(TextAlign::Left),
             vertical_align: VerticalAlign::Top,
             font_weight: parent.map(|s| s.font_weight).unwrap_or(false),
             underline: parent.map(|s| s.underline).unwrap_or(false),
-            white_space: parent.map(|s| s.white_space).unwrap_or(WhiteSpaceMode::Normal),
+            white_space: parent
+                .map(|s| s.white_space)
+                .unwrap_or(WhiteSpaceMode::Normal),
             // new fields – most not inherited
             border: EdgeSizes::default(),
             border_color: parent.map(|s| s.color).unwrap_or(DEFAULT_TEXT_COLOR),
@@ -313,7 +325,9 @@ impl ComputedStyle {
             line_height: parent.map(|s| s.line_height).unwrap_or(0),
             opacity: 255,
             font_style_italic: parent.map(|s| s.font_style_italic).unwrap_or(false),
-            text_transform: parent.map(|s| s.text_transform).unwrap_or(TextTransform::None),
+            text_transform: parent
+                .map(|s| s.text_transform)
+                .unwrap_or(TextTransform::None),
             text_indent: 0,
             letter_spacing: parent.map(|s| s.letter_spacing).unwrap_or(0),
             max_width: None,
@@ -587,19 +601,32 @@ pub fn parse_inline_declarations(input: &str) -> Vec<Declaration> {
         .collect()
 }
 
-pub fn build_styled_tree(document: &Node, stylesheet: &Stylesheet, viewport_width: u32) -> StyledNode {
+pub fn build_styled_tree(
+    document: &Node,
+    stylesheet: &Stylesheet,
+    viewport_width: u32,
+) -> StyledNode {
     let ancestors = Vec::new();
-    build_node(document, stylesheet, None, &ancestors, 0, 0, &[], viewport_width)
+    build_node(
+        document,
+        stylesheet,
+        None,
+        &ancestors,
+        0,
+        0,
+        &[],
+        viewport_width,
+    )
 }
 
 fn build_node(
     node: &Node,
     stylesheet: &Stylesheet,
     parent_style: Option<&ComputedStyle>,
-    ancestors: &[ElementIdentity],
+    ancestors: &[AncestorSlot],
     sibling_index: usize,
     sibling_count: usize,
-    preceding_siblings: &[ElementIdentity],
+    preceding_siblings: &[AncestorSlot],
     viewport_width: u32,
 ) -> StyledNode {
     match node {
@@ -620,8 +647,14 @@ fn build_node(
                 preceding_siblings,
                 viewport_width,
             );
+            let current_slot = AncestorSlot {
+                element: ElementIdentity::from(element),
+                sibling_index,
+                sibling_count,
+                preceding_siblings: preceding_siblings.to_vec(),
+            };
             let mut next_ancestors = ancestors.to_vec();
-            next_ancestors.push(ElementIdentity::from(element));
+            next_ancestors.push(current_slot);
 
             // Count element children and build sibling info
             let element_children: Vec<&Node> = element
@@ -632,7 +665,7 @@ fn build_node(
             let child_element_count = element_children.len();
 
             let mut elem_sibling_idx = 0;
-            let mut preceding: Vec<ElementIdentity> = Vec::new();
+            let mut preceding: Vec<AncestorSlot> = Vec::new();
 
             let children = element
                 .children
@@ -642,7 +675,12 @@ fn build_node(
                         let idx = elem_sibling_idx;
                         let prec_snap = preceding.clone();
                         if let Node::Element(e) = child {
-                            preceding.push(ElementIdentity::from(e));
+                            preceding.push(AncestorSlot {
+                                element: ElementIdentity::from(e),
+                                sibling_index: idx,
+                                sibling_count: child_element_count,
+                                preceding_siblings: prec_snap.clone(),
+                            });
                         }
                         elem_sibling_idx += 1;
                         (idx, child_element_count, prec_snap)
@@ -677,10 +715,10 @@ fn compute_style(
     element: &Element,
     stylesheet: &Stylesheet,
     parent_style: Option<&ComputedStyle>,
-    ancestors: &[ElementIdentity],
+    ancestors: &[AncestorSlot],
     sibling_index: usize,
     sibling_count: usize,
-    preceding_siblings: &[ElementIdentity],
+    preceding_siblings: &[AncestorSlot],
     viewport_width: u32,
 ) -> ComputedStyle {
     let mut style = ComputedStyle::for_element(&element.tag_name, parent_style);
@@ -712,17 +750,15 @@ fn compute_style(
                         css_variables.insert(decl.property.clone(), decl.value.clone());
                     }
                 }
-                applicable.extend(
-                    rule.declarations.iter().cloned().enumerate().map(
-                        |(declaration_index, declaration)| {
-                            (
-                                selector.specificity(),
-                                rule_index * 100 + declaration_index,
-                                declaration,
-                            )
-                        },
-                    ),
-                );
+                applicable.extend(rule.declarations.iter().cloned().enumerate().map(
+                    |(declaration_index, declaration)| {
+                        (
+                            selector.specificity(),
+                            rule_index * 100 + declaration_index,
+                            declaration,
+                        )
+                    },
+                ));
                 break; // each rule contributes once per matching selector
             }
         }
@@ -785,7 +821,12 @@ fn substitute_vars(value: &str, vars: &BTreeMap<String, String>) -> String {
             .or(fallback)
             .unwrap_or("")
             .to_string();
-        result = format!("{}{}{}", &result[..start], replacement, &result[inner_start + end + 1..]);
+        result = format!(
+            "{}{}{}",
+            &result[..start],
+            replacement,
+            &result[inner_start + end + 1..]
+        );
     }
     result
 }
@@ -1227,8 +1268,12 @@ fn parse_selector(input: &str) -> Option<Selector> {
             i += 1;
             let mut depth = 1;
             while i < chars.len() && depth > 0 {
-                if chars[i] == '[' { depth += 1; }
-                if chars[i] == ']' { depth -= 1; }
+                if chars[i] == '[' {
+                    depth += 1;
+                }
+                if chars[i] == ']' {
+                    depth -= 1;
+                }
                 i += 1;
             }
             // include the full [...]
@@ -1246,7 +1291,9 @@ fn parse_selector(input: &str) -> Option<Selector> {
                 i += 1;
             }
             // collect ident or function (with parens)
-            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_') {
+            while i < chars.len()
+                && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == '_')
+            {
                 current.push(chars[i]);
                 i += 1;
             }
@@ -1256,8 +1303,12 @@ fn parse_selector(input: &str) -> Option<Selector> {
                 i += 1;
                 let mut depth = 1;
                 while i < chars.len() && depth > 0 {
-                    if chars[i] == '(' { depth += 1; }
-                    if chars[i] == ')' { depth -= 1; }
+                    if chars[i] == '(' {
+                        depth += 1;
+                    }
+                    if chars[i] == ')' {
+                        depth -= 1;
+                    }
                     i += 1;
                 }
                 current.push_str(&chars[start..i].iter().collect::<String>());
@@ -1326,7 +1377,9 @@ fn parse_simple_selector(input: &str) -> Option<SimpleSelector> {
                     attr_content.push(chars[i]);
                     i += 1;
                 }
-                if i < chars.len() { i += 1; } // skip ']'
+                if i < chars.len() {
+                    i += 1;
+                } // skip ']'
                 if let Some(cond) = parse_attribute_condition(&attr_content) {
                     selector.attributes.push(cond);
                 }
@@ -1340,7 +1393,9 @@ fn parse_simple_selector(input: &str) -> Option<SimpleSelector> {
                     // ::before / ::after → never match
                     selector.never_match = true;
                     // consume rest
-                    while i < chars.len() { i += 1; }
+                    while i < chars.len() {
+                        i += 1;
+                    }
                     continue;
                 }
                 // collect pseudo-class name
@@ -1358,9 +1413,15 @@ fn parse_simple_selector(input: &str) -> Option<SimpleSelector> {
                     let mut paren_content = String::new();
                     let mut depth = 1;
                     while i < chars.len() && depth > 0 {
-                        if chars[i] == '(' { depth += 1; }
-                        if chars[i] == ')' { depth -= 1; }
-                        if depth > 0 { paren_content.push(chars[i]); }
+                        if chars[i] == '(' {
+                            depth += 1;
+                        }
+                        if chars[i] == ')' {
+                            depth -= 1;
+                        }
+                        if depth > 0 {
+                            paren_content.push(chars[i]);
+                        }
                         i += 1;
                     }
                     args = Some(paren_content);
@@ -1408,8 +1469,8 @@ fn parse_pseudo_class(name: &str, args: Option<&str>) -> Option<PseudoClass> {
             Some(PseudoClass::Not(Box::new(inner)))
         }
         // Ignored pseudo-classes (no-op)
-        "hover" | "focus" | "active" | "visited" | "checked" | "disabled" | "enabled"
-        | "link" | "root" | "empty" | "focus-within" | "focus-visible" | "placeholder" => None,
+        "hover" | "focus" | "active" | "visited" | "checked" | "disabled" | "enabled" | "link"
+        | "root" | "empty" | "focus-within" | "focus-visible" | "placeholder" => None,
         _ => None,
     }
 }
@@ -1457,14 +1518,23 @@ fn parse_attribute_condition(content: &str) -> Option<AttributeCondition> {
     let content = content.trim();
 
     // Find operator
-    let operators = [("~=", AttrOperator::Word), ("|=", AttrOperator::DashPrefix),
-                     ("^=", AttrOperator::StartsWith), ("$=", AttrOperator::EndsWith),
-                     ("*=", AttrOperator::Contains), ("=", AttrOperator::Equals)];
+    let operators = [
+        ("~=", AttrOperator::Word),
+        ("|=", AttrOperator::DashPrefix),
+        ("^=", AttrOperator::StartsWith),
+        ("$=", AttrOperator::EndsWith),
+        ("*=", AttrOperator::Contains),
+        ("=", AttrOperator::Equals),
+    ];
 
     for (op_str, op) in &operators {
         if let Some(pos) = content.find(op_str) {
             let name = content[..pos].trim().to_ascii_lowercase();
-            let val = content[pos + op_str.len()..].trim().trim_matches('"').trim_matches('\'').to_string();
+            let val = content[pos + op_str.len()..]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
             return Some(AttributeCondition {
                 name,
                 operator: op.clone(),
@@ -1531,96 +1601,69 @@ impl Selector {
     fn matches(
         &self,
         element: &ElementIdentity,
-        ancestors: &[ElementIdentity],
+        ancestors: &[AncestorSlot],
         sibling_index: usize,
         sibling_count: usize,
-        preceding_siblings: &[ElementIdentity],
+        preceding_siblings: &[AncestorSlot],
     ) -> bool {
-        let Some(last_part) = self.parts.last() else {
+        let Some(last_index) = self.parts.len().checked_sub(1) else {
             return false;
         };
-        if !last_part.simple.matches_element(element, sibling_index, sibling_count, preceding_siblings) {
+        let current = AncestorSlot {
+            element: element.clone(),
+            sibling_index,
+            sibling_count,
+            preceding_siblings: preceding_siblings.to_vec(),
+        };
+        self.matches_part(last_index, &current, ancestors)
+    }
+
+    fn matches_part(
+        &self,
+        part_index: usize,
+        current: &AncestorSlot,
+        ancestors: &[AncestorSlot],
+    ) -> bool {
+        if !self.parts[part_index].simple.matches_slot(current) {
             return false;
         }
 
-        if self.parts.len() == 1 {
+        if part_index == 0 {
             return true;
         }
 
-        let mut ancestor_index = ancestors.len();
-        // preceding_siblings not threaded into ancestor matching for simplicity
-        for part_index in (0..self.parts.len() - 1).rev() {
-            let part = &self.parts[part_index];
-            let combinator = self.parts[part_index + 1]
-                .combinator
-                .unwrap_or(Combinator::Descendant);
-            match combinator {
-                Combinator::Descendant => {
-                    let mut found = false;
-                    while ancestor_index > 0 {
-                        ancestor_index -= 1;
-                        if part.simple.matches_element(&ancestors[ancestor_index], 0, 0, &[]) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if !found {
-                        return false;
-                    }
-                }
-                Combinator::Child => {
-                    if ancestor_index == 0 {
-                        return false;
-                    }
-                    ancestor_index -= 1;
-                    if !part.simple.matches_element(&ancestors[ancestor_index], 0, 0, &[]) {
-                        return false;
-                    }
-                }
-                // Sibling combinators: for now we only partially support them
-                // (we'd need sibling data threaded into ancestor matching)
-                Combinator::AdjacentSibling | Combinator::GeneralSibling => {
-                    // Check preceding_siblings only for the immediately preceding element
-                    if part_index == self.parts.len() - 2 {
-                        // this is directly preceding the target
-                        let found = match combinator {
-                            Combinator::AdjacentSibling => {
-                                preceding_siblings.last().map_or(false, |sib| {
-                                    part.simple.matches_element(sib, 0, 0, &[])
-                                })
-                            }
-                            Combinator::GeneralSibling => {
-                                preceding_siblings.iter().any(|sib| {
-                                    part.simple.matches_element(sib, 0, 0, &[])
-                                })
-                            }
-                            _ => false,
-                        };
-                        if !found {
-                            return false;
-                        }
-                    } else {
-                        return false;
-                    }
-                }
+        match self.parts[part_index]
+            .combinator
+            .unwrap_or(Combinator::Descendant)
+        {
+            Combinator::Descendant => {
+                ancestors.iter().enumerate().rev().any(|(index, ancestor)| {
+                    self.matches_part(part_index - 1, ancestor, &ancestors[..index])
+                })
             }
+            Combinator::Child => ancestors.last().is_some_and(|parent| {
+                self.matches_part(part_index - 1, parent, &ancestors[..ancestors.len() - 1])
+            }),
+            Combinator::AdjacentSibling => current
+                .preceding_siblings
+                .last()
+                .is_some_and(|sibling| self.matches_part(part_index - 1, sibling, ancestors)),
+            Combinator::GeneralSibling => current
+                .preceding_siblings
+                .iter()
+                .rev()
+                .any(|sibling| self.matches_part(part_index - 1, sibling, ancestors)),
         }
-
-        true
     }
 }
 
 impl SimpleSelector {
-    fn matches_element(
-        &self,
-        element: &ElementIdentity,
-        sibling_index: usize,
-        sibling_count: usize,
-        preceding_siblings: &[ElementIdentity],
-    ) -> bool {
+    fn matches_slot(&self, slot: &AncestorSlot) -> bool {
         if self.never_match {
             return false;
         }
+
+        let element = &slot.element;
 
         if let Some(tag_name) = &self.tag_name {
             if &element.tag_name != tag_name {
@@ -1644,7 +1687,11 @@ impl SimpleSelector {
 
         // Attribute conditions
         for cond in &self.attributes {
-            let attr_val = element.attributes.get(&cond.name).map(String::as_str).unwrap_or("");
+            let attr_val = element
+                .attributes
+                .get(&cond.name)
+                .map(String::as_str)
+                .unwrap_or("");
             let matches = match &cond.operator {
                 AttrOperator::Exists => element.attributes.contains_key(&cond.name),
                 AttrOperator::Equals => attr_val == cond.value,
@@ -1653,8 +1700,7 @@ impl SimpleSelector {
                 AttrOperator::EndsWith => attr_val.ends_with(&cond.value),
                 AttrOperator::Word => attr_val.split_whitespace().any(|w| w == cond.value),
                 AttrOperator::DashPrefix => {
-                    attr_val == cond.value
-                        || attr_val.starts_with(&format!("{}-", cond.value))
+                    attr_val == cond.value || attr_val.starts_with(&format!("{}-", cond.value))
                 }
             };
             if !matches {
@@ -1663,11 +1709,11 @@ impl SimpleSelector {
         }
 
         // Pseudo-classes
-        let one_based_index = sibling_index + 1;
+        let one_based_index = slot.sibling_index + 1;
         for pc in &self.pseudo_classes {
             let matched = match pc {
-                PseudoClass::FirstChild => sibling_index == 0,
-                PseudoClass::LastChild => sibling_index + 1 == sibling_count,
+                PseudoClass::FirstChild => slot.sibling_index == 0,
+                PseudoClass::LastChild => slot.sibling_index + 1 == slot.sibling_count,
                 PseudoClass::NthChild(a, b) => {
                     let idx = one_based_index as i32;
                     if *a == 0 {
@@ -1677,9 +1723,7 @@ impl SimpleSelector {
                         rem == 0 && (idx - b) / a >= 0
                     }
                 }
-                PseudoClass::Not(inner) => {
-                    !inner.matches_element(element, sibling_index, sibling_count, preceding_siblings)
-                }
+                PseudoClass::Not(inner) => !inner.matches_slot(slot),
             };
             if !matched {
                 return false;
@@ -1718,8 +1762,8 @@ impl From<&Element> for ElementIdentity {
 
 fn parse_display(input: &str) -> Option<Display> {
     match input.trim().to_ascii_lowercase().as_str() {
-        "block" | "flow-root" | "flex" | "inline-flex" | "grid" | "inline-grid"
-        | "table" | "table-row" => Some(Display::Block),
+        "block" | "flow-root" | "flex" | "inline-flex" | "grid" | "inline-grid" | "table"
+        | "table-row" => Some(Display::Block),
         "inline" | "inline-block" | "table-cell" | "contents" => Some(Display::Inline),
         "list-item" => Some(Display::ListItem),
         "none" => Some(Display::None),
@@ -1782,11 +1826,21 @@ fn parse_overflow(input: &str) -> Overflow {
 
 fn parse_list_style_type(input: &str) -> ListStyleType {
     let lower = input.trim().to_ascii_lowercase();
-    if lower.contains("disc") { return ListStyleType::Disc; }
-    if lower.contains("circle") { return ListStyleType::Circle; }
-    if lower.contains("square") { return ListStyleType::Square; }
-    if lower.contains("decimal") { return ListStyleType::Decimal; }
-    if lower.contains("none") { return ListStyleType::None; }
+    if lower.contains("disc") {
+        return ListStyleType::Disc;
+    }
+    if lower.contains("circle") {
+        return ListStyleType::Circle;
+    }
+    if lower.contains("square") {
+        return ListStyleType::Square;
+    }
+    if lower.contains("decimal") {
+        return ListStyleType::Decimal;
+    }
+    if lower.contains("none") {
+        return ListStyleType::None;
+    }
     ListStyleType::Disc
 }
 
@@ -1803,7 +1857,11 @@ fn parse_line_height(input: &str, parent_font_size: u32) -> u32 {
     if let Some(rest) = v.strip_suffix("px") {
         if let Some(px) = parse_float(rest) {
             // store as em thousandths relative to parent_font_size
-            let em = if parent_font_size > 0 { px / parent_font_size as f32 } else { px / 16.0 };
+            let em = if parent_font_size > 0 {
+                px / parent_font_size as f32
+            } else {
+                px / 16.0
+            };
             return (em * 1000.0).round() as u32;
         }
     }
@@ -1836,7 +1894,10 @@ fn parse_border_shorthand(style: &mut ComputedStyle, value: &str, parent_font_si
             style.border_style_none = true;
             continue;
         }
-        if matches!(token, "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset") {
+        if matches!(
+            token,
+            "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset"
+        ) {
             style.border_style_none = false;
             continue;
         }
@@ -2024,7 +2085,10 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
     }
 
     // calc()
-    if let Some(inner) = value.strip_prefix("calc(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(inner) = value
+        .strip_prefix("calc(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         return parse_calc(inner, parent_font_size);
     }
 
@@ -2050,8 +2114,7 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
     }
 
     if let Some(number) = value.strip_suffix('%') {
-        return parse_float(number)
-            .map(|p| ((p / 100.0) * parent_font_size as f32).round() as u32);
+        return parse_float(number).map(|p| ((p / 100.0) * parent_font_size as f32).round() as u32);
     }
 
     parse_float(&value).map(|p| p.round().max(0.0) as u32)
@@ -2177,8 +2240,7 @@ fn resolve_calc_operand_f32(token: &str, parent_font_size: u32) -> Option<f32> {
 fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue> {
     let value = input.trim().to_ascii_lowercase();
     if let Some(number) = value.strip_suffix('%') {
-        return parse_float(number)
-            .map(|p| LengthValue::Percent(p.round().max(0.0) as u32));
+        return parse_float(number).map(|p| LengthValue::Percent(p.round().max(0.0) as u32));
     }
 
     parse_length(&value, parent_font_size).map(LengthValue::Pixels)
@@ -2305,7 +2367,11 @@ fn parse_hex_color(value: &str) -> Option<Color> {
             let green = u8::from_str_radix(&value[1..2].repeat(2), 16).ok()?;
             let blue = u8::from_str_radix(&value[2..3].repeat(2), 16).ok()?;
             let alpha = u8::from_str_radix(&value[3..4].repeat(2), 16).ok()?;
-            if alpha < 128 { None } else { Some(rgb(red, green, blue)) }
+            if alpha < 128 {
+                None
+            } else {
+                Some(rgb(red, green, blue))
+            }
         }
         6 => {
             let red = u8::from_str_radix(&value[0..2], 16).ok()?;
@@ -2318,16 +2384,19 @@ fn parse_hex_color(value: &str) -> Option<Color> {
             let green = u8::from_str_radix(&value[2..4], 16).ok()?;
             let blue = u8::from_str_radix(&value[4..6], 16).ok()?;
             let alpha = u8::from_str_radix(&value[6..8], 16).ok()?;
-            if alpha < 128 { None } else { Some(rgb(red, green, blue)) }
+            if alpha < 128 {
+                None
+            } else {
+                Some(rgb(red, green, blue))
+            }
         }
         _ => None,
     }
 }
 
 fn blend_with_white(r: u8, g: u8, b: u8, alpha: f32) -> Color {
-    let blend = |channel: u8| -> u8 {
-        (channel as f32 * alpha + 255.0 * (1.0 - alpha)).round() as u8
-    };
+    let blend =
+        |channel: u8| -> u8 { (channel as f32 * alpha + 255.0 * (1.0 - alpha)).round() as u8 };
     rgb(blend(r), blend(g), blend(b))
 }
 
@@ -2567,6 +2636,26 @@ mod tests {
         }
     }
 
+    fn find_element_by_id<'a>(node: &'a StyledNode, id: &str) -> Option<&'a super::StyledElement> {
+        match node {
+            StyledNode::Text(_) => None,
+            StyledNode::Element(element) => {
+                if element
+                    .attributes
+                    .get("id")
+                    .is_some_and(|value| value == id)
+                {
+                    return Some(element);
+                }
+
+                element
+                    .children
+                    .iter()
+                    .find_map(|child| find_element_by_id(child, id))
+            }
+        }
+    }
+
     #[test]
     fn parses_colors() {
         assert_eq!(parse_color("#ff00aa"), Some(0xFF00AA));
@@ -2620,6 +2709,55 @@ mod tests {
         };
 
         assert_eq!(second.style.color, 0xFF0000);
+    }
+
+    #[test]
+    fn supports_adjacent_sibling_selector_on_target() {
+        let document = parse_document(
+            "<div><h1>Title</h1><p id=\"lead\">Lead</p><p id=\"body\">Body</p></div>",
+        );
+        let stylesheet = parse_stylesheet("h1 + p { color: #ff0000; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+
+        let lead = find_element_by_id(&styled, "lead").expect("lead paragraph should exist");
+        let body = find_element_by_id(&styled, "body").expect("body paragraph should exist");
+
+        assert_eq!(lead.style.color, 0xFF0000);
+        assert_ne!(body.style.color, 0xFF0000);
+    }
+
+    #[test]
+    fn supports_adjacent_sibling_selector_on_ancestor_chain() {
+        let document = parse_document(
+            "<div><h1 id=\"heading\">Title</h1><section id=\"content\"><p id=\"text\">Hello</p></section></div>",
+        );
+        let stylesheet = parse_stylesheet("h1 + section p { color: #00aa00; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+
+        let text = find_element_by_id(&styled, "text").expect("nested paragraph should exist");
+        assert_eq!(text.style.color, 0x00AA00);
+    }
+
+    #[test]
+    fn supports_chained_adjacent_and_general_sibling_selectors() {
+        let document = parse_document(
+            "<div><p id=\"a\">A</p><p id=\"b\">B</p><p id=\"c\">C</p><p id=\"d\">D</p></div>",
+        );
+        let stylesheet = parse_stylesheet(
+            "p + p + p { color: #ff0000; } p#a ~ p { background-color: #0000ff; }",
+        );
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+
+        let a = find_element_by_id(&styled, "a").expect("first paragraph should exist");
+        let b = find_element_by_id(&styled, "b").expect("second paragraph should exist");
+        let c = find_element_by_id(&styled, "c").expect("third paragraph should exist");
+        let d = find_element_by_id(&styled, "d").expect("fourth paragraph should exist");
+
+        assert_ne!(a.style.background_color, Some(0x0000FF));
+        assert_eq!(b.style.background_color, Some(0x0000FF));
+        assert_eq!(c.style.color, 0xFF0000);
+        assert_eq!(d.style.color, 0xFF0000);
+        assert_eq!(d.style.background_color, Some(0x0000FF));
     }
 
     #[test]
@@ -2687,16 +2825,18 @@ mod tests {
 
     #[test]
     fn attribute_equals_selector_matches() {
-        let document = parse_document(
-            "<input type=\"text\"><input type=\"checkbox\">",
-        );
+        let document = parse_document("<input type=\"text\"><input type=\"checkbox\">");
         let stylesheet = parse_stylesheet("[type=text] { color: #00ff00; }");
         let styled = build_styled_tree(&document, &stylesheet, 1280);
         let inputs: Vec<_> = {
             fn collect_inputs<'a>(node: &'a StyledNode, out: &mut Vec<&'a StyledElement>) {
                 if let StyledNode::Element(el) = node {
-                    if el.tag_name == "input" { out.push(el); }
-                    for c in &el.children { collect_inputs(c, out); }
+                    if el.tag_name == "input" {
+                        out.push(el);
+                    }
+                    for c in &el.children {
+                        collect_inputs(c, out);
+                    }
                 }
             }
             let mut v = Vec::new();
@@ -2709,15 +2849,20 @@ mod tests {
 
     #[test]
     fn attribute_starts_with_selector_matches() {
-        let document = parse_document("<a href=\"https://example.com\">A</a><a href=\"http://x.com\">B</a>");
+        let document =
+            parse_document("<a href=\"https://example.com\">A</a><a href=\"http://x.com\">B</a>");
         let stylesheet = parse_stylesheet("[href^=\"https\"] { color: #0000ff; }");
         let styled = build_styled_tree(&document, &stylesheet, 1280);
         fn nth_a(node: &StyledNode, n: usize) -> Option<&StyledElement> {
             let mut found = Vec::new();
             fn collect<'a>(node: &'a StyledNode, out: &mut Vec<&'a StyledElement>) {
                 if let StyledNode::Element(el) = node {
-                    if el.tag_name == "a" { out.push(el); }
-                    for c in &el.children { collect(c, out); }
+                    if el.tag_name == "a" {
+                        out.push(el);
+                    }
+                    for c in &el.children {
+                        collect(c, out);
+                    }
                 }
             }
             collect(node, &mut found);
@@ -2736,8 +2881,12 @@ mod tests {
         let styled = build_styled_tree(&document, &stylesheet, 1280);
         fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
             if let StyledNode::Element(el) = node {
-                if el.tag_name == "li" { out.push(el.style.color); }
-                for c in &el.children { collect_li(c, out); }
+                if el.tag_name == "li" {
+                    out.push(el.style.color);
+                }
+                for c in &el.children {
+                    collect_li(c, out);
+                }
             }
         }
         let mut colors = Vec::new();
@@ -2753,25 +2902,39 @@ mod tests {
         let styled = build_styled_tree(&document, &stylesheet, 1280);
         fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
             if let StyledNode::Element(el) = node {
-                if el.tag_name == "li" { out.push(el.style.color); }
-                for c in &el.children { collect_li(c, out); }
+                if el.tag_name == "li" {
+                    out.push(el.style.color);
+                }
+                for c in &el.children {
+                    collect_li(c, out);
+                }
             }
         }
         let mut colors = Vec::new();
         collect_li(&styled, &mut colors);
         assert_ne!(colors[0], 0x0000FF, "first should not be blue");
-        assert_eq!(*colors.last().unwrap(), 0x0000FF, "last-child should be blue");
+        assert_eq!(
+            *colors.last().unwrap(),
+            0x0000FF,
+            "last-child should be blue"
+        );
     }
 
     #[test]
     fn nth_child_odd_even_matches() {
         let document = parse_document("<ul><li>1</li><li>2</li><li>3</li><li>4</li></ul>");
-        let stylesheet = parse_stylesheet("li:nth-child(odd) { color: #ff0000; } li:nth-child(even) { color: #0000ff; }");
+        let stylesheet = parse_stylesheet(
+            "li:nth-child(odd) { color: #ff0000; } li:nth-child(even) { color: #0000ff; }",
+        );
         let styled = build_styled_tree(&document, &stylesheet, 1280);
         fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
             if let StyledNode::Element(el) = node {
-                if el.tag_name == "li" { out.push(el.style.color); }
-                for c in &el.children { collect_li(c, out); }
+                if el.tag_name == "li" {
+                    out.push(el.style.color);
+                }
+                for c in &el.children {
+                    collect_li(c, out);
+                }
             }
         }
         let mut colors = Vec::new();
@@ -2789,8 +2952,12 @@ mod tests {
         let styled = build_styled_tree(&document, &stylesheet, 1280);
         fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
             if let StyledNode::Element(el) = node {
-                if el.tag_name == "li" { out.push(el.style.color); }
-                for c in &el.children { collect_li(c, out); }
+                if el.tag_name == "li" {
+                    out.push(el.style.color);
+                }
+                for c in &el.children {
+                    collect_li(c, out);
+                }
             }
         }
         let mut colors = Vec::new();
@@ -2812,25 +2979,33 @@ mod tests {
         // Viewport 1280 → max-width 600 rule should NOT apply, base rule wins
         let styled_wide = build_styled_tree(&document, &stylesheet, 1280);
         let p_wide = find_first_element(&styled_wide, "p").unwrap();
-        assert_eq!(p_wide.style.color, 0x0000FF, "wide viewport: plain rule wins");
+        assert_eq!(
+            p_wide.style.color, 0x0000FF,
+            "wide viewport: plain rule wins"
+        );
 
         // Viewport 400 → max-width 600 rule SHOULD apply and wins (later in source)
         let styled_narrow = build_styled_tree(&document, &stylesheet, 400);
         let p_narrow = find_first_element(&styled_narrow, "p").unwrap();
-        assert_eq!(p_narrow.style.color, 0xFF0000, "narrow viewport: media rule wins");
+        assert_eq!(
+            p_narrow.style.color, 0xFF0000,
+            "narrow viewport: media rule wins"
+        );
     }
 
     #[test]
     fn media_nested_braces_are_parsed_correctly() {
         // @media with multiple rules inside — previously the first } broke the parse
         let document = parse_document("<p class=\"a\">A</p><p class=\"b\">B</p>");
-        let stylesheet = parse_stylesheet(
-            "@media screen { .a { color: #ff0000; } .b { color: #0000ff; } }",
-        );
+        let stylesheet =
+            parse_stylesheet("@media screen { .a { color: #ff0000; } .b { color: #0000ff; } }");
         let styled = build_styled_tree(&document, &stylesheet, 1280);
         let a = find_first_element(&styled, "p").unwrap();
         // Both rules inside @media screen should be parsed (screen always applies)
-        assert_eq!(a.style.color, 0xFF0000, "first rule inside @media should apply");
+        assert_eq!(
+            a.style.color, 0xFF0000,
+            "first rule inside @media should apply"
+        );
     }
 
     // ── calc() tests ──────────────────────────────────────────────────────────
@@ -2851,7 +3026,10 @@ mod tests {
         let stylesheet = parse_stylesheet("p { font-size: calc(2px + 3 * 4px); }");
         let styled = build_styled_tree(&document, &stylesheet, 1280);
         let p = find_first_element(&styled, "p").unwrap();
-        assert_eq!(p.style.font_size_px, 14, "multiplication must bind tighter than addition");
+        assert_eq!(
+            p.style.font_size_px, 14,
+            "multiplication must bind tighter than addition"
+        );
     }
 
     #[test]

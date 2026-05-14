@@ -97,7 +97,11 @@ struct LayoutContext {
 
 #[derive(Debug, Clone)]
 enum InlineFragment {
-    Text { text: String, style: ComputedStyle, link_href: Option<String> },
+    Text {
+        text: String,
+        style: ComputedStyle,
+        link_href: Option<String>,
+    },
     LineBreak,
 }
 
@@ -121,7 +125,13 @@ impl LineBuilder {
         self.spans.is_empty()
     }
 
-    fn push_span(&mut self, text: &str, style: &ComputedStyle, fonts: &mut FontContext, link_href: Option<&str>) {
+    fn push_span(
+        &mut self,
+        text: &str,
+        style: &ComputedStyle,
+        fonts: &mut FontContext,
+        link_href: Option<&str>,
+    ) {
         if text.is_empty() {
             return;
         }
@@ -233,14 +243,19 @@ fn layout_block_element(
     *cursor_y = cursor_y.saturating_add(element.style.margin.top);
 
     let outer_x = x.saturating_add(element.style.margin.left);
-    let raw_outer_width = width.saturating_sub(element.style.margin.left + element.style.margin.right);
+    let raw_outer_width =
+        width.saturating_sub(element.style.margin.left + element.style.margin.right);
     // Apply min/max-width
     let outer_width = raw_outer_width
         .min(element.style.max_width.unwrap_or(u32::MAX))
         .max(element.style.min_width);
     let background_top = *cursor_y;
     let background_index = if let Some(background_color) = element.style.background_color {
-        let blended_bg = apply_opacity(background_color, DEFAULT_BACKGROUND_COLOR, element.style.opacity);
+        let blended_bg = apply_opacity(
+            background_color,
+            DEFAULT_BACKGROUND_COLOR,
+            element.style.opacity,
+        );
         context.rects.push(RectCommand {
             x: outer_x,
             y: background_top,
@@ -261,15 +276,29 @@ fn layout_block_element(
         0
     };
 
-    let border_left = if !element.style.border_style_none { element.style.border.left } else { 0 };
-    let border_right = if !element.style.border_style_none { element.style.border.right } else { 0 };
+    let border_left = if !element.style.border_style_none {
+        element.style.border.left
+    } else {
+        0
+    };
+    let border_right = if !element.style.border_style_none {
+        element.style.border.right
+    } else {
+        0
+    };
 
     let content_x = outer_x
         .saturating_add(border_left)
         .saturating_add(element.style.padding.left)
         .saturating_add(bullet_indent);
     let content_width = outer_width
-        .saturating_sub(border_left + border_right + element.style.padding.left + element.style.padding.right + bullet_indent)
+        .saturating_sub(
+            border_left
+                + border_right
+                + element.style.padding.left
+                + element.style.padding.right
+                + bullet_indent,
+        )
         .max(1);
 
     if element.tag_name == "hr" {
@@ -305,7 +334,11 @@ fn layout_block_element(
 
     // Draw borders if present
     if !element.style.border_style_none {
-        let bc = apply_opacity(element.style.border_color, DEFAULT_BACKGROUND_COLOR, element.style.opacity);
+        let bc = apply_opacity(
+            element.style.border_color,
+            DEFAULT_BACKGROUND_COLOR,
+            element.style.opacity,
+        );
         let border_top_h = element.style.border.top;
         let border_bottom_h = element.style.border.bottom;
         let border_left_w = element.style.border.left;
@@ -340,7 +373,9 @@ fn layout_block_element(
         }
         if border_right_w > 0 {
             context.rects.push(RectCommand {
-                x: outer_x.saturating_add(outer_width).saturating_sub(border_right_w),
+                x: outer_x
+                    .saturating_add(outer_width)
+                    .saturating_sub(border_right_w),
                 y: background_top,
                 width: border_right_w,
                 height: background_height,
@@ -586,7 +621,11 @@ fn layout_table_element(
             .saturating_add(spacing.saturating_mul(placement.rowspan.saturating_sub(1) as u32));
 
         if let Some(background_color) = placement.cell.style.background_color {
-            let blended = apply_opacity(background_color, DEFAULT_BACKGROUND_COLOR, placement.cell.style.opacity);
+            let blended = apply_opacity(
+                background_color,
+                DEFAULT_BACKGROUND_COLOR,
+                placement.cell.style.opacity,
+            );
             context.rects.push(RectCommand {
                 x: cell_x,
                 y: cell_y,
@@ -942,7 +981,11 @@ fn layout_mixed_children(
     }
 }
 
-fn collect_inline_fragments(node: &StyledNode, output: &mut Vec<InlineFragment>, link_href: Option<&str>) {
+fn collect_inline_fragments(
+    node: &StyledNode,
+    output: &mut Vec<InlineFragment>,
+    link_href: Option<&str>,
+) {
     match node {
         StyledNode::Text(text) => {
             output.push(InlineFragment::Text {
@@ -953,7 +996,11 @@ fn collect_inline_fragments(node: &StyledNode, output: &mut Vec<InlineFragment>,
         }
         StyledNode::Element(element) => {
             let current_link = if element.tag_name == "a" {
-                element.attributes.get("href").map(String::as_str).or(link_href)
+                element
+                    .attributes
+                    .get("href")
+                    .map(String::as_str)
+                    .or(link_href)
             } else {
                 link_href
             };
@@ -1063,7 +1110,11 @@ fn layout_normal_fragments(
                 first_line = false;
                 pending_space = false;
             }
-            InlineFragment::Text { text, style, link_href } => {
+            InlineFragment::Text {
+                text,
+                style,
+                link_href,
+            } => {
                 let had_whitespace = text.chars().any(char::is_whitespace);
 
                 for word in text.split_whitespace() {
@@ -1154,7 +1205,11 @@ fn layout_preformatted_fragments(
                 context,
                 fonts,
             ),
-            InlineFragment::Text { text, style, link_href } => {
+            InlineFragment::Text {
+                text,
+                style,
+                link_href,
+            } => {
                 for character in text.chars() {
                     if character == '\n' {
                         emit_line(
@@ -1183,7 +1238,12 @@ fn layout_preformatted_fragments(
                     }
 
                     let mut buffer = [0_u8; 4];
-                    line.push_span(character.encode_utf8(&mut buffer), style, fonts, link_href.as_deref());
+                    line.push_span(
+                        character.encode_utf8(&mut buffer),
+                        style,
+                        fonts,
+                        link_href.as_deref(),
+                    );
                 }
             }
         }
@@ -1255,7 +1315,16 @@ fn emit_line_with_indent(
     fonts: &mut FontContext,
     indent: u32,
 ) {
-    emit_line_impl(line, container_style, x, width, cursor_y, context, fonts, indent);
+    emit_line_impl(
+        line,
+        container_style,
+        x,
+        width,
+        cursor_y,
+        context,
+        fonts,
+        indent,
+    );
 }
 
 fn emit_line(
@@ -1303,7 +1372,8 @@ fn emit_line_impl(
     for span in &line.spans {
         let span_opacity = span.style.opacity;
         if let Some(background_color) = span.style.background_color {
-            let blended_bg = apply_opacity(background_color, DEFAULT_BACKGROUND_COLOR, span_opacity);
+            let blended_bg =
+                apply_opacity(background_color, DEFAULT_BACKGROUND_COLOR, span_opacity);
             context.rects.push(RectCommand {
                 x: cursor_x,
                 y: *cursor_y,
@@ -1318,7 +1388,10 @@ fn emit_line_impl(
         } else {
             span.text.clone()
         };
-        let text_bg = span.style.background_color.unwrap_or(DEFAULT_BACKGROUND_COLOR);
+        let text_bg = span
+            .style
+            .background_color
+            .unwrap_or(DEFAULT_BACKGROUND_COLOR);
         context.texts.push(TextCommand {
             x: cursor_x,
             y: *cursor_y,

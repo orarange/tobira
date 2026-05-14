@@ -355,7 +355,9 @@ impl BrowserApp {
         }
         let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
-        let content_y = (pos_y as u32).saturating_sub(body_top).saturating_add(self.scroll_y);
+        let content_y = (pos_y as u32)
+            .saturating_sub(body_top)
+            .saturating_add(self.scroll_y);
         let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
         for link in &layout.links {
             if content_x >= link.x
