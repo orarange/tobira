@@ -6,22 +6,25 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 ## Handoff Rules
 
 - Read this file, `git status --short`, and the latest `git log --oneline -n 20` before making assumptions.
+- Confirm the current branch with `git branch --show-current` before starting work.
 - Update the `Current Snapshot` section when the high-level state changes.
 - Append a short entry to `Session Log` whenever you hand off or resume meaningful work.
+- Parallel work with Claude may happen on a different branch. Keep Codex changes isolated to the current branch and let merge reconciliation happen later through GitHub Copilot / the user's chosen merge flow.
 - Do not stage unrelated local helper artifacts unless the user explicitly asks for them.
   Current local artifacts that are present but not part of the tracked repo are:
   `.claude/`, `.repomix/`, `copilot.md`, `gemini.md`, `repomix-output.xmlbrowser.xml`
 
 ## Current Snapshot
 
-- Date: `2026-05-14`
+- Date: `2026-05-15`
 - Repo / package name: `tobira`
+- Active branch seen by Codex: `codex/codex`
 - App identity in code:
   - Cargo package: `tobira`
   - window title prefix: `Tobira`
   - README was previously under the old `Scratch Browser` name
 - Verification status:
-  - `cargo test` passes: `77` tests green on `2026-05-14`
+  - `cargo test` passes: `79` tests green on `2026-05-14`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -129,3 +132,9 @@ git log --oneline -n 20
 - Added address-bar clipboard support backed by the OS clipboard via `arboard`.
 - `Ctrl+C`, `Ctrl+X`, and `Ctrl+V` now work against the current address-bar selection / insertion point.
 - Added focused tests for selected-text and cut-selection behavior in `src/gui.rs`.
+
+### 2026-05-15 - Codex (parallel branch workflow)
+
+- Confirmed the current Codex branch is `codex/codex`.
+- Recorded the new workflow: Codex and Claude may implement in parallel on separate branches, with merge reconciliation handled later through GitHub Copilot / the user's preferred merge flow.
+- Future handoffs should always note the active branch before assuming current repo state.
