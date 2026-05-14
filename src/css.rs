@@ -2226,10 +2226,10 @@ fn resolve_calc_operand_f32(token: &str, parent_font_size: u32) -> Option<f32> {
         return parse_float(n).map(|f| f * 16.0);
     }
     if let Some(n) = t.strip_suffix("vw") {
-        return parse_float(n).map(|f| f * 12.8); // viewport 1280px
+        return parse_float(n).map(|f| f * 12.8); // viewport 1280px wide
     }
     if let Some(n) = t.strip_suffix("vh") {
-        return parse_float(n).map(|f| f * 7.2); // viewport 720px
+        return parse_float(n).map(|f| f * 8.0); // viewport 800px tall (matches parse_length)
     }
     if let Some(n) = t.strip_suffix('%') {
         return parse_float(n).map(|f| f * parent_font_size as f32 / 100.0);
