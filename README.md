@@ -1,6 +1,6 @@
-# Scratch Browser
+# Tobira
 
-Scratch Browser is a from-scratch browser experiment built without Chromium, WebView, or a browser SDK.
+Tobira is a from-scratch browser experiment built without Chromium, WebView, or a browser SDK.
 
 Current capabilities:
 
@@ -13,34 +13,37 @@ Current capabilities:
   - `style=""` inline declarations
   - `link rel="stylesheet"` over `http://` and `https://`
 - Selector support for:
-  - tag selectors
-  - `.class`
-  - `#id`
-  - descendant selectors
-  - child selectors with `>`
+  - tag, `.class`, `#id`, `*` universal
+  - descendant (` `), child (`>`), adjacent sibling (`+`), general sibling (`~`)
+  - attribute selectors: `[attr]`, `[attr=val]`, `[attr*=val]`, `[attr^=val]`, `[attr$=val]`
+  - pseudo-classes: `:first-child`, `:last-child`, `:nth-child(an+b)`, `:not(...)`
+  - chained and mixed combinator chains: `A + B + C`, `A + B > C`, `A ~ B > C`
 - Style support for:
-  - `display`
-  - `color`
-  - `background-color`
-  - `margin`
-  - `padding`
-  - `font-size`
-  - `font-weight`
-  - `text-align`
-  - `text-decoration`
-  - `white-space`
+  - box model: `display`, `margin`, `padding`, `width`, `height`, `max-width`, `min-width`, `box-sizing`
+  - color: `color`, `background-color`, `opacity`, `border-color`
+  - border: `border`, `border-width`, `border-style`, `border-radius`, `outline`
+  - typography: `font-size`, `font-weight`, `font-style`, `font-family`, `text-align`, `text-decoration`, `text-transform`, `text-indent`, `letter-spacing`, `line-height`, `white-space`
+  - layout: `overflow`, `list-style-type`, `cursor`, `vertical-align`
+  - color values: hex (`#rgb`, `#rrggbb`, `#rgba`, `#rrggbbaa`), `rgb()`, `rgba()` (alpha blended), `hsl()`, `hsla()`, 140+ named colors
+  - CSS custom properties (`--var`) and `var(--name, fallback)`
+  - `calc()` with correct operator precedence (`*`/`/` before `+`/`-`)
+  - viewport units: `vw`, `vh` (consistent 1280×800 base)
+  - `@media` with `max-width`, `min-width`, `screen`, `print`
 - Lightweight GUI window with `winit`
 - Software rendering with `softbuffer`
 - System font rendering with TrueType / OpenType fonts via `fontdue`
 - Plain text CLI renderer with `--cli`
-- Basic JavaScript execution with `boa_engine`
-
-Still missing:
-
-- full CSS layout coverage
-- DOM APIs beyond the basics
-- address bar, tabs, history, navigation UI
-- images, forms, and modern page features
+- JavaScript execution via `boa_engine`:
+  - inline `<script>` and external `<script src>`
+  - block-list filter (allows most utility scripts; blocks known-dangerous APIs)
+  - `document.write()` / `document.writeln()` with recursive expansion
+  - `document.title`, `location.href`
+  - `window.crypto` stubs (`getRandomValues`, `randomUUID`)
+  - `URLSearchParams` stub
+  - `document.cookie` read stub
+  - `console.log()` / `warn()` / `error()`
+  - immediate `setTimeout(...)` fallback
+- Site-specific rendering paths for YouTube and Google
 
 ## Run
 
@@ -77,49 +80,19 @@ cargo run -- http://127.0.0.1:8765/demo/js-demo.html
 - `PageUp` / `PageDown`: page scroll
 - `Home` / `End`: jump to top or bottom
 - `R`: reload
+- `Ctrl+L`: focus the address bar
 - `Esc`: quit
 
 ## Project Structure
 
-- `src/url.rs`
-  URL parsing and relative URL resolution
-- `src/http.rs`
-  HTTP fetch, response parsing, chunked decoding, redirect handling
-- `src/html.rs`
-  HTML tokenization and DOM-like tree building
-- `src/css.rs`
-  CSS parsing, selector matching, cascade, and computed styles
-- `src/font.rs`
-  System font loading, glyph rasterization, and text measurement helpers
-- `src/layout.rs`
-  Styled text layout and block rendering model
-- `src/browser.rs`
-  Page loading, stylesheet collection, and browser page model
-- `src/gui.rs`
-  `winit` event loop and software drawing
-- `src/render.rs`
-  Plain text fallback renderer for CLI mode
-- `src/main.rs`
-  Application entry point
-
-## Next Steps
-
-1. Expand CSS coverage for more layout properties
-2. Add better block layout and inline formatting behavior
-3. Add address bar and navigation controls
-4. Add image loading and richer page rendering
-5. Add JavaScript execution for highly dynamic pages
-
-## JavaScript Scope
-
-Current JS support is intentionally small:
-
-- inline `<script>`
-- external `<script src>`
-- `document.write()` / `document.writeln()`
-- `document.title`
-- `location.href`
-- `console.log()` / `warn()` / `error()`
-- immediate `setTimeout(...)` fallback
-
-It does not yet implement a real DOM, query selectors, events, async networking, or framework-level browser APIs.
+- `src/url.rs` — URL parsing and relative URL resolution
+- `src/http.rs` — HTTP fetch, response parsing, chunked decoding, redirect handling
+- `src/html.rs` — HTML tokenization and DOM-like tree building
+- `src/css.rs` — CSS parsing, selector matching, cascade, computed styles, `@media`, `calc()`, color parsing
+- `src/layout.rs` — Layout pipeline, text flow, tables, image placement, background/border drawing, link hitboxes
+- `src/font.rs` — System font loading, glyph rasterization, text measurement
+- `src/browser.rs` — Page loading pipeline, site-specific rewrites, YouTube/Google synthetic documents
+- `src/gui.rs` — `winit` event loop, address bar, input handling, software rendering
+- `src/js.rs` — Sandboxed JS execution, block-list filter, browser-ish stubs
+- `src/render.rs` — Plain text fallback renderer for CLI mode
+- `src/main.rs` — Application entry point
