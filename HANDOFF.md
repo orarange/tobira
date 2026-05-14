@@ -21,7 +21,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - window title prefix: `Tobira`
   - README was previously under the old `Scratch Browser` name
 - Verification status:
-  - `cargo test` passes: `74` tests green on `2026-05-14`
+  - `cargo test` passes: `77` tests green on `2026-05-14`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -38,6 +38,14 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - clickable links in the rendered page with hit-testing in the GUI
   - image loading / rendering for supported formats
   - guarded JavaScript execution through `boa_engine` with a growing set of stubs
+  - lightweight mutable DOM bridge for script execution
+    - real `document.querySelector(...)` / `querySelectorAll(...)`
+    - `getElementById(...)`
+    - `createElement(...)`
+    - `appendChild(...)` / `insertBefore(...)` / `remove()`
+    - `innerHTML`, `textContent`, `classList`, `id`, `className`
+    - `document.write(...)` with recursive script expansion
+    - DOM mutations serialized back into the HTML pipeline after JS runs
   - site-specific rendering paths for:
     - YouTube watch pages
     - YouTube home shell / cards / nudge UI
@@ -55,7 +63,9 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - `src/gui.rs`
   Custom chrome, address bar state, input handling, hover/click navigation, rendering integration.
 - `src/js.rs`
-  Sandboxed JS execution policy and browser-ish stubs.
+  Sandboxed JS execution policy plus the mutable DOM bridge used during script execution.
+- `src/html.rs`
+  Hand-rolled HTML parser. Now preserves raw text for `script` / `style` / `title` / `textarea`, which matters for JS and CSS correctness.
 - `src/http.rs`
   HTTP/TLS fetch layer and browser-like request headers.
 
@@ -73,6 +83,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 - README capability list is partially stale; prefer this file for the latest snapshot.
 - JS support is still far from a full browser DOM / framework runtime.
+- Event dispatch, `addEventListener` depth, and async network-backed browser APIs are still mostly stubbed.
 - History / back-forward behavior is not yet called out as complete.
 - Modern app-shell sites may still need more DOM APIs, events, storage behavior, and CSS coverage.
 - Actual media playback and a true YouTube watch experience are still incomplete.
@@ -98,3 +109,11 @@ git log --oneline -n 20
 - Confirmed `cargo test` is green with `74` passing tests.
 - Added this handoff file and linked it from `README.md`.
 - Established the rule that this file should be updated on every handoff / resume.
+
+### 2026-05-14 - Codex (DOM / JS pass)
+
+- Reworked `src/js.rs` so script execution runs against a lightweight mutable DOM instead of mostly fake stubs.
+- Added DOM-backed support for selectors, element creation, child insertion/removal, `innerHTML`, `textContent`, `classList`, and ID/class mutation.
+- Changed `document.write(...)` handling to mutate the DOM and recursively execute script tags written by scripts.
+- Fixed a parsing correctness bug by teaching `src/html.rs` to keep raw-text contents for `script`, `style`, `title`, and `textarea`.
+- Verified the current state with `cargo test` (`77` passing tests) and `cargo build`.
