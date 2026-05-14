@@ -210,11 +210,29 @@ fn tokenize(input: &str) -> Vec<Token> {
             }
         }
 
+        let is_raw_text = !self_closing && is_raw_text_element(&name);
         tokens.push(Token::StartTag {
-            name,
+            name: name.clone(),
             attributes,
             self_closing,
         });
+
+        if is_raw_text {
+            if let Some(close_start) = find_raw_text_close(input, index, &name) {
+                let raw_text = &input[index..close_start];
+                if !raw_text.is_empty() {
+                    tokens.push(Token::Text(raw_text.to_string()));
+                }
+                tokens.push(Token::EndTag(name.clone()));
+                index = consume_raw_text_close(input, close_start, &name);
+            } else {
+                let raw_text = &input[index..];
+                if !raw_text.is_empty() {
+                    tokens.push(Token::Text(raw_text.to_string()));
+                }
+                break;
+            }
+        }
     }
 
     tokens
@@ -287,6 +305,54 @@ fn is_void_element(name: &str) -> bool {
             | "track"
             | "wbr"
     )
+}
+
+fn is_raw_text_element(name: &str) -> bool {
+    matches!(name, "script" | "style" | "title" | "textarea")
+}
+
+fn find_raw_text_close(input: &str, start: usize, tag_name: &str) -> Option<usize> {
+    let mut search_index = start;
+    let close_tag = format!("</{tag_name}");
+
+    while search_index < input.len() {
+        let remaining = &input[search_index..];
+        let Some(offset) = find_case_insensitive(remaining, &close_tag) else {
+            return None;
+        };
+        let close_start = search_index + offset;
+        let name_end = close_start + close_tag.len();
+        if name_end >= input.len() {
+            return Some(close_start);
+        }
+
+        let trailing = input.as_bytes()[name_end];
+        if trailing.is_ascii_whitespace() || trailing == b'>' {
+            return Some(close_start);
+        }
+
+        search_index = close_start + 1;
+    }
+
+    None
+}
+
+fn consume_raw_text_close(input: &str, close_start: usize, tag_name: &str) -> usize {
+    let mut index = close_start + 2 + tag_name.len();
+    consume_until_tag_end(input, &mut index);
+    index
+}
+
+fn find_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return Some(0);
+    }
+
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn decode_html_entities(input: &str) -> String {
@@ -411,5 +477,29 @@ mod tests {
 
         assert_eq!(frameset.tag_name, "frameset");
         assert_eq!(frameset.children.len(), 2);
+    }
+
+    #[test]
+    fn keeps_script_contents_as_raw_text() {
+        let document = parse_document(
+            "<script>document.write('<script>document.write(\"<p>Nested</p>\")</' + 'script>')</script>",
+        );
+        let Node::Element(root) = document else {
+            panic!("root should be an element");
+        };
+
+        let Node::Element(script) = &root.children[0] else {
+            panic!("first child should be a script");
+        };
+
+        assert_eq!(script.tag_name, "script");
+        assert_eq!(script.children.len(), 1);
+
+        let Node::Text(source) = &script.children[0] else {
+            panic!("script should contain raw text");
+        };
+
+        assert!(source.contains("</' + 'script>"));
+        assert!(source.contains("<p>Nested</p>"));
     }
 }

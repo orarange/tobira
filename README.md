@@ -2,6 +2,9 @@
 
 Tobira is a from-scratch browser experiment built without Chromium, WebView, or a browser SDK.
 
+For the most current implementation snapshot and handoff notes, see [HANDOFF.md](HANDOFF.md).
+When work switches between Codex, Claude, Gemini, Copilot, or a fresh session, update `HANDOFF.md` so the next person can resume quickly.
+
 Current capabilities:
 
 - Hand-rolled `http://` and `https://` client
@@ -43,6 +46,12 @@ Current capabilities:
   - `document.cookie` read stub
   - `console.log()` / `warn()` / `error()`
   - immediate `setTimeout(...)` fallback
+- Lightweight mutable DOM support for:
+  - `document.querySelector(...)` / `querySelectorAll(...)`
+  - `document.getElementById(...)`
+  - `document.createElement(...)`
+  - `appendChild(...)`, `insertBefore(...)`, `remove()`
+  - `innerHTML`, `textContent`, `classList`, `id`, `className`
 - Site-specific rendering paths for YouTube and Google
 
 ## Run
@@ -74,6 +83,13 @@ python -m http.server 8765
 cargo run -- http://127.0.0.1:8765/demo/js-demo.html
 ```
 
+Local DOM demo:
+
+```bash
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/dom-demo.html
+```
+
 ## GUI Controls
 
 - `Up` / `Down`: scroll
@@ -81,6 +97,8 @@ cargo run -- http://127.0.0.1:8765/demo/js-demo.html
 - `Home` / `End`: jump to top or bottom
 - `R`: reload
 - `Ctrl+L`: focus the address bar
+- `Ctrl+A`: select all text in the address bar
+- `Ctrl+C` / `Ctrl+X` / `Ctrl+V`: copy, cut, and paste inside the address bar
 - `Esc`: quit
 
 ## Project Structure
@@ -93,6 +111,6 @@ cargo run -- http://127.0.0.1:8765/demo/js-demo.html
 - `src/font.rs` — System font loading, glyph rasterization, text measurement
 - `src/browser.rs` — Page loading pipeline, site-specific rewrites, YouTube/Google synthetic documents
 - `src/gui.rs` — `winit` event loop, address bar, input handling, software rendering
-- `src/js.rs` — Sandboxed JS execution, block-list filter, browser-ish stubs
+- `src/js.rs` — Sandboxed JS execution, block-list filter, mutable DOM bridge, browser-ish stubs
 - `src/render.rs` — Plain text fallback renderer for CLI mode
 - `src/main.rs` — Application entry point
