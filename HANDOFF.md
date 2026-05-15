@@ -7,9 +7,10 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 - Read this file, `git status --short`, and the latest `git log --oneline -n 20` before making assumptions.
 - Confirm the current branch with `git branch --show-current` before starting work.
+- Codex must stay on the dedicated branch `codex/codex` unless the user explicitly changes that rule.
 - Update the `Current Snapshot` section when the high-level state changes.
 - Append a short entry to `Session Log` whenever you hand off or resume meaningful work.
-- Parallel work with Claude may happen on a different branch. Keep Codex changes isolated to the current branch and let merge reconciliation happen later through GitHub Copilot / the user's chosen merge flow.
+- Claude work may happen on its own dedicated branch. Keep Codex changes isolated to `codex/codex` and let merge reconciliation happen later through GitHub Copilot / the user's chosen merge flow.
 - Do not stage unrelated local helper artifacts unless the user explicitly asks for them.
   Current local artifacts that are present but not part of the tracked repo are:
   `.claude/`, `.repomix/`, `copilot.md`, `gemini.md`, `repomix-output.xmlbrowser.xml`
@@ -138,3 +139,8 @@ git log --oneline -n 20
 - Confirmed the current Codex branch is `codex/codex`.
 - Recorded the new workflow: Codex and Claude may implement in parallel on separate branches, with merge reconciliation handled later through GitHub Copilot / the user's preferred merge flow.
 - Future handoffs should always note the active branch before assuming current repo state.
+
+### 2026-05-15 - Codex (fixed branch rule)
+
+- Locked the documented Codex workflow to the dedicated branch `codex/codex`.
+- Claude is expected to stay on its own separate branch so both agents can work in parallel without branch drift.
