@@ -1,6 +1,6 @@
-use crate::css::{
+﻿use crate::css::{
     Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, LengthValue,
-    StyledElement, StyledNode, TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode,
+    Overflow, StyledElement, StyledNode, TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode,
     apply_text_transform,
 };
 use crate::font::FontContext;
@@ -500,6 +500,21 @@ fn layout_block_element(
     // Restore parent background color after children are rendered
     context.background_color = saved_bg;
 
+    // overflow: hidden — clip commands that fall outside the element box
+    if element.style.overflow == Overflow::Hidden {
+        let start_clip_idx = background_cmd_index
+            .map(|i| i + 1)
+            .unwrap_or(context.commands.len());
+        clip_commands_to_box(
+            &mut context.commands,
+            start_clip_idx,
+            outer_x,
+            background_top,
+            outer_width,
+            background_height,
+        );
+    }
+
     // Draw borders if present
     if !element.style.border_style_none {
         let bc = apply_opacity(
@@ -553,6 +568,54 @@ fn layout_block_element(
     }
 
     *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+}
+
+/// Remove draw commands (from index start) that fall entirely outside the given box.
+fn clip_commands_to_box(
+    commands: &mut Vec<DrawCommand>,
+    start: usize,
+    clip_x: u32,
+    clip_y: u32,
+    clip_w: u32,
+    clip_h: u32,
+) {
+    let clip_x2 = clip_x.saturating_add(clip_w);
+    let clip_y2 = clip_y.saturating_add(clip_h);
+
+    let mut i = start;
+    while i < commands.len() {
+        let outside = match &commands[i] {
+            DrawCommand::Rect(r) => {
+                r.x >= clip_x2
+                    || r.y >= clip_y2
+                    || r.x.saturating_add(r.width) <= clip_x
+                    || r.y.saturating_add(r.height) <= clip_y
+            }
+            DrawCommand::Text(t) => {
+                t.y >= clip_y2
+                    || t.y.saturating_add(t.font_size_px) <= clip_y
+                    || t.x >= clip_x2
+                    || t.x.saturating_add(t.width) <= clip_x
+            }
+            DrawCommand::Image(img) => {
+                img.x >= clip_x2
+                    || img.y >= clip_y2
+                    || img.x.saturating_add(img.width) <= clip_x
+                    || img.y.saturating_add(img.height) <= clip_y
+            }
+            DrawCommand::Layer(l) => {
+                l.x >= clip_x2
+                    || l.y >= clip_y2
+                    || l.x.saturating_add(l.width) <= clip_x
+                    || l.y.saturating_add(l.height) <= clip_y
+            }
+        };
+        if outside {
+            commands.remove(i);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32) {
@@ -2287,5 +2350,33 @@ mod tests {
             crate::css::StyledNode::Text(_) => None,
             crate::css::StyledNode::Element(child) => find_paragraph(child),
         })
+    }
+    #[test]
+    fn test_overflow_hidden_clips_commands() {
+        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::html::parse_document;
+        use crate::font::FontContext;
+        use crate::image::ImageStore;
+
+        let html = r#"<div style="overflow:hidden;height:50px;background:#ffffff"><div style="height:100px;background:#ff0000">Content</div></div>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &stylesheet, 800);
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
+
+        // The outer div is at y=8 (body margin), height=50, so max_y=58
+        let div_top = 8u32;
+        let max_y = div_top + 50;
+        for rect in layout.rects() {
+            if rect.y >= div_top && rect.y < max_y {
+                assert!(
+                    rect.y.saturating_add(rect.height) <= max_y + 2,
+                    "Rect y={} height={} exceeds overflow:hidden boundary y={}",
+                    rect.y, rect.height, max_y
+                );
+            }
+        }
     }
 }
