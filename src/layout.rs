@@ -45,6 +45,28 @@ impl LayoutDocument {
     }
 }
 
+/// Shift a DrawCommand by (dx, dy), saturating on overflow.
+fn shift_command(cmd: &mut DrawCommand, dx: u32, dy: u32) {
+    match cmd {
+        DrawCommand::Rect(r) => {
+            r.x = r.x.saturating_add(dx);
+            r.y = r.y.saturating_add(dy);
+        }
+        DrawCommand::Text(t) => {
+            t.x = t.x.saturating_add(dx);
+            t.y = t.y.saturating_add(dy);
+        }
+        DrawCommand::Image(i) => {
+            i.x = i.x.saturating_add(dx);
+            i.y = i.y.saturating_add(dy);
+        }
+        DrawCommand::Layer(l) => {
+            l.x = l.x.saturating_add(dx);
+            l.y = l.y.saturating_add(dy);
+        }
+    }
+}
+
 fn collect_texts(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec<TextCommand> {
     let mut out = Vec::new();
     for cmd in commands {
@@ -56,7 +78,7 @@ fn collect_texts(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec<
                 out.push(t2);
             }
             DrawCommand::Layer(l) => {
-                out.extend(collect_texts(&l.commands, offset_x + l.x, offset_y + l.y));
+                out.extend(collect_texts(&l.commands, offset_x.saturating_add(l.x), offset_y.saturating_add(l.y)));
             }
             _ => {}
         }
@@ -75,7 +97,7 @@ fn collect_rects(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec<
                 out.push(r2);
             }
             DrawCommand::Layer(l) => {
-                out.extend(collect_rects(&l.commands, offset_x + l.x, offset_y + l.y));
+                out.extend(collect_rects(&l.commands, offset_x.saturating_add(l.x), offset_y.saturating_add(l.y)));
             }
             _ => {}
         }
@@ -94,7 +116,7 @@ fn collect_images(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec
                 out.push(i2);
             }
             DrawCommand::Layer(l) => {
-                out.extend(collect_images(&l.commands, offset_x + l.x, offset_y + l.y));
+                out.extend(collect_images(&l.commands, offset_x.saturating_add(l.x), offset_y.saturating_add(l.y)));
             }
             _ => {}
         }
@@ -978,21 +1000,6 @@ fn layout_table_element(
         let cell_height = cell_span_height(&row_heights, placement.row_index, placement.rowspan)
             .saturating_add(spacing.saturating_mul(placement.rowspan.saturating_sub(1) as u32));
 
-        if let Some(background_color) = placement.cell.style.background_color {
-            let blended = apply_opacity(
-                background_color,
-                context.background_color,
-                placement.cell.style.effective_opacity,
-            );
-            context.commands.push(DrawCommand::Rect(RectCommand {
-                x: cell_x,
-                y: cell_y,
-                width: cell_width.max(1),
-                height: cell_height.max(1),
-                color: blended,
-            }));
-        }
-
         let content_area_height = cell_height.saturating_sub(padding.saturating_mul(2));
         let vertical_offset = match placement.cell.style.vertical_align {
             VerticalAlign::Top => 0,
@@ -1004,26 +1011,61 @@ fn layout_table_element(
         let content_y = cell_y.saturating_add(padding).saturating_add(vertical_offset);
 
         if placement.cell.style.opacity < 255 {
-            // Wrap cell content in a LayerCommand for opacity compositing
+            // Wrap cell content in a LayerCommand for opacity compositing.
+            // Emit the background rect INSIDE the layer with the raw (unblended) color so
+            // it is composited once by the LayerCommand — not pre-blended into the parent.
             let layer_w = cell_width.max(1);
-            let layer_h = layout.content_height.max(1);
-            // Cell layout commands are already at (0,0)-relative; wrap them in a layer
+            let layer_h = cell_height.max(1);
+            let mut layer_commands = Vec::new();
+            if let Some(background_color) = placement.cell.style.background_color {
+                layer_commands.push(DrawCommand::Rect(RectCommand {
+                    x: 0,
+                    y: 0,
+                    width: layer_w,
+                    height: layer_h,
+                    color: background_color,
+                }));
+            }
+            // Content commands are (0,0)-relative within the cell; offset by padding/valign
+            let pad_x = padding;
+            let pad_y = padding.saturating_add(vertical_offset);
+            for cmd in &layout.commands {
+                let mut shifted = cmd.clone();
+                shift_command(&mut shifted, pad_x, pad_y);
+                layer_commands.push(shifted);
+            }
             context.commands.push(DrawCommand::Layer(LayerCommand {
-                x: content_x,
-                y: content_y,
+                x: cell_x,
+                y: cell_y,
                 width: layer_w,
                 height: layer_h,
                 opacity: placement.cell.style.opacity,
-                commands: layout.commands.clone(),
+                commands: layer_commands,
             }));
+            // Links are content-relative; shift by cell position + padding/valign
             context.links.extend(layout.links.iter().map(|link| LinkCommand {
-                x: link.x.saturating_add(content_x),
-                y: link.y.saturating_add(content_y),
+                x: link.x.saturating_add(cell_x).saturating_add(padding),
+                y: link.y.saturating_add(cell_y).saturating_add(padding).saturating_add(vertical_offset),
                 width: link.width,
                 height: link.height,
                 href: link.href.clone(),
             }));
         } else {
+            // opacity == 255: emit background rect directly into parent context
+            if let Some(background_color) = placement.cell.style.background_color {
+                let blended = apply_opacity(
+                    background_color,
+                    context.background_color,
+                    placement.cell.style.effective_opacity,
+                );
+                context.commands.push(DrawCommand::Rect(RectCommand {
+                    x: cell_x,
+                    y: cell_y,
+                    width: cell_width.max(1),
+                    height: cell_height.max(1),
+                    color: blended,
+                }));
+            }
             merge_fragment(context, layout, content_x, content_y);
         }
     }

@@ -87,6 +87,8 @@ struct BrowserApp {
     hovered_target: HitTarget,
     hovered_link_url: Option<String>,
     ime_composing: bool,
+    /// Reusable scratch buffer for layer compositing — avoids per-frame allocation.
+    scratch: Vec<u32>,
 }
 
 impl BrowserApp {
@@ -118,6 +120,7 @@ impl BrowserApp {
             hovered_target: HitTarget::None,
             hovered_link_url: None,
             ime_composing: false,
+            scratch: Vec::new(),
         }
     }
 
@@ -323,6 +326,7 @@ impl BrowserApp {
             viewport_height,
             self.scroll_y,
             &layout,
+            &mut self.scratch,
         );
 
         buffer
@@ -2064,6 +2068,7 @@ fn paint_layout(
     viewport_height: u32,
     scroll_y: u32,
     layout: &LayoutDocument,
+    scratch: &mut Vec<u32>,
 ) {
     let page = if let DocumentContent::Loaded(page) = &document.content {
         Some(page)
@@ -2071,7 +2076,6 @@ fn paint_layout(
         None
     };
 
-    let mut scratch: Vec<u32> = Vec::new();
     render_commands(
         buffer,
         width,
@@ -2083,7 +2087,7 @@ fn paint_layout(
         &layout.commands,
         page,
         fonts,
-        &mut scratch,
+        scratch,
     );
 }
 
@@ -2211,12 +2215,13 @@ fn render_layer(
     let lw = layer.width;
     let lh = layer.height;
 
-    // Reuse scratch buffer to avoid per-frame allocation
+    // Reuse scratch buffer to avoid per-frame allocation.
+    // Layout: scratch[0..needed] = this layer's offscreen pixels;
+    //         scratch[needed..]  = scratch space for nested layers (split_at_mut below).
     let needed = (lw * lh) as usize;
     if scratch.len() < needed {
         scratch.resize(needed, 0);
     }
-    let offscreen = &mut scratch[..needed];
 
     // Copy backdrop from main framebuffer into offscreen (only visible region matters,
     // but we need a full layer-sized buffer for rendering sub-commands)
@@ -2226,15 +2231,18 @@ fn render_layer(
         let buf_start = (buf_row * buf_width + dst_x) as usize;
         let off_start = (layer_row * lw + src_x_start) as usize;
         let len = visible_w as usize;
-        if buf_start + len <= buffer.len() && off_start + len <= offscreen.len() {
-            offscreen[off_start..off_start + len]
-                .copy_from_slice(&buffer[buf_start..buf_start + len]);
+        if buf_start + len <= buffer.len() && off_start + len <= scratch.len() {
+            let buf_slice = &buffer[buf_start..buf_start + len];
+            scratch[off_start..off_start + len].copy_from_slice(buf_slice);
         }
     }
 
     // Render layer's sub-commands into the offscreen buffer.
     // Sub-commands are layer-relative (rebased at layout time), so offset and scroll are 0.
-    // We need a separate scratch for nested layers since we've borrowed scratch above.
+    // scratch holds this layer's offscreen pixels (reused across frames via BrowserApp).
+    // Nested LayerCommands within this layer use a local vec; deeply-nested layers are rare,
+    // and the main per-frame allocation (this layer's offscreen) is already eliminated.
+    let offscreen = &mut scratch[..needed];
     let mut nested_scratch: Vec<u32> = Vec::new();
     render_commands(
         offscreen,

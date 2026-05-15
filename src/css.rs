@@ -806,9 +806,13 @@ fn compute_style(
 
     style.effective_opacity = parent_style
         .map(|parent| {
-            let parent_is_block = !matches!(parent.display, Display::Inline);
-            if parent.opacity < 255 && parent_is_block {
-                // Parent is a block stacking context — reset accumulation
+            // A parent with opacity < 255 that is NOT purely inline creates a stacking
+            // context (Block, ListItem, None, or any table element).  The LayerCommand
+            // compositor handles the parent's opacity, so children must NOT pre-multiply
+            // it into effective_opacity — reset to the child's own opacity instead.
+            let parent_is_stacking_context = parent.opacity < 255
+                && !matches!(parent.display, Display::Inline);
+            if parent_is_stacking_context {
                 style.opacity
             } else {
                 ((parent.effective_opacity as u16 * style.opacity as u16) / 255) as u8
