@@ -1,12 +1,14 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::mem;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use boa_engine::object::{ObjectInitializer, builtins::JsFunction};
+use boa_engine::object::{ObjectInitializer, builtins::{JsFunction, JsPromise}};
 use boa_engine::property::Attribute;
 use boa_engine::{
-    Context, Finalize, JsData, JsResult, JsValue, NativeFunction, Source, Trace, js_string,
+    Context, Finalize, JsData, JsNativeError, JsResult, JsValue, NativeFunction, Source, Trace,
+    js_string,
 };
 
 use crate::html::{Node, parse_document};
@@ -14,15 +16,17 @@ use crate::http::fetch;
 use crate::text::decode_text_response;
 use crate::url::Url;
 
-const MAX_SCRIPT_SOURCE_BYTES: usize = 48 * 1024;
-const MAX_TOTAL_SCRIPT_BYTES: usize = 192 * 1024;
-const MAX_SCRIPT_ITERATIONS: usize = 256;
+const MAX_SCRIPT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_TOTAL_SCRIPT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SCRIPT_ITERATIONS: usize = 1024;
+const JS_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessedScriptHtml {
     pub html: String,
     pub title_override: Option<String>,
     pub console_logs: Vec<String>,
+    pub navigation_target: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -88,7 +92,63 @@ struct DomClassListHandle {
     node_id: usize,
 }
 
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct FetchResponseHandle {
+    #[unsafe_ignore_trace]
+    response: crate::http::HttpResponse,
+}
+
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct ResponseHeadersHandle {
+    #[unsafe_ignore_trace]
+    headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Trace, Finalize, JsData)]
+struct XmlHttpRequestHandle {
+    #[unsafe_ignore_trace]
+    state: RefCell<XmlHttpRequestState>,
+}
+
+#[derive(Debug, Default)]
+struct XmlHttpRequestState {
+    method: String,
+    url: Option<String>,
+    request_headers: BTreeMap<String, String>,
+    ready_state: u8,
+    status: u16,
+    status_text: String,
+    response_text: String,
+    response_url: String,
+}
+
 pub fn process_document_scripts(html: &str, base_url: &Url) -> ProcessedScriptHtml {
+    let html_owned = html.to_string();
+    let base_url_owned = base_url.clone();
+    let worker = thread::Builder::new()
+        .name("tobira-js".to_string())
+        .stack_size(JS_THREAD_STACK_BYTES)
+        .spawn({
+            let html = html_owned.clone();
+            let base_url = base_url_owned.clone();
+            move || process_document_scripts_impl(&html, &base_url)
+        });
+
+    match worker {
+        Ok(handle) => match handle.join() {
+            Ok(processed) => processed,
+            Err(_) => ProcessedScriptHtml {
+                html: html_owned,
+                title_override: None,
+                console_logs: vec!["js error: runtime worker panicked".to_string()],
+                navigation_target: None,
+            },
+        },
+        Err(_) => process_document_scripts_impl(html, base_url),
+    }
+}
+
+fn process_document_scripts_impl(html: &str, base_url: &Url) -> ProcessedScriptHtml {
     let mut runtime = JavaScriptRuntime::new(base_url, html);
     let mut iterations = 0;
 
@@ -114,6 +174,7 @@ pub fn process_document_scripts(html: &str, base_url: &Url) -> ProcessedScriptHt
         html,
         title_override,
         console_logs: runtime.take_logs(),
+        navigation_target: runtime.navigation_target(base_url),
     }
 }
 
@@ -156,7 +217,7 @@ impl JavaScriptRuntime {
 
         if !is_supported_script_source(source, &self.host) {
             self.push_log(format!(
-                "js skip: unsupported script pattern ({} bytes)",
+                "js skip: script policy rejected source ({} bytes)",
                 source.len()
             ));
             return;
@@ -172,8 +233,13 @@ impl JavaScriptRuntime {
 
         self.executed_bytes = self.executed_bytes.saturating_add(source.len());
 
-        if let Err(error) = self.context.eval(Source::from_bytes(source)) {
-            self.push_log(format!("js error: {error}"));
+        match self.context.eval(Source::from_bytes(source)) {
+            Ok(_) => {
+                if let Err(error) = self.context.run_jobs() {
+                    self.push_log(format!("js job error: {error}"));
+                }
+            }
+            Err(error) => self.push_log(format!("js error: {error}")),
         }
     }
 
@@ -206,6 +272,12 @@ impl JavaScriptRuntime {
         if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
             host.state.borrow_mut().console_logs.push(message);
         }
+    }
+
+    fn navigation_target(&self, base_url: &Url) -> Option<String> {
+        let host = self.context.get_data::<JavaScriptHostData>()?;
+        let href = host.state.borrow().location_href.clone();
+        (href != base_url.to_string()).then_some(href)
     }
 
     fn next_script(&self) -> Option<(usize, BTreeMap<String, String>, String)> {
@@ -1132,6 +1204,11 @@ fn install_browser_globals(context: &mut Context) {
             1,
         )
         .function(
+            NativeFunction::from_fn_ptr(js_document_create_text_node),
+            js_string!("createTextNode"),
+            1,
+        )
+        .function(
             NativeFunction::from_fn_ptr(js_add_event_listener),
             js_string!("addEventListener"),
             2,
@@ -1388,6 +1465,20 @@ fn install_browser_globals(context: &mut Context) {
         )
         .expect("prompt should be installable");
     context
+        .register_global_builtin_callable(
+            js_string!("fetch"),
+            2,
+            NativeFunction::from_fn_ptr(js_fetch),
+        )
+        .expect("fetch should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("__tobiraCreateXMLHttpRequest"),
+            0,
+            NativeFunction::from_fn_ptr(js_create_xml_http_request),
+        )
+        .expect("XMLHttpRequest factory should be installable");
+    context
         .register_global_property(js_string!("innerWidth"), 1280, Attribute::all())
         .expect("innerWidth should be installable");
     context
@@ -1464,6 +1555,10 @@ fn install_browser_globals(context: &mut Context) {
             Attribute::all(),
         )
         .expect("URLSearchParams should be installable");
+
+    let _ = context.eval(Source::from_bytes(
+        "globalThis.XMLHttpRequest = function XMLHttpRequest(){ return __tobiraCreateXMLHttpRequest(); };",
+    ));
 }
 
 fn build_simple_node_list_stub(context: &mut Context) -> boa_engine::object::JsObject {
@@ -1503,6 +1598,26 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_class_name).to_js_function(context.realm());
     let set_class_name =
         NativeFunction::from_fn_ptr(js_dom_set_class_name).to_js_function(context.realm());
+    let get_value = NativeFunction::from_fn_ptr(js_dom_get_value).to_js_function(context.realm());
+    let set_value = NativeFunction::from_fn_ptr(js_dom_set_value).to_js_function(context.realm());
+    let get_src = NativeFunction::from_fn_ptr(js_dom_get_src).to_js_function(context.realm());
+    let set_src = NativeFunction::from_fn_ptr(js_dom_set_src).to_js_function(context.realm());
+    let get_href = NativeFunction::from_fn_ptr(js_dom_get_href).to_js_function(context.realm());
+    let set_href = NativeFunction::from_fn_ptr(js_dom_set_href).to_js_function(context.realm());
+    let get_rel = NativeFunction::from_fn_ptr(js_dom_get_rel).to_js_function(context.realm());
+    let set_rel = NativeFunction::from_fn_ptr(js_dom_set_rel).to_js_function(context.realm());
+    let get_type = NativeFunction::from_fn_ptr(js_dom_get_type).to_js_function(context.realm());
+    let set_type = NativeFunction::from_fn_ptr(js_dom_set_type).to_js_function(context.realm());
+    let get_name = NativeFunction::from_fn_ptr(js_dom_get_name).to_js_function(context.realm());
+    let set_name = NativeFunction::from_fn_ptr(js_dom_set_name).to_js_function(context.realm());
+    let get_content =
+        NativeFunction::from_fn_ptr(js_dom_get_content).to_js_function(context.realm());
+    let set_content =
+        NativeFunction::from_fn_ptr(js_dom_set_content).to_js_function(context.realm());
+    let get_parent_element =
+        NativeFunction::from_fn_ptr(js_dom_get_parent_element).to_js_function(context.realm());
+    let get_owner_document =
+        NativeFunction::from_fn_ptr(js_dom_get_owner_document).to_js_function(context.realm());
     let get_tag_name =
         NativeFunction::from_fn_ptr(js_dom_get_tag_name).to_js_function(context.realm());
     let get_parent_node =
@@ -1614,6 +1729,48 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             Attribute::all(),
         )
         .accessor(
+            js_string!("value"),
+            Some(get_value),
+            Some(set_value),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("src"),
+            Some(get_src),
+            Some(set_src),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("href"),
+            Some(get_href),
+            Some(set_href),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("rel"),
+            Some(get_rel),
+            Some(set_rel),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("type"),
+            Some(get_type),
+            Some(set_type),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("name"),
+            Some(get_name),
+            Some(set_name),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("content"),
+            Some(get_content),
+            Some(set_content),
+            Attribute::all(),
+        )
+        .accessor(
             js_string!("tagName"),
             Some(get_tag_name.clone()),
             None,
@@ -1631,8 +1788,19 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             None,
             Attribute::all(),
         )
+        .accessor(
+            js_string!("parentElement"),
+            Some(get_parent_element),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("ownerDocument"),
+            Some(get_owner_document),
+            None,
+            Attribute::all(),
+        )
         .property(js_string!("style"), style, Attribute::all())
-        .property(js_string!("value"), js_string!(""), Attribute::all())
         .property(js_string!("checked"), false, Attribute::all())
         .property(js_string!("hidden"), false, Attribute::all())
         .property(js_string!("clientWidth"), 1280, Attribute::all())
@@ -1721,6 +1889,133 @@ fn build_storage_stub(context: &mut Context) -> boa_engine::object::JsObject {
         .build()
 }
 
+fn build_fetch_response_object(
+    context: &mut Context,
+    response: crate::http::HttpResponse,
+) -> boa_engine::object::JsObject {
+    let ok = (200..=299).contains(&response.status_code);
+    let status = response.status_code as i32;
+    let status_text = response.reason_phrase.clone();
+    let url = response.final_url.to_string();
+    let headers = build_response_headers_object(context, &response.headers);
+
+    ObjectInitializer::with_native_data(FetchResponseHandle { response }, context)
+        .function(
+            NativeFunction::from_fn_ptr(js_fetch_response_text),
+            js_string!("text"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_fetch_response_json),
+            js_string!("json"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_fetch_response_clone),
+            js_string!("clone"),
+            0,
+        )
+        .property(js_string!("ok"), ok, Attribute::all())
+        .property(js_string!("status"), status, Attribute::all())
+        .property(js_string!("statusText"), js_string!(status_text), Attribute::all())
+        .property(js_string!("url"), js_string!(url), Attribute::all())
+        .property(js_string!("headers"), headers, Attribute::all())
+        .build()
+}
+
+fn build_response_headers_object(
+    context: &mut Context,
+    headers: &std::collections::HashMap<String, String>,
+) -> boa_engine::object::JsObject {
+    let headers = headers
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    ObjectInitializer::with_native_data(ResponseHeadersHandle { headers }, context)
+        .function(
+            NativeFunction::from_fn_ptr(js_response_headers_get),
+            js_string!("get"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_response_headers_has),
+            js_string!("has"),
+            1,
+        )
+        .build()
+}
+
+fn build_xml_http_request_object(context: &mut Context) -> boa_engine::object::JsObject {
+    let get_ready_state =
+        NativeFunction::from_fn_ptr(js_xhr_get_ready_state).to_js_function(context.realm());
+    let get_status = NativeFunction::from_fn_ptr(js_xhr_get_status).to_js_function(context.realm());
+    let get_status_text =
+        NativeFunction::from_fn_ptr(js_xhr_get_status_text).to_js_function(context.realm());
+    let get_response_text =
+        NativeFunction::from_fn_ptr(js_xhr_get_response_text).to_js_function(context.realm());
+    let get_response =
+        NativeFunction::from_fn_ptr(js_xhr_get_response).to_js_function(context.realm());
+    let get_response_url =
+        NativeFunction::from_fn_ptr(js_xhr_get_response_url).to_js_function(context.realm());
+
+    ObjectInitializer::with_native_data(
+        XmlHttpRequestHandle {
+            state: RefCell::new(XmlHttpRequestState::default()),
+        },
+        context,
+    )
+    .function(NativeFunction::from_fn_ptr(js_xhr_open), js_string!("open"), 3)
+    .function(
+        NativeFunction::from_fn_ptr(js_xhr_set_request_header),
+        js_string!("setRequestHeader"),
+        2,
+    )
+    .function(NativeFunction::from_fn_ptr(js_xhr_send), js_string!("send"), 1)
+    .function(NativeFunction::from_fn_ptr(js_xhr_abort), js_string!("abort"), 0)
+    .function(
+        NativeFunction::from_fn_ptr(js_xhr_get_response_header),
+        js_string!("getResponseHeader"),
+        1,
+    )
+    .accessor(
+        js_string!("readyState"),
+        Some(get_ready_state),
+        None,
+        Attribute::all(),
+    )
+    .accessor(js_string!("status"), Some(get_status), None, Attribute::all())
+    .accessor(
+        js_string!("statusText"),
+        Some(get_status_text),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("responseText"),
+        Some(get_response_text.clone()),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("response"),
+        Some(get_response),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("responseURL"),
+        Some(get_response_url),
+        None,
+        Attribute::all(),
+    )
+    .property(js_string!("responseType"), js_string!(""), Attribute::all())
+    .property(js_string!("withCredentials"), false, Attribute::all())
+    .property(js_string!("onreadystatechange"), JsValue::undefined(), Attribute::all())
+    .property(js_string!("onload"), JsValue::undefined(), Attribute::all())
+    .property(js_string!("onerror"), JsValue::undefined(), Attribute::all())
+    .build()
+}
+
 fn build_match_media_stub(context: &mut Context, media: String) -> boa_engine::object::JsObject {
     ObjectInitializer::new(context)
         .function(
@@ -1806,30 +2101,7 @@ fn should_execute_script(attributes: &BTreeMap<String, String>) -> bool {
 }
 
 fn is_supported_script_source(source: &str, _host: &str) -> bool {
-    if source.len() > MAX_SCRIPT_SOURCE_BYTES {
-        return false;
-    }
-    let lowered = source.to_ascii_lowercase();
-    !contains_any(&lowered, BLOCKED_SCRIPT_PATTERNS)
-}
-
-const BLOCKED_SCRIPT_PATTERNS: &[&str] = &[
-    "xmlhttprequest",
-    "fetch(",
-    "websocket(",
-    "eventsource(",
-    "sharedworker(",
-    "serviceworker",
-    "indexeddb",
-    "navigator.serviceworker",
-    "new image(",
-    "eval(",
-    "new function(",
-    "import(",
-];
-
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
+    source.len() <= MAX_SCRIPT_SOURCE_BYTES
 }
 
 fn escape_html_text(input: &str) -> String {
@@ -2018,8 +2290,13 @@ fn js_location_replace(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
 }
 
 fn set_location_href(href: &str, context: &mut Context) {
+    let resolved = current_location_url(context)
+        .and_then(|url| url.resolve(href).ok())
+        .map(|url| url.to_string())
+        .or_else(|| Url::parse(href).ok().map(|url| url.to_string()))
+        .unwrap_or_else(|| href.to_string());
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
-        host.state.borrow_mut().location_href = href.to_string();
+        host.state.borrow_mut().location_href = resolved;
     }
 }
 
@@ -2028,6 +2305,337 @@ fn current_location_url(context: &mut Context) -> Option<Url> {
         .get_data::<JavaScriptHostData>()
         .map(|host| host.state.borrow().location_href.clone())?;
     Url::parse(&href).ok()
+}
+
+fn resolve_requested_url(request: &JsValue, context: &mut Context) -> JsResult<Url> {
+    let request_url = if let Some(object) = request.as_object() {
+        match object.get(js_string!("url"), context) {
+            Ok(value) if !value.is_undefined() && !value.is_null() => js_value_to_string(&value, context)?,
+            _ => js_value_to_string(request, context)?,
+        }
+    } else {
+        js_value_to_string(request, context)?
+    };
+
+    if let Ok(url) = Url::parse(&request_url) {
+        return Ok(url);
+    }
+
+    if let Some(base) = current_location_url(context)
+        && let Ok(url) = base.resolve(&request_url)
+    {
+        return Ok(url);
+    }
+
+    Err(JsNativeError::error()
+        .with_message(format!("unsupported fetch url: {request_url}"))
+        .into())
+}
+
+fn js_fetch(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let request = args.first().cloned().unwrap_or_else(JsValue::undefined);
+    let url = resolve_requested_url(&request, context);
+    let promise = match url {
+        Ok(url) => JsPromise::from_result(
+            fetch(&url)
+                .map(|response| JsValue::from(build_fetch_response_object(context, response)))
+                .map_err(|error| JsNativeError::error().with_message(error.to_string())),
+            context,
+        ),
+        Err(error) => JsPromise::reject(error, context),
+    };
+    Ok(JsValue::from(promise))
+}
+
+fn js_fetch_response_text(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let promise = if let Some(object) = this.as_object()
+        && let Some(handle) = object.downcast_ref::<FetchResponseHandle>()
+    {
+        let text = decode_text_response(
+            &handle.response.body,
+            handle.response.header("content-type"),
+        );
+        JsPromise::resolve(js_string!(text), context)
+    } else {
+        JsPromise::reject(
+            JsNativeError::typ().with_message("Response.text called on non-response object"),
+            context,
+        )
+    };
+    Ok(JsValue::from(promise))
+}
+
+fn js_fetch_response_json(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let promise = if let Some(object) = this.as_object()
+        && let Some(handle) = object.downcast_ref::<FetchResponseHandle>()
+    {
+        let text = decode_text_response(
+            &handle.response.body,
+            handle.response.header("content-type"),
+        );
+        let value = serde_json::from_str::<serde_json::Value>(&text)
+            .map_err(|error| JsNativeError::syntax().with_message(error.to_string()))
+            .and_then(|json| JsValue::from_json(&json, context).map_err(|error| {
+                JsNativeError::error().with_message(error.to_string())
+            }));
+        JsPromise::from_result(value, context)
+    } else {
+        JsPromise::reject(
+            JsNativeError::typ().with_message("Response.json called on non-response object"),
+            context,
+        )
+    };
+    Ok(JsValue::from(promise))
+}
+
+fn js_fetch_response_clone(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if let Some(object) = this.as_object()
+        && let Some(handle) = object.downcast_ref::<FetchResponseHandle>()
+    {
+        return Ok(JsValue::from(build_fetch_response_object(
+            context,
+            handle.response.clone(),
+        )));
+    }
+
+    Ok(JsValue::undefined())
+}
+
+fn js_response_headers_get(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?
+        .to_ascii_lowercase();
+    let value = if let Some(object) = this.as_object() {
+        object
+            .downcast_ref::<ResponseHeadersHandle>()
+            .and_then(|handle| handle.headers.get(&name).cloned())
+    } else {
+        None
+    };
+    Ok(value
+        .map(|value| JsValue::from(js_string!(value)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_response_headers_has(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?
+        .to_ascii_lowercase();
+    let has = if let Some(object) = this.as_object() {
+        object
+            .downcast_ref::<ResponseHeadersHandle>()
+            .map(|handle| handle.headers.contains_key(&name))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    Ok(JsValue::new(has))
+}
+
+fn js_create_xml_http_request(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::from(build_xml_http_request_object(context)))
+}
+
+fn js_xhr_open(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let method = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?
+        .to_ascii_uppercase();
+    let url = js_value_to_string(args.get(1).unwrap_or(&JsValue::undefined()), context)?;
+    if let Some(object) = this.as_object()
+        && let Some(handle) = object.downcast_ref::<XmlHttpRequestHandle>()
+    {
+        let mut state = handle.state.borrow_mut();
+        state.method = method;
+        state.url = Some(url);
+        state.ready_state = 1;
+        state.status = 0;
+        state.status_text.clear();
+        state.response_text.clear();
+        state.response_url.clear();
+        state.request_headers.clear();
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_xhr_set_request_header(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?
+        .to_ascii_lowercase();
+    let value = js_value_to_string(args.get(1).unwrap_or(&JsValue::undefined()), context)?;
+    if let Some(object) = this.as_object()
+        && let Some(handle) = object.downcast_ref::<XmlHttpRequestHandle>()
+    {
+        handle.state.borrow_mut().request_headers.insert(name, value);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_xhr_send(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(handle) = object.downcast_ref::<XmlHttpRequestHandle>() else {
+        return Ok(JsValue::undefined());
+    };
+
+    let (method, target_url) = {
+        let state = handle.state.borrow();
+        (
+            state.method.clone(),
+            state.url.clone().unwrap_or_else(|| "/".to_string()),
+        )
+    };
+
+    let result = if method.is_empty() || method == "GET" {
+        resolve_requested_url(&JsValue::from(js_string!(target_url)), context)
+            .and_then(|url| fetch(&url).map_err(|error| {
+                JsNativeError::error().with_message(error.to_string()).into()
+            }))
+    } else {
+        Err(JsNativeError::error()
+            .with_message(format!("unsupported XMLHttpRequest method: {method}"))
+            .into())
+    };
+
+    match result {
+        Ok(response) => {
+            let text = decode_text_response(&response.body, response.header("content-type"));
+            {
+                let mut state = handle.state.borrow_mut();
+                state.ready_state = 4;
+                state.status = response.status_code;
+                state.status_text = response.reason_phrase.clone();
+                state.response_text = text;
+                state.response_url = response.final_url.to_string();
+            }
+            trigger_xhr_handler(&object, "onreadystatechange", context)?;
+            trigger_xhr_handler(&object, "onload", context)?;
+        }
+        Err(error) => {
+            {
+                let mut state = handle.state.borrow_mut();
+                state.ready_state = 4;
+                state.status = 0;
+                state.status_text = error.to_string();
+                state.response_text.clear();
+                state.response_url.clear();
+            }
+            trigger_xhr_handler(&object, "onreadystatechange", context)?;
+            trigger_xhr_handler(&object, "onerror", context)?;
+        }
+    }
+
+    Ok(JsValue::undefined())
+}
+
+fn js_xhr_abort(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    if let Some(object) = this.as_object()
+        && let Some(handle) = object.downcast_ref::<XmlHttpRequestHandle>()
+    {
+        let mut state = handle.state.borrow_mut();
+        state.ready_state = 0;
+        state.status = 0;
+        state.status_text.clear();
+        state.response_text.clear();
+        state.response_url.clear();
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_xhr_get_response_header(
+    _: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::null())
+}
+
+fn js_xhr_get_ready_state(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::new(
+        xhr_state_value(this, |state| state.ready_state).unwrap_or(0),
+    ))
+}
+
+fn js_xhr_get_status(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::new(
+        xhr_state_value(this, |state| state.status).unwrap_or(0),
+    ))
+}
+
+fn js_xhr_get_status_text(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::from(js_string!(
+        xhr_state_value(this, |state| state.status_text.clone())
+            .unwrap_or_default()
+    )))
+}
+
+fn js_xhr_get_response_text(
+    this: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::from(js_string!(
+        xhr_state_value(this, |state| state.response_text.clone())
+            .unwrap_or_default()
+    )))
+}
+
+fn js_xhr_get_response(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::from(js_string!(
+        xhr_state_value(this, |state| state.response_text.clone())
+            .unwrap_or_default()
+    )))
+}
+
+fn js_xhr_get_response_url(
+    this: &JsValue,
+    _: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::from(js_string!(
+        xhr_state_value(this, |state| state.response_url.clone())
+            .unwrap_or_default()
+    )))
+}
+
+fn xhr_state_value<T>(this: &JsValue, map: impl FnOnce(&XmlHttpRequestState) -> T) -> Option<T> {
+    let object = this.as_object()?;
+    let handle = object.downcast_ref::<XmlHttpRequestHandle>()?;
+    Some(map(&handle.state.borrow()))
+}
+
+fn trigger_xhr_handler(
+    object: &boa_engine::object::JsObject,
+    property: &str,
+    context: &mut Context,
+) -> JsResult<()> {
+    let callback = object.get(js_string!(property), context)?;
+    call_js_callback(&callback, &[], context)?;
+    Ok(())
 }
 
 fn js_console_log(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -2198,6 +2806,19 @@ fn js_document_create_element(
     Ok(JsValue::from(build_dom_node_object(context, node_id)))
 }
 
+fn js_document_create_text_node(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let node_id = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow_mut().dom.create_text_node(&text))
+        .unwrap_or(0);
+    Ok(JsValue::from(build_dom_node_object(context, node_id)))
+}
+
 fn js_document_create_stub_object(
     _: &JsValue,
     _: &[JsValue],
@@ -2257,6 +2878,21 @@ fn js_dom_get_attribute(this: &JsValue, args: &[JsValue], context: &mut Context)
         .unwrap_or_else(JsValue::null))
 }
 
+fn js_dom_get_property_attribute(
+    this: &JsValue,
+    name: &str,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(js_string!("")));
+    };
+    let value = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.get_attribute(node_id, name))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(value)))
+}
+
 fn js_dom_set_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
     let value = js_value_to_string(args.get(1).unwrap_or(&JsValue::undefined()), context)?;
@@ -2264,6 +2900,21 @@ fn js_dom_set_attribute(this: &JsValue, args: &[JsValue], context: &mut Context)
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
         host.state.borrow_mut().dom.set_attribute(node_id, &name, &value);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_set_property_attribute(
+    this: &JsValue,
+    args: &[JsValue],
+    name: &str,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let value = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    if let Some(node_id) = this_node_id(this)
+        && let Some(host) = context.get_data::<JavaScriptHostData>()
+    {
+        host.state.borrow_mut().dom.set_attribute(node_id, name, &value);
     }
     Ok(JsValue::undefined())
 }
@@ -2412,6 +3063,66 @@ fn js_dom_set_class_name(
     )
 }
 
+fn js_dom_get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_get_property_attribute(this, "value", context)
+}
+
+fn js_dom_set_value(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_set_property_attribute(this, args, "value", context)
+}
+
+fn js_dom_get_src(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_get_property_attribute(this, "src", context)
+}
+
+fn js_dom_set_src(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_set_property_attribute(this, args, "src", context)
+}
+
+fn js_dom_get_href(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_get_property_attribute(this, "href", context)
+}
+
+fn js_dom_set_href(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_set_property_attribute(this, args, "href", context)
+}
+
+fn js_dom_get_rel(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_get_property_attribute(this, "rel", context)
+}
+
+fn js_dom_set_rel(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_set_property_attribute(this, args, "rel", context)
+}
+
+fn js_dom_get_type(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_get_property_attribute(this, "type", context)
+}
+
+fn js_dom_set_type(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_set_property_attribute(this, args, "type", context)
+}
+
+fn js_dom_get_name(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_get_property_attribute(this, "name", context)
+}
+
+fn js_dom_set_name(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_set_property_attribute(this, args, "name", context)
+}
+
+fn js_dom_get_content(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    js_dom_get_property_attribute(this, "content", context)
+}
+
+fn js_dom_set_content(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    js_dom_set_property_attribute(this, args, "content", context)
+}
+
 fn js_dom_get_tag_name(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let tag_name = context
@@ -2429,6 +3140,39 @@ fn js_dom_get_parent_node(this: &JsValue, _: &[JsValue], context: &mut Context) 
     Ok(parent_id
         .map(|parent_id| JsValue::from(build_dom_node_object(context, parent_id)))
         .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_get_parent_element(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let parent_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            let state = host.state.borrow();
+            state
+                .dom
+                .node(node_id)
+                .and_then(|node| node.parent)
+                .filter(|parent_id| state.dom.element(*parent_id).is_some())
+        });
+    Ok(parent_id
+        .map(|parent_id| JsValue::from(build_dom_node_object(context, parent_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_get_owner_document(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let document_id = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.document_id)
+        .unwrap_or(0);
+    Ok(JsValue::from(build_dom_node_object(context, document_id)))
 }
 
 fn js_dom_class_list_add(
@@ -2706,23 +3450,20 @@ mod tests {
             processed
                 .console_logs
                 .iter()
-                .any(|entry| entry.contains("unsupported script pattern"))
+                .any(|entry| entry.contains("script policy rejected source"))
         );
     }
 
     #[test]
-    fn skips_scripts_that_touch_unsupported_dom_apis() {
+    fn reports_navigation_target_when_location_changes() {
         let processed = process_document_scripts(
-            "<script>fetch('/api/demo').then(function(){ document.write('<p>Nope</p>'); });</script>",
-            &Url::parse("https://example.com").unwrap(),
+            "<script>location.href = '/next?from=test';</script>",
+            &Url::parse("https://example.com/start").unwrap(),
         );
 
-        assert!(!processed.html.contains("<p>Nope</p>"));
-        assert!(
-            processed
-                .console_logs
-                .iter()
-                .any(|entry| entry.contains("unsupported script pattern"))
+        assert_eq!(
+            processed.navigation_target.as_deref(),
+            Some("https://example.com/next?from=test")
         );
     }
 
@@ -2755,5 +3496,16 @@ mod tests {
 
         assert!(processed.html.contains("class=\"shell ready\""));
         assert!(processed.html.contains("<p>Rendered</p>"));
+    }
+
+    #[test]
+    fn supports_create_text_node_and_property_reflection() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"app\"></div><script>var app = document.getElementById('app'); var span = document.createElement('span'); span.className = 'chip'; var text = document.createTextNode('Hello'); span.appendChild(text); var img = document.createElement('img'); img.src = '/avatar.png'; app.appendChild(span); app.appendChild(img);</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("<span class=\"chip\">Hello</span>"));
+        assert!(processed.html.contains("<img src=\"/avatar.png\">"));
     }
 }

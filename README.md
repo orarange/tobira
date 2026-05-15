@@ -50,8 +50,13 @@ Current capabilities:
   - `document.querySelector(...)` / `querySelectorAll(...)`
   - `document.getElementById(...)`
   - `document.createElement(...)`
+  - `document.createTextNode(...)`
   - `appendChild(...)`, `insertBefore(...)`, `remove()`
   - `innerHTML`, `textContent`, `classList`, `id`, `className`
+  - reflected DOM properties such as `src`, `href`, `type`, and `value`
+  - recursive `document.write(...)`
+  - Promise-backed `fetch(...)`
+  - minimal `XMLHttpRequest`
 - Site-specific rendering paths for YouTube and Google
 
 ## Run
