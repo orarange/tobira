@@ -2191,80 +2191,83 @@ fn render_layer(
     let layer_screen_y = layer.y as i64 + offset_y as i64 - scroll_y as i64;
     let layer_screen_x = layer.x as i64 + offset_x as i64;
 
+    // Content viewport top/left: the chrome (address bar, etc.) occupies [0, offset_y) rows
+    // and [0, offset_x) cols. Layers must not bleed into the chrome area.
+    let content_top = offset_y as i64;
+    let content_left = offset_x as i64;
+
     // Skip layers fully below or to the right of viewport/buffer
     if layer_screen_y >= buf_height as i64 { return; }
     if layer_screen_x >= buf_width as i64 { return; }
-    // Skip layers fully above or to the left
-    if layer_screen_y + layer.height as i64 <= 0 { return; }
-    if layer_screen_x + layer.width as i64 <= 0 { return; }
+    // Skip layers fully within the chrome (no part reaches the content area)
+    if layer_screen_y + layer.height as i64 <= content_top { return; }
+    if layer_screen_x + layer.width as i64 <= content_left { return; }
 
-    // Clip: how many rows/cols of the layer are above/left of visible area
-    let src_y_start = if layer_screen_y < 0 { (-layer_screen_y) as u32 } else { 0 };
-    let src_x_start = if layer_screen_x < 0 { (-layer_screen_x) as u32 } else { 0 };
-    // Destination in the main buffer
-    let dst_y = if layer_screen_y > 0 { layer_screen_y as u32 } else { 0 };
-    let dst_x = if layer_screen_x > 0 { layer_screen_x as u32 } else { 0 };
+    // Clip: how many rows/cols of the layer are above/left of the content viewport
+    let src_y_start = (content_top - layer_screen_y).max(0) as u32;
+    let src_x_start = (content_left - layer_screen_x).max(0) as u32;
+    // Destination in the main buffer: at least content_top / content_left
+    let dst_y = layer_screen_y.max(content_top) as u32;
+    let dst_x = layer_screen_x.max(content_left) as u32;
 
     // Visible size: clipped by layer bounds and buffer bounds
     let visible_h = layer.height.saturating_sub(src_y_start).min(buf_height.saturating_sub(dst_y));
     let visible_w = layer.width.saturating_sub(src_x_start).min(buf_width.saturating_sub(dst_x));
     if visible_h == 0 || visible_w == 0 { return; }
 
-    // Use full layer size for the offscreen buffer (layer-relative coords)
-    let lw = layer.width;
-    let lh = layer.height;
+    // Allocate only the visible slice for the offscreen buffer (Fix 2).
+    // This avoids allocating e.g. 1280×10000 for a full-page opacity layer.
+    let lw = visible_w;
+    let lh = visible_h;
 
     // Reuse scratch buffer to avoid per-frame allocation.
     // Layout: scratch[0..needed] = this layer's offscreen pixels;
     //         scratch[needed..]  = scratch space for nested layers (split_at_mut below).
-    let needed = (lw * lh) as usize;
+    let needed = (lw as usize) * (lh as usize); // usize arithmetic avoids u32 overflow
     if scratch.len() < needed {
         scratch.resize(needed, 0);
     }
 
-    // Copy backdrop from main framebuffer into offscreen (only visible region matters,
-    // but we need a full layer-sized buffer for rendering sub-commands)
-    for row in 0..visible_h {
+    // Copy backdrop from main framebuffer into offscreen (visible slice only).
+    // offscreen row r  ↔  buffer row dst_y + r
+    for row in 0..lh {
         let buf_row = dst_y + row;
-        let layer_row = src_y_start + row;
         let buf_start = (buf_row * buf_width + dst_x) as usize;
-        let off_start = (layer_row * lw + src_x_start) as usize;
-        let len = visible_w as usize;
+        let off_start = (row * lw) as usize;
+        let len = lw as usize;
         if buf_start + len <= buffer.len() && off_start + len <= scratch.len() {
-            let buf_slice = &buffer[buf_start..buf_start + len];
-            scratch[off_start..off_start + len].copy_from_slice(buf_slice);
+            scratch[off_start..off_start + len]
+                .copy_from_slice(&buffer[buf_start..buf_start + len]);
         }
     }
 
     // Render layer's sub-commands into the offscreen buffer.
-    // Sub-commands are layer-relative (rebased at layout time), so offset and scroll are 0.
-    // scratch holds this layer's offscreen pixels (reused across frames via BrowserApp).
-    // Nested LayerCommands within this layer use a local vec; deeply-nested layers are rare,
-    // and the main per-frame allocation (this layer's offscreen) is already eliminated.
+    // Sub-commands are layer-relative (rebased at layout time), so x/y offsets are 0.
+    // Pass src_y_start as scroll_y so rendering culls/renders the visible vertical portion.
     let offscreen = &mut scratch[..needed];
     let mut nested_scratch: Vec<u32> = Vec::new();
     render_commands(
         offscreen,
         lw,
         lh,
-        0,  // sub-commands are layer-relative, no x offset
-        0,  // sub-commands are layer-relative, no y offset
-        lh, // full offscreen height as viewport
-        0,  // no scroll inside offscreen (coords are already layer-relative)
+        0,           // x offset: sub-commands are layer-relative
+        0,           // y offset: sub-commands are layer-relative
+        lh,          // viewport height = visible height
+        src_y_start, // scroll past non-visible top of layer
         &layer.commands,
         page,
         fonts,
         &mut nested_scratch,
     );
 
-    // Blend visible region of offscreen back onto main buffer with opacity
+    // Blend visible region of offscreen back onto main buffer with opacity.
+    // offscreen row r  ↔  buffer row dst_y + r
     let opacity = layer.opacity as u32;
-    for row in 0..visible_h {
+    for row in 0..lh {
         let buf_row = dst_y + row;
-        let layer_row = src_y_start + row;
         let buf_start = (buf_row * buf_width + dst_x) as usize;
-        let off_start = (layer_row * lw + src_x_start) as usize;
-        for col in 0..visible_w as usize {
+        let off_start = (row * lw) as usize;
+        for col in 0..lw as usize {
             if buf_start + col >= buffer.len() || off_start + col >= offscreen.len() {
                 break;
             }
