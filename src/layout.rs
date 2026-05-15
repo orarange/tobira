@@ -63,11 +63,13 @@ pub fn layout_styled_document(
     viewport_width: u32,
     fonts: &mut FontContext,
 ) -> LayoutDocument {
-    let canvas_bg = find_document_background(document)
+    let doc_bg = find_document_background(document);
+    let canvas_bg = doc_bg
         .map(|(c, o)| apply_opacity(c, DEFAULT_BACKGROUND_COLOR, o))
         .unwrap_or(DEFAULT_BACKGROUND_COLOR);
     let mut context = LayoutContext {
         background_color: canvas_bg,
+        doc_bg_raw: doc_bg.map(|(c, _)| c),
         ..LayoutContext::default()
     };
     let mut cursor_y = 0;
@@ -95,6 +97,7 @@ pub fn layout_styled_document(
 #[derive(Default)]
 struct LayoutContext {
     background_color: Color,
+    doc_bg_raw: Option<Color>,
     rects: Vec<RectCommand>,
     texts: Vec<TextCommand>,
     images: Vec<ImageCommand>,
@@ -256,20 +259,27 @@ fn layout_block_element(
         .min(element.style.max_width.unwrap_or(u32::MAX))
         .max(element.style.min_width);
     let background_top = *cursor_y;
-    let background_index = if let Some(background_color) = element.style.background_color {
-        let blended_bg = apply_opacity(
-            background_color,
-            context.background_color,
-            element.style.effective_opacity,
-        );
-        context.rects.push(RectCommand {
-            x: outer_x,
-            y: background_top,
-            width: outer_width.max(1),
-            height: 1,
-            color: blended_bg,
-        });
-        Some(context.rects.len() - 1)
+    let is_doc_bg_element = context.doc_bg_raw.is_some()
+        && matches!(element.tag_name.as_str(), "body" | "html" | "document")
+        && element.style.background_color == context.doc_bg_raw;
+    let background_index = if !is_doc_bg_element {
+        if let Some(background_color) = element.style.background_color {
+            let blended_bg = apply_opacity(
+                background_color,
+                context.background_color,
+                element.style.effective_opacity,
+            );
+            context.rects.push(RectCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: 1,
+                color: blended_bg,
+            });
+            Some(context.rects.len() - 1)
+        } else {
+            None
+        }
     } else {
         None
     };
