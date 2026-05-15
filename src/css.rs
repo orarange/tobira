@@ -793,7 +793,14 @@ fn compute_style(
     }
 
     style.effective_opacity = parent_style
-        .map(|parent| ((parent.effective_opacity as u16 * style.opacity as u16) / 255) as u8)
+        .map(|parent| {
+            if parent.opacity < 255 {
+                // Parent creates a stacking context — reset accumulation
+                style.opacity
+            } else {
+                ((parent.effective_opacity as u16 * style.opacity as u16) / 255) as u8
+            }
+        })
         .unwrap_or(style.opacity);
 
     style

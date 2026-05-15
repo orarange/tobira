@@ -7,13 +7,78 @@ use crate::font::FontContext;
 use crate::image::ImageStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrawCommand {
+    Rect(RectCommand),
+    Text(TextCommand),
+    Image(ImageCommand),
+    Layer(LayerCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerCommand {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub opacity: u8,
+    pub commands: Vec<DrawCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutDocument {
     pub background_color: Color,
     pub content_height: u32,
-    pub rects: Vec<RectCommand>,
-    pub texts: Vec<TextCommand>,
-    pub images: Vec<ImageCommand>,
+    pub commands: Vec<DrawCommand>,
     pub links: Vec<LinkCommand>,
+}
+
+// Convenience accessors for consumers that need flat lists
+impl LayoutDocument {
+    pub fn texts(&self) -> Vec<&TextCommand> {
+        collect_texts(&self.commands)
+    }
+    pub fn rects(&self) -> Vec<&RectCommand> {
+        collect_rects(&self.commands)
+    }
+    pub fn images(&self) -> Vec<&ImageCommand> {
+        collect_images(&self.commands)
+    }
+}
+
+fn collect_texts(commands: &[DrawCommand]) -> Vec<&TextCommand> {
+    let mut out = Vec::new();
+    for cmd in commands {
+        match cmd {
+            DrawCommand::Text(t) => out.push(t),
+            DrawCommand::Layer(l) => out.extend(collect_texts(&l.commands)),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn collect_rects(commands: &[DrawCommand]) -> Vec<&RectCommand> {
+    let mut out = Vec::new();
+    for cmd in commands {
+        match cmd {
+            DrawCommand::Rect(r) => out.push(r),
+            DrawCommand::Layer(l) => out.extend(collect_rects(&l.commands)),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn collect_images(commands: &[DrawCommand]) -> Vec<&ImageCommand> {
+    let mut out = Vec::new();
+    for cmd in commands {
+        match cmd {
+            DrawCommand::Image(i) => out.push(i),
+            DrawCommand::Layer(l) => out.extend(collect_images(&l.commands)),
+            _ => {}
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,9 +152,7 @@ pub fn layout_styled_document(
     LayoutDocument {
         background_color: canvas_bg,
         content_height: cursor_y,
-        rects: context.rects,
-        texts: context.texts,
-        images: context.images,
+        commands: context.commands,
         links: context.links,
     }
 }
@@ -98,9 +161,7 @@ pub fn layout_styled_document(
 struct LayoutContext {
     background_color: Color,
     doc_bg_raw: Option<Color>,
-    rects: Vec<RectCommand>,
-    texts: Vec<TextCommand>,
-    images: Vec<ImageCommand>,
+    commands: Vec<DrawCommand>,
     links: Vec<LinkCommand>,
 }
 
@@ -259,11 +320,21 @@ fn layout_block_element(
         .min(element.style.max_width.unwrap_or(u32::MAX))
         .max(element.style.min_width);
     let background_top = *cursor_y;
+
+    // Detect stacking context: element has opacity < 255
+    if element.style.opacity < 255 {
+        layout_block_element_as_layer(
+            element, outer_x, outer_width, background_top, cursor_y, context, images, fonts,
+        );
+        *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+        return;
+    }
+
     let is_doc_bg_element = context.doc_bg_raw.is_some()
         && matches!(element.tag_name.as_str(), "body" | "html" | "document")
         && element.style.background_color == context.doc_bg_raw;
     let saved_bg = context.background_color;
-    let background_index = if !is_doc_bg_element {
+    let background_cmd_index = if !is_doc_bg_element {
         if let Some(background_color) = element.style.background_color {
             // Use effective_opacity for the actual drawn rect color (correct visual result)
             let blended_for_rect = apply_opacity(
@@ -271,19 +342,19 @@ fn layout_block_element(
                 context.background_color,
                 element.style.effective_opacity,
             );
-            context.rects.push(RectCommand {
+            context.commands.push(DrawCommand::Rect(RectCommand {
                 x: outer_x,
                 y: background_top,
                 width: outer_width.max(1),
                 height: 1,
                 color: blended_for_rect,
-            });
+            }));
             if element.style.effective_opacity == 255 {
                 // Fully opaque: children blend against this element's solid background
                 context.background_color = background_color;
             }
             // If opacity < 255: don't update — children keep the parent/canvas backdrop
-            Some(context.rects.len() - 1)
+            Some(context.commands.len() - 1)
         } else {
             None
         }
@@ -325,13 +396,13 @@ fn layout_block_element(
         .max(1);
 
     if element.tag_name == "hr" {
-        context.rects.push(RectCommand {
+        context.commands.push(DrawCommand::Rect(RectCommand {
             x: content_x,
             y: *cursor_y,
             width: content_width,
             height: 2,
             color: element.style.color,
-        });
+        }));
         *cursor_y = cursor_y.saturating_add(10);
     } else {
         layout_mixed_children(
@@ -349,8 +420,8 @@ fn layout_block_element(
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     let background_height = cursor_y.saturating_sub(background_top).max(1);
 
-    if let Some(background_index) = background_index {
-        if let Some(rect) = context.rects.get_mut(background_index) {
+    if let Some(background_cmd_index) = background_cmd_index {
+        if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(background_cmd_index) {
             rect.height = background_height;
         }
     }
@@ -371,34 +442,34 @@ fn layout_block_element(
         let border_right_w = element.style.border.right;
 
         if border_top_h > 0 {
-            context.rects.push(RectCommand {
+            context.commands.push(DrawCommand::Rect(RectCommand {
                 x: outer_x,
                 y: background_top,
                 width: outer_width.max(1),
                 height: border_top_h,
                 color: bc,
-            });
+            }));
         }
         if border_bottom_h > 0 {
-            context.rects.push(RectCommand {
+            context.commands.push(DrawCommand::Rect(RectCommand {
                 x: outer_x,
                 y: cursor_y.saturating_sub(border_bottom_h),
                 width: outer_width.max(1),
                 height: border_bottom_h,
                 color: bc,
-            });
+            }));
         }
         if border_left_w > 0 {
-            context.rects.push(RectCommand {
+            context.commands.push(DrawCommand::Rect(RectCommand {
                 x: outer_x,
                 y: background_top,
                 width: border_left_w,
                 height: background_height,
                 color: bc,
-            });
+            }));
         }
         if border_right_w > 0 {
-            context.rects.push(RectCommand {
+            context.commands.push(DrawCommand::Rect(RectCommand {
                 x: outer_x
                     .saturating_add(outer_width)
                     .saturating_sub(border_right_w),
@@ -406,11 +477,180 @@ fn layout_block_element(
                 width: border_right_w,
                 height: background_height,
                 color: bc,
-            });
+            }));
         }
     }
 
     *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+}
+
+fn layout_block_element_as_layer(
+    element: &StyledElement,
+    outer_x: u32,
+    outer_width: u32,
+    background_top: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) {
+    // Create a sub-context for the element's subtree
+    let mut sub_context = LayoutContext {
+        background_color: context.background_color,
+        doc_bg_raw: context.doc_bg_raw,
+        ..LayoutContext::default()
+    };
+
+    // The element's own background rect goes into the sub-context (raw color, no opacity blend)
+    let is_doc_bg_element = context.doc_bg_raw.is_some()
+        && matches!(element.tag_name.as_str(), "body" | "html" | "document")
+        && element.style.background_color == context.doc_bg_raw;
+
+    let background_cmd_index = if !is_doc_bg_element {
+        if let Some(background_color) = element.style.background_color {
+            // Use raw background color — opacity is applied by the layer compositor
+            sub_context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: 1,
+                color: background_color,
+            }));
+            // Update sub_context backdrop for children
+            sub_context.background_color = background_color;
+            Some(sub_context.commands.len() - 1)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    *cursor_y = cursor_y.saturating_add(element.style.padding.top);
+
+    let bullet_indent = if element.style.display == Display::ListItem {
+        16
+    } else {
+        0
+    };
+
+    let border_left = if !element.style.border_style_none {
+        element.style.border.left
+    } else {
+        0
+    };
+    let border_right = if !element.style.border_style_none {
+        element.style.border.right
+    } else {
+        0
+    };
+
+    let content_x = outer_x
+        .saturating_add(border_left)
+        .saturating_add(element.style.padding.left)
+        .saturating_add(bullet_indent);
+    let content_width = outer_width
+        .saturating_sub(
+            border_left
+                + border_right
+                + element.style.padding.left
+                + element.style.padding.right
+                + bullet_indent,
+        )
+        .max(1);
+
+    if element.tag_name == "hr" {
+        sub_context.commands.push(DrawCommand::Rect(RectCommand {
+            x: content_x,
+            y: *cursor_y,
+            width: content_width,
+            height: 2,
+            color: element.style.color,
+        }));
+        *cursor_y = cursor_y.saturating_add(10);
+    } else {
+        layout_mixed_children(
+            element,
+            content_x,
+            content_width,
+            cursor_y,
+            &mut sub_context,
+            bullet_indent > 0,
+            images,
+            fonts,
+        );
+    }
+
+    *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
+    let final_height = cursor_y.saturating_sub(background_top).max(1);
+
+    if let Some(background_cmd_index) = background_cmd_index {
+        if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(background_cmd_index) {
+            rect.height = final_height;
+        }
+    }
+
+    // Draw borders into the sub-context (they are part of the composited layer)
+    if !element.style.border_style_none {
+        // Borders use raw border_color since they're inside the layer
+        let bc = element.style.border_color;
+        let border_top_h = element.style.border.top;
+        let border_bottom_h = element.style.border.bottom;
+        let border_left_w = element.style.border.left;
+        let border_right_w = element.style.border.right;
+
+        if border_top_h > 0 {
+            sub_context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: border_top_h,
+                color: bc,
+            }));
+        }
+        if border_bottom_h > 0 {
+            sub_context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x,
+                y: cursor_y.saturating_sub(border_bottom_h),
+                width: outer_width.max(1),
+                height: border_bottom_h,
+                color: bc,
+            }));
+        }
+        if border_left_w > 0 {
+            sub_context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x,
+                y: background_top,
+                width: border_left_w,
+                height: final_height,
+                color: bc,
+            }));
+        }
+        if border_right_w > 0 {
+            sub_context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x
+                    .saturating_add(outer_width)
+                    .saturating_sub(border_right_w),
+                y: background_top,
+                width: border_right_w,
+                height: final_height,
+                color: bc,
+            }));
+        }
+    }
+
+    // Wrap sub-context commands in a LayerCommand and push to parent
+    context.commands.push(DrawCommand::Layer(LayerCommand {
+        x: outer_x,
+        y: background_top,
+        width: outer_width,
+        height: final_height,
+        opacity: element.style.opacity,
+        commands: sub_context.commands,
+    }));
+
+    // Propagate links from sub_context to parent (links are for hit-testing, not compositing)
+    context.links.extend(sub_context.links);
 }
 
 fn layout_image_element(
@@ -442,13 +682,13 @@ fn layout_image_element(
         TextAlign::Left => x,
     };
 
-    context.images.push(ImageCommand {
+    context.commands.push(DrawCommand::Image(ImageCommand {
         x: draw_x,
         y: *cursor_y,
         width: draw_width,
         height: draw_height,
         src: src.to_string(),
-    });
+    }));
 
     *cursor_y = cursor_y.saturating_add(draw_height);
     *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
@@ -655,13 +895,13 @@ fn layout_table_element(
                 context.background_color,
                 placement.cell.style.effective_opacity,
             );
-            context.rects.push(RectCommand {
+            context.commands.push(DrawCommand::Rect(RectCommand {
                 x: cell_x,
                 y: cell_y,
                 width: cell_width.max(1),
                 height: cell_height.max(1),
                 color: blended,
-            });
+            }));
         }
 
         let content_area_height = cell_height.saturating_sub(padding.saturating_mul(2));
@@ -699,9 +939,7 @@ struct TablePlacement<'a> {
 #[derive(Debug, Clone, Default)]
 struct FragmentLayout {
     content_height: u32,
-    rects: Vec<RectCommand>,
-    texts: Vec<TextCommand>,
-    images: Vec<ImageCommand>,
+    commands: Vec<DrawCommand>,
     links: Vec<LinkCommand>,
 }
 
@@ -870,9 +1108,7 @@ fn layout_table_cell(
 
     FragmentLayout {
         content_height: cursor_y.max(1),
-        rects: context.rects,
-        texts: context.texts,
-        images: context.images,
+        commands: context.commands,
         links: context.links,
     }
 }
@@ -883,18 +1119,30 @@ fn merge_fragment(
     offset_x: u32,
     offset_y: u32,
 ) {
+    for cmd in &fragment.commands {
+        context.commands.push(offset_draw_command(cmd, offset_x, offset_y));
+    }
     context
-        .rects
-        .extend(fragment.rects.iter().map(|rect| RectCommand {
+        .links
+        .extend(fragment.links.iter().map(|link| LinkCommand {
+            x: link.x.saturating_add(offset_x),
+            y: link.y.saturating_add(offset_y),
+            width: link.width,
+            height: link.height,
+            href: link.href.clone(),
+        }));
+}
+
+fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawCommand {
+    match cmd {
+        DrawCommand::Rect(rect) => DrawCommand::Rect(RectCommand {
             x: rect.x.saturating_add(offset_x),
             y: rect.y.saturating_add(offset_y),
             width: rect.width,
             height: rect.height,
             color: rect.color,
-        }));
-    context
-        .texts
-        .extend(fragment.texts.iter().map(|text| TextCommand {
+        }),
+        DrawCommand::Text(text) => DrawCommand::Text(TextCommand {
             x: text.x.saturating_add(offset_x),
             y: text.y.saturating_add(offset_y),
             width: text.width,
@@ -905,25 +1153,27 @@ fn merge_fragment(
             underline: text.underline,
             bold: text.bold,
             italic: text.italic,
-        }));
-    context
-        .images
-        .extend(fragment.images.iter().map(|image| ImageCommand {
+        }),
+        DrawCommand::Image(image) => DrawCommand::Image(ImageCommand {
             x: image.x.saturating_add(offset_x),
             y: image.y.saturating_add(offset_y),
             width: image.width,
             height: image.height,
             src: image.src.clone(),
-        }));
-    context
-        .links
-        .extend(fragment.links.iter().map(|link| LinkCommand {
-            x: link.x.saturating_add(offset_x),
-            y: link.y.saturating_add(offset_y),
-            width: link.width,
-            height: link.height,
-            href: link.href.clone(),
-        }));
+        }),
+        DrawCommand::Layer(layer) => DrawCommand::Layer(LayerCommand {
+            x: layer.x.saturating_add(offset_x),
+            y: layer.y.saturating_add(offset_y),
+            width: layer.width,
+            height: layer.height,
+            opacity: layer.opacity,
+            commands: layer
+                .commands
+                .iter()
+                .map(|c| offset_draw_command(c, offset_x, offset_y))
+                .collect(),
+        }),
+    }
 }
 
 fn span_width(widths: &[u32], start: usize, span: usize) -> u32 {
@@ -1403,13 +1653,13 @@ fn emit_line_impl(
         let span_opacity = span.style.effective_opacity;
         if let Some(background_color) = span.style.background_color {
             let blended_bg = apply_opacity(background_color, context.background_color, span_opacity);
-            context.rects.push(RectCommand {
+            context.commands.push(DrawCommand::Rect(RectCommand {
                 x: cursor_x,
                 y: *cursor_y,
                 width: span.width,
                 height: line_height,
                 color: blended_bg,
-            });
+            }));
         }
 
         let display_text = if span.style.text_transform != TextTransform::None {
@@ -1417,7 +1667,7 @@ fn emit_line_impl(
         } else {
             span.text.clone()
         };
-        context.texts.push(TextCommand {
+        context.commands.push(DrawCommand::Text(TextCommand {
             x: cursor_x,
             y: *cursor_y,
             width: span.width,
@@ -1428,7 +1678,7 @@ fn emit_line_impl(
             underline: span.style.underline,
             bold: span.style.font_weight,
             italic: span.style.font_style_italic,
-        });
+        }));
 
         if let Some(href) = &span.link_href {
             context.links.push(LinkCommand {
@@ -1649,7 +1899,7 @@ fn find_document_background(node: &StyledNode) -> Option<(Color, u8)> {
 
 #[cfg(test)]
 mod tests {
-    use super::layout_styled_document;
+    use super::{DrawCommand, layout_styled_document};
     use crate::css::{TextAlign, build_styled_tree, parse_stylesheet};
     use crate::font::FontContext;
     use crate::html::parse_document;
@@ -1663,9 +1913,10 @@ mod tests {
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
-        assert!(layout.texts.iter().any(|text| text.text.contains("Hello")));
-        assert!(layout.texts.iter().all(|text| !text.text.contains("Nope")));
-        assert!(layout.texts.iter().any(|text| text.color == 0xFF0000));
+        let texts = layout.texts();
+        assert!(texts.iter().any(|text| text.text.contains("Hello")));
+        assert!(texts.iter().all(|text| !text.text.contains("Nope")));
+        assert!(texts.iter().any(|text| text.color == 0xFF0000));
     }
 
     #[test]
@@ -1676,7 +1927,8 @@ mod tests {
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 200, &mut fonts);
 
-        let text = layout.texts.first().expect("text command should exist");
+        let texts = layout.texts();
+        let text = texts.first().expect("text command should exist");
         let expected_left_offset = (200 - text.width) / 2;
 
         assert_eq!(text.x, expected_left_offset);
@@ -1691,8 +1943,8 @@ mod tests {
         let layout = layout_styled_document(&styled, &ImageStore::default(), 90, &mut fonts);
 
         let distinct_rows = layout
-            .texts
-            .iter()
+            .texts()
+            .into_iter()
             .map(|text| text.y)
             .collect::<std::collections::BTreeSet<_>>();
 
@@ -1721,13 +1973,12 @@ mod tests {
         let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
-        let left = layout
-            .texts
+        let texts = layout.texts();
+        let left = texts
             .iter()
             .find(|text| text.text.contains("Left"))
             .expect("left cell text should exist");
-        let right = layout
-            .texts
+        let right = texts
             .iter()
             .find(|text| text.text.contains("Right"))
             .expect("right cell text should exist");
@@ -1755,9 +2006,10 @@ mod tests {
 
         let layout = layout_styled_document(&styled, &images, 320, &mut fonts);
 
-        assert_eq!(layout.images.len(), 1);
-        assert_eq!(layout.images[0].width, 40);
-        assert_eq!(layout.images[0].height, 20);
+        let images_list = layout.images();
+        assert_eq!(images_list.len(), 1);
+        assert_eq!(images_list[0].width, 40);
+        assert_eq!(images_list[0].height, 20);
     }
 
     #[test]
@@ -1767,13 +2019,12 @@ mod tests {
         let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 500, &mut fonts);
-        let hello = layout
-            .texts
+        let texts = layout.texts();
+        let hello = texts
             .iter()
             .find(|text| text.text.contains("Hello"))
             .expect("hello text should exist");
-        let world = layout
-            .texts
+        let world = texts
             .iter()
             .find(|text| text.text.contains("World"))
             .expect("world text should exist");
@@ -1790,8 +2041,8 @@ mod tests {
         let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
-        let short = layout
-            .texts
+        let texts = layout.texts();
+        let short = texts
             .iter()
             .find(|text| text.text.contains("short"))
             .expect("short text should exist");
@@ -1807,13 +2058,12 @@ mod tests {
         let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
-        let top = layout
-            .texts
+        let texts = layout.texts();
+        let top = texts
             .iter()
             .find(|text| text.text.contains("Top"))
             .expect("top cell text should exist");
-        let bottom = layout
-            .texts
+        let bottom = texts
             .iter()
             .find(|text| text.text.contains("Bottom"))
             .expect("bottom cell text should exist");
@@ -1831,9 +2081,29 @@ mod tests {
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
+        // With stacking contexts, the div with opacity: 0.5 becomes a LayerCommand.
+        // Its background rect inside the layer uses the raw red (#ff0000), not a pre-blended value.
+        // The compositor blends it at render time.
+        let has_layer = layout.commands.iter().any(|cmd| {
+            matches!(cmd, DrawCommand::Layer(layer) if layer.opacity == 128 || layer.opacity == 127)
+        });
         assert!(
-            layout.rects.iter().any(|rect| rect.color == 0x800000),
-            "semi-transparent red should blend against the document background, not the default page color"
+            has_layer,
+            "div with opacity: 0.5 should produce a LayerCommand with ~50% opacity"
+        );
+        // The raw red rect should be inside the layer
+        let has_raw_red = layout.commands.iter().any(|cmd| {
+            if let DrawCommand::Layer(layer) = cmd {
+                layer.commands.iter().any(|inner| {
+                    matches!(inner, DrawCommand::Rect(r) if r.color == 0xFF0000)
+                })
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_raw_red,
+            "raw red rect should be inside the LayerCommand"
         );
     }
 
@@ -1846,9 +2116,26 @@ mod tests {
         let styled = build_styled_tree(&document, &stylesheet, 1280);
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
-        let text = layout.texts.first().expect("text command should exist");
 
-        assert_eq!(text.color, 0x404040);
+        // With proper stacking contexts, div creates a LayerCommand with its own opacity.
+        // The span inside has its own effective_opacity (reset at stacking context boundary).
+        // The text color inside the layer is pre-blended with the span's own opacity (0.5)
+        // against the layer's local backdrop (black #000000 from body background).
+        // span.opacity=0.5=128, color=white=#ffffff blended against black => ~0x808080
+        let has_layer = layout.commands.iter().any(|cmd| {
+            matches!(cmd, DrawCommand::Layer(_))
+        });
+        assert!(has_layer, "div with opacity: 0.5 should produce a LayerCommand");
+
+        // Text color inside layer should be pre-blended with span's own opacity against the
+        // layer's local backdrop color. The layer's backdrop is black (body bg).
+        // span effective_opacity = 128 (its own opacity, reset at stacking context boundary)
+        // color = apply_opacity(0xFFFFFF, 0x000000, 128) = ~0x808080
+        let texts = layout.texts();
+        let text = texts.first().expect("text command should exist");
+        // The text should be blended with span's 50% opacity against the layer backdrop (black)
+        assert_eq!(text.color, 0x808080,
+            "text inside stacking context should be pre-blended with span's own opacity against layer backdrop");
     }
 
     fn find_paragraph(element: &crate::css::StyledElement) -> Option<&crate::css::StyledElement> {

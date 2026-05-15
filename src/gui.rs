@@ -15,7 +15,7 @@ use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamily
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
 use crate::image::DecodedImage;
-use crate::layout::{LayoutDocument, TextCommand, layout_styled_document};
+use crate::layout::{DrawCommand, LayerCommand, LayoutDocument, TextCommand, layout_styled_document};
 use crate::url::Url;
 
 const WINDOW_WIDTH: u32 = 1100;
@@ -907,9 +907,7 @@ impl DocumentView {
             DocumentContent::Blank => LayoutDocument {
                 background_color: DEFAULT_BACKGROUND_COLOR,
                 content_height: 0,
-                rects: Vec::new(),
-                texts: Vec::new(),
-                images: Vec::new(),
+                commands: Vec::new(),
                 links: Vec::new(),
             },
             DocumentContent::Loaded(page) => {
@@ -925,7 +923,7 @@ fn layout_error_document(
     _width: u32,
     fonts: &mut FontContext,
 ) -> LayoutDocument {
-    let mut texts = Vec::new();
+    let mut commands = Vec::new();
     let mut cursor_y: u32 = 0;
 
     for line in &document.lines {
@@ -943,7 +941,7 @@ fn layout_error_document(
             continue;
         }
 
-        texts.push(TextCommand {
+        commands.push(DrawCommand::Text(TextCommand {
             x: 0,
             y: cursor_y,
             width: fonts.text_width_px(line, font_size_px, FontFamilyKind::Sans),
@@ -954,7 +952,7 @@ fn layout_error_document(
             underline: false,
             bold: scale >= 3,
             italic: false,
-        });
+        }));
 
         cursor_y = cursor_y.saturating_add(height);
     }
@@ -962,9 +960,7 @@ fn layout_error_document(
     LayoutDocument {
         background_color: DEFAULT_BACKGROUND_COLOR,
         content_height: cursor_y,
-        rects: Vec::new(),
-        texts,
-        images: Vec::new(),
+        commands,
         links: Vec::new(),
     }
 }
@@ -2069,71 +2065,186 @@ fn paint_layout(
     scroll_y: u32,
     layout: &LayoutDocument,
 ) {
+    let page = if let DocumentContent::Loaded(page) = &document.content {
+        Some(page)
+    } else {
+        None
+    };
+
+    render_commands(
+        buffer,
+        width,
+        height,
+        offset_x,
+        offset_y,
+        viewport_height,
+        scroll_y,
+        &layout.commands,
+        page,
+        fonts,
+    );
+}
+
+fn render_commands(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    offset_x: u32,
+    offset_y: u32,
+    viewport_height: u32,
+    scroll_y: u32,
+    commands: &[DrawCommand],
+    page: Option<&crate::browser::BrowserPage>,
+    fonts: &mut FontContext,
+) {
     let viewport_bottom = scroll_y.saturating_add(viewport_height);
 
-    for rect in &layout.rects {
-        let rect_bottom = rect.y.saturating_add(rect.height);
-        if rect_bottom < scroll_y || rect.y > viewport_bottom {
-            continue;
-        }
-
-        draw_rect(
-            buffer,
-            width,
-            height,
-            offset_x.saturating_add(rect.x),
-            offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
-            rect.width,
-            rect.height,
-            rect.color,
-        );
-    }
-
-    if let DocumentContent::Loaded(page) = &document.content {
-        for image in &layout.images {
-            let image_bottom = image.y.saturating_add(image.height);
-            if image_bottom < scroll_y || image.y > viewport_bottom {
-                continue;
+    for cmd in commands {
+        match cmd {
+            DrawCommand::Rect(rect) => {
+                let rect_bottom = rect.y.saturating_add(rect.height);
+                if rect_bottom < scroll_y || rect.y > viewport_bottom {
+                    continue;
+                }
+                draw_rect(
+                    buffer,
+                    width,
+                    height,
+                    offset_x.saturating_add(rect.x),
+                    offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
+                    rect.width,
+                    rect.height,
+                    rect.color,
+                );
             }
+            DrawCommand::Text(text) => {
+                let text_bottom = text
+                    .y
+                    .saturating_add(fonts.line_height_px(text.font_size_px, text.font_family));
+                if text_bottom < scroll_y || text.y > viewport_bottom {
+                    continue;
+                }
+                fonts.draw_text(
+                    buffer,
+                    width,
+                    height,
+                    offset_x.saturating_add(text.x),
+                    offset_y.saturating_add(text.y.saturating_sub(scroll_y)),
+                    &text.text,
+                    text.font_size_px,
+                    text.color,
+                    text.bold,
+                    text.underline,
+                    text.font_family,
+                );
+            }
+            DrawCommand::Image(image) => {
+                let image_bottom = image.y.saturating_add(image.height);
+                if image_bottom < scroll_y || image.y > viewport_bottom {
+                    continue;
+                }
+                if let Some(page) = page {
+                    if let Some(decoded) = page.images.get(&image.src) {
+                        draw_scaled_image(
+                            buffer,
+                            width,
+                            height,
+                            offset_x.saturating_add(image.x),
+                            offset_y.saturating_add(image.y.saturating_sub(scroll_y)),
+                            image.width,
+                            image.height,
+                            decoded,
+                        );
+                    }
+                }
+            }
+            DrawCommand::Layer(layer) => {
+                render_layer(
+                    buffer, width, height, offset_x, offset_y, viewport_height, scroll_y, layer,
+                    page, fonts,
+                );
+            }
+        }
+    }
+}
 
-            let Some(decoded) = page.images.get(&image.src) else {
-                continue;
-            };
+fn render_layer(
+    buffer: &mut [u32],
+    buf_width: u32,
+    buf_height: u32,
+    offset_x: u32,
+    offset_y: u32,
+    viewport_height: u32,
+    scroll_y: u32,
+    layer: &LayerCommand,
+    page: Option<&crate::browser::BrowserPage>,
+    fonts: &mut FontContext,
+) {
+    // Compute screen-space rect of this layer (clipped to viewport)
+    let screen_x = offset_x.saturating_add(layer.x);
+    let screen_y_unclipped = offset_y
+        .saturating_add(layer.y.saturating_sub(scroll_y));
 
-            draw_scaled_image(
-                buffer,
-                width,
-                height,
-                offset_x.saturating_add(image.x),
-                offset_y.saturating_add(image.y.saturating_sub(scroll_y)),
-                image.width,
-                image.height,
-                decoded,
-            );
+    // Skip layers that are entirely outside the visible area
+    let viewport_bottom_screen = offset_y.saturating_add(viewport_height);
+    let layer_screen_bottom = screen_y_unclipped.saturating_add(layer.height);
+    if layer_screen_bottom < offset_y || screen_y_unclipped > viewport_bottom_screen {
+        return;
+    }
+
+    let screen_y = screen_y_unclipped;
+    let w = layer.width.min(buf_width.saturating_sub(screen_x));
+    let h = layer.height.min(buf_height.saturating_sub(screen_y));
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    // Allocate offscreen buffer, copy backdrop from main framebuffer
+    let mut offscreen = vec![0u32; (w * h) as usize];
+    for row in 0..h {
+        let src_start = ((screen_y + row) * buf_width + screen_x) as usize;
+        let dst_start = (row * w) as usize;
+        let len = w as usize;
+        if src_start + len <= buffer.len() {
+            offscreen[dst_start..dst_start + len]
+                .copy_from_slice(&buffer[src_start..src_start + len]);
         }
     }
 
-    for text in &layout.texts {
-        let text_bottom = text
-            .y
-            .saturating_add(fonts.line_height_px(text.font_size_px, text.font_family));
-        if text_bottom < scroll_y || text.y > viewport_bottom {
-            continue;
-        }
+    // Render layer's sub-commands into the offscreen buffer.
+    // Coordinates are page-absolute, so we adjust offset so that layer.x → 0 in offscreen.
+    let sub_offset_x = offset_x.wrapping_sub(layer.x);
+    let sub_offset_y = offset_y.wrapping_sub(layer.y).wrapping_add(scroll_y);
 
-        fonts.draw_text(
-            buffer,
-            width,
-            height,
-            offset_x.saturating_add(text.x),
-            offset_y.saturating_add(text.y.saturating_sub(scroll_y)),
-            &text.text,
-            text.font_size_px,
-            text.color,
-            text.bold,
-            text.underline,
-            text.font_family,
-        );
+    render_commands(
+        &mut offscreen,
+        w,
+        h,
+        sub_offset_x,
+        sub_offset_y,
+        h,  // full offscreen height as viewport
+        0,  // no scroll inside offscreen
+        &layer.commands,
+        page,
+        fonts,
+    );
+
+    // Blend offscreen buffer back onto main buffer with opacity
+    let opacity = layer.opacity as u32;
+    for row in 0..h {
+        let dst_start = ((screen_y + row) * buf_width + screen_x) as usize;
+        let src_start = (row * w) as usize;
+        for col in 0..w as usize {
+            if dst_start + col >= buffer.len() {
+                break;
+            }
+            let src = offscreen[src_start + col];
+            let dst = buffer[dst_start + col];
+            let r = ((src >> 16 & 0xFF) * opacity + (dst >> 16 & 0xFF) * (255 - opacity)) / 255;
+            let g = ((src >> 8 & 0xFF) * opacity + (dst >> 8 & 0xFF) * (255 - opacity)) / 255;
+            let b = ((src & 0xFF) * opacity + (dst & 0xFF) * (255 - opacity)) / 255;
+            buffer[dst_start + col] = (r << 16) | (g << 8) | b;
+        }
     }
 }
 
@@ -2285,7 +2396,7 @@ mod tests {
             &mut fonts,
         );
 
-        assert!(layout.texts.len() >= 2);
+        assert!(layout.texts().len() >= 2);
     }
 
     #[test]
