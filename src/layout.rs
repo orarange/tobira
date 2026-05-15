@@ -67,7 +67,7 @@ pub fn layout_styled_document(
         .map(|(c, o)| apply_opacity(c, DEFAULT_BACKGROUND_COLOR, o))
         .unwrap_or(DEFAULT_BACKGROUND_COLOR);
     let mut context = LayoutContext {
-        background_color: DEFAULT_BACKGROUND_COLOR,
+        background_color: canvas_bg,
         ..LayoutContext::default()
     };
     let mut cursor_y = 0;
@@ -256,7 +256,6 @@ fn layout_block_element(
         .min(element.style.max_width.unwrap_or(u32::MAX))
         .max(element.style.min_width);
     let background_top = *cursor_y;
-    let saved_bg = context.background_color;
     let background_index = if let Some(background_color) = element.style.background_color {
         let blended_bg = apply_opacity(
             background_color,
@@ -270,7 +269,6 @@ fn layout_block_element(
             height: 1,
             color: blended_bg,
         });
-        context.background_color = blended_bg;
         Some(context.rects.len() - 1)
     } else {
         None
@@ -339,8 +337,6 @@ fn layout_block_element(
             rect.height = background_height;
         }
     }
-
-    context.background_color = saved_bg;
 
     // Draw borders if present
     if !element.style.border_style_none {
@@ -1382,7 +1378,7 @@ fn emit_line_impl(
 
     for span in &line.spans {
         let span_opacity = span.style.effective_opacity;
-        let _text_bg = if let Some(background_color) = span.style.background_color {
+        if let Some(background_color) = span.style.background_color {
             let blended_bg = apply_opacity(background_color, context.background_color, span_opacity);
             context.rects.push(RectCommand {
                 x: cursor_x,
@@ -1391,10 +1387,7 @@ fn emit_line_impl(
                 height: line_height,
                 color: blended_bg,
             });
-            blended_bg
-        } else {
-            context.background_color
-        };
+        }
 
         let display_text = if span.style.text_transform != TextTransform::None {
             apply_text_transform(&span.text, span.style.text_transform)
