@@ -193,8 +193,6 @@ pub fn layout_styled_document(
     let canvas_bg = DEFAULT_BACKGROUND_COLOR;
     let mut context = LayoutContext {
         background_color: canvas_bg,
-        // doc_bg_raw is no longer needed: we no longer skip the body bg rect.
-        doc_bg_raw: None,
         ..LayoutContext::default()
     };
     let mut cursor_y = 0;
@@ -220,7 +218,6 @@ pub fn layout_styled_document(
 #[derive(Default)]
 struct LayoutContext {
     background_color: Color,
-    doc_bg_raw: Option<Color>,
     commands: Vec<DrawCommand>,
     links: Vec<LinkCommand>,
 }
@@ -370,7 +367,6 @@ fn layout_block_element(
             // Table with opacity: render into sub-context and wrap in a LayerCommand
             let mut sub_context = LayoutContext {
                 background_color: context.background_color,
-                doc_bg_raw: context.doc_bg_raw,
                 ..LayoutContext::default()
             };
             let y_before = *cursor_y;
@@ -412,34 +408,27 @@ fn layout_block_element(
         return;
     }
 
-    let is_doc_bg_element = context.doc_bg_raw.is_some()
-        && matches!(element.tag_name.as_str(), "body" | "html" | "document")
-        && element.style.background_color == context.doc_bg_raw;
     let saved_bg = context.background_color;
-    let background_cmd_index = if !is_doc_bg_element {
-        if let Some(background_color) = element.style.background_color {
-            // Use effective_opacity for the actual drawn rect color (correct visual result)
-            let blended_for_rect = apply_opacity(
-                background_color,
-                context.background_color,
-                element.style.effective_opacity,
-            );
-            context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x,
-                y: background_top,
-                width: outer_width.max(1),
-                height: 1,
-                color: blended_for_rect,
-            }));
-            if element.style.effective_opacity == 255 {
-                // Fully opaque: children blend against this element's solid background
-                context.background_color = background_color;
-            }
-            // If opacity < 255: don't update — children keep the parent/canvas backdrop
-            Some(context.commands.len() - 1)
-        } else {
-            None
+    let background_cmd_index = if let Some(background_color) = element.style.background_color {
+        // Use effective_opacity for the actual drawn rect color (correct visual result)
+        let blended_for_rect = apply_opacity(
+            background_color,
+            context.background_color,
+            element.style.effective_opacity,
+        );
+        context.commands.push(DrawCommand::Rect(RectCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1,
+            color: blended_for_rect,
+        }));
+        if element.style.effective_opacity == 255 {
+            // Fully opaque: children blend against this element's solid background
+            context.background_color = background_color;
         }
+        // If opacity < 255: don't update — children keep the parent/canvas backdrop
+        Some(context.commands.len() - 1)
     } else {
         None
     };
@@ -603,31 +592,22 @@ fn layout_block_element_as_layer(
     // Create a sub-context for the element's subtree
     let mut sub_context = LayoutContext {
         background_color: context.background_color,
-        doc_bg_raw: context.doc_bg_raw,
         ..LayoutContext::default()
     };
 
     // The element's own background rect goes into the sub-context (raw color, no opacity blend)
-    let is_doc_bg_element = context.doc_bg_raw.is_some()
-        && matches!(element.tag_name.as_str(), "body" | "html" | "document")
-        && element.style.background_color == context.doc_bg_raw;
-
-    let background_cmd_index = if !is_doc_bg_element {
-        if let Some(background_color) = element.style.background_color {
-            // Use raw background color — opacity is applied by the layer compositor
-            sub_context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x,
-                y: background_top,
-                width: outer_width.max(1),
-                height: 1,
-                color: background_color,
-            }));
-            // Update sub_context backdrop for children
-            sub_context.background_color = background_color;
-            Some(sub_context.commands.len() - 1)
-        } else {
-            None
-        }
+    let background_cmd_index = if let Some(background_color) = element.style.background_color {
+        // Use raw background color — opacity is applied by the layer compositor
+        sub_context.commands.push(DrawCommand::Rect(RectCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1,
+            color: background_color,
+        }));
+        // Update sub_context backdrop for children
+        sub_context.background_color = background_color;
+        Some(sub_context.commands.len() - 1)
     } else {
         None
     };
@@ -1332,7 +1312,9 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             width: layer.width,
             height: layer.height,
             opacity: layer.opacity,
-            // Do NOT recurse into layer.commands — they're already layer-relative
+            // Do NOT recurse into layer.commands — they're already layer-relative.
+            // TODO: wrap commands in Rc<[DrawCommand]> for O(1) clone when deep/large
+            //       layer trees are encountered during fragment merge (perf, not correctness).
             commands: layer.commands.clone(),
         }),
     }
@@ -1813,6 +1795,14 @@ fn emit_line_impl(
 
     for span in &line.spans {
         let span_opacity = span.style.effective_opacity;
+        // Note: apply_opacity here blends span colors against context.background_color,
+        // which tracks the nearest solid block-level backdrop. For spans inside a block
+        // with opacity < 1, the block emits a LayerCommand and effective_opacity is reset
+        // to 255 (via compute_style stacking-context rule), so blending is correct.
+        // For a bare inline <span style="opacity:0.5"> with no surrounding stacking-context
+        // block, effective_opacity accumulates multiplicatively and blending is done against
+        // the block-level backdrop — ignoring any inline content painted underneath.
+        // This is an intentional approximation (see css.rs nested_inline_opacity test).
         if let Some(background_color) = span.style.background_color {
             let blended_bg = apply_opacity(background_color, context.background_color, span_opacity);
             context.commands.push(DrawCommand::Rect(RectCommand {

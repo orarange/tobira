@@ -2241,6 +2241,14 @@ fn render_layer(
     let oh = layer.height; // full layer height — natural coordinate space
     let needed = (ow as usize) * (oh as usize); // usize arithmetic avoids u32 overflow
 
+    // Safety guard: refuse to allocate an obviously pathological offscreen buffer.
+    // 64 MP (8192×8192) is well above any screen size we realistically support.
+    // A layer larger than this is almost certainly a bug in layout (e.g. height not clamped).
+    const MAX_OFFSCREEN_PIXELS: usize = 8192 * 8192;
+    if needed > MAX_OFFSCREEN_PIXELS {
+        return;
+    }
+
     // Depth-indexed pool: scratch[depth] is the reusable offscreen Vec for this level.
     // Nested DrawCommand::Layer calls use depth+1 so each nesting level has its own slot.
     // After this frame, the Vec is returned to the pool with its capacity intact,
@@ -2311,6 +2319,13 @@ fn render_layer(
     }
 
     // Return offscreen Vec to the pool so its capacity is reused next frame.
+    // Trim if dramatically over-sized: if the buffer is more than 4× larger than what
+    // this frame needed (and wastes >1 MB), release the excess so a previously-huge
+    // layer (e.g. a tall scrollable body) doesn't permanently inflate RAM after navigation.
+    const MAX_OVERAGE_PIXELS: usize = 256 * 1024; // 1 MB = 256K u32 pixels
+    if offscreen.capacity() > needed * 4 && offscreen.capacity() - needed > MAX_OVERAGE_PIXELS {
+        offscreen.shrink_to(needed * 2);
+    }
     scratch[depth] = offscreen;
 }
 
