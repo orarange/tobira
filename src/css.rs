@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+﻿use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::html::{Element, Node};
@@ -16,11 +16,13 @@ pub const DEFAULT_LINK_COLOR: Color = 0x2A5DB0;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    pub root_vars: std::collections::BTreeMap<String, String>,
 }
 
 impl Stylesheet {
     pub fn extend(&mut self, other: Stylesheet) {
         self.rules.extend(other.rules);
+        self.root_vars.extend(other.root_vars);
     }
 }
 
@@ -581,7 +583,35 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         }
     }
 
-    Stylesheet { rules }
+    // Pre-pass: collect :root and html CSS variables from the raw source
+    let mut root_vars = std::collections::BTreeMap::new();
+    {
+        let source2 = strip_comments(input);
+        let mut cur2 = 0;
+        while let Some(open_off) = source2[cur2..].find('{') {
+            let sel_start = cur2;
+            let sel_end = cur2 + open_off;
+            let blk_start = sel_end + 1;
+            let blk_raw = &source2[blk_start..];
+            let Some(close_off) = find_matching_close_brace(blk_raw) else { break };
+            let blk_end = blk_start + close_off;
+            let sel_text = source2[sel_start..sel_end].trim().to_ascii_lowercase();
+            let blk_text = source2[blk_start..blk_end].trim();
+            cur2 = blk_end + 1;
+            let is_root = sel_text.split(',').any(|s| {
+                let s = s.trim();
+                s == ":root" || s == "html"
+            });
+            if is_root {
+                for decl in parse_inline_declarations(blk_text) {
+                    if decl.property.starts_with("--") {
+                        root_vars.insert(decl.property.clone(), decl.value.clone());
+                    }
+                }
+            }
+        }
+    }
+    Stylesheet { rules, root_vars }
 }
 
 fn parse_media_condition(query: &str) -> MediaCondition {
@@ -767,7 +797,7 @@ fn compute_style(
     apply_legacy_attributes(&mut style, element, parent_font_size);
 
     let identity = ElementIdentity::from(element);
-    let mut css_variables: BTreeMap<String, String> = BTreeMap::new();
+    let mut css_variables = stylesheet.root_vars.clone();
     let mut applicable: Vec<(usize, usize, Declaration)> = Vec::new();
 
     for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
@@ -3299,5 +3329,25 @@ mod tests {
             em.style.effective_opacity, 128,
             "inline stacking context should reset effective_opacity to child's own opacity"
         );
+    }
+    #[test]
+    fn test_root_css_variable_inheritance() {
+        use crate::html::parse_document;
+        let css_text = r#":root { --color: #ff0000; } p { color: var(--color); }"#;
+        let html = r#"<html><head></head><body><p>Hello</p></body></html>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet(css_text);
+        let styled = build_styled_tree(&doc, &stylesheet, 800);
+
+        fn find_p(node: &StyledNode) -> Option<&StyledElement> {
+            match node {
+                StyledNode::Element(el) if el.tag_name == "p" => Some(el),
+                StyledNode::Element(el) => el.children.iter().find_map(find_p),
+                _ => None,
+            }
+        }
+
+        let p_el = find_p(&styled).expect("Should find <p> element");
+        assert_eq!(p_el.style.color, 0xff0000, "p color should be #ff0000 from :root var");
     }
 }
