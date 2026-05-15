@@ -278,7 +278,7 @@ fn layout_block_element(
                 height: 1,
                 color: blended_for_rect,
             });
-            if element.style.opacity == 255 {
+            if element.style.effective_opacity == 255 {
                 // Fully opaque: children blend against this element's solid background
                 context.background_color = background_color;
             }
@@ -603,7 +603,7 @@ fn layout_table_element(
                 .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
             let inner_width = span_width.saturating_sub(padding.saturating_mul(2)).max(1);
             let cell_backdrop = placement.cell.style.background_color
-                .filter(|_| placement.cell.style.opacity == 255)
+                .filter(|_| placement.cell.style.effective_opacity == 255)
                 .unwrap_or(context.background_color);
             layout_table_cell(placement.cell, inner_width, images, fonts, cell_backdrop)
         })

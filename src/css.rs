@@ -2675,7 +2675,7 @@ pub fn apply_text_transform(text: &str, transform: TextTransform) -> String {
 mod tests {
     use super::{
         Display, LengthValue, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
-        build_styled_tree, parse_color, parse_stylesheet, split_at_top_level,
+        build_styled_tree, parse_color, parse_length, parse_stylesheet, split_at_top_level,
     };
     use crate::html::{Node, parse_document};
 
@@ -3149,6 +3149,14 @@ mod tests {
         let styled = build_styled_tree(&document, &stylesheet, 1280);
         let p = find_first_element(&styled, "p").unwrap();
         assert_eq!(p.style.font_size_px, 24);
+    }
+
+    #[test]
+    fn calc_vh_uses_800px_base() {
+        // 50vh should resolve to 400px (50% of 800px viewport height)
+        // This locks the vh base against parse_length's viewport-unit handling
+        let result = parse_length("calc(50vh)", 16);
+        assert_eq!(result, Some(400));
     }
 
     // ── rgba() blending tests ─────────────────────────────────────────────────
