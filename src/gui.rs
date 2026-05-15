@@ -132,6 +132,9 @@ impl BrowserApp {
         self.address_bar.set_text(url.to_string());
         self.address_bar.blur();
         self.scroll_y = 0;
+        // Clear scratch pool on navigation: new page may have different layer nesting depth,
+        // and old over-sized buffers would waste memory across the lifetime of the session.
+        self.scratch.clear();
         self.sync_window_title();
         self.sync_input_method();
         self.request_redraw();
@@ -141,6 +144,7 @@ impl BrowserApp {
         let Some(url) = self.current_url.clone() else {
             self.document = DocumentView::blank();
             self.scroll_y = 0;
+            self.scratch.clear();
             self.sync_window_title();
             self.request_redraw();
             return;
@@ -150,6 +154,8 @@ impl BrowserApp {
         self.current_url = Some(url.clone());
         self.address_bar.set_text(url.to_string());
         self.scroll_y = 0;
+        // Clear scratch pool on reload: page structure may have changed.
+        self.scratch.clear();
         self.sync_window_title();
         self.sync_input_method();
         self.request_redraw();
@@ -161,6 +167,7 @@ impl BrowserApp {
             self.current_url = None;
             self.document = DocumentView::blank();
             self.scroll_y = 0;
+            self.scratch.clear();
             self.sync_window_title();
             self.request_redraw();
             return;
@@ -172,6 +179,7 @@ impl BrowserApp {
                 self.document =
                     DocumentView::error(format!("could not navigate to `{entered}`: {error}"));
                 self.scroll_y = 0;
+                self.scratch.clear();
                 self.sync_window_title();
                 self.request_redraw();
             }
@@ -776,6 +784,8 @@ impl ApplicationHandler for BrowserApp {
                 }
             }
             WindowEvent::Resized(size) => {
+                // Clear scratch pool on resize: buffer dimensions change, old buffers may be wrong size.
+                self.scratch.clear();
                 self.update_hover(size);
                 self.sync_input_method();
                 self.request_redraw();
@@ -2220,11 +2230,13 @@ fn render_layer(
     let visible_w = layer.width.saturating_sub(src_x_start).min(buf_width.saturating_sub(dst_x));
     if visible_h == 0 || visible_w == 0 { return; }
 
-    // Allocate only the visible slice for the offscreen buffer.
-    // This avoids allocating e.g. 1280×10000 for a full-page opacity layer.
-    let lw = visible_w;
-    let lh = visible_h;
-    let needed = (lw as usize) * (lh as usize); // usize arithmetic avoids u32 overflow
+    // Allocate a full-width offscreen buffer (layer.width columns) so that sub-commands
+    // rendered at their natural x positions land in the right column.  We then read back
+    // starting at src_x_start when blending into the main buffer.
+    // This fixes the bug where src_x_start was computed but never used.
+    let ow = layer.width; // full layer width (offscreen width)
+    let oh = visible_h;   // only the visible vertical slice
+    let needed = (ow as usize) * (oh as usize); // usize arithmetic avoids u32 overflow
 
     // Depth-indexed pool: scratch[depth] is the reusable offscreen Vec for this level.
     // Nested DrawCommand::Layer calls use depth+1 so each nesting level has its own slot.
@@ -2240,30 +2252,31 @@ fn render_layer(
     let mut offscreen = std::mem::take(&mut scratch[depth]);
     offscreen.resize(needed, 0);
 
-    // Copy backdrop from main framebuffer into offscreen (visible slice only).
-    // offscreen row r  ↔  buffer row dst_y + r
-    for row in 0..lh {
+    // Copy backdrop from main framebuffer into offscreen.
+    // We copy visible_w columns starting from dst_x in the buffer into offscreen at
+    // column src_x_start, mirroring where render_commands will draw them.
+    for row in 0..oh {
         let buf_row = dst_y + row;
         let buf_start = (buf_row * buf_width + dst_x) as usize;
-        let off_start = (row * lw) as usize;
-        let len = lw as usize;
+        let off_start = (row * ow + src_x_start) as usize;
+        let len = visible_w as usize;
         if buf_start + len <= buffer.len() && off_start + len <= offscreen.len() {
             offscreen[off_start..off_start + len]
                 .copy_from_slice(&buffer[buf_start..buf_start + len]);
         }
     }
 
-    // Render layer's sub-commands into the offscreen buffer.
-    // Sub-commands are layer-relative (rebased at layout time), so x/y offsets are 0.
+    // Render layer's sub-commands into the full-width offscreen buffer.
+    // Sub-commands are layer-relative (rebased at layout time), so x offset is 0.
     // Pass src_y_start as scroll_y so rendering culls/renders the visible vertical portion.
     // scratch is free (offscreen was taken via mem::take), so nested layers can use it.
     render_commands(
         &mut offscreen,
-        lw,
-        lh,
+        ow,
+        oh,
         0,           // x offset: sub-commands are layer-relative
         0,           // y offset: sub-commands are layer-relative
-        lh,          // viewport height = visible height
+        oh,          // viewport height = visible height
         src_y_start, // scroll past non-visible top of layer
         &layer.commands,
         page,
@@ -2273,22 +2286,23 @@ fn render_layer(
     );
 
     // Blend visible region of offscreen back onto main buffer with opacity.
-    // offscreen row r  ↔  buffer row dst_y + r
+    // Read from offscreen starting at column src_x_start (the horizontally clipped offset).
     let opacity = layer.opacity as u32;
-    for row in 0..lh {
-        let buf_row = dst_y + row;
-        let buf_start = (buf_row * buf_width + dst_x) as usize;
-        let off_start = (row * lw) as usize;
-        for col in 0..lw as usize {
-            if buf_start + col >= buffer.len() || off_start + col >= offscreen.len() {
-                break;
-            }
-            let src = offscreen[off_start + col];
-            let dst_px = buffer[buf_start + col];
-            let r = ((src >> 16 & 0xFF) * opacity + (dst_px >> 16 & 0xFF) * (255 - opacity)) / 255;
-            let g = ((src >> 8 & 0xFF) * opacity + (dst_px >> 8 & 0xFF) * (255 - opacity)) / 255;
-            let b = ((src & 0xFF) * opacity + (dst_px & 0xFF) * (255 - opacity)) / 255;
-            buffer[buf_start + col] = (r << 16) | (g << 8) | b;
+    let buf_end = buffer.len();
+    let off_end = offscreen.len();
+    for row in 0..oh {
+        let buf_row_start = (dst_y + row) as usize * buf_width as usize + dst_x as usize;
+        let off_row_start = row as usize * ow as usize + src_x_start as usize;
+        if buf_row_start + visible_w as usize > buf_end || off_row_start + visible_w as usize > off_end {
+            continue;
+        }
+        for col in 0..visible_w as usize {
+            let src = offscreen[off_row_start + col];
+            let dst_px = buffer[buf_row_start + col];
+            let r = ((src >> 16 & 0xFF) * opacity + (dst_px >> 16 & 0xFF) * (255 - opacity) + 127) / 255;
+            let g = ((src >> 8 & 0xFF) * opacity + (dst_px >> 8 & 0xFF) * (255 - opacity) + 127) / 255;
+            let b = ((src & 0xFF) * opacity + (dst_px & 0xFF) * (255 - opacity) + 127) / 255;
+            buffer[buf_row_start + col] = (r << 16) | (g << 8) | b;
         }
     }
 

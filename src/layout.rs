@@ -34,12 +34,26 @@ pub struct LayoutDocument {
 
 // Convenience accessors for consumers that need flat lists
 impl LayoutDocument {
+    /// Flatten all text commands across the command tree, including those inside layers.
+    ///
+    /// **Note:** these methods recurse into `LayerCommand` children but ignore the layer's
+    /// `opacity` value.  Colors/positions returned reflect the *raw* (pre-compositor) values
+    /// stored in the draw commands.  If a stacking context sets `opacity < 1`, the colors
+    /// you see here are the unblended source colors — the actual on-screen appearance
+    /// depends on the compositor blending them at render time.  Use these accessors for
+    /// structural inspection (e.g. unit tests), not for pixel-accurate color assertions.
     pub fn texts(&self) -> Vec<TextCommand> {
         collect_texts(&self.commands, 0, 0)
     }
+    /// Flatten all rect commands across the command tree, including those inside layers.
+    ///
+    /// See [`texts`](Self::texts) for the note on opacity and unblended colors.
     pub fn rects(&self) -> Vec<RectCommand> {
         collect_rects(&self.commands, 0, 0)
     }
+    /// Flatten all image commands across the command tree, including those inside layers.
+    ///
+    /// See [`texts`](Self::texts) for the note on opacity and unblended colors.
     pub fn images(&self) -> Vec<ImageCommand> {
         collect_images(&self.commands, 0, 0)
     }
@@ -171,13 +185,16 @@ pub fn layout_styled_document(
     viewport_width: u32,
     fonts: &mut FontContext,
 ) -> LayoutDocument {
-    let doc_bg = find_document_background(document);
-    let canvas_bg = doc_bg
-        .map(|(c, o)| apply_opacity(c, DEFAULT_BACKGROUND_COLOR, o))
-        .unwrap_or(DEFAULT_BACKGROUND_COLOR);
+    // Do NOT pre-blend the body background colour here.
+    // When body has an opacity < 1, layout_block_element_as_layer wraps the body in a
+    // LayerCommand which composites it at render time.  Pre-blending here AND compositing
+    // in render_layer would double-apply the opacity (Issue 4).
+    // canvas_bg stays as the default so the body's LayerCommand is the sole source of truth.
+    let canvas_bg = DEFAULT_BACKGROUND_COLOR;
     let mut context = LayoutContext {
         background_color: canvas_bg,
-        doc_bg_raw: doc_bg.map(|(c, _)| c),
+        // doc_bg_raw is no longer needed: we no longer skip the body bg rect.
+        doc_bg_raw: None,
         ..LayoutContext::default()
     };
     let mut cursor_y = 0;
@@ -2017,7 +2034,7 @@ fn apply_opacity(color: Color, background: Color, opacity: u8) -> Color {
         return background;
     }
     let a = opacity as u32;
-    let blend = |fg: u32, bg: u32| -> u32 { (fg * a + bg * (255 - a)) / 255 };
+    let blend = |fg: u32, bg: u32| -> u32 { (fg * a + bg * (255 - a) + 127) / 255 };
     let fr = (color >> 16) & 0xFF;
     let fg = (color >> 8) & 0xFF;
     let fb = color & 0xFF;
@@ -2027,20 +2044,8 @@ fn apply_opacity(color: Color, background: Color, opacity: u8) -> Color {
     (blend(fr, br) << 16) | (blend(fg, bg_g) << 8) | blend(fb, bb)
 }
 
-fn find_document_background(node: &StyledNode) -> Option<(Color, u8)> {
-    match node {
-        StyledNode::Text(_) => None,
-        StyledNode::Element(element) => {
-            if matches!(element.tag_name.as_str(), "body" | "html" | "document") {
-                if let Some(background_color) = element.style.background_color {
-                    return Some((background_color, element.style.effective_opacity));
-                }
-            }
-
-            element.children.iter().find_map(find_document_background)
-        }
-    }
-}
+// find_document_background was removed: we no longer pre-blend body background
+// in layout_styled_document (Issue 4 — double compositing fix).
 
 #[cfg(test)]
 mod tests {

@@ -462,7 +462,9 @@ fn split_at_top_level(input: &str, delimiter: char) -> Vec<String> {
             continue;
         }
         match ch {
-            '\\' if in_string.is_some() => {
+            // Handle backslash escapes both inside strings AND at the top level
+            // (e.g. `\,` in a selector must not be treated as a delimiter).
+            '\\' => {
                 escaped = true;
             }
             q @ ('"' | '\'') if in_string.is_none() => {
@@ -680,6 +682,14 @@ fn build_node(
                 .into();
             let child_element_count = all_sibling_ids.len();
 
+            // `current_slot` records this element's position in its own sibling list so that
+            // ancestor-combinator matching can call `ancestor.preceding_siblings()`.
+            // `siblings` holds *this element's own* preceding siblings (not children's).
+            // Note: `all_sibling_ids` is the children's sibling Rc (different tree level) and
+            // cannot be reused here without semantic error — the two lists are distinct.
+            // The `Rc::from(preceding_siblings)` creates one Rc per element; a future
+            // optimisation could share the parent's Rc by threading it down, but the current
+            // approach is correct and the cost is bounded to one allocation per DOM element.
             let current_slot = AncestorSlot {
                 element: ElementIdentity::from(element),
                 sibling_index,
@@ -1640,6 +1650,15 @@ impl Selector {
         let Some(last_index) = self.parts.len().checked_sub(1) else {
             return false;
         };
+        // Synthetic AncestorSlot for the element being matched.
+        // `siblings` is intentionally left empty and `prec_count` is 0 because this slot is
+        // only used to match the rightmost selector part against the element itself (tag, id,
+        // class, pseudo-class, etc.).  The element's actual preceding siblings are passed
+        // separately as `preceding_siblings` to `matches_part`, which is the authoritative
+        // source for sibling-combinator lookups (`+`, `~`).
+        // Calling `current.preceding_siblings()` would return `&[]` — always use the
+        // `current_preceding_siblings` parameter in `matches_part` for the current element's
+        // siblings.
         let current = AncestorSlot {
             element: element.clone(),
             sibling_index,
