@@ -88,6 +88,12 @@ impl Url {
             format!("{}:{}", self.host, self.port)
         }
     }
+
+    pub fn shares_origin(&self, other: &Self) -> bool {
+        self.scheme == other.scheme
+            && self.port == other.port
+            && self.host.eq_ignore_ascii_case(&other.host)
+    }
 }
 
 impl fmt::Display for Url {
@@ -188,5 +194,15 @@ mod tests {
         let next = base.resolve("../next.html").unwrap();
 
         assert_eq!(next.to_string(), "http://example.com/notes/next.html");
+    }
+
+    #[test]
+    fn compares_same_origin_urls() {
+        let left = Url::parse("https://Example.com/path").unwrap();
+        let same = Url::parse("https://example.com/other").unwrap();
+        let other_port = Url::parse("https://example.com:444/other").unwrap();
+
+        assert!(left.shares_origin(&same));
+        assert!(!left.shares_origin(&other_port));
     }
 }

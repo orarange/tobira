@@ -839,14 +839,8 @@ fn is_youtube_watch_url(url: &Url) -> bool {
     is_youtube_host(url) && url.path.starts_with("/watch")
 }
 
-fn urls_share_origin(left: &Url, right: &Url) -> bool {
-    left.scheme == right.scheme
-        && left.port == right.port
-        && left.host.eq_ignore_ascii_case(&right.host)
-}
-
 fn should_follow_script_navigation(current_url: &Url, target_url: &Url) -> bool {
-    urls_share_origin(current_url, target_url)
+    current_url.shares_origin(target_url)
 }
 
 fn document_has_meaningful_body(document: &Node) -> bool {

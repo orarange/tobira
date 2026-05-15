@@ -1573,9 +1573,11 @@ fn install_browser_globals(context: &mut Context) {
         )
         .expect("URLSearchParams should be installable");
 
-    let _ = context.eval(Source::from_bytes(
-        "globalThis.XMLHttpRequest = function XMLHttpRequest(){ return __tobiraCreateXMLHttpRequest(); };",
-    ));
+    context
+        .eval(Source::from_bytes(
+            "globalThis.XMLHttpRequest = function XMLHttpRequest(){ return __tobiraCreateXMLHttpRequest(); };",
+        ))
+        .expect("XMLHttpRequest bootstrap should evaluate");
 }
 
 fn build_simple_node_list_stub(context: &mut Context) -> boa_engine::object::JsObject {
@@ -2349,12 +2351,6 @@ fn resolve_requested_url(request: &JsValue, context: &mut Context) -> JsResult<U
         .into())
 }
 
-fn urls_share_origin(left: &Url, right: &Url) -> bool {
-    left.scheme == right.scheme
-        && left.port == right.port
-        && left.host.eq_ignore_ascii_case(&right.host)
-}
-
 fn reserve_js_network_budget(context: &mut Context) -> JsResult<usize> {
     let Some(host) = context.get_data::<JavaScriptHostData>() else {
         return Err(JsNativeError::error()
@@ -2371,7 +2367,8 @@ fn reserve_js_network_budget(context: &mut Context) -> JsResult<usize> {
             .into());
     }
 
-    let remaining = JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES.saturating_sub(state.network_response_bytes);
+    let remaining =
+        JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES.saturating_sub(state.network_response_bytes);
     if remaining == 0 {
         return Err(JsNativeError::error()
             .with_message(format!(
@@ -2384,32 +2381,35 @@ fn reserve_js_network_budget(context: &mut Context) -> JsResult<usize> {
     Ok(remaining.min(JS_MAX_NETWORK_RESPONSE_BYTES))
 }
 
-fn record_js_network_response_bytes(response_len: usize, context: &mut Context) -> JsResult<()> {
-    let Some(host) = context.get_data::<JavaScriptHostData>() else {
-        return Err(JsNativeError::error()
-            .with_message("missing JS runtime host state")
-            .into());
-    };
+fn record_js_network_response_bytes(response_len: usize, context: &mut Context) {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        state.network_response_bytes =
+            state.network_response_bytes.saturating_add(response_len);
+        debug_assert!(state.network_response_bytes <= JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES);
+    }
+}
 
-    let mut state = host.state.borrow_mut();
-    let next = state.network_response_bytes.saturating_add(response_len);
-    if next > JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES {
-        return Err(JsNativeError::error()
-            .with_message(format!(
-                "JS network response budget exceeded ({JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES} bytes)"
-            ))
-            .into());
+fn xhr_body_is_supported(body: Option<&JsValue>, context: &mut Context) -> JsResult<bool> {
+    let Some(body) = body else {
+        return Ok(true);
+    };
+    if body.is_undefined() || body.is_null() {
+        return Ok(true);
     }
 
-    state.network_response_bytes = next;
-    Ok(())
+    if body.is_string() {
+        return Ok(js_value_to_string(body, context)?.is_empty());
+    }
+
+    Ok(false)
 }
 
 fn fetch_for_script(url: &Url, context: &mut Context) -> JsResult<HttpResponse> {
     let current = current_location_url(context).ok_or_else(|| {
         JsNativeError::error().with_message("missing current page origin for JS request")
     })?;
-    if !urls_share_origin(&current, url) {
+    if !current.shares_origin(url) {
         return Err(JsNativeError::error()
             .with_message(format!(
                 "cross-origin JS requests are blocked: {} -> {}",
@@ -2422,7 +2422,7 @@ fn fetch_for_script(url: &Url, context: &mut Context) -> JsResult<HttpResponse> 
     let response = fetch_with_limits(url, max_response_bytes).map_err(|error| {
         JsNativeError::error().with_message(error.to_string())
     })?;
-    record_js_network_response_bytes(response.body.len(), context)?;
+    record_js_network_response_bytes(response.body.len(), context);
     Ok(response)
 }
 
@@ -2590,7 +2590,7 @@ fn js_xhr_set_request_header(
     Ok(JsValue::undefined())
 }
 
-fn js_xhr_send(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let Some(object) = this.as_object() else {
         return Ok(JsValue::undefined());
     };
@@ -2606,7 +2606,11 @@ fn js_xhr_send(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult
         )
     };
 
-    let result = if method.is_empty() || method == "GET" {
+    let result = if !xhr_body_is_supported(args.first(), context)? {
+        Err(JsNativeError::error()
+            .with_message("XMLHttpRequest send(body) is not supported yet")
+            .into())
+    } else if method.is_empty() || method == "GET" {
         resolve_requested_url(&JsValue::from(js_string!(target_url)), context)
             .and_then(|url| fetch_for_script(&url, context))
     } else {
@@ -3571,6 +3575,16 @@ mod tests {
         );
 
         assert!(processed.html.contains("<p>blocked</p>"));
+    }
+
+    #[test]
+    fn rejects_xml_http_request_bodies() {
+        let processed = process_document_scripts(
+            "<script>var xhr = new XMLHttpRequest(); xhr.open('GET', '/api'); xhr.onerror = function () { document.write('<p>xhr blocked</p>'); }; xhr.send('payload');</script>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("<p>xhr blocked</p>"));
     }
 
     #[test]

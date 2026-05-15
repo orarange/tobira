@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - window title prefix: `Tobira`
   - README was previously under the old `Scratch Browser` name
 - Verification status:
-  - `cargo test` passes: `87` tests green on `2026-05-15`
+  - `cargo test` passes: `89` tests green on `2026-05-15`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -175,3 +175,11 @@ git log --oneline -n 20
 - Added same-origin-only policy plus request/response budgets for JS-driven `fetch(...)` and `XMLHttpRequest`, backed by a new limited HTTP fetch path.
 - Made `Response.clone()` error consistently on invalid receivers and blocked automatic cross-origin `location.href` follow-up loads.
 - Added tests for the new fetch/navigation guards and HTTP body-limit enforcement, bringing `cargo test` to `87` passing tests.
+
+### 2026-05-15 - Codex (Copilot follow-up cleanup)
+
+- Extracted same-origin comparison into `Url::shares_origin(...)` so the browser and JS runtime no longer duplicate origin checks.
+- Made `XMLHttpRequest` bootstrap installation fail loudly during JS global setup instead of silently discarding eval errors.
+- Clarified the GET-only XHR limitation by rejecting non-empty `xhr.send(body)` calls explicitly, with test coverage.
+- Simplified the JS network budget bookkeeping so the fetch-layer byte limit is the source of truth and the post-fetch accounting just records used bytes.
+- Added tests for `Url::shares_origin(...)` and rejected XHR bodies, bringing `cargo test` to `89` passing tests.
