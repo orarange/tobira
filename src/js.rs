@@ -12,7 +12,7 @@ use boa_engine::{
 };
 
 use crate::html::{Node, parse_document};
-use crate::http::fetch;
+use crate::http::{HttpResponse, fetch, fetch_with_limits};
 use crate::text::decode_text_response;
 use crate::url::Url;
 
@@ -20,6 +20,9 @@ const MAX_SCRIPT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TOTAL_SCRIPT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SCRIPT_ITERATIONS: usize = 1024;
 const JS_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
+const JS_MAX_NETWORK_REQUESTS: usize = 8;
+const JS_MAX_NETWORK_RESPONSE_BYTES: usize = 256 * 1024;
+const JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessedScriptHtml {
@@ -37,6 +40,8 @@ struct JavaScriptState {
     console_logs: Vec<String>,
     location_href: String,
     current_script: Option<usize>,
+    network_request_count: usize,
+    network_response_bytes: usize,
     dom: DomState,
 }
 
@@ -137,14 +142,24 @@ pub fn process_document_scripts(html: &str, base_url: &Url) -> ProcessedScriptHt
     match worker {
         Ok(handle) => match handle.join() {
             Ok(processed) => processed,
-            Err(_) => ProcessedScriptHtml {
-                html: html_owned,
-                title_override: None,
-                console_logs: vec!["js error: runtime worker panicked".to_string()],
-                navigation_target: None,
-            },
+            Err(_) => process_document_scripts_error(
+                html_owned,
+                "js error: runtime worker panicked".to_string(),
+            ),
         },
-        Err(_) => process_document_scripts_impl(html, base_url),
+        Err(_) => process_document_scripts_error(
+            html_owned,
+            "js error: failed to start runtime worker".to_string(),
+        ),
+    }
+}
+
+fn process_document_scripts_error(html: String, message: String) -> ProcessedScriptHtml {
+    ProcessedScriptHtml {
+        html,
+        title_override: None,
+        console_logs: vec![message],
+        navigation_target: None,
     }
 }
 
@@ -197,6 +212,8 @@ impl JavaScriptRuntime {
                 console_logs: Vec::new(),
                 location_href: base_url.to_string(),
                 current_script: None,
+                network_request_count: 0,
+                network_response_bytes: 0,
                 dom,
             }),
         });
@@ -2332,12 +2349,89 @@ fn resolve_requested_url(request: &JsValue, context: &mut Context) -> JsResult<U
         .into())
 }
 
+fn urls_share_origin(left: &Url, right: &Url) -> bool {
+    left.scheme == right.scheme
+        && left.port == right.port
+        && left.host.eq_ignore_ascii_case(&right.host)
+}
+
+fn reserve_js_network_budget(context: &mut Context) -> JsResult<usize> {
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return Err(JsNativeError::error()
+            .with_message("missing JS runtime host state")
+            .into());
+    };
+
+    let mut state = host.state.borrow_mut();
+    if state.network_request_count >= JS_MAX_NETWORK_REQUESTS {
+        return Err(JsNativeError::error()
+            .with_message(format!(
+                "JS network request limit reached ({JS_MAX_NETWORK_REQUESTS})"
+            ))
+            .into());
+    }
+
+    let remaining = JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES.saturating_sub(state.network_response_bytes);
+    if remaining == 0 {
+        return Err(JsNativeError::error()
+            .with_message(format!(
+                "JS network response budget exhausted ({JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES} bytes)"
+            ))
+            .into());
+    }
+
+    state.network_request_count += 1;
+    Ok(remaining.min(JS_MAX_NETWORK_RESPONSE_BYTES))
+}
+
+fn record_js_network_response_bytes(response_len: usize, context: &mut Context) -> JsResult<()> {
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return Err(JsNativeError::error()
+            .with_message("missing JS runtime host state")
+            .into());
+    };
+
+    let mut state = host.state.borrow_mut();
+    let next = state.network_response_bytes.saturating_add(response_len);
+    if next > JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES {
+        return Err(JsNativeError::error()
+            .with_message(format!(
+                "JS network response budget exceeded ({JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES} bytes)"
+            ))
+            .into());
+    }
+
+    state.network_response_bytes = next;
+    Ok(())
+}
+
+fn fetch_for_script(url: &Url, context: &mut Context) -> JsResult<HttpResponse> {
+    let current = current_location_url(context).ok_or_else(|| {
+        JsNativeError::error().with_message("missing current page origin for JS request")
+    })?;
+    if !urls_share_origin(&current, url) {
+        return Err(JsNativeError::error()
+            .with_message(format!(
+                "cross-origin JS requests are blocked: {} -> {}",
+                current, url
+            ))
+            .into());
+    }
+
+    let max_response_bytes = reserve_js_network_budget(context)?;
+    let response = fetch_with_limits(url, max_response_bytes).map_err(|error| {
+        JsNativeError::error().with_message(error.to_string())
+    })?;
+    record_js_network_response_bytes(response.body.len(), context)?;
+    Ok(response)
+}
+
 fn js_fetch(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let request = args.first().cloned().unwrap_or_else(JsValue::undefined);
     let url = resolve_requested_url(&request, context);
     let promise = match url {
         Ok(url) => JsPromise::from_result(
-            fetch(&url)
+            fetch_for_script(&url, context)
                 .map(|response| JsValue::from(build_fetch_response_object(context, response)))
                 .map_err(|error| JsNativeError::error().with_message(error.to_string())),
             context,
@@ -2410,7 +2504,9 @@ fn js_fetch_response_clone(
         )));
     }
 
-    Ok(JsValue::undefined())
+    Err(JsNativeError::typ()
+        .with_message("Response.clone called on non-response object")
+        .into())
 }
 
 fn js_response_headers_get(
@@ -2512,9 +2608,7 @@ fn js_xhr_send(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult
 
     let result = if method.is_empty() || method == "GET" {
         resolve_requested_url(&JsValue::from(js_string!(target_url)), context)
-            .and_then(|url| fetch(&url).map_err(|error| {
-                JsNativeError::error().with_message(error.to_string()).into()
-            }))
+            .and_then(|url| fetch_for_script(&url, context))
     } else {
         Err(JsNativeError::error()
             .with_message(format!("unsupported XMLHttpRequest method: {method}"))
@@ -3372,6 +3466,8 @@ fn js_value_to_string(value: &JsValue, context: &mut Context) -> JsResult<String
 
 #[cfg(test)]
 mod tests {
+    use boa_engine::{Context, JsValue};
+
     use super::process_document_scripts;
     use crate::url::Url;
 
@@ -3468,6 +3564,16 @@ mod tests {
     }
 
     #[test]
+    fn blocks_cross_origin_fetch_requests() {
+        let processed = process_document_scripts(
+            "<script>fetch('https://other.example/data').catch(function () { document.write('<p>blocked</p>'); });</script>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("<p>blocked</p>"));
+    }
+
+    #[test]
     fn supports_lightweight_dom_like_scripts() {
         let processed = process_document_scripts(
             "<div id=\"demo\"></div><script>document.addEventListener('DOMContentLoaded', function () { var el = document.querySelector('#demo'); if (el) { document.write('<p>Ready</p>'); } });</script>",
@@ -3507,5 +3613,13 @@ mod tests {
 
         assert!(processed.html.contains("<span class=\"chip\">Hello</span>"));
         assert!(processed.html.contains("<img src=\"/avatar.png\">"));
+    }
+
+    #[test]
+    fn response_clone_errors_on_invalid_receiver() {
+        let mut context = Context::default();
+        let result = super::js_fetch_response_clone(&JsValue::undefined(), &[], &mut context);
+
+        assert!(result.is_err());
     }
 }

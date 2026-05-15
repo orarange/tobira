@@ -136,10 +136,17 @@ fn load_document_source_with_script_navigation(
         && script_navigation_depth < MAX_SCRIPT_NAVIGATION_DEPTH
         && let Ok(next_url) = Url::parse(target)
     {
-        return load_document_source_with_script_navigation(
-            &next_url,
-            frame_depth,
-            script_navigation_depth + 1,
+        if should_follow_script_navigation(&response.final_url, &next_url) {
+            return load_document_source_with_script_navigation(
+                &next_url,
+                frame_depth,
+                script_navigation_depth + 1,
+            );
+        }
+
+        eprintln!(
+            "[tobira] blocked cross-origin script navigation: {} -> {}",
+            response.final_url, next_url
         );
     }
     let mut parsed_document = parse_document(&scripted.html);
@@ -830,6 +837,16 @@ fn is_google_host(url: &Url) -> bool {
 
 fn is_youtube_watch_url(url: &Url) -> bool {
     is_youtube_host(url) && url.path.starts_with("/watch")
+}
+
+fn urls_share_origin(left: &Url, right: &Url) -> bool {
+    left.scheme == right.scheme
+        && left.port == right.port
+        && left.host.eq_ignore_ascii_case(&right.host)
+}
+
+fn should_follow_script_navigation(current_url: &Url, target_url: &Url) -> bool {
+    urls_share_origin(current_url, target_url)
 }
 
 fn document_has_meaningful_body(document: &Node) -> bool {
@@ -2693,7 +2710,7 @@ mod tests {
     use super::{
         BrowserPage, build_site_specific_document, build_youtube_generic_document_from_html,
         collect_frame_specs, collect_stylesheet, document_has_meaningful_body, document_title,
-        extract_body_children, synthetic_document,
+        extract_body_children, should_follow_script_navigation, synthetic_document,
     };
     use crate::css::StyledNode;
     use crate::html::{Node, parse_document};
@@ -2909,6 +2926,16 @@ mod tests {
         );
 
         assert!(document_has_meaningful_body(&document));
+    }
+
+    #[test]
+    fn only_follows_same_origin_script_navigation() {
+        let current = Url::parse("https://www.youtube.com/watch?v=demo").unwrap();
+        let same_origin = Url::parse("https://www.youtube.com/results?search_query=rust").unwrap();
+        let cross_origin = Url::parse("https://accounts.google.com/signin").unwrap();
+
+        assert!(should_follow_script_navigation(&current, &same_origin));
+        assert!(!should_follow_script_navigation(&current, &cross_origin));
     }
 
     #[test]

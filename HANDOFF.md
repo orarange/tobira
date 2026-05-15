@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - window title prefix: `Tobira`
   - README was previously under the old `Scratch Browser` name
 - Verification status:
-  - `cargo test` passes: `83` tests green on `2026-05-15`
+  - `cargo test` passes: `87` tests green on `2026-05-15`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -55,6 +55,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - JS runtime worker now uses a larger dedicated stack and higher script budgets
   - JS runtime now exposes lightweight `fetch(...)`, `XMLHttpRequest`, response headers helpers, and Promise job flushing
   - script-driven `location.href = ...` navigation can trigger a follow-up page load
+  - JS-initiated `fetch(...)` / `XMLHttpRequest` are now same-origin only and run under per-request plus total response-byte budgets
+  - automatic script-driven follow-up navigation is now same-origin only
   - local test pages for CSS, basic JS, and DOM mutation coverage under `demo/`
   - site-specific rendering paths for:
     - YouTube watch pages
@@ -100,6 +102,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - GUI interactivity still only knows browser chrome plus anchor hitboxes; real page controls are not yet first-class widgets.
 - CSS is still computed once up front instead of being rebuilt against the live window width.
 - Actual media playback and a true YouTube watch experience are still incomplete.
+- `fetch(...)` / `XMLHttpRequest` are intentionally conservative now; cross-origin app shells will still be blocked until a safer policy exists.
 
 ## Useful Commands
 
@@ -164,3 +167,11 @@ git log --oneline -n 20
 - Relaxed the browser pipeline so generic `google.com` and `youtube.com` pages now try the real JS/HTML path first, and only fall back to synthetic summaries when the post-script body is still effectively empty.
 - Added tests around YouTube rewrite scope and the new fallback heuristic, bringing `cargo test` to `83` passing tests.
 - Verified CLI smoke output for `https://www.google.com/` and `https://www.youtube.com/`, plus 4-second GUI startup smokes for both URLs.
+
+### 2026-05-15 - Codex (Copilot review fixes)
+
+- Addressed the Copilot review comments on PR `#6`.
+- JS worker startup now fails closed instead of silently running on the default thread stack.
+- Added same-origin-only policy plus request/response budgets for JS-driven `fetch(...)` and `XMLHttpRequest`, backed by a new limited HTTP fetch path.
+- Made `Response.clone()` error consistently on invalid receivers and blocked automatic cross-origin `location.href` follow-up loads.
+- Added tests for the new fetch/navigation guards and HTTP body-limit enforcement, bringing `cargo test` to `87` passing tests.
