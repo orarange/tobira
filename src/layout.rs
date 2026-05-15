@@ -34,47 +34,68 @@ pub struct LayoutDocument {
 
 // Convenience accessors for consumers that need flat lists
 impl LayoutDocument {
-    pub fn texts(&self) -> Vec<&TextCommand> {
-        collect_texts(&self.commands)
+    pub fn texts(&self) -> Vec<TextCommand> {
+        collect_texts(&self.commands, 0, 0)
     }
-    pub fn rects(&self) -> Vec<&RectCommand> {
-        collect_rects(&self.commands)
+    pub fn rects(&self) -> Vec<RectCommand> {
+        collect_rects(&self.commands, 0, 0)
     }
-    pub fn images(&self) -> Vec<&ImageCommand> {
-        collect_images(&self.commands)
+    pub fn images(&self) -> Vec<ImageCommand> {
+        collect_images(&self.commands, 0, 0)
     }
 }
 
-fn collect_texts(commands: &[DrawCommand]) -> Vec<&TextCommand> {
+fn collect_texts(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec<TextCommand> {
     let mut out = Vec::new();
     for cmd in commands {
         match cmd {
-            DrawCommand::Text(t) => out.push(t),
-            DrawCommand::Layer(l) => out.extend(collect_texts(&l.commands)),
+            DrawCommand::Text(t) => {
+                let mut t2 = t.clone();
+                t2.x = t2.x.saturating_add(offset_x);
+                t2.y = t2.y.saturating_add(offset_y);
+                out.push(t2);
+            }
+            DrawCommand::Layer(l) => {
+                out.extend(collect_texts(&l.commands, offset_x + l.x, offset_y + l.y));
+            }
             _ => {}
         }
     }
     out
 }
 
-fn collect_rects(commands: &[DrawCommand]) -> Vec<&RectCommand> {
+fn collect_rects(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec<RectCommand> {
     let mut out = Vec::new();
     for cmd in commands {
         match cmd {
-            DrawCommand::Rect(r) => out.push(r),
-            DrawCommand::Layer(l) => out.extend(collect_rects(&l.commands)),
+            DrawCommand::Rect(r) => {
+                let mut r2 = r.clone();
+                r2.x = r2.x.saturating_add(offset_x);
+                r2.y = r2.y.saturating_add(offset_y);
+                out.push(r2);
+            }
+            DrawCommand::Layer(l) => {
+                out.extend(collect_rects(&l.commands, offset_x + l.x, offset_y + l.y));
+            }
             _ => {}
         }
     }
     out
 }
 
-fn collect_images(commands: &[DrawCommand]) -> Vec<&ImageCommand> {
+fn collect_images(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec<ImageCommand> {
     let mut out = Vec::new();
     for cmd in commands {
         match cmd {
-            DrawCommand::Image(i) => out.push(i),
-            DrawCommand::Layer(l) => out.extend(collect_images(&l.commands)),
+            DrawCommand::Image(i) => {
+                let mut i2 = i.clone();
+                i2.x = i2.x.saturating_add(offset_x);
+                i2.y = i2.y.saturating_add(offset_y);
+                out.push(i2);
+            }
+            DrawCommand::Layer(l) => {
+                out.extend(collect_images(&l.commands, offset_x + l.x, offset_y + l.y));
+            }
             _ => {}
         }
     }
@@ -306,7 +327,29 @@ fn layout_block_element(
     }
 
     if element.tag_name == "table" {
-        layout_table_element(element, x, width, cursor_y, context, images, fonts);
+        if element.style.opacity < 255 {
+            // Table with opacity: render into sub-context and wrap in a LayerCommand
+            let mut sub_context = LayoutContext {
+                background_color: context.background_color,
+                doc_bg_raw: context.doc_bg_raw,
+                ..LayoutContext::default()
+            };
+            let y_before = *cursor_y;
+            layout_table_element(element, x, width, cursor_y, &mut sub_context, images, fonts);
+            let table_height = cursor_y.saturating_sub(y_before).max(1);
+            rebase_commands(&mut sub_context.commands, x, y_before);
+            context.commands.push(DrawCommand::Layer(LayerCommand {
+                x,
+                y: y_before,
+                width: width.max(1),
+                height: table_height,
+                opacity: element.style.opacity,
+                commands: sub_context.commands,
+            }));
+            context.links.extend(sub_context.links);
+        } else {
+            layout_table_element(element, x, width, cursor_y, context, images, fonts);
+        }
         return;
     }
 
@@ -502,7 +545,7 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
             DrawCommand::Layer(l) => {
                 l.x = l.x.saturating_sub(origin_x);
                 l.y = l.y.saturating_sub(origin_y);
-                rebase_commands(&mut l.commands, origin_x, origin_y);
+                // Do NOT recurse into l.commands — they're already layer-relative
             }
         }
     }
@@ -709,13 +752,32 @@ fn layout_image_element(
         TextAlign::Left => x,
     };
 
-    context.commands.push(DrawCommand::Image(ImageCommand {
-        x: draw_x,
-        y: *cursor_y,
-        width: draw_width,
-        height: draw_height,
-        src: src.to_string(),
-    }));
+    if element.style.opacity < 255 {
+        // Wrap the image in a LayerCommand so opacity is applied correctly
+        let img_cmd = DrawCommand::Image(ImageCommand {
+            x: 0,
+            y: 0,
+            width: draw_width,
+            height: draw_height,
+            src: src.to_string(),
+        });
+        context.commands.push(DrawCommand::Layer(LayerCommand {
+            x: draw_x,
+            y: *cursor_y,
+            width: draw_width,
+            height: draw_height,
+            opacity: element.style.opacity,
+            commands: vec![img_cmd],
+        }));
+    } else {
+        context.commands.push(DrawCommand::Image(ImageCommand {
+            x: draw_x,
+            y: *cursor_y,
+            width: draw_width,
+            height: draw_height,
+            src: src.to_string(),
+        }));
+    }
 
     *cursor_y = cursor_y.saturating_add(draw_height);
     *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
@@ -938,14 +1000,32 @@ fn layout_table_element(
             VerticalAlign::Bottom => content_area_height.saturating_sub(layout.content_height),
         };
 
-        merge_fragment(
-            context,
-            layout,
-            cell_x.saturating_add(padding),
-            cell_y
-                .saturating_add(padding)
-                .saturating_add(vertical_offset),
-        );
+        let content_x = cell_x.saturating_add(padding);
+        let content_y = cell_y.saturating_add(padding).saturating_add(vertical_offset);
+
+        if placement.cell.style.opacity < 255 {
+            // Wrap cell content in a LayerCommand for opacity compositing
+            let layer_w = cell_width.max(1);
+            let layer_h = layout.content_height.max(1);
+            // Cell layout commands are already at (0,0)-relative; wrap them in a layer
+            context.commands.push(DrawCommand::Layer(LayerCommand {
+                x: content_x,
+                y: content_y,
+                width: layer_w,
+                height: layer_h,
+                opacity: placement.cell.style.opacity,
+                commands: layout.commands.clone(),
+            }));
+            context.links.extend(layout.links.iter().map(|link| LinkCommand {
+                x: link.x.saturating_add(content_x),
+                y: link.y.saturating_add(content_y),
+                width: link.width,
+                height: link.height,
+                href: link.href.clone(),
+            }));
+        } else {
+            merge_fragment(context, layout, content_x, content_y);
+        }
     }
 
     let table_height = row_heights.iter().sum::<u32>()
@@ -1194,11 +1274,8 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             width: layer.width,
             height: layer.height,
             opacity: layer.opacity,
-            commands: layer
-                .commands
-                .iter()
-                .map(|c| offset_draw_command(c, offset_x, offset_y))
-                .collect(),
+            // Do NOT recurse into layer.commands — they're already layer-relative
+            commands: layer.commands.clone(),
         }),
     }
 }

@@ -633,12 +633,24 @@ fn build_node(
     viewport_width: u32,
 ) -> StyledNode {
     match node {
-        Node::Text(text) => StyledNode::Text(StyledText {
-            text: text.clone(),
-            style: parent_style
+        Node::Text(text) => {
+            let mut style = parent_style
                 .cloned()
-                .unwrap_or_else(|| ComputedStyle::for_element("body", None)),
-        }),
+                .unwrap_or_else(|| ComputedStyle::for_element("body", None));
+            // If the parent is a block stacking context (opacity < 255, non-inline), the
+            // LayerCommand handles compositing at the parent's opacity. The text node's
+            // effective_opacity should be 255 inside the layer to avoid double application.
+            if let Some(parent) = parent_style {
+                let parent_is_block = !matches!(parent.display, Display::Inline);
+                if parent.opacity < 255 && parent_is_block {
+                    style.effective_opacity = 255;
+                }
+            }
+            StyledNode::Text(StyledText {
+                text: text.clone(),
+                style,
+            })
+        }
         Node::Element(element) => {
             let style = compute_style(
                 element,
