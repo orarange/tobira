@@ -32,6 +32,7 @@ pub struct Rule {
     declarations: Vec<Declaration>,
     /// None = always apply; Some(cond) = apply only when cond matches
     media: Option<MediaCondition>,
+    pub pseudo_element: Option<PseudoElement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +65,7 @@ impl MediaCondition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Selector {
     parts: Vec<SelectorPart>,
+    pseudo_element: Option<PseudoElement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +90,14 @@ struct SimpleSelector {
     universal: bool,
     pseudo_classes: Vec<PseudoClass>,
     attributes: Vec<AttributeCondition>,
-    never_match: bool, // for ::before / ::after pseudo-elements
+    never_match: bool,
+    pseudo_element: Option<PseudoElement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PseudoElement {
+    Before,
+    After,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,6 +334,7 @@ pub struct ComputedStyle {
     pub cursor_pointer: bool,
     pub text_decoration_color: Option<Color>,
     pub box_shadow: Option<BoxShadow>,
+    pub content: Option<String>,
 }
 
 impl ComputedStyle {
@@ -375,6 +385,7 @@ impl ComputedStyle {
             cursor_pointer: false,
             text_decoration_color: None,
             box_shadow: None,
+            content: None,
         };
 
         match tag_name {
@@ -585,10 +596,12 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         let declarations = parse_inline_declarations(block_text);
 
         if !selectors.is_empty() && !declarations.is_empty() {
+            let pseudo_element = selectors.iter().find_map(|sel| sel.pseudo_element.clone());
             rules.push(Rule {
                 selectors,
                 declarations,
                 media: None,
+                pseudo_element,
             });
         }
     }
@@ -756,7 +769,7 @@ fn build_node(
 
             let mut elem_sibling_idx = 0;
 
-            let children = element
+            let children: Vec<StyledNode> = element
                 .children
                 .iter()
                 .map(|child| {
@@ -781,6 +794,39 @@ fn build_node(
                 })
                 .collect();
 
+            // Inject ::before and ::after pseudo-element content
+            let mut children = children;
+            if let Some(before_text) = collect_pseudo_content(
+                element,
+                stylesheet,
+                &next_ancestors,
+                sibling_index,
+                sibling_count,
+                preceding_siblings,
+                viewport_width,
+                &PseudoElement::Before,
+            ) {
+                children.insert(0, StyledNode::Text(StyledText {
+                    text: before_text,
+                    style: style.clone(),
+                }));
+            }
+            if let Some(after_text) = collect_pseudo_content(
+                element,
+                stylesheet,
+                &next_ancestors,
+                sibling_index,
+                sibling_count,
+                preceding_siblings,
+                viewport_width,
+                &PseudoElement::After,
+            ) {
+                children.push(StyledNode::Text(StyledText {
+                    text: after_text,
+                    style: style.clone(),
+                }));
+            }
+
             StyledNode::Element(StyledElement {
                 tag_name: element.tag_name.clone(),
                 attributes: element.attributes.clone(),
@@ -789,6 +835,52 @@ fn build_node(
             })
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_pseudo_content(
+    element: &Element,
+    stylesheet: &Stylesheet,
+    ancestors: &[AncestorSlot],
+    sibling_index: usize,
+    sibling_count: usize,
+    preceding_siblings: &[ElementIdentity],
+    viewport_width: u32,
+    which: &PseudoElement,
+) -> Option<String> {
+    let identity = ElementIdentity::from(element);
+    let mut result: Option<String> = None;
+
+    for rule in &stylesheet.rules {
+        if rule.pseudo_element.as_ref() != Some(which) {
+            continue;
+        }
+        if let Some(cond) = &rule.media {
+            if !cond.matches(viewport_width) {
+                continue;
+            }
+        }
+        // Match the host element (the selector without the pseudo-element part)
+        for selector in &rule.selectors {
+            if selector.matches(
+                &identity,
+                ancestors,
+                sibling_index,
+                sibling_count,
+                preceding_siblings,
+            ) {
+                for decl in &rule.declarations {
+                    if decl.property == "content" {
+                        let v = decl.value.trim().trim_matches('"').trim_matches('\'');
+                        if v != "none" && v != "normal" && !v.is_empty() {
+                            result = Some(v.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -811,6 +903,10 @@ fn compute_style(
     let mut applicable: Vec<(usize, usize, Declaration)> = Vec::new();
 
     for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
+        // Skip pseudo-element rules — they are handled by collect_pseudo_content
+        if rule.pseudo_element.is_some() {
+            continue;
+        }
         // Check media condition
         if let Some(cond) = &rule.media {
             if !cond.matches(viewport_width) {
@@ -1210,6 +1306,14 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             // simple: just look for known list-style-type tokens
             style.list_style_type = parse_list_style_type(value);
         }
+        "content" => {
+            let v = value.trim().trim_matches('"').trim_matches('\'');
+            if v == "none" || v == "normal" || v == "" {
+                style.content = None;
+            } else {
+                style.content = Some(v.to_string());
+            }
+        }
         "box-shadow" => {
             let v = value.trim().to_ascii_lowercase();
             if v == "none" {
@@ -1445,7 +1549,9 @@ fn parse_selector(input: &str) -> Option<Selector> {
     if parts.is_empty() {
         None
     } else {
-        Some(Selector { parts })
+        // Extract pseudo_element from the last part's simple selector
+        let pseudo_element = parts.last().and_then(|p| p.simple.pseudo_element.clone());
+        Some(Selector { parts, pseudo_element })
     }
 }
 
@@ -1497,11 +1603,17 @@ fn parse_simple_selector(input: &str) -> Option<SimpleSelector> {
                 i += 1;
                 // pseudo-element ::
                 if i < chars.len() && chars[i] == ':' {
-                    // ::before / ::after → never match
-                    selector.never_match = true;
-                    // consume rest
-                    while i < chars.len() {
+                    i += 1; // skip second ':'
+                    // collect pseudo-element name
+                    let mut pe_name = String::new();
+                    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-') {
+                        pe_name.push(chars[i]);
                         i += 1;
+                    }
+                    match pe_name.to_ascii_lowercase().as_str() {
+                        "before" => selector.pseudo_element = Some(PseudoElement::Before),
+                        "after" => selector.pseudo_element = Some(PseudoElement::After),
+                        _ => selector.never_match = true,
                     }
                     continue;
                 }
@@ -1554,6 +1666,7 @@ fn parse_simple_selector(input: &str) -> Option<SimpleSelector> {
         && selector.pseudo_classes.is_empty()
         && selector.attributes.is_empty()
         && !selector.never_match
+        && selector.pseudo_element.is_none()
     {
         None
     } else {
@@ -3423,5 +3536,31 @@ mod tests {
 
         let p_el = find_p(&styled).expect("Should find <p> element");
         assert_eq!(p_el.style.color, 0xff0000, "p color should be #ff0000 from :root var");
+    }
+    #[test]
+    fn test_before_pseudo_element_content_injection() {
+        use crate::html::parse_document;
+
+        let css = r#"p::before { content: "-> "; }"#;
+        let html = r#"<p>Hello</p>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &stylesheet, 800);
+
+        fn find_p(node: &StyledNode) -> Option<&StyledElement> {
+            match node {
+                StyledNode::Element(el) if el.tag_name == "p" => Some(el),
+                StyledNode::Element(el) => el.children.iter().find_map(find_p),
+                _ => None,
+            }
+        }
+
+        let p_el = find_p(&styled).expect("Should find <p> element");
+        assert!(!p_el.children.is_empty(), "p should have children");
+        if let StyledNode::Text(first) = &p_el.children[0] {
+            assert_eq!(first.text, "-> ", "First child should be ::before content");
+        } else {
+            panic!("First child should be a text node from ::before");
+        }
     }
 }

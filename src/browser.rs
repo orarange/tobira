@@ -2795,6 +2795,7 @@ mod tests {
                     cursor_pointer: false,
                     text_decoration_color: None,
                     box_shadow: None,
+                    content: None,
                 },
             }),
             images: crate::image::ImageStore::default(),
@@ -3077,6 +3078,7 @@ mod tests {
                 cursor_pointer: false,
                 text_decoration_color: None,
                 box_shadow: None,
+                content: None,
             },
         })
     }
