@@ -20,6 +20,7 @@ const MAX_SCRIPT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TOTAL_SCRIPT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SCRIPT_ITERATIONS: usize = 1024;
 const JS_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
+const JS_LOOP_ITERATION_LIMIT: u64 = 100_000;
 const JS_MAX_NETWORK_REQUESTS: usize = 8;
 const JS_MAX_NETWORK_RESPONSE_BYTES: usize = 256 * 1024;
 const JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES: usize = 512 * 1024;
@@ -203,6 +204,9 @@ struct JavaScriptRuntime {
 impl JavaScriptRuntime {
     fn new(base_url: &Url, html: &str) -> Self {
         let mut context = Context::default();
+        context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(JS_LOOP_ITERATION_LIMIT);
         let dom = DomState::from_html(html);
         let initial_title = dom.title_text().unwrap_or_default();
         context.insert_data(JavaScriptHostData {
@@ -3678,6 +3682,23 @@ mod tests {
         );
 
         assert!(processed.html.contains("<p>blocked</p>"));
+    }
+
+    #[test]
+    fn aborts_runaway_loops_with_runtime_limit() {
+        let processed = process_document_scripts(
+            "<script>for (;;) {}</script>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .console_logs
+                .iter()
+                .any(|entry| entry.contains("Maximum loop iteration limit")),
+            "logs: {:?}",
+            processed.console_logs
+        );
     }
 
     #[test]

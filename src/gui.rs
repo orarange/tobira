@@ -3203,4 +3203,16 @@ mod tests {
 
         assert_eq!(target, "https://example.com/find?q=hello+world");
     }
+
+    #[test]
+    fn build_get_form_submission_preserves_fragment_only_actions() {
+        let target = build_get_form_submission_url(
+            "https://example.com/find#results",
+            &[("q".to_string(), "hello world".to_string())],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(target, "https://example.com/find?q=hello+world#results");
+    }
 }

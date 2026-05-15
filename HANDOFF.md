@@ -18,15 +18,15 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-15`
+- Date: `2026-05-16`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/codex`
 - Workflow:
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/codex` worktree
 - Verification status:
-  - `cargo test`: `97` passing tests on `2026-05-15`
-  - `cargo build`: success on `2026-05-15`
+  - `cargo test`: `102` passing tests on `2026-05-16`
+  - `cargo build`: success on `2026-05-16`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -59,6 +59,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - Promise job flushing
     - lightweight `fetch(...)`
     - lightweight `XMLHttpRequest`
+    - loop-iteration runtime budget for runaway scripts
     - same-origin request and redirect guards
     - script-driven `location.href` follow-up navigation
   - local demo pages under `demo/` for CSS, JS, DOM mutation, and form handling
@@ -164,3 +165,10 @@ git worktree list
 - Reduced page-form submission overhead to a single layout pass, fixed empty button-submission values, and surfaced unsupported non-GET form methods in the GUI status line.
 - Made `location.href` assignments resolve relative URLs against the immutable document URL for consistency with the same-origin security model.
 - Added regression coverage for same-origin URLs with explicit default ports and repeated `location.href` updates resolved from the original document URL.
+
+### 2026-05-16 - Codex (PR #29 Copilot follow-up)
+
+- Replaced saturating form/control ID allocation with checked overflow guards so pathological layouts fail fast instead of silently reusing IDs.
+- Fixed `Url::resolve(...)` for fragment-only and query-only targets when the current URL already carries a fragment.
+- Added regression coverage for fragment-preserving GET form submissions and fragmented base-URL resolution.
+- Added a `boa_engine` loop-iteration runtime budget so runaway `for` / `while` scripts bail out with a JS error instead of hanging the browser worker indefinitely.

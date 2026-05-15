@@ -54,16 +54,20 @@ impl Url {
             return Self::parse(location);
         }
 
+        let current_without_fragment = self.path.split('#').next().unwrap_or(&self.path);
+        let current_path = current_without_fragment
+            .split('?')
+            .next()
+            .unwrap_or(current_without_fragment);
+
         let next_path = if location.starts_with('/') {
             location.to_string()
         } else if location.starts_with('?') {
-            let current_path = self.path.split('?').next().unwrap_or(&self.path);
             format!("{current_path}{location}")
         } else if location.starts_with('#') {
-            self.path.clone()
+            format!("{current_without_fragment}{location}")
         } else {
-            let base = self.path.split('?').next().unwrap_or(&self.path);
-            let directory = match base.rsplit_once('/') {
+            let directory = match current_path.rsplit_once('/') {
                 Some((prefix, _)) if prefix.is_empty() => "/".to_string(),
                 Some((prefix, _)) => format!("{prefix}/"),
                 None => "/".to_string(),
@@ -194,6 +198,22 @@ mod tests {
         let next = base.resolve("../next.html").unwrap();
 
         assert_eq!(next.to_string(), "http://example.com/notes/next.html");
+    }
+
+    #[test]
+    fn resolves_fragment_only_locations() {
+        let base = Url::parse("https://example.com/find?src=home#old").unwrap();
+        let next = base.resolve("#results").unwrap();
+
+        assert_eq!(next.to_string(), "https://example.com/find?src=home#results");
+    }
+
+    #[test]
+    fn resolves_query_locations_against_fragmented_urls() {
+        let base = Url::parse("https://example.com/find?src=home#old").unwrap();
+        let next = base.resolve("?q=rust").unwrap();
+
+        assert_eq!(next.to_string(), "https://example.com/find?q=rust");
     }
 
     #[test]

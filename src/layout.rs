@@ -147,13 +147,19 @@ impl Default for LayoutContext {
 impl LayoutContext {
     fn allocate_control_id(&mut self) -> usize {
         let id = self.next_control_id;
-        self.next_control_id = self.next_control_id.saturating_add(1);
+        self.next_control_id = self
+            .next_control_id
+            .checked_add(1)
+            .expect("control id counter overflowed");
         id
     }
 
     fn allocate_form_id(&mut self) -> usize {
         let id = self.next_form_id;
-        self.next_form_id = self.next_form_id.saturating_add(1);
+        self.next_form_id = self
+            .next_form_id
+            .checked_add(1)
+            .expect("form id counter overflowed");
         id
     }
 }
