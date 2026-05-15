@@ -32,12 +32,13 @@ pub struct ProcessedScriptHtml {
     pub navigation_target: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct JavaScriptState {
     current_title: String,
     title_dirty: bool,
     write_buffer: String,
     console_logs: Vec<String>,
+    document_url: Url,
     location_href: String,
     current_script: Option<usize>,
     network_request_count: usize,
@@ -210,6 +211,7 @@ impl JavaScriptRuntime {
                 title_dirty: false,
                 write_buffer: String::new(),
                 console_logs: Vec::new(),
+                document_url: base_url.clone(),
                 location_href: base_url.to_string(),
                 current_script: None,
                 network_request_count: 0,
@@ -2326,11 +2328,19 @@ fn current_location_url(context: &mut Context) -> Option<Url> {
     Url::parse(&href).ok()
 }
 
+fn current_document_url(context: &mut Context) -> Option<Url> {
+    context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().document_url.clone())
+}
+
 fn resolve_requested_url(request: &JsValue, context: &mut Context) -> JsResult<Url> {
     let request_url = if let Some(object) = request.as_object() {
-        match object.get(js_string!("url"), context) {
-            Ok(value) if !value.is_undefined() && !value.is_null() => js_value_to_string(&value, context)?,
-            _ => js_value_to_string(request, context)?,
+        let value = object.get(js_string!("url"), context)?;
+        if !value.is_undefined() && !value.is_null() {
+            js_value_to_string(&value, context)?
+        } else {
+            js_value_to_string(request, context)?
         }
     } else {
         js_value_to_string(request, context)?
@@ -2340,7 +2350,7 @@ fn resolve_requested_url(request: &JsValue, context: &mut Context) -> JsResult<U
         return Ok(url);
     }
 
-    if let Some(base) = current_location_url(context)
+    if let Some(base) = current_document_url(context)
         && let Ok(url) = base.resolve(&request_url)
     {
         return Ok(url);
@@ -2405,24 +2415,31 @@ fn xhr_body_is_supported(body: Option<&JsValue>, context: &mut Context) -> JsRes
     Ok(false)
 }
 
+fn ensure_same_origin_script_url(current: &Url, target: &Url, reason: &str) -> JsResult<()> {
+    if current.shares_origin(target) {
+        return Ok(());
+    }
+
+    Err(JsNativeError::error()
+        .with_message(format!(
+            "{reason}: {} -> {}",
+            current, target
+        ))
+        .into())
+}
+
 fn fetch_for_script(url: &Url, context: &mut Context) -> JsResult<HttpResponse> {
-    let current = current_location_url(context).ok_or_else(|| {
+    let current = current_document_url(context).ok_or_else(|| {
         JsNativeError::error().with_message("missing current page origin for JS request")
     })?;
-    if !current.shares_origin(url) {
-        return Err(JsNativeError::error()
-            .with_message(format!(
-                "cross-origin JS requests are blocked: {} -> {}",
-                current, url
-            ))
-            .into());
-    }
+    ensure_same_origin_script_url(&current, url, "cross-origin JS requests are blocked")?;
 
     let max_response_bytes = reserve_js_network_budget(context)?;
     let response = fetch_with_limits(url, max_response_bytes).map_err(|error| {
         JsNativeError::error().with_message(error.to_string())
     })?;
     record_js_network_response_bytes(response.body.len(), context);
+    ensure_same_origin_script_url(&current, &response.final_url, "cross-origin JS redirects are blocked")?;
     Ok(response)
 }
 
@@ -3470,9 +3487,12 @@ fn js_value_to_string(value: &JsValue, context: &mut Context) -> JsResult<String
 
 #[cfg(test)]
 mod tests {
-    use boa_engine::{Context, JsValue};
+    use boa_engine::{Context, JsValue, Source, js_string};
 
-    use super::process_document_scripts;
+    use super::{
+        JavaScriptRuntime, ensure_same_origin_script_url, fetch_for_script,
+        process_document_scripts, resolve_requested_url, set_location_href,
+    };
     use crate::url::Url;
 
     #[test]
@@ -3565,6 +3585,70 @@ mod tests {
             processed.navigation_target.as_deref(),
             Some("https://example.com/next?from=test")
         );
+    }
+
+    #[test]
+    fn resolves_script_requests_against_document_url_after_location_changes() {
+        let base_url = Url::parse("https://example.com/start").unwrap();
+        let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
+        set_location_href("https://other.example/app", &mut runtime.context);
+
+        let resolved =
+            resolve_requested_url(&JsValue::from(js_string!("/api/data")), &mut runtime.context)
+                .unwrap();
+
+        assert_eq!(
+            resolved,
+            Url::parse("https://example.com/api/data").unwrap()
+        );
+    }
+
+    #[test]
+    fn blocks_cross_origin_fetch_requests_even_after_location_changes() {
+        let base_url = Url::parse("https://example.com/start").unwrap();
+        let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
+        set_location_href("https://other.example/app", &mut runtime.context);
+
+        let error = fetch_for_script(
+            &Url::parse("https://other.example/data").unwrap(),
+            &mut runtime.context,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cross-origin JS requests are blocked"));
+    }
+
+    #[test]
+    fn blocks_cross_origin_redirect_targets() {
+        let current = Url::parse("https://example.com/start").unwrap();
+        let redirect = Url::parse("https://other.example/data").unwrap();
+
+        let error = ensure_same_origin_script_url(
+            &current,
+            &redirect,
+            "cross-origin JS redirects are blocked",
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("cross-origin JS redirects are blocked"));
+    }
+
+    #[test]
+    fn propagates_request_url_getter_errors() {
+        let base_url = Url::parse("https://example.com/start").unwrap();
+        let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
+        let request = runtime
+            .context
+            .eval(Source::from_bytes(
+                "({ get url() { throw new Error('boom'); } })",
+            ))
+            .unwrap();
+
+        let error = resolve_requested_url(&request, &mut runtime.context).unwrap_err();
+
+        assert!(error.to_string().contains("boom"));
     }
 
     #[test]

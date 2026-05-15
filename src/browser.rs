@@ -143,11 +143,6 @@ fn load_document_source_with_script_navigation(
                 script_navigation_depth + 1,
             );
         }
-
-        eprintln!(
-            "[tobira] blocked cross-origin script navigation: {} -> {}",
-            response.final_url, next_url
-        );
     }
     let mut parsed_document = parse_document(&scripted.html);
     if let Some(rewritten) =

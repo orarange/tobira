@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - window title prefix: `Tobira`
   - README was previously under the old `Scratch Browser` name
 - Verification status:
-  - `cargo test` passes: `89` tests green on `2026-05-15`
+  - `cargo test` passes: `93` tests green on `2026-05-15`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -183,3 +183,12 @@ git log --oneline -n 20
 - Clarified the GET-only XHR limitation by rejecting non-empty `xhr.send(body)` calls explicitly, with test coverage.
 - Simplified the JS network budget bookkeeping so the fetch-layer byte limit is the source of truth and the post-fetch accounting just records used bytes.
 - Added tests for `Url::shares_origin(...)` and rejected XHR bodies, bringing `cargo test` to `89` passing tests.
+
+### 2026-05-15 - Codex (Copilot review fix round 2)
+
+- Addressed the three Copilot comments on PR `#11`.
+- JS request resolution and same-origin checks now use an immutable per-document URL captured at runtime startup, so `location.href` mutations cannot widen fetch/XHR origin privileges before navigation actually commits.
+- JS fetch/XHR now also reject cross-origin final redirect targets, so a same-origin endpoint cannot tunnel script access to another origin through a 30x hop.
+- `resolve_requested_url(...)` now propagates thrown `request.url` getter exceptions instead of swallowing them and stringifying the whole request object.
+- Removed direct `stderr` logging from blocked script-navigation paths to keep the core loader quiet in GUI and embedding scenarios.
+- Added regression tests for immutable request-base resolution, cross-origin fetch blocking after `location.href` mutation, cross-origin redirect rejection, and getter error propagation, bringing `cargo test` to `93` passing tests.
