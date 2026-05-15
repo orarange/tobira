@@ -134,11 +134,15 @@ cargo run -- http://127.0.0.1:8765/demo/forms-demo.html
 
 ## Next Steps
 
-1. Expand CSS coverage for more layout properties
-2. Add better block layout and inline formatting behavior
-3. Deepen page input, click, and event handling
-4. Add history, back-forward, and tab behavior
-5. Expand JavaScript support for highly dynamic sites
+The living JavaScript roadmap is in [JS_ROADMAP.md](JS_ROADMAP.md).
+
+Short version:
+
+1. Add real event plumbing for clicks, typing, and form submission
+2. Expand DOM fidelity for framework-heavy pages
+3. Add storage, cookies, and history/navigation behavior
+4. Improve networking semantics and reflow after DOM mutation
+5. Validate against Google, YouTube, and other app-shell sites
 
 ## JavaScript Scope
 

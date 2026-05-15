@@ -69,6 +69,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - lightweight Google shell fallback
     - legacy frame/table-heavy pages such as the Abe Hiroshi site
   - generic `google.com` and `youtube.com` now try the real JS/HTML path before synthetic fallback
+  - living JS roadmap tracked in `JS_ROADMAP.md`
 
 ## Important Modules
 
@@ -172,3 +173,8 @@ git worktree list
 - Fixed `Url::resolve(...)` for fragment-only and query-only targets when the current URL already carries a fragment.
 - Added regression coverage for fragment-preserving GET form submissions and fragmented base-URL resolution.
 - Added a `boa_engine` loop-iteration runtime budget so runaway `for` / `while` scripts bail out with a JS error instead of hanging the browser worker indefinitely.
+
+### 2026-05-16 - Codex (JS roadmap)
+
+- Added `JS_ROADMAP.md` as the living plan for taking JavaScript support from lightweight and useful to browser-grade.
+- Linked the roadmap from `README.md` so future sessions can find the priority order quickly.
