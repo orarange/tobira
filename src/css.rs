@@ -16,13 +16,18 @@ pub const DEFAULT_LINK_COLOR: Color = 0x2A5DB0;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
-    pub root_vars: std::collections::BTreeMap<String, String>,
+    /// CSS custom properties declared on `:root` or `html`.
+    /// Shared via `Rc` so that cloning into each element's `css_variables` map is O(1).
+    pub root_vars: Rc<BTreeMap<String, String>>,
 }
 
 impl Stylesheet {
     pub fn extend(&mut self, other: Stylesheet) {
         self.rules.extend(other.rules);
-        self.root_vars.extend(other.root_vars);
+        // Merge root_vars: make a mutable copy, extend it, then wrap back in Rc
+        let mut merged = (*self.root_vars).clone();
+        merged.extend((*other.root_vars).clone());
+        self.root_vars = Rc::new(merged);
     }
 }
 
@@ -323,7 +328,7 @@ pub struct ComputedStyle {
     pub font_style_italic: bool,
     pub text_transform: TextTransform,
     pub text_indent: u32,
-    pub letter_spacing: i16,
+    pub letter_spacing: i32,
     pub max_width: Option<u32>,
     pub min_width: u32,
     pub max_height: Option<u32>,
@@ -641,7 +646,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
             }
         }
     }
-    Stylesheet { rules, root_vars }
+    Stylesheet { rules, root_vars: Rc::new(root_vars) }
 }
 
 fn parse_media_condition(query: &str) -> MediaCondition {
@@ -801,9 +806,11 @@ fn build_node(
                 })
                 .collect();
 
-            // Inject ::before and ::after pseudo-element content
+            // Inject ::before and ::after pseudo-element content.
+            // Use the pseudo-element rule's own ComputedStyle (color, font-size, etc.)
+            // rather than the host element's style, so `p::before { color: red; }` works.
             let mut children = children;
-            if let Some(before_text) = collect_pseudo_content(
+            if let Some((before_text, pseudo_style)) = collect_pseudo_content(
                 element,
                 stylesheet,
                 &next_ancestors,
@@ -815,10 +822,10 @@ fn build_node(
             ) {
                 children.insert(0, StyledNode::Text(StyledText {
                     text: before_text,
-                    style: style.clone(),
+                    style: pseudo_style,
                 }));
             }
-            if let Some(after_text) = collect_pseudo_content(
+            if let Some((after_text, pseudo_style)) = collect_pseudo_content(
                 element,
                 stylesheet,
                 &next_ancestors,
@@ -830,7 +837,7 @@ fn build_node(
             ) {
                 children.push(StyledNode::Text(StyledText {
                     text: after_text,
-                    style: style.clone(),
+                    style: pseudo_style,
                 }));
             }
 
@@ -844,7 +851,26 @@ fn build_node(
     }
 }
 
+/// Strip a matched pair of surrounding CSS string quotes (`"..."` or `'...'`).
+/// Only removes quotes when the same quote character opens and closes the string.
+/// Unbalanced quotes (e.g. `"foo'`) are left intact.
+fn strip_css_string_quotes(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() >= 2 {
+        let first = s.as_bytes()[0];
+        let last = s.as_bytes()[s.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
 #[allow(clippy::too_many_arguments)]
+/// Returns `(content_string, pseudo_element_style)` for the last matching rule,
+/// or `None` if no matching `::before`/`::after` rule with a non-empty `content` exists.
+/// The returned `ComputedStyle` carries the pseudo-element's own declarations
+/// (color, font-size, font-weight, etc.) so callers can apply them to the injected node.
 fn collect_pseudo_content(
     element: &Element,
     stylesheet: &Stylesheet,
@@ -854,9 +880,9 @@ fn collect_pseudo_content(
     preceding_siblings: &[ElementIdentity],
     viewport_width: u32,
     which: &PseudoElement,
-) -> Option<String> {
+) -> Option<(String, ComputedStyle)> {
     let identity = ElementIdentity::from(element);
-    let mut result: Option<String> = None;
+    let mut result: Option<(String, ComputedStyle)> = None;
 
     for rule in &stylesheet.rules {
         if let Some(cond) = &rule.media {
@@ -879,13 +905,25 @@ fn collect_pseudo_content(
         if !host_matches {
             continue;
         }
-        for decl in &rule.declarations {
+        // Find the content value in this rule
+        let content_val = rule.declarations.iter().find_map(|decl| {
             if decl.property == "content" {
-                let v = decl.value.trim().trim_matches('"').trim_matches('\'');
+                let v = strip_css_string_quotes(decl.value.trim());
                 if v != "none" && v != "normal" && !v.is_empty() {
-                    result = Some(v.to_string());
+                    return Some(v.to_string());
                 }
             }
+            None
+        });
+        if let Some(text) = content_val {
+            // Compute a style from this rule's non-content declarations
+            let mut pseudo_style = ComputedStyle::for_element("span", None);
+            for decl in &rule.declarations {
+                if decl.property != "content" {
+                    apply_declaration(&mut pseudo_style, decl, 16);
+                }
+            }
+            result = Some((text, pseudo_style));
         }
     }
     result
@@ -907,7 +945,8 @@ fn compute_style(
     apply_legacy_attributes(&mut style, element, parent_font_size);
 
     let identity = ElementIdentity::from(element);
-    let mut css_variables = stylesheet.root_vars.clone();
+    // Clone the Rc (O(1) reference count bump), then dereference for the mutable local copy.
+    let mut css_variables = (*stylesheet.root_vars).clone();
     let mut applicable: Vec<(usize, usize, Declaration)> = Vec::new();
 
     for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
@@ -1315,8 +1354,8 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.list_style_type = parse_list_style_type(value);
         }
         "content" => {
-            let v = value.trim().trim_matches('"').trim_matches('\'');
-            if v == "none" || v == "normal" || v == "" {
+            let v = strip_css_string_quotes(value.trim());
+            if v == "none" || v == "normal" || v.is_empty() {
                 style.content = None;
             } else {
                 style.content = Some(v.to_string());
@@ -2476,8 +2515,10 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
     parse_float(&value).map(|p| p.round().max(0.0) as u32)
 }
 
-/// Like parse_length but allows negative values; returns i16.
-fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i16> {
+/// Like parse_length but allows negative values; returns i32.
+/// Using i32 rather than i16 avoids silent truncation for large offsets
+/// (e.g. box-shadow offsets > 32767px which are legal in CSS).
+fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i32> {
     let value = input.trim().to_ascii_lowercase();
     if value == "0" {
         return Some(0);
@@ -2485,11 +2526,11 @@ fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i16> {
 
     if value.starts_with('-') {
         let positive = &value[1..];
-        let px = parse_length(positive, parent_font_size)? as i16;
+        let px = parse_length(positive, parent_font_size)? as i32;
         return Some(-px);
     }
 
-    parse_length(input, parent_font_size).map(|v| v.min(i16::MAX as u32) as i16)
+    parse_length(input, parent_font_size).map(|v| v as i32)
 }
 
 /// Simple calc() evaluator: left-to-right, no precedence.

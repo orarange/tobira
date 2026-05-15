@@ -424,7 +424,7 @@ fn layout_block_element(
             width: sw,
             height: 1,
             color: shadow.color,
-            border_radius: element.style.border_radius,
+            border_radius: element.style.border_radius.saturating_add(blur),
         }));
         Some(context.commands.len() - 1)
     } else {
@@ -455,6 +455,10 @@ fn layout_block_element(
     } else {
         None
     };
+
+    // Capture clip start BEFORE children are laid out, so overflow:hidden can correctly
+    // filter commands added by children (even when there is no background rect).
+    let clip_start_idx = context.commands.len();
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.top);
 
@@ -531,13 +535,12 @@ fn layout_block_element(
     context.background_color = saved_bg;
 
     // overflow: hidden — clip commands that fall outside the element box
+    // Use clip_start_idx (captured before children were laid out) so that child
+    // commands are correctly filtered even when there is no background rect.
     if element.style.overflow == Overflow::Hidden {
-        let start_clip_idx = background_cmd_index
-            .map(|i| i + 1)
-            .unwrap_or(context.commands.len());
         clip_commands_to_box(
             &mut context.commands,
-            start_clip_idx,
+            clip_start_idx,
             outer_x,
             background_top,
             outer_width,
@@ -605,6 +608,10 @@ fn layout_block_element(
 }
 
 /// Remove draw commands (from index start) that fall entirely outside the given box.
+/// Uses split_off + filter + extend for O(n) performance instead of O(n²) remove().
+///
+/// TODO: partially-overlapping commands are not truncated — a future improvement
+///       would wrap overflow:hidden subtrees in a LayerCommand with clip rect.
 fn clip_commands_to_box(
     commands: &mut Vec<DrawCommand>,
     start: usize,
@@ -616,9 +623,9 @@ fn clip_commands_to_box(
     let clip_x2 = clip_x.saturating_add(clip_w);
     let clip_y2 = clip_y.saturating_add(clip_h);
 
-    let mut i = start;
-    while i < commands.len() {
-        let outside = match &commands[i] {
+    let tail = commands.split_off(start);
+    let filtered = tail.into_iter().filter(|cmd| {
+        let outside = match cmd {
             DrawCommand::Rect(r) => {
                 r.x >= clip_x2
                     || r.y >= clip_y2
@@ -644,12 +651,9 @@ fn clip_commands_to_box(
                     || l.y.saturating_add(l.height) <= clip_y
             }
         };
-        if outside {
-            commands.remove(i);
-        } else {
-            i += 1;
-        }
-    }
+        !outside
+    });
+    commands.extend(filtered);
 }
 
 fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32) {

@@ -28,7 +28,7 @@ Current capabilities:
   - typography: `font-size`, `font-weight`, `font-style`, `font-family`, `text-align`, `text-decoration`, `text-transform`, `text-indent`, `letter-spacing`, `line-height`, `white-space`
   - layout: `list-style-type`, `vertical-align`
   - color values: hex (`#rgb`, `#rrggbb`, `#rgba`, `#rrggbbaa`), `rgb()`, `rgba()` (alpha blended), `hsl()`, `hsla()`, 140+ named colors
-  - CSS custom properties (`--var`) and `var(--name, fallback)` (resolved per-element; `:root`/body inheritance not yet supported)
+  - CSS custom properties (`--var`) and `var(--name, fallback)` with `:root` variable inheritance
   - `calc()` with correct operator precedence (`*`/`/` before `+`/`-`)
   - viewport units: `vw`, `vh` (consistent 1280×800 base)
   - `@media` with `max-width`, `min-width`, `screen`, `print`
