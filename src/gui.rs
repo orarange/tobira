@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
@@ -15,7 +16,7 @@ use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamily
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
 use crate::image::DecodedImage;
-use crate::layout::{LayoutDocument, TextCommand, layout_styled_document};
+use crate::layout::{FormControlCommand, FormControlKind, LayoutDocument, TextCommand, layout_styled_document};
 use crate::url::Url;
 
 const WINDOW_WIDTH: u32 = 1100;
@@ -31,6 +32,8 @@ const BUTTON_HEIGHT: u32 = 30;
 const BUTTON_GAP: u32 = 2;
 const TOOL_BUTTON_WIDTH: u32 = 52;
 const ADDRESS_BAR_PADDING_X: u32 = 12;
+const CONTROL_PADDING_X: u32 = 8;
+const CONTROL_PADDING_Y: u32 = 6;
 const INFO_FONT_SIZE: u32 = 12;
 const ADDRESS_BAR_FONT_SIZE: u32 = 16;
 const APP_FONT_SIZE: u32 = 18;
@@ -55,6 +58,9 @@ const COLOR_ADDRESS_BAR_BORDER: Color = 0x91A6C6;
 const COLOR_ADDRESS_BAR_FOCUS: Color = 0xE6A53A;
 const COLOR_ADDRESS_BAR_TEXT: Color = 0x122033;
 const COLOR_ADDRESS_BAR_SELECTION: Color = 0xBBD5F7;
+const COLOR_CONTROL_PLACEHOLDER: Color = 0x6D7788;
+const COLOR_CONTROL_SELECTION: Color = 0xC5D8F5;
+const COLOR_CONTROL_BUTTON_HOVER: Color = 0xD7E4F8;
 const COLOR_PANEL_BORDER: Color = 0xD4C7B2;
 
 type WindowHandle = Rc<Window>;
@@ -84,6 +90,8 @@ struct BrowserApp {
     modifiers: ModifiersState,
     cursor_position: PhysicalPosition<f64>,
     address_bar: AddressBarState,
+    page_control_values: BTreeMap<usize, String>,
+    focused_page_input: Option<FocusedPageInput>,
     hovered_target: HitTarget,
     hovered_link_url: Option<String>,
     ime_composing: bool,
@@ -115,6 +123,8 @@ impl BrowserApp {
             modifiers: ModifiersState::default(),
             cursor_position: PhysicalPosition::new(0.0, 0.0),
             address_bar,
+            page_control_values: BTreeMap::new(),
+            focused_page_input: None,
             hovered_target: HitTarget::None,
             hovered_link_url: None,
             ime_composing: false,
@@ -126,6 +136,7 @@ impl BrowserApp {
         self.current_url = Some(url.clone());
         self.address_bar.set_text(url.to_string());
         self.address_bar.blur();
+        self.clear_page_control_state();
         self.scroll_y = 0;
         self.sync_window_title();
         self.sync_input_method();
@@ -144,6 +155,7 @@ impl BrowserApp {
         self.document = DocumentView::load(url.clone());
         self.current_url = Some(url.clone());
         self.address_bar.set_text(url.to_string());
+        self.clear_page_control_state();
         self.scroll_y = 0;
         self.sync_window_title();
         self.sync_input_method();
@@ -155,6 +167,7 @@ impl BrowserApp {
         if entered.is_empty() {
             self.current_url = None;
             self.document = DocumentView::blank();
+            self.clear_page_control_state();
             self.scroll_y = 0;
             self.sync_window_title();
             self.request_redraw();
@@ -166,6 +179,7 @@ impl BrowserApp {
             Err(error) => {
                 self.document =
                     DocumentView::error(format!("could not navigate to `{entered}`: {error}"));
+                self.clear_page_control_state();
                 self.scroll_y = 0;
                 self.sync_window_title();
                 self.request_redraw();
@@ -174,12 +188,14 @@ impl BrowserApp {
     }
 
     fn focus_address_bar(&mut self, char_index: usize) {
+        self.blur_page_input();
         self.address_bar.focus_at(char_index);
         self.sync_input_method();
         self.request_redraw();
     }
 
     fn focus_address_bar_select_all(&mut self) {
+        self.blur_page_input();
         if self.address_bar.select_all() || !self.address_bar.focused {
             self.address_bar.focused = true;
             self.sync_input_method();
@@ -215,33 +231,70 @@ impl BrowserApp {
             return;
         };
 
-        window.set_ime_allowed(self.address_bar.focused);
+        let page_input_focused = self.focused_page_input.is_some();
+        window.set_ime_allowed(self.address_bar.focused || page_input_focused);
 
-        if !self.address_bar.focused {
+        if self.address_bar.focused {
+            let size = window.inner_size();
+            let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
+            let view = address_bar_view(
+                &self.address_bar,
+                &mut self.fonts,
+                chrome
+                    .address_bar
+                    .width
+                    .saturating_sub(ADDRESS_BAR_PADDING_X * 2),
+            );
+            let line_height = self
+                .fonts
+                .line_height_px(ADDRESS_BAR_FONT_SIZE, FontFamilyKind::Sans);
+            let text_y = chrome
+                .address_bar
+                .y
+                .saturating_add(chrome.address_bar.height.saturating_sub(line_height) / 2);
+            let caret_x = chrome
+                .address_bar
+                .x
+                .saturating_add(ADDRESS_BAR_PADDING_X)
+                .saturating_add(view.caret_x);
+
+            window.set_ime_cursor_area(
+                PhysicalPosition::new(caret_x as i32, text_y as i32),
+                PhysicalSize::new(1, line_height.max(1)),
+            );
             return;
         }
 
+        let Some(focused) = self.focused_page_input.as_ref() else {
+            return;
+        };
+
         let size = window.inner_size();
         let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
-        let view = address_bar_view(
-            &self.address_bar,
+        let body_top = chrome.height + FRAME_PADDING;
+        let content_width = size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let layout = self.document.layout(content_width, &mut self.fonts);
+        let Some(control) = layout.controls.iter().find(|control| control.id == focused.control_id)
+        else {
+            return;
+        };
+
+        let view = text_editor_view(
+            &focused.editor,
             &mut self.fonts,
-            chrome
-                .address_bar
-                .width
-                .saturating_sub(ADDRESS_BAR_PADDING_X * 2),
+            control.width.saturating_sub(CONTROL_PADDING_X * 2),
+            control.font_size_px,
+            control.font_family,
         );
         let line_height = self
             .fonts
-            .line_height_px(ADDRESS_BAR_FONT_SIZE, FontFamilyKind::Sans);
-        let text_y = chrome
-            .address_bar
-            .y
-            .saturating_add(chrome.address_bar.height.saturating_sub(line_height) / 2);
-        let caret_x = chrome
-            .address_bar
-            .x
-            .saturating_add(ADDRESS_BAR_PADDING_X)
+            .line_height_px(control.font_size_px, control.font_family);
+        let text_y = body_top
+            .saturating_add(control.y.saturating_sub(self.scroll_y))
+            .saturating_add(control.height.saturating_sub(line_height) / 2);
+        let caret_x = FRAME_PADDING
+            .saturating_add(control.x)
+            .saturating_add(CONTROL_PADDING_X)
             .saturating_add(view.caret_x);
 
         window.set_ime_cursor_area(
@@ -323,6 +376,9 @@ impl BrowserApp {
             viewport_height,
             self.scroll_y,
             &layout,
+            &self.page_control_values,
+            self.focused_page_input.as_ref(),
+            self.hovered_target,
         );
 
         buffer
@@ -365,6 +421,35 @@ impl BrowserApp {
                 && content_y < link.y.saturating_add(link.height)
             {
                 return Some(link.href.clone());
+            }
+        }
+        None
+    }
+
+    fn find_hovered_page_control(&mut self, window_size: PhysicalSize<u32>) -> Option<HitTarget> {
+        let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
+        let body_top = chrome.height + FRAME_PADDING;
+        let pos_x = self.cursor_position.x;
+        let pos_y = self.cursor_position.y;
+        if pos_y < body_top as f64 {
+            return None;
+        }
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let layout = self.document.layout(content_width, &mut self.fonts);
+        let content_y = (pos_y as u32)
+            .saturating_sub(body_top)
+            .saturating_add(self.scroll_y);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        for control in &layout.controls {
+            if content_x >= control.x
+                && content_x < control.x.saturating_add(control.width)
+                && content_y >= control.y
+                && content_y < control.y.saturating_add(control.height)
+            {
+                return Some(match control.kind {
+                    FormControlKind::TextInput => HitTarget::PageTextInput(control.id),
+                    FormControlKind::Button => HitTarget::PageButton(control.id),
+                });
             }
         }
         None
@@ -417,6 +502,9 @@ impl BrowserApp {
         }
         if chrome.address_bar.contains(position) {
             return HitTarget::AddressBar;
+        }
+        if let Some(target) = self.find_hovered_page_control(window_size) {
+            return target;
         }
         if let Some(direction) = resize_direction_at(window_size, position) {
             return HitTarget::Resize(direction);
@@ -547,6 +635,147 @@ impl BrowserApp {
             }
         }
 
+        if self.focused_page_input.is_some() {
+            let control = self.modifiers.control_key();
+            let shift = self.modifiers.shift_key();
+            let focused_control_id = self.focused_page_input.as_ref().map(|focused| focused.control_id);
+            match key_code {
+                KeyCode::Escape if !repeat => {
+                    self.blur_page_input();
+                    return false;
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter if !repeat => {
+                    if let Some(control_id) = focused_control_id {
+                        self.submit_page_form(control_id);
+                    }
+                    return false;
+                }
+                KeyCode::Backspace => {
+                    let changed = if control {
+                        self.focused_page_editor_mut()
+                            .map(AddressBarState::delete_word_backward)
+                            .unwrap_or(false)
+                    } else {
+                        self.focused_page_editor_mut()
+                            .map(AddressBarState::backspace)
+                            .unwrap_or(false)
+                    };
+                    if changed {
+                        self.sync_page_input_value();
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::Delete => {
+                    let changed = if control {
+                        self.focused_page_editor_mut()
+                            .map(AddressBarState::delete_word_forward)
+                            .unwrap_or(false)
+                    } else {
+                        self.focused_page_editor_mut()
+                            .map(AddressBarState::delete_forward)
+                            .unwrap_or(false)
+                    };
+                    if changed {
+                        self.sync_page_input_value();
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::ArrowLeft => {
+                    let changed = if control {
+                        self.focused_page_editor_mut()
+                            .map(|editor| editor.move_word_left(shift))
+                            .unwrap_or(false)
+                    } else {
+                        self.focused_page_editor_mut()
+                            .map(|editor| editor.move_left(shift))
+                            .unwrap_or(false)
+                    };
+                    if changed {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::ArrowRight => {
+                    let changed = if control {
+                        self.focused_page_editor_mut()
+                            .map(|editor| editor.move_word_right(shift))
+                            .unwrap_or(false)
+                    } else {
+                        self.focused_page_editor_mut()
+                            .map(|editor| editor.move_right(shift))
+                            .unwrap_or(false)
+                    };
+                    if changed {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::Home => {
+                    if self
+                        .focused_page_editor_mut()
+                        .map(|editor| editor.move_home(shift))
+                        .unwrap_or(false)
+                    {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::End => {
+                    if self
+                        .focused_page_editor_mut()
+                        .map(|editor| editor.move_end(shift))
+                        .unwrap_or(false)
+                    {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::KeyA if control && !repeat => {
+                    if self
+                        .focused_page_editor_mut()
+                        .map(AddressBarState::select_all)
+                        .unwrap_or(false)
+                    {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::KeyC if control && !repeat => {
+                    self.copy_page_input_selection();
+                    return false;
+                }
+                KeyCode::KeyX if control && !repeat => {
+                    if self.cut_page_input_selection() {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::KeyV if control && !repeat => {
+                    if self.paste_into_page_input() {
+                        self.sync_input_method();
+                        self.request_redraw();
+                    }
+                    return false;
+                }
+                KeyCode::KeyL if control && !repeat => {
+                    self.blur_page_input();
+                    self.focus_address_bar_select_all();
+                    return false;
+                }
+                _ => return false,
+            }
+        }
+
         let (viewport_height, content_height) = self.content_metrics(window_size);
         match key_code {
             KeyCode::Escape if !repeat => return true,
@@ -577,12 +806,20 @@ impl BrowserApp {
     }
 
     fn handle_text_input(&mut self, text: &str) {
-        if !self.address_bar.focused || self.ime_composing {
+        if self.ime_composing {
             return;
         }
 
-        if self.address_bar.insert_text(text) {
+        if self.address_bar.focused && self.address_bar.insert_text(text) {
             self.refresh_address_bar_input();
+        } else if self
+            .focused_page_editor_mut()
+            .map(|editor| editor.insert_text(text))
+            .unwrap_or(false)
+        {
+            self.sync_page_input_value();
+            self.sync_input_method();
+            self.request_redraw();
         }
     }
 
@@ -597,6 +834,14 @@ impl BrowserApp {
                 self.ime_composing = false;
                 if self.address_bar.focused && self.address_bar.insert_text(&text) {
                     self.refresh_address_bar_input();
+                } else if self
+                    .focused_page_editor_mut()
+                    .map(|editor| editor.insert_text(&text))
+                    .unwrap_or(false)
+                {
+                    self.sync_page_input_value();
+                    self.sync_input_method();
+                    self.request_redraw();
                 }
             }
         }
@@ -605,6 +850,60 @@ impl BrowserApp {
     fn refresh_address_bar_input(&mut self) {
         self.sync_input_method();
         self.request_redraw();
+    }
+
+    fn clear_page_control_state(&mut self) {
+        self.page_control_values.clear();
+        self.focused_page_input = None;
+        self.ime_composing = false;
+    }
+
+    fn blur_page_input(&mut self) {
+        if self.focused_page_input.is_none() {
+            return;
+        }
+
+        self.focused_page_input = None;
+        self.ime_composing = false;
+        self.sync_input_method();
+        self.request_redraw();
+    }
+
+    fn control_current_value(&self, control: &FormControlCommand) -> String {
+        if let Some(focused) = &self.focused_page_input
+            && focused.control_id == control.id
+        {
+            return focused.editor.text().to_string();
+        }
+
+        self.page_control_values
+            .get(&control.id)
+            .cloned()
+            .unwrap_or_else(|| control.value.clone())
+    }
+
+    fn focus_page_input_at(&mut self, control: &FormControlCommand, char_index: Option<usize>) {
+        self.blur_address_bar();
+        let mut editor = AddressBarState::new(self.control_current_value(control));
+        editor.focus_at(char_index.unwrap_or_else(|| editor.char_len()));
+        self.focused_page_input = Some(FocusedPageInput {
+            control_id: control.id,
+            editor,
+        });
+        self.sync_page_input_value();
+        self.sync_input_method();
+        self.request_redraw();
+    }
+
+    fn sync_page_input_value(&mut self) {
+        if let Some(focused) = &self.focused_page_input {
+            self.page_control_values
+                .insert(focused.control_id, focused.editor.text().to_string());
+        }
+    }
+
+    fn focused_page_editor_mut(&mut self) -> Option<&mut AddressBarState> {
+        self.focused_page_input.as_mut().map(|focused| &mut focused.editor)
     }
 
     fn copy_address_selection(&self) -> bool {
@@ -652,6 +951,141 @@ impl BrowserApp {
         self.request_redraw();
     }
 
+    fn page_base_url(&self) -> Option<&Url> {
+        match &self.document.content {
+            DocumentContent::Loaded(page) => Some(&page.url),
+            _ => self.current_url.as_ref(),
+        }
+    }
+
+    fn current_page_control(&mut self, id: usize) -> Option<FormControlCommand> {
+        let window_size = self
+            .window
+            .as_ref()
+            .map(|window| window.inner_size())
+            .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        self.document
+            .layout(content_width, &mut self.fonts)
+            .controls
+            .into_iter()
+            .find(|control| control.id == id)
+    }
+
+    fn copy_page_input_selection(&self) -> bool {
+        let Some(text) = self
+            .focused_page_input
+            .as_ref()
+            .and_then(|focused| focused.editor.selected_text())
+        else {
+            return false;
+        };
+
+        write_clipboard_text(&text)
+    }
+
+    fn cut_page_input_selection(&mut self) -> bool {
+        let Some(text) = self
+            .focused_page_input
+            .as_ref()
+            .and_then(|focused| focused.editor.selected_text())
+        else {
+            return false;
+        };
+        if !write_clipboard_text(&text) {
+            return false;
+        }
+
+        let changed = self
+            .focused_page_editor_mut()
+            .and_then(AddressBarState::cut_selection_text)
+            .is_some();
+        if changed {
+            self.sync_page_input_value();
+        }
+        changed
+    }
+
+    fn paste_into_page_input(&mut self) -> bool {
+        let Some(text) = read_clipboard_text() else {
+            return false;
+        };
+
+        let changed = self
+            .focused_page_editor_mut()
+            .map(|editor| editor.insert_text(&text))
+            .unwrap_or(false);
+        if changed {
+            self.sync_page_input_value();
+        }
+        changed
+    }
+
+    fn submit_page_form(&mut self, trigger_control_id: usize) {
+        let Some(trigger) = self.current_page_control(trigger_control_id) else {
+            return;
+        };
+        if trigger.disabled {
+            return;
+        }
+        if matches!(trigger.kind, FormControlKind::Button) && !trigger.activates_submit {
+            return;
+        }
+        if !trigger.form_method.eq_ignore_ascii_case("get") {
+            return;
+        }
+
+        let window_size = self
+            .window
+            .as_ref()
+            .map(|window| window.inner_size())
+            .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let layout = self.document.layout(content_width, &mut self.fonts);
+        let mut fields = Vec::new();
+        for control in &layout.controls {
+            if control.form_id != trigger.form_id || control.disabled {
+                continue;
+            }
+            if matches!(control.kind, FormControlKind::TextInput)
+                && let Some(name) = &control.name
+                && !name.is_empty()
+            {
+                fields.push((name.clone(), self.control_current_value(control)));
+            }
+        }
+        if matches!(trigger.kind, FormControlKind::Button)
+            && let Some(name) = &trigger.name
+            && !name.is_empty()
+        {
+            let value = if trigger.value.is_empty() {
+                trigger
+                    .placeholder
+                    .clone()
+                    .unwrap_or_else(|| "Submit".to_string())
+            } else {
+                trigger.value.clone()
+            };
+            fields.push((name.clone(), value));
+        }
+
+        let base = self.page_base_url().or(self.current_url.as_ref());
+        let action = trigger.form_action.as_deref().unwrap_or("");
+        let resolved = if action.is_empty() {
+            base.map(ToString::to_string)
+        } else {
+            Some(resolve_content_href(action, base))
+        };
+        let Some(url_text) = resolved else {
+            return;
+        };
+        if let Some(target_url) = build_get_form_submission_url(&url_text, &fields)
+            && let Ok(url) = Url::parse(&target_url)
+        {
+            self.load_url(url);
+        }
+    }
+
     fn handle_left_click(&mut self, window_size: PhysicalSize<u32>) -> bool {
         let hit = self.hit_test(window_size, self.cursor_position);
         let Some(window) = self.window.as_ref().cloned() else {
@@ -661,6 +1095,7 @@ impl BrowserApp {
         match hit {
             HitTarget::Button(button) => return self.handle_button(button),
             HitTarget::AddressBar => {
+                self.blur_page_input();
                 let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
                 let char_index = cursor_index_for_address_x(
                     &self.address_bar,
@@ -674,18 +1109,46 @@ impl BrowserApp {
                 );
                 self.focus_address_bar(char_index);
             }
+            HitTarget::PageTextInput(control_id) => {
+                if let Some(control) = self.current_page_control(control_id) {
+                    let local_x = self
+                        .cursor_position
+                        .x
+                        .max((FRAME_PADDING + control.x + CONTROL_PADDING_X) as f64)
+                        - (FRAME_PADDING + control.x + CONTROL_PADDING_X) as f64;
+                    let mut editor = AddressBarState::new(self.control_current_value(&control));
+                    editor.focus_at(editor.char_len());
+                    let char_index = cursor_index_for_text_x(
+                        &editor,
+                        &mut self.fonts,
+                        control.width.saturating_sub(CONTROL_PADDING_X * 2),
+                        local_x,
+                        control.font_size_px,
+                        control.font_family,
+                    );
+                    self.focus_page_input_at(&control, Some(char_index));
+                }
+            }
+            HitTarget::PageButton(control_id) => {
+                self.blur_address_bar();
+                self.blur_page_input();
+                self.submit_page_form(control_id);
+            }
             HitTarget::Resize(direction) => {
                 self.blur_address_bar();
+                self.blur_page_input();
                 let _ = window.drag_resize_window(direction);
             }
             HitTarget::TitleBar => {
                 self.blur_address_bar();
+                self.blur_page_input();
                 let _ = window.drag_window();
             }
             HitTarget::None => {
                 self.blur_address_bar();
+                self.blur_page_input();
                 if let Some(href) = self.hovered_link_url.clone() {
-                    let resolved = resolve_content_href(&href, self.current_url.as_ref());
+                    let resolved = resolve_content_href(&href, self.page_base_url());
                     if let Ok(url) = parse_address_input(&resolved) {
                         self.load_url(url);
                     }
@@ -698,6 +1161,7 @@ impl BrowserApp {
 
     fn handle_button(&mut self, button: ChromeButton) -> bool {
         self.blur_address_bar();
+        self.blur_page_input();
         let Some(window) = self.window.as_ref().cloned() else {
             return false;
         };
@@ -909,6 +1373,7 @@ impl DocumentView {
                 texts: Vec::new(),
                 images: Vec::new(),
                 links: Vec::new(),
+                controls: Vec::new(),
             },
             DocumentContent::Loaded(page) => {
                 layout_styled_document(&page.styled_document, &page.images, width, fonts)
@@ -964,6 +1429,7 @@ fn layout_error_document(
         texts,
         images: Vec::new(),
         links: Vec::new(),
+        controls: Vec::new(),
     }
 }
 
@@ -973,6 +1439,12 @@ struct AddressBarState {
     cursor_chars: usize,
     selection_anchor: Option<usize>,
     focused: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FocusedPageInput {
+    control_id: usize,
+    editor: AddressBarState,
 }
 
 impl AddressBarState {
@@ -1250,6 +1722,8 @@ enum HitTarget {
     None,
     TitleBar,
     AddressBar,
+    PageTextInput(usize),
+    PageButton(usize),
     Button(ChromeButton),
     Resize(ResizeDirection),
 }
@@ -1381,10 +1855,12 @@ fn chrome_layout_metrics(fonts: &mut FontContext, window_width: u32) -> ChromeLa
     }
 }
 
-fn address_bar_view(
+fn text_editor_view(
     state: &AddressBarState,
     fonts: &mut FontContext,
     available_width: u32,
+    font_size: u32,
+    font_family: FontFamilyKind,
 ) -> AddressBarView {
     let characters: Vec<char> = state.text.chars().collect();
     let cursor = state.cursor_chars.min(characters.len());
@@ -1404,8 +1880,7 @@ fn address_bar_view(
     let mut width: u32 = 0;
 
     while end < characters.len() {
-        let advance =
-            fonts.glyph_advance_px(characters[end], ADDRESS_BAR_FONT_SIZE, FontFamilyKind::Sans);
+        let advance = fonts.glyph_advance_px(characters[end], font_size, font_family);
         if width.saturating_add(advance) > available_width && end > start {
             break;
         }
@@ -1417,11 +1892,7 @@ fn address_bar_view(
     }
 
     while start > 0 {
-        let advance = fonts.glyph_advance_px(
-            characters[start - 1],
-            ADDRESS_BAR_FONT_SIZE,
-            FontFamilyKind::Sans,
-        );
+        let advance = fonts.glyph_advance_px(characters[start - 1], font_size, font_family);
         if width.saturating_add(advance) > available_width && end > start {
             break;
         }
@@ -1439,9 +1910,7 @@ fn address_bar_view(
     let text: String = characters[start..end].iter().collect();
     let caret_x = characters[start..cursor]
         .iter()
-        .map(|character| {
-            fonts.glyph_advance_px(*character, ADDRESS_BAR_FONT_SIZE, FontFamilyKind::Sans)
-        })
+        .map(|character| fonts.glyph_advance_px(*character, font_size, font_family))
         .sum();
 
     let mut selection_start_x = None;
@@ -1453,25 +1922,13 @@ fn address_bar_view(
             selection_start_x = Some(
                 characters[start..visible_start]
                     .iter()
-                    .map(|character| {
-                        fonts.glyph_advance_px(
-                            *character,
-                            ADDRESS_BAR_FONT_SIZE,
-                            FontFamilyKind::Sans,
-                        )
-                    })
+                    .map(|character| fonts.glyph_advance_px(*character, font_size, font_family))
                     .sum(),
             );
             selection_end_x = Some(
                 characters[start..visible_end]
                     .iter()
-                    .map(|character| {
-                        fonts.glyph_advance_px(
-                            *character,
-                            ADDRESS_BAR_FONT_SIZE,
-                            FontFamilyKind::Sans,
-                        )
-                    })
+                    .map(|character| fonts.glyph_advance_px(*character, font_size, font_family))
                     .sum(),
             );
         }
@@ -1487,20 +1944,35 @@ fn address_bar_view(
     }
 }
 
-fn cursor_index_for_address_x(
+fn address_bar_view(
+    state: &AddressBarState,
+    fonts: &mut FontContext,
+    available_width: u32,
+) -> AddressBarView {
+    text_editor_view(
+        state,
+        fonts,
+        available_width,
+        ADDRESS_BAR_FONT_SIZE,
+        FontFamilyKind::Sans,
+    )
+}
+
+fn cursor_index_for_text_x(
     state: &AddressBarState,
     fonts: &mut FontContext,
     available_width: u32,
     local_x: f64,
+    font_size: u32,
+    font_family: FontFamilyKind,
 ) -> usize {
-    let view = address_bar_view(state, fonts, available_width);
+    let view = text_editor_view(state, fonts, available_width, font_size, font_family);
     let characters: Vec<char> = view.text.chars().collect();
     let mut cursor_x = 0_u32;
     let target_x = local_x.max(0.0) as u32;
 
     for (index, character) in characters.iter().enumerate() {
-        let advance =
-            fonts.glyph_advance_px(*character, ADDRESS_BAR_FONT_SIZE, FontFamilyKind::Sans);
+        let advance = fonts.glyph_advance_px(*character, font_size, font_family);
         let midpoint = cursor_x.saturating_add(advance / 2);
         if target_x < midpoint {
             return view.start_char + index;
@@ -1509,6 +1981,22 @@ fn cursor_index_for_address_x(
     }
 
     view.end_char
+}
+
+fn cursor_index_for_address_x(
+    state: &AddressBarState,
+    fonts: &mut FontContext,
+    available_width: u32,
+    local_x: f64,
+) -> usize {
+    cursor_index_for_text_x(
+        state,
+        fonts,
+        available_width,
+        local_x,
+        ADDRESS_BAR_FONT_SIZE,
+        FontFamilyKind::Sans,
+    )
 }
 
 fn resolve_content_href(href: &str, base: Option<&Url>) -> String {
@@ -1521,6 +2009,62 @@ fn resolve_content_href(href: &str, base: Option<&Url>) -> String {
         }
     }
     href.to_string()
+}
+
+fn build_get_form_submission_url(
+    action_url: &str,
+    fields: &[(String, String)],
+) -> Option<String> {
+    if action_url.trim().is_empty() {
+        return None;
+    }
+
+    let (without_fragment, fragment_suffix) = action_url
+        .split_once('#')
+        .map(|(head, fragment)| (head, format!("#{fragment}")))
+        .unwrap_or((action_url, String::new()));
+
+    let (base, existing_query) = without_fragment
+        .split_once('?')
+        .map(|(head, query)| (head, Some(query)))
+        .unwrap_or((without_fragment, None));
+
+    let mut query = existing_query.unwrap_or_default().to_string();
+    let mut needs_separator = !query.is_empty();
+    for (name, value) in fields {
+        if name.is_empty() {
+            continue;
+        }
+        if needs_separator {
+            query.push('&');
+        }
+        query.push_str(&percent_encode_form_component(name));
+        query.push('=');
+        query.push_str(&percent_encode_form_component(value));
+        needs_separator = true;
+    }
+
+    let mut final_url = base.to_string();
+    if !query.is_empty() {
+        final_url.push('?');
+        final_url.push_str(&query);
+    }
+    final_url.push_str(&fragment_suffix);
+    Some(final_url)
+}
+
+fn percent_encode_form_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            b' ' => encoded.push('+'),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 fn parse_address_input(input: &str) -> Result<Url> {
@@ -1582,6 +2126,8 @@ fn resize_direction_at(
 fn cursor_icon_for_target(target: HitTarget) -> CursorIcon {
     match target {
         HitTarget::AddressBar => CursorIcon::Text,
+        HitTarget::PageTextInput(_) => CursorIcon::Text,
+        HitTarget::PageButton(_) => CursorIcon::Pointer,
         HitTarget::Button(_) => CursorIcon::Pointer,
         HitTarget::Resize(direction) => direction.into(),
         HitTarget::TitleBar | HitTarget::None => CursorIcon::Default,
@@ -2055,6 +2601,211 @@ fn paint_button(
     );
 }
 
+fn paint_page_control(
+    fonts: &mut FontContext,
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    offset_x: u32,
+    offset_y: u32,
+    scroll_y: u32,
+    control: &FormControlCommand,
+    page_control_values: &BTreeMap<usize, String>,
+    focused_page_input: Option<&FocusedPageInput>,
+    hovered_target: HitTarget,
+) {
+    let absolute_x = offset_x.saturating_add(control.x);
+    let absolute_y = offset_y.saturating_add(control.y.saturating_sub(scroll_y));
+    let is_hovered = matches!(
+        hovered_target,
+        HitTarget::PageTextInput(id) | HitTarget::PageButton(id) if id == control.id
+    );
+    let focused = focused_page_input
+        .as_ref()
+        .filter(|focused| focused.control_id == control.id)
+        .copied();
+
+    let background = if matches!(control.kind, FormControlKind::Button) && is_hovered && !control.disabled
+    {
+        COLOR_CONTROL_BUTTON_HOVER
+    } else {
+        control.background_color
+    };
+    let border = if focused.is_some() {
+        COLOR_ADDRESS_BAR_FOCUS
+    } else if is_hovered {
+        COLOR_ADDRESS_BAR_BORDER
+    } else {
+        control.border_color
+    };
+
+    draw_rect(
+        buffer,
+        width,
+        height,
+        absolute_x,
+        absolute_y,
+        control.width,
+        control.height,
+        background,
+    );
+    draw_rect_outline(
+        buffer,
+        width,
+        height,
+        absolute_x,
+        absolute_y,
+        control.width,
+        control.height,
+        border,
+    );
+
+    match control.kind {
+        FormControlKind::TextInput => {
+            let line_height = fonts.line_height_px(control.font_size_px, control.font_family);
+            let text_y =
+                absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
+            let available_width = control.width.saturating_sub(CONTROL_PADDING_X * 2);
+
+            let render_value = focused
+                .map(|focused| focused.editor.text().to_string())
+                .or_else(|| page_control_values.get(&control.id).cloned())
+                .unwrap_or_else(|| control.value.clone());
+            let show_placeholder = render_value.is_empty()
+                && control
+                    .placeholder
+                    .as_deref()
+                    .map(|text| !text.is_empty())
+                    .unwrap_or(false);
+
+            if show_placeholder {
+                let placeholder = fit_text_to_width(
+                    fonts,
+                    control.placeholder.as_deref().unwrap_or_default(),
+                    available_width,
+                    control.font_size_px,
+                    control.font_family,
+                );
+                fonts.draw_text(
+                    buffer,
+                    width,
+                    height,
+                    absolute_x.saturating_add(CONTROL_PADDING_X),
+                    text_y,
+                    &placeholder,
+                    control.font_size_px,
+                    COLOR_CONTROL_PLACEHOLDER,
+                    false,
+                    false,
+                    control.font_family,
+                );
+            } else {
+                let mut editor = focused
+                    .map(|focused| focused.editor.clone())
+                    .unwrap_or_else(|| AddressBarState::new(render_value));
+                if focused.is_none() {
+                    editor.focus_at(0);
+                    editor.blur();
+                }
+                let view = text_editor_view(
+                    &editor,
+                    fonts,
+                    available_width,
+                    control.font_size_px,
+                    control.font_family,
+                );
+                if focused.is_some()
+                    && let (Some(selection_start_x), Some(selection_end_x)) =
+                        (view.selection_start_x, view.selection_end_x)
+                {
+                    let selection_x = absolute_x
+                        .saturating_add(CONTROL_PADDING_X)
+                        .saturating_add(selection_start_x);
+                    let selection_width = selection_end_x.saturating_sub(selection_start_x).max(1);
+                    draw_rect(
+                        buffer,
+                        width,
+                        height,
+                        selection_x,
+                        absolute_y.saturating_add(CONTROL_PADDING_Y),
+                        selection_width,
+                        control
+                            .height
+                            .saturating_sub(CONTROL_PADDING_Y.saturating_mul(2))
+                            .max(1),
+                        COLOR_CONTROL_SELECTION,
+                    );
+                }
+                fonts.draw_text(
+                    buffer,
+                    width,
+                    height,
+                    absolute_x.saturating_add(CONTROL_PADDING_X),
+                    text_y,
+                    &view.text,
+                    control.font_size_px,
+                    control.text_color,
+                    false,
+                    false,
+                    control.font_family,
+                );
+                if focused.is_some() {
+                    let caret_x = absolute_x
+                        .saturating_add(CONTROL_PADDING_X)
+                        .saturating_add(view.caret_x);
+                    draw_rect(
+                        buffer,
+                        width,
+                        height,
+                        caret_x,
+                        absolute_y.saturating_add(CONTROL_PADDING_Y),
+                        1,
+                        control
+                            .height
+                            .saturating_sub(CONTROL_PADDING_Y.saturating_mul(2))
+                            .max(1),
+                        control.text_color,
+                    );
+                }
+            }
+        }
+        FormControlKind::Button => {
+            let label = if !control.label.trim().is_empty() {
+                control.label.as_str()
+            } else if !control.value.trim().is_empty() {
+                control.value.as_str()
+            } else {
+                "Button"
+            };
+            let label = fit_text_to_width(
+                fonts,
+                label,
+                control.width.saturating_sub(CONTROL_PADDING_X * 2),
+                control.font_size_px,
+                control.font_family,
+            );
+            let text_width = fonts.text_width_px(&label, control.font_size_px, control.font_family);
+            let line_height = fonts.line_height_px(control.font_size_px, control.font_family);
+            let text_x = absolute_x.saturating_add(control.width.saturating_sub(text_width) / 2);
+            let text_y =
+                absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
+            fonts.draw_text(
+                buffer,
+                width,
+                height,
+                text_x,
+                text_y,
+                &label,
+                control.font_size_px,
+                control.text_color,
+                true,
+                false,
+                control.font_family,
+            );
+        }
+    }
+}
+
 fn paint_layout(
     document: &DocumentView,
     fonts: &mut FontContext,
@@ -2066,6 +2817,9 @@ fn paint_layout(
     viewport_height: u32,
     scroll_y: u32,
     layout: &LayoutDocument,
+    page_control_values: &BTreeMap<usize, String>,
+    focused_page_input: Option<&FocusedPageInput>,
+    hovered_target: HitTarget,
 ) {
     let viewport_bottom = scroll_y.saturating_add(viewport_height);
 
@@ -2109,6 +2863,27 @@ fn paint_layout(
                 decoded,
             );
         }
+    }
+
+    for control in &layout.controls {
+        let control_bottom = control.y.saturating_add(control.height);
+        if control_bottom < scroll_y || control.y > viewport_bottom {
+            continue;
+        }
+
+        paint_page_control(
+            fonts,
+            buffer,
+            width,
+            height,
+            offset_x,
+            offset_y,
+            scroll_y,
+            control,
+            page_control_values,
+            focused_page_input,
+            hovered_target,
+        );
     }
 
     for text in &layout.texts {
@@ -2261,7 +3036,8 @@ fn draw_scaled_image(
 #[cfg(test)]
 mod tests {
     use super::{
-        AddressBarState, cursor_index_for_address_x, layout_error_document,
+        AddressBarState, build_get_form_submission_url, cursor_index_for_address_x,
+        layout_error_document,
         looks_like_local_address, max_scroll, parse_address_input,
     };
     use crate::font::FontContext;
@@ -2373,5 +3149,33 @@ mod tests {
 
         let cursor = cursor_index_for_address_x(&state, &mut fonts, 300, 0.0);
         assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn build_get_form_submission_appends_encoded_query() {
+        let target = build_get_form_submission_url(
+            "https://www.google.com/search",
+            &[("q".to_string(), "rust browser".to_string())],
+        )
+        .unwrap();
+
+        assert_eq!(target, "https://www.google.com/search?q=rust+browser");
+    }
+
+    #[test]
+    fn build_get_form_submission_preserves_existing_query_and_fragment() {
+        let target = build_get_form_submission_url(
+            "https://example.com/find?src=home#results",
+            &[
+                ("q".to_string(), "hello world".to_string()),
+                ("lang".to_string(), "ja".to_string()),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            target,
+            "https://example.com/find?src=home&q=hello+world&lang=ja#results"
+        );
     }
 }

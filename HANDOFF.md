@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - window title prefix: `Tobira`
   - README was previously under the old `Scratch Browser` name
 - Verification status:
-  - `cargo test` passes: `93` tests green on `2026-05-15`
+  - `cargo test` passes: `96` tests green on `2026-05-15`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -40,6 +40,10 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - blank startup page and direct URL entry
   - address bar editing shortcuts including `Ctrl+A`, `Ctrl+C`, `Ctrl+X`, and `Ctrl+V`
   - clickable links in the rendered page with hit-testing in the GUI
+  - first-class page form controls in the GUI
+    - native rendering for text inputs and buttons
+    - focus, caret, selection, clipboard shortcuts, and IME placement for focused page text inputs
+    - basic `GET` form submission with relative-action resolution and query encoding
   - image loading / rendering for supported formats
   - guarded JavaScript execution through `boa_engine` with a growing set of stubs
   - lightweight mutable DOM bridge for script execution
@@ -57,7 +61,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - script-driven `location.href = ...` navigation can trigger a follow-up page load
   - JS-initiated `fetch(...)` / `XMLHttpRequest` are now same-origin only and run under per-request plus total response-byte budgets
   - automatic script-driven follow-up navigation is now same-origin only
-  - local test pages for CSS, basic JS, and DOM mutation coverage under `demo/`
+  - local test pages for CSS, basic JS, DOM mutation, and forms under `demo/`
   - site-specific rendering paths for:
     - YouTube watch pages
     - YouTube home shell / cards / nudge UI as fallback when the real page stays empty
@@ -99,10 +103,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Event dispatch, `addEventListener` depth, and GUI-to-page event delivery are still shallow.
 - History / back-forward behavior is not yet called out as complete.
 - Modern app-shell sites still need more DOM APIs, stateful storage/cookie behavior, and CSS coverage.
-- GUI interactivity still only knows browser chrome plus anchor hitboxes; real page controls are not yet first-class widgets.
+- GUI page controls now cover text inputs and buttons, but general widget/event coverage is still shallow.
 - CSS is still computed once up front instead of being rebuilt against the live window width.
 - Actual media playback and a true YouTube watch experience are still incomplete.
 - `fetch(...)` / `XMLHttpRequest` are intentionally conservative now; cross-origin app shells will still be blocked until a safer policy exists.
+- Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
 
 ## Useful Commands
 
@@ -192,3 +197,10 @@ git log --oneline -n 20
 - `resolve_requested_url(...)` now propagates thrown `request.url` getter exceptions instead of swallowing them and stringifying the whole request object.
 - Removed direct `stderr` logging from blocked script-navigation paths to keep the core loader quiet in GUI and embedding scenarios.
 - Added regression tests for immutable request-base resolution, cross-origin fetch blocking after `location.href` mutation, cross-origin redirect rejection, and getter error propagation, bringing `cargo test` to `93` passing tests.
+
+### 2026-05-15 - Codex (page form controls pass)
+
+- Promoted page inputs and buttons to first-class layout commands so the GUI can hit-test and paint them separately from static text.
+- Added native rendering for page text inputs and buttons, including focus border, caret, selection highlight, placeholder text, and clipboard shortcuts shared with the address bar editor model.
+- Added basic `GET` form submission with relative action resolution and query-string encoding, which is enough to drive search-like forms such as Google from rendered pages.
+- Added `demo/forms-demo.html` plus regression tests for layout control emission and GET form URL building, bringing `cargo test` to `96` passing tests.

@@ -36,6 +36,8 @@ Current capabilities:
 - Software rendering with `softbuffer`
 - System font rendering with TrueType / OpenType fonts via `fontdue`
 - Plain text CLI renderer with `--cli`
+- Custom title bar and address bar
+- Clickable page links plus basic GUI form controls for `GET` submissions
 - Basic JavaScript execution with `boa_engine`
 - Lightweight mutable DOM support for:
   - `document.querySelector(...)`
@@ -49,9 +51,9 @@ Current capabilities:
 Still missing:
 
 - full CSS layout coverage
-- DOM APIs beyond the basics
-- address bar, tabs, history, navigation UI
-- images, forms, and modern page features
+- deeper DOM APIs and event coverage
+- tabs, history, and richer navigation UI
+- POST forms, complex widgets, and modern app-shell browser APIs
 
 ## Run
 
@@ -89,6 +91,13 @@ python -m http.server 8765
 cargo run -- http://127.0.0.1:8765/demo/dom-demo.html
 ```
 
+Local forms demo:
+
+```bash
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/forms-demo.html
+```
+
 ## GUI Controls
 
 - `Up` / `Down`: scroll
@@ -96,8 +105,8 @@ cargo run -- http://127.0.0.1:8765/demo/dom-demo.html
 - `Home` / `End`: jump to top or bottom
 - `R`: reload
 - `Ctrl+L`: focus the address bar
-- `Ctrl+A`: select all text in the address bar
-- `Ctrl+C` / `Ctrl+X` / `Ctrl+V`: copy, cut, and paste inside the address bar
+- `Ctrl+A`: select all text in the address bar or a focused page input
+- `Ctrl+C` / `Ctrl+X` / `Ctrl+V`: copy, cut, and paste inside the address bar or a focused page input
 - `Esc`: quit
 
 ## Project Structure
@@ -127,9 +136,9 @@ cargo run -- http://127.0.0.1:8765/demo/dom-demo.html
 
 1. Expand CSS coverage for more layout properties
 2. Add better block layout and inline formatting behavior
-3. Add address bar and navigation controls
-4. Add image loading and richer page rendering
-5. Add JavaScript execution for highly dynamic pages
+3. Deepen page input, click, and event handling
+4. Add history, back-forward, and tab behavior
+5. Expand JavaScript support for highly dynamic sites
 
 ## JavaScript Scope
 

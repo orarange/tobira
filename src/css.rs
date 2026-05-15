@@ -1043,7 +1043,8 @@ fn default_display(tag_name: &str) -> Display {
     match tag_name {
         "document" | "html" | "body" | "main" | "section" | "article" | "div" | "header"
         | "footer" | "nav" | "aside" | "p" | "ul" | "ol" | "li" | "pre" | "blockquote" | "h1"
-        | "h2" | "h3" | "h4" | "h5" | "h6" | "table" | "tbody" | "thead" | "tfoot" | "tr"
+        | "h2" | "h3" | "h4" | "h5" | "h6" | "form" | "table" | "tbody" | "thead" | "tfoot"
+        | "tr"
         | "td" | "th" | "center" | "frameset" | "hr" => {
             if tag_name == "li" {
                 Display::ListItem

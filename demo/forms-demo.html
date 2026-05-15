@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Tobira Form Demo</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        background: #f4efe6;
+        color: #1a2233;
+        margin: 0;
+      }
+
+      main {
+        max-width: 760px;
+        margin: 48px auto;
+        background: #fffdf8;
+        padding: 32px;
+        border: 1px solid #d4c7b2;
+      }
+
+      h1 {
+        margin-top: 0;
+      }
+
+      p {
+        line-height: 1.6;
+      }
+
+      form {
+        display: block;
+        margin: 24px 0;
+        padding: 18px;
+        background: #eef3fb;
+        border: 1px solid #c8d7ee;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 12px;
+        font-weight: 600;
+      }
+
+      small {
+        display: block;
+        color: #5d6778;
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Form Demo</h1>
+      <p>
+        This page exists to exercise native page input handling in Tobira.
+        Click into the fields, type, use Ctrl+A / Ctrl+C / Ctrl+V, then press
+        Enter or the submit button.
+      </p>
+
+      <form action="https://www.google.com/search" method="get">
+        <label>
+          Google query
+          <input name="q" value="tobira browser" size="28" placeholder="search terms">
+        </label>
+        <input type="submit" value="Search Google">
+        <small>Submitting should navigate to a real Google search URL.</small>
+      </form>
+
+      <form action="/demo/dom-demo.html" method="get">
+        <label>
+          Local query echo
+          <input name="q" placeholder="try editing this value">
+        </label>
+        <button type="submit">Open DOM demo with query string</button>
+        <small>This one stays on the local demo server and exercises relative form actions.</small>
+      </form>
+    </main>
+  </body>
+</html>
