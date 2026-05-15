@@ -958,15 +958,18 @@ impl BrowserApp {
         }
     }
 
-    fn current_page_control(&mut self, id: usize) -> Option<FormControlCommand> {
+    fn current_layout(&mut self) -> LayoutDocument {
         let window_size = self
             .window
             .as_ref()
             .map(|window| window.inner_size())
             .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
         let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
-        self.document
-            .layout(content_width, &mut self.fonts)
+        self.document.layout(content_width, &mut self.fonts)
+    }
+
+    fn current_page_control(&mut self, id: usize) -> Option<FormControlCommand> {
+        self.current_layout()
             .controls
             .into_iter()
             .find(|control| control.id == id)
@@ -1022,7 +1025,13 @@ impl BrowserApp {
     }
 
     fn submit_page_form(&mut self, trigger_control_id: usize) {
-        let Some(trigger) = self.current_page_control(trigger_control_id) else {
+        let layout = self.current_layout();
+        let Some(trigger) = layout
+            .controls
+            .iter()
+            .find(|control| control.id == trigger_control_id)
+            .cloned()
+        else {
             return;
         };
         if trigger.disabled {
@@ -1032,16 +1041,14 @@ impl BrowserApp {
             return;
         }
         if !trigger.form_method.eq_ignore_ascii_case("get") {
+            self.document.status_line = format!(
+                "Status: {} forms are not supported yet",
+                trigger.form_method.to_ascii_uppercase()
+            );
+            self.request_redraw();
             return;
         }
 
-        let window_size = self
-            .window
-            .as_ref()
-            .map(|window| window.inner_size())
-            .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
         let mut fields = Vec::new();
         for control in &layout.controls {
             if control.form_id != trigger.form_id || control.disabled {
@@ -1059,10 +1066,7 @@ impl BrowserApp {
             && !name.is_empty()
         {
             let value = if trigger.value.is_empty() {
-                trigger
-                    .placeholder
-                    .clone()
-                    .unwrap_or_else(|| "Submit".to_string())
+                String::new()
             } else {
                 trigger.value.clone()
             };
@@ -1443,6 +1447,8 @@ struct AddressBarState {
 
 #[derive(Debug, Clone)]
 struct FocusedPageInput {
+    // While a page input is focused, this native editor state is the source of truth
+    // until we wire live DOM/event synchronization for script-driven value changes.
     control_id: usize,
     editor: AddressBarState,
 }
@@ -2865,27 +2871,6 @@ fn paint_layout(
         }
     }
 
-    for control in &layout.controls {
-        let control_bottom = control.y.saturating_add(control.height);
-        if control_bottom < scroll_y || control.y > viewport_bottom {
-            continue;
-        }
-
-        paint_page_control(
-            fonts,
-            buffer,
-            width,
-            height,
-            offset_x,
-            offset_y,
-            scroll_y,
-            control,
-            page_control_values,
-            focused_page_input,
-            hovered_target,
-        );
-    }
-
     for text in &layout.texts {
         let text_bottom = text
             .y
@@ -2906,6 +2891,27 @@ fn paint_layout(
             text.bold,
             text.underline,
             text.font_family,
+        );
+    }
+
+    for control in &layout.controls {
+        let control_bottom = control.y.saturating_add(control.height);
+        if control_bottom < scroll_y || control.y > viewport_bottom {
+            continue;
+        }
+
+        paint_page_control(
+            fonts,
+            buffer,
+            width,
+            height,
+            offset_x,
+            offset_y,
+            scroll_y,
+            control,
+            page_control_values,
+            focused_page_input,
+            hovered_target,
         );
     }
 }

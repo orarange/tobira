@@ -201,8 +201,10 @@ mod tests {
         let left = Url::parse("https://Example.com/path").unwrap();
         let same = Url::parse("https://example.com/other").unwrap();
         let other_port = Url::parse("https://example.com:444/other").unwrap();
+        let explicit_default_port = Url::parse("https://example.com:443/third").unwrap();
 
         assert!(left.shares_origin(&same));
+        assert!(left.shares_origin(&explicit_default_port));
         assert!(!left.shares_origin(&other_port));
     }
 }

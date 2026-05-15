@@ -1462,8 +1462,9 @@ fn layout_normal_fragments(
                     width
                 };
 
-                if pending_space && !line.is_empty() {
-                        let space_width = char_width(&control.style, ' ', fonts);
+                let pending_space_before_control = pending_space && !line.is_empty();
+                if pending_space_before_control {
+                    let space_width = char_width(&control.style, ' ', fonts);
                     if line.width.saturating_add(space_width) > effective_width {
                         emit_line_with_indent(
                             &mut line,
@@ -1765,13 +1766,6 @@ fn emit_line_impl(
                 0xFFFFFF
             };
             let border_color = if control.disabled { 0xA9AFB8 } else { 0x7F8B9C };
-            context.rects.push(RectCommand {
-                x: cursor_x,
-                y: control_y,
-                width: span.width.max(1),
-                height: span.height.max(1),
-                color: background_color,
-            });
             context.controls.push(FormControlCommand {
                 id: control.id,
                 kind: control.kind,
@@ -1793,34 +1787,6 @@ fn emit_line_impl(
                 text_color: span.style.color,
                 background_color,
                 border_color,
-            });
-            context.rects.push(RectCommand {
-                x: cursor_x,
-                y: control_y,
-                width: span.width.max(1),
-                height: 1,
-                color: border_color,
-            });
-            context.rects.push(RectCommand {
-                x: cursor_x,
-                y: control_y.saturating_add(span.height.saturating_sub(1)),
-                width: span.width.max(1),
-                height: 1,
-                color: border_color,
-            });
-            context.rects.push(RectCommand {
-                x: cursor_x,
-                y: control_y,
-                width: 1,
-                height: span.height.max(1),
-                color: border_color,
-            });
-            context.rects.push(RectCommand {
-                x: cursor_x.saturating_add(span.width.saturating_sub(1)),
-                y: control_y,
-                width: 1,
-                height: span.height.max(1),
-                color: border_color,
             });
 
             cursor_x = cursor_x.saturating_add(span.width);

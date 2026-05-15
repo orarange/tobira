@@ -5,211 +5,162 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Handoff Rules
 
-- Read this file, `git status --short`, and the latest `git log --oneline -n 20` before making assumptions.
+- Read this file, `git status --short`, and `git log --oneline -n 20` before making assumptions.
 - Confirm the current branch with `git branch --show-current` before starting work.
-- Codex must stay on the dedicated branch `codex/codex` unless the user explicitly changes that rule.
-- Codex should use the dedicated local worktree at `C:/Users/user/OneDrive/ドキュメント/vscode/browser-codex` so it does not edit the same checkout as Claude or the user's main shell.
-- Update the `Current Snapshot` section when the high-level state changes.
-- Append a short entry to `Session Log` whenever you hand off or resume meaningful work.
-- Claude work may happen on its own dedicated branch. Keep Codex changes isolated to `codex/codex` and let merge reconciliation happen later through GitHub Copilot / the user's chosen merge flow.
+- Codex must stay on branch `codex/codex` unless the user explicitly changes that rule.
+- Codex should use a dedicated worktree for `codex/codex` instead of sharing the user's main checkout.
+- Keep Codex changes isolated to `codex/codex`; Claude may work on its own branch and merge reconciliation happens later through GitHub Copilot or the user's preferred flow.
+- Update the `Current Snapshot` section whenever the high-level state changes.
+- Append a short entry to `Session Log` whenever meaningful work is handed off or resumed.
 - Do not stage unrelated local helper artifacts unless the user explicitly asks for them.
-  Current local artifacts that are present but not part of the tracked repo are:
+  Current known local-only artifacts:
   `.claude/`, `.repomix/`, `copilot.md`, `gemini.md`, `repomix-output.xmlbrowser.xml`
 
 ## Current Snapshot
 
 - Date: `2026-05-15`
 - Repo / package name: `tobira`
-- Active branch seen by Codex: `codex/codex`
-- Dedicated Codex worktree path: `C:/Users/user/OneDrive/ドキュメント/vscode/browser-codex`
-- Shared root checkout now sits on: `master` at `C:/Users/user/OneDrive/ドキュメント/vscode/browser`
-- App identity in code:
-  - Cargo package: `tobira`
-  - window title prefix: `Tobira`
-  - README was previously under the old `Scratch Browser` name
+- Active Codex branch: `codex/codex`
+- Workflow:
+  - keep the shared root checkout free for the user / Claude side
+  - run Codex implementation from a separate `codex/codex` worktree
 - Verification status:
-  - `cargo test` passes: `96` tests green on `2026-05-15`
+  - `cargo test`: `97` passing tests on `2026-05-15`
+  - `cargo build`: success on `2026-05-15`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
-  - CSS engine with broader selector and expression support than the original README says
+  - CSS engine with:
     - descendant / child selectors
     - attribute selectors
     - `:first-child`, `:last-child`, `:nth-child(...)`, `:not(...)`
-    - `@media` handling
+    - `@media`
     - `calc(...)`
     - `rgba(...)` blending
   - software-rendered GUI with custom title bar and address bar
   - blank startup page and direct URL entry
   - address bar editing shortcuts including `Ctrl+A`, `Ctrl+C`, `Ctrl+X`, and `Ctrl+V`
-  - clickable links in the rendered page with hit-testing in the GUI
-  - first-class page form controls in the GUI
-    - native rendering for text inputs and buttons
-    - focus, caret, selection, clipboard shortcuts, and IME placement for focused page text inputs
-    - basic `GET` form submission with relative-action resolution and query encoding
-  - image loading / rendering for supported formats
-  - guarded JavaScript execution through `boa_engine` with a growing set of stubs
-  - lightweight mutable DOM bridge for script execution
-    - real `document.querySelector(...)` / `querySelectorAll(...)`
-    - `getElementById(...)`
-    - `createElement(...)`
-    - `createTextNode(...)`
-    - `appendChild(...)` / `insertBefore(...)` / `remove()`
+  - clickable links in the rendered page
+  - first-class GUI page controls for:
+    - text inputs
+    - buttons
+    - caret / selection / clipboard shortcuts
+    - IME cursor placement
+    - basic `GET` form submission with relative action resolution and query encoding
+  - guarded JavaScript execution through `boa_engine`
+  - lightweight mutable DOM bridge with:
+    - `querySelector(...)`, `querySelectorAll(...)`, `getElementById(...)`
+    - `createElement(...)`, `createTextNode(...)`
+    - `appendChild(...)`, `insertBefore(...)`, `remove()`
     - `innerHTML`, `textContent`, `classList`, `id`, `className`
-    - reflected `value` / `src` / `href` / `rel` / `type` / `name` / `content`
-    - `document.write(...)` with recursive script expansion
-    - DOM mutations serialized back into the HTML pipeline after JS runs
-  - JS runtime worker now uses a larger dedicated stack and higher script budgets
-  - JS runtime now exposes lightweight `fetch(...)`, `XMLHttpRequest`, response headers helpers, and Promise job flushing
-  - script-driven `location.href = ...` navigation can trigger a follow-up page load
-  - JS-initiated `fetch(...)` / `XMLHttpRequest` are now same-origin only and run under per-request plus total response-byte budgets
-  - automatic script-driven follow-up navigation is now same-origin only
-  - local test pages for CSS, basic JS, DOM mutation, and forms under `demo/`
+    - reflected `value`, `src`, `href`, `rel`, `type`, `name`, `content`
+    - recursive `document.write(...)`
+  - JS runtime support for:
+    - Promise job flushing
+    - lightweight `fetch(...)`
+    - lightweight `XMLHttpRequest`
+    - same-origin request and redirect guards
+    - script-driven `location.href` follow-up navigation
+  - local demo pages under `demo/` for CSS, JS, DOM mutation, and form handling
   - site-specific rendering paths for:
     - YouTube watch pages
-    - YouTube home shell / cards / nudge UI as fallback when the real page stays empty
-    - lightweight Google shell as fallback when the real page stays empty
+    - YouTube home shell fallback
+    - lightweight Google shell fallback
     - legacy frame/table-heavy pages such as the Abe Hiroshi site
-  - generic `google.com` and `youtube.com` now attempt the real JS/HTML pipeline before falling back to synthetic summaries
+  - generic `google.com` and `youtube.com` now try the real JS/HTML path before synthetic fallback
 
 ## Important Modules
 
 - `src/browser.rs`
-  Main page-loading pipeline, site-specific rewrites, legacy page handling, YouTube/Google synthetic documents.
+  Main page-loading pipeline, fallback heuristics, legacy page handling, site-specific rewrites.
 - `src/css.rs`
-  CSS parser, selector matching, computed styles, `@media`, `calc(...)`, color parsing.
+  CSS parser, selector matching, cascade, `@media`, `calc(...)`, color parsing.
 - `src/layout.rs`
-  Layout pipeline, text flow, tables, image placement, background drawing, link hitbox generation.
+  Layout pipeline, text flow, tables, images, inline controls, hitbox generation.
 - `src/gui.rs`
-  Custom chrome, address bar state, input handling, hover/click navigation, rendering integration.
+  Custom chrome, address bar state, page control input handling, painting, hover/click navigation.
 - `src/js.rs`
-  Sandboxed JS execution policy plus the mutable DOM bridge used during script execution.
-- `src/html.rs`
-  Hand-rolled HTML parser. Now preserves raw text for `script` / `style` / `title` / `textarea`, which matters for JS and CSS correctness.
+  JS runtime policy, DOM bridge, fetch/XHR shims, navigation handling.
 - `src/http.rs`
   HTTP/TLS fetch layer and browser-like request headers.
+- `src/html.rs`
+  Hand-rolled HTML parser with raw-text preservation for `script` / `style` / `title` / `textarea`.
 
 ## Recent Commit Landmarks
 
-- `91cc671` Merge branch `claude/modest-pascal-9bf652`
-- `7fda6c9` fix `@media` brace parsing, `calc()` precedence, `rgba` blending, add 15 tests
-- `9c2e24b` comprehensive CSS support implementation complete
-- `373dd0c` step 1: relax JS filter to block-list, add crypto/cookie/URLSearchParams stubs
-- `ba0df47` tobira rename and youtube UI improvements complete
-- `9e69220` link click navigation and youtube card interactivity implementation complete
-- `4be7625` youtube home ui rendering implementation complete
+- `6981cea` dedicated codex worktree setup documentation complete
+- `5952827` page form controls feature implementation complete
+- `c5266c1` copilot review round two fixes complete
+- `8cb6455` copilot followup cleanup fixes complete
+- `51b60ed` copilot review security fixes complete
+- `fd5c362` real js first host pipeline update complete
+- `d159cf0` dom backed javascript support implementation complete
+- `8751537` address bar clipboard support implementation complete
 
 ## Known Gaps / Likely Next Work
 
-- README capability list is partially stale; prefer this file for the latest snapshot.
 - JS support is still far from a full browser DOM / framework runtime.
-- Event dispatch, `addEventListener` depth, and GUI-to-page event delivery are still shallow.
-- History / back-forward behavior is not yet called out as complete.
-- Modern app-shell sites still need more DOM APIs, stateful storage/cookie behavior, and CSS coverage.
-- GUI page controls now cover text inputs and buttons, but general widget/event coverage is still shallow.
+- GUI-to-page event delivery is still shallow; forms are native-painted controls, not true DOM event targets yet.
+- `addEventListener`, richer event types, and framework-facing browser APIs still need a lot more depth.
+- History / back-forward behavior is not yet complete.
+- Modern app-shell sites still need more DOM APIs, cookies/storage, and CSS coverage.
 - CSS is still computed once up front instead of being rebuilt against the live window width.
-- Actual media playback and a true YouTube watch experience are still incomplete.
-- `fetch(...)` / `XMLHttpRequest` are intentionally conservative now; cross-origin app shells will still be blocked until a safer policy exists.
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
+- JS `input.value` reflection still targets the backing attribute/default value, not the live focused editor state after GUI typing begins.
+- The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
+- Actual media playback and a true YouTube watch experience are still incomplete.
+- `fetch(...)` / `XMLHttpRequest` remain intentionally conservative; cross-origin app shells are still blocked until a safer policy exists.
 
 ## Useful Commands
 
 ```powershell
 cargo run
+cargo run -- https://www.google.com/
 cargo run -- https://www.youtube.com/
-cargo run -- --cli https://www.youtube.com/
+cargo run -- --cli https://www.google.com/
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/forms-demo.html
 cargo test
 cargo build
 git status --short
 git log --oneline -n 20
+git worktree list
 ```
 
 ## Session Log
 
 ### 2026-05-14 - Codex
 
-- Inspected the repo after user said Claude had advanced implementation during a context gap.
-- Confirmed the repo has moved to the `tobira` name and the current branch head is `91cc671`.
-- Confirmed `cargo test` is green with `74` passing tests.
-- Added this handoff file and linked it from `README.md`.
-- Established the rule that this file should be updated on every handoff / resume.
+- Inspected the repo after a context gap and confirmed the project had already moved to the `tobira` name.
+- Added the original handoff file and linked it from `README.md`.
+- Reworked `src/js.rs` around a lightweight mutable DOM instead of mostly fake JS stubs.
+- Added DOM-backed support for selectors, element creation, child insertion/removal, `innerHTML`, `textContent`, `classList`, and recursive `document.write(...)`.
+- Added `demo/dom-demo.html` and `demo/dom-demo.js`.
+- Added address-bar clipboard support backed by the OS clipboard.
 
-### 2026-05-14 - Codex (DOM / JS pass)
+### 2026-05-15 - Codex (real JS-first pipeline)
 
-- Reworked `src/js.rs` so script execution runs against a lightweight mutable DOM instead of mostly fake stubs.
-- Added DOM-backed support for selectors, element creation, child insertion/removal, `innerHTML`, `textContent`, `classList`, and ID/class mutation.
-- Changed `document.write(...)` handling to mutate the DOM and recursively execute script tags written by scripts.
-- Fixed a parsing correctness bug by teaching `src/html.rs` to keep raw-text contents for `script`, `style`, `title`, and `textarea`.
-- Verified the current state with `cargo test` (`77` passing tests) and `cargo build`.
-
-### 2026-05-14 - Codex (DOM demo follow-up)
-
-- Added `demo/dom-demo.html` and `demo/dom-demo.js` to exercise the new DOM-backed JS path locally.
-- Updated `README.md` so the documented JS scope matches the current implementation better and includes the new DOM demo command.
-
-### 2026-05-14 - Codex (clipboard fix)
-
-- Added address-bar clipboard support backed by the OS clipboard via `arboard`.
-- `Ctrl+C`, `Ctrl+X`, and `Ctrl+V` now work against the current address-bar selection / insertion point.
-- Added focused tests for selected-text and cut-selection behavior in `src/gui.rs`.
-
-### 2026-05-15 - Codex (parallel branch workflow)
-
-- Confirmed the current Codex branch is `codex/codex`.
-- Recorded the new workflow: Codex and Claude may implement in parallel on separate branches, with merge reconciliation handled later through GitHub Copilot / the user's preferred merge flow.
-- Future handoffs should always note the active branch before assuming current repo state.
-
-### 2026-05-15 - Codex (fixed branch rule)
-
-- Locked the documented Codex workflow to the dedicated branch `codex/codex`.
-- Claude is expected to stay on its own separate branch so both agents can work in parallel without branch drift.
-
-### 2026-05-15 - Codex (Copilot review follow-up)
-
-- Re-ran `cargo test` on `codex/codex` and confirmed the branch is green with `79` passing tests on `2026-05-15`.
-- Updated the snapshot so the top-level verification note matches the newer run date instead of conflicting with older session log entries.
-
-### 2026-05-15 - Codex (JS runtime pass)
-
-- Cherry-picked `3930a90` from `master` onto `codex/codex` to pick up the larger-stack JS worker, Promise job flushing, `fetch`, `XMLHttpRequest`, `createTextNode`, DOM property reflection, and script-driven navigation handling.
-- Relaxed the browser pipeline so generic `google.com` and `youtube.com` pages now try the real JS/HTML path first, and only fall back to synthetic summaries when the post-script body is still effectively empty.
-- Added tests around YouTube rewrite scope and the new fallback heuristic, bringing `cargo test` to `83` passing tests.
-- Verified CLI smoke output for `https://www.google.com/` and `https://www.youtube.com/`, plus 4-second GUI startup smokes for both URLs.
-
-### 2026-05-15 - Codex (Copilot review fixes)
-
-- Addressed the Copilot review comments on PR `#6`.
-- JS worker startup now fails closed instead of silently running on the default thread stack.
-- Added same-origin-only policy plus request/response budgets for JS-driven `fetch(...)` and `XMLHttpRequest`, backed by a new limited HTTP fetch path.
-- Made `Response.clone()` error consistently on invalid receivers and blocked automatic cross-origin `location.href` follow-up loads.
-- Added tests for the new fetch/navigation guards and HTTP body-limit enforcement, bringing `cargo test` to `87` passing tests.
-
-### 2026-05-15 - Codex (Copilot follow-up cleanup)
-
-- Extracted same-origin comparison into `Url::shares_origin(...)` so the browser and JS runtime no longer duplicate origin checks.
-- Made `XMLHttpRequest` bootstrap installation fail loudly during JS global setup instead of silently discarding eval errors.
-- Clarified the GET-only XHR limitation by rejecting non-empty `xhr.send(body)` calls explicitly, with test coverage.
-- Simplified the JS network budget bookkeeping so the fetch-layer byte limit is the source of truth and the post-fetch accounting just records used bytes.
-- Added tests for `Url::shares_origin(...)` and rejected XHR bodies, bringing `cargo test` to `89` passing tests.
-
-### 2026-05-15 - Codex (Copilot review fix round 2)
-
-- Addressed the three Copilot comments on PR `#11`.
-- JS request resolution and same-origin checks now use an immutable per-document URL captured at runtime startup, so `location.href` mutations cannot widen fetch/XHR origin privileges before navigation actually commits.
-- JS fetch/XHR now also reject cross-origin final redirect targets, so a same-origin endpoint cannot tunnel script access to another origin through a 30x hop.
-- `resolve_requested_url(...)` now propagates thrown `request.url` getter exceptions instead of swallowing them and stringifying the whole request object.
-- Removed direct `stderr` logging from blocked script-navigation paths to keep the core loader quiet in GUI and embedding scenarios.
-- Added regression tests for immutable request-base resolution, cross-origin fetch blocking after `location.href` mutation, cross-origin redirect rejection, and getter error propagation, bringing `cargo test` to `93` passing tests.
+- Cherry-picked the larger-stack JS worker, Promise job flushing, `fetch`, `XMLHttpRequest`, `createTextNode`, DOM property reflection, and script-driven navigation handling onto `codex/codex`.
+- Relaxed the browser pipeline so generic `google.com` and `youtube.com` try the real JS/HTML path first and only fall back when the post-script body is still effectively empty.
+- Addressed Copilot review rounds around same-origin checks, redirect blocking, request getter errors, and XHR bootstrap/error behavior.
+- Added `Url::shares_origin(...)`, limited HTTP fetches for JS, and regression coverage around same-origin request policy.
 
 ### 2026-05-15 - Codex (page form controls pass)
 
 - Promoted page inputs and buttons to first-class layout commands so the GUI can hit-test and paint them separately from static text.
-- Added native rendering for page text inputs and buttons, including focus border, caret, selection highlight, placeholder text, and clipboard shortcuts shared with the address bar editor model.
-- Added basic `GET` form submission with relative action resolution and query-string encoding, which is enough to drive search-like forms such as Google from rendered pages.
-- Added `demo/forms-demo.html` plus regression tests for layout control emission and GET form URL building, bringing `cargo test` to `96` passing tests.
+- Added native rendering for page text inputs and buttons, including focus border, caret, selection highlight, placeholder text, clipboard shortcuts, and IME placement.
+- Added basic `GET` form submission with relative action resolution and query-string encoding.
+- Added `demo/forms-demo.html` and regression tests for form-control emission and GET form URL building.
 
 ### 2026-05-15 - Codex (dedicated worktree setup)
 
-- Moved the shared root checkout at `C:/Users/user/OneDrive/ドキュメント/vscode/browser` back to `master`.
-- Created the dedicated Codex worktree at `C:/Users/user/OneDrive/ドキュメント/vscode/browser-codex` on branch `codex/codex`.
+- Moved the shared root checkout back to `master`.
+- Created a dedicated Codex worktree on branch `codex/codex`.
 - Future Codex implementation and review work should happen from that dedicated worktree so local file edits no longer collide with Claude's branch checkout or the user's main shell.
+
+### 2026-05-15 - Codex (PR #25 follow-up fixes)
+
+- Fixed the inline-control wrap branch in `src/layout.rs` and removed duplicate layout-time control rectangle painting so GUI controls render from a single source of truth.
+- Reduced page-form submission overhead to a single layout pass, fixed empty button-submission values, and surfaced unsupported non-GET form methods in the GUI status line.
+- Made `location.href` assignments resolve relative URLs against the immutable document URL for consistency with the same-origin security model.
+- Added regression coverage for same-origin URLs with explicit default ports and repeated `location.href` updates resolved from the original document URL.

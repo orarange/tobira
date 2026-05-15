@@ -1577,6 +1577,8 @@ fn install_browser_globals(context: &mut Context) {
 
     context
         .eval(Source::from_bytes(
+            // Lightweight constructor shim: enough for `new XMLHttpRequest()`, but
+            // prototype/instanceof behavior is still intentionally incomplete.
             "globalThis.XMLHttpRequest = function XMLHttpRequest(){ return __tobiraCreateXMLHttpRequest(); };",
         ))
         .expect("XMLHttpRequest bootstrap should evaluate");
@@ -2311,7 +2313,7 @@ fn js_location_replace(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
 }
 
 fn set_location_href(href: &str, context: &mut Context) {
-    let resolved = current_location_url(context)
+    let resolved = current_document_url(context)
         .and_then(|url| url.resolve(href).ok())
         .map(|url| url.to_string())
         .or_else(|| Url::parse(href).ok().map(|url| url.to_string()))
@@ -2435,6 +2437,8 @@ fn fetch_for_script(url: &Url, context: &mut Context) -> JsResult<HttpResponse> 
     ensure_same_origin_script_url(&current, url, "cross-origin JS requests are blocked")?;
 
     let max_response_bytes = reserve_js_network_budget(context)?;
+    // Redirects are followed inside `fetch_with_limits`, so one JS fetch/XHR still
+    // consumes a single request slot even if the transport follows same-origin hops.
     let response = fetch_with_limits(url, max_response_bytes).map_err(|error| {
         JsNativeError::error().with_message(error.to_string())
     })?;
@@ -3179,6 +3183,8 @@ fn js_dom_set_class_name(
 }
 
 fn js_dom_get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    // Simplified model: JS `input.value` currently reflects the backing attribute /
+    // default value, not the live GUI editor state while the user is typing.
     js_dom_get_property_attribute(this, "value", context)
 }
 
@@ -3490,8 +3496,8 @@ mod tests {
     use boa_engine::{Context, JsValue, Source, js_string};
 
     use super::{
-        JavaScriptRuntime, ensure_same_origin_script_url, fetch_for_script,
-        process_document_scripts, resolve_requested_url, set_location_href,
+        JavaScriptRuntime, current_location_url, ensure_same_origin_script_url,
+        fetch_for_script, process_document_scripts, resolve_requested_url, set_location_href,
     };
     use crate::url::Url;
 
@@ -3600,6 +3606,19 @@ mod tests {
         assert_eq!(
             resolved,
             Url::parse("https://example.com/api/data").unwrap()
+        );
+    }
+
+    #[test]
+    fn resolves_location_updates_against_original_document_url() {
+        let base_url = Url::parse("https://example.com/notes/start.html").unwrap();
+        let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
+        set_location_href("/first", &mut runtime.context);
+        set_location_href("next.html", &mut runtime.context);
+
+        assert_eq!(
+            current_location_url(&mut runtime.context).unwrap(),
+            Url::parse("https://example.com/notes/next.html").unwrap()
         );
     }
 
