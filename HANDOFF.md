@@ -8,6 +8,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Read this file, `git status --short`, and the latest `git log --oneline -n 20` before making assumptions.
 - Confirm the current branch with `git branch --show-current` before starting work.
 - Codex must stay on the dedicated branch `codex/codex` unless the user explicitly changes that rule.
+- Codex should use the dedicated local worktree at `C:/Users/user/OneDrive/ドキュメント/vscode/browser-codex` so it does not edit the same checkout as Claude or the user's main shell.
 - Update the `Current Snapshot` section when the high-level state changes.
 - Append a short entry to `Session Log` whenever you hand off or resume meaningful work.
 - Claude work may happen on its own dedicated branch. Keep Codex changes isolated to `codex/codex` and let merge reconciliation happen later through GitHub Copilot / the user's chosen merge flow.
@@ -20,6 +21,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Date: `2026-05-15`
 - Repo / package name: `tobira`
 - Active branch seen by Codex: `codex/codex`
+- Dedicated Codex worktree path: `C:/Users/user/OneDrive/ドキュメント/vscode/browser-codex`
+- Shared root checkout now sits on: `master` at `C:/Users/user/OneDrive/ドキュメント/vscode/browser`
 - App identity in code:
   - Cargo package: `tobira`
   - window title prefix: `Tobira`
@@ -204,3 +207,9 @@ git log --oneline -n 20
 - Added native rendering for page text inputs and buttons, including focus border, caret, selection highlight, placeholder text, and clipboard shortcuts shared with the address bar editor model.
 - Added basic `GET` form submission with relative action resolution and query-string encoding, which is enough to drive search-like forms such as Google from rendered pages.
 - Added `demo/forms-demo.html` plus regression tests for layout control emission and GET form URL building, bringing `cargo test` to `96` passing tests.
+
+### 2026-05-15 - Codex (dedicated worktree setup)
+
+- Moved the shared root checkout at `C:/Users/user/OneDrive/ドキュメント/vscode/browser` back to `master`.
+- Created the dedicated Codex worktree at `C:/Users/user/OneDrive/ドキュメント/vscode/browser-codex` on branch `codex/codex`.
+- Future Codex implementation and review work should happen from that dedicated worktree so local file edits no longer collide with Claude's branch checkout or the user's main shell.
