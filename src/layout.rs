@@ -262,9 +262,11 @@ fn layout_block_element(
     let is_doc_bg_element = context.doc_bg_raw.is_some()
         && matches!(element.tag_name.as_str(), "body" | "html" | "document")
         && element.style.background_color == context.doc_bg_raw;
+    let saved_bg = context.background_color;
     let background_index = if !is_doc_bg_element {
         if let Some(background_color) = element.style.background_color {
-            let blended_bg = apply_opacity(
+            // Use effective_opacity for the actual drawn rect color (correct visual result)
+            let blended_for_rect = apply_opacity(
                 background_color,
                 context.background_color,
                 element.style.effective_opacity,
@@ -274,8 +276,15 @@ fn layout_block_element(
                 y: background_top,
                 width: outer_width.max(1),
                 height: 1,
-                color: blended_bg,
+                color: blended_for_rect,
             });
+            // Use local opacity for threading to children (avoids double-counting parent opacity)
+            let blended_for_children = apply_opacity(
+                background_color,
+                saved_bg,
+                element.style.opacity,
+            );
+            context.background_color = blended_for_children;
             Some(context.rects.len() - 1)
         } else {
             None
@@ -347,6 +356,9 @@ fn layout_block_element(
             rect.height = background_height;
         }
     }
+
+    // Restore parent background color after children are rendered
+    context.background_color = saved_bg;
 
     // Draw borders if present
     if !element.style.border_style_none {
