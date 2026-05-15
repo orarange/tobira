@@ -254,6 +254,14 @@ pub enum BoxSizing {
     BorderBox,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoxShadow {
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub blur: u32,
+    pub color: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overflow {
     Visible,
@@ -316,6 +324,7 @@ pub struct ComputedStyle {
     pub list_style_type: ListStyleType,
     pub cursor_pointer: bool,
     pub text_decoration_color: Option<Color>,
+    pub box_shadow: Option<BoxShadow>,
 }
 
 impl ComputedStyle {
@@ -365,6 +374,7 @@ impl ComputedStyle {
             list_style_type: ListStyleType::Disc,
             cursor_pointer: false,
             text_decoration_color: None,
+            box_shadow: None,
         };
 
         match tag_name {
@@ -1200,6 +1210,14 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             // simple: just look for known list-style-type tokens
             style.list_style_type = parse_list_style_type(value);
         }
+        "box-shadow" => {
+            let v = value.trim().to_ascii_lowercase();
+            if v == "none" {
+                style.box_shadow = None;
+            } else {
+                style.box_shadow = parse_box_shadow(value);
+            }
+        }
         "cursor" => {
             let v = value.trim().to_ascii_lowercase();
             style.cursor_pointer = v == "pointer";
@@ -2003,6 +2021,62 @@ fn parse_list_style_type(input: &str) -> ListStyleType {
         return ListStyleType::None;
     }
     ListStyleType::Disc
+}
+
+fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
+    let v = value.trim();
+    if v.to_ascii_lowercase() == "none" {
+        return None;
+    }
+    // Split tokens at spaces, respecting parentheses (for rgba/rgb colors)
+    let tokens: Vec<String> = split_at_top_level(v, ' ')
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Skip "inset" keyword
+    let tokens: Vec<&str> = tokens
+        .iter()
+        .filter(|t| t.to_ascii_lowercase() != "inset")
+        .map(|s| s.as_str())
+        .collect();
+
+    if tokens.len() < 2 {
+        return None;
+    }
+
+    let mut offset_x: i32 = 0;
+    let mut offset_y: i32 = 0;
+    let mut blur: u32 = 0;
+    let mut color: u32 = 0;
+    let mut length_count = 0;
+
+    for token in &tokens {
+        if let Some(val) = parse_signed_length(token, 16) {
+            let val_i32 = val as i32;
+            match length_count {
+                0 => offset_x = val_i32,
+                1 => offset_y = val_i32,
+                2 => blur = val_i32.max(0) as u32,
+                _ => {}
+            }
+            length_count += 1;
+        } else if let Some(c) = parse_color(token) {
+            color = c;
+        }
+    }
+
+    if length_count < 2 {
+        return None;
+    }
+
+    Some(BoxShadow {
+        offset_x,
+        offset_y,
+        blur,
+        color,
+    })
 }
 
 fn parse_line_height(input: &str, parent_font_size: u32) -> u32 {

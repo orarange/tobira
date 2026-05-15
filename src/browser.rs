@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+﻿use std::collections::BTreeMap;
 
 use serde_json::Value;
 
@@ -2794,6 +2794,7 @@ mod tests {
                     list_style_type: crate::css::ListStyleType::Disc,
                     cursor_pointer: false,
                     text_decoration_color: None,
+                    box_shadow: None,
                 },
             }),
             images: crate::image::ImageStore::default(),
@@ -3075,6 +3076,7 @@ mod tests {
                 list_style_type: crate::css::ListStyleType::Disc,
                 cursor_pointer: false,
                 text_decoration_color: None,
+                box_shadow: None,
             },
         })
     }

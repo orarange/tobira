@@ -410,6 +410,24 @@ fn layout_block_element(
     }
 
     let saved_bg = context.background_color;
+
+    // box-shadow: push shadow rect before background (so it renders behind it)
+    let shadow_cmd_index = if let Some(ref shadow) = element.style.box_shadow {
+        let sx = (outer_x as i64 + shadow.offset_x as i64).max(0) as u32;
+        let sy = (background_top as i64 + shadow.offset_y as i64).max(0) as u32;
+        context.commands.push(DrawCommand::Rect(RectCommand {
+            x: sx,
+            y: sy,
+            width: outer_width.max(1),
+            height: 1,
+            color: shadow.color,
+            border_radius: element.style.border_radius,
+        }));
+        Some(context.commands.len() - 1)
+    } else {
+        None
+    };
+
     let background_cmd_index = if let Some(background_color) = element.style.background_color {
         // Use effective_opacity for the actual drawn rect color (correct visual result)
         let blended_for_rect = apply_opacity(
@@ -494,6 +512,11 @@ fn layout_block_element(
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     let background_height = cursor_y.saturating_sub(background_top).max(1);
 
+    if let Some(shadow_idx) = shadow_cmd_index {
+        if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(shadow_idx) {
+            rect.height = background_height;
+        }
+    }
     if let Some(background_cmd_index) = background_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(background_cmd_index) {
             rect.height = background_height;
@@ -2413,5 +2436,23 @@ mod tests {
         let bg_rect = rects.iter().find(|r| r.border_radius == 10);
         assert!(bg_rect.is_some(), "Should have a rect with border_radius=10");
         assert_eq!(bg_rect.unwrap().border_radius, 10);
+    }
+    #[test]
+    fn test_box_shadow_generates_shadow_rect() {
+        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::html::parse_document;
+
+        let html = r#"<div style="background:#ffffff;box-shadow:2px 2px #000000">Hello</div>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &stylesheet, 800);
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
+
+        // Should have a black shadow rect
+        let rects = layout.rects();
+        let shadow_rect = rects.iter().find(|r| r.color == 0x000000);
+        assert!(shadow_rect.is_some(), "Should have a shadow rect with black color");
     }
 }
