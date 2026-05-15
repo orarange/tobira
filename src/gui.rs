@@ -1065,12 +1065,7 @@ impl BrowserApp {
             && let Some(name) = &trigger.name
             && !name.is_empty()
         {
-            let value = if trigger.value.is_empty() {
-                String::new()
-            } else {
-                trigger.value.clone()
-            };
-            fields.push((name.clone(), value));
+            fields.push((name.clone(), trigger.value.clone()));
         }
 
         let base = self.page_base_url().or(self.current_url.as_ref());
@@ -1083,7 +1078,8 @@ impl BrowserApp {
         let Some(url_text) = resolved else {
             return;
         };
-        if let Some(target_url) = build_get_form_submission_url(&url_text, &fields)
+        if let Some(target_url) =
+            build_get_form_submission_url(&url_text, &fields, action.is_empty())
             && let Ok(url) = Url::parse(&target_url)
         {
             self.load_url(url);
@@ -2020,22 +2016,31 @@ fn resolve_content_href(href: &str, base: Option<&Url>) -> String {
 fn build_get_form_submission_url(
     action_url: &str,
     fields: &[(String, String)],
+    replace_existing_query: bool,
 ) -> Option<String> {
     if action_url.trim().is_empty() {
         return None;
     }
 
-    let (without_fragment, fragment_suffix) = action_url
-        .split_once('#')
-        .map(|(head, fragment)| (head, format!("#{fragment}")))
-        .unwrap_or((action_url, String::new()));
+    let (without_fragment, fragment_suffix) = if replace_existing_query {
+        (action_url.split_once('#').map(|(head, _)| head).unwrap_or(action_url), String::new())
+    } else {
+        action_url
+            .split_once('#')
+            .map(|(head, fragment)| (head, format!("#{fragment}")))
+            .unwrap_or((action_url, String::new()))
+    };
 
     let (base, existing_query) = without_fragment
         .split_once('?')
         .map(|(head, query)| (head, Some(query)))
         .unwrap_or((without_fragment, None));
 
-    let mut query = existing_query.unwrap_or_default().to_string();
+    let mut query = if replace_existing_query {
+        String::new()
+    } else {
+        existing_query.unwrap_or_default().to_string()
+    };
     let mut needs_separator = !query.is_empty();
     for (name, value) in fields {
         if name.is_empty() {
@@ -3162,6 +3167,7 @@ mod tests {
         let target = build_get_form_submission_url(
             "https://www.google.com/search",
             &[("q".to_string(), "rust browser".to_string())],
+            false,
         )
         .unwrap();
 
@@ -3176,6 +3182,7 @@ mod tests {
                 ("q".to_string(), "hello world".to_string()),
                 ("lang".to_string(), "ja".to_string()),
             ],
+            false,
         )
         .unwrap();
 
@@ -3183,5 +3190,17 @@ mod tests {
             target,
             "https://example.com/find?src=home&q=hello+world&lang=ja#results"
         );
+    }
+
+    #[test]
+    fn build_get_form_submission_replaces_existing_query_when_requested() {
+        let target = build_get_form_submission_url(
+            "https://example.com/find?src=home#results",
+            &[("q".to_string(), "hello world".to_string())],
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(target, "https://example.com/find?q=hello+world");
     }
 }
