@@ -413,12 +413,15 @@ fn layout_block_element(
 
     // box-shadow: push shadow rect before background (so it renders behind it)
     let shadow_cmd_index = if let Some(ref shadow) = element.style.box_shadow {
-        let sx = (outer_x as i64 + shadow.offset_x as i64).max(0) as u32;
-        let sy = (background_top as i64 + shadow.offset_y as i64).max(0) as u32;
+        let blur = shadow.blur;
+        // Expand shadow rect by blur amount in all directions for approximate blur spread
+        let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64).max(0) as u32;
+        let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64).max(0) as u32;
+        let sw = outer_width.saturating_add(blur.saturating_mul(2)).max(1);
         context.commands.push(DrawCommand::Rect(RectCommand {
             x: sx,
             y: sy,
-            width: outer_width.max(1),
+            width: sw,
             height: 1,
             color: shadow.color,
             border_radius: element.style.border_radius,
@@ -514,7 +517,8 @@ fn layout_block_element(
 
     if let Some(shadow_idx) = shadow_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(shadow_idx) {
-            rect.height = background_height;
+            let blur = element.style.box_shadow.as_ref().map(|s| s.blur).unwrap_or(0);
+            rect.height = background_height.saturating_add(blur.saturating_mul(2));
         }
     }
     if let Some(background_cmd_index) = background_cmd_index {

@@ -1482,7 +1482,7 @@ fn install_browser_globals(context: &mut Context) {
         .register_global_property(js_string!("innerWidth"), 1280, Attribute::all())
         .expect("innerWidth should be installable");
     context
-        .register_global_property(js_string!("innerHeight"), 800, Attribute::all())
+        .register_global_property(js_string!("innerHeight"), 800, Attribute::all()) // must match vh base (800px) in css.rs parse_length
         .expect("innerHeight should be installable");
 
     let crypto_subtle = ObjectInitializer::new(context)

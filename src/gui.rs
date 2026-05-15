@@ -2402,53 +2402,77 @@ fn draw_rounded_rect(
         draw_rect(buffer, buf_w, buf_h, x, y, w, h, color);
         return;
     }
+
     let x2 = x.saturating_add(w);
     let y2 = y.saturating_add(h);
-
-    // Corner centers
     let cx_left = x.saturating_add(r);
     let cx_right = x2.saturating_sub(r);
     let cy_top = y.saturating_add(r);
     let cy_bottom = y2.saturating_sub(r);
-
-    let px_start = x as usize;
-    let px_end = x2.min(buf_w) as usize;
-    let py_start = y as usize;
-    let py_end = y2.min(buf_h) as usize;
     let r_sq = (r as i64) * (r as i64);
 
-    for py in py_start..py_end {
-        for px in px_start..px_end {
+    // Middle strip: full-width rows — no corner checks needed
+    if cy_top < cy_bottom {
+        draw_rect(buffer, buf_w, buf_h, x, cy_top, w, cy_bottom - cy_top, color);
+    }
+
+    // Top corner strip: rows y..cy_top
+    let py_end_top = cy_top.min(buf_h) as usize;
+    for py in (y.min(buf_h) as usize)..py_end_top {
+        let pv32 = py as u32;
+        // Left corner: x..cx_left
+        for px in (x.min(buf_w) as usize)..(cx_left.min(buf_w) as usize) {
             let pu32 = px as u32;
-            let pv32 = py as u32;
-            let in_corner = if pu32 < cx_left && pv32 < cy_top {
-                // top-left
-                let dx = cx_left.saturating_sub(pu32) as i64;
-                let dy = cy_top.saturating_sub(pv32) as i64;
-                dx * dx + dy * dy > r_sq
-            } else if pu32 >= cx_right && pv32 < cy_top {
-                // top-right
-                let dx = pu32.saturating_sub(cx_right) as i64;
-                let dy = cy_top.saturating_sub(pv32) as i64;
-                dx * dx + dy * dy > r_sq
-            } else if pu32 < cx_left && pv32 >= cy_bottom {
-                // bottom-left
-                let dx = cx_left.saturating_sub(pu32) as i64;
-                let dy = pv32.saturating_sub(cy_bottom) as i64;
-                dx * dx + dy * dy > r_sq
-            } else if pu32 >= cx_right && pv32 >= cy_bottom {
-                // bottom-right
-                let dx = pu32.saturating_sub(cx_right) as i64;
-                let dy = pv32.saturating_sub(cy_bottom) as i64;
-                dx * dx + dy * dy > r_sq
-            } else {
-                false
-            };
-            if !in_corner {
+            let dx = cx_left.saturating_sub(pu32) as i64;
+            let dy = cy_top.saturating_sub(pv32) as i64;
+            if dx * dx + dy * dy <= r_sq {
                 let idx = py * buf_w as usize + px;
-                if idx < buffer.len() {
-                    buffer[idx] = color;
-                }
+                if idx < buffer.len() { buffer[idx] = color; }
+            }
+        }
+        // Middle of row: cx_left..cx_right (always inside)
+        if cx_left < cx_right {
+            draw_rect(buffer, buf_w, buf_h, cx_left, pv32, cx_right - cx_left, 1, color);
+        }
+        // Right corner: cx_right..x2
+        for px in (cx_right.min(buf_w) as usize)..(x2.min(buf_w) as usize) {
+            let pu32 = px as u32;
+            let dx = pu32.saturating_sub(cx_right) as i64;
+            let dy = cy_top.saturating_sub(pv32) as i64;
+            if dx * dx + dy * dy <= r_sq {
+                let idx = py * buf_w as usize + px;
+                if idx < buffer.len() { buffer[idx] = color; }
+            }
+        }
+    }
+
+    // Bottom corner strip: rows cy_bottom..y2
+    let py_start_bot = cy_bottom.min(buf_h) as usize;
+    let py_end_bot = y2.min(buf_h) as usize;
+    for py in py_start_bot..py_end_bot {
+        let pv32 = py as u32;
+        // Left corner
+        for px in (x.min(buf_w) as usize)..(cx_left.min(buf_w) as usize) {
+            let pu32 = px as u32;
+            let dx = cx_left.saturating_sub(pu32) as i64;
+            let dy = pv32.saturating_sub(cy_bottom) as i64;
+            if dx * dx + dy * dy <= r_sq {
+                let idx = py * buf_w as usize + px;
+                if idx < buffer.len() { buffer[idx] = color; }
+            }
+        }
+        // Middle of row
+        if cx_left < cx_right {
+            draw_rect(buffer, buf_w, buf_h, cx_left, pv32, cx_right - cx_left, 1, color);
+        }
+        // Right corner
+        for px in (cx_right.min(buf_w) as usize)..(x2.min(buf_w) as usize) {
+            let pu32 = px as u32;
+            let dx = pu32.saturating_sub(cx_right) as i64;
+            let dy = pv32.saturating_sub(cy_bottom) as i64;
+            if dx * dx + dy * dy <= r_sq {
+                let idx = py * buf_w as usize + px;
+                if idx < buffer.len() { buffer[idx] = color; }
             }
         }
     }

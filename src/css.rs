@@ -487,7 +487,8 @@ pub struct StyledText {
 /// being split on the inner comma.
 fn split_at_top_level(input: &str, delimiter: char) -> Vec<String> {
     let mut result = Vec::new();
-    let mut depth: u32 = 0;
+    let mut depth_paren: u32 = 0;
+    let mut depth_bracket: u32 = 0;
     let mut in_string: Option<char> = None;
     let mut escaped = false;
     let mut segment_start = 0;
@@ -509,13 +510,19 @@ fn split_at_top_level(input: &str, delimiter: char) -> Vec<String> {
                 in_string = None;
             }
             _ if in_string.is_some() => {}
-            '(' | '[' => {
-                depth += 1;
+            '(' => {
+                depth_paren += 1;
             }
-            ')' | ']' if depth > 0 => {
-                depth -= 1;
+            ')' if depth_paren > 0 => {
+                depth_paren -= 1;
             }
-            c if c == delimiter && depth == 0 => {
+            '[' => {
+                depth_bracket += 1;
+            }
+            ']' if depth_bracket > 0 => {
+                depth_bracket -= 1;
+            }
+            c if c == delimiter && depth_paren == 0 && depth_bracket == 0 => {
                 result.push(input[segment_start..index].to_string());
                 segment_start = index + ch.len_utf8();
             }
@@ -852,30 +859,31 @@ fn collect_pseudo_content(
     let mut result: Option<String> = None;
 
     for rule in &stylesheet.rules {
-        if rule.pseudo_element.as_ref() != Some(which) {
-            continue;
-        }
         if let Some(cond) = &rule.media {
             if !cond.matches(viewport_width) {
                 continue;
             }
         }
-        // Match the host element (the selector without the pseudo-element part)
-        for selector in &rule.selectors {
-            if selector.matches(
-                &identity,
-                ancestors,
-                sibling_index,
-                sibling_count,
-                preceding_siblings,
-            ) {
-                for decl in &rule.declarations {
-                    if decl.property == "content" {
-                        let v = decl.value.trim().trim_matches('"').trim_matches('\'');
-                        if v != "none" && v != "normal" && !v.is_empty() {
-                            result = Some(v.to_string());
-                        }
-                    }
+        // Check per-selector pseudo_element (not rule-level) to handle
+        // comma-separated selectors like `p::before, div::after { ... }`
+        let host_matches = rule.selectors.iter().any(|sel| {
+            sel.pseudo_element.as_ref() == Some(which)
+                && sel.matches(
+                    &identity,
+                    ancestors,
+                    sibling_index,
+                    sibling_count,
+                    preceding_siblings,
+                )
+        });
+        if !host_matches {
+            continue;
+        }
+        for decl in &rule.declarations {
+            if decl.property == "content" {
+                let v = decl.value.trim().trim_matches('"').trim_matches('\'');
+                if v != "none" && v != "normal" && !v.is_empty() {
+                    result = Some(v.to_string());
                 }
             }
         }
@@ -903,8 +911,8 @@ fn compute_style(
     let mut applicable: Vec<(usize, usize, Declaration)> = Vec::new();
 
     for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
-        // Skip pseudo-element rules — they are handled by collect_pseudo_content
-        if rule.pseudo_element.is_some() {
+        // Skip rules where ALL selectors are pseudo-element rules — they are handled by collect_pseudo_content
+        if rule.selectors.iter().all(|sel| sel.pseudo_element.is_some()) {
             continue;
         }
         // Check media condition
@@ -2449,7 +2457,7 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
     }
 
     if let Some(number) = value.strip_suffix("vh") {
-        return parse_float(number).map(|p| (p * 800.0 / 100.0).round() as u32);
+        return parse_float(number).map(|p| (p * 800.0 / 100.0).round() as u32); // viewport 800px tall — must match js.rs innerHeight
     }
 
     // rem must be checked before em
