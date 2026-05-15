@@ -2230,12 +2230,15 @@ fn render_layer(
     let visible_w = layer.width.saturating_sub(src_x_start).min(buf_width.saturating_sub(dst_x));
     if visible_h == 0 || visible_w == 0 { return; }
 
-    // Allocate a full-width offscreen buffer (layer.width columns) so that sub-commands
-    // rendered at their natural x positions land in the right column.  We then read back
-    // starting at src_x_start when blending into the main buffer.
-    // This fixes the bug where src_x_start was computed but never used.
-    let ow = layer.width; // full layer width (offscreen width)
-    let oh = visible_h;   // only the visible vertical slice
+    // Offscreen buffer uses the full layer dimensions (layer.width × layer.height) so that
+    // sub-commands are rendered at their natural layer-relative coordinates with scroll_y=0.
+    // This avoids the y-straddling bug where a command starting above src_y_start (e.g. a
+    // large background rect or image) would be shifted to y=0 via saturating_sub, causing
+    // the wrong portion of its content to appear in the visible slice.
+    // We copy the backdrop into the visible rows only, render all commands (scroll_y=0),
+    // then blend only the visible rows back to the main buffer.
+    let ow = layer.width;  // full layer width
+    let oh = layer.height; // full layer height — natural coordinate space
     let needed = (ow as usize) * (oh as usize); // usize arithmetic avoids u32 overflow
 
     // Depth-indexed pool: scratch[depth] is the reusable offscreen Vec for this level.
@@ -2252,13 +2255,13 @@ fn render_layer(
     let mut offscreen = std::mem::take(&mut scratch[depth]);
     offscreen.resize(needed, 0);
 
-    // Copy backdrop from main framebuffer into offscreen.
-    // We copy visible_w columns starting from dst_x in the buffer into offscreen at
-    // column src_x_start, mirroring where render_commands will draw them.
-    for row in 0..oh {
+    // Copy backdrop from the main framebuffer into the visible rows of the offscreen.
+    // Offscreen row (src_y_start + r) ↔ buffer row (dst_y + r), for r in 0..visible_h.
+    for row in 0..visible_h {
         let buf_row = dst_y + row;
+        let off_row = src_y_start + row;
         let buf_start = (buf_row * buf_width + dst_x) as usize;
-        let off_start = (row * ow + src_x_start) as usize;
+        let off_start = (off_row * ow + src_x_start) as usize;
         let len = visible_w as usize;
         if buf_start + len <= buffer.len() && off_start + len <= offscreen.len() {
             offscreen[off_start..off_start + len]
@@ -2266,33 +2269,34 @@ fn render_layer(
         }
     }
 
-    // Render layer's sub-commands into the full-width offscreen buffer.
-    // Sub-commands are layer-relative (rebased at layout time), so x offset is 0.
-    // Pass src_y_start as scroll_y so rendering culls/renders the visible vertical portion.
+    // Render layer's sub-commands into the full-size offscreen buffer at natural coordinates.
+    // Sub-commands are layer-relative (rebased at layout time), so x/y offsets are 0.
+    // scroll_y = 0: commands render at their layer-relative y without any shift.
     // scratch is free (offscreen was taken via mem::take), so nested layers can use it.
     render_commands(
         &mut offscreen,
         ow,
         oh,
-        0,           // x offset: sub-commands are layer-relative
-        0,           // y offset: sub-commands are layer-relative
-        oh,          // viewport height = visible height
-        src_y_start, // scroll past non-visible top of layer
+        0,  // x offset: sub-commands are layer-relative
+        0,  // y offset: sub-commands are layer-relative
+        oh, // viewport height = full layer height (all commands visible)
+        0,  // scroll_y = 0: render at natural layer-relative coordinates
         &layer.commands,
         page,
         fonts,
         scratch,
-        depth + 1,   // nested layers use the next depth slot
+        depth + 1, // nested layers use the next depth slot
     );
 
-    // Blend visible region of offscreen back onto main buffer with opacity.
-    // Read from offscreen starting at column src_x_start (the horizontally clipped offset).
+    // Blend the visible rows of the offscreen back onto the main buffer with opacity.
+    // Visible row r: offscreen row (src_y_start + r) → buffer row (dst_y + r).
+    // Read from src_x_start in the offscreen (horizontal clip offset).
     let opacity = layer.opacity as u32;
     let buf_end = buffer.len();
     let off_end = offscreen.len();
-    for row in 0..oh {
+    for row in 0..visible_h {
         let buf_row_start = (dst_y + row) as usize * buf_width as usize + dst_x as usize;
-        let off_row_start = row as usize * ow as usize + src_x_start as usize;
+        let off_row_start = (src_y_start + row) as usize * ow as usize + src_x_start as usize;
         if buf_row_start + visible_w as usize > buf_end || off_row_start + visible_w as usize > off_end {
             continue;
         }

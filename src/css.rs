@@ -137,14 +137,26 @@ struct ElementIdentity {
     attributes: BTreeMap<String, String>,
 }
 
+/// Returns a shared empty `Rc<[ElementIdentity]>` without allocating on each call.
+/// Used for synthetic `AncestorSlot`s created during selector matching where no
+/// sibling data is needed.
+fn empty_siblings_rc() -> Rc<[ElementIdentity]> {
+    thread_local! {
+        static EMPTY: Rc<[ElementIdentity]> = Rc::from([]);
+    }
+    EMPTY.with(Rc::clone)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AncestorSlot {
     element: ElementIdentity,
     sibling_index: usize,
     sibling_count: usize,
-    /// Shared full sibling list for this parent's children.
+    /// The parent's full sibling identity list (shared `Rc`, no per-element cloning).
+    /// `siblings[..prec_count]` yields this element's preceding siblings.
+    /// Top-level elements without a parent use an empty Rc.
     siblings: Rc<[ElementIdentity]>,
-    /// How many entries in `siblings` precede this slot's element.
+    /// Index of this element in `siblings` (equal to the number of preceding siblings).
     prec_count: usize,
 }
 
@@ -629,6 +641,7 @@ pub fn build_styled_tree(
         0,
         0,
         &[],
+        None,
         viewport_width,
     )
 }
@@ -641,6 +654,10 @@ fn build_node(
     sibling_index: usize,
     sibling_count: usize,
     preceding_siblings: &[ElementIdentity],
+    // The parent's shared full-sibling Rc (all children of the same parent).
+    // When Some, used directly for AncestorSlot.siblings to avoid a per-element clone.
+    // None at the root or for nodes without an element parent.
+    parent_all_sibling_ids: Option<Rc<[ElementIdentity]>>,
     viewport_width: u32,
 ) -> StyledNode {
     match node {
@@ -682,20 +699,17 @@ fn build_node(
                 .into();
             let child_element_count = all_sibling_ids.len();
 
-            // `current_slot` records this element's position in its own sibling list so that
-            // ancestor-combinator matching can call `ancestor.preceding_siblings()`.
-            // `siblings` holds *this element's own* preceding siblings (not children's).
-            // Note: `all_sibling_ids` is the children's sibling Rc (different tree level) and
-            // cannot be reused here without semantic error — the two lists are distinct.
-            // The `Rc::from(preceding_siblings)` creates one Rc per element; a future
-            // optimisation could share the parent's Rc by threading it down, but the current
-            // approach is correct and the cost is bounded to one allocation per DOM element.
+            // `current_slot` records this element's position in its parent's sibling list so
+            // that ancestor-combinator matching can call `ancestor.preceding_siblings()`.
+            // Re-use the parent's shared `Rc<[ElementIdentity]>` when available (threaded in
+            // via `parent_all_sibling_ids`) so that all siblings of the same parent share one
+            // allocation.  Falls back to a fresh Rc for top-level / root nodes.
             let current_slot = AncestorSlot {
                 element: ElementIdentity::from(element),
                 sibling_index,
                 sibling_count,
-                siblings: Rc::from(preceding_siblings),
-                prec_count: preceding_siblings.len(),
+                siblings: parent_all_sibling_ids.unwrap_or_else(|| Rc::from(preceding_siblings)),
+                prec_count: sibling_index,
             };
             let mut next_ancestors = ancestors.to_vec();
             next_ancestors.push(current_slot);
@@ -721,6 +735,7 @@ fn build_node(
                         idx,
                         count,
                         prec_snap,
+                        Some(all_sibling_ids.clone()), // share parent's Rc with all children
                         viewport_width,
                     )
                 })
@@ -1663,7 +1678,7 @@ impl Selector {
             element: element.clone(),
             sibling_index,
             sibling_count,
-            siblings: Rc::from([]),
+            siblings: empty_siblings_rc(), // shared empty Rc — no allocation per call
             prec_count: 0,
         };
         self.matches_part(last_index, &current, ancestors, preceding_siblings)
@@ -1714,7 +1729,7 @@ impl Selector {
                         element: sibling.clone(),
                         sibling_index,
                         sibling_count: current.sibling_count,
-                        siblings: Rc::from([]),
+                        siblings: empty_siblings_rc(),
                         prec_count: 0,
                     };
                     self.matches_part(
@@ -1733,7 +1748,7 @@ impl Selector {
                         element: sibling.clone(),
                         sibling_index,
                         sibling_count: current.sibling_count,
-                        siblings: Rc::from([]),
+                        siblings: empty_siblings_rc(),
                         prec_count: 0,
                     };
                     self.matches_part(
