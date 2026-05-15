@@ -130,30 +130,6 @@ fn load_document_source_with_script_navigation(
             document: build_youtube_watch_document(&data),
         });
     }
-    if is_google_host(&response.final_url) {
-        let document = build_google_document_from_html(&text, &response.final_url);
-        let title = document_title(&document).unwrap_or_else(|| "Google".to_string());
-        return Ok(LoadedDocumentSource {
-            final_url: response.final_url,
-            status_code: response.status_code,
-            reason_phrase: response.reason_phrase,
-            content_type,
-            title,
-            document,
-        });
-    }
-    if is_youtube_host(&response.final_url) && !is_youtube_watch_url(&response.final_url) {
-        let document = build_youtube_generic_document_from_html(&text, &response.final_url);
-        let title = document_title(&document).unwrap_or_else(|| "YouTube".to_string());
-        return Ok(LoadedDocumentSource {
-            final_url: response.final_url,
-            status_code: response.status_code,
-            reason_phrase: response.reason_phrase,
-            content_type,
-            title,
-            document,
-        });
-    }
     let scripted = process_document_scripts(&text, &response.final_url);
     if let Some(target) = scripted.navigation_target.as_deref()
         && target != response.final_url.to_string()
@@ -171,6 +147,14 @@ fn load_document_source_with_script_navigation(
         build_site_specific_document(&parsed_document, &text, &response.final_url)
     {
         parsed_document = rewritten;
+    } else if is_google_host(&response.final_url) && !document_has_meaningful_body(&parsed_document)
+    {
+        parsed_document = build_google_document_from_html(&text, &response.final_url);
+    } else if is_youtube_host(&response.final_url)
+        && !is_youtube_watch_url(&response.final_url)
+        && !document_has_meaningful_body(&parsed_document)
+    {
+        parsed_document = build_youtube_generic_document_from_html(&text, &response.final_url);
     }
     annotate_resource_urls(&mut parsed_document, &response.final_url);
     let original_title = scripted
@@ -831,10 +815,6 @@ fn build_site_specific_document(document: &Node, html: &str, url: &Url) -> Optio
         return Some(build_youtube_watch_document(&data));
     }
 
-    if is_youtube_host(url) {
-        return Some(build_youtube_generic_document(document, html, url));
-    }
-
     None
 }
 
@@ -850,6 +830,45 @@ fn is_google_host(url: &Url) -> bool {
 
 fn is_youtube_watch_url(url: &Url) -> bool {
     is_youtube_host(url) && url.path.starts_with("/watch")
+}
+
+fn document_has_meaningful_body(document: &Node) -> bool {
+    extract_body_children(document)
+        .iter()
+        .any(node_has_meaningful_content)
+}
+
+fn node_has_meaningful_content(node: &Node) -> bool {
+    match node {
+        Node::Text(text) => !text.trim().is_empty(),
+        Node::Element(element) => {
+            if matches!(
+                element.tag_name.as_str(),
+                "script" | "style" | "meta" | "link" | "noscript" | "head" | "title"
+            ) {
+                return false;
+            }
+
+            if matches!(
+                element.tag_name.as_str(),
+                "img"
+                    | "input"
+                    | "button"
+                    | "textarea"
+                    | "select"
+                    | "option"
+                    | "video"
+                    | "audio"
+                    | "canvas"
+                    | "svg"
+                    | "iframe"
+            ) {
+                return true;
+            }
+
+            element.children.iter().any(node_has_meaningful_content)
+        }
+    }
 }
 
 fn extract_youtube_watch_data_from_html(html: &str, url: &Url) -> Option<YouTubeWatchData> {
@@ -1215,64 +1234,6 @@ fn build_youtube_watch_document(data: &YouTubeWatchData) -> Node {
             })],
         })],
     )
-}
-
-fn build_youtube_generic_document(document: &Node, html: &str, url: &Url) -> Node {
-    if let Some(data) = extract_youtube_home_data_from_html(html, url) {
-        return build_youtube_home_document(&data, url);
-    }
-
-    let title = document_title(document).unwrap_or_else(|| "YouTube".to_string());
-    let description = find_meta_content(document, "name", "description")
-        .or_else(|| find_meta_content(document, "property", "og:description"))
-        .unwrap_or_else(|| {
-            "This YouTube page relies on a large app shell. Tobira currently renders specific watch URLs more accurately than the full home feed.".to_string()
-        });
-
-    let mut body_children = vec![
-        simple_text_element("h1", &title),
-        simple_text_element("p", &description),
-        simple_text_element(
-            "p",
-            "Tip: open a specific https://www.youtube.com/watch?v=... URL for a richer video summary.",
-        ),
-    ];
-
-    let watch_links = extract_html_attribute_values(html, "href=\"/watch?v=", '"', 10)
-        .into_iter()
-        .map(|path| {
-            if path.starts_with("http://") || path.starts_with("https://") {
-                path
-            } else {
-                format!("https://www.youtube.com{path}")
-            }
-        })
-        .collect::<Vec<_>>();
-
-    if !watch_links.is_empty() {
-        body_children.push(hr_node());
-        body_children.push(simple_text_element("h2", "Watch Links"));
-        let items = watch_links
-            .into_iter()
-            .map(|href| {
-                Node::Element(Element {
-                    tag_name: "li".to_string(),
-                    attributes: BTreeMap::new(),
-                    children: vec![Node::Text(href)],
-                })
-            })
-            .collect();
-        body_children.push(Node::Element(Element {
-            tag_name: "ul".to_string(),
-            attributes: BTreeMap::new(),
-            children: items,
-        }));
-    }
-
-    body_children.push(hr_node());
-    body_children.push(simple_text_element("p", &format!("URL: {}", url)));
-
-    synthetic_document(&title, body_children)
 }
 
 fn build_youtube_generic_document_from_html(html: &str, url: &Url) -> Node {
@@ -2731,8 +2692,8 @@ fn collect_raw_text_into(node: &Node, output: &mut String) {
 mod tests {
     use super::{
         BrowserPage, build_site_specific_document, build_youtube_generic_document_from_html,
-        collect_frame_specs, collect_stylesheet, document_title, extract_body_children,
-        synthetic_document,
+        collect_frame_specs, collect_stylesheet, document_has_meaningful_body, document_title,
+        extract_body_children, synthetic_document,
     };
     use crate::css::StyledNode;
     use crate::html::{Node, parse_document};
@@ -2916,6 +2877,38 @@ mod tests {
         assert!(rendered.contains("1,234,567"));
         assert!(rendered.contains("3:34"));
         assert!(rendered.contains("2026-05-13"));
+    }
+
+    #[test]
+    fn does_not_rewrite_generic_youtube_pages_through_site_specific_path() {
+        let html = "<html><body><div id=\"app\">Real shell</div></body></html>";
+        let document = parse_document(html);
+
+        let rewritten = build_site_specific_document(
+            &document,
+            html,
+            &Url::parse("https://www.youtube.com/").unwrap(),
+        );
+
+        assert!(rewritten.is_none());
+    }
+
+    #[test]
+    fn meaningful_body_detection_ignores_script_only_shells() {
+        let document = parse_document(
+            "<html><head><title>Demo</title></head><body><script>boot()</script></body></html>",
+        );
+
+        assert!(!document_has_meaningful_body(&document));
+    }
+
+    #[test]
+    fn meaningful_body_detection_accepts_interactive_shell_markup() {
+        let document = parse_document(
+            "<html><body><div id=\"app\"></div><input type=\"text\" value=\"search\"></body></html>",
+        );
+
+        assert!(document_has_meaningful_body(&document));
     }
 
     #[test]

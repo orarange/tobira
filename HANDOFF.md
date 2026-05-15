@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - window title prefix: `Tobira`
   - README was previously under the old `Scratch Browser` name
 - Verification status:
-  - `cargo test` passes: `79` tests green on `2026-05-15`
+  - `cargo test` passes: `83` tests green on `2026-05-15`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -46,16 +46,22 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - real `document.querySelector(...)` / `querySelectorAll(...)`
     - `getElementById(...)`
     - `createElement(...)`
+    - `createTextNode(...)`
     - `appendChild(...)` / `insertBefore(...)` / `remove()`
     - `innerHTML`, `textContent`, `classList`, `id`, `className`
+    - reflected `value` / `src` / `href` / `rel` / `type` / `name` / `content`
     - `document.write(...)` with recursive script expansion
     - DOM mutations serialized back into the HTML pipeline after JS runs
+  - JS runtime worker now uses a larger dedicated stack and higher script budgets
+  - JS runtime now exposes lightweight `fetch(...)`, `XMLHttpRequest`, response headers helpers, and Promise job flushing
+  - script-driven `location.href = ...` navigation can trigger a follow-up page load
   - local test pages for CSS, basic JS, and DOM mutation coverage under `demo/`
   - site-specific rendering paths for:
     - YouTube watch pages
-    - YouTube home shell / cards / nudge UI
-    - lightweight Google shell
+    - YouTube home shell / cards / nudge UI as fallback when the real page stays empty
+    - lightweight Google shell as fallback when the real page stays empty
     - legacy frame/table-heavy pages such as the Abe Hiroshi site
+  - generic `google.com` and `youtube.com` now attempt the real JS/HTML pipeline before falling back to synthetic summaries
 
 ## Important Modules
 
@@ -88,9 +94,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 - README capability list is partially stale; prefer this file for the latest snapshot.
 - JS support is still far from a full browser DOM / framework runtime.
-- Event dispatch, `addEventListener` depth, and async network-backed browser APIs are still mostly stubbed.
+- Event dispatch, `addEventListener` depth, and GUI-to-page event delivery are still shallow.
 - History / back-forward behavior is not yet called out as complete.
-- Modern app-shell sites may still need more DOM APIs, events, storage behavior, and CSS coverage.
+- Modern app-shell sites still need more DOM APIs, stateful storage/cookie behavior, and CSS coverage.
+- GUI interactivity still only knows browser chrome plus anchor hitboxes; real page controls are not yet first-class widgets.
+- CSS is still computed once up front instead of being rebuilt against the live window width.
 - Actual media playback and a true YouTube watch experience are still incomplete.
 
 ## Useful Commands
@@ -149,3 +157,10 @@ git log --oneline -n 20
 
 - Re-ran `cargo test` on `codex/codex` and confirmed the branch is green with `79` passing tests on `2026-05-15`.
 - Updated the snapshot so the top-level verification note matches the newer run date instead of conflicting with older session log entries.
+
+### 2026-05-15 - Codex (JS runtime pass)
+
+- Cherry-picked `3930a90` from `master` onto `codex/codex` to pick up the larger-stack JS worker, Promise job flushing, `fetch`, `XMLHttpRequest`, `createTextNode`, DOM property reflection, and script-driven navigation handling.
+- Relaxed the browser pipeline so generic `google.com` and `youtube.com` pages now try the real JS/HTML path first, and only fall back to synthetic summaries when the post-script body is still effectively empty.
+- Added tests around YouTube rewrite scope and the new fallback heuristic, bringing `cargo test` to `83` passing tests.
+- Verified CLI smoke output for `https://www.google.com/` and `https://www.youtube.com/`, plus 4-second GUI startup smokes for both URLs.
