@@ -87,8 +87,10 @@ struct BrowserApp {
     hovered_target: HitTarget,
     hovered_link_url: Option<String>,
     ime_composing: bool,
-    /// Reusable scratch buffer for layer compositing — avoids per-frame allocation.
-    scratch: Vec<u32>,
+    /// Depth-indexed offscreen buffer pool for layer compositing.
+    /// scratch[depth] holds the pixel buffer used by the layer at that nesting depth.
+    /// Buffers are reused across frames; no per-frame allocation after the first paint.
+    scratch: Vec<Vec<u32>>,
 }
 
 impl BrowserApp {
@@ -120,7 +122,7 @@ impl BrowserApp {
             hovered_target: HitTarget::None,
             hovered_link_url: None,
             ime_composing: false,
-            scratch: Vec::new(),
+            scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
         }
     }
 
@@ -2068,7 +2070,7 @@ fn paint_layout(
     viewport_height: u32,
     scroll_y: u32,
     layout: &LayoutDocument,
-    scratch: &mut Vec<u32>,
+    scratch: &mut Vec<Vec<u32>>,
 ) {
     let page = if let DocumentContent::Loaded(page) = &document.content {
         Some(page)
@@ -2088,6 +2090,7 @@ fn paint_layout(
         page,
         fonts,
         scratch,
+        0,
     );
 }
 
@@ -2102,7 +2105,8 @@ fn render_commands(
     commands: &[DrawCommand],
     page: Option<&crate::browser::BrowserPage>,
     fonts: &mut FontContext,
-    scratch: &mut Vec<u32>,
+    scratch: &mut Vec<Vec<u32>>,
+    depth: usize,
 ) {
     let viewport_bottom = scroll_y.saturating_add(viewport_height);
 
@@ -2168,7 +2172,7 @@ fn render_commands(
             DrawCommand::Layer(layer) => {
                 render_layer(
                     buffer, width, height, offset_x, offset_y, scroll_y, layer,
-                    page, fonts, scratch,
+                    page, fonts, scratch, depth,
                 );
             }
         }
@@ -2185,7 +2189,8 @@ fn render_layer(
     layer: &LayerCommand,
     page: Option<&crate::browser::BrowserPage>,
     fonts: &mut FontContext,
-    scratch: &mut Vec<u32>,
+    scratch: &mut Vec<Vec<u32>>,
+    depth: usize,
 ) {
     // Compute screen-space position using signed arithmetic to handle layers above viewport
     let layer_screen_y = layer.y as i64 + offset_y as i64 - scroll_y as i64;
@@ -2215,18 +2220,25 @@ fn render_layer(
     let visible_w = layer.width.saturating_sub(src_x_start).min(buf_width.saturating_sub(dst_x));
     if visible_h == 0 || visible_w == 0 { return; }
 
-    // Allocate only the visible slice for the offscreen buffer (Fix 2).
+    // Allocate only the visible slice for the offscreen buffer.
     // This avoids allocating e.g. 1280×10000 for a full-page opacity layer.
     let lw = visible_w;
     let lh = visible_h;
-
-    // Reuse scratch buffer to avoid per-frame allocation.
-    // Layout: scratch[0..needed] = this layer's offscreen pixels;
-    //         scratch[needed..]  = scratch space for nested layers (split_at_mut below).
     let needed = (lw as usize) * (lh as usize); // usize arithmetic avoids u32 overflow
-    if scratch.len() < needed {
-        scratch.resize(needed, 0);
+
+    // Depth-indexed pool: scratch[depth] is the reusable offscreen Vec for this level.
+    // Nested DrawCommand::Layer calls use depth+1 so each nesting level has its own slot.
+    // After this frame, the Vec is returned to the pool with its capacity intact,
+    // so subsequent frames skip allocation entirely.
+    if scratch.len() <= depth {
+        scratch.resize_with(depth + 1, Vec::new);
     }
+
+    // Take the offscreen Vec out of the pool temporarily.
+    // This gives us an exclusive &mut to `offscreen` while leaving `scratch` free to pass
+    // to render_commands for nested layers — no aliasing, no unsafe needed.
+    let mut offscreen = std::mem::take(&mut scratch[depth]);
+    offscreen.resize(needed, 0);
 
     // Copy backdrop from main framebuffer into offscreen (visible slice only).
     // offscreen row r  ↔  buffer row dst_y + r
@@ -2235,8 +2247,8 @@ fn render_layer(
         let buf_start = (buf_row * buf_width + dst_x) as usize;
         let off_start = (row * lw) as usize;
         let len = lw as usize;
-        if buf_start + len <= buffer.len() && off_start + len <= scratch.len() {
-            scratch[off_start..off_start + len]
+        if buf_start + len <= buffer.len() && off_start + len <= offscreen.len() {
+            offscreen[off_start..off_start + len]
                 .copy_from_slice(&buffer[buf_start..buf_start + len]);
         }
     }
@@ -2244,10 +2256,9 @@ fn render_layer(
     // Render layer's sub-commands into the offscreen buffer.
     // Sub-commands are layer-relative (rebased at layout time), so x/y offsets are 0.
     // Pass src_y_start as scroll_y so rendering culls/renders the visible vertical portion.
-    let offscreen = &mut scratch[..needed];
-    let mut nested_scratch: Vec<u32> = Vec::new();
+    // scratch is free (offscreen was taken via mem::take), so nested layers can use it.
     render_commands(
-        offscreen,
+        &mut offscreen,
         lw,
         lh,
         0,           // x offset: sub-commands are layer-relative
@@ -2257,7 +2268,8 @@ fn render_layer(
         &layer.commands,
         page,
         fonts,
-        &mut nested_scratch,
+        scratch,
+        depth + 1,   // nested layers use the next depth slot
     );
 
     // Blend visible region of offscreen back onto main buffer with opacity.
@@ -2272,13 +2284,16 @@ fn render_layer(
                 break;
             }
             let src = offscreen[off_start + col];
-            let dst = buffer[buf_start + col];
-            let r = ((src >> 16 & 0xFF) * opacity + (dst >> 16 & 0xFF) * (255 - opacity)) / 255;
-            let g = ((src >> 8 & 0xFF) * opacity + (dst >> 8 & 0xFF) * (255 - opacity)) / 255;
-            let b = ((src & 0xFF) * opacity + (dst & 0xFF) * (255 - opacity)) / 255;
+            let dst_px = buffer[buf_start + col];
+            let r = ((src >> 16 & 0xFF) * opacity + (dst_px >> 16 & 0xFF) * (255 - opacity)) / 255;
+            let g = ((src >> 8 & 0xFF) * opacity + (dst_px >> 8 & 0xFF) * (255 - opacity)) / 255;
+            let b = ((src & 0xFF) * opacity + (dst_px & 0xFF) * (255 - opacity)) / 255;
             buffer[buf_start + col] = (r << 16) | (g << 8) | b;
         }
     }
+
+    // Return offscreen Vec to the pool so its capacity is reused next frame.
+    scratch[depth] = offscreen;
 }
 
 fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {
