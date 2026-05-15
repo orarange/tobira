@@ -580,7 +580,7 @@ fn layout_table_element(
             let span_width = span_width(&column_widths, placement.column_index, placement.colspan)
                 .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
             let inner_width = span_width.saturating_sub(padding.saturating_mul(2)).max(1);
-            layout_table_cell(placement.cell, inner_width, images, fonts)
+            layout_table_cell(placement.cell, inner_width, images, fonts, context.background_color)
         })
         .collect::<Vec<_>>();
 
@@ -830,8 +830,9 @@ fn layout_table_cell(
     width: u32,
     images: &ImageStore,
     fonts: &mut FontContext,
+    background_color: Color,
 ) -> FragmentLayout {
-    let mut context = LayoutContext::default();
+    let mut context = LayoutContext { background_color, ..LayoutContext::default() };
     let mut cursor_y = 0_u32;
 
     for child in &cell.children {

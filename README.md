@@ -22,13 +22,13 @@ Current capabilities:
   - pseudo-classes: `:first-child`, `:last-child`, `:nth-child(an+b)`, `:not(...)`
   - chained and mixed combinator chains: `A + B + C`, `A + B > C`, `A ~ B > C`
 - Style support for:
-  - box model: `display`, `margin`, `padding`, `width`, `height`, `max-width`, `min-width`, `box-sizing`
+  - box model: `display`, `margin`, `padding`, `width`, `height`, `max-width`, `min-width`
   - color: `color`, `background-color`, `opacity`, `border-color`
-  - border: `border`, `border-width`, `border-style`, `border-radius`, `outline`
+  - border: `border`, `border-width`, `border-style`
   - typography: `font-size`, `font-weight`, `font-style`, `font-family`, `text-align`, `text-decoration`, `text-transform`, `text-indent`, `letter-spacing`, `line-height`, `white-space`
-  - layout: `overflow`, `list-style-type`, `cursor`, `vertical-align`
+  - layout: `list-style-type`, `vertical-align`
   - color values: hex (`#rgb`, `#rrggbb`, `#rgba`, `#rrggbbaa`), `rgb()`, `rgba()` (alpha blended), `hsl()`, `hsla()`, 140+ named colors
-  - CSS custom properties (`--var`) and `var(--name, fallback)`
+  - CSS custom properties (`--var`) and `var(--name, fallback)` (resolved per-element; `:root`/body inheritance not yet supported)
   - `calc()` with correct operator precedence (`*`/`/` before `+`/`-`)
   - viewport units: `vw`, `vh` (consistent 1280×800 base)
   - `@media` with `max-width`, `min-width`, `screen`, `print`

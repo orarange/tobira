@@ -444,9 +444,17 @@ fn split_at_top_level(input: &str, delimiter: char) -> Vec<String> {
     let mut result = Vec::new();
     let mut depth: u32 = 0;
     let mut in_string: Option<char> = None;
+    let mut escaped = false;
     let mut segment_start = 0;
     for (index, ch) in input.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match ch {
+            '\\' if in_string.is_some() => {
+                escaped = true;
+            }
             q @ ('"' | '\'') if in_string.is_none() => {
                 in_string = Some(q);
             }
@@ -1585,17 +1593,7 @@ enum SelectorMode {
 
 impl Selector {
     fn specificity(&self) -> usize {
-        self.parts
-            .iter()
-            .map(|part| {
-                part.simple.id.iter().count() * 100
-                    + (part.simple.classes.len()
-                        + part.simple.pseudo_classes.len()
-                        + part.simple.attributes.len())
-                        * 10
-                    + part.simple.tag_name.iter().count()
-            })
-            .sum()
+        self.parts.iter().map(|part| part.simple.specificity()).sum()
     }
 
     fn matches(
@@ -1695,6 +1693,30 @@ impl Selector {
 }
 
 impl SimpleSelector {
+    fn specificity(&self) -> usize {
+        let id_score = self.id.is_some() as usize * 100;
+        let non_not_pseudo_count = self
+            .pseudo_classes
+            .iter()
+            .filter(|pc| !matches!(pc, PseudoClass::Not(_)))
+            .count();
+        let not_score: usize = self
+            .pseudo_classes
+            .iter()
+            .filter_map(|pc| {
+                if let PseudoClass::Not(selectors) = pc {
+                    selectors.iter().map(|s| s.specificity()).max()
+                } else {
+                    None
+                }
+            })
+            .sum();
+        let class_score =
+            (self.classes.len() + non_not_pseudo_count + self.attributes.len()) * 10;
+        let tag_score = self.tag_name.is_some() as usize;
+        id_score + class_score + not_score + tag_score
+    }
+
     fn matches_slot(&self, slot: &AncestorSlot) -> bool {
         if self.never_match {
             return false;
@@ -2797,6 +2819,30 @@ mod tests {
         assert_eq!(c.style.color, 0xFF0000);
         assert_eq!(d.style.color, 0xFF0000);
         assert_eq!(d.style.background_color, Some(0x0000FF));
+    }
+
+    #[test]
+    fn supports_adjacent_sibling_then_child_combinator() {
+        let document = parse_document(
+            "<body><div></div><section><p id=\"target\"></p><div></div></section></body>",
+        );
+        let stylesheet = parse_stylesheet("div + section > p { color: #ff0000; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+
+        let target = find_element_by_id(&styled, "target").expect("target paragraph should exist");
+        assert_eq!(target.style.color, 0xFF0000);
+    }
+
+    #[test]
+    fn supports_general_sibling_then_child_combinator() {
+        let document = parse_document(
+            "<body><h1></h1><p></p><div><span id=\"target\"></span></div></body>",
+        );
+        let stylesheet = parse_stylesheet("h1 ~ div > span { color: #00ff00; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+
+        let target = find_element_by_id(&styled, "target").expect("target span should exist");
+        assert_eq!(target.style.color, 0x00FF00);
     }
 
     #[test]
