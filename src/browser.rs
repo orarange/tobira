@@ -1860,17 +1860,26 @@ fn default_youtube_sidebar_labels<'a>(
         vec![
             ("ホーム", "https://www.youtube.com/"),
             ("ショート", "https://www.youtube.com/shorts"),
-            ("登録チャンネル", "https://www.youtube.com/feed/subscriptions"),
+            (
+                "登録チャンネル",
+                "https://www.youtube.com/feed/subscriptions",
+            ),
             ("トレンド", "https://www.youtube.com/feed/trending"),
             ("履歴", "https://www.youtube.com/feed/history"),
             ("後で見る", "https://www.youtube.com/playlist?list=WL"),
-            ("高く評価した動画", "https://www.youtube.com/playlist?list=LL"),
+            (
+                "高く評価した動画",
+                "https://www.youtube.com/playlist?list=LL",
+            ),
         ]
     } else {
         vec![
             ("Home", "https://www.youtube.com/"),
             ("Shorts", "https://www.youtube.com/shorts"),
-            ("Subscriptions", "https://www.youtube.com/feed/subscriptions"),
+            (
+                "Subscriptions",
+                "https://www.youtube.com/feed/subscriptions",
+            ),
             ("Trending", "https://www.youtube.com/feed/trending"),
             ("History", "https://www.youtube.com/feed/history"),
             ("Watch later", "https://www.youtube.com/playlist?list=WL"),
@@ -2771,6 +2780,7 @@ mod tests {
                     outline_color: None,
                     line_height: 0,
                     opacity: 255,
+                    effective_opacity: 255,
                     font_style_italic: false,
                     text_transform: crate::css::TextTransform::None,
                     text_indent: 0,
@@ -3051,6 +3061,7 @@ mod tests {
                 outline_color: None,
                 line_height: 0,
                 opacity: 255,
+                effective_opacity: 255,
                 font_style_italic: false,
                 text_transform: crate::css::TextTransform::None,
                 text_indent: 0,
