@@ -2239,10 +2239,13 @@ fn render_layer(
     // then blend only the visible rows back to the main buffer.
     let ow = layer.width;  // full layer width
     let oh = layer.height; // full layer height — natural coordinate space
-    let needed = (ow as usize) * (oh as usize); // usize arithmetic avoids u32 overflow
+
+    // Use checked_mul so pathological dimensions (which would overflow usize in release
+    // or panic in debug) are caught safely before any allocation attempt.
+    let Some(needed) = (ow as usize).checked_mul(oh as usize) else { return; };
 
     // Safety guard: refuse to allocate an obviously pathological offscreen buffer.
-    // 64 MP (8192×8192) is well above any screen size we realistically support.
+    // 8192×8192 (~67 MP) is well above any screen size we realistically support.
     // A layer larger than this is almost certainly a bug in layout (e.g. height not clamped).
     const MAX_OFFSCREEN_PIXELS: usize = 8192 * 8192;
     if needed > MAX_OFFSCREEN_PIXELS {
