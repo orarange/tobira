@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use crate::html::{Element, Node};
 
@@ -141,7 +142,7 @@ struct AncestorSlot {
     element: ElementIdentity,
     sibling_index: usize,
     sibling_count: usize,
-    preceding_siblings: Vec<ElementIdentity>,
+    preceding_siblings: Rc<[ElementIdentity]>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -653,7 +654,7 @@ fn build_node(
                 element: ElementIdentity::from(element),
                 sibling_index,
                 sibling_count,
-                preceding_siblings: preceding_siblings.to_vec(),
+                preceding_siblings: Rc::from(preceding_siblings),
             };
             let mut next_ancestors = ancestors.to_vec();
             next_ancestors.push(current_slot);
@@ -1611,7 +1612,7 @@ impl Selector {
             element: element.clone(),
             sibling_index,
             sibling_count,
-            preceding_siblings: Vec::new(),
+            preceding_siblings: Rc::from([]),
         };
         self.matches_part(last_index, &current, ancestors, preceding_siblings)
     }
@@ -1661,7 +1662,7 @@ impl Selector {
                         element: sibling.clone(),
                         sibling_index,
                         sibling_count: current.sibling_count,
-                        preceding_siblings: Vec::new(),
+                        preceding_siblings: Rc::from([]),
                     };
                     self.matches_part(
                         part_index - 1,
@@ -1679,7 +1680,7 @@ impl Selector {
                         element: sibling.clone(),
                         sibling_index,
                         sibling_count: current.sibling_count,
-                        preceding_siblings: Vec::new(),
+                        preceding_siblings: Rc::from([]),
                     };
                     self.matches_part(
                         part_index - 1,

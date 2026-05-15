@@ -63,9 +63,11 @@ pub fn layout_styled_document(
     viewport_width: u32,
     fonts: &mut FontContext,
 ) -> LayoutDocument {
-    let background_color = find_document_background(document).unwrap_or(DEFAULT_BACKGROUND_COLOR);
+    let canvas_bg = find_document_background(document)
+        .map(|(c, o)| apply_opacity(c, DEFAULT_BACKGROUND_COLOR, o))
+        .unwrap_or(DEFAULT_BACKGROUND_COLOR);
     let mut context = LayoutContext {
-        background_color,
+        background_color: DEFAULT_BACKGROUND_COLOR,
         ..LayoutContext::default()
     };
     let mut cursor_y = 0;
@@ -81,7 +83,7 @@ pub fn layout_styled_document(
     );
 
     LayoutDocument {
-        background_color,
+        background_color: canvas_bg,
         content_height: cursor_y,
         rects: context.rects,
         texts: context.texts,
@@ -254,6 +256,7 @@ fn layout_block_element(
         .min(element.style.max_width.unwrap_or(u32::MAX))
         .max(element.style.min_width);
     let background_top = *cursor_y;
+    let saved_bg = context.background_color;
     let background_index = if let Some(background_color) = element.style.background_color {
         let blended_bg = apply_opacity(
             background_color,
@@ -267,6 +270,7 @@ fn layout_block_element(
             height: 1,
             color: blended_bg,
         });
+        context.background_color = blended_bg;
         Some(context.rects.len() - 1)
     } else {
         None
@@ -335,6 +339,8 @@ fn layout_block_element(
             rect.height = background_height;
         }
     }
+
+    context.background_color = saved_bg;
 
     // Draw borders if present
     if !element.style.border_style_none {
@@ -1376,7 +1382,7 @@ fn emit_line_impl(
 
     for span in &line.spans {
         let span_opacity = span.style.effective_opacity;
-        let text_bg = if let Some(background_color) = span.style.background_color {
+        let _text_bg = if let Some(background_color) = span.style.background_color {
             let blended_bg = apply_opacity(background_color, context.background_color, span_opacity);
             context.rects.push(RectCommand {
                 x: cursor_x,
@@ -1402,7 +1408,7 @@ fn emit_line_impl(
             text: display_text,
             font_size_px: span.style.font_size_px,
             font_family: span.style.font_family,
-            color: apply_opacity(span.style.color, text_bg, span_opacity),
+            color: apply_opacity(span.style.color, context.background_color, span_opacity),
             underline: span.style.underline,
             bold: span.style.font_weight,
             italic: span.style.font_style_italic,
@@ -1610,17 +1616,13 @@ fn apply_opacity(color: Color, background: Color, opacity: u8) -> Color {
     (blend(fr, br) << 16) | (blend(fg, bg_g) << 8) | blend(fb, bb)
 }
 
-fn find_document_background(node: &StyledNode) -> Option<Color> {
+fn find_document_background(node: &StyledNode) -> Option<(Color, u8)> {
     match node {
         StyledNode::Text(_) => None,
         StyledNode::Element(element) => {
             if matches!(element.tag_name.as_str(), "body" | "html" | "document") {
                 if let Some(background_color) = element.style.background_color {
-                    return Some(apply_opacity(
-                        background_color,
-                        DEFAULT_BACKGROUND_COLOR,
-                        element.style.effective_opacity,
-                    ));
+                    return Some((background_color, element.style.effective_opacity));
                 }
             }
 
