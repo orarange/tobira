@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - window title prefix: `Tobira`
   - README was previously under the old `Scratch Browser` name
 - Verification status:
-  - `cargo test` passes: `79` tests green on `2026-05-14`
+  - `cargo test` passes: `79` tests green on `2026-05-15`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -144,3 +144,8 @@ git log --oneline -n 20
 
 - Locked the documented Codex workflow to the dedicated branch `codex/codex`.
 - Claude is expected to stay on its own separate branch so both agents can work in parallel without branch drift.
+
+### 2026-05-15 - Codex (Copilot review follow-up)
+
+- Re-ran `cargo test` on `codex/codex` and confirmed the branch is green with `79` passing tests on `2026-05-15`.
+- Updated the snapshot so the top-level verification note matches the newer run date instead of conflicting with older session log entries.
