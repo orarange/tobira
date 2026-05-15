@@ -954,7 +954,6 @@ fn layout_table_element(
                 .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
             let inner_width = span_width.saturating_sub(padding.saturating_mul(2)).max(1);
             let cell_backdrop = placement.cell.style.background_color
-                .filter(|_| placement.cell.style.effective_opacity == 255)
                 .unwrap_or(context.background_color);
             layout_table_cell(placement.cell, inner_width, images, fonts, cell_backdrop)
         })

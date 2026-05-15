@@ -2167,7 +2167,7 @@ fn render_commands(
             }
             DrawCommand::Layer(layer) => {
                 render_layer(
-                    buffer, width, height, offset_x, offset_y, viewport_height, scroll_y, layer,
+                    buffer, width, height, offset_x, offset_y, scroll_y, layer,
                     page, fonts, scratch,
                 );
             }
@@ -2181,7 +2181,6 @@ fn render_layer(
     buf_height: u32,
     offset_x: u32,
     offset_y: u32,
-    viewport_height: u32,
     scroll_y: u32,
     layer: &LayerCommand,
     page: Option<&crate::browser::BrowserPage>,

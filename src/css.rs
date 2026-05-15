@@ -142,7 +142,16 @@ struct AncestorSlot {
     element: ElementIdentity,
     sibling_index: usize,
     sibling_count: usize,
-    preceding_siblings: Rc<[ElementIdentity]>,
+    /// Shared full sibling list for this parent's children.
+    siblings: Rc<[ElementIdentity]>,
+    /// How many entries in `siblings` precede this slot's element.
+    prec_count: usize,
+}
+
+impl AncestorSlot {
+    fn preceding_siblings(&self) -> &[ElementIdentity] {
+        &self.siblings[..self.prec_count]
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -662,40 +671,37 @@ fn build_node(
                 preceding_siblings,
                 viewport_width,
             );
+            // Pre-build the full sibling identity list once for all children to share.
+            let all_sibling_ids: Rc<[ElementIdentity]> = element
+                .children
+                .iter()
+                .filter_map(|c| if let Node::Element(e) = c { Some(ElementIdentity::from(e)) } else { None })
+                .collect::<Vec<_>>()
+                .into();
+            let child_element_count = all_sibling_ids.len();
+
             let current_slot = AncestorSlot {
                 element: ElementIdentity::from(element),
                 sibling_index,
                 sibling_count,
-                preceding_siblings: Rc::from(preceding_siblings),
+                siblings: Rc::from(preceding_siblings),
+                prec_count: preceding_siblings.len(),
             };
             let mut next_ancestors = ancestors.to_vec();
             next_ancestors.push(current_slot);
 
-            // Count element children and build sibling info
-            let element_children: Vec<&Node> = element
-                .children
-                .iter()
-                .filter(|c| matches!(c, Node::Element(_)))
-                .collect();
-            let child_element_count = element_children.len();
-
             let mut elem_sibling_idx = 0;
-            let mut preceding: Vec<ElementIdentity> = Vec::new();
 
             let children = element
                 .children
                 .iter()
                 .map(|child| {
-                    let (idx, count, prec) = if matches!(child, Node::Element(_)) {
+                    let (idx, count, prec_snap) = if matches!(child, Node::Element(_)) {
                         let idx = elem_sibling_idx;
-                        let prec_snap = preceding.clone();
-                        if let Node::Element(e) = child {
-                            preceding.push(ElementIdentity::from(e));
-                        }
                         elem_sibling_idx += 1;
-                        (idx, child_element_count, prec_snap)
+                        (idx, child_element_count, &all_sibling_ids[..idx])
                     } else {
-                        (0, 0, Vec::new())
+                        (0, 0, &all_sibling_ids[..0])
                     };
                     build_node(
                         child,
@@ -704,7 +710,7 @@ fn build_node(
                         &next_ancestors,
                         idx,
                         count,
-                        &prec,
+                        prec_snap,
                         viewport_width,
                     )
                 })
@@ -1636,7 +1642,8 @@ impl Selector {
             element: element.clone(),
             sibling_index,
             sibling_count,
-            preceding_siblings: Rc::from([]),
+            siblings: Rc::from([]),
+            prec_count: 0,
         };
         self.matches_part(last_index, &current, ancestors, preceding_siblings)
     }
@@ -1666,7 +1673,7 @@ impl Selector {
                         part_index - 1,
                         ancestor,
                         &ancestors[..index],
-                        &ancestor.preceding_siblings,
+                        ancestor.preceding_siblings(),
                     )
                 })
             }
@@ -1675,7 +1682,7 @@ impl Selector {
                     part_index - 1,
                     parent,
                     &ancestors[..ancestors.len() - 1],
-                    &parent.preceding_siblings,
+                    parent.preceding_siblings(),
                 )
             }),
             Combinator::AdjacentSibling => current_preceding_siblings
@@ -1686,7 +1693,8 @@ impl Selector {
                         element: sibling.clone(),
                         sibling_index,
                         sibling_count: current.sibling_count,
-                        preceding_siblings: Rc::from([]),
+                        siblings: Rc::from([]),
+                        prec_count: 0,
                     };
                     self.matches_part(
                         part_index - 1,
@@ -1704,7 +1712,8 @@ impl Selector {
                         element: sibling.clone(),
                         sibling_index,
                         sibling_count: current.sibling_count,
-                        preceding_siblings: Rc::from([]),
+                        siblings: Rc::from([]),
+                        prec_count: 0,
                     };
                     self.matches_part(
                         part_index - 1,
