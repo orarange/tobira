@@ -145,6 +145,7 @@ pub struct RectCommand {
     pub width: u32,
     pub height: u32,
     pub color: Color,
+    pub border_radius: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -422,6 +423,7 @@ fn layout_block_element(
             width: outer_width.max(1),
             height: 1,
             color: blended_for_rect,
+            border_radius: element.style.border_radius,
         }));
         if element.style.effective_opacity == 255 {
             // Fully opaque: children blend against this element's solid background
@@ -473,6 +475,7 @@ fn layout_block_element(
             width: content_width,
             height: 2,
             color: element.style.color,
+            border_radius: 0,
         }));
         *cursor_y = cursor_y.saturating_add(10);
     } else {
@@ -534,6 +537,7 @@ fn layout_block_element(
                 width: outer_width.max(1),
                 height: border_top_h,
                 color: bc,
+                border_radius: 0,
             }));
         }
         if border_bottom_h > 0 {
@@ -543,6 +547,7 @@ fn layout_block_element(
                 width: outer_width.max(1),
                 height: border_bottom_h,
                 color: bc,
+                border_radius: 0,
             }));
         }
         if border_left_w > 0 {
@@ -552,6 +557,7 @@ fn layout_block_element(
                 width: border_left_w,
                 height: background_height,
                 color: bc,
+                border_radius: 0,
             }));
         }
         if border_right_w > 0 {
@@ -563,6 +569,7 @@ fn layout_block_element(
                 width: border_right_w,
                 height: background_height,
                 color: bc,
+                border_radius: 0,
             }));
         }
     }
@@ -667,6 +674,7 @@ fn layout_block_element_as_layer(
             width: outer_width.max(1),
             height: 1,
             color: background_color,
+            border_radius: element.style.border_radius,
         }));
         // Update sub_context backdrop for children
         sub_context.background_color = background_color;
@@ -715,6 +723,7 @@ fn layout_block_element_as_layer(
             width: content_width,
             height: 2,
             color: element.style.color,
+            border_radius: 0,
         }));
         *cursor_y = cursor_y.saturating_add(10);
     } else {
@@ -755,6 +764,7 @@ fn layout_block_element_as_layer(
                 width: outer_width.max(1),
                 height: border_top_h,
                 color: bc,
+                border_radius: 0,
             }));
         }
         if border_bottom_h > 0 {
@@ -764,6 +774,7 @@ fn layout_block_element_as_layer(
                 width: outer_width.max(1),
                 height: border_bottom_h,
                 color: bc,
+                border_radius: 0,
             }));
         }
         if border_left_w > 0 {
@@ -773,6 +784,7 @@ fn layout_block_element_as_layer(
                 width: border_left_w,
                 height: final_height,
                 color: bc,
+                border_radius: 0,
             }));
         }
         if border_right_w > 0 {
@@ -784,6 +796,7 @@ fn layout_block_element_as_layer(
                 width: border_right_w,
                 height: final_height,
                 color: bc,
+                border_radius: 0,
             }));
         }
     }
@@ -1083,6 +1096,7 @@ fn layout_table_element(
                     width: layer_w,
                     height: layer_h,
                     color: background_color,
+                    border_radius: 0,
                 }));
             }
             // Content commands are (0,0)-relative within the cell; offset by padding/valign
@@ -1123,6 +1137,7 @@ fn layout_table_element(
                     width: cell_width.max(1),
                     height: cell_height.max(1),
                     color: blended,
+                    border_radius: 0,
                 }));
             }
             merge_fragment(context, layout, content_x, content_y);
@@ -1349,6 +1364,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             width: rect.width,
             height: rect.height,
             color: rect.color,
+            border_radius: rect.border_radius,
         }),
         DrawCommand::Text(text) => DrawCommand::Text(TextCommand {
             x: text.x.saturating_add(offset_x),
@@ -1874,6 +1890,7 @@ fn emit_line_impl(
                 width: span.width,
                 height: line_height,
                 color: blended_bg,
+                border_radius: 0,
             }));
         }
 
@@ -2378,5 +2395,23 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn test_border_radius_in_rect_command() {
+        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::html::parse_document;
+
+        let html = r#"<div style="background:#ff0000;border-radius:10px">Hello</div>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &stylesheet, 800);
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
+
+        let rects = layout.rects();
+        let bg_rect = rects.iter().find(|r| r.border_radius == 10);
+        assert!(bg_rect.is_some(), "Should have a rect with border_radius=10");
+        assert_eq!(bg_rect.unwrap().border_radius, 10);
     }
 }

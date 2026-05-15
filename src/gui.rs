@@ -1,4 +1,4 @@
-use std::num::NonZeroU32;
+﻿use std::num::NonZeroU32;
 use std::rc::Rc;
 
 use arboard::Clipboard;
@@ -2127,16 +2127,30 @@ fn render_commands(
                 if rect_bottom < scroll_y || rect.y > viewport_bottom {
                     continue;
                 }
-                draw_rect(
-                    buffer,
-                    width,
-                    height,
-                    offset_x.saturating_add(rect.x),
-                    offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
-                    rect.width,
-                    rect.height,
-                    rect.color,
-                );
+                if rect.border_radius > 0 {
+                    draw_rounded_rect(
+                        buffer,
+                        width,
+                        height,
+                        offset_x.saturating_add(rect.x),
+                        offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
+                        rect.width,
+                        rect.height,
+                        rect.border_radius,
+                        rect.color,
+                    );
+                } else {
+                    draw_rect(
+                        buffer,
+                        width,
+                        height,
+                        offset_x.saturating_add(rect.x),
+                        offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
+                        rect.width,
+                        rect.height,
+                        rect.color,
+                    );
+                }
             }
             DrawCommand::Text(text) => {
                 let text_bottom = text
@@ -2364,6 +2378,78 @@ fn draw_rect(
         let row_offset = row as usize * width as usize;
         for column in x..max_x {
             buffer[row_offset + column as usize] = color;
+        }
+    }
+}
+
+fn draw_rounded_rect(
+    buffer: &mut [u32],
+    buf_w: u32,
+    buf_h: u32,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    radius: u32,
+    color: u32,
+) {
+    if radius == 0 || w == 0 || h == 0 {
+        draw_rect(buffer, buf_w, buf_h, x, y, w, h, color);
+        return;
+    }
+    let r = radius.min(w / 2).min(h / 2);
+    if r == 0 {
+        draw_rect(buffer, buf_w, buf_h, x, y, w, h, color);
+        return;
+    }
+    let x2 = x.saturating_add(w);
+    let y2 = y.saturating_add(h);
+
+    // Corner centers
+    let cx_left = x.saturating_add(r);
+    let cx_right = x2.saturating_sub(r);
+    let cy_top = y.saturating_add(r);
+    let cy_bottom = y2.saturating_sub(r);
+
+    let px_start = x as usize;
+    let px_end = x2.min(buf_w) as usize;
+    let py_start = y as usize;
+    let py_end = y2.min(buf_h) as usize;
+    let r_sq = (r as i64) * (r as i64);
+
+    for py in py_start..py_end {
+        for px in px_start..px_end {
+            let pu32 = px as u32;
+            let pv32 = py as u32;
+            let in_corner = if pu32 < cx_left && pv32 < cy_top {
+                // top-left
+                let dx = cx_left.saturating_sub(pu32) as i64;
+                let dy = cy_top.saturating_sub(pv32) as i64;
+                dx * dx + dy * dy > r_sq
+            } else if pu32 >= cx_right && pv32 < cy_top {
+                // top-right
+                let dx = pu32.saturating_sub(cx_right) as i64;
+                let dy = cy_top.saturating_sub(pv32) as i64;
+                dx * dx + dy * dy > r_sq
+            } else if pu32 < cx_left && pv32 >= cy_bottom {
+                // bottom-left
+                let dx = cx_left.saturating_sub(pu32) as i64;
+                let dy = pv32.saturating_sub(cy_bottom) as i64;
+                dx * dx + dy * dy > r_sq
+            } else if pu32 >= cx_right && pv32 >= cy_bottom {
+                // bottom-right
+                let dx = pu32.saturating_sub(cx_right) as i64;
+                let dy = pv32.saturating_sub(cy_bottom) as i64;
+                dx * dx + dy * dy > r_sq
+            } else {
+                false
+            };
+            if !in_corner {
+                let idx = py * buf_w as usize + px;
+                if idx < buffer.len() {
+                    buffer[idx] = color;
+                }
+            }
         }
     }
 }
