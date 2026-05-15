@@ -278,13 +278,11 @@ fn layout_block_element(
                 height: 1,
                 color: blended_for_rect,
             });
-            // Use local opacity for threading to children (avoids double-counting parent opacity)
-            let blended_for_children = apply_opacity(
-                background_color,
-                saved_bg,
-                element.style.opacity,
-            );
-            context.background_color = blended_for_children;
+            if element.style.opacity == 255 {
+                // Fully opaque: children blend against this element's solid background
+                context.background_color = background_color;
+            }
+            // If opacity < 255: don't update — children keep the parent/canvas backdrop
             Some(context.rects.len() - 1)
         } else {
             None
@@ -604,7 +602,10 @@ fn layout_table_element(
             let span_width = span_width(&column_widths, placement.column_index, placement.colspan)
                 .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
             let inner_width = span_width.saturating_sub(padding.saturating_mul(2)).max(1);
-            layout_table_cell(placement.cell, inner_width, images, fonts, context.background_color)
+            let cell_backdrop = placement.cell.style.background_color
+                .filter(|_| placement.cell.style.opacity == 255)
+                .unwrap_or(context.background_color);
+            layout_table_cell(placement.cell, inner_width, images, fonts, cell_backdrop)
         })
         .collect::<Vec<_>>();
 
