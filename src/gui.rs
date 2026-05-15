@@ -2212,18 +2212,15 @@ fn render_layer(
     }
 
     // Render layer's sub-commands into the offscreen buffer.
-    // Coordinates are page-absolute, so we adjust offset so that layer.x → 0 in offscreen.
-    let sub_offset_x = offset_x.wrapping_sub(layer.x);
-    let sub_offset_y = offset_y.wrapping_sub(layer.y).wrapping_add(scroll_y);
-
+    // Sub-commands are layer-relative (rebased at layout time), so offset and scroll are 0.
     render_commands(
         &mut offscreen,
         w,
         h,
-        sub_offset_x,
-        sub_offset_y,
+        0,  // sub-commands are layer-relative, no x offset
+        0,  // sub-commands are layer-relative, no y offset
         h,  // full offscreen height as viewport
-        0,  // no scroll inside offscreen
+        0,  // no scroll inside offscreen (coords are already layer-relative)
         &layer.commands,
         page,
         fonts,

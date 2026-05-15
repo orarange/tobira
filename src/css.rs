@@ -794,8 +794,9 @@ fn compute_style(
 
     style.effective_opacity = parent_style
         .map(|parent| {
-            if parent.opacity < 255 {
-                // Parent creates a stacking context — reset accumulation
+            let parent_is_block = !matches!(parent.display, Display::Inline);
+            if parent.opacity < 255 && parent_is_block {
+                // Parent is a block stacking context — reset accumulation
                 style.opacity
             } else {
                 ((parent.effective_opacity as u16 * style.opacity as u16) / 255) as u8
@@ -3216,5 +3217,21 @@ mod tests {
         let pa = find_first_element(&styled, "p").unwrap();
         // first p has class "a" so :not(.a) should NOT match it
         assert_ne!(pa.style.color, 0xFF0000, "p.a should not match :not(.a)");
+    }
+
+    #[test]
+    fn nested_inline_opacity_accumulates() {
+        // span opacity=0.5 inside another span opacity=0.5 should give effective_opacity ~= 0.25
+        let document = parse_document("<body><span><em>hi</em></span></body>");
+        let stylesheet = parse_stylesheet("span { opacity: 0.5; } em { opacity: 0.5; }");
+        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        // Navigate to the em element and check its effective_opacity
+        // effective_opacity should be ~64 (0.25 * 255)
+        let em = find_first_element(&styled, "em").expect("em element should exist");
+        assert!(
+            em.style.effective_opacity <= 70,
+            "nested inline opacity should accumulate: expected ~64, got {}",
+            em.style.effective_opacity
+        );
     }
 }

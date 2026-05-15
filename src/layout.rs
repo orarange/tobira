@@ -484,6 +484,30 @@ fn layout_block_element(
     *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
 }
 
+fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32) {
+    for cmd in commands.iter_mut() {
+        match cmd {
+            DrawCommand::Rect(r) => {
+                r.x = r.x.saturating_sub(origin_x);
+                r.y = r.y.saturating_sub(origin_y);
+            }
+            DrawCommand::Text(t) => {
+                t.x = t.x.saturating_sub(origin_x);
+                t.y = t.y.saturating_sub(origin_y);
+            }
+            DrawCommand::Image(i) => {
+                i.x = i.x.saturating_sub(origin_x);
+                i.y = i.y.saturating_sub(origin_y);
+            }
+            DrawCommand::Layer(l) => {
+                l.x = l.x.saturating_sub(origin_x);
+                l.y = l.y.saturating_sub(origin_y);
+                rebase_commands(&mut l.commands, origin_x, origin_y);
+            }
+        }
+    }
+}
+
 fn layout_block_element_as_layer(
     element: &StyledElement,
     outer_x: u32,
@@ -639,11 +663,14 @@ fn layout_block_element_as_layer(
         }
     }
 
+    // Rebase sub-commands to layer-relative coordinates before wrapping
+    rebase_commands(&mut sub_context.commands, outer_x, background_top);
+
     // Wrap sub-context commands in a LayerCommand and push to parent
     context.commands.push(DrawCommand::Layer(LayerCommand {
         x: outer_x,
         y: background_top,
-        width: outer_width,
+        width: outer_width.max(1),
         height: final_height,
         opacity: element.style.opacity,
         commands: sub_context.commands,
