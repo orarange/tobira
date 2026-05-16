@@ -148,11 +148,10 @@ The living JavaScript roadmap is in [JS_ROADMAP.md](JS_ROADMAP.md).
 
 Short version:
 
-1. Finish richer listener options and capture phase handling
-2. Tighten live `input.value` sync and other DOM fidelity gaps
-3. Add storage, cookies, and history/navigation behavior
-4. Improve networking semantics and reflow after DOM mutation
-5. Validate against Google, YouTube, and other app-shell sites
+1. Tighten passive listener semantics and live `input.value` sync
+2. Add storage, cookies, and history/navigation behavior
+3. Improve networking semantics and reflow after DOM mutation
+4. Validate against Google, YouTube, and other app-shell sites
 
 ## JavaScript Scope
 
@@ -167,12 +166,12 @@ Current JS support is intentionally small:
 - `document.createElement(...)`
 - `appendChild(...)` / `insertBefore(...)` / `remove()`
 - `innerHTML`, `textContent`, `classList`, `id`, `className`
-- `document.addEventListener(...)` / bubbling for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`
+- `document.addEventListener(...)` / capture + bubbling for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`
 - `focus` / `blur` are currently target-only
-- `addEventListener(...)` on page inputs, buttons, links, and forms
-- `click`, `focus`, `blur`, `input`, `change`, `submit`, `keydown`, and `keyup` event dispatch
+- `addEventListener(...)` / `removeEventListener(...)` on page inputs, buttons, links, forms, and document nodes
+- `click`, `focus`, `blur`, `input`, `change`, `submit`, `keydown`, and `keyup` event dispatch, including `once` listeners and capture-phase listeners
 - `location.href`
 - `console.log()` / `warn()` / `error()`
 - immediate `setTimeout(...)` fallback
 
-It still does not implement a full browser DOM, robust keyboard events, async networking, live `input.value` reflection for every GUI edit path, or framework-level browser APIs.
+It still does not implement a full browser DOM, passive listener semantics, async networking, live `input.value` reflection for every GUI edit path, or framework-level browser APIs.

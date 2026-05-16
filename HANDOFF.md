@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `103` passing tests on `2026-05-16`
+  - `cargo test`: `106` passing tests on `2026-05-16`
   - `cargo build`: success on `2026-05-16`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -51,6 +51,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - page keyboard events:
     - focused page inputs receive bubbling `keydown` / `keyup`
     - key metadata includes `key`, `code`, modifier flags, and `repeat`
+  - page event listeners now support capture + bubbling, plus `once` listeners and capture-sensitive `removeEventListener(...)`
   - guarded JavaScript execution through `boa_engine`
   - lightweight mutable DOM bridge with:
     - `querySelector(...)`, `querySelectorAll(...)`, `getElementById(...)`
@@ -97,6 +98,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 - `6981cea` dedicated codex worktree setup documentation complete
 - `c64f16a` event listener capture groundwork complete
+- `d864ed6` codex branch switch handoff update complete
 - `5952827` page form controls feature implementation complete
 - `c5266c1` copilot review round two fixes complete
 - `8cb6455` copilot followup cleanup fixes complete
@@ -109,7 +111,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 ## Known Gaps / Likely Next Work
 
 - JS support is still far from a full browser DOM / framework runtime.
-- GUI-to-page event delivery now covers bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; capture-phase behavior and richer listener options still need depth.
+- GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics and the rest of the option matrix still need depth.
 - Native page input typing now syncs `value` into the JS DOM, but a few edge cases still need validation.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward behavior is not yet complete.
@@ -209,3 +211,9 @@ git worktree list
 
 - Moved Codex work from `codex/codex` to a fresh branch, `codex/js-event-capture`, so the next JS/event slice can continue cleanly after the previous merge.
 - Keep future Codex implementation work on this branch unless the user explicitly asks to switch again.
+
+### 2026-05-16 - Codex (capture listener groundwork)
+
+- Added capture-phase dispatch and `once` listener support to the DOM event bridge for ordinary page controls.
+- Added regression tests for capture order, once-listener removal, and capture-sensitive `removeEventListener(...)`.
+- Updated the roadmap, README, and event demo copy so the next session starts from the current event semantics instead of the pre-capture baseline.

@@ -2060,18 +2060,9 @@ fn event_listener_options_from_value(
     }
 
     if let Some(object) = value.as_object() {
-        let capture = object
-            .get(js_string!("capture"), context)
-            .unwrap_or_else(|_| JsValue::undefined())
-            .to_boolean();
-        let once = object
-            .get(js_string!("once"), context)
-            .unwrap_or_else(|_| JsValue::undefined())
-            .to_boolean();
-        let passive = object
-            .get(js_string!("passive"), context)
-            .unwrap_or_else(|_| JsValue::undefined())
-            .to_boolean();
+        let capture = object.get(js_string!("capture"), context)?.to_boolean();
+        let once = object.get(js_string!("once"), context)?.to_boolean();
+        let passive = object.get(js_string!("passive"), context)?.to_boolean();
         return Ok(EventListenerOptions {
             capture,
             once,
@@ -4945,6 +4936,117 @@ mod tests {
             result.snapshot.title_override.as_deref(),
             Some("keydown|a|KeyA|false|false")
         );
+    }
+
+    #[test]
+    fn dispatches_dom_events_in_capture_target_and_bubble_order() {
+        let mut runtime = JavaScriptRuntime::new(
+            &Url::parse("https://example.com").unwrap(),
+            "<html><body><div id=\"outer\"><button id=\"inner\">Go</button></div><script>var order = []; var outer = document.getElementById('outer'); var inner = document.getElementById('inner'); function record(label) { order.push(label); document.title = order.join('|'); } outer.addEventListener('click', function () { record('outer-capture'); }, true); outer.addEventListener('click', function () { record('outer-bubble'); }); inner.addEventListener('click', function () { record('inner-capture'); }, true); inner.addEventListener('click', function () { record('inner-bubble'); }); inner.addEventListener('click', function () { record('once'); }, { once: true });</script></body></html>",
+        );
+        runtime.process_loaded_document();
+        runtime.dispatch_initial_load_events();
+
+        let button_id = {
+            let host = runtime
+                .context
+                .get_data::<super::JavaScriptHostData>()
+                .unwrap();
+            let document_id = {
+                let state = host.state.borrow();
+                state.dom.document_id
+            };
+            let state = host.state.borrow();
+            state.dom.find_first_tag(document_id, "button").unwrap()
+        };
+
+        let result = runtime.dispatch_dom_event(DomEventRequest {
+            target_node_id: button_id,
+            event_type: "click".to_string(),
+            bubbles: true,
+            cancelable: true,
+            ..Default::default()
+        });
+
+        assert!(!result.default_prevented);
+        assert_eq!(
+            result.snapshot.title_override.as_deref(),
+            Some("outer-capture|inner-capture|inner-bubble|once|outer-bubble")
+        );
+    }
+
+    #[test]
+    fn once_event_listeners_are_removed_after_first_dispatch() {
+        let mut runtime = JavaScriptRuntime::new(
+            &Url::parse("https://example.com").unwrap(),
+            "<html><body><button id=\"inner\">Go</button><script>var count = 0; var inner = document.getElementById('inner'); inner.addEventListener('click', function () { count += 1; document.title = String(count); }, { once: true });</script></body></html>",
+        );
+        runtime.process_loaded_document();
+        runtime.dispatch_initial_load_events();
+
+        let button_id = {
+            let host = runtime
+                .context
+                .get_data::<super::JavaScriptHostData>()
+                .unwrap();
+            let document_id = {
+                let state = host.state.borrow();
+                state.dom.document_id
+            };
+            let state = host.state.borrow();
+            state.dom.find_first_tag(document_id, "button").unwrap()
+        };
+
+        let first = runtime.dispatch_dom_event(DomEventRequest {
+            target_node_id: button_id,
+            event_type: "click".to_string(),
+            bubbles: true,
+            cancelable: true,
+            ..Default::default()
+        });
+        assert_eq!(first.snapshot.title_override.as_deref(), Some("1"));
+
+        let second = runtime.dispatch_dom_event(DomEventRequest {
+            target_node_id: button_id,
+            event_type: "click".to_string(),
+            bubbles: true,
+            cancelable: true,
+            ..Default::default()
+        });
+        assert_eq!(second.snapshot.title_override.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn remove_event_listener_respects_capture_flag() {
+        let mut runtime = JavaScriptRuntime::new(
+            &Url::parse("https://example.com").unwrap(),
+            "<html><body><button id=\"inner\">Go</button><script>var count = 0; var inner = document.getElementById('inner'); function record() { count += 1; document.title = String(count); } inner.addEventListener('click', record, true); inner.removeEventListener('click', record, false);</script></body></html>",
+        );
+        runtime.process_loaded_document();
+        runtime.dispatch_initial_load_events();
+
+        let button_id = {
+            let host = runtime
+                .context
+                .get_data::<super::JavaScriptHostData>()
+                .unwrap();
+            let document_id = {
+                let state = host.state.borrow();
+                state.dom.document_id
+            };
+            let state = host.state.borrow();
+            state.dom.find_first_tag(document_id, "button").unwrap()
+        };
+
+        let result = runtime.dispatch_dom_event(DomEventRequest {
+            target_node_id: button_id,
+            event_type: "click".to_string(),
+            bubbles: true,
+            cancelable: true,
+            ..Default::default()
+        });
+
+        assert_eq!(result.snapshot.title_override.as_deref(), Some("1"));
     }
 
     #[test]

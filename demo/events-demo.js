@@ -31,6 +31,7 @@ function describeEvent(event) {
     `type=${event.type}`,
     `target=${nodeLabel(event.target)}`,
     `current=${nodeLabel(event.currentTarget)}`,
+    `phase=${event.eventPhase}`,
     `defaultPrevented=${event.defaultPrevented}`,
   ];
 
@@ -75,6 +76,14 @@ document.addEventListener("click", (event) => {
   record("document", event);
 });
 
+document.addEventListener(
+  "click",
+  (event) => {
+    record("document-capture", event);
+  },
+  true,
+);
+
 document.addEventListener("submit", (event) => {
   record("document", event);
 });
@@ -110,6 +119,14 @@ input.addEventListener("keydown", (event) => {
 input.addEventListener("keyup", (event) => {
   record("input", event);
 });
+
+input.addEventListener(
+  "click",
+  (event) => {
+    record("input-once", event);
+  },
+  { once: true },
+);
 
 submit.addEventListener("click", (event) => {
   record("submit", event);

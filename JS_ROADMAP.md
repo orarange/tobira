@@ -19,7 +19,7 @@ Already working:
 - inline and external scripts
 - recursive `document.write(...)`
 - lightweight DOM mutation helpers
-- basic DOM event plumbing for bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`
+- basic DOM event plumbing for capture + bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`
 - `Promise` job flushing
 - guarded `fetch(...)` and `XMLHttpRequest`
 - same-origin navigation checks
@@ -28,9 +28,7 @@ Already working:
 
 Still missing or shallow:
 
-- `removeEventListener(...)`
-- keyboard events such as `keydown` and `keyup`
-- capture phase / richer listener options
+- passive listener semantics and the rest of the richer listener option matrix
 - tighter alignment between GUI text editing and live DOM `input.value`
 - storage and cookies
 - richer networking semantics
@@ -45,22 +43,22 @@ Goal: make page interaction feel like a browser, not a custom app.
 Tasks:
 
 - `addEventListener(...)` and basic listener registration are in place
-- basic bubbling exists for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`; `focus` and `blur` are target-only
+- basic capture + bubbling exists for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`; `focus` and `blur` are target-only
 - page controls now dispatch DOM events before default actions
 - submit and link clicks can be canceled with `preventDefault()`
 
 Still to finish in this phase:
 
-- capture phase / richer listener options
+- passive listener semantics and the rest of the richer listener option matrix
 - live GUI typing synchronized into script-visible DOM state in every edit path
 - more complete default-action sequencing for edge cases
-- `removeEventListener(...)` parity for more option combinations
 
 Exit criteria:
 
 - simple JS-driven buttons and forms work without special-case browser code
 - page scripts can observe user typing and clicks
 - Google-style search boxes can react to input, submit, and keyboard handlers
+- capture-phase and once listeners behave like the browser for the common page-control cases
 
 ## Phase 2: DOM Fidelity
 
