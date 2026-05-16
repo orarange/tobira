@@ -226,6 +226,26 @@ struct XmlHttpRequestState {
     response_url: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct EventListenerOptions {
+    capture: bool,
+    once: bool,
+    passive: bool,
+}
+
+#[derive(Debug, Clone)]
+struct EventListenerEntry {
+    callback: JsValue,
+    options: EventListenerOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventDispatchPhase {
+    Capturing = 1,
+    AtTarget = 2,
+    Bubbling = 3,
+}
+
 pub fn process_document_scripts(html: &str, base_url: &Url) -> ProcessedScriptHtml {
     let (processed, session) = start_document_script_session(html, base_url);
     drop(session);
@@ -605,8 +625,20 @@ impl JavaScriptRuntime {
             &target,
             &event_type.to_ascii_lowercase(),
             &event,
+            true,
+            EventDispatchPhase::AtTarget,
             &mut self.context,
         )?;
+        if !event_flag_value(&event, "immediatePropagationStopped", &mut self.context) {
+            dispatch_listeners_on_target(
+                &target,
+                &event_type.to_ascii_lowercase(),
+                &event,
+                false,
+                EventDispatchPhase::AtTarget,
+                &mut self.context,
+            )?;
+        }
         Ok(event_flag_value(
             &event,
             "defaultPrevented",
@@ -1533,7 +1565,7 @@ fn install_browser_globals(context: &mut Context) {
         2,
     )
     .function(
-        NativeFunction::from_fn_ptr(js_noop),
+        NativeFunction::from_fn_ptr(js_remove_event_listener),
         js_string!("removeEventListener"),
         2,
     )
@@ -1930,6 +1962,19 @@ fn build_event_listener_list_stub(context: &mut Context) -> boa_engine::object::
         .build()
 }
 
+fn build_event_listener_record(
+    context: &mut Context,
+    callback: JsValue,
+    options: &EventListenerOptions,
+) -> boa_engine::object::JsObject {
+    ObjectInitializer::new(context)
+        .property(js_string!("callback"), callback, Attribute::all())
+        .property(js_string!("capture"), options.capture, Attribute::all())
+        .property(js_string!("once"), options.once, Attribute::all())
+        .property(js_string!("passive"), options.passive, Attribute::all())
+        .build()
+}
+
 fn dom_node_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObject> {
     let global = context.global_object();
     let cache_key = js_string!("__tobiraDomNodeCache");
@@ -2002,6 +2047,45 @@ fn hidden_event_listener_list(
     Ok(list)
 }
 
+fn event_listener_options_from_value(
+    value: Option<&JsValue>,
+    context: &mut Context,
+) -> JsResult<EventListenerOptions> {
+    let Some(value) = value else {
+        return Ok(EventListenerOptions::default());
+    };
+
+    if value.is_undefined() || value.is_null() {
+        return Ok(EventListenerOptions::default());
+    }
+
+    if let Some(object) = value.as_object() {
+        let capture = object
+            .get(js_string!("capture"), context)
+            .unwrap_or_else(|_| JsValue::undefined())
+            .to_boolean();
+        let once = object
+            .get(js_string!("once"), context)
+            .unwrap_or_else(|_| JsValue::undefined())
+            .to_boolean();
+        let passive = object
+            .get(js_string!("passive"), context)
+            .unwrap_or_else(|_| JsValue::undefined())
+            .to_boolean();
+        return Ok(EventListenerOptions {
+            capture,
+            once,
+            passive,
+        });
+    }
+
+    Ok(EventListenerOptions {
+        capture: value.to_boolean(),
+        once: false,
+        passive: false,
+    })
+}
+
 fn is_same_js_callback(lhs: &JsValue, rhs: &JsValue) -> bool {
     match (lhs.as_object(), rhs.as_object()) {
         (Some(lhs), Some(rhs)) => boa_engine::object::JsObject::equals(&lhs, &rhs),
@@ -2013,6 +2097,7 @@ fn append_event_listener(
     target: &boa_engine::object::JsObject,
     event_name: &str,
     callback: JsValue,
+    options: EventListenerOptions,
     context: &mut Context,
 ) -> JsResult<()> {
     let list = hidden_event_listener_list(target, event_name, context)?;
@@ -2021,12 +2106,26 @@ fn append_event_listener(
         .to_length(context)? as usize;
     for index in 0..length {
         let existing = list.get(js_string!(index.to_string()), context)?;
-        if is_same_js_callback(&existing, &callback) {
+        let Some(existing_record) = existing.as_object() else {
+            continue;
+        };
+        let existing_callback = existing_record.get(js_string!("callback"), context)?;
+        let existing_capture = existing_record
+            .get(js_string!("capture"), context)
+            .unwrap_or_else(|_| JsValue::undefined())
+            .to_boolean();
+        if existing_capture == options.capture && is_same_js_callback(&existing_callback, &callback)
+        {
             return Ok(());
         }
     }
 
-    list.set(js_string!(length.to_string()), callback, true, context)?;
+    list.set(
+        js_string!(length.to_string()),
+        JsValue::from(build_event_listener_record(context, callback, &options)),
+        true,
+        context,
+    )?;
     list.set(
         js_string!("length"),
         JsValue::new((length + 1) as i32),
@@ -2040,6 +2139,7 @@ fn remove_event_listener(
     target: &boa_engine::object::JsObject,
     event_name: &str,
     callback: &JsValue,
+    capture: bool,
     context: &mut Context,
 ) -> JsResult<()> {
     let store = hidden_event_listener_store(target, context)?;
@@ -2055,7 +2155,16 @@ fn remove_event_listener(
     let mut retained = Vec::new();
     for index in 0..length {
         let value = list.get(js_string!(index.to_string()), context)?;
-        if !is_same_js_callback(&value, callback) {
+        let Some(record) = value.as_object() else {
+            retained.push(value);
+            continue;
+        };
+        let record_callback = record.get(js_string!("callback"), context)?;
+        let record_capture = record
+            .get(js_string!("capture"), context)
+            .unwrap_or_else(|_| JsValue::undefined())
+            .to_boolean();
+        if record_capture != capture || !is_same_js_callback(&record_callback, callback) {
             retained.push(value);
         }
     }
@@ -2075,11 +2184,11 @@ fn remove_event_listener(
     Ok(())
 }
 
-fn event_listener_callbacks(
+fn event_listener_entries(
     target: &boa_engine::object::JsObject,
     event_name: &str,
     context: &mut Context,
-) -> JsResult<Vec<JsValue>> {
+) -> JsResult<Vec<EventListenerEntry>> {
     let store = hidden_event_listener_store(target, context)?;
     let key = js_string!(event_name);
     let existing = store.get(key, context)?;
@@ -2090,11 +2199,30 @@ fn event_listener_callbacks(
     let length = list
         .get(js_string!("length"), context)?
         .to_length(context)? as usize;
-    let mut callbacks = Vec::with_capacity(length);
+    let mut entries = Vec::with_capacity(length);
     for index in 0..length {
-        callbacks.push(list.get(js_string!(index.to_string()), context)?);
+        let value = list.get(js_string!(index.to_string()), context)?;
+        let Some(record) = value.as_object() else {
+            continue;
+        };
+        let callback = record.get(js_string!("callback"), context)?;
+        let options = EventListenerOptions {
+            capture: record
+                .get(js_string!("capture"), context)
+                .unwrap_or_else(|_| JsValue::undefined())
+                .to_boolean(),
+            once: record
+                .get(js_string!("once"), context)
+                .unwrap_or_else(|_| JsValue::undefined())
+                .to_boolean(),
+            passive: record
+                .get(js_string!("passive"), context)
+                .unwrap_or_else(|_| JsValue::undefined())
+                .to_boolean(),
+        };
+        entries.push(EventListenerEntry { callback, options });
     }
-    Ok(callbacks)
+    Ok(entries)
 }
 
 fn build_dom_event_object(
@@ -2129,6 +2257,7 @@ fn build_dom_event_object(
             request.cancelable,
             Attribute::all(),
         )
+        .property(js_string!("eventPhase"), 0, Attribute::all())
         .property(js_string!("defaultPrevented"), false, Attribute::all())
         .property(js_string!("cancelBubble"), false, Attribute::all())
         .property(js_string!("propagationStopped"), false, Attribute::all())
@@ -2298,16 +2427,6 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             NativeFunction::from_fn_ptr(js_dom_remove_attribute),
             js_string!("removeAttribute"),
             1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_add_event_listener),
-            js_string!("addEventListener"),
-            2,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_remove_event_listener),
-            js_string!("removeEventListener"),
-            2,
         )
         .function(
             NativeFunction::from_fn_ptr(js_dom_dispatch_event),
@@ -3476,7 +3595,8 @@ fn js_add_event_listener(
     if callback.as_object().is_none() {
         return Ok(JsValue::undefined());
     }
-    append_event_listener(&target, &event_name, callback, context)?;
+    let options = event_listener_options_from_value(args.get(2), context)?;
+    append_event_listener(&target, &event_name, callback, options, context)?;
 
     Ok(JsValue::undefined())
 }
@@ -3498,7 +3618,8 @@ fn js_remove_event_listener(
     let Some(target) = this.as_object() else {
         return Ok(JsValue::undefined());
     };
-    remove_event_listener(&target, &event_name, callback, context)?;
+    let options = event_listener_options_from_value(args.get(2), context)?;
+    remove_event_listener(&target, &event_name, callback, options.capture, context)?;
     Ok(JsValue::undefined())
 }
 
@@ -4369,23 +4490,78 @@ fn set_event_current_target(
     Ok(())
 }
 
+fn set_event_phase(
+    event: &boa_engine::object::JsObject,
+    phase: EventDispatchPhase,
+    context: &mut Context,
+) -> JsResult<()> {
+    event.set(
+        js_string!("eventPhase"),
+        JsValue::new(phase as i32),
+        true,
+        context,
+    )?;
+    Ok(())
+}
+
 fn dispatch_listeners_on_target(
     target: &boa_engine::object::JsObject,
     event_type: &str,
     event: &boa_engine::object::JsObject,
+    capture_phase: bool,
+    phase: EventDispatchPhase,
     context: &mut Context,
 ) -> JsResult<()> {
-    let callbacks = event_listener_callbacks(target, event_type, context)?;
+    set_event_phase(event, phase, context)?;
+    let entries = event_listener_entries(target, event_type, context)?;
     let target_value = JsValue::from(target.clone());
     let event_value = JsValue::from(event.clone());
-    for callback in callbacks {
-        let _ =
-            call_js_callback_with_this(&callback, &target_value, &[event_value.clone()], context);
+    for entry in entries {
+        if entry.options.capture != capture_phase {
+            continue;
+        }
+        let _ = call_js_callback_with_this(
+            &entry.callback,
+            &target_value,
+            &[event_value.clone()],
+            context,
+        );
+        if entry.options.once {
+            let _ = remove_event_listener(
+                target,
+                event_type,
+                &entry.callback,
+                entry.options.capture,
+                context,
+            );
+        }
         if event_flag_value(event, "immediatePropagationStopped", context) {
             break;
         }
     }
     Ok(())
+}
+
+fn dom_event_path(node_id: usize, context: &mut Context) -> Vec<usize> {
+    let mut path = vec![node_id];
+    let mut current = node_id;
+
+    loop {
+        let Some(parent_id) = context.get_data::<JavaScriptHostData>().and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .node(current)
+                .and_then(|node| node.parent)
+        }) else {
+            break;
+        };
+        path.push(parent_id);
+        current = parent_id;
+    }
+
+    path.reverse();
+    path
 }
 
 fn dispatch_dom_event_on_target(
@@ -4395,35 +4571,102 @@ fn dispatch_dom_event_on_target(
 ) -> JsResult<bool> {
     let event = build_dom_event_object(context, request, &target);
     let listener_event_type = request.event_type.to_ascii_lowercase();
-    let mut current_target = target;
-    let mut current_id = current_target
+    if let Some(target_node_id) = target
         .downcast_ref::<DomNodeHandle>()
-        .map(|handle| handle.node_id);
+        .map(|handle| handle.node_id)
+    {
+        let path = dom_event_path(target_node_id, context);
+        let ancestors = path
+            .len()
+            .checked_sub(1)
+            .map(|end| &path[..end])
+            .unwrap_or(&[]);
 
-    loop {
-        set_event_current_target(&event, &current_target, context)?;
-        dispatch_listeners_on_target(&current_target, &listener_event_type, &event, context)?;
-        if event_flag_value(&event, "immediatePropagationStopped", context)
-            || event_flag_value(&event, "propagationStopped", context)
-            || !request.bubbles
-        {
-            break;
+        for ancestor_id in ancestors.iter().copied() {
+            let current_target = build_dom_node_object(context, ancestor_id);
+            set_event_current_target(&event, &current_target, context)?;
+            dispatch_listeners_on_target(
+                &current_target,
+                &listener_event_type,
+                &event,
+                true,
+                EventDispatchPhase::Capturing,
+                context,
+            )?;
+            if event_flag_value(&event, "immediatePropagationStopped", context)
+                || event_flag_value(&event, "propagationStopped", context)
+            {
+                return Ok(event_flag_value(&event, "defaultPrevented", context));
+            }
         }
 
-        let Some(node_id) = current_id else {
-            break;
-        };
-        let Some(parent_id) = context.get_data::<JavaScriptHostData>().and_then(|host| {
-            host.state
-                .borrow()
-                .dom
-                .node(node_id)
-                .and_then(|node| node.parent)
-        }) else {
-            break;
-        };
-        current_id = Some(parent_id);
-        current_target = build_dom_node_object(context, parent_id);
+        let current_target = target.clone();
+        set_event_current_target(&event, &current_target, context)?;
+        dispatch_listeners_on_target(
+            &current_target,
+            &listener_event_type,
+            &event,
+            true,
+            EventDispatchPhase::AtTarget,
+            context,
+        )?;
+        if event_flag_value(&event, "immediatePropagationStopped", context) {
+            return Ok(event_flag_value(&event, "defaultPrevented", context));
+        }
+        dispatch_listeners_on_target(
+            &current_target,
+            &listener_event_type,
+            &event,
+            false,
+            EventDispatchPhase::AtTarget,
+            context,
+        )?;
+        if event_flag_value(&event, "immediatePropagationStopped", context)
+            || event_flag_value(&event, "propagationStopped", context)
+        {
+            return Ok(event_flag_value(&event, "defaultPrevented", context));
+        }
+
+        if request.bubbles {
+            for ancestor_id in ancestors.iter().rev().copied() {
+                let current_target = build_dom_node_object(context, ancestor_id);
+                set_event_current_target(&event, &current_target, context)?;
+                dispatch_listeners_on_target(
+                    &current_target,
+                    &listener_event_type,
+                    &event,
+                    false,
+                    EventDispatchPhase::Bubbling,
+                    context,
+                )?;
+                if event_flag_value(&event, "immediatePropagationStopped", context)
+                    || event_flag_value(&event, "propagationStopped", context)
+                {
+                    break;
+                }
+            }
+        }
+    } else {
+        let current_target = target.clone();
+        set_event_current_target(&event, &current_target, context)?;
+        dispatch_listeners_on_target(
+            &current_target,
+            &listener_event_type,
+            &event,
+            true,
+            EventDispatchPhase::AtTarget,
+            context,
+        )?;
+        if !event_flag_value(&event, "immediatePropagationStopped", context) {
+            dispatch_listeners_on_target(
+                &current_target,
+                &listener_event_type,
+                &event,
+                false,
+                EventDispatchPhase::AtTarget,
+                context,
+            )?;
+        }
     }
 
     Ok(event_flag_value(&event, "defaultPrevented", context))
