@@ -83,6 +83,8 @@ pub fn run(initial_url: Option<Url>) -> Result<()> {
 
 struct BrowserApp {
     current_url: Option<Url>,
+    history: Vec<Url>,
+    history_index: Option<usize>,
     document: DocumentView,
     fonts: FontContext,
     context: Context<OwnedDisplayHandle>,
@@ -101,21 +103,23 @@ struct BrowserApp {
 
 impl BrowserApp {
     fn new(initial_url: Option<Url>, context: Context<OwnedDisplayHandle>) -> Self {
-        let (current_url, document, address_bar) = match initial_url {
+        let (current_url, history, history_index, document, address_bar) = match initial_url {
             Some(url) => {
                 let document = DocumentView::load(url.clone());
                 let address_bar = AddressBarState::new(url.to_string());
-                (Some(url), document, address_bar)
+                (Some(url.clone()), vec![url], Some(0), document, address_bar)
             }
             None => {
                 let mut address_bar = AddressBarState::new(String::new());
                 address_bar.focus_at(0);
-                (None, DocumentView::blank(), address_bar)
+                (None, Vec::new(), None, DocumentView::blank(), address_bar)
             }
         };
 
         Self {
             current_url,
+            history,
+            history_index,
             document,
             fonts: FontContext::load(),
             context,
@@ -134,15 +138,8 @@ impl BrowserApp {
     }
 
     fn load_url(&mut self, url: Url) {
-        self.document = DocumentView::load(url.clone());
-        self.current_url = Some(url.clone());
-        self.address_bar.set_text(url.to_string());
-        self.address_bar.blur();
-        self.clear_page_control_state();
-        self.scroll_y = 0;
-        self.sync_window_title();
-        self.sync_input_method();
-        self.request_redraw();
+        self.record_history_visit(url.clone());
+        self.load_document(url);
     }
 
     fn reload(&mut self) {
@@ -154,14 +151,7 @@ impl BrowserApp {
             return;
         };
 
-        self.document = DocumentView::load(url.clone());
-        self.current_url = Some(url.clone());
-        self.address_bar.set_text(url.to_string());
-        self.clear_page_control_state();
-        self.scroll_y = 0;
-        self.sync_window_title();
-        self.sync_input_method();
-        self.request_redraw();
+        self.load_document(url);
     }
 
     fn navigate_to_address(&mut self) {
@@ -187,6 +177,90 @@ impl BrowserApp {
                 self.request_redraw();
             }
         }
+    }
+
+    fn go_back(&mut self) {
+        self.navigate_history(-1);
+    }
+
+    fn go_forward(&mut self) {
+        self.navigate_history(1);
+    }
+
+    fn can_go_back(&self) -> bool {
+        self.history_index.is_some_and(|index| index > 0)
+    }
+
+    fn can_go_forward(&self) -> bool {
+        self.history_index
+            .is_some_and(|index| index.saturating_add(1) < self.history.len())
+    }
+
+    fn record_history_visit(&mut self, url: Url) {
+        match self.history_index {
+            Some(index) => {
+                if self
+                    .history
+                    .get(index)
+                    .is_some_and(|current| current == &url)
+                {
+                    return;
+                }
+                let next_index = index.saturating_add(1);
+                self.history.truncate(next_index);
+                self.history.push(url);
+                self.history_index = self.history.len().checked_sub(1);
+            }
+            None => {
+                self.history.clear();
+                self.history.push(url);
+                self.history_index = Some(0);
+            }
+        }
+    }
+
+    fn replace_current_history_entry(&mut self, url: Url) {
+        match self.history_index {
+            Some(index) => {
+                if let Some(entry) = self.history.get_mut(index) {
+                    *entry = url;
+                } else {
+                    self.history.push(url);
+                    self.history_index = Some(self.history.len().saturating_sub(1));
+                }
+            }
+            None => {
+                self.history.clear();
+                self.history.push(url);
+                self.history_index = Some(0);
+            }
+        }
+    }
+
+    fn navigate_history(&mut self, delta: isize) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+        let next = index as isize + delta;
+        if next < 0 || next as usize >= self.history.len() {
+            return;
+        }
+        let next_index = next as usize;
+        let url = self.history[next_index].clone();
+        self.history_index = Some(next_index);
+        self.load_document(url);
+    }
+
+    fn load_document(&mut self, url: Url) {
+        self.document = DocumentView::load(url.clone());
+        self.current_url = Some(url.clone());
+        self.address_bar.set_text(url.to_string());
+        self.address_bar.blur();
+        self.clear_page_control_state();
+        self.scroll_y = 0;
+        self.sync_window_title();
+        self.sync_input_method();
+        self.request_redraw();
     }
 
     fn focus_address_bar(&mut self, char_index: usize) {
@@ -329,6 +403,8 @@ impl BrowserApp {
         }
 
         let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
+        let can_go_back = self.can_go_back();
+        let can_go_forward = self.can_go_forward();
         let body_top = chrome.height + FRAME_PADDING;
         let content_width = size.width.saturating_sub(FRAME_PADDING * 2).max(1);
         let viewport_height = size.height.saturating_sub(body_top + FRAME_PADDING).max(1);
@@ -367,6 +443,8 @@ impl BrowserApp {
             &self.document,
             &self.address_bar,
             self.hovered_target,
+            can_go_back,
+            can_go_forward,
             self.scroll_y,
             max_scroll_y,
         );
@@ -509,6 +587,12 @@ impl BrowserApp {
         if chrome.close_button.contains(position) {
             return HitTarget::Button(ChromeButton::Close);
         }
+        if chrome.back_button.contains(position) {
+            return HitTarget::Button(ChromeButton::Back);
+        }
+        if chrome.forward_button.contains(position) {
+            return HitTarget::Button(ChromeButton::Forward);
+        }
         if chrome.reload_button.contains(position) {
             return HitTarget::Button(ChromeButton::Reload);
         }
@@ -537,6 +621,20 @@ impl BrowserApp {
         window_size: PhysicalSize<u32>,
         repeat: bool,
     ) -> bool {
+        if !repeat && self.modifiers.alt_key() && !self.modifiers.control_key() {
+            match key_code {
+                KeyCode::ArrowLeft => {
+                    self.go_back();
+                    return false;
+                }
+                KeyCode::ArrowRight => {
+                    self.go_forward();
+                    return false;
+                }
+                _ => {}
+            }
+        }
+
         if self.address_bar.focused {
             let control = self.modifiers.control_key();
             let shift = self.modifiers.shift_key();
@@ -1002,6 +1100,7 @@ impl BrowserApp {
         {
             self.current_url = Some(url.clone());
             self.address_bar.set_text(url.to_string());
+            self.replace_current_history_entry(url);
         }
 
         self.document.sync_from_loaded_page();
@@ -1368,11 +1467,14 @@ impl BrowserApp {
             return false;
         };
         match button {
+            ChromeButton::Back if self.can_go_back() => self.go_back(),
+            ChromeButton::Forward if self.can_go_forward() => self.go_forward(),
             ChromeButton::Reload => self.reload(),
             ChromeButton::Navigate => self.navigate_to_address(),
             ChromeButton::Minimize => window.set_minimized(true),
             ChromeButton::ToggleMaximize => window.set_maximized(!window.is_maximized()),
             ChromeButton::Close => return true,
+            _ => {}
         }
 
         false
@@ -2001,6 +2103,8 @@ enum HitTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChromeButton {
+    Back,
+    Forward,
     Reload,
     Navigate,
     Minimize,
@@ -2034,6 +2138,8 @@ struct ChromeLayoutMetrics {
     height: u32,
     title_bar: Rect,
     drag_region: Rect,
+    back_button: Rect,
+    forward_button: Rect,
     reload_button: Rect,
     address_bar: Rect,
     go_button: Rect,
@@ -2078,8 +2184,20 @@ fn chrome_layout_metrics(fonts: &mut FontContext, window_width: u32) -> ChromeLa
     };
 
     let address_y = title_y.saturating_add(TITLE_BAR_HEIGHT + CHROME_ROW_GAP);
-    let reload_button = Rect {
+    let back_button = Rect {
         x: FRAME_PADDING,
+        y: address_y,
+        width: TOOL_BUTTON_WIDTH,
+        height: ADDRESS_BAR_HEIGHT,
+    };
+    let forward_button = Rect {
+        x: back_button.right().saturating_add(BUTTON_GAP),
+        y: address_y,
+        width: TOOL_BUTTON_WIDTH,
+        height: ADDRESS_BAR_HEIGHT,
+    };
+    let reload_button = Rect {
+        x: forward_button.right().saturating_add(BUTTON_GAP),
         y: address_y,
         width: TOOL_BUTTON_WIDTH,
         height: ADDRESS_BAR_HEIGHT,
@@ -2116,6 +2234,8 @@ fn chrome_layout_metrics(fonts: &mut FontContext, window_width: u32) -> ChromeLa
             width: minimize_button.x.saturating_sub(FRAME_PADDING + 8),
             height: TITLE_BAR_HEIGHT,
         },
+        back_button,
+        forward_button,
         reload_button,
         address_bar,
         go_button,
@@ -2568,6 +2688,8 @@ fn paint_chrome(
     document: &DocumentView,
     address_bar: &AddressBarState,
     hovered_target: HitTarget,
+    can_go_back: bool,
+    can_go_forward: bool,
     scroll_y: u32,
     max_scroll_y: u32,
 ) {
@@ -2670,10 +2792,33 @@ fn paint_chrome(
         buffer,
         width,
         height,
+        chrome.back_button,
+        "←",
+        hovered_target == HitTarget::Button(ChromeButton::Back),
+        false,
+        can_go_back,
+    );
+    paint_button(
+        fonts,
+        buffer,
+        width,
+        height,
+        chrome.forward_button,
+        "→",
+        hovered_target == HitTarget::Button(ChromeButton::Forward),
+        false,
+        can_go_forward,
+    );
+    paint_button(
+        fonts,
+        buffer,
+        width,
+        height,
         chrome.reload_button,
         "R",
         hovered_target == HitTarget::Button(ChromeButton::Reload),
         false,
+        true,
     );
     paint_button(
         fonts,
@@ -2684,6 +2829,7 @@ fn paint_chrome(
         "GO",
         hovered_target == HitTarget::Button(ChromeButton::Navigate),
         false,
+        true,
     );
     paint_button(
         fonts,
@@ -2694,6 +2840,7 @@ fn paint_chrome(
         "-",
         hovered_target == HitTarget::Button(ChromeButton::Minimize),
         false,
+        true,
     );
     paint_button(
         fonts,
@@ -2704,6 +2851,7 @@ fn paint_chrome(
         "[]",
         hovered_target == HitTarget::Button(ChromeButton::ToggleMaximize),
         false,
+        true,
     );
     paint_button(
         fonts,
@@ -2713,6 +2861,7 @@ fn paint_chrome(
         chrome.close_button,
         "X",
         hovered_target == HitTarget::Button(ChromeButton::Close),
+        true,
         true,
     );
 
@@ -2922,8 +3071,11 @@ fn paint_button(
     label: &str,
     hovered: bool,
     destructive: bool,
+    enabled: bool,
 ) {
-    let color = if destructive {
+    let color = if !enabled {
+        COLOR_HEADER_ROW
+    } else if destructive {
         if hovered {
             COLOR_CLOSE_BUTTON_HOVER
         } else {
@@ -2973,7 +3125,11 @@ fn paint_button(
         text_y,
         label,
         font_size,
-        COLOR_HEADER_TEXT,
+        if enabled {
+            COLOR_HEADER_TEXT
+        } else {
+            COLOR_HEADER_MUTED
+        },
         true,
         false,
         FontFamilyKind::Sans,

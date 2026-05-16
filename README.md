@@ -37,6 +37,7 @@ Current capabilities:
 - System font rendering with TrueType / OpenType fonts via `fontdue`
 - Plain text CLI renderer with `--cli`
 - Custom title bar and address bar
+- Browser back/forward buttons and Alt+Left/Alt+Right history navigation
 - Clickable page links plus basic GUI form controls for `GET` submissions
 - Basic DOM event plumbing for page controls:
   - bubbling `click`, `input`, `change`, and `submit`
@@ -59,7 +60,8 @@ Still missing:
 
 - full CSS layout coverage
 - deeper DOM APIs and event coverage
-- tabs, history, and richer navigation UI
+- tabs and richer navigation UI
+- session-history replay polish across full document loads
 - POST forms, complex widgets, and modern app-shell browser APIs
 
 ## Run
@@ -128,6 +130,7 @@ cargo run -- http://127.0.0.1:8765/demo/storage-demo.html
 - `Ctrl+L`: focus the address bar
 - `Ctrl+A`: select all text in the address bar or a focused page input
 - `Ctrl+C` / `Ctrl+X` / `Ctrl+V`: copy, cut, and paste inside the address bar or a focused page input
+- `Alt+Left` / `Alt+Right`: browser back and forward
 - `Esc`: blur a focused page input, otherwise quit
 
 ## Project Structure

@@ -28,11 +28,12 @@ Already working:
 - native GUI form controls for `GET` submissions
 - passive listener semantics
 - `location.hash`, `history.pushState(...)`, `replaceState(...)`, `back()`, and `forward()` for same-document navigation
+- browser-level back/forward navigation across document loads
 
 Still missing or shallow:
 
 - richer networking semantics
-- session-history replay across full document loads
+- session-history replay polish across full document loads
 - async browser APIs that modern frameworks expect
 - rendering invalidation and layout reflow after DOM mutation
 
@@ -46,11 +47,13 @@ Tasks:
 - basic capture + bubbling exists for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`; `focus` and `blur` are target-only
 - page controls now dispatch DOM events before default actions
 - submit and link clicks can be canceled with `preventDefault()`
+- browser chrome back/forward navigation is now in place
 
 Still to finish in this phase:
 
 - finish the rest of the richer listener option matrix
 - more complete default-action sequencing for edge cases
+- session-history restoration for same-document states is still shallow
 
 Exit criteria:
 
@@ -85,7 +88,8 @@ Tasks:
 
 - cookie store with origin scoping is now in place
 - `localStorage` and `sessionStorage` are now in place
-- finish richer session-history replay across full document loads
+- browser history stack and back/forward UI are now in place for full document loads
+- finish replay polish for same-document states and scroll restoration
 - keep `location` updates and history state in sync
 - extend the current soft-navigation handling so it cooperates with browser history instead of only updating the current URL
 - support hash navigation and same-document scroll targets
@@ -93,7 +97,7 @@ Tasks:
 Exit criteria:
 
 - login-ish flows keep their session state via cookies / storage
-- back/forward works for same-document navigation and hash changes
+- back/forward works for same-document navigation, hash changes, and full document loads
 - sites that rely on history state stop losing context
 
 ## Phase 4: Networking Semantics

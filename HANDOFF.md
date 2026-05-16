@@ -69,6 +69,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - same-origin request and redirect guards
     - script-driven `location.href` follow-up navigation
     - origin-scoped `localStorage`, `sessionStorage`, and `document.cookie`
+  - browser chrome history controls for back/forward navigation across full document loads
   - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, keyboard event logging, and storage/cookies
   - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
   - site-specific rendering paths for:
@@ -119,7 +120,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics are in place, and `location.hash` plus `history.pushState(...)` / `replaceState(...)` now support soft navigation without a reload, while the rest of the option matrix and back/forward stack still need depth.
 - Native page input typing now syncs `value` into the JS DOM.
 - Framework-facing browser APIs still need a lot more depth.
-- History / back-forward behavior is not yet complete.
+- History / back-forward replay and scroll restoration still need depth.
 - Modern app-shell sites still need more DOM APIs, richer history replay, and CSS coverage.
 - CSS is still computed once up front instead of being rebuilt against the live window width.
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
@@ -240,3 +241,15 @@ git worktree list
 - Added origin-scoped `localStorage` and `sessionStorage` backed by shared site state.
 - Added `document.cookie` getter/setter behavior and request/response cookie propagation in the HTTP layer.
 - Added `demo/storage-demo.html` so storage and cookie state can be exercised manually.
+
+### 2026-05-16 - Codex (browser history back/forward)
+
+- Added browser-level history tracking for full document loads.
+- Added back/forward chrome buttons and `Alt+Left` / `Alt+Right` shortcuts.
+- Kept same-document soft navigation in sync with the browser history entry for the current page.
+
+### 2026-05-16 - Codex (browser history back/forward)
+
+- Added browser-level history tracking for full document loads.
+- Added back/forward chrome buttons and `Alt+Left` / `Alt+Right` shortcuts.
+- Kept same-document soft navigation in sync with the browser history entry for the current page.
