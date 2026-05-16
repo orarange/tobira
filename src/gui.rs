@@ -17,7 +17,9 @@ use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
 use crate::image::DecodedImage;
 use crate::js::{DomEventDispatchResult, DomEventRequest};
-use crate::layout::{FormControlCommand, FormControlKind, LayoutDocument, TextCommand, layout_styled_document};
+use crate::layout::{
+    FormControlCommand, FormControlKind, LayoutDocument, TextCommand, layout_styled_document,
+};
 use crate::url::Url;
 
 const WINDOW_WIDTH: u32 = 1100;
@@ -277,7 +279,10 @@ impl BrowserApp {
         let body_top = chrome.height + FRAME_PADDING;
         let content_width = size.width.saturating_sub(FRAME_PADDING * 2).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
-        let Some(control) = layout.controls.iter().find(|control| control.id == focused.control_id)
+        let Some(control) = layout
+            .controls
+            .iter()
+            .find(|control| control.id == focused.control_id)
         else {
             return;
         };
@@ -405,7 +410,10 @@ impl BrowserApp {
         (viewport_height, content_height)
     }
 
-    fn find_hovered_link(&mut self, window_size: PhysicalSize<u32>) -> Option<(String, Option<usize>)> {
+    fn find_hovered_link(
+        &mut self,
+        window_size: PhysicalSize<u32>,
+    ) -> Option<(String, Option<usize>)> {
         let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
         let body_top = chrome.height + FRAME_PADDING;
         let pos_x = self.cursor_position.x;
@@ -415,7 +423,9 @@ impl BrowserApp {
         }
         let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
-        let content_y = (pos_y as u32).saturating_sub(body_top).saturating_add(self.scroll_y);
+        let content_y = (pos_y as u32)
+            .saturating_sub(body_top)
+            .saturating_add(self.scroll_y);
         let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
         for link in &layout.links {
             if content_x >= link.x
@@ -452,6 +462,7 @@ impl BrowserApp {
                 return Some(match control.kind {
                     FormControlKind::TextInput => HitTarget::PageTextInput(control.id),
                     FormControlKind::Button => HitTarget::PageButton(control.id),
+                    FormControlKind::Hidden => return None,
                 });
             }
         }
@@ -646,7 +657,10 @@ impl BrowserApp {
         if self.focused_page_input.is_some() {
             let control = self.modifiers.control_key();
             let shift = self.modifiers.shift_key();
-            let focused_control_id = self.focused_page_input.as_ref().map(|focused| focused.control_id);
+            let focused_control_id = self
+                .focused_page_input
+                .as_ref()
+                .map(|focused| focused.control_id);
             match key_code {
                 KeyCode::Escape if !repeat => {
                     self.blur_page_input();
@@ -879,19 +893,9 @@ impl BrowserApp {
         };
 
         let changed = focused.initial_value != focused.editor.text();
-        self.dispatch_page_dom_event(
-            focused.node_id,
-            "blur",
-            false,
-            false,
-        );
+        self.dispatch_page_dom_event(focused.node_id, "blur", false, false);
         if changed {
-            self.dispatch_page_dom_event(
-                focused.node_id,
-                "change",
-                true,
-                false,
-            );
+            self.dispatch_page_dom_event(focused.node_id, "change", true, false);
         }
 
         self.focused_page_input = None;
@@ -914,6 +918,9 @@ impl BrowserApp {
     }
 
     fn focus_page_input_at(&mut self, control: &FormControlCommand, char_index: Option<usize>) {
+        if control.disabled {
+            return;
+        }
         self.blur_address_bar();
         let mut editor = AddressBarState::new(self.control_current_value(control));
         editor.focus_at(char_index.unwrap_or_else(|| editor.char_len()));
@@ -931,14 +938,26 @@ impl BrowserApp {
     }
 
     fn sync_page_input_value(&mut self) {
-        if let Some(focused) = &self.focused_page_input {
-            self.page_control_values
-                .insert(focused.control_id, focused.editor.text().to_string());
-        }
+        let Some((control_id, node_id, value)) = self.focused_page_input.as_ref().map(|focused| {
+            (
+                focused.control_id,
+                focused.node_id,
+                focused.editor.text().to_string(),
+            )
+        }) else {
+            return;
+        };
+
+        self.page_control_values.insert(control_id, value.clone());
+        self.document.set_dom_attribute(node_id, "value", &value);
     }
 
     fn refresh_focused_page_input_from_document(&mut self) {
-        let Some(focused_id) = self.focused_page_input.as_ref().map(|focused| focused.control_id) else {
+        let Some(focused_id) = self
+            .focused_page_input
+            .as_ref()
+            .map(|focused| focused.control_id)
+        else {
             return;
         };
         let Some(control) = self.current_page_control(focused_id) else {
@@ -946,11 +965,16 @@ impl BrowserApp {
             return;
         };
         if let Some(focused) = self.focused_page_input.as_mut()
+            && control.value != focused.initial_value
             && focused.editor.text() != control.value
         {
-            let cursor = focused.editor.cursor_chars.min(control.value.chars().count());
+            let cursor = focused
+                .editor
+                .cursor_chars
+                .min(control.value.chars().count());
             focused.editor.set_text(control.value.clone());
             focused.editor.focus_at(cursor);
+            focused.initial_value = control.value.clone();
         }
         self.sync_page_input_value();
     }
@@ -968,6 +992,7 @@ impl BrowserApp {
             event_type: event_type.to_string(),
             bubbles,
             cancelable,
+            ..Default::default()
         })?;
 
         if let Some(target_url) = result.snapshot.navigation_target.clone()
@@ -977,6 +1002,7 @@ impl BrowserApp {
             return Some(result);
         }
 
+        self.document.sync_from_loaded_page();
         self.sync_window_title();
         self.refresh_focused_page_input_from_document();
         self.sync_input_method();
@@ -990,12 +1016,17 @@ impl BrowserApp {
         bubbles: bool,
         cancelable: bool,
     ) -> Option<DomEventDispatchResult> {
-        let node_id = self.focused_page_input.as_ref().and_then(|focused| focused.node_id);
+        let node_id = self
+            .focused_page_input
+            .as_ref()
+            .and_then(|focused| focused.node_id);
         self.dispatch_page_dom_event(node_id, event_type, bubbles, cancelable)
     }
 
     fn focused_page_editor_mut(&mut self) -> Option<&mut AddressBarState> {
-        self.focused_page_input.as_mut().map(|focused| &mut focused.editor)
+        self.focused_page_input
+            .as_mut()
+            .map(|focused| &mut focused.editor)
     }
 
     fn copy_address_selection(&self) -> bool {
@@ -1133,6 +1164,23 @@ impl BrowserApp {
         if matches!(trigger.kind, FormControlKind::Button) && !trigger.activates_submit {
             return;
         }
+        let Some(trigger_form_id) = trigger.form_id else {
+            return;
+        };
+        let trigger_form_node_id = trigger.form_node_id;
+        let trigger_form_action = trigger.form_action.clone();
+        let trigger_kind = trigger.kind;
+        let trigger_name = trigger.name.clone();
+        let trigger_value = trigger.value.clone();
+
+        if let Some(result) =
+            self.dispatch_page_dom_event(trigger_form_node_id, "submit", true, true)
+        {
+            if result.default_prevented || result.snapshot.navigation_target.is_some() {
+                return;
+            }
+        }
+
         if !trigger.form_method.eq_ignore_ascii_case("get") {
             self.document.status_line = format!(
                 "Status: {} forms are not supported yet",
@@ -1142,32 +1190,16 @@ impl BrowserApp {
             return;
         }
 
-        let trigger_form_id = trigger.form_id;
-        let trigger_form_node_id = trigger.form_node_id;
-        let trigger_form_action = trigger.form_action.clone();
-        let trigger_kind = trigger.kind;
-        let trigger_name = trigger.name.clone();
-        let trigger_value = trigger.value.clone();
-
-        if let Some(result) = self.dispatch_page_dom_event(
-            trigger_form_node_id,
-            "submit",
-            true,
-            true,
-        ) {
-            if result.default_prevented || result.snapshot.navigation_target.is_some() {
-                return;
-            }
-        }
-
         let layout = self.current_layout();
         let mut fields = Vec::new();
         for control in &layout.controls {
-            if control.form_id != trigger_form_id || control.disabled {
+            if control.form_id != Some(trigger_form_id) || control.disabled {
                 continue;
             }
-            if matches!(control.kind, FormControlKind::TextInput)
-                && let Some(name) = &control.name
+            if matches!(
+                control.kind,
+                FormControlKind::TextInput | FormControlKind::Hidden
+            ) && let Some(name) = &control.name
                 && !name.is_empty()
             {
                 fields.push((name.clone(), self.control_current_value(control)));
@@ -1223,12 +1255,11 @@ impl BrowserApp {
             }
             HitTarget::PageTextInput(control_id) => {
                 if let Some(control) = self.current_page_control(control_id) {
-                    let click_result = self.dispatch_page_dom_event(
-                        control.node_id,
-                        "click",
-                        true,
-                        true,
-                    );
+                    if control.disabled {
+                        return false;
+                    }
+                    let click_result =
+                        self.dispatch_page_dom_event(control.node_id, "click", true, true);
                     if let Some(result) = click_result {
                         if result.default_prevented || result.snapshot.navigation_target.is_some() {
                             return false;
@@ -1257,15 +1288,18 @@ impl BrowserApp {
             }
             HitTarget::PageButton(control_id) => {
                 let control = self.current_page_control(control_id);
+                if control
+                    .as_ref()
+                    .map(|control| control.disabled)
+                    .unwrap_or(false)
+                {
+                    return false;
+                }
                 self.blur_address_bar();
                 self.blur_page_input();
                 if let Some(control) = control {
-                    let click_result = self.dispatch_page_dom_event(
-                        control.node_id,
-                        "click",
-                        true,
-                        true,
-                    );
+                    let click_result =
+                        self.dispatch_page_dom_event(control.node_id, "click", true, true);
                     if let Some(result) = click_result {
                         if result.default_prevented || result.snapshot.navigation_target.is_some() {
                             return false;
@@ -1289,12 +1323,7 @@ impl BrowserApp {
                 self.blur_page_input();
                 if let Some(href) = self.hovered_link_url.clone() {
                     let node_id = self.hovered_link_node_id;
-                    let click_result = self.dispatch_page_dom_event(
-                        node_id,
-                        "click",
-                        true,
-                        true,
-                    );
+                    let click_result = self.dispatch_page_dom_event(node_id, "click", true, true);
                     if let Some(result) = click_result {
                         if result.default_prevented || result.snapshot.navigation_target.is_some() {
                             return false;
@@ -1486,13 +1515,28 @@ impl DocumentView {
         }
     }
 
-    fn dispatch_dom_event(
-        &mut self,
-        request: DomEventRequest,
-    ) -> Option<DomEventDispatchResult> {
+    fn dispatch_dom_event(&mut self, request: DomEventRequest) -> Option<DomEventDispatchResult> {
         match &mut self.content {
             DocumentContent::Loaded(page) => page.dispatch_dom_event(request),
             _ => None,
+        }
+    }
+
+    fn set_dom_attribute(&mut self, node_id: Option<usize>, name: &str, value: &str) {
+        if let DocumentContent::Loaded(page) = &mut self.content {
+            page.set_dom_attribute(node_id, name, value);
+        }
+    }
+
+    fn sync_from_loaded_page(&mut self) {
+        if let DocumentContent::Loaded(page) = &self.content {
+            let content_type = page
+                .content_type
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            self.title = page.title.clone();
+            self.status_line = format!("Status: {}", page.status_text());
+            self.subtitle = format!("{} | {}", page.url, content_type);
         }
     }
 
@@ -2189,7 +2233,13 @@ fn build_get_form_submission_url(
     }
 
     let (without_fragment, fragment_suffix) = if replace_existing_query {
-        (action_url.split_once('#').map(|(head, _)| head).unwrap_or(action_url), String::new())
+        (
+            action_url
+                .split_once('#')
+                .map(|(head, _)| head)
+                .unwrap_or(action_url),
+            String::new(),
+        )
     } else {
         action_url
             .split_once('#')
@@ -2802,12 +2852,16 @@ fn paint_page_control(
         .filter(|focused| focused.control_id == control.id)
         .copied();
 
-    let background = if matches!(control.kind, FormControlKind::Button) && is_hovered && !control.disabled
-    {
-        COLOR_CONTROL_BUTTON_HOVER
-    } else {
-        control.background_color
-    };
+    if matches!(control.kind, FormControlKind::Hidden) {
+        return;
+    }
+
+    let background =
+        if matches!(control.kind, FormControlKind::Button) && is_hovered && !control.disabled {
+            COLOR_CONTROL_BUTTON_HOVER
+        } else {
+            control.background_color
+        };
     let border = if focused.is_some() {
         COLOR_ADDRESS_BAR_FOCUS
     } else if is_hovered {
@@ -2840,15 +2894,19 @@ fn paint_page_control(
     match control.kind {
         FormControlKind::TextInput => {
             let line_height = fonts.line_height_px(control.font_size_px, control.font_family);
-            let text_y =
-                absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
+            let text_y = absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
             let available_width = control.width.saturating_sub(CONTROL_PADDING_X * 2);
 
-            let render_value = focused
+            let actual_value = focused
                 .map(|focused| focused.editor.text().to_string())
                 .or_else(|| page_control_values.get(&control.id).cloned())
                 .unwrap_or_else(|| control.value.clone());
-            let show_placeholder = render_value.is_empty()
+            let display_value = if control.masked {
+                "*".repeat(actual_value.chars().count())
+            } else {
+                actual_value.clone()
+            };
+            let show_placeholder = actual_value.is_empty()
                 && control
                     .placeholder
                     .as_deref()
@@ -2879,7 +2937,7 @@ fn paint_page_control(
             } else {
                 let mut editor = focused
                     .map(|focused| focused.editor.clone())
-                    .unwrap_or_else(|| AddressBarState::new(render_value));
+                    .unwrap_or_else(|| AddressBarState::new(actual_value));
                 if focused.is_none() {
                     editor.focus_at(0);
                     editor.blur();
@@ -2919,7 +2977,11 @@ fn paint_page_control(
                     height,
                     absolute_x.saturating_add(CONTROL_PADDING_X),
                     text_y,
-                    &view.text,
+                    if control.masked {
+                        &display_value
+                    } else {
+                        &view.text
+                    },
                     control.font_size_px,
                     control.text_color,
                     false,
@@ -2964,8 +3026,7 @@ fn paint_page_control(
             let text_width = fonts.text_width_px(&label, control.font_size_px, control.font_family);
             let line_height = fonts.line_height_px(control.font_size_px, control.font_family);
             let text_x = absolute_x.saturating_add(control.width.saturating_sub(text_width) / 2);
-            let text_y =
-                absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
+            let text_y = absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
             fonts.draw_text(
                 buffer,
                 width,
@@ -2980,6 +3041,7 @@ fn paint_page_control(
                 control.font_family,
             );
         }
+        FormControlKind::Hidden => {}
     }
 }
 
@@ -3214,8 +3276,7 @@ fn draw_scaled_image(
 mod tests {
     use super::{
         AddressBarState, build_get_form_submission_url, cursor_index_for_address_x,
-        layout_error_document,
-        looks_like_local_address, max_scroll, parse_address_input,
+        layout_error_document, looks_like_local_address, max_scroll, parse_address_input,
     };
     use crate::font::FontContext;
 

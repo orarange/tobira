@@ -205,7 +205,10 @@ mod tests {
         let base = Url::parse("https://example.com/find?src=home#old").unwrap();
         let next = base.resolve("#results").unwrap();
 
-        assert_eq!(next.to_string(), "https://example.com/find?src=home#results");
+        assert_eq!(
+            next.to_string(),
+            "https://example.com/find?src=home#results"
+        );
     }
 
     #[test]

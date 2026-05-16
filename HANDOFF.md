@@ -63,6 +63,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - same-origin request and redirect guards
     - script-driven `location.href` follow-up navigation
   - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, and event plumbing
+  - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
   - site-specific rendering paths for:
     - YouTube watch pages
     - YouTube home shell fallback
@@ -103,8 +104,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 ## Known Gaps / Likely Next Work
 
 - JS support is still far from a full browser DOM / framework runtime.
-- GUI-to-page event delivery now covers basic `click`, `focus`, `blur`, `input`, `change`, and `submit` bubbling, but keyboard events and capture-phase behavior still need depth.
-- Live `input.value` reflection from GUI typing into script-visible DOM state is still incomplete in some paths.
+- GUI-to-page event delivery now covers bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`; keyboard events and capture-phase behavior still need depth.
+- Native page input typing now syncs `value` into the JS DOM, but a few edge cases still need validation.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward behavior is not yet complete.
 - Modern app-shell sites still need more DOM APIs, cookies/storage, and CSS coverage.
@@ -184,5 +185,5 @@ git worktree list
 ### 2026-05-16 - Codex (event plumbing demo)
 
 - Added a dedicated `demo/events-demo.html` / `demo/events-demo.js` page for verifying native page event plumbing.
-- Updated the docs to reflect that basic DOM event dispatch now covers `click`, `focus`, `blur`, `input`, `change`, and `submit`.
-- Kept the roadmap and handoff notes in sync with the still-missing keyboard, capture-phase, and live-value reflection gaps.
+- Updated the docs to reflect that bubbling DOM event dispatch covers `click`, `input`, `change`, and `submit`, while `focus` and `blur` remain target-only.
+- Kept the roadmap and handoff notes in sync with the remaining keyboard, capture-phase, and live-value reflection gaps.

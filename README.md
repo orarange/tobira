@@ -39,12 +39,8 @@ Current capabilities:
 - Custom title bar and address bar
 - Clickable page links plus basic GUI form controls for `GET` submissions
 - Basic DOM event plumbing for page controls:
-  - `click`
-  - `focus`
-  - `blur`
-  - `input`
-  - `change`
-  - `submit`
+  - bubbling `click`, `input`, `change`, and `submit`
+  - target-only `focus` and `blur`
 - Basic JavaScript execution with `boa_engine`
 - Lightweight mutable DOM support for:
   - `document.querySelector(...)`
@@ -121,7 +117,7 @@ cargo run -- http://127.0.0.1:8765/demo/events-demo.html
 - `Ctrl+L`: focus the address bar
 - `Ctrl+A`: select all text in the address bar or a focused page input
 - `Ctrl+C` / `Ctrl+X` / `Ctrl+V`: copy, cut, and paste inside the address bar or a focused page input
-- `Esc`: quit
+- `Esc`: blur a focused page input, otherwise quit
 
 ## Project Structure
 
@@ -152,8 +148,8 @@ The living JavaScript roadmap is in [JS_ROADMAP.md](JS_ROADMAP.md).
 
 Short version:
 
-1. Add real event plumbing for clicks, typing, and form submission
-2. Expand DOM fidelity for framework-heavy pages
+1. Finish keyboard events and richer listener options
+2. Tighten live `input.value` sync and other DOM fidelity gaps
 3. Add storage, cookies, and history/navigation behavior
 4. Improve networking semantics and reflow after DOM mutation
 5. Validate against Google, YouTube, and other app-shell sites
@@ -171,7 +167,8 @@ Current JS support is intentionally small:
 - `document.createElement(...)`
 - `appendChild(...)` / `insertBefore(...)` / `remove()`
 - `innerHTML`, `textContent`, `classList`, `id`, `className`
-- `document.addEventListener(...)` / basic bubbling for page control events
+- `document.addEventListener(...)` / bubbling for `click`, `input`, `change`, and `submit`
+- `focus` / `blur` are currently target-only
 - `addEventListener(...)` on page inputs, buttons, links, and forms
 - `click`, `focus`, `blur`, `input`, `change`, and `submit` event dispatch
 - `location.href`

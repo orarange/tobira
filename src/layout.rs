@@ -63,6 +63,7 @@ pub struct LinkCommand {
 pub enum FormControlKind {
     TextInput,
     Button,
+    Hidden,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +85,7 @@ pub struct FormControlCommand {
     pub form_method: String,
     pub activates_submit: bool,
     pub disabled: bool,
+    pub masked: bool,
     pub font_size_px: u32,
     pub font_family: FontFamilyKind,
     pub text_color: Color,
@@ -169,7 +171,12 @@ impl LayoutContext {
 
 #[derive(Debug, Clone)]
 enum InlineFragment {
-    Text { text: String, style: ComputedStyle, link_href: Option<String>, link_node_id: Option<usize> },
+    Text {
+        text: String,
+        style: ComputedStyle,
+        link_href: Option<String>,
+        link_node_id: Option<usize>,
+    },
     Control(FormControlSpec),
     LineBreak,
 }
@@ -216,6 +223,7 @@ struct FormControlSpec {
     form_method: String,
     activates_submit: bool,
     disabled: bool,
+    masked: bool,
     size_chars: Option<u32>,
 }
 
@@ -245,6 +253,7 @@ impl LineBuilder {
             if last.control.is_none()
                 && last.style == *style
                 && last.link_href.as_deref() == link_href
+                && last.link_node_id == link_node_id
             {
                 last.text.push_str(text);
                 last.width = last.width.saturating_add(width);
@@ -263,11 +272,7 @@ impl LineBuilder {
         });
     }
 
-    fn push_control(
-        &mut self,
-        control: &FormControlSpec,
-        fonts: &mut FontContext,
-    ) {
+    fn push_control(&mut self, control: &FormControlSpec, fonts: &mut FontContext) {
         let (width, height) = measure_form_control(control, fonts);
         self.width = self.width.saturating_add(width);
         self.line_height = self.line_height.max(height);
@@ -332,7 +337,25 @@ fn build_form_control_spec(
                 .unwrap_or_else(|| "text".to_string());
 
             match input_type.as_str() {
-                "hidden" | "checkbox" | "radio" | "file" | "image" | "reset" => None,
+                "hidden" => Some(FormControlSpec {
+                    id: context.allocate_control_id(),
+                    node_id,
+                    form_node_id,
+                    kind: FormControlKind::Hidden,
+                    style: element.style.clone(),
+                    name: element.attributes.get("name").cloned(),
+                    value: element.attributes.get("value").cloned().unwrap_or_default(),
+                    placeholder: None,
+                    label: String::new(),
+                    form_id,
+                    form_action,
+                    form_method,
+                    activates_submit: false,
+                    disabled,
+                    masked: false,
+                    size_chars: None,
+                }),
+                "checkbox" | "radio" | "file" | "image" | "reset" => None,
                 "submit" | "button" => Some(FormControlSpec {
                     id: context.allocate_control_id(),
                     node_id,
@@ -359,7 +382,29 @@ fn build_form_control_spec(
                     form_method,
                     activates_submit: input_type == "submit",
                     disabled,
+                    masked: false,
                     size_chars: None,
+                }),
+                "password" => Some(FormControlSpec {
+                    id: context.allocate_control_id(),
+                    node_id,
+                    form_node_id,
+                    kind: FormControlKind::TextInput,
+                    style: element.style.clone(),
+                    name: element.attributes.get("name").cloned(),
+                    value: element.attributes.get("value").cloned().unwrap_or_default(),
+                    placeholder: element.attributes.get("placeholder").cloned(),
+                    label: String::new(),
+                    form_id,
+                    form_action,
+                    form_method,
+                    activates_submit: false,
+                    disabled,
+                    masked: true,
+                    size_chars: element
+                        .attributes
+                        .get("size")
+                        .and_then(|value| value.parse::<u32>().ok()),
                 }),
                 _ => Some(FormControlSpec {
                     id: context.allocate_control_id(),
@@ -376,6 +421,7 @@ fn build_form_control_spec(
                     form_method,
                     activates_submit: false,
                     disabled,
+                    masked: false,
                     size_chars: element
                         .attributes
                         .get("size")
@@ -390,7 +436,7 @@ fn build_form_control_spec(
             kind: FormControlKind::TextInput,
             style: element.style.clone(),
             name: element.attributes.get("name").cloned(),
-            value: collect_text_content(&element.children),
+            value: collect_raw_text_content(&element.children),
             placeholder: element.attributes.get("placeholder").cloned(),
             label: String::new(),
             form_id,
@@ -398,6 +444,7 @@ fn build_form_control_spec(
             form_method,
             activates_submit: false,
             disabled,
+            masked: false,
             size_chars: element
                 .attributes
                 .get("cols")
@@ -433,6 +480,7 @@ fn build_form_control_spec(
                 form_method,
                 activates_submit: button_type != "button" && button_type != "reset",
                 disabled,
+                masked: false,
                 size_chars: None,
             })
         }
@@ -447,13 +495,11 @@ fn element_node_id(element: &StyledElement) -> Option<usize> {
         .and_then(|value| value.parse::<usize>().ok())
 }
 
-fn measure_form_control(
-    control: &FormControlSpec,
-    fonts: &mut FontContext,
-) -> (u32, u32) {
+fn measure_form_control(control: &FormControlSpec, fonts: &mut FontContext) -> (u32, u32) {
     let line_height = text_line_height(&control.style, fonts);
     let height = line_height.saturating_add(10).max(28);
     match control.kind {
+        FormControlKind::Hidden => (0, 0),
         FormControlKind::TextInput => {
             let size_chars = control.size_chars.unwrap_or(20).max(4);
             let char_width = char_width(&control.style, 'M', fonts).max(7);
@@ -481,6 +527,19 @@ fn collect_text_content(children: &[StyledNode]) -> String {
         }
     }
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn collect_raw_text_content(children: &[StyledNode]) -> String {
+    let mut text = String::new();
+    for child in children {
+        match child {
+            StyledNode::Text(node) => text.push_str(&node.text),
+            StyledNode::Element(element) => {
+                text.push_str(&collect_raw_text_content(&element.children))
+            }
+        }
+    }
+    text
 }
 
 fn layout_node(
@@ -597,7 +656,8 @@ fn layout_block_element(
     *cursor_y = cursor_y.saturating_add(element.style.margin.top);
 
     let outer_x = x.saturating_add(element.style.margin.left);
-    let raw_outer_width = width.saturating_sub(element.style.margin.left + element.style.margin.right);
+    let raw_outer_width =
+        width.saturating_sub(element.style.margin.left + element.style.margin.right);
     // Apply min/max-width
     let outer_width = raw_outer_width
         .min(element.style.max_width.unwrap_or(u32::MAX))
@@ -624,15 +684,29 @@ fn layout_block_element(
         0
     };
 
-    let border_left = if !element.style.border_style_none { element.style.border.left } else { 0 };
-    let border_right = if !element.style.border_style_none { element.style.border.right } else { 0 };
+    let border_left = if !element.style.border_style_none {
+        element.style.border.left
+    } else {
+        0
+    };
+    let border_right = if !element.style.border_style_none {
+        element.style.border.right
+    } else {
+        0
+    };
 
     let content_x = outer_x
         .saturating_add(border_left)
         .saturating_add(element.style.padding.left)
         .saturating_add(bullet_indent);
     let content_width = outer_width
-        .saturating_sub(border_left + border_right + element.style.padding.left + element.style.padding.right + bullet_indent)
+        .saturating_sub(
+            border_left
+                + border_right
+                + element.style.padding.left
+                + element.style.padding.right
+                + bullet_indent,
+        )
         .max(1);
 
     if element.tag_name == "hr" {
@@ -704,7 +778,9 @@ fn layout_block_element(
         }
         if border_right_w > 0 {
             context.rects.push(RectCommand {
-                x: outer_x.saturating_add(outer_width).saturating_sub(border_right_w),
+                x: outer_x
+                    .saturating_add(outer_width)
+                    .saturating_sub(border_right_w),
                 y: background_top,
                 width: border_right_w,
                 height: background_height,
@@ -901,15 +977,26 @@ fn layout_table_element(
         _ => x,
     };
 
-    let cell_layouts = placements
-        .iter()
-        .map(|placement| {
-            let span_width = span_width(&column_widths, placement.column_index, placement.colspan)
-                .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
-            let inner_width = span_width.saturating_sub(padding.saturating_mul(2)).max(1);
-            layout_table_cell(placement.cell, inner_width, images, fonts, current_form.clone())
-        })
-        .collect::<Vec<_>>();
+    let mut cell_layouts = Vec::with_capacity(placements.len());
+    let mut next_control_id = context.next_control_id;
+    let mut next_form_id = context.next_form_id;
+    for placement in &placements {
+        let span_width = span_width(&column_widths, placement.column_index, placement.colspan)
+            .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
+        let inner_width = span_width.saturating_sub(padding.saturating_mul(2)).max(1);
+        let layout = layout_table_cell(
+            placement.cell,
+            inner_width,
+            images,
+            fonts,
+            current_form.clone(),
+            next_control_id,
+            next_form_id,
+        );
+        next_control_id = layout.next_control_id;
+        next_form_id = layout.next_form_id;
+        cell_layouts.push(layout);
+    }
 
     let row_count = rows.len();
     let mut row_heights = vec![0_u32; row_count];
@@ -980,6 +1067,8 @@ fn layout_table_element(
 
     let table_height = row_heights.iter().sum::<u32>()
         + spacing.saturating_mul(row_count.saturating_sub(1) as u32);
+    context.next_control_id = next_control_id;
+    context.next_form_id = next_form_id;
     *cursor_y = cursor_y.saturating_add(table_height);
     *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
 }
@@ -1001,6 +1090,8 @@ struct FragmentLayout {
     images: Vec<ImageCommand>,
     links: Vec<LinkCommand>,
     controls: Vec<FormControlCommand>,
+    next_control_id: usize,
+    next_form_id: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1154,8 +1245,18 @@ fn layout_table_cell(
     images: &ImageStore,
     fonts: &mut FontContext,
     current_form: Option<FormContext>,
+    control_id_seed: usize,
+    form_id_seed: usize,
 ) -> FragmentLayout {
-    let mut context = LayoutContext::default();
+    let mut context = LayoutContext {
+        rects: Vec::new(),
+        texts: Vec::new(),
+        images: Vec::new(),
+        links: Vec::new(),
+        controls: Vec::new(),
+        next_control_id: control_id_seed,
+        next_form_id: form_id_seed,
+    };
     let mut cursor_y = 0_u32;
 
     for child in &cell.children {
@@ -1182,6 +1283,8 @@ fn layout_table_cell(
         images: context.images,
         links: context.links,
         controls: context.controls,
+        next_control_id: context.next_control_id,
+        next_form_id: context.next_form_id,
     }
 }
 
@@ -1253,6 +1356,7 @@ fn merge_fragment(
             form_method: control.form_method.clone(),
             activates_submit: control.activates_submit,
             disabled: control.disabled,
+            masked: control.masked,
             font_size_px: control.font_size_px,
             font_family: control.font_family,
             text_color: control.text_color,
@@ -1386,7 +1490,11 @@ fn collect_inline_fragments(
         StyledNode::Element(element) => {
             let current_form = form_context_for_element(element, context, current_form);
             let current_link = if element.tag_name == "a" {
-                element.attributes.get("href").map(String::as_str).or(link_href)
+                element
+                    .attributes
+                    .get("href")
+                    .map(String::as_str)
+                    .or(link_href)
             } else {
                 link_href
             };
@@ -1404,7 +1512,9 @@ fn collect_inline_fragments(
                         return;
                     }
 
-                    if let Some(control) = build_form_control_spec(element, current_form.as_ref(), context) {
+                    if let Some(control) =
+                        build_form_control_spec(element, current_form.as_ref(), context)
+                    {
                         output.push(InlineFragment::Control(control));
                         return;
                     }
@@ -1567,7 +1677,12 @@ fn layout_normal_fragments(
                 line.push_control(control, fonts);
                 pending_space = true;
             }
-            InlineFragment::Text { text, style, link_href, link_node_id } => {
+            InlineFragment::Text {
+                text,
+                style,
+                link_href,
+                link_node_id,
+            } => {
                 let had_whitespace = text.chars().any(char::is_whitespace);
 
                 for word in text.split_whitespace() {
@@ -1674,7 +1789,12 @@ fn layout_preformatted_fragments(
                 }
                 line.push_control(control, fonts);
             }
-            InlineFragment::Text { text, style, link_href, link_node_id } => {
+            InlineFragment::Text {
+                text,
+                style,
+                link_href,
+                link_node_id,
+            } => {
                 for character in text.chars() {
                     if character == '\n' {
                         emit_line(
@@ -1703,7 +1823,13 @@ fn layout_preformatted_fragments(
                     }
 
                     let mut buffer = [0_u8; 4];
-                    line.push_span(character.encode_utf8(&mut buffer), style, fonts, link_href.as_deref(), *link_node_id);
+                    line.push_span(
+                        character.encode_utf8(&mut buffer),
+                        style,
+                        fonts,
+                        link_href.as_deref(),
+                        *link_node_id,
+                    );
                 }
             }
         }
@@ -1776,7 +1902,16 @@ fn emit_line_with_indent(
     fonts: &mut FontContext,
     indent: u32,
 ) {
-    emit_line_impl(line, container_style, x, width, cursor_y, context, fonts, indent);
+    emit_line_impl(
+        line,
+        container_style,
+        x,
+        width,
+        cursor_y,
+        context,
+        fonts,
+        indent,
+    );
 }
 
 fn emit_line(
@@ -1850,6 +1985,7 @@ fn emit_line_impl(
                 form_method: control.form_method.clone(),
                 activates_submit: control.activates_submit,
                 disabled: control.disabled,
+                masked: control.masked,
                 font_size_px: span.style.font_size_px,
                 font_family: span.style.font_family,
                 text_color: span.style.color,
@@ -2273,16 +2409,20 @@ mod tests {
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
         assert_eq!(layout.controls.len(), 2);
-        assert!(layout
-            .controls
-            .iter()
-            .any(|control| control.kind == super::FormControlKind::TextInput
-                && control.name.as_deref() == Some("q")));
-        assert!(layout
-            .controls
-            .iter()
-            .any(|control| control.kind == super::FormControlKind::Button
-                && control.label == "Go"));
+        assert!(
+            layout
+                .controls
+                .iter()
+                .any(|control| control.kind == super::FormControlKind::TextInput
+                    && control.name.as_deref() == Some("q"))
+        );
+        assert!(
+            layout
+                .controls
+                .iter()
+                .any(|control| control.kind == super::FormControlKind::Button
+                    && control.label == "Go")
+        );
     }
 
     fn find_paragraph(element: &crate::css::StyledElement) -> Option<&crate::css::StyledElement> {

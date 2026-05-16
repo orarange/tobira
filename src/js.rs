@@ -5,7 +5,10 @@ use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use boa_engine::object::{JsObject, ObjectInitializer, builtins::{JsFunction, JsPromise}};
+use boa_engine::object::{
+    JsObject, ObjectInitializer,
+    builtins::{JsFunction, JsPromise},
+};
 use boa_engine::property::Attribute;
 use boa_engine::{
     Context, Finalize, JsData, JsNativeError, JsResult, JsValue, NativeFunction, Source, Trace,
@@ -13,7 +16,7 @@ use boa_engine::{
 };
 
 use crate::html::{Node, parse_document};
-use crate::http::{HttpResponse, fetch, fetch_with_limits};
+use crate::http::{HttpResponse, fetch, fetch_with_limits_same_origin};
 use crate::text::decode_text_response;
 use crate::url::Url;
 
@@ -34,12 +37,19 @@ pub struct ProcessedScriptHtml {
     pub navigation_target: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DomEventRequest {
     pub target_node_id: usize,
     pub event_type: String,
     pub bubbles: bool,
     pub cancelable: bool,
+    pub key: Option<String>,
+    pub code: Option<String>,
+    pub repeat: bool,
+    pub alt_key: bool,
+    pub ctrl_key: bool,
+    pub shift_key: bool,
+    pub meta_key: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -59,6 +69,11 @@ enum JavaScriptSessionCommand {
         request: DomEventRequest,
         response_tx: Sender<DomEventDispatchResult>,
     },
+    SetAttribute {
+        node_id: usize,
+        name: String,
+        value: String,
+    },
     Snapshot {
         response_tx: Sender<ProcessedScriptHtml>,
     },
@@ -66,7 +81,10 @@ enum JavaScriptSessionCommand {
 }
 
 impl JavaScriptSession {
-    pub(crate) fn dispatch_event(&self, request: DomEventRequest) -> Option<DomEventDispatchResult> {
+    pub(crate) fn dispatch_event(
+        &self,
+        request: DomEventRequest,
+    ) -> Option<DomEventDispatchResult> {
         let (response_tx, response_rx) = mpsc::channel();
         if self
             .command_tx
@@ -93,6 +111,16 @@ impl JavaScriptSession {
         }
 
         response_rx.recv().ok()
+    }
+
+    pub(crate) fn set_attribute(&self, node_id: usize, name: &str, value: &str) -> bool {
+        self.command_tx
+            .send(JavaScriptSessionCommand::SetAttribute {
+                node_id,
+                name: name.to_string(),
+                value: value.to_string(),
+            })
+            .is_ok()
     }
 }
 
@@ -234,6 +262,13 @@ pub fn start_document_script_session(
                             let result = runtime.dispatch_dom_event(request);
                             let _ = response_tx.send(result);
                         }
+                        JavaScriptSessionCommand::SetAttribute {
+                            node_id,
+                            name,
+                            value,
+                        } => {
+                            runtime.set_dom_attribute(node_id, &name, &value);
+                        }
                         JavaScriptSessionCommand::Snapshot { response_tx } => {
                             let _ = response_tx.send(runtime.snapshot());
                         }
@@ -357,6 +392,15 @@ impl JavaScriptRuntime {
         }
     }
 
+    fn set_dom_attribute(&mut self, node_id: usize, name: &str, value: &str) {
+        if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+            host.state
+                .borrow_mut()
+                .dom
+                .set_attribute(node_id, name, value);
+        }
+    }
+
     fn dispatch_dom_event(&mut self, request: DomEventRequest) -> DomEventDispatchResult {
         let default_prevented = self
             .dispatch_dom_event_to_node(
@@ -469,8 +513,15 @@ impl JavaScriptRuntime {
             .find(|id| state.dom.should_execute_script_node(*id))?;
         Some((
             script_id,
-            state.dom.node_attributes(script_id).cloned().unwrap_or_default(),
-            state.dom.script_inline_source(script_id).unwrap_or_default(),
+            state
+                .dom
+                .node_attributes(script_id)
+                .cloned()
+                .unwrap_or_default(),
+            state
+                .dom
+                .script_inline_source(script_id)
+                .unwrap_or_default(),
         ))
     }
 
@@ -529,7 +580,14 @@ impl JavaScriptRuntime {
         cancelable: bool,
     ) -> JsResult<bool> {
         let target = build_dom_node_object(&mut self.context, node_id);
-        dispatch_dom_event_on_target(target, event_type, bubbles, cancelable, &mut self.context)
+        let request = DomEventRequest {
+            target_node_id: node_id,
+            event_type: event_type.to_string(),
+            bubbles,
+            cancelable,
+            ..Default::default()
+        };
+        dispatch_dom_event_on_target(target, &request, &mut self.context)
     }
 
     fn dispatch_global_event(
@@ -539,14 +597,25 @@ impl JavaScriptRuntime {
         cancelable: bool,
     ) -> JsResult<bool> {
         let target = self.context.global_object();
-        let event = build_dom_event_object(&mut self.context, event_type, &target, bubbles, cancelable);
+        let request = DomEventRequest {
+            target_node_id: self.document_id(),
+            event_type: event_type.to_string(),
+            bubbles,
+            cancelable,
+            ..Default::default()
+        };
+        let event = build_dom_event_object(&mut self.context, &request, &target);
         dispatch_listeners_on_target(
             &target,
             &event_type.to_ascii_lowercase(),
             &event,
             &mut self.context,
         )?;
-        Ok(event_flag_value(&event, "defaultPrevented", &mut self.context))
+        Ok(event_flag_value(
+            &event,
+            "defaultPrevented",
+            &mut self.context,
+        ))
     }
 
     fn serialize_html(&self) -> String {
@@ -751,7 +820,11 @@ impl DomState {
                 self.node(parent_id)
                     .and_then(|parent| parent.children.iter().position(|id| *id == before_id))
             })
-            .unwrap_or_else(|| self.node(parent_id).map(|parent| parent.children.len()).unwrap_or(0));
+            .unwrap_or_else(|| {
+                self.node(parent_id)
+                    .map(|parent| parent.children.len())
+                    .unwrap_or(0)
+            });
         if let Some(parent) = self.node_mut(parent_id) {
             parent.children.insert(insert_index, child_id);
         }
@@ -851,10 +924,12 @@ impl DomState {
         };
         node.children
             .iter()
-            .map(|child_id| match self.node(*child_id).map(|child| &child.kind) {
-                Some(DomNodeKind::Text(text)) => text.clone(),
-                _ => self.serialize_node(*child_id),
-            })
+            .map(
+                |child_id| match self.node(*child_id).map(|child| &child.kind) {
+                    Some(DomNodeKind::Text(text)) => text.clone(),
+                    _ => self.serialize_node(*child_id),
+                },
+            )
             .collect()
     }
 
@@ -912,6 +987,10 @@ impl DomState {
         self.element(node_id)
             .and_then(|element| element.attributes.get(name))
             .cloned()
+    }
+
+    fn is_disabled(&self, node_id: usize) -> bool {
+        self.get_attribute(node_id, "disabled").is_some()
     }
 
     fn set_attribute(&mut self, node_id: usize, name: &str, value: &str) {
@@ -974,7 +1053,12 @@ impl DomState {
         }
     }
 
-    fn query_selector(&self, scope_id: usize, selector: &str, include_scope: bool) -> Option<usize> {
+    fn query_selector(
+        &self,
+        scope_id: usize,
+        selector: &str,
+        include_scope: bool,
+    ) -> Option<usize> {
         let selector = ParsedSelector::parse(selector)?;
         self.descendant_nodes(scope_id, include_scope)
             .into_iter()
@@ -997,11 +1081,13 @@ impl DomState {
     }
 
     fn get_element_by_id(&self, scope_id: usize, target_id: &str) -> Option<usize> {
-        self.descendant_nodes(scope_id, true).into_iter().find(|node_id| {
-            self.get_attribute(*node_id, "id")
-                .map(|value| value == target_id)
-                .unwrap_or(false)
-        })
+        self.descendant_nodes(scope_id, true)
+            .into_iter()
+            .find(|node_id| {
+                self.get_attribute(*node_id, "id")
+                    .map(|value| value == target_id)
+                    .unwrap_or(false)
+            })
     }
 
     fn matches_selector_in_scope(
@@ -1090,7 +1176,8 @@ impl DomState {
         for attribute in &selector.attributes {
             match &attribute.value {
                 Some(value) => {
-                    if self.get_attribute(node_id, &attribute.name).as_deref() != Some(value.as_str())
+                    if self.get_attribute(node_id, &attribute.name).as_deref()
+                        != Some(value.as_str())
                     {
                         return false;
                     }
@@ -1221,9 +1308,7 @@ impl SimpleSelector {
 
         if !matches!(bytes.first(), Some(b'#' | b'.' | b'[' | b':')) {
             let start = index;
-            while index < bytes.len()
-                && !matches!(bytes[index], b'#' | b'.' | b'[' | b':')
-            {
+            while index < bytes.len() && !matches!(bytes[index], b'#' | b'.' | b'[' | b':') {
                 index += 1;
             }
             let tag_name = token[start..index].trim();
@@ -1237,9 +1322,7 @@ impl SimpleSelector {
                 b'#' => {
                     index += 1;
                     let start = index;
-                    while index < bytes.len()
-                        && is_selector_name_char(bytes[index])
-                    {
+                    while index < bytes.len() && is_selector_name_char(bytes[index]) {
                         index += 1;
                     }
                     selector.id = Some(token[start..index].to_string());
@@ -1247,9 +1330,7 @@ impl SimpleSelector {
                 b'.' => {
                     index += 1;
                     let start = index;
-                    while index < bytes.len()
-                        && is_selector_name_char(bytes[index])
-                    {
+                    while index < bytes.len() && is_selector_name_char(bytes[index]) {
                         index += 1;
                     }
                     selector.classes.push(token[start..index].to_string());
@@ -1276,14 +1357,16 @@ impl SimpleSelector {
 }
 
 fn parse_attribute_selector(input: &str) -> Option<AttributeSelector> {
-    let (name, value) = input.split_once('=').map_or((input, None), |(name, value)| {
-        let value = value
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
-        (name, Some(value))
-    });
+    let (name, value) = input
+        .split_once('=')
+        .map_or((input, None), |(name, value)| {
+            let value = value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+            (name, Some(value))
+        });
     let name = name.trim().to_ascii_lowercase();
     (!name.is_empty()).then_some(AttributeSelector { name, value })
 }
@@ -1401,70 +1484,91 @@ fn install_browser_globals(context: &mut Context) {
         .build();
 
     let global_object = context.global_object();
-    let document = ObjectInitializer::with_native_data(DomNodeHandle { node_id: document_id }, context)
-        .function(
-            NativeFunction::from_fn_ptr(js_document_write),
-            js_string!("write"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_document_writeln),
-            js_string!("writeln"),
-            1,
-        )
-        .accessor(
-            js_string!("title"),
-            Some(title_getter),
-            Some(title_setter),
-            Attribute::all(),
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_dom_query_selector),
-            js_string!("querySelector"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_dom_query_selector_all),
-            js_string!("querySelectorAll"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_document_get_element_by_id),
-            js_string!("getElementById"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_document_create_element),
-            js_string!("createElement"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_document_create_text_node),
-            js_string!("createTextNode"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_add_event_listener),
-            js_string!("addEventListener"),
-            2,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_noop),
-            js_string!("removeEventListener"),
-            2,
-        )
-        .property(js_string!("location"), location.clone(), Attribute::all())
-        .property(js_string!("body"), body_object, Attribute::all())
-        .property(js_string!("head"), head_object, Attribute::all())
-        .property(js_string!("documentElement"), html_object, Attribute::all())
-        .property(js_string!("fonts"), document_fonts, Attribute::all())
-        .property(js_string!("cookie"), js_string!(""), Attribute::all())
-        .property(js_string!("readyState"), js_string!("complete"), Attribute::all())
-        .property(js_string!("compatMode"), js_string!("CSS1Compat"), Attribute::all())
-        .property(js_string!("hidden"), false, Attribute::all())
-        .property(js_string!("visibilityState"), js_string!("visible"), Attribute::all())
-        .property(js_string!("defaultView"), global_object.clone(), Attribute::all())
-        .build();
+    let document = ObjectInitializer::with_native_data(
+        DomNodeHandle {
+            node_id: document_id,
+        },
+        context,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_document_write),
+        js_string!("write"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_document_writeln),
+        js_string!("writeln"),
+        1,
+    )
+    .accessor(
+        js_string!("title"),
+        Some(title_getter),
+        Some(title_setter),
+        Attribute::all(),
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_dom_query_selector),
+        js_string!("querySelector"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_dom_query_selector_all),
+        js_string!("querySelectorAll"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_document_get_element_by_id),
+        js_string!("getElementById"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_document_create_element),
+        js_string!("createElement"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_document_create_text_node),
+        js_string!("createTextNode"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_add_event_listener),
+        js_string!("addEventListener"),
+        2,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_noop),
+        js_string!("removeEventListener"),
+        2,
+    )
+    .property(js_string!("location"), location.clone(), Attribute::all())
+    .property(js_string!("body"), body_object, Attribute::all())
+    .property(js_string!("head"), head_object, Attribute::all())
+    .property(js_string!("documentElement"), html_object, Attribute::all())
+    .property(js_string!("fonts"), document_fonts, Attribute::all())
+    .property(js_string!("cookie"), js_string!(""), Attribute::all())
+    .property(
+        js_string!("readyState"),
+        js_string!("complete"),
+        Attribute::all(),
+    )
+    .property(
+        js_string!("compatMode"),
+        js_string!("CSS1Compat"),
+        Attribute::all(),
+    )
+    .property(js_string!("hidden"), false, Attribute::all())
+    .property(
+        js_string!("visibilityState"),
+        js_string!("visible"),
+        Attribute::all(),
+    )
+    .property(
+        js_string!("defaultView"),
+        global_object.clone(),
+        Attribute::all(),
+    )
+    .build();
     store_dom_node_object(context, document_id, &document);
 
     let console = ObjectInitializer::new(context)
@@ -1729,7 +1833,11 @@ fn install_browser_globals(context: &mut Context) {
         .expect("innerHeight should be installable");
 
     let crypto_subtle = ObjectInitializer::new(context)
-        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("digest"), 2)
+        .function(
+            NativeFunction::from_fn_ptr(js_noop),
+            js_string!("digest"),
+            2,
+        )
         .function(
             NativeFunction::from_fn_ptr(js_noop),
             js_string!("encrypt"),
@@ -1764,11 +1872,7 @@ fn install_browser_globals(context: &mut Context) {
             js_string!("get"),
             1,
         )
-        .function(
-            NativeFunction::from_fn_ptr(js_noop),
-            js_string!("set"),
-            2,
-        )
+        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("set"), 2)
         .function(
             NativeFunction::from_fn_ptr(js_noop),
             js_string!("append"),
@@ -1855,9 +1959,18 @@ fn cached_dom_node_object(
         .and_then(|value| value.as_object())
 }
 
-fn store_dom_node_object(context: &mut Context, node_id: usize, object: &boa_engine::object::JsObject) {
+fn store_dom_node_object(
+    context: &mut Context,
+    node_id: usize,
+    object: &boa_engine::object::JsObject,
+) {
     if let Ok(cache) = dom_node_cache(context) {
-        let _ = cache.set(js_string!(node_id.to_string()), object.clone(), true, context);
+        let _ = cache.set(
+            js_string!(node_id.to_string()),
+            object.clone(),
+            true,
+            context,
+        );
     }
 }
 
@@ -1918,7 +2031,12 @@ fn append_event_listener(
     }
 
     list.set(js_string!(length.to_string()), callback, true, context)?;
-    list.set(js_string!("length"), JsValue::new((length + 1) as i32), true, context)?;
+    list.set(
+        js_string!("length"),
+        JsValue::new((length + 1) as i32),
+        true,
+        context,
+    )?;
     Ok(())
 }
 
@@ -1985,10 +2103,8 @@ fn event_listener_callbacks(
 
 fn build_dom_event_object(
     context: &mut Context,
-    event_type: &str,
+    request: &DomEventRequest,
     target: &boa_engine::object::JsObject,
-    bubbles: bool,
-    cancelable: bool,
 ) -> boa_engine::object::JsObject {
     let event = ObjectInitializer::new(context)
         .function(
@@ -2006,9 +2122,17 @@ fn build_dom_event_object(
             js_string!("stopImmediatePropagation"),
             0,
         )
-        .property(js_string!("type"), js_string!(event_type), Attribute::all())
-        .property(js_string!("bubbles"), bubbles, Attribute::all())
-        .property(js_string!("cancelable"), cancelable, Attribute::all())
+        .property(
+            js_string!("type"),
+            js_string!(request.event_type.as_str()),
+            Attribute::all(),
+        )
+        .property(js_string!("bubbles"), request.bubbles, Attribute::all())
+        .property(
+            js_string!("cancelable"),
+            request.cancelable,
+            Attribute::all(),
+        )
         .property(js_string!("defaultPrevented"), false, Attribute::all())
         .property(js_string!("cancelBubble"), false, Attribute::all())
         .property(js_string!("propagationStopped"), false, Attribute::all())
@@ -2018,8 +2142,48 @@ fn build_dom_event_object(
             Attribute::all(),
         )
         .property(js_string!("target"), target.clone(), Attribute::all())
-        .property(js_string!("currentTarget"), target.clone(), Attribute::all())
+        .property(
+            js_string!("currentTarget"),
+            target.clone(),
+            Attribute::all(),
+        )
         .build();
+    if let Some(key) = &request.key {
+        let _ = event.set(js_string!("key"), js_string!(key.as_str()), true, context);
+    }
+    if let Some(code) = &request.code {
+        let _ = event.set(js_string!("code"), js_string!(code.as_str()), true, context);
+    }
+    let _ = event.set(
+        js_string!("repeat"),
+        JsValue::new(request.repeat),
+        true,
+        context,
+    );
+    let _ = event.set(
+        js_string!("altKey"),
+        JsValue::new(request.alt_key),
+        true,
+        context,
+    );
+    let _ = event.set(
+        js_string!("ctrlKey"),
+        JsValue::new(request.ctrl_key),
+        true,
+        context,
+    );
+    let _ = event.set(
+        js_string!("shiftKey"),
+        JsValue::new(request.shift_key),
+        true,
+        context,
+    );
+    let _ = event.set(
+        js_string!("metaKey"),
+        JsValue::new(request.meta_key),
+        true,
+        context,
+    );
     event
 }
 
@@ -2309,19 +2473,28 @@ fn build_dom_node_list_object(
     context: &mut Context,
     node_ids: Vec<usize>,
 ) -> boa_engine::object::JsObject {
-    let object = ObjectInitializer::with_native_data(DomNodeListHandle { node_ids: node_ids.clone() }, context)
-        .function(
-            NativeFunction::from_fn_ptr(js_dom_node_list_for_each),
-            js_string!("forEach"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_dom_node_list_item),
-            js_string!("item"),
-            1,
-        )
-        .property(js_string!("length"), node_ids.len() as i32, Attribute::all())
-        .build();
+    let object = ObjectInitializer::with_native_data(
+        DomNodeListHandle {
+            node_ids: node_ids.clone(),
+        },
+        context,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_dom_node_list_for_each),
+        js_string!("forEach"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_dom_node_list_item),
+        js_string!("item"),
+        1,
+    )
+    .property(
+        js_string!("length"),
+        node_ids.len() as i32,
+        Attribute::all(),
+    )
+    .build();
 
     for (index, node_id) in node_ids.into_iter().enumerate() {
         let _ = object.create_data_property_or_throw(
@@ -2412,7 +2585,11 @@ fn build_fetch_response_object(
         )
         .property(js_string!("ok"), ok, Attribute::all())
         .property(js_string!("status"), status, Attribute::all())
-        .property(js_string!("statusText"), js_string!(status_text), Attribute::all())
+        .property(
+            js_string!("statusText"),
+            js_string!(status_text),
+            Attribute::all(),
+        )
         .property(js_string!("url"), js_string!(url), Attribute::all())
         .property(js_string!("headers"), headers, Attribute::all())
         .build()
@@ -2459,14 +2636,26 @@ fn build_xml_http_request_object(context: &mut Context) -> boa_engine::object::J
         },
         context,
     )
-    .function(NativeFunction::from_fn_ptr(js_xhr_open), js_string!("open"), 3)
+    .function(
+        NativeFunction::from_fn_ptr(js_xhr_open),
+        js_string!("open"),
+        3,
+    )
     .function(
         NativeFunction::from_fn_ptr(js_xhr_set_request_header),
         js_string!("setRequestHeader"),
         2,
     )
-    .function(NativeFunction::from_fn_ptr(js_xhr_send), js_string!("send"), 1)
-    .function(NativeFunction::from_fn_ptr(js_xhr_abort), js_string!("abort"), 0)
+    .function(
+        NativeFunction::from_fn_ptr(js_xhr_send),
+        js_string!("send"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_xhr_abort),
+        js_string!("abort"),
+        0,
+    )
     .function(
         NativeFunction::from_fn_ptr(js_xhr_get_response_header),
         js_string!("getResponseHeader"),
@@ -2478,7 +2667,12 @@ fn build_xml_http_request_object(context: &mut Context) -> boa_engine::object::J
         None,
         Attribute::all(),
     )
-    .accessor(js_string!("status"), Some(get_status), None, Attribute::all())
+    .accessor(
+        js_string!("status"),
+        Some(get_status),
+        None,
+        Attribute::all(),
+    )
     .accessor(
         js_string!("statusText"),
         Some(get_status_text),
@@ -2505,9 +2699,17 @@ fn build_xml_http_request_object(context: &mut Context) -> boa_engine::object::J
     )
     .property(js_string!("responseType"), js_string!(""), Attribute::all())
     .property(js_string!("withCredentials"), false, Attribute::all())
-    .property(js_string!("onreadystatechange"), JsValue::undefined(), Attribute::all())
+    .property(
+        js_string!("onreadystatechange"),
+        JsValue::undefined(),
+        Attribute::all(),
+    )
     .property(js_string!("onload"), JsValue::undefined(), Attribute::all())
-    .property(js_string!("onerror"), JsValue::undefined(), Attribute::all())
+    .property(
+        js_string!("onerror"),
+        JsValue::undefined(),
+        Attribute::all(),
+    )
     .build()
 }
 
@@ -2868,8 +3070,7 @@ fn reserve_js_network_budget(context: &mut Context) -> JsResult<usize> {
 fn record_js_network_response_bytes(response_len: usize, context: &mut Context) {
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
-        state.network_response_bytes =
-            state.network_response_bytes.saturating_add(response_len);
+        state.network_response_bytes = state.network_response_bytes.saturating_add(response_len);
         debug_assert!(state.network_response_bytes <= JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES);
     }
 }
@@ -2895,10 +3096,7 @@ fn ensure_same_origin_script_url(current: &Url, target: &Url, reason: &str) -> J
     }
 
     Err(JsNativeError::error()
-        .with_message(format!(
-            "{reason}: {} -> {}",
-            current, target
-        ))
+        .with_message(format!("{reason}: {} -> {}", current, target))
         .into())
 }
 
@@ -2909,13 +3107,9 @@ fn fetch_for_script(url: &Url, context: &mut Context) -> JsResult<HttpResponse> 
     ensure_same_origin_script_url(&current, url, "cross-origin JS requests are blocked")?;
 
     let max_response_bytes = reserve_js_network_budget(context)?;
-    // Redirects are followed inside `fetch_with_limits`, so one JS fetch/XHR still
-    // consumes a single request slot even if the transport follows same-origin hops.
-    let response = fetch_with_limits(url, max_response_bytes).map_err(|error| {
-        JsNativeError::error().with_message(error.to_string())
-    })?;
+    let response = fetch_with_limits_same_origin(url, max_response_bytes, &current)
+        .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
     record_js_network_response_bytes(response.body.len(), context);
-    ensure_same_origin_script_url(&current, &response.final_url, "cross-origin JS redirects are blocked")?;
     Ok(response)
 }
 
@@ -2970,9 +3164,10 @@ fn js_fetch_response_json(
         );
         let value = serde_json::from_str::<serde_json::Value>(&text)
             .map_err(|error| JsNativeError::syntax().with_message(error.to_string()))
-            .and_then(|json| JsValue::from_json(&json, context).map_err(|error| {
-                JsNativeError::error().with_message(error.to_string())
-            }));
+            .and_then(|json| {
+                JsValue::from_json(&json, context)
+                    .map_err(|error| JsNativeError::error().with_message(error.to_string()))
+            });
         JsPromise::from_result(value, context)
     } else {
         JsPromise::reject(
@@ -3078,7 +3273,11 @@ fn js_xhr_set_request_header(
     if let Some(object) = this.as_object()
         && let Some(handle) = object.downcast_ref::<XmlHttpRequestHandle>()
     {
-        handle.state.borrow_mut().request_headers.insert(name, value);
+        handle
+            .state
+            .borrow_mut()
+            .request_headers
+            .insert(name, value);
     }
     Ok(JsValue::undefined())
 }
@@ -3157,11 +3356,7 @@ fn js_xhr_abort(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsVa
     Ok(JsValue::undefined())
 }
 
-fn js_xhr_get_response_header(
-    _: &JsValue,
-    _: &[JsValue],
-    _: &mut Context,
-) -> JsResult<JsValue> {
+fn js_xhr_get_response_header(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::null())
 }
 
@@ -3179,37 +3374,25 @@ fn js_xhr_get_status(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult
 
 fn js_xhr_get_status_text(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::from(js_string!(
-        xhr_state_value(this, |state| state.status_text.clone())
-            .unwrap_or_default()
+        xhr_state_value(this, |state| state.status_text.clone()).unwrap_or_default()
     )))
 }
 
-fn js_xhr_get_response_text(
-    this: &JsValue,
-    _: &[JsValue],
-    _: &mut Context,
-) -> JsResult<JsValue> {
+fn js_xhr_get_response_text(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::from(js_string!(
-        xhr_state_value(this, |state| state.response_text.clone())
-            .unwrap_or_default()
+        xhr_state_value(this, |state| state.response_text.clone()).unwrap_or_default()
     )))
 }
 
 fn js_xhr_get_response(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::from(js_string!(
-        xhr_state_value(this, |state| state.response_text.clone())
-            .unwrap_or_default()
+        xhr_state_value(this, |state| state.response_text.clone()).unwrap_or_default()
     )))
 }
 
-fn js_xhr_get_response_url(
-    this: &JsValue,
-    _: &[JsValue],
-    _: &mut Context,
-) -> JsResult<JsValue> {
+fn js_xhr_get_response_url(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::from(js_string!(
-        xhr_state_value(this, |state| state.response_url.clone())
-            .unwrap_or_default()
+        xhr_state_value(this, |state| state.response_url.clone()).unwrap_or_default()
     )))
 }
 
@@ -3225,7 +3408,7 @@ fn trigger_xhr_handler(
     context: &mut Context,
 ) -> JsResult<()> {
     let callback = object.get(js_string!(property), context)?;
-    call_js_callback(&callback, &[], context)?;
+    call_js_callback_with_this(&callback, &JsValue::from(object.clone()), &[], context)?;
     Ok(())
 }
 
@@ -3333,16 +3516,9 @@ fn js_dom_dispatch_event(
     };
     let event_arg = args.first().cloned().unwrap_or_else(JsValue::undefined);
     let (event_type, bubbles, cancelable) = if let Some(object) = event_arg.as_object() {
-        let event_type = js_value_to_string(
-            &object.get(js_string!("type"), context)?,
-            context,
-        )?;
-        let bubbles = object
-            .get(js_string!("bubbles"), context)?
-            .to_boolean();
-        let cancelable = object
-            .get(js_string!("cancelable"), context)?
-            .to_boolean();
+        let event_type = js_value_to_string(&object.get(js_string!("type"), context)?, context)?;
+        let bubbles = object.get(js_string!("bubbles"), context)?.to_boolean();
+        let cancelable = object.get(js_string!("cancelable"), context)?.to_boolean();
         (event_type, bubbles, cancelable)
     } else {
         let event_type = js_value_to_string(&event_arg, context)?;
@@ -3350,7 +3526,17 @@ fn js_dom_dispatch_event(
         let cancelable = default_event_cancelable(&event_type);
         (event_type, bubbles, cancelable)
     };
-    let prevented = dispatch_dom_event_on_target(target.clone(), &event_type, bubbles, cancelable, context)?;
+    let request = DomEventRequest {
+        target_node_id: target
+            .downcast_ref::<DomNodeHandle>()
+            .map(|handle| handle.node_id)
+            .unwrap_or(0),
+        event_type,
+        bubbles,
+        cancelable,
+        ..Default::default()
+    };
+    let prevented = dispatch_dom_event_on_target(target.clone(), &request, context)?;
     Ok(JsValue::new(!prevented))
 }
 
@@ -3358,7 +3544,25 @@ fn js_dom_focus(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResul
     let Some(target) = this.as_object() else {
         return Ok(JsValue::undefined());
     };
-    let _ = dispatch_dom_event_on_target(target.clone(), "focus", false, false, context)?;
+    if let Some(node_id) = target
+        .downcast_ref::<DomNodeHandle>()
+        .map(|handle| handle.node_id)
+        && context
+            .get_data::<JavaScriptHostData>()
+            .map(|host| host.state.borrow().dom.is_disabled(node_id))
+            .unwrap_or(false)
+    {
+        return Ok(JsValue::undefined());
+    }
+    let request = DomEventRequest {
+        target_node_id: target
+            .downcast_ref::<DomNodeHandle>()
+            .map(|handle| handle.node_id)
+            .unwrap_or(0),
+        event_type: "focus".to_string(),
+        ..Default::default()
+    };
+    let _ = dispatch_dom_event_on_target(target.clone(), &request, context)?;
     Ok(JsValue::undefined())
 }
 
@@ -3366,7 +3570,15 @@ fn js_dom_blur(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult
     let Some(target) = this.as_object() else {
         return Ok(JsValue::undefined());
     };
-    let _ = dispatch_dom_event_on_target(target.clone(), "blur", false, false, context)?;
+    let request = DomEventRequest {
+        target_node_id: target
+            .downcast_ref::<DomNodeHandle>()
+            .map(|handle| handle.node_id)
+            .unwrap_or(0),
+        event_type: "blur".to_string(),
+        ..Default::default()
+    };
+    let _ = dispatch_dom_event_on_target(target.clone(), &request, context)?;
     Ok(JsValue::undefined())
 }
 
@@ -3432,22 +3644,27 @@ fn this_node_id(this: &JsValue) -> Option<usize> {
 }
 
 fn node_id_argument(arg: Option<&JsValue>) -> Option<usize> {
-    arg.and_then(JsValue::as_object)
-        .and_then(|object| object.downcast_ref::<DomNodeHandle>().map(|handle| handle.node_id))
+    arg.and_then(JsValue::as_object).and_then(|object| {
+        object
+            .downcast_ref::<DomNodeHandle>()
+            .map(|handle| handle.node_id)
+    })
 }
 
-fn js_dom_query_selector(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_query_selector(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let selector = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
     let Some(scope_id) = this_node_id(this) else {
         return Ok(JsValue::null());
     };
-    let found = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| {
-            let state = host.state.borrow();
-            let include_scope = scope_id == state.dom.document_id;
-            state.dom.query_selector(scope_id, &selector, include_scope)
-        });
+    let found = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        let state = host.state.borrow();
+        let include_scope = scope_id == state.dom.document_id;
+        state.dom.query_selector(scope_id, &selector, include_scope)
+    });
     Ok(found
         .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
         .unwrap_or_else(JsValue::null))
@@ -3460,14 +3677,19 @@ fn js_dom_query_selector_all(
 ) -> JsResult<JsValue> {
     let selector = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
     let Some(scope_id) = this_node_id(this) else {
-        return Ok(JsValue::from(build_dom_node_list_object(context, Vec::new())));
+        return Ok(JsValue::from(build_dom_node_list_object(
+            context,
+            Vec::new(),
+        )));
     };
     let node_ids = context
         .get_data::<JavaScriptHostData>()
         .map(|host| {
             let state = host.state.borrow();
             let include_scope = scope_id == state.dom.document_id;
-            state.dom.query_selector_all(scope_id, &selector, include_scope)
+            state
+                .dom
+                .query_selector_all(scope_id, &selector, include_scope)
         })
         .unwrap_or_default();
     Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
@@ -3482,9 +3704,12 @@ fn js_document_get_element_by_id(
     let Some(scope_id) = this_node_id(this) else {
         return Ok(JsValue::null());
     };
-    let found = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.get_element_by_id(scope_id, &target_id));
+    let found = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .get_element_by_id(scope_id, &target_id)
+    });
     Ok(found
         .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
         .unwrap_or_else(JsValue::null))
@@ -3528,7 +3753,11 @@ fn js_document_create_stub_object(
     Ok(JsValue::from(build_dom_node_object(context, node_id)))
 }
 
-fn js_dom_append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_append_child(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let Some(parent_id) = this_node_id(this) else {
         return Ok(JsValue::undefined());
     };
@@ -3536,7 +3765,10 @@ fn js_dom_append_child(this: &JsValue, args: &[JsValue], context: &mut Context) 
         return Ok(JsValue::undefined());
     };
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
-        host.state.borrow_mut().dom.append_child(parent_id, child_id);
+        host.state
+            .borrow_mut()
+            .dom
+            .append_child(parent_id, child_id);
     }
     Ok(args.first().cloned().unwrap_or_else(JsValue::undefined))
 }
@@ -3562,7 +3794,11 @@ fn js_dom_insert_before(
     Ok(args.first().cloned().unwrap_or_else(JsValue::undefined))
 }
 
-fn js_dom_get_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_get_attribute(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
     let Some(node_id) = this_node_id(this) else {
         return Ok(JsValue::null());
@@ -3590,13 +3826,20 @@ fn js_dom_get_property_attribute(
     Ok(JsValue::from(js_string!(value)))
 }
 
-fn js_dom_set_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_set_attribute(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
     let value = js_value_to_string(args.get(1).unwrap_or(&JsValue::undefined()), context)?;
     if let Some(node_id) = this_node_id(this)
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
-        host.state.borrow_mut().dom.set_attribute(node_id, &name, &value);
+        host.state
+            .borrow_mut()
+            .dom
+            .set_attribute(node_id, &name, &value);
     }
     Ok(JsValue::undefined())
 }
@@ -3611,7 +3854,10 @@ fn js_dom_set_property_attribute(
     if let Some(node_id) = this_node_id(this)
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
-        host.state.borrow_mut().dom.set_attribute(node_id, name, &value);
+        host.state
+            .borrow_mut()
+            .dom
+            .set_attribute(node_id, name, &value);
     }
     Ok(JsValue::undefined())
 }
@@ -3639,7 +3885,11 @@ fn js_dom_remove(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
     Ok(JsValue::undefined())
 }
 
-fn js_dom_get_class_list(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_get_class_list(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     Ok(JsValue::from(build_dom_class_list_object(context, node_id)))
 }
@@ -3666,16 +3916,30 @@ fn js_dom_get_children(this: &JsValue, _: &[JsValue], context: &mut Context) -> 
     Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
 }
 
-fn js_dom_get_child_nodes(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_get_child_nodes(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let node_ids = context
         .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.node(node_id).map(|node| node.children.clone()))
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .node(node_id)
+                .map(|node| node.children.clone())
+        })
         .unwrap_or_default();
     Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
 }
 
-fn js_dom_get_text_content(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_get_text_content(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let text = context
         .get_data::<JavaScriptHostData>()
@@ -3697,7 +3961,11 @@ fn js_dom_set_text_content(
     Ok(JsValue::undefined())
 }
 
-fn js_dom_get_inner_html(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_get_inner_html(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let html = context
         .get_data::<JavaScriptHostData>()
@@ -3723,28 +3991,20 @@ fn js_dom_set_inner_html(
 }
 
 fn js_dom_get_id(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    js_dom_get_attribute(
-        this,
-        &[JsValue::from(js_string!("id"))],
-        context,
-    )
+    js_dom_get_attribute(this, &[JsValue::from(js_string!("id"))], context)
 }
 
 fn js_dom_set_id(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let value = args.first().cloned().unwrap_or_else(JsValue::undefined);
-    js_dom_set_attribute(
-        this,
-        &[JsValue::from(js_string!("id")), value],
-        context,
-    )
+    js_dom_set_attribute(this, &[JsValue::from(js_string!("id")), value], context)
 }
 
-fn js_dom_get_class_name(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    js_dom_get_attribute(
-        this,
-        &[JsValue::from(js_string!("class"))],
-        context,
-    )
+fn js_dom_get_class_name(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    js_dom_get_attribute(this, &[JsValue::from(js_string!("class"))], context)
 }
 
 fn js_dom_set_class_name(
@@ -3753,11 +4013,7 @@ fn js_dom_set_class_name(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let value = args.first().cloned().unwrap_or_else(JsValue::undefined);
-    js_dom_set_attribute(
-        this,
-        &[JsValue::from(js_string!("class")), value],
-        context,
-    )
+    js_dom_set_attribute(this, &[JsValue::from(js_string!("class")), value], context)
 }
 
 fn js_dom_get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -3826,16 +4082,30 @@ fn js_dom_get_tag_name(this: &JsValue, _: &[JsValue], context: &mut Context) -> 
     let node_id = this_node_id(this).unwrap_or(0);
     let tag_name = context
         .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.element(node_id).map(|element| element.tag_name.to_ascii_uppercase()))
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .element(node_id)
+                .map(|element| element.tag_name.to_ascii_uppercase())
+        })
         .unwrap_or_default();
     Ok(JsValue::from(js_string!(tag_name)))
 }
 
-fn js_dom_get_parent_node(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_get_parent_node(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
-    let parent_id = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.node(node_id).and_then(|node| node.parent));
+    let parent_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .node(node_id)
+            .and_then(|node| node.parent)
+    });
     Ok(parent_id
         .map(|parent_id| JsValue::from(build_dom_node_object(context, parent_id)))
         .unwrap_or_else(JsValue::null))
@@ -3847,16 +4117,14 @@ fn js_dom_get_parent_element(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
-    let parent_id = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| {
-            let state = host.state.borrow();
-            state
-                .dom
-                .node(node_id)
-                .and_then(|node| node.parent)
-                .filter(|parent_id| state.dom.element(*parent_id).is_some())
-        });
+    let parent_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        let state = host.state.borrow();
+        state
+            .dom
+            .node(node_id)
+            .and_then(|node| node.parent)
+            .filter(|parent_id| state.dom.element(*parent_id).is_some())
+    });
     Ok(parent_id
         .map(|parent_id| JsValue::from(build_dom_node_object(context, parent_id)))
         .unwrap_or_else(JsValue::null))
@@ -3884,7 +4152,10 @@ fn js_dom_class_list_add(
         && let Some(handle) = object.downcast_ref::<DomClassListHandle>()
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
-        host.state.borrow_mut().dom.add_class(handle.node_id, &class_name);
+        host.state
+            .borrow_mut()
+            .dom
+            .add_class(handle.node_id, &class_name);
     }
     Ok(JsValue::undefined())
 }
@@ -3899,7 +4170,10 @@ fn js_dom_class_list_remove(
         && let Some(handle) = object.downcast_ref::<DomClassListHandle>()
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
-        host.state.borrow_mut().dom.remove_class(handle.node_id, &class_name);
+        host.state
+            .borrow_mut()
+            .dom
+            .remove_class(handle.node_id, &class_name);
     }
     Ok(JsValue::undefined())
 }
@@ -3912,7 +4186,11 @@ fn js_dom_class_list_contains(
     let class_name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
     let contains = this
         .as_object()
-        .and_then(|object| object.downcast_ref::<DomClassListHandle>().map(|handle| handle.node_id))
+        .and_then(|object| {
+            object
+                .downcast_ref::<DomClassListHandle>()
+                .map(|handle| handle.node_id)
+        })
         .and_then(|node_id| {
             context
                 .get_data::<JavaScriptHostData>()
@@ -3959,7 +4237,8 @@ fn js_dom_node_list_for_each(
     for (index, node_id) in handle.node_ids.iter().copied().enumerate() {
         let node_value = JsValue::from(build_dom_node_object(context, node_id));
         let index_value = JsValue::new(index as i32);
-        let list_value = JsValue::from(build_dom_node_list_object(context, handle.node_ids.clone()));
+        let list_value =
+            JsValue::from(build_dom_node_list_object(context, handle.node_ids.clone()));
         let args = [node_value, index_value, list_value];
         call_js_callback(callback, &args, context)?;
     }
@@ -4059,12 +4338,19 @@ fn call_js_callback_with_this(
     Ok(JsValue::undefined())
 }
 
-fn call_js_callback(callback: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn call_js_callback(
+    callback: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     call_js_callback_with_this(callback, &JsValue::undefined(), args, context)
 }
 
 fn default_event_bubbles(event_type: &str) -> bool {
-    matches!(event_type, "click" | "input" | "change" | "submit" | "keydown" | "keyup")
+    matches!(
+        event_type,
+        "click" | "input" | "change" | "submit" | "keydown" | "keyup"
+    )
 }
 
 fn default_event_cancelable(event_type: &str) -> bool {
@@ -4097,7 +4383,8 @@ fn dispatch_listeners_on_target(
     let target_value = JsValue::from(target.clone());
     let event_value = JsValue::from(event.clone());
     for callback in callbacks {
-        call_js_callback_with_this(&callback, &target_value, &[event_value.clone()], context)?;
+        let _ =
+            call_js_callback_with_this(&callback, &target_value, &[event_value.clone()], context);
         if event_flag_value(event, "immediatePropagationStopped", context) {
             break;
         }
@@ -4107,13 +4394,11 @@ fn dispatch_listeners_on_target(
 
 fn dispatch_dom_event_on_target(
     target: boa_engine::object::JsObject,
-    event_type: &str,
-    bubbles: bool,
-    cancelable: bool,
+    request: &DomEventRequest,
     context: &mut Context,
 ) -> JsResult<bool> {
-    let event = build_dom_event_object(context, event_type, &target, bubbles, cancelable);
-    let listener_event_type = event_type.to_ascii_lowercase();
+    let event = build_dom_event_object(context, request, &target);
+    let listener_event_type = request.event_type.to_ascii_lowercase();
     let mut current_target = target;
     let mut current_id = current_target
         .downcast_ref::<DomNodeHandle>()
@@ -4124,7 +4409,7 @@ fn dispatch_dom_event_on_target(
         dispatch_listeners_on_target(&current_target, &listener_event_type, &event, context)?;
         if event_flag_value(&event, "immediatePropagationStopped", context)
             || event_flag_value(&event, "propagationStopped", context)
-            || !bubbles
+            || !request.bubbles
         {
             break;
         }
@@ -4132,10 +4417,13 @@ fn dispatch_dom_event_on_target(
         let Some(node_id) = current_id else {
             break;
         };
-        let Some(parent_id) = context
-            .get_data::<JavaScriptHostData>()
-            .and_then(|host| host.state.borrow().dom.node(node_id).and_then(|node| node.parent))
-        else {
+        let Some(parent_id) = context.get_data::<JavaScriptHostData>().and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .node(node_id)
+                .and_then(|node| node.parent)
+        }) else {
             break;
         };
         current_id = Some(parent_id);
@@ -4161,8 +4449,8 @@ mod tests {
     use boa_engine::{Context, JsValue, Source, js_string};
 
     use super::{
-        JavaScriptRuntime, current_location_url, ensure_same_origin_script_url,
-        fetch_for_script, process_document_scripts, resolve_requested_url, set_location_href,
+        JavaScriptRuntime, current_location_url, ensure_same_origin_script_url, fetch_for_script,
+        process_document_scripts, resolve_requested_url, set_location_href,
     };
     use crate::url::Url;
 
@@ -4264,9 +4552,11 @@ mod tests {
         let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
         set_location_href("https://other.example/app", &mut runtime.context);
 
-        let resolved =
-            resolve_requested_url(&JsValue::from(js_string!("/api/data")), &mut runtime.context)
-                .unwrap();
+        let resolved = resolve_requested_url(
+            &JsValue::from(js_string!("/api/data")),
+            &mut runtime.context,
+        )
+        .unwrap();
 
         assert_eq!(
             resolved,
@@ -4299,7 +4589,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("cross-origin JS requests are blocked"));
+        assert!(
+            error
+                .to_string()
+                .contains("cross-origin JS requests are blocked")
+        );
     }
 
     #[test]
@@ -4314,9 +4608,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("cross-origin JS redirects are blocked"));
+        assert!(
+            error
+                .to_string()
+                .contains("cross-origin JS redirects are blocked")
+        );
     }
 
     #[test]

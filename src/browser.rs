@@ -7,7 +7,10 @@ use crate::error::Result;
 use crate::html::{Element, Node, parse_document};
 use crate::http::fetch;
 use crate::image::{ImageStore, decode_image};
-use crate::js::{DomEventDispatchResult, DomEventRequest, JavaScriptSession, ProcessedScriptHtml, start_document_script_session};
+use crate::js::{
+    DomEventDispatchResult, DomEventRequest, JavaScriptSession, ProcessedScriptHtml,
+    start_document_script_session,
+};
 use crate::render::render_document;
 use crate::text::decode_text_response;
 use crate::url::Url;
@@ -38,6 +41,7 @@ impl BrowserPage {
 
     pub fn apply_script_snapshot(&mut self, snapshot: ProcessedScriptHtml) {
         let include_rendered_output = self.rendered.is_some();
+        let javascript_session = self.javascript_session.take();
         let rebuilt = rebuild_page_from_html(
             &self.url,
             self.status_code,
@@ -46,7 +50,7 @@ impl BrowserPage {
             &snapshot.html,
             snapshot.title_override.clone(),
             include_rendered_output,
-            self.javascript_session.clone(),
+            javascript_session,
         );
         *self = rebuilt;
     }
@@ -63,6 +67,15 @@ impl BrowserPage {
             self.apply_script_snapshot(result.snapshot.clone());
         }
         result
+    }
+
+    pub fn set_dom_attribute(&mut self, node_id: Option<usize>, name: &str, value: &str) {
+        let Some(node_id) = node_id else {
+            return;
+        };
+        if let Some(session) = &self.javascript_session {
+            let _ = session.set_attribute(node_id, name, value);
+        }
     }
 
     pub fn body_text(&self) -> &str {
@@ -99,7 +112,6 @@ struct LoadedDocumentSource {
     status_code: u16,
     reason_phrase: String,
     content_type: Option<String>,
-    title: String,
     document: Node,
     processed_html: ProcessedScriptHtml,
     javascript_session: Option<JavaScriptSession>,
@@ -121,12 +133,13 @@ pub fn load_page_for_cli(url: &Url) -> Result<BrowserPage> {
 
 fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<BrowserPage> {
     let source = load_document_source(url, 0)?;
-    Ok(rebuild_page_from_html(
+    Ok(rebuild_page_from_document(
         &source.final_url,
         source.status_code,
         source.reason_phrase,
         source.content_type,
-        &source.processed_html.html,
+        source.document,
+        source.processed_html.html,
         source.processed_html.title_override,
         include_rendered_output,
         source.javascript_session,
@@ -155,8 +168,36 @@ fn rebuild_page_from_html(
         parsed_document = build_youtube_generic_document_from_html(html, url);
     }
     annotate_resource_urls(&mut parsed_document, url);
-    let original_title = title_override.or_else(|| document_title(&parsed_document));
-    let document = parsed_document;
+    let document = expand_frames(&parsed_document, url, 1)
+        .ok()
+        .flatten()
+        .unwrap_or(parsed_document);
+    rebuild_page_from_document(
+        url,
+        status_code,
+        reason_phrase,
+        content_type,
+        document,
+        html.to_string(),
+        title_override,
+        include_rendered_output,
+        javascript_session,
+    )
+}
+
+fn rebuild_page_from_document(
+    url: &Url,
+    status_code: u16,
+    reason_phrase: String,
+    content_type: Option<String>,
+    mut document: Node,
+    html_source: String,
+    title_override: Option<String>,
+    include_rendered_output: bool,
+    javascript_session: Option<JavaScriptSession>,
+) -> BrowserPage {
+    annotate_node_ids(&mut document);
+    let original_title = title_override.or_else(|| document_title(&document));
     let title = original_title
         .or_else(|| document_title(&document))
         .or_else(|| first_heading(&document))
@@ -173,7 +214,7 @@ fn rebuild_page_from_html(
         reason_phrase,
         content_type,
         title,
-        html_source: html.to_string(),
+        html_source,
         styled_document,
         images,
         rendered,
@@ -222,31 +263,40 @@ fn load_document_source_with_script_navigation(
         parsed_document = build_youtube_generic_document_from_html(&text, &response.final_url);
     }
     annotate_resource_urls(&mut parsed_document, &response.final_url);
-    let original_title = scripted
-        .title_override
-        .clone()
-        .or_else(|| document_title(&parsed_document));
     let document = if frame_depth < MAX_FRAME_DEPTH {
         expand_frames(&parsed_document, &response.final_url, frame_depth + 1)?
             .unwrap_or(parsed_document)
     } else {
         parsed_document
     };
-    let title = original_title
-        .or_else(|| document_title(&document))
-        .or_else(|| first_heading(&document))
-        .unwrap_or_else(|| "Tobira".to_string());
-
     Ok(LoadedDocumentSource {
         final_url: response.final_url,
         status_code: response.status_code,
         reason_phrase: response.reason_phrase,
         content_type,
-        title,
         document,
         processed_html: scripted,
         javascript_session,
     })
+}
+
+fn annotate_node_ids(document: &mut Node) {
+    fn walk(node: &mut Node, next_id: &mut usize) {
+        if let Node::Element(element) = node {
+            element
+                .attributes
+                .insert("data-tobira-node-id".to_string(), next_id.to_string());
+            *next_id = next_id
+                .checked_add(1)
+                .expect("document node id counter overflowed");
+            for child in &mut element.children {
+                walk(child, next_id);
+            }
+        }
+    }
+
+    let mut next_id = 1;
+    walk(document, &mut next_id);
 }
 
 fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<Option<Node>> {
@@ -442,14 +492,18 @@ fn section_heading_node(title: &str) -> Node {
 }
 
 fn frame_section_title(frame: &FrameSpec, frame_document: &LoadedDocumentSource) -> Option<String> {
+    let frame_title = document_title(&frame_document.document)
+        .or_else(|| first_heading(&frame_document.document))
+        .unwrap_or_default();
+
     if let Some(first_heading) = first_heading(&frame_document.document)
-        && first_heading == frame_document.title
+        && first_heading == frame_title
     {
         return None;
     }
 
-    if !frame_document.title.trim().is_empty() && frame_document.title != "Tobira" {
-        return Some(frame_document.title.clone());
+    if !frame_title.trim().is_empty() && frame_title != "Tobira" {
+        return Some(frame_title);
     }
 
     frame
@@ -1893,17 +1947,26 @@ fn default_youtube_sidebar_labels<'a>(
         vec![
             ("ホーム", "https://www.youtube.com/"),
             ("ショート", "https://www.youtube.com/shorts"),
-            ("登録チャンネル", "https://www.youtube.com/feed/subscriptions"),
+            (
+                "登録チャンネル",
+                "https://www.youtube.com/feed/subscriptions",
+            ),
             ("トレンド", "https://www.youtube.com/feed/trending"),
             ("履歴", "https://www.youtube.com/feed/history"),
             ("後で見る", "https://www.youtube.com/playlist?list=WL"),
-            ("高く評価した動画", "https://www.youtube.com/playlist?list=LL"),
+            (
+                "高く評価した動画",
+                "https://www.youtube.com/playlist?list=LL",
+            ),
         ]
     } else {
         vec![
             ("Home", "https://www.youtube.com/"),
             ("Shorts", "https://www.youtube.com/shorts"),
-            ("Subscriptions", "https://www.youtube.com/feed/subscriptions"),
+            (
+                "Subscriptions",
+                "https://www.youtube.com/feed/subscriptions",
+            ),
             ("Trending", "https://www.youtube.com/feed/trending"),
             ("History", "https://www.youtube.com/feed/history"),
             ("Watch later", "https://www.youtube.com/playlist?list=WL"),

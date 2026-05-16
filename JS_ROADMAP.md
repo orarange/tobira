@@ -19,7 +19,7 @@ Already working:
 - inline and external scripts
 - recursive `document.write(...)`
 - lightweight DOM mutation helpers
-- basic DOM event plumbing for `click`, `input`, `change`, `submit`, `focus`, and `blur`
+- basic DOM event plumbing for bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`
 - `Promise` job flushing
 - guarded `fetch(...)` and `XMLHttpRequest`
 - same-origin navigation checks
@@ -45,7 +45,7 @@ Goal: make page interaction feel like a browser, not a custom app.
 Tasks:
 
 - `addEventListener(...)` and basic listener registration are in place
-- basic bubbling exists for `click`, `input`, `change`, `submit`, `focus`, and `blur`
+- basic bubbling exists for `click`, `input`, `change`, and `submit`; `focus` and `blur` are target-only
 - page controls now dispatch DOM events before default actions
 - submit and link clicks can be canceled with `preventDefault()`
 

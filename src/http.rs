@@ -34,17 +34,26 @@ impl HttpResponse {
 }
 
 pub fn fetch(url: &Url) -> Result<HttpResponse> {
-    fetch_inner(url, 0, None)
+    fetch_inner(url, 0, None, None)
 }
 
 pub fn fetch_with_limits(url: &Url, max_body_bytes: usize) -> Result<HttpResponse> {
-    fetch_inner(url, 0, Some(max_body_bytes))
+    fetch_inner(url, 0, Some(max_body_bytes), None)
+}
+
+pub fn fetch_with_limits_same_origin(
+    url: &Url,
+    max_body_bytes: usize,
+    origin: &Url,
+) -> Result<HttpResponse> {
+    fetch_inner(url, 0, Some(max_body_bytes), Some(origin))
 }
 
 fn fetch_inner(
     url: &Url,
     redirect_count: usize,
     max_body_bytes: Option<usize>,
+    same_origin: Option<&Url>,
 ) -> Result<HttpResponse> {
     if redirect_count > MAX_REDIRECTS {
         return Err(BrowserError::message("too many redirects"));
@@ -75,7 +84,14 @@ fn fetch_inner(
     if is_redirect(response.status_code) {
         if let Some(location) = response.header("location") {
             let next_url = url.resolve(location)?;
-            return fetch_inner(&next_url, redirect_count + 1, max_body_bytes);
+            if let Some(origin) = same_origin
+                && !origin.shares_origin(&next_url)
+            {
+                return Err(BrowserError::message(
+                    "cross-origin redirect target is blocked",
+                ));
+            }
+            return fetch_inner(&next_url, redirect_count + 1, max_body_bytes, same_origin);
         }
     }
 
@@ -185,10 +201,7 @@ fn decode_content(
         "" | "identity" => Ok(body),
         "gzip" => read_all(GzDecoder::new(Cursor::new(body)), max_output_bytes),
         "deflate" => decode_deflate(body, max_output_bytes),
-        "br" => read_all(
-            Decompressor::new(Cursor::new(body), 4096),
-            max_output_bytes,
-        ),
+        "br" => read_all(Decompressor::new(Cursor::new(body), 4096), max_output_bytes),
         other => Err(BrowserError::message(format!(
             "unsupported content encoding: {other}"
         ))),
@@ -196,7 +209,10 @@ fn decode_content(
 }
 
 fn decode_deflate(body: Vec<u8>, max_output_bytes: Option<usize>) -> Result<Vec<u8>> {
-    let first_try = read_all(ZlibDecoder::new(Cursor::new(body.clone())), max_output_bytes);
+    let first_try = read_all(
+        ZlibDecoder::new(Cursor::new(body.clone())),
+        max_output_bytes,
+    );
     match first_try {
         Ok(decoded) => Ok(decoded),
         Err(_) => read_all(DeflateDecoder::new(Cursor::new(body)), max_output_bytes),
