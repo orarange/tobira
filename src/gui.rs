@@ -11,7 +11,7 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, ResizeDirection, Window};
 
 use crate::browser::{BrowserPage, load_page};
-use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind, InteractiveState, ObjectFit};
+use crate::css::{Color, CursorKind, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind, InteractiveState, ObjectFit};
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
 use crate::image::DecodedImage;
@@ -519,14 +519,55 @@ impl BrowserApp {
         if changed {
             self.request_redraw();
         }
+        // Determine cursor icon before borrowing self.window
+        let icon = if self.hovered_link_url.is_some() {
+            CursorIcon::Pointer
+        } else if next == HitTarget::None {
+            let elem_cursor = self.find_hovered_element_cursor(window_size);
+            match elem_cursor {
+                CursorKind::Pointer => CursorIcon::Pointer,
+                CursorKind::Text => CursorIcon::Text,
+                CursorKind::Move => CursorIcon::Move,
+                CursorKind::Crosshair => CursorIcon::Crosshair,
+                CursorKind::Wait => CursorIcon::Wait,
+                CursorKind::Help => CursorIcon::Help,
+                CursorKind::NotAllowed => CursorIcon::NotAllowed,
+                CursorKind::Grab => CursorIcon::Grab,
+                CursorKind::Grabbing => CursorIcon::Grabbing,
+                CursorKind::ZoomIn => CursorIcon::ZoomIn,
+                CursorKind::ZoomOut => CursorIcon::ZoomOut,
+                CursorKind::None | CursorKind::Default => CursorIcon::Default,
+                CursorKind::Auto => cursor_icon_for_target(next),
+            }
+        } else {
+            cursor_icon_for_target(next)
+        };
         if let Some(window) = &self.window {
-            let icon = if self.hovered_link_url.is_some() {
-                CursorIcon::Pointer
-            } else {
-                cursor_icon_for_target(next)
-            };
             window.set_cursor(icon);
         }
+    }
+
+    fn find_hovered_element_cursor(&mut self, window_size: PhysicalSize<u32>) -> CursorKind {
+        let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
+        let body_top = chrome.height + FRAME_PADDING;
+        let pos_x = self.cursor_position.x;
+        let pos_y = self.cursor_position.y;
+        if pos_y < body_top as f64 {
+            return CursorKind::Auto;
+        }
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let layout = self.document.layout(content_width, &mut self.fonts);
+        let content_y = (pos_y as u32)
+            .saturating_sub(body_top)
+            .saturating_add(self.scroll_y);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        layout.element_hitboxes.iter().rev()
+            .find(|h| {
+                content_x >= h.x && content_x < h.x + h.width
+                    && content_y >= h.y && content_y < h.y + h.height
+            })
+            .map(|h| h.cursor_kind)
+            .unwrap_or(CursorKind::Auto)
     }
 
     fn find_hovered_element(&mut self, window_size: PhysicalSize<u32>) -> Option<usize> {

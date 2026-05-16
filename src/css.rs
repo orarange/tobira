@@ -249,6 +249,9 @@ pub enum FontFamilyKind {
 pub enum LengthValue {
     Pixels(u32),
     Percent(u32),
+    MinContent,
+    MaxContent,
+    FitContent(u32), // argument in pixels
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -315,6 +318,7 @@ pub enum Position {
     Relative,
     Absolute,
     Fixed,
+    Sticky,
 }
 
 impl Default for Position {
@@ -351,6 +355,25 @@ pub enum AlignContent {
     Stretch,
 }
 impl Default for AlignContent { fn default() -> Self { AlignContent::Stretch } }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorKind {
+    #[default]
+    Auto,
+    Default,
+    Pointer,
+    Text,
+    Move,
+    Crosshair,
+    Wait,
+    Help,
+    NotAllowed,
+    Grab,
+    Grabbing,
+    ZoomIn,
+    ZoomOut,
+    None,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ObjectFit {
@@ -447,6 +470,8 @@ pub struct ComputedStyle {
     pub overflow: Overflow,
     pub list_style_type: ListStyleType,
     pub cursor_pointer: bool,
+    pub cursor_kind: CursorKind,
+    pub pointer_events_none: bool,
     pub text_decoration_color: Option<Color>,
     pub box_shadow: Option<BoxShadow>,
     pub content: Option<String>,
@@ -532,6 +557,8 @@ impl ComputedStyle {
             overflow: Overflow::Visible,
             list_style_type: ListStyleType::Disc,
             cursor_pointer: false,
+            cursor_kind: CursorKind::Auto,
+            pointer_events_none: false,
             text_decoration_color: None,
             box_shadow: None,
             content: None,
@@ -1611,14 +1638,33 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "cursor" => {
-            let v = value.trim().to_ascii_lowercase();
-            style.cursor_pointer = v == "pointer";
+            style.cursor_kind = match value.trim().to_ascii_lowercase().as_str() {
+                "pointer" => CursorKind::Pointer,
+                "text" | "i-beam" => CursorKind::Text,
+                "move" => CursorKind::Move,
+                "crosshair" => CursorKind::Crosshair,
+                "wait" | "progress" => CursorKind::Wait,
+                "help" => CursorKind::Help,
+                "not-allowed" | "no-drop" => CursorKind::NotAllowed,
+                "grab" => CursorKind::Grab,
+                "grabbing" => CursorKind::Grabbing,
+                "zoom-in" => CursorKind::ZoomIn,
+                "zoom-out" => CursorKind::ZoomOut,
+                "none" => CursorKind::None,
+                "default" => CursorKind::Default,
+                _ => CursorKind::Auto,
+            };
+            style.cursor_pointer = matches!(style.cursor_kind, CursorKind::Pointer);
+        }
+        "pointer-events" => {
+            style.pointer_events_none = value.trim().to_ascii_lowercase() == "none";
         }
         "position" => {
             style.position = match value.trim().to_ascii_lowercase().as_str() {
                 "relative" => Position::Relative,
                 "absolute" => Position::Absolute,
                 "fixed" => Position::Fixed,
+                "sticky" | "-webkit-sticky" => Position::Sticky,
                 _ => Position::Static,
             };
         }
@@ -3363,10 +3409,20 @@ fn resolve_calc_operand_f32(token: &str, parent_font_size: u32) -> Option<f32> {
 
 fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue> {
     let value = input.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "min-content" => return Some(LengthValue::MinContent),
+        "max-content" => return Some(LengthValue::MaxContent),
+        "auto" => return None,
+        _ => {}
+    }
+    if let Some(inner) = value.strip_prefix("fit-content(").and_then(|s| s.strip_suffix(')')) {
+        if let Some(px) = parse_length(inner, parent_font_size) {
+            return Some(LengthValue::FitContent(px));
+        }
+    }
     if let Some(number) = value.strip_suffix('%') {
         return parse_float(number).map(|p| LengthValue::Percent(p.round().max(0.0) as u32));
     }
-
     parse_length(&value, parent_font_size).map(LengthValue::Pixels)
 }
 
@@ -4510,5 +4566,35 @@ mod tests {
         assert_eq!(div.style.grid_column.start, Some(1));
         assert_eq!(div.style.grid_column.span, Some(2));
         assert_eq!(div.style.grid_row.start, Some(2));
+    }
+
+    #[test]
+    fn min_max_content_length_value_parsed() {
+        let html = r#"<div style="width: min-content;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.width, Some(LengthValue::MinContent));
+    }
+
+    #[test]
+    fn fit_content_length_value_parsed() {
+        let html = r#"<div style="width: fit-content(300px);"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.width, Some(LengthValue::FitContent(300)));
+    }
+
+    #[test]
+    fn pointer_events_none_parsed() {
+        let html = r#"<div style="pointer-events: none;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert!(div.style.pointer_events_none);
     }
 }

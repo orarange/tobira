@@ -1,5 +1,5 @@
 use crate::css::{
-    Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, GridTrackSize,
+    Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, GridTrackSize,
     LengthValue, ObjectFit, Overflow, Position, FlexDirection, AlignItems, AlignSelf,
     JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform, VerticalAlign,
     WhiteSpaceMode, apply_text_transform,
@@ -32,6 +32,7 @@ pub struct ElementHitbox {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+    pub cursor_kind: CursorKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -827,7 +828,7 @@ fn layout_node(
                     );
                     if let Some(href) = link_href {
                         let link_height = cursor_y.saturating_sub(y_before);
-                        if link_height > 0 {
+                        if link_height > 0 && !element.style.pointer_events_none {
                             context.links.push(LinkCommand {
                                 node_id: link_node_id,
                                 x,
@@ -851,6 +852,9 @@ fn layout_node(
                         .map(|w| match w {
                             LengthValue::Pixels(px) => px,
                             LengthValue::Percent(pct) => (width as f32 * pct as f32 / 100.0) as u32,
+                            LengthValue::MinContent => 0,
+                            LengthValue::MaxContent => width,
+                            LengthValue::FitContent(max_px) => width.min(max_px),
                         })
                         .unwrap_or(width);
                     layout_flex_container(element, x, inline_width, cursor_y, context, images, fonts, current_form.clone());
@@ -865,6 +869,9 @@ fn layout_node(
                         .map(|w| match w {
                             LengthValue::Pixels(px) => px,
                             LengthValue::Percent(pct) => (width as f32 * pct as f32 / 100.0) as u32,
+                            LengthValue::MinContent => 0,
+                            LengthValue::MaxContent => width,
+                            LengthValue::FitContent(max_px) => width.min(max_px),
                         })
                         .unwrap_or(width);
                     layout_grid_container(element, x, inline_width, cursor_y, context, images, fonts, current_form);
@@ -1057,13 +1064,14 @@ fn layout_block_element(
 
     // Emit element hitbox for interactive state (hover/focus) detection
     if let Some(node_id) = element_node_id(element) {
-        if background_height > 0 {
+        if background_height > 0 && !element.style.pointer_events_none {
             context.element_hitboxes.push(ElementHitbox {
                 node_id,
                 x: outer_x,
                 y: background_top,
                 width: outer_width.max(1),
                 height: background_height,
+                cursor_kind: element.style.cursor_kind,
             });
         }
     }
@@ -1091,6 +1099,7 @@ fn layout_block_element(
             .map(|lv| match lv {
                 LengthValue::Pixels(px) => px,
                 LengthValue::Percent(_) => background_height, // can't resolve % without context
+                LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => background_height,
             })
             .unwrap_or(background_height);
         clip_commands_to_box(
@@ -1159,8 +1168,10 @@ fn layout_block_element(
         }
     }
 
-    // position: relative — apply visual offset without affecting flow
-    if element.style.position == Position::Relative {
+    // position: relative / sticky — apply visual offset without affecting flow
+    // sticky: lay out in normal flow then apply top/bottom as minimum offsets (same as relative
+    // for now; true scroll-based stickiness requires scroll state propagation).
+    if element.style.position == Position::Relative || element.style.position == Position::Sticky {
         let dx = element.style.left.unwrap_or(0) - element.style.right.unwrap_or(0);
         let dy = element.style.top.unwrap_or(0) - element.style.bottom.unwrap_or(0);
         if dx != 0 || dy != 0 {
@@ -1484,6 +1495,7 @@ fn layout_block_element_as_layer(
             .map(|lv| match lv {
                 LengthValue::Pixels(px) => px,
                 LengthValue::Percent(_) => final_height,
+                LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => final_height,
             })
             .unwrap_or(final_height);
         clip_commands_to_box(
@@ -1880,6 +1892,7 @@ fn layout_table_element(
                 y: h.y.saturating_add(cell_y).saturating_add(padding).saturating_add(vertical_offset),
                 width: h.width,
                 height: h.height,
+                cursor_kind: h.cursor_kind,
             }));
         } else {
             // opacity == 255: emit background rect directly into parent context
@@ -2178,6 +2191,7 @@ fn merge_fragment(
             y: h.y.saturating_add(offset_y),
             width: h.width,
             height: h.height,
+            cursor_kind: h.cursor_kind,
         }));
 }
 
@@ -2898,14 +2912,16 @@ fn emit_line_impl(
         }));
 
         if let Some(href) = &span.link_href {
-            context.links.push(LinkCommand {
-                node_id: span.link_node_id,
-                x: cursor_x,
-                y: *cursor_y,
-                width: span.width,
-                height: line_height,
-                href: href.clone(),
-            });
+            if !span.style.pointer_events_none {
+                context.links.push(LinkCommand {
+                    node_id: span.link_node_id,
+                    x: cursor_x,
+                    y: *cursor_y,
+                    width: span.width,
+                    height: line_height,
+                    href: href.clone(),
+                });
+            }
         }
 
         cursor_x = cursor_x.saturating_add(span.width);
@@ -3037,6 +3053,8 @@ fn measure_node_preferred_width(
                     .map(|length| match length {
                         LengthValue::Pixels(value) => value,
                         LengthValue::Percent(value) => value.saturating_mul(8),
+                        LengthValue::MinContent => 0,
+                        LengthValue::MaxContent | LengthValue::FitContent(_) => u32::MAX / 2,
                     })
                     .unwrap_or_else(|| {
                         collect_table_rows(element)
@@ -3083,6 +3101,9 @@ fn resolve_length_value(length: LengthValue, available_width: u32) -> u32 {
     match length {
         LengthValue::Pixels(value) => value,
         LengthValue::Percent(value) => available_width.saturating_mul(value) / 100,
+        LengthValue::MinContent => 0,
+        LengthValue::MaxContent => available_width,
+        LengthValue::FitContent(max_px) => available_width.min(max_px),
     }
 }
 
@@ -3129,6 +3150,9 @@ fn layout_positioned_element(
         .and_then(|lv| match lv {
             LengthValue::Pixels(px) => Some(*px),
             LengthValue::Percent(p) => Some((container_width as f32 * (*p as f32) / 100.0) as u32),
+            LengthValue::MinContent => Some(0),
+            LengthValue::MaxContent => Some(container_width),
+            LengthValue::FitContent(max_px) => Some(container_width.min(*max_px)),
         })
         .unwrap_or(container_width);
 
@@ -3626,6 +3650,9 @@ fn layout_flex_container(
                 child.style.width.as_ref().and_then(|lv| match lv {
                     LengthValue::Pixels(px) => Some(*px),
                     LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
+                    LengthValue::MinContent => Some(0),
+                    LengthValue::MaxContent => Some(content_width),
+                    LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
                 }).unwrap_or(0)
                 + child.style.margin.left + child.style.margin.right
             }).sum();
@@ -3638,6 +3665,9 @@ fn layout_flex_container(
                 let child_w = child.style.width.as_ref().and_then(|lv| match lv {
                     LengthValue::Pixels(px) => Some(*px),
                     LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
+                    LengthValue::MinContent => Some(0),
+                    LengthValue::MaxContent => Some(content_width),
+                    LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
                 }).unwrap_or(auto_width).max(1);
                 let mut dummy_y = content_y;
                 let mut dummy_ctx = LayoutContext { background_color: context.background_color, ..LayoutContext::default() };
@@ -3657,6 +3687,9 @@ fn layout_flex_container(
                 let child_w = child.style.width.as_ref().and_then(|lv| match lv {
                     LengthValue::Pixels(px) => Some(*px),
                     LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
+                    LengthValue::MinContent => Some(0),
+                    LengthValue::MaxContent => Some(content_width),
+                    LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
                 }).unwrap_or(auto_width).max(1);
 
                 let self_align = match child.style.align_self {
