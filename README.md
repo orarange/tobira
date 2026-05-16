@@ -38,6 +38,13 @@ Current capabilities:
 - Plain text CLI renderer with `--cli`
 - Custom title bar and address bar
 - Clickable page links plus basic GUI form controls for `GET` submissions
+- Basic DOM event plumbing for page controls:
+  - `click`
+  - `focus`
+  - `blur`
+  - `input`
+  - `change`
+  - `submit`
 - Basic JavaScript execution with `boa_engine`
 - Lightweight mutable DOM support for:
   - `document.querySelector(...)`
@@ -96,6 +103,13 @@ Local forms demo:
 ```bash
 python -m http.server 8765
 cargo run -- http://127.0.0.1:8765/demo/forms-demo.html
+```
+
+Local event demo:
+
+```bash
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/events-demo.html
 ```
 
 ## GUI Controls
@@ -157,8 +171,11 @@ Current JS support is intentionally small:
 - `document.createElement(...)`
 - `appendChild(...)` / `insertBefore(...)` / `remove()`
 - `innerHTML`, `textContent`, `classList`, `id`, `className`
+- `document.addEventListener(...)` / basic bubbling for page control events
+- `addEventListener(...)` on page inputs, buttons, links, and forms
+- `click`, `focus`, `blur`, `input`, `change`, and `submit` event dispatch
 - `location.href`
 - `console.log()` / `warn()` / `error()`
 - immediate `setTimeout(...)` fallback
 
-It still does not implement a full browser DOM, robust events, async networking, or framework-level browser APIs.
+It still does not implement a full browser DOM, robust keyboard events, async networking, live `input.value` reflection for every GUI edit path, or framework-level browser APIs.

@@ -62,7 +62,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - loop-iteration runtime budget for runaway scripts
     - same-origin request and redirect guards
     - script-driven `location.href` follow-up navigation
-  - local demo pages under `demo/` for CSS, JS, DOM mutation, and form handling
+  - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, and event plumbing
   - site-specific rendering paths for:
     - YouTube watch pages
     - YouTube home shell fallback
@@ -98,17 +98,18 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - `fd5c362` real js first host pipeline update complete
 - `d159cf0` dom backed javascript support implementation complete
 - `8751537` address bar clipboard support implementation complete
+- `18f2be6` copilot review runtime limit and fragment fixes complete
 
 ## Known Gaps / Likely Next Work
 
 - JS support is still far from a full browser DOM / framework runtime.
-- GUI-to-page event delivery is still shallow; forms are native-painted controls, not true DOM event targets yet.
-- `addEventListener`, richer event types, and framework-facing browser APIs still need a lot more depth.
+- GUI-to-page event delivery now covers basic `click`, `focus`, `blur`, `input`, `change`, and `submit` bubbling, but keyboard events and capture-phase behavior still need depth.
+- Live `input.value` reflection from GUI typing into script-visible DOM state is still incomplete in some paths.
+- Framework-facing browser APIs still need a lot more depth.
 - History / back-forward behavior is not yet complete.
 - Modern app-shell sites still need more DOM APIs, cookies/storage, and CSS coverage.
 - CSS is still computed once up front instead of being rebuilt against the live window width.
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
-- JS `input.value` reflection still targets the backing attribute/default value, not the live focused editor state after GUI typing begins.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
 - `fetch(...)` / `XMLHttpRequest` remain intentionally conservative; cross-origin app shells are still blocked until a safer policy exists.
@@ -122,6 +123,7 @@ cargo run -- https://www.youtube.com/
 cargo run -- --cli https://www.google.com/
 python -m http.server 8765
 cargo run -- http://127.0.0.1:8765/demo/forms-demo.html
+cargo run -- http://127.0.0.1:8765/demo/events-demo.html
 cargo test
 cargo build
 git status --short
@@ -178,3 +180,9 @@ git worktree list
 
 - Added `JS_ROADMAP.md` as the living plan for taking JavaScript support from lightweight and useful to browser-grade.
 - Linked the roadmap from `README.md` so future sessions can find the priority order quickly.
+
+### 2026-05-16 - Codex (event plumbing demo)
+
+- Added a dedicated `demo/events-demo.html` / `demo/events-demo.js` page for verifying native page event plumbing.
+- Updated the docs to reflect that basic DOM event dispatch now covers `click`, `focus`, `blur`, `input`, `change`, and `submit`.
+- Kept the roadmap and handoff notes in sync with the still-missing keyboard, capture-phase, and live-value reflection gaps.

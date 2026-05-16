@@ -19,6 +19,7 @@ Already working:
 - inline and external scripts
 - recursive `document.write(...)`
 - lightweight DOM mutation helpers
+- basic DOM event plumbing for `click`, `input`, `change`, `submit`, `focus`, and `blur`
 - `Promise` job flushing
 - guarded `fetch(...)` and `XMLHttpRequest`
 - same-origin navigation checks
@@ -27,7 +28,10 @@ Already working:
 
 Still missing or shallow:
 
-- full event model
+- `removeEventListener(...)`
+- keyboard events such as `keydown` and `keyup`
+- capture phase / richer listener options
+- tighter alignment between GUI text editing and live DOM `input.value`
 - storage and cookies
 - richer networking semantics
 - full history/navigation behavior
@@ -40,12 +44,18 @@ Goal: make page interaction feel like a browser, not a custom app.
 
 Tasks:
 
-- add `addEventListener(...)` / `removeEventListener(...)`
-- support event dispatch for `click`, `input`, `change`, `submit`, `keydown`, `keyup`, `focus`, `blur`
-- implement bubbling and cancelation
-- wire GUI pointer and keyboard input into DOM targets
-- make native page controls dispatch DOM events instead of only mutating local state
-- ensure default actions happen after listeners when not canceled
+- `addEventListener(...)` and basic listener registration are in place
+- basic bubbling exists for `click`, `input`, `change`, `submit`, `focus`, and `blur`
+- page controls now dispatch DOM events before default actions
+- submit and link clicks can be canceled with `preventDefault()`
+
+Still to finish in this phase:
+
+- `removeEventListener(...)`
+- keyboard events such as `keydown` and `keyup`
+- capture phase / richer listener options
+- live GUI typing synchronized into script-visible DOM state in every edit path
+- more complete default-action sequencing for edge cases
 
 Exit criteria:
 
@@ -166,9 +176,10 @@ The roadmap should be validated in this order:
 
 1. local unit tests
 2. local demo pages
-3. Google top/search flows
-4. YouTube home/watch/search flows
-5. common real-world app shells that exercise events, storage, and network APIs
+3. the event plumbing demo
+4. Google top/search flows
+5. YouTube home/watch/search flows
+6. common real-world app shells that exercise events, storage, and network APIs
 
 ## Working Rule
 
@@ -178,4 +189,3 @@ Whenever a phase lands or a new blocker shows up:
 - update `HANDOFF.md`
 - add or adjust a demo page if it helps prove the feature
 - record the change in the session log
-

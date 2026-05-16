@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Tobira Event Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        background: #eef2f7;
+        color: #1d2738;
+        margin: 0;
+        padding: 0;
+      }
+
+      main {
+        max-width: 860px;
+        margin: 32px auto;
+        padding: 28px;
+        background: #fffdfa;
+        border: 1px solid #cad4e2;
+        box-shadow: 0 10px 30px rgba(32, 43, 59, 0.08);
+      }
+
+      h1 {
+        margin-top: 0;
+      }
+
+      form {
+        margin: 24px 0;
+        padding: 18px;
+        background: #f4f7fc;
+        border: 1px solid #d7e0ed;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 10px;
+        font-weight: 600;
+      }
+
+      input,
+      button {
+        font: inherit;
+      }
+
+      input {
+        width: min(420px, 100%);
+        box-sizing: border-box;
+        padding: 10px 12px;
+        border: 1px solid #9fb0c7;
+        background: #fff;
+      }
+
+      button {
+        margin-top: 12px;
+        padding: 10px 14px;
+        border: 1px solid #7c93b2;
+        background: #dbe7f7;
+        cursor: pointer;
+      }
+
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+        margin-top: 12px;
+      }
+
+      pre {
+        min-height: 260px;
+        padding: 16px;
+        border: 1px solid #cad4e2;
+        background: #111827;
+        color: #dbe7ff;
+        overflow: auto;
+        white-space: pre-wrap;
+      }
+
+      small {
+        display: block;
+        margin-top: 10px;
+        color: #5f6d82;
+      }
+
+      a {
+        color: #1f5fbf;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Event Plumbing Demo</h1>
+      <p>
+        This page exercises native page events in Tobira. Try clicking the
+        input and link, typing, pressing Enter, and using the submit button.
+        The log should show bubbling for focus, blur, input, change, click,
+        and submit.
+      </p>
+
+      <form id="demo-form" action="?submitted=1" method="get">
+        <label for="demo-input">Search text</label>
+        <input id="demo-input" name="q" placeholder="Type here" value="">
+        <div class="row">
+          <button id="demo-submit" type="submit">Submit form</button>
+          <a id="demo-link" href="#linked">Prevented link</a>
+        </div>
+        <small>
+          The submit and link handlers call <code>preventDefault()</code> so the
+          browser stays on this page and the log keeps growing.
+        </small>
+      </form>
+
+      <pre id="log"></pre>
+    </main>
+    <script src="events-demo.js"></script>
+  </body>
+</html>

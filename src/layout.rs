@@ -51,6 +51,7 @@ pub struct ImageCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkCommand {
+    pub node_id: Option<usize>,
     pub x: u32,
     pub y: u32,
     pub width: u32,
@@ -67,6 +68,8 @@ pub enum FormControlKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormControlCommand {
     pub id: usize,
+    pub node_id: Option<usize>,
+    pub form_node_id: Option<usize>,
     pub kind: FormControlKind,
     pub x: u32,
     pub y: u32,
@@ -166,7 +169,7 @@ impl LayoutContext {
 
 #[derive(Debug, Clone)]
 enum InlineFragment {
-    Text { text: String, style: ComputedStyle, link_href: Option<String> },
+    Text { text: String, style: ComputedStyle, link_href: Option<String>, link_node_id: Option<usize> },
     Control(FormControlSpec),
     LineBreak,
 }
@@ -178,6 +181,7 @@ struct LineSpan {
     height: u32,
     style: ComputedStyle,
     link_href: Option<String>,
+    link_node_id: Option<usize>,
     control: Option<FormControlSpec>,
 }
 
@@ -191,6 +195,7 @@ struct LineBuilder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FormContext {
     id: usize,
+    node_id: Option<usize>,
     action: Option<String>,
     method: String,
 }
@@ -198,6 +203,8 @@ struct FormContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FormControlSpec {
     id: usize,
+    node_id: Option<usize>,
+    form_node_id: Option<usize>,
     kind: FormControlKind,
     style: ComputedStyle,
     name: Option<String>,
@@ -217,7 +224,14 @@ impl LineBuilder {
         self.spans.is_empty()
     }
 
-    fn push_span(&mut self, text: &str, style: &ComputedStyle, fonts: &mut FontContext, link_href: Option<&str>) {
+    fn push_span(
+        &mut self,
+        text: &str,
+        style: &ComputedStyle,
+        fonts: &mut FontContext,
+        link_href: Option<&str>,
+        link_node_id: Option<usize>,
+    ) {
         if text.is_empty() {
             return;
         }
@@ -244,6 +258,7 @@ impl LineBuilder {
             height,
             style: style.clone(),
             link_href: link_href.map(str::to_string),
+            link_node_id,
             control: None,
         });
     }
@@ -262,6 +277,7 @@ impl LineBuilder {
             height,
             style: control.style.clone(),
             link_href: None,
+            link_node_id: None,
             control: Some(control.clone()),
         });
     }
@@ -278,6 +294,7 @@ fn form_context_for_element(
 
     Some(FormContext {
         id: context.allocate_form_id(),
+        node_id: element_node_id(element),
         action: element
             .attributes
             .get("action")
@@ -299,6 +316,8 @@ fn build_form_control_spec(
 ) -> Option<FormControlSpec> {
     let disabled = element.attributes.contains_key("disabled");
     let form_id = current_form.map(|form| form.id);
+    let node_id = element_node_id(element);
+    let form_node_id = current_form.and_then(|form| form.node_id);
     let form_action = current_form.and_then(|form| form.action.clone());
     let form_method = current_form
         .map(|form| form.method.clone())
@@ -316,6 +335,8 @@ fn build_form_control_spec(
                 "hidden" | "checkbox" | "radio" | "file" | "image" | "reset" => None,
                 "submit" | "button" => Some(FormControlSpec {
                     id: context.allocate_control_id(),
+                    node_id,
+                    form_node_id,
                     kind: FormControlKind::Button,
                     style: element.style.clone(),
                     name: element.attributes.get("name").cloned(),
@@ -342,6 +363,8 @@ fn build_form_control_spec(
                 }),
                 _ => Some(FormControlSpec {
                     id: context.allocate_control_id(),
+                    node_id,
+                    form_node_id,
                     kind: FormControlKind::TextInput,
                     style: element.style.clone(),
                     name: element.attributes.get("name").cloned(),
@@ -362,6 +385,8 @@ fn build_form_control_spec(
         }
         "textarea" => Some(FormControlSpec {
             id: context.allocate_control_id(),
+            node_id,
+            form_node_id,
             kind: FormControlKind::TextInput,
             style: element.style.clone(),
             name: element.attributes.get("name").cloned(),
@@ -395,6 +420,8 @@ fn build_form_control_spec(
             };
             Some(FormControlSpec {
                 id: context.allocate_control_id(),
+                node_id,
+                form_node_id,
                 kind: FormControlKind::Button,
                 style: element.style.clone(),
                 name: element.attributes.get("name").cloned(),
@@ -411,6 +438,13 @@ fn build_form_control_spec(
         }
         _ => None,
     }
+}
+
+fn element_node_id(element: &StyledElement) -> Option<usize> {
+    element
+        .attributes
+        .get("data-tobira-node-id")
+        .and_then(|value| value.parse::<usize>().ok())
 }
 
 fn measure_form_control(
@@ -465,6 +499,7 @@ fn layout_node(
                 text: text.text.clone(),
                 style: text.style.clone(),
                 link_href: None,
+                link_node_id: None,
             }];
             layout_inline_fragments(&fragments, &text.style, x, width, cursor_y, context, fonts);
         }
@@ -495,6 +530,11 @@ fn layout_node(
                     } else {
                         None
                     };
+                    let link_node_id = if element.tag_name == "a" {
+                        element_node_id(element)
+                    } else {
+                        None
+                    };
                     let y_before = *cursor_y;
                     layout_block_element(
                         element,
@@ -510,6 +550,7 @@ fn layout_node(
                         let link_height = cursor_y.saturating_sub(y_before);
                         if link_height > 0 {
                             context.links.push(LinkCommand {
+                                node_id: link_node_id,
                                 x,
                                 y: y_before,
                                 width,
@@ -734,6 +775,7 @@ fn layout_image_fallback(
         text: alt,
         style: element.style.clone(),
         link_href: None,
+        link_node_id: None,
     }];
     layout_inline_fragments(
         &fragments,
@@ -1184,6 +1226,7 @@ fn merge_fragment(
     context
         .links
         .extend(fragment.links.iter().map(|link| LinkCommand {
+            node_id: link.node_id,
             x: link.x.saturating_add(offset_x),
             y: link.y.saturating_add(offset_y),
             width: link.width,
@@ -1194,6 +1237,8 @@ fn merge_fragment(
         .controls
         .extend(fragment.controls.iter().map(|control| FormControlCommand {
             id: control.id,
+            node_id: control.node_id,
+            form_node_id: control.form_node_id,
             kind: control.kind,
             x: control.x.saturating_add(offset_x),
             y: control.y.saturating_add(offset_y),
@@ -1252,6 +1297,7 @@ fn layout_mixed_children(
                             text: "- ".to_string(),
                             style: element.style.clone(),
                             link_href: None,
+                            link_node_id: None,
                         },
                     );
                 }
@@ -1284,12 +1330,14 @@ fn layout_mixed_children(
                     text: "- ".to_string(),
                     style: element.style.clone(),
                     link_href: None,
+                    link_node_id: None,
                 });
                 bullet_pending = false;
             }
             collect_inline_fragments(
                 child,
                 &mut inline_fragments,
+                None,
                 None,
                 current_form.clone(),
                 context,
@@ -1303,6 +1351,7 @@ fn layout_mixed_children(
                 text: "- ".to_string(),
                 style: element.style.clone(),
                 link_href: None,
+                link_node_id: None,
             });
         }
         layout_inline_fragments(
@@ -1321,6 +1370,7 @@ fn collect_inline_fragments(
     node: &StyledNode,
     output: &mut Vec<InlineFragment>,
     link_href: Option<&str>,
+    link_node_id: Option<usize>,
     current_form: Option<FormContext>,
     context: &mut LayoutContext,
 ) {
@@ -1330,6 +1380,7 @@ fn collect_inline_fragments(
                 text: text.text.clone(),
                 style: text.style.clone(),
                 link_href: link_href.map(str::to_string),
+                link_node_id,
             });
         }
         StyledNode::Element(element) => {
@@ -1338,6 +1389,11 @@ fn collect_inline_fragments(
                 element.attributes.get("href").map(String::as_str).or(link_href)
             } else {
                 link_href
+            };
+            let current_link_node_id = if element.tag_name == "a" {
+                element_node_id(element).or(link_node_id)
+            } else {
+                link_node_id
             };
 
             match element.style.display {
@@ -1364,6 +1420,7 @@ fn collect_inline_fragments(
                             text: alt,
                             style: element.style.clone(),
                             link_href: current_link.map(str::to_string),
+                            link_node_id: current_link_node_id,
                         });
                         return;
                     }
@@ -1373,6 +1430,7 @@ fn collect_inline_fragments(
                             child,
                             output,
                             current_link,
+                            current_link_node_id,
                             current_form.clone(),
                             context,
                         );
@@ -1390,7 +1448,7 @@ fn flatten_inline_fragments(
     current_form: Option<FormContext>,
 ) -> Vec<InlineFragment> {
     let mut fragments = Vec::new();
-    collect_inline_fragments(node, &mut fragments, None, current_form, context);
+    collect_inline_fragments(node, &mut fragments, None, None, current_form, context);
     fragments
 }
 
@@ -1484,7 +1542,7 @@ fn layout_normal_fragments(
                         );
                         first_line = false;
                     } else {
-                        line.push_span(" ", &control.style, fonts, None);
+                        line.push_span(" ", &control.style, fonts, None, None);
                     }
                 }
 
@@ -1509,7 +1567,7 @@ fn layout_normal_fragments(
                 line.push_control(control, fonts);
                 pending_space = true;
             }
-            InlineFragment::Text { text, style, link_href } => {
+            InlineFragment::Text { text, style, link_href, link_node_id } => {
                 let had_whitespace = text.chars().any(char::is_whitespace);
 
                 for word in text.split_whitespace() {
@@ -1534,7 +1592,7 @@ fn layout_normal_fragments(
                             );
                             first_line = false;
                         } else {
-                            line.push_span(" ", style, fonts, link_href.as_deref());
+                            line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
                         }
                     }
 
@@ -1548,6 +1606,7 @@ fn layout_normal_fragments(
                         word,
                         style,
                         link_href.as_deref(),
+                        *link_node_id,
                         container_style,
                         x,
                         effective_width2,
@@ -1615,7 +1674,7 @@ fn layout_preformatted_fragments(
                 }
                 line.push_control(control, fonts);
             }
-            InlineFragment::Text { text, style, link_href } => {
+            InlineFragment::Text { text, style, link_href, link_node_id } => {
                 for character in text.chars() {
                     if character == '\n' {
                         emit_line(
@@ -1644,7 +1703,7 @@ fn layout_preformatted_fragments(
                     }
 
                     let mut buffer = [0_u8; 4];
-                    line.push_span(character.encode_utf8(&mut buffer), style, fonts, link_href.as_deref());
+                    line.push_span(character.encode_utf8(&mut buffer), style, fonts, link_href.as_deref(), *link_node_id);
                 }
             }
         }
@@ -1665,6 +1724,7 @@ fn push_wrapped_word(
     word: &str,
     style: &ComputedStyle,
     link_href: Option<&str>,
+    link_node_id: Option<usize>,
     container_style: &ComputedStyle,
     x: u32,
     width: u32,
@@ -1678,7 +1738,7 @@ fn push_wrapped_word(
         if !line.is_empty() && line.width.saturating_add(word_width) > width {
             emit_line(line, container_style, x, width, cursor_y, context, fonts);
         }
-        line.push_span(word, style, fonts, link_href);
+        line.push_span(word, style, fonts, link_href, link_node_id);
         return;
     }
 
@@ -1692,7 +1752,7 @@ fn push_wrapped_word(
             if !line.is_empty() {
                 emit_line(line, container_style, x, width, cursor_y, context, fonts);
             }
-            line.push_span(&chunk, style, fonts, link_href);
+            line.push_span(&chunk, style, fonts, link_href, link_node_id);
             emit_line(line, container_style, x, width, cursor_y, context, fonts);
             chunk.clear();
         }
@@ -1702,7 +1762,7 @@ fn push_wrapped_word(
         if !line.is_empty() && line.width.saturating_add(text_width(style, &chunk, fonts)) > width {
             emit_line(line, container_style, x, width, cursor_y, context, fonts);
         }
-        line.push_span(&chunk, style, fonts, link_href);
+        line.push_span(&chunk, style, fonts, link_href, link_node_id);
     }
 }
 
@@ -1774,6 +1834,8 @@ fn emit_line_impl(
             let border_color = if control.disabled { 0xA9AFB8 } else { 0x7F8B9C };
             context.controls.push(FormControlCommand {
                 id: control.id,
+                node_id: control.node_id,
+                form_node_id: control.form_node_id,
                 kind: control.kind,
                 x: cursor_x,
                 y: control_y,
@@ -1829,6 +1891,7 @@ fn emit_line_impl(
 
         if let Some(href) = &span.link_href {
             context.links.push(LinkCommand {
+                node_id: span.link_node_id,
                 x: cursor_x,
                 y: *cursor_y,
                 width: span.width,
