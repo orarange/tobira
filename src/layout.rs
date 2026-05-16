@@ -178,6 +178,7 @@ pub struct TextCommand {
     pub width: u32,
     pub text: String,
     pub font_size_px: u32,
+    pub line_height_px: u32,
     pub font_family: FontFamilyKind,
     pub color: Color,
     pub underline: bool,
@@ -202,6 +203,40 @@ pub struct LinkCommand {
     pub width: u32,
     pub height: u32,
     pub href: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormControlKind {
+    TextInput,
+    Button,
+    Hidden,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormControlCommand {
+    pub id: usize,
+    pub node_id: Option<usize>,
+    pub form_node_id: Option<usize>,
+    pub kind: FormControlKind,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub name: Option<String>,
+    pub value: String,
+    pub label: String,
+    pub placeholder: Option<String>,
+    pub form_id: Option<usize>,
+    pub form_action: Option<String>,
+    pub form_method: String,
+    pub activates_submit: bool,
+    pub disabled: bool,
+    pub masked: bool,
+    pub font_size_px: u32,
+    pub font_family: FontFamilyKind,
+    pub text_color: Color,
+    pub background_color: Color,
+    pub border_color: Color,
 }
 
 /// Scan the document tree for a body/html element with a solid background color.
@@ -733,7 +768,7 @@ fn layout_node(
 
             // Handle positioned elements (absolute/fixed) — they don't contribute to flow
             if element.style.position == Position::Absolute || element.style.position == Position::Fixed {
-                layout_positioned_element(element, x, width, cursor_y, context, images, fonts);
+                layout_positioned_element(element, x, width, cursor_y, context, images, fonts, current_form.clone());
                 return;
             }
 
@@ -789,7 +824,8 @@ fn layout_node(
                     }
                 }
                 Display::Flex => {
-                    layout_flex_container(element, x, width, cursor_y, context, images, fonts);
+                    let current_form = form_context_for_element(element, context, current_form);
+                    layout_flex_container(element, x, width, cursor_y, context, images, fonts, current_form.clone());
                 }
             }
         }
@@ -859,7 +895,7 @@ fn layout_block_element(
     // Detect stacking context: element has opacity < 255
     if element.style.opacity < 255 {
         layout_block_element_as_layer(
-            element, outer_x, outer_width, background_top, cursor_y, context, images, fonts,
+            element, outer_x, outer_width, background_top, cursor_y, context, images, fonts, current_form,
         );
         *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
         return;
@@ -879,7 +915,7 @@ fn layout_block_element(
             y: sy,
             width: sw,
             height: 1,
-            color: shadow.color,
+            color: shadow.color.unwrap_or(element.style.color),
             border_radius: element.style.border_radius.saturating_add(blur),
         }));
         Some(context.commands.len() - 1)
@@ -1150,7 +1186,7 @@ fn clip_commands_to_box(
                 Some(DrawCommand::Layer(l))
             }
             DrawCommand::Text(t) => {
-                let ty2 = t.y.saturating_add(t.font_size_px);
+                let ty2 = t.y.saturating_add(t.line_height_px);
                 let tx2 = t.x.saturating_add(t.width);
                 if t.x >= clip_x2 || t.y >= clip_y2 || tx2 <= clip_x || ty2 <= clip_y {
                     None
@@ -1204,10 +1240,13 @@ fn layout_block_element_as_layer(
     context: &mut LayoutContext,
     images: &ImageStore,
     fonts: &mut FontContext,
+    current_form: Option<FormContext>,
 ) {
     // Create a sub-context for the element's subtree
     let mut sub_context = LayoutContext {
         background_color: context.background_color,
+        next_control_id: context.next_control_id,
+        next_form_id: context.next_form_id,
         ..LayoutContext::default()
     };
 
@@ -1230,7 +1269,7 @@ fn layout_block_element_as_layer(
             y: sy,
             width: sw,
             height: 1,
-            color: shadow.color,
+            color: shadow.color.unwrap_or(element.style.color),
             border_radius: element.style.border_radius.saturating_add(blur),
         }));
         Some(sub_context.commands.len() - 1)
@@ -1312,6 +1351,7 @@ fn layout_block_element_as_layer(
             bullet_indent > 0,
             images,
             fonts,
+            current_form,
         );
     }
 
@@ -1413,8 +1453,11 @@ fn layout_block_element_as_layer(
         commands: sub_context.commands,
     }));
 
-    // Propagate links from sub_context to parent (links are for hit-testing, not compositing)
+    // Propagate links and controls from sub_context to parent (for hit-testing, not compositing)
     context.links.extend(sub_context.links);
+    context.controls.extend(sub_context.controls);
+    context.next_control_id = sub_context.next_control_id;
+    context.next_form_id = sub_context.next_form_id;
 }
 
 fn layout_image_element(
@@ -1730,11 +1773,37 @@ fn layout_table_element(
             }));
             // Links are content-relative; shift by cell position + padding/valign
             context.links.extend(layout.links.iter().map(|link| LinkCommand {
+                node_id: link.node_id,
                 x: link.x.saturating_add(cell_x).saturating_add(padding),
                 y: link.y.saturating_add(cell_y).saturating_add(padding).saturating_add(vertical_offset),
                 width: link.width,
                 height: link.height,
                 href: link.href.clone(),
+            }));
+            context.controls.extend(layout.controls.iter().map(|ctrl| FormControlCommand {
+                id: ctrl.id,
+                node_id: ctrl.node_id,
+                form_node_id: ctrl.form_node_id,
+                kind: ctrl.kind,
+                x: ctrl.x.saturating_add(cell_x).saturating_add(padding),
+                y: ctrl.y.saturating_add(cell_y).saturating_add(padding).saturating_add(vertical_offset),
+                width: ctrl.width,
+                height: ctrl.height,
+                name: ctrl.name.clone(),
+                value: ctrl.value.clone(),
+                label: ctrl.label.clone(),
+                placeholder: ctrl.placeholder.clone(),
+                form_id: ctrl.form_id,
+                form_action: ctrl.form_action.clone(),
+                form_method: ctrl.form_method.clone(),
+                activates_submit: ctrl.activates_submit,
+                disabled: ctrl.disabled,
+                masked: ctrl.masked,
+                font_size_px: ctrl.font_size_px,
+                font_family: ctrl.font_family,
+                text_color: ctrl.text_color,
+                background_color: ctrl.background_color,
+                border_color: ctrl.border_color,
             }));
         } else {
             // opacity == 255: emit background rect directly into parent context
@@ -1946,6 +2015,7 @@ fn layout_table_cell(
         controls: Vec::new(),
         next_control_id: control_id_seed,
         next_form_id: form_id_seed,
+        ..LayoutContext::default()
     };
     let mut cursor_y = 0_u32;
 
@@ -1988,55 +2058,6 @@ fn merge_fragment(
     context
         .links
         .extend(fragment.links.iter().map(|link| LinkCommand {
-            x: link.x.saturating_add(offset_x),
-            y: link.y.saturating_add(offset_y),
-            width: link.width,
-            height: link.height,
-            href: link.href.clone(),
-        }));
-}
-
-fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawCommand {
-    match cmd {
-        DrawCommand::Rect(rect) => DrawCommand::Rect(RectCommand {
-            x: rect.x.saturating_add(offset_x),
-            y: rect.y.saturating_add(offset_y),
-            width: rect.width,
-            height: rect.height,
-            color: rect.color,
-            border_radius: rect.border_radius,
-        }),
-        DrawCommand::Text(text) => DrawCommand::Text(TextCommand {
-            x: text.x.saturating_add(offset_x),
-            y: text.y.saturating_add(offset_y),
-            width: text.width,
-            text: text.text.clone(),
-            font_size_px: text.font_size_px,
-            font_family: text.font_family,
-            color: text.color,
-            underline: text.underline,
-            bold: text.bold,
-            italic: text.italic,
-        }),
-        DrawCommand::Image(image) => DrawCommand::Image(ImageCommand {
-            x: image.x.saturating_add(offset_x),
-            y: image.y.saturating_add(offset_y),
-            width: image.width,
-            height: image.height,
-            src: image.src.clone(),
-        }),
-        DrawCommand::Layer(layer) => DrawCommand::Layer(LayerCommand {
-            x: layer.x.saturating_add(offset_x),
-            y: layer.y.saturating_add(offset_y),
-            width: layer.width,
-            height: layer.height,
-            opacity: layer.opacity,
-            commands: layer.commands.clone(),
-        }),
-    }
-    context
-        .links
-        .extend(fragment.links.iter().map(|link| LinkCommand {
             node_id: link.node_id,
             x: link.x.saturating_add(offset_x),
             y: link.y.saturating_add(offset_y),
@@ -2071,6 +2092,47 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             background_color: control.background_color,
             border_color: control.border_color,
         }));
+}
+
+fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawCommand {
+    match cmd {
+        DrawCommand::Rect(rect) => DrawCommand::Rect(RectCommand {
+            x: rect.x.saturating_add(offset_x),
+            y: rect.y.saturating_add(offset_y),
+            width: rect.width,
+            height: rect.height,
+            color: rect.color,
+            border_radius: rect.border_radius,
+        }),
+        DrawCommand::Text(text) => DrawCommand::Text(TextCommand {
+            x: text.x.saturating_add(offset_x),
+            y: text.y.saturating_add(offset_y),
+            width: text.width,
+            text: text.text.clone(),
+            font_size_px: text.font_size_px,
+            line_height_px: text.line_height_px,
+            font_family: text.font_family,
+            color: text.color,
+            underline: text.underline,
+            bold: text.bold,
+            italic: text.italic,
+        }),
+        DrawCommand::Image(image) => DrawCommand::Image(ImageCommand {
+            x: image.x.saturating_add(offset_x),
+            y: image.y.saturating_add(offset_y),
+            width: image.width,
+            height: image.height,
+            src: image.src.clone(),
+        }),
+        DrawCommand::Layer(layer) => DrawCommand::Layer(LayerCommand {
+            x: layer.x.saturating_add(offset_x),
+            y: layer.y.saturating_add(offset_y),
+            width: layer.width,
+            height: layer.height,
+            opacity: layer.opacity,
+            commands: layer.commands.clone(),
+        }),
+    }
 }
 
 fn span_width(widths: &[u32], start: usize, span: usize) -> u32 {
@@ -2469,97 +2531,59 @@ fn layout_preformatted_fragments(
     fonts: &mut FontContext,
 ) {
     let mut line = LineBuilder::default();
+    let mut first_line = true;
+    let text_indent = container_style.text_indent;
 
     for fragment in fragments {
         match fragment {
-            InlineFragment::LineBreak => emit_line(
-                &mut line,
-                container_style,
-                x,
-                width,
-                cursor_y,
-                context,
-                fonts,
-            ),
+            InlineFragment::LineBreak => {
+                emit_line_with_indent(
+                    &mut line, container_style, x, width, cursor_y, context, fonts,
+                    if first_line { text_indent } else { 0 },
+                );
+                first_line = false;
+            }
             InlineFragment::Control(control) => {
                 let (control_width, _) = measure_form_control(control, fonts);
-                let effective_width = if first_line && line.is_empty() {
+                let effective_width = if first_line {
                     width.saturating_sub(text_indent)
                 } else {
                     width
                 };
-
-                let pending_space_before_control = pending_space && !line.is_empty();
-                if pending_space_before_control {
-                    let space_width = char_width(&control.style, ' ', fonts);
-                    if line.width.saturating_add(space_width) > effective_width {
-                        emit_line_with_indent(
-                            &mut line,
-                            container_style,
-                            x,
-                            width,
-                            cursor_y,
-                            context,
-                            fonts,
-                            if first_line { text_indent } else { 0 },
-                        );
-                        first_line = false;
-                    } else {
-                        line.push_span(" ", &control.style, fonts, None, None);
-                    }
-                }
-
-                let effective_width = if first_line && line.is_empty() {
-                    width.saturating_sub(text_indent)
-                } else {
-                    width
-                };
+                // Only emit current line if the control won't fit inline
                 if !line.is_empty() && line.width.saturating_add(control_width) > effective_width {
                     emit_line_with_indent(
-                        &mut line,
-                        container_style,
-                        x,
-                        width,
-                        cursor_y,
-                        context,
-                        fonts,
+                        &mut line, container_style, x, width, cursor_y, context, fonts,
                         if first_line { text_indent } else { 0 },
                     );
                     first_line = false;
                 }
                 line.push_control(control, fonts);
-                pending_space = true;
             }
             InlineFragment::Text {
                 text,
                 style,
                 link_href,
-                link_node_id,            } => {
+                link_node_id,
+            } => {
                 for character in text.chars() {
                     if character == '\n' {
-                        emit_line(
-                            &mut line,
-                            container_style,
-                            x,
-                            width,
-                            cursor_y,
-                            context,
-                            fonts,
+                        emit_line_with_indent(
+                            &mut line, container_style, x, width, cursor_y, context, fonts,
+                            if first_line { text_indent } else { 0 },
                         );
+                        first_line = false;
                         continue;
                     }
 
                     let character_width = char_width(style, character, fonts);
-                    if !line.is_empty() && line.width.saturating_add(character_width) > width {
-                        emit_line(
-                            &mut line,
-                            container_style,
-                            x,
-                            width,
-                            cursor_y,
-                            context,
-                            fonts,
+                    let eff_w = if first_line { width.saturating_sub(text_indent) } else { width };
+                    if !line.is_empty() && line.width.saturating_add(character_width) > eff_w {
+                        emit_line_with_indent(
+                            &mut line, container_style, x, width, cursor_y, context, fonts,
+                            if first_line { text_indent } else { 0 },
                         );
+                        first_line = false;
                     }
 
                     let mut buffer = [0_u8; 4];
@@ -2568,13 +2592,14 @@ fn layout_preformatted_fragments(
                         style,
                         fonts,
                         link_href.as_deref(),
-                link_node_id,                    );
+                        *link_node_id,
+                    );
                 }
             }
         }
     }
 
-    emit_line(
+    emit_line_with_indent(
         &mut line,
         container_style,
         x,
@@ -2582,6 +2607,7 @@ fn layout_preformatted_fragments(
         cursor_y,
         context,
         fonts,
+        if first_line { text_indent } else { 0 },
     );
 }
 
@@ -2768,6 +2794,7 @@ fn emit_line_impl(
             width: span.width,
             text: display_text,
             font_size_px: span.style.font_size_px,
+            line_height_px: line_height,
             font_family: span.style.font_family,
             color: apply_opacity(span.style.color, context.background_color, span_opacity),
             underline: span.style.underline,
@@ -2989,6 +3016,7 @@ fn layout_positioned_element(
     context: &mut LayoutContext,
     images: &ImageStore,
     fonts: &mut FontContext,
+    current_form: Option<FormContext>,
 ) {
     let (base_x, base_y) = if element.style.position == Position::Fixed {
         (0u32, context.scroll_y_for_fixed)
@@ -3009,12 +3037,20 @@ fn layout_positioned_element(
 
     let mut sub_context = LayoutContext {
         background_color: context.background_color,
+        next_control_id: context.next_control_id,
+        next_form_id: context.next_form_id,
         ..LayoutContext::default()
     };
-    layout_block_element(element, x, elem_width, &mut cursor_y, &mut sub_context, images, fonts);
+    // Use sub_context for form allocation so next_form_id counter stays consistent
+    // when propagated back — avoids form_id going backwards if element is a <form>
+    let current_form = form_context_for_element(element, &mut sub_context, current_form);
+    layout_block_element(element, x, elem_width, &mut cursor_y, &mut sub_context, images, fonts, current_form);
     let z = element.style.z_index.unwrap_or(0);
     context.positioned_commands.push((z, sub_context.commands));
     context.links.extend(sub_context.links);
+    context.controls.extend(sub_context.controls);
+    context.next_control_id = sub_context.next_control_id;
+    context.next_form_id = sub_context.next_form_id;
 }
 
 fn layout_flex_container(
@@ -3025,6 +3061,7 @@ fn layout_flex_container(
     context: &mut LayoutContext,
     images: &ImageStore,
     fonts: &mut FontContext,
+    current_form: Option<FormContext>,
 ) {
     *cursor_y = cursor_y.saturating_add(element.style.margin.top);
     let outer_x = x.saturating_add(element.style.margin.left);
@@ -3104,7 +3141,7 @@ fn layout_flex_container(
                 }).unwrap_or(auto_width).max(1);
                 let mut dummy_y = content_y;
                 let mut dummy_ctx = LayoutContext { background_color: context.background_color, ..LayoutContext::default() };
-                layout_block_element(child, content_x, child_w, &mut dummy_y, &mut dummy_ctx, images, fonts);
+                layout_block_element(child, content_x, child_w, &mut dummy_y, &mut dummy_ctx, images, fonts, current_form.clone());
                 dummy_y.saturating_sub(content_y)
             }).collect();
             let max_height = *item_heights.iter().max().unwrap_or(&0);
@@ -3137,7 +3174,8 @@ fn layout_flex_container(
                 };
 
                 let mut child_y = content_y.saturating_add(child_y_offset);
-                layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts);
+                let child_form = form_context_for_element(child, context, current_form.clone());
+                layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts, child_form);
                 cursor_x = cursor_x.saturating_add(child_w).saturating_add(item_gap);
             }
 
@@ -3148,7 +3186,8 @@ fn layout_flex_container(
             // Column direction: stack children vertically with gap
             *cursor_y = content_y;
             for (i, child) in children.iter().enumerate() {
-                layout_block_element(child, content_x, content_width, cursor_y, context, images, fonts);
+                let child_form = form_context_for_element(child, context, current_form.clone());
+                layout_block_element(child, content_x, content_width, cursor_y, context, images, fonts, child_form);
                 if i < children.len() - 1 {
                     *cursor_y = cursor_y.saturating_add(gap);
                 }
@@ -3477,7 +3516,7 @@ mod tests {
     #[test]
     fn emits_form_controls_for_inputs_and_buttons() {
         let document = parse_document(
-            "<form action="/search"><input name="q" value="rust"><button type="submit">Go</button></form>",
+            r#"<form action="/search"><input name="q" value="rust"><button type="submit">Go</button></form>"#,
         );
         let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
         let mut fonts = FontContext::load();
