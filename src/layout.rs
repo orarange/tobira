@@ -768,7 +768,7 @@ fn layout_node(
 
             // Handle positioned elements (absolute/fixed) — they don't contribute to flow
             if element.style.position == Position::Absolute || element.style.position == Position::Fixed {
-                layout_positioned_element(element, x, width, cursor_y, context, images, fonts);
+                layout_positioned_element(element, x, width, cursor_y, context, images, fonts, current_form.clone());
                 return;
             }
 
@@ -824,6 +824,7 @@ fn layout_node(
                     }
                 }
                 Display::Flex => {
+                    let current_form = form_context_for_element(element, context, current_form);
                     layout_flex_container(element, x, width, cursor_y, context, images, fonts, current_form.clone());
                 }
             }
@@ -894,7 +895,7 @@ fn layout_block_element(
     // Detect stacking context: element has opacity < 255
     if element.style.opacity < 255 {
         layout_block_element_as_layer(
-            element, outer_x, outer_width, background_top, cursor_y, context, images, fonts,
+            element, outer_x, outer_width, background_top, cursor_y, context, images, fonts, current_form,
         );
         *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
         return;
@@ -1239,10 +1240,13 @@ fn layout_block_element_as_layer(
     context: &mut LayoutContext,
     images: &ImageStore,
     fonts: &mut FontContext,
+    current_form: Option<FormContext>,
 ) {
     // Create a sub-context for the element's subtree
     let mut sub_context = LayoutContext {
         background_color: context.background_color,
+        next_control_id: context.next_control_id,
+        next_form_id: context.next_form_id,
         ..LayoutContext::default()
     };
 
@@ -1347,7 +1351,7 @@ fn layout_block_element_as_layer(
             bullet_indent > 0,
             images,
             fonts,
-            None,
+            current_form,
         );
     }
 
@@ -1449,8 +1453,11 @@ fn layout_block_element_as_layer(
         commands: sub_context.commands,
     }));
 
-    // Propagate links from sub_context to parent (links are for hit-testing, not compositing)
+    // Propagate links and controls from sub_context to parent (for hit-testing, not compositing)
     context.links.extend(sub_context.links);
+    context.controls.extend(sub_context.controls);
+    context.next_control_id = sub_context.next_control_id;
+    context.next_form_id = sub_context.next_form_id;
 }
 
 fn layout_image_element(
@@ -2537,8 +2544,9 @@ fn layout_preformatted_fragments(
                 fonts,
             ),
             InlineFragment::Control(control) => {
-                // In preformatted context, emit current line then push control without wrapping logic
-                if !line.is_empty() {
+                let (control_width, _) = measure_form_control(control, fonts);
+                // Only emit current line if the control won't fit inline
+                if !line.is_empty() && line.width.saturating_add(control_width) > width {
                     emit_line(&mut line, container_style, x, width, cursor_y, context, fonts);
                 }
                 line.push_control(control, fonts);
@@ -3005,6 +3013,7 @@ fn layout_positioned_element(
     context: &mut LayoutContext,
     images: &ImageStore,
     fonts: &mut FontContext,
+    current_form: Option<FormContext>,
 ) {
     let (base_x, base_y) = if element.style.position == Position::Fixed {
         (0u32, context.scroll_y_for_fixed)
@@ -3029,7 +3038,8 @@ fn layout_positioned_element(
         next_form_id: context.next_form_id,
         ..LayoutContext::default()
     };
-    layout_block_element(element, x, elem_width, &mut cursor_y, &mut sub_context, images, fonts, None);
+    let current_form = form_context_for_element(element, context, current_form);
+    layout_block_element(element, x, elem_width, &mut cursor_y, &mut sub_context, images, fonts, current_form);
     let z = element.style.z_index.unwrap_or(0);
     context.positioned_commands.push((z, sub_context.commands));
     context.links.extend(sub_context.links);
