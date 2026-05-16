@@ -1693,6 +1693,7 @@ fn layout_error_document(
             width: fonts.text_width_px(line, font_size_px, FontFamilyKind::Sans),
             text: line.clone(),
             font_size_px,
+            line_height_px: height,
             font_family: FontFamilyKind::Sans,
             color,
             underline: false,
@@ -3447,9 +3448,9 @@ fn render_layer(
     // the existing viewport culling in render_commands() handles out-of-view commands correctly.
 
     // Safety guard: refuse to allocate an obviously pathological offscreen buffer.
-    // 8192×8192 (~67 MP) is well above any screen size we realistically support.
+    // 4096×4096 (~16 MP) is well above any screen size we realistically support (~64MB max).
     // A layer larger than this is almost certainly a bug in layout (e.g. height not clamped).
-    const MAX_OFFSCREEN_PIXELS: usize = 8192 * 8192;
+    const MAX_OFFSCREEN_PIXELS: usize = 4096 * 4096;
     if needed > MAX_OFFSCREEN_PIXELS {
         // Degraded fallback: the layer is too large to allocate an offscreen buffer.
         // Sub-commands are rendered directly into the main buffer WITHOUT applying

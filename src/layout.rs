@@ -178,6 +178,7 @@ pub struct TextCommand {
     pub width: u32,
     pub text: String,
     pub font_size_px: u32,
+    pub line_height_px: u32,
     pub font_family: FontFamilyKind,
     pub color: Color,
     pub underline: bool,
@@ -879,7 +880,7 @@ fn layout_block_element(
             y: sy,
             width: sw,
             height: 1,
-            color: shadow.color,
+            color: shadow.color.unwrap_or(element.style.color),
             border_radius: element.style.border_radius.saturating_add(blur),
         }));
         Some(context.commands.len() - 1)
@@ -1150,7 +1151,7 @@ fn clip_commands_to_box(
                 Some(DrawCommand::Layer(l))
             }
             DrawCommand::Text(t) => {
-                let ty2 = t.y.saturating_add(t.font_size_px);
+                let ty2 = t.y.saturating_add(t.line_height_px);
                 let tx2 = t.x.saturating_add(t.width);
                 if t.x >= clip_x2 || t.y >= clip_y2 || tx2 <= clip_x || ty2 <= clip_y {
                     None
@@ -1230,7 +1231,7 @@ fn layout_block_element_as_layer(
             y: sy,
             width: sw,
             height: 1,
-            color: shadow.color,
+            color: shadow.color.unwrap_or(element.style.color),
             border_radius: element.style.border_radius.saturating_add(blur),
         }));
         Some(sub_context.commands.len() - 1)
@@ -2012,6 +2013,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             width: text.width,
             text: text.text.clone(),
             font_size_px: text.font_size_px,
+            line_height_px: text.line_height_px,
             font_family: text.font_family,
             color: text.color,
             underline: text.underline,
@@ -2768,6 +2770,7 @@ fn emit_line_impl(
             width: span.width,
             text: display_text,
             font_size_px: span.style.font_size_px,
+            line_height_px: line_height,
             font_family: span.style.font_family,
             color: apply_opacity(span.style.color, context.background_color, span_opacity),
             underline: span.style.underline,

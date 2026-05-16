@@ -280,7 +280,7 @@ pub struct BoxShadow {
     pub offset_x: i32,
     pub offset_y: i32,
     pub blur: u32,
-    pub color: u32,
+    pub color: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2449,7 +2449,7 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
     let mut offset_x: i32 = 0;
     let mut offset_y: i32 = 0;
     let mut blur: u32 = 0;
-    let mut color: u32 = 0;
+    let mut color: Option<u32> = None;
     let mut length_count = 0;
 
     for token in &tokens {
@@ -2465,7 +2465,7 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
             }
             length_count += 1;
         } else if let Some(c) = parse_color(token) {
-            color = c;
+            color = Some(c);
         }
     }
 
@@ -3903,5 +3903,4 @@ mod tests {
         let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
         assert_eq!(style.z_index, Some(10));
     }
->>>>>>> origin/claude/phase2-css
 }
