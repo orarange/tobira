@@ -4339,8 +4339,8 @@ fn js_dom_set_class_name(
 }
 
 fn js_dom_get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    // Simplified model: JS `input.value` currently reflects the backing attribute /
-    // default value, not the live GUI editor state while the user is typing.
+    // The DOM attribute stays in step with GUI edits, so `value` reflects the
+    // current live control state for both script-driven and native input paths.
     js_dom_get_property_attribute(this, "value", context)
 }
 

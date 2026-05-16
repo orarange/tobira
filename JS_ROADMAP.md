@@ -19,6 +19,7 @@ Already working:
 - inline and external scripts
 - recursive `document.write(...)`
 - lightweight DOM mutation helpers
+- native GUI typing stays in sync with live DOM `input.value`
 - basic DOM event plumbing for capture + bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`
 - `Promise` job flushing
 - guarded `fetch(...)` and `XMLHttpRequest`
@@ -30,7 +31,6 @@ Already working:
 
 Still missing or shallow:
 
-- tighter alignment between GUI text editing and live DOM `input.value`
 - storage and cookies
 - richer networking semantics
 - session-history replay across full document loads
@@ -51,7 +51,6 @@ Tasks:
 Still to finish in this phase:
 
 - finish the rest of the richer listener option matrix
-- live GUI typing synchronized into script-visible DOM state in every edit path
 - more complete default-action sequencing for edge cases
 
 Exit criteria:

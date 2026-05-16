@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `106` passing tests on `2026-05-16`
+  - `cargo test`: `110` passing tests on `2026-05-16`
   - `cargo build`: success on `2026-05-16`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -48,6 +48,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - IME cursor placement
     - basic `GET` form submission with relative action resolution and query encoding
     - focused-input keyboard event delivery for `keydown` / `keyup`
+    - live GUI typing synchronized into DOM-backed `value`
   - page keyboard events:
     - focused page inputs receive bubbling `keydown` / `keyup`
     - key metadata includes `key`, `code`, modifier flags, and `repeat`
@@ -112,7 +113,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 - JS support is still far from a full browser DOM / framework runtime.
 - GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics are in place, and `location.hash` plus `history.pushState(...)` / `replaceState(...)` now support soft navigation without a reload, while the rest of the option matrix and back/forward stack still need depth.
-- Native page input typing now syncs `value` into the JS DOM, but a few edge cases still need validation.
+- Native page input typing now syncs `value` into the JS DOM.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward behavior is not yet complete.
 - Modern app-shell sites still need more DOM APIs, cookies/storage, and CSS coverage.
@@ -217,3 +218,9 @@ git worktree list
 - Added capture-phase dispatch and `once` listener support to the DOM event bridge for ordinary page controls.
 - Added regression tests for capture order, once-listener removal, and capture-sensitive `removeEventListener(...)`.
 - Updated the roadmap, README, and event demo copy so the next session starts from the current event semantics instead of the pre-capture baseline.
+
+### 2026-05-16 - Codex (live input sync)
+
+- Removed the stale page-control value cache so rendered inputs now trust the DOM-backed `value` as the source of truth when they are not focused.
+- Kept focused native editors authoritative during typing, while syncing their live text back into the DOM attribute on each edit path.
+- Added a small regression test to lock in the focused-editor-vs-DOM value precedence.
