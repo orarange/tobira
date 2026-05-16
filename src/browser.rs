@@ -93,6 +93,22 @@ impl BrowserPage {
         }
     }
 
+    pub fn set_viewport_size(&mut self, width: u32, height: u32) -> bool {
+        if let Some(session) = &self.javascript_session {
+            return session.set_viewport_size(width, height);
+        }
+        false
+    }
+
+    pub fn dispatch_window_resize(&mut self) -> Option<DomEventDispatchResult> {
+        let result = self
+            .javascript_session
+            .as_ref()
+            .and_then(|session| session.dispatch_global_event("resize", false, false))?;
+        self.apply_script_snapshot(result.snapshot.clone());
+        Some(result)
+    }
+
     pub fn body_text(&self) -> &str {
         match &self.rendered {
             Some(rendered) => {

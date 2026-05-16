@@ -258,6 +258,7 @@ impl BrowserApp {
         self.address_bar.blur();
         self.clear_page_control_state();
         self.scroll_y = 0;
+        self.sync_viewport_size();
         self.sync_window_title();
         self.sync_input_method();
         self.request_redraw();
@@ -380,6 +381,17 @@ impl BrowserApp {
             PhysicalPosition::new(caret_x as i32, text_y as i32),
             PhysicalSize::new(1, line_height.max(1)),
         );
+    }
+
+    fn sync_viewport_size(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+
+        let size = window.inner_size();
+        if self.document.set_viewport_size(size.width, size.height) {
+            let _ = self.document.dispatch_window_resize();
+        }
     }
 
     fn scroll_by(&mut self, delta: i32, viewport_height: u32, content_height: u32) {
@@ -1506,6 +1518,7 @@ impl ApplicationHandler for BrowserApp {
 
         self.surface = Some(surface);
         self.window = Some(window);
+        self.sync_viewport_size();
         self.sync_window_title();
         self.sync_input_method();
         self.request_redraw();
@@ -1537,6 +1550,7 @@ impl ApplicationHandler for BrowserApp {
             }
             WindowEvent::Resized(size) => {
                 self.update_hover(size);
+                self.sync_viewport_size();
                 self.sync_input_method();
                 self.request_redraw();
             }
@@ -1697,6 +1711,25 @@ impl DocumentView {
         if let DocumentContent::Loaded(page) = &mut self.content {
             page.set_dom_attribute(node_id, name, value);
         }
+    }
+
+    fn set_viewport_size(&mut self, width: u32, height: u32) -> bool {
+        match &mut self.content {
+            DocumentContent::Loaded(page) => page.set_viewport_size(width, height),
+            _ => false,
+        }
+    }
+
+    fn dispatch_window_resize(&mut self) -> bool {
+        let resized = match &mut self.content {
+            DocumentContent::Loaded(page) => page.dispatch_window_resize().is_some(),
+            _ => false,
+        };
+        if resized {
+            self.sync_from_loaded_page();
+            self.layout_cache = None;
+        }
+        resized
     }
 
     fn sync_from_loaded_page(&mut self) {

@@ -9,7 +9,7 @@ use boa_engine::object::{
     JsObject, ObjectInitializer,
     builtins::{JsFunction, JsPromise},
 };
-use boa_engine::property::Attribute;
+use boa_engine::property::{Attribute, PropertyDescriptor};
 use boa_engine::{
     Context, Finalize, JsData, JsNativeError, JsResult, JsValue, NativeFunction, Source, Trace,
     js_string,
@@ -29,6 +29,8 @@ const JS_LOOP_ITERATION_LIMIT: u64 = 100_000;
 const JS_MAX_NETWORK_REQUESTS: usize = 8;
 const JS_MAX_NETWORK_RESPONSE_BYTES: usize = 256 * 1024;
 const JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES: usize = 512 * 1024;
+const DEFAULT_VIEWPORT_WIDTH: u32 = 1280;
+const DEFAULT_VIEWPORT_HEIGHT: u32 = 720;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessedScriptHtml {
@@ -70,6 +72,16 @@ enum JavaScriptSessionCommand {
     DispatchEvent {
         request: DomEventRequest,
         response_tx: Sender<DomEventDispatchResult>,
+    },
+    DispatchGlobalEvent {
+        event_type: String,
+        bubbles: bool,
+        cancelable: bool,
+        response_tx: Sender<DomEventDispatchResult>,
+    },
+    SetViewportSize {
+        width: u32,
+        height: u32,
     },
     SetAttribute {
         node_id: usize,
@@ -124,6 +136,35 @@ impl JavaScriptSession {
             })
             .is_ok()
     }
+
+    pub(crate) fn set_viewport_size(&self, width: u32, height: u32) -> bool {
+        self.command_tx
+            .send(JavaScriptSessionCommand::SetViewportSize { width, height })
+            .is_ok()
+    }
+
+    pub(crate) fn dispatch_global_event(
+        &self,
+        event_type: &str,
+        bubbles: bool,
+        cancelable: bool,
+    ) -> Option<DomEventDispatchResult> {
+        let (response_tx, response_rx) = mpsc::channel();
+        if self
+            .command_tx
+            .send(JavaScriptSessionCommand::DispatchGlobalEvent {
+                event_type: event_type.to_string(),
+                bubbles,
+                cancelable,
+                response_tx,
+            })
+            .is_err()
+        {
+            return None;
+        }
+
+        response_rx.recv().ok()
+    }
 }
 
 impl Drop for JavaScriptSession {
@@ -146,6 +187,9 @@ struct JavaScriptState {
     current_script: Option<usize>,
     network_request_count: usize,
     network_response_bytes: usize,
+    viewport_width: u32,
+    viewport_height: u32,
+    active_element_node_id: Option<usize>,
     dom: DomState,
 }
 
@@ -299,6 +343,22 @@ pub fn start_document_script_session(
                             let result = runtime.dispatch_dom_event(request);
                             let _ = response_tx.send(result);
                         }
+                        JavaScriptSessionCommand::DispatchGlobalEvent {
+                            event_type,
+                            bubbles,
+                            cancelable,
+                            response_tx,
+                        } => {
+                            let result = runtime.dispatch_global_event_request(
+                                &event_type,
+                                bubbles,
+                                cancelable,
+                            );
+                            let _ = response_tx.send(result);
+                        }
+                        JavaScriptSessionCommand::SetViewportSize { width, height } => {
+                            runtime.set_viewport_size(width, height);
+                        }
                         JavaScriptSessionCommand::SetAttribute {
                             node_id,
                             name,
@@ -381,6 +441,9 @@ impl JavaScriptRuntime {
                 current_script: None,
                 network_request_count: 0,
                 network_response_bytes: 0,
+                viewport_width: DEFAULT_VIEWPORT_WIDTH,
+                viewport_height: DEFAULT_VIEWPORT_HEIGHT,
+                active_element_node_id: None,
                 dom,
             }),
         });
@@ -434,6 +497,14 @@ impl JavaScriptRuntime {
         }
     }
 
+    fn set_viewport_size(&mut self, width: u32, height: u32) {
+        if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+            let mut state = host.state.borrow_mut();
+            state.viewport_width = width;
+            state.viewport_height = height;
+        }
+    }
+
     fn set_dom_attribute(&mut self, node_id: usize, name: &str, value: &str) {
         if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
             host.state
@@ -456,6 +527,23 @@ impl JavaScriptRuntime {
     fn dispatch_dom_event_request(&mut self, request: DomEventRequest) -> JsResult<bool> {
         let target = build_dom_node_object(&mut self.context, request.target_node_id);
         dispatch_dom_event_on_target(target, &request, &mut self.context)
+    }
+
+    fn dispatch_global_event_request(
+        &mut self,
+        event_type: &str,
+        bubbles: bool,
+        cancelable: bool,
+    ) -> DomEventDispatchResult {
+        let default_prevented = self
+            .dispatch_global_event(event_type, bubbles, cancelable)
+            .unwrap_or(false);
+        self.flush_pending_document_writes();
+        self.process_loaded_document();
+        DomEventDispatchResult {
+            snapshot: self.snapshot(),
+            default_prevented,
+        }
     }
 
     fn execute(&mut self, source: &str) {
@@ -1547,6 +1635,8 @@ fn install_browser_globals(context: &mut Context) {
         NativeFunction::from_fn_ptr(js_document_get_cookie).to_js_function(context.realm());
     let cookie_setter =
         NativeFunction::from_fn_ptr(js_document_set_cookie).to_js_function(context.realm());
+    let active_element_getter =
+        NativeFunction::from_fn_ptr(js_document_get_active_element).to_js_function(context.realm());
 
     let global_object = context.global_object();
     let document = ObjectInitializer::with_native_data(
@@ -1597,6 +1687,11 @@ fn install_browser_globals(context: &mut Context) {
         1,
     )
     .function(
+        NativeFunction::from_fn_ptr(js_document_has_focus),
+        js_string!("hasFocus"),
+        0,
+    )
+    .function(
         NativeFunction::from_fn_ptr(js_add_event_listener),
         js_string!("addEventListener"),
         2,
@@ -1610,6 +1705,12 @@ fn install_browser_globals(context: &mut Context) {
     .property(js_string!("body"), body_object, Attribute::all())
     .property(js_string!("head"), head_object, Attribute::all())
     .property(js_string!("documentElement"), html_object, Attribute::all())
+    .accessor(
+        js_string!("activeElement"),
+        Some(active_element_getter),
+        None,
+        Attribute::all(),
+    )
     .property(js_string!("fonts"), document_fonts, Attribute::all())
     .accessor(
         js_string!("cookie"),
@@ -1909,11 +2010,31 @@ fn install_browser_globals(context: &mut Context) {
             NativeFunction::from_fn_ptr(js_create_xml_http_request),
         )
         .expect("XMLHttpRequest factory should be installable");
+    let inner_width_getter =
+        NativeFunction::from_fn_ptr(js_window_get_inner_width).to_js_function(context.realm());
+    let inner_height_getter =
+        NativeFunction::from_fn_ptr(js_window_get_inner_height).to_js_function(context.realm());
     context
-        .register_global_property(js_string!("innerWidth"), 1280, Attribute::all())
+        .global_object()
+        .define_property_or_throw(
+            js_string!("innerWidth"),
+            PropertyDescriptor::builder()
+                .get(inner_width_getter)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )
         .expect("innerWidth should be installable");
     context
-        .register_global_property(js_string!("innerHeight"), 720, Attribute::all())
+        .global_object()
+        .define_property_or_throw(
+            js_string!("innerHeight"),
+            PropertyDescriptor::builder()
+                .get(inner_height_getter)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )
         .expect("innerHeight should be installable");
 
     let crypto_subtle = ObjectInitializer::new(context)
@@ -2406,6 +2527,112 @@ fn event_bool_property(this: &JsValue, name: &str, context: &mut Context) -> boo
         .unwrap_or(false)
 }
 
+fn viewport_size(context: &mut Context) -> (u32, u32) {
+    context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| {
+            let state = host.state.borrow();
+            (state.viewport_width, state.viewport_height)
+        })
+        .unwrap_or((DEFAULT_VIEWPORT_WIDTH, DEFAULT_VIEWPORT_HEIGHT))
+}
+
+fn viewport_width(context: &mut Context) -> u32 {
+    viewport_size(context).0
+}
+
+fn viewport_height(context: &mut Context) -> u32 {
+    viewport_size(context).1
+}
+
+fn js_window_get_inner_width(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::new(viewport_width(context)))
+}
+
+fn js_window_get_inner_height(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::new(viewport_height(context)))
+}
+
+fn js_dom_get_client_width(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let width = if this_node_id(this).is_some() {
+        viewport_width(context)
+    } else {
+        DEFAULT_VIEWPORT_WIDTH
+    };
+    Ok(JsValue::new(width))
+}
+
+fn js_dom_get_client_height(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let height = if this_node_id(this).is_some() {
+        viewport_height(context)
+    } else {
+        DEFAULT_VIEWPORT_HEIGHT
+    };
+    Ok(JsValue::new(height))
+}
+
+fn js_dom_get_scroll_width(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    js_dom_get_client_width(this, &[], context)
+}
+
+fn js_dom_get_scroll_height(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    js_dom_get_client_height(this, &[], context)
+}
+
+fn active_element_node_id(context: &mut Context) -> Option<usize> {
+    let host = context.get_data::<JavaScriptHostData>()?;
+    let state = host.state.borrow();
+    state
+        .active_element_node_id
+        .or(state.dom.body_id)
+        .or(state.dom.html_id)
+        .or(Some(state.dom.document_id))
+}
+
+fn js_document_get_active_element(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = active_element_node_id(context) else {
+        return Ok(JsValue::null());
+    };
+    Ok(JsValue::from(build_dom_node_object(context, node_id)))
+}
+
+fn js_document_has_focus(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::new(
+        context
+            .get_data::<JavaScriptHostData>()
+            .map(|host| host.state.borrow().active_element_node_id.is_some())
+            .unwrap_or(false),
+    ))
+}
+
 fn set_event_bool_property(
     this: &JsValue,
     name: &str,
@@ -2478,6 +2705,14 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_tag_name).to_js_function(context.realm());
     let get_parent_node =
         NativeFunction::from_fn_ptr(js_dom_get_parent_node).to_js_function(context.realm());
+    let get_client_width =
+        NativeFunction::from_fn_ptr(js_dom_get_client_width).to_js_function(context.realm());
+    let get_client_height =
+        NativeFunction::from_fn_ptr(js_dom_get_client_height).to_js_function(context.realm());
+    let get_scroll_width =
+        NativeFunction::from_fn_ptr(js_dom_get_scroll_width).to_js_function(context.realm());
+    let get_scroll_height =
+        NativeFunction::from_fn_ptr(js_dom_get_scroll_height).to_js_function(context.realm());
     let style = build_dom_style_object(context, node_id);
     let object = ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context)
         .function(
@@ -2672,10 +2907,30 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .property(js_string!("style"), style, Attribute::all())
         .property(js_string!("checked"), false, Attribute::all())
         .property(js_string!("hidden"), false, Attribute::all())
-        .property(js_string!("clientWidth"), 1280, Attribute::all())
-        .property(js_string!("clientHeight"), 720, Attribute::all())
-        .property(js_string!("scrollWidth"), 1280, Attribute::all())
-        .property(js_string!("scrollHeight"), 720, Attribute::all())
+        .accessor(
+            js_string!("clientWidth"),
+            Some(get_client_width),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("clientHeight"),
+            Some(get_client_height),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("scrollWidth"),
+            Some(get_scroll_width),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("scrollHeight"),
+            Some(get_scroll_height),
+            None,
+            Attribute::all(),
+        )
         .build();
     store_dom_node_object(context, node_id, &object);
     object
@@ -5736,6 +5991,16 @@ fn dispatch_dom_event_on_target(
     request: &DomEventRequest,
     context: &mut Context,
 ) -> JsResult<bool> {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        if request.event_type.eq_ignore_ascii_case("focus") {
+            state.active_element_node_id = Some(request.target_node_id);
+        } else if request.event_type.eq_ignore_ascii_case("blur")
+            && state.active_element_node_id == Some(request.target_node_id)
+        {
+            state.active_element_node_id = None;
+        }
+    }
     let event = build_dom_event_object(context, request, &target);
     let listener_event_type = request.event_type.to_ascii_lowercase();
     if let Some(target_node_id) = target
@@ -5857,6 +6122,7 @@ mod tests {
     use super::{
         DomEventRequest, JavaScriptRuntime, current_location_url, ensure_same_origin_script_url,
         fetch_for_script, process_document_scripts, resolve_requested_url, set_location_href,
+        start_document_script_session,
     };
     use crate::url::Url;
 
@@ -6136,6 +6402,34 @@ mod tests {
         );
 
         assert!(processed.html.contains("<p>Ready</p>"));
+    }
+
+    #[test]
+    fn updates_viewport_accessors_and_resize_events() {
+        let (processed, session) = start_document_script_session(
+            "<html><body><script>document.title = [window.innerWidth, window.innerHeight].join('x'); window.addEventListener('resize', function () { document.title = [window.innerWidth, window.innerHeight].join('x'); });</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(processed.title_override.as_deref(), Some("1280x720"));
+
+        let session = session.expect("session should exist");
+        assert!(session.set_viewport_size(800, 600));
+        let result = session
+            .dispatch_global_event("resize", false, false)
+            .expect("resize dispatch should succeed");
+
+        assert_eq!(result.snapshot.title_override.as_deref(), Some("800x600"));
+    }
+
+    #[test]
+    fn tracks_document_active_element_for_focus_and_blur() {
+        let processed = process_document_scripts(
+            "<html><body><button id=\"btn\">Go</button><script>var btn = document.getElementById('btn'); btn.focus(); document.title = document.activeElement.tagName; btn.blur(); document.title += '|' + document.activeElement.tagName;</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(processed.title_override.as_deref(), Some("BUTTON|BODY"));
     }
 
     #[test]
