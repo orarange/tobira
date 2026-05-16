@@ -187,3 +187,151 @@ Whenever a phase lands or a new blocker shows up:
 - update `HANDOFF.md`
 - add or adjust a demo page if it helps prove the feature
 - record the change in the session log
+
+---
+
+## ⚠️ Roadmap Assessment (added 2026-05-16)
+
+*This section was added after reviewing the current implementation state and checking whether the roadmap above is realistic.*
+
+### Progress Summary
+
+| Phase | Status |
+|---|---|
+| Phase 1: Event Plumbing | ✅ Largely complete |
+| Phase 2: DOM Fidelity | 🟡 Partially done |
+| Phase 3: Storage & Cookies | ❌ Not started |
+| Phase 4: Networking | 🟡 Minimal implementation only |
+| Phase 5: Layout Reflow | ❌ Not started — **architectural blocker** |
+| Phase 6: Framework Compat | ❌ Not started |
+| Phase 7: Media & APIs | ❌ Not started |
+
+CSS progress (Claude's track, separate from this file):
+
+| Stage | Status |
+|---|---|
+| Basic CSS (color, font, box model) | ✅ Complete |
+| Opacity / layer compositing | ✅ Complete |
+| border-radius, box-shadow, overflow, pseudo-elements, CSS vars | ✅ Complete |
+| position: relative/absolute/fixed, z-index, display: flex | ✅ Complete (merged 2026-05-16) |
+| display: grid, transform, transition/animation | ❌ No roadmap entry yet |
+
+### Critical Gap: Phase 5 is Understated
+
+The single biggest risk to reaching the stated goal (Google / YouTube browsable without synthetic pages) is **Phase 5: Layout Reflow**.
+
+The current architecture computes layout **once** at page load and never again. When JS mutates the DOM, the screen does not update. Fixing this requires:
+
+1. A reactive dependency graph between DOM nodes and layout outputs, **or**
+2. A full re-layout pass triggered by any DOM mutation, **or**
+3. A hybrid: re-layout only the subtree that changed.
+
+None of these are small. Option 2 is the simplest to implement but will be slow on large pages. Option 1 is what real browsers do but takes months to build correctly. This is not a "Tasks: 4 bullet points" problem — it is an **architectural redesign** of the rendering pipeline, and it must be planned before Phase 3 and 4 work is finished, or the project will stall.
+
+Additionally, the CSS roadmap has no entries for `display: grid`, `transform`, `transition`, or `animation` — all of which are used heavily by Google and YouTube. Without them, Phase 6's exit criteria cannot be met even if the JS phases are completed.
+
+---
+
+## Revised Roadmap Proposal
+
+The goal remains the same: **Google and YouTube browsable without synthetic pages.**
+
+The phases below replace or refine the original ones to address the gaps above.
+
+### Revised Phase 2: DOM Fidelity (continue)
+
+- `classList`, `dataset`, attribute reflection, `parentElement`, `children`, `nextSibling`, `previousSibling`
+- consistent `document.body`, `document.head`, `document.documentElement`
+- `innerHTML` round-trip correctness
+- dynamically inserted `<script>` tags execute correctly
+
+Exit: DOM-heavy single-page init scripts can build their UI tree without crashing.
+
+### Revised Phase 3: Storage & Cookies
+
+- `localStorage` / `sessionStorage` (in-memory, per-origin)
+- cookie read/write with basic `Set-Cookie` header support
+- `document.cookie` read and write
+- history state kept on full page loads (not just soft navigation)
+
+Exit: login-ish flows and session-dependent pages retain state across navigations.
+
+### Revised Phase 4: Networking
+
+- `fetch(...)` request/response headers, JSON body, abort signal
+- `XMLHttpRequest` prototype / `instanceof` and `onreadystatechange`
+- cross-origin policy: block by default, user-configurable allow-list
+- consistent redirect handling between fetch and page navigation
+
+Exit: API-driven pages can load data without special-case rewrites.
+
+### **NEW Phase 5a: CSS Completeness (before reflow)**
+
+Before tackling reflow, close the CSS gaps that block even a static render of modern pages.
+
+- `display: grid` — basic 12-column and auto-placement
+- `position: sticky`
+- `transform: translate/scale/rotate` (static, no animation)
+- `transition` and `animation` (at minimum: opacity and transform)
+- `clip-path: inset()`
+- `z-index` stacking across flex/grid containers
+
+Exit: the visual layout of Google search results and YouTube home renders recognizably without JS interaction.
+
+### **NEW Phase 5b: Incremental Reflow (architecture decision required)**
+
+This phase requires an **explicit design decision** before implementation begins. The recommended approach:
+
+**Strategy: "Dirty-subtree re-layout" (Option 2 simplified)**
+
+1. Add a `dirty` flag to each DOM node. JS mutations set the flag on the affected node and its ancestors up to `<body>`.
+2. After each JS execution session ends, if any node is dirty, re-run `layout_styled_document` for the full document. Cache the previous layout and diff at the `LayoutDocument` level to minimize redraws.
+3. On the next render frame, use the new layout.
+
+This is not perfect (full re-layout is O(n) per mutation), but it is **correct**, **implementable in 1-2 weeks**, and **enough to unblock Phase 6**. True subtree-only invalidation can come later.
+
+Implementation steps:
+1. Add `dirty: bool` to `StyledNode` (or track a global dirty flag per JS session)
+2. After `dispatch_dom_event` or `process_document_scripts` returns, check the dirty flag
+3. If dirty: invalidate `DocumentView`'s cached layout and request redraw
+4. Ensure `layout_styled_document` is called fresh (it already is; just remove any caching that prevents this)
+
+Exit: JS DOM mutations are reflected on screen without a page reload.
+
+### Revised Phase 6: Framework Compatibility
+
+Run against real targets in this order:
+
+1. Google search (type a query, get results, click a result)
+2. Wikipedia (navigate, follow links, search)
+3. YouTube home (load page, scroll, click a card)
+4. YouTube watch (load title/description; video playback is Phase 7)
+5. A React or Vue-based docs site (e.g. Vue.js docs)
+
+For each target: identify the top 3 JS or CSS features that break the experience and feed them back into earlier phases.
+
+Exit: all five targets are browsable in their core flows without falling back to synthetic pages.
+
+### Revised Phase 7: Media & Advanced APIs
+
+- `<video>` and `<audio>` element stubs (show poster image, handle `play()`/`pause()` events)
+- `<canvas>` 2D context (minimal: `fillRect`, `drawImage`, `fillText`)
+- `ResizeObserver` / `IntersectionObserver` stubs
+- `navigator.userAgent`, `navigator.language`, feature-detection shims
+- `requestAnimationFrame` loop (currently synchronous / absent)
+
+Exit: video-centric pages stop crashing on feature detection; canvas-based UI elements render.
+
+---
+
+## Revised Priority Order
+
+If time is limited, tackle in this order:
+
+1. **Phase 5b (reflow)** — unblocks everything else; do this before Phase 3/4 if possible
+2. **Phase 5a (CSS grid + transform)** — needed for static render of target sites
+3. **Phase 3 (storage)** — relatively self-contained, high user-visible impact
+4. **Phase 2 (DOM fidelity)** — fill gaps as they appear in real-site testing
+5. **Phase 4 (networking)** — improve as real sites expose gaps
+6. **Phase 6 (real-site testing)** — ongoing validation, not a one-time phase
+7. **Phase 7 (media)** — lower priority unless YouTube video is a specific goal
