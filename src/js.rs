@@ -1,10 +1,14 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::mem;
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use boa_engine::object::{ObjectInitializer, builtins::{JsFunction, JsPromise}};
+use boa_engine::object::{
+    JsObject, ObjectInitializer,
+    builtins::{JsFunction, JsPromise},
+};
 use boa_engine::property::Attribute;
 use boa_engine::{
     Context, Finalize, JsData, JsNativeError, JsResult, JsValue, NativeFunction, Source, Trace,
@@ -12,7 +16,7 @@ use boa_engine::{
 };
 
 use crate::html::{Node, parse_document};
-use crate::http::fetch;
+use crate::http::{HttpResponse, fetch, fetch_with_limits_same_origin};
 use crate::text::decode_text_response;
 use crate::url::Url;
 
@@ -20,6 +24,10 @@ const MAX_SCRIPT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TOTAL_SCRIPT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SCRIPT_ITERATIONS: usize = 1024;
 const JS_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
+const JS_LOOP_ITERATION_LIMIT: u64 = 100_000;
+const JS_MAX_NETWORK_REQUESTS: usize = 8;
+const JS_MAX_NETWORK_RESPONSE_BYTES: usize = 256 * 1024;
+const JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessedScriptHtml {
@@ -29,14 +37,110 @@ pub struct ProcessedScriptHtml {
     pub navigation_target: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
+pub struct DomEventRequest {
+    pub target_node_id: usize,
+    pub event_type: String,
+    pub bubbles: bool,
+    pub cancelable: bool,
+    pub key: Option<String>,
+    pub code: Option<String>,
+    pub repeat: bool,
+    pub alt_key: bool,
+    pub ctrl_key: bool,
+    pub shift_key: bool,
+    pub meta_key: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DomEventDispatchResult {
+    pub snapshot: ProcessedScriptHtml,
+    pub default_prevented: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct JavaScriptSession {
+    command_tx: Sender<JavaScriptSessionCommand>,
+}
+
+#[derive(Debug)]
+enum JavaScriptSessionCommand {
+    DispatchEvent {
+        request: DomEventRequest,
+        response_tx: Sender<DomEventDispatchResult>,
+    },
+    SetAttribute {
+        node_id: usize,
+        name: String,
+        value: String,
+    },
+    Snapshot {
+        response_tx: Sender<ProcessedScriptHtml>,
+    },
+    Shutdown,
+}
+
+impl JavaScriptSession {
+    pub(crate) fn dispatch_event(
+        &self,
+        request: DomEventRequest,
+    ) -> Option<DomEventDispatchResult> {
+        let (response_tx, response_rx) = mpsc::channel();
+        if self
+            .command_tx
+            .send(JavaScriptSessionCommand::DispatchEvent {
+                request,
+                response_tx,
+            })
+            .is_err()
+        {
+            return None;
+        }
+
+        response_rx.recv().ok()
+    }
+
+    pub(crate) fn snapshot(&self) -> Option<ProcessedScriptHtml> {
+        let (response_tx, response_rx) = mpsc::channel();
+        if self
+            .command_tx
+            .send(JavaScriptSessionCommand::Snapshot { response_tx })
+            .is_err()
+        {
+            return None;
+        }
+
+        response_rx.recv().ok()
+    }
+
+    pub(crate) fn set_attribute(&self, node_id: usize, name: &str, value: &str) -> bool {
+        self.command_tx
+            .send(JavaScriptSessionCommand::SetAttribute {
+                node_id,
+                name: name.to_string(),
+                value: value.to_string(),
+            })
+            .is_ok()
+    }
+}
+
+impl Drop for JavaScriptSession {
+    fn drop(&mut self) {
+        let _ = self.command_tx.send(JavaScriptSessionCommand::Shutdown);
+    }
+}
+
+#[derive(Debug)]
 struct JavaScriptState {
     current_title: String,
     title_dirty: bool,
     write_buffer: String,
     console_logs: Vec<String>,
+    document_url: Url,
     location_href: String,
     current_script: Option<usize>,
+    network_request_count: usize,
+    network_response_bytes: usize,
     dom: DomState,
 }
 
@@ -122,60 +226,113 @@ struct XmlHttpRequestState {
     response_url: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct EventListenerOptions {
+    capture: bool,
+    once: bool,
+    passive: bool,
+}
+
+#[derive(Debug, Clone)]
+struct EventListenerEntry {
+    callback: JsValue,
+    options: EventListenerOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventDispatchPhase {
+    Capturing = 1,
+    AtTarget = 2,
+    Bubbling = 3,
+}
+
 pub fn process_document_scripts(html: &str, base_url: &Url) -> ProcessedScriptHtml {
+    let (processed, session) = start_document_script_session(html, base_url);
+    drop(session);
+    processed
+}
+
+pub fn start_document_script_session(
+    html: &str,
+    base_url: &Url,
+) -> (ProcessedScriptHtml, Option<JavaScriptSession>) {
     let html_owned = html.to_string();
     let base_url_owned = base_url.clone();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (command_tx, command_rx) = mpsc::channel();
     let worker = thread::Builder::new()
         .name("tobira-js".to_string())
         .stack_size(JS_THREAD_STACK_BYTES)
         .spawn({
             let html = html_owned.clone();
             let base_url = base_url_owned.clone();
-            move || process_document_scripts_impl(&html, &base_url)
+            move || {
+                let mut runtime = JavaScriptRuntime::new(&base_url, &html);
+                runtime.process_loaded_document();
+                runtime.dispatch_initial_load_events();
+                let processed = runtime.snapshot();
+                let _ = ready_tx.send(processed);
+
+                while let Ok(command) = command_rx.recv() {
+                    match command {
+                        JavaScriptSessionCommand::DispatchEvent {
+                            request,
+                            response_tx,
+                        } => {
+                            let result = runtime.dispatch_dom_event(request);
+                            let _ = response_tx.send(result);
+                        }
+                        JavaScriptSessionCommand::SetAttribute {
+                            node_id,
+                            name,
+                            value,
+                        } => {
+                            runtime.set_dom_attribute(node_id, &name, &value);
+                        }
+                        JavaScriptSessionCommand::Snapshot { response_tx } => {
+                            let _ = response_tx.send(runtime.snapshot());
+                        }
+                        JavaScriptSessionCommand::Shutdown => break,
+                    }
+                }
+            }
         });
 
     match worker {
-        Ok(handle) => match handle.join() {
-            Ok(processed) => processed,
-            Err(_) => ProcessedScriptHtml {
-                html: html_owned,
-                title_override: None,
-                console_logs: vec!["js error: runtime worker panicked".to_string()],
-                navigation_target: None,
-            },
+        Ok(_) => match ready_rx.recv() {
+            Ok(processed) => (processed, Some(JavaScriptSession { command_tx })),
+            Err(_) => (
+                process_document_scripts_error(
+                    html_owned,
+                    "js error: runtime worker failed to initialize".to_string(),
+                ),
+                None,
+            ),
         },
-        Err(_) => process_document_scripts_impl(html, base_url),
+        Err(_) => (
+            process_document_scripts_error(
+                html_owned,
+                "js error: failed to start runtime worker".to_string(),
+            ),
+            None,
+        ),
+    }
+}
+
+fn process_document_scripts_error(html: String, message: String) -> ProcessedScriptHtml {
+    ProcessedScriptHtml {
+        html,
+        title_override: None,
+        console_logs: vec![message],
+        navigation_target: None,
     }
 }
 
 fn process_document_scripts_impl(html: &str, base_url: &Url) -> ProcessedScriptHtml {
     let mut runtime = JavaScriptRuntime::new(base_url, html);
-    let mut iterations = 0;
-
-    while let Some((script_id, attributes, inline_source)) = runtime.next_script() {
-        iterations += 1;
-        if iterations > MAX_SCRIPT_ITERATIONS {
-            runtime.push_log("js skip: script iteration limit reached".to_string());
-            break;
-        }
-        if let Some(source) = load_script_source(&inline_source, &attributes, base_url) {
-            runtime.set_current_script(script_id);
-            runtime.execute(&source);
-            runtime.flush_document_writes(script_id);
-            runtime.clear_current_script();
-        }
-        runtime.remove_script_node(script_id);
-    }
-
-    let html = runtime.serialize_html();
-    let title_override = runtime.title_override();
-
-    ProcessedScriptHtml {
-        html,
-        title_override,
-        console_logs: runtime.take_logs(),
-        navigation_target: runtime.navigation_target(base_url),
-    }
+    runtime.process_loaded_document();
+    runtime.dispatch_initial_load_events();
+    runtime.snapshot()
 }
 
 struct JavaScriptRuntime {
@@ -187,6 +344,9 @@ struct JavaScriptRuntime {
 impl JavaScriptRuntime {
     fn new(base_url: &Url, html: &str) -> Self {
         let mut context = Context::default();
+        context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(JS_LOOP_ITERATION_LIMIT);
         let dom = DomState::from_html(html);
         let initial_title = dom.title_text().unwrap_or_default();
         context.insert_data(JavaScriptHostData {
@@ -195,8 +355,11 @@ impl JavaScriptRuntime {
                 title_dirty: false,
                 write_buffer: String::new(),
                 console_logs: Vec::new(),
+                document_url: base_url.clone(),
                 location_href: base_url.to_string(),
                 current_script: None,
+                network_request_count: 0,
+                network_response_bytes: 0,
                 dom,
             }),
         });
@@ -208,6 +371,69 @@ impl JavaScriptRuntime {
             executed_bytes: 0,
             host: base_url.host.to_ascii_lowercase(),
         }
+    }
+
+    fn process_loaded_document(&mut self) {
+        let mut iterations = 0;
+
+        while let Some((script_id, attributes, inline_source)) = self.next_script() {
+            iterations += 1;
+            if iterations > MAX_SCRIPT_ITERATIONS {
+                self.push_log("js skip: script iteration limit reached".to_string());
+                break;
+            }
+            let document_url = self.document_url();
+            if let Some(source) = load_script_source(&inline_source, &attributes, &document_url) {
+                self.set_current_script(script_id);
+                self.execute(&source);
+                self.flush_document_writes(script_id);
+                self.clear_current_script();
+            }
+            self.remove_script_node(script_id);
+        }
+    }
+
+    fn dispatch_initial_load_events(&mut self) {
+        let document_id = self.document_id();
+        let _ = self.dispatch_dom_event_to_node(document_id, "readystatechange", false, false);
+        let _ = self.dispatch_dom_event_to_node(document_id, "DOMContentLoaded", false, false);
+        let _ = self.dispatch_dom_event_to_node(document_id, "load", false, false);
+        let _ = self.dispatch_global_event("load", false, false);
+        self.flush_pending_document_writes();
+        self.process_loaded_document();
+    }
+
+    fn snapshot(&mut self) -> ProcessedScriptHtml {
+        ProcessedScriptHtml {
+            html: self.serialize_html(),
+            title_override: self.title_override(),
+            console_logs: self.take_logs(),
+            navigation_target: self.navigation_target(),
+        }
+    }
+
+    fn set_dom_attribute(&mut self, node_id: usize, name: &str, value: &str) {
+        if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+            host.state
+                .borrow_mut()
+                .dom
+                .set_attribute(node_id, name, value);
+        }
+    }
+
+    fn dispatch_dom_event(&mut self, request: DomEventRequest) -> DomEventDispatchResult {
+        let default_prevented = self.dispatch_dom_event_request(request).unwrap_or(false);
+        self.flush_pending_document_writes();
+        self.process_loaded_document();
+        DomEventDispatchResult {
+            snapshot: self.snapshot(),
+            default_prevented,
+        }
+    }
+
+    fn dispatch_dom_event_request(&mut self, request: DomEventRequest) -> JsResult<bool> {
+        let target = build_dom_node_object(&mut self.context, request.target_node_id);
+        dispatch_dom_event_on_target(target, &request, &mut self.context)
     }
 
     fn execute(&mut self, source: &str) {
@@ -260,7 +486,7 @@ impl JavaScriptRuntime {
             .or_else(|| state.title_dirty.then(|| state.current_title.clone()))
     }
 
-    fn take_logs(&self) -> Vec<String> {
+    fn take_logs(&mut self) -> Vec<String> {
         let Some(host) = self.context.get_data::<JavaScriptHostData>() else {
             return Vec::new();
         };
@@ -274,10 +500,25 @@ impl JavaScriptRuntime {
         }
     }
 
-    fn navigation_target(&self, base_url: &Url) -> Option<String> {
+    fn navigation_target(&self) -> Option<String> {
         let host = self.context.get_data::<JavaScriptHostData>()?;
         let href = host.state.borrow().location_href.clone();
-        (href != base_url.to_string()).then_some(href)
+        let document_url = self.document_url().to_string();
+        (href != document_url).then_some(href)
+    }
+
+    fn document_url(&self) -> Url {
+        self.context
+            .get_data::<JavaScriptHostData>()
+            .map(|host| host.state.borrow().document_url.clone())
+            .expect("document URL should exist in JS runtime")
+    }
+
+    fn document_id(&self) -> usize {
+        self.context
+            .get_data::<JavaScriptHostData>()
+            .map(|host| host.state.borrow().dom.document_id)
+            .unwrap_or(0)
     }
 
     fn next_script(&self) -> Option<(usize, BTreeMap<String, String>, String)> {
@@ -290,8 +531,15 @@ impl JavaScriptRuntime {
             .find(|id| state.dom.should_execute_script_node(*id))?;
         Some((
             script_id,
-            state.dom.node_attributes(script_id).cloned().unwrap_or_default(),
-            state.dom.script_inline_source(script_id).unwrap_or_default(),
+            state
+                .dom
+                .node_attributes(script_id)
+                .cloned()
+                .unwrap_or_default(),
+            state
+                .dom
+                .script_inline_source(script_id)
+                .unwrap_or_default(),
         ))
     }
 
@@ -320,10 +568,82 @@ impl JavaScriptRuntime {
         }
     }
 
+    fn flush_pending_document_writes(&self) {
+        let written = self.take_written_html();
+        if written.trim().is_empty() {
+            return;
+        }
+        if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+            let mut state = host.state.borrow_mut();
+            let parent_id = state
+                .dom
+                .body_id
+                .or(state.dom.html_id)
+                .unwrap_or(state.dom.document_id);
+            state.dom.append_fragment(parent_id, &written);
+        }
+    }
+
     fn remove_script_node(&self, script_id: usize) {
         if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
             host.state.borrow_mut().dom.detach_node(script_id);
         }
+    }
+
+    fn dispatch_dom_event_to_node(
+        &mut self,
+        node_id: usize,
+        event_type: &str,
+        bubbles: bool,
+        cancelable: bool,
+    ) -> JsResult<bool> {
+        self.dispatch_dom_event_request(DomEventRequest {
+            target_node_id: node_id,
+            event_type: event_type.to_string(),
+            bubbles,
+            cancelable,
+            ..Default::default()
+        })
+    }
+
+    fn dispatch_global_event(
+        &mut self,
+        event_type: &str,
+        bubbles: bool,
+        cancelable: bool,
+    ) -> JsResult<bool> {
+        let target = self.context.global_object();
+        let request = DomEventRequest {
+            target_node_id: self.document_id(),
+            event_type: event_type.to_string(),
+            bubbles,
+            cancelable,
+            ..Default::default()
+        };
+        let event = build_dom_event_object(&mut self.context, &request, &target);
+        dispatch_listeners_on_target(
+            &target,
+            &event_type.to_ascii_lowercase(),
+            &event,
+            true,
+            EventDispatchPhase::AtTarget,
+            &mut self.context,
+        )?;
+        if !event_flag_value(&event, "immediatePropagationStopped", &mut self.context) {
+            dispatch_listeners_on_target(
+                &target,
+                &event_type.to_ascii_lowercase(),
+                &event,
+                false,
+                EventDispatchPhase::AtTarget,
+                &mut self.context,
+            )?;
+        }
+        Ok(event_flag_value(
+            &event,
+            "defaultPrevented",
+            &mut self.context,
+        ))
     }
 
     fn serialize_html(&self) -> String {
@@ -528,7 +848,11 @@ impl DomState {
                 self.node(parent_id)
                     .and_then(|parent| parent.children.iter().position(|id| *id == before_id))
             })
-            .unwrap_or_else(|| self.node(parent_id).map(|parent| parent.children.len()).unwrap_or(0));
+            .unwrap_or_else(|| {
+                self.node(parent_id)
+                    .map(|parent| parent.children.len())
+                    .unwrap_or(0)
+            });
         if let Some(parent) = self.node_mut(parent_id) {
             parent.children.insert(insert_index, child_id);
         }
@@ -550,6 +874,18 @@ impl DomState {
             .unwrap_or_default();
         for child_id in fragment_children {
             self.insert_before(parent_id, child_id, Some(target_id));
+        }
+    }
+
+    fn append_fragment(&mut self, parent_id: usize, html: &str) {
+        let fragment = parse_document(html);
+        let fragment_root_id = self.push_node(None, &fragment);
+        let fragment_children = self
+            .node(fragment_root_id)
+            .map(|node| node.children.clone())
+            .unwrap_or_default();
+        for child_id in fragment_children {
+            self.append_child(parent_id, child_id);
         }
     }
 
@@ -616,10 +952,12 @@ impl DomState {
         };
         node.children
             .iter()
-            .map(|child_id| match self.node(*child_id).map(|child| &child.kind) {
-                Some(DomNodeKind::Text(text)) => text.clone(),
-                _ => self.serialize_node(*child_id),
-            })
+            .map(
+                |child_id| match self.node(*child_id).map(|child| &child.kind) {
+                    Some(DomNodeKind::Text(text)) => text.clone(),
+                    _ => self.serialize_node(*child_id),
+                },
+            )
             .collect()
     }
 
@@ -677,6 +1015,10 @@ impl DomState {
         self.element(node_id)
             .and_then(|element| element.attributes.get(name))
             .cloned()
+    }
+
+    fn is_disabled(&self, node_id: usize) -> bool {
+        self.get_attribute(node_id, "disabled").is_some()
     }
 
     fn set_attribute(&mut self, node_id: usize, name: &str, value: &str) {
@@ -739,7 +1081,12 @@ impl DomState {
         }
     }
 
-    fn query_selector(&self, scope_id: usize, selector: &str, include_scope: bool) -> Option<usize> {
+    fn query_selector(
+        &self,
+        scope_id: usize,
+        selector: &str,
+        include_scope: bool,
+    ) -> Option<usize> {
         let selector = ParsedSelector::parse(selector)?;
         self.descendant_nodes(scope_id, include_scope)
             .into_iter()
@@ -762,11 +1109,13 @@ impl DomState {
     }
 
     fn get_element_by_id(&self, scope_id: usize, target_id: &str) -> Option<usize> {
-        self.descendant_nodes(scope_id, true).into_iter().find(|node_id| {
-            self.get_attribute(*node_id, "id")
-                .map(|value| value == target_id)
-                .unwrap_or(false)
-        })
+        self.descendant_nodes(scope_id, true)
+            .into_iter()
+            .find(|node_id| {
+                self.get_attribute(*node_id, "id")
+                    .map(|value| value == target_id)
+                    .unwrap_or(false)
+            })
     }
 
     fn matches_selector_in_scope(
@@ -855,7 +1204,8 @@ impl DomState {
         for attribute in &selector.attributes {
             match &attribute.value {
                 Some(value) => {
-                    if self.get_attribute(node_id, &attribute.name).as_deref() != Some(value.as_str())
+                    if self.get_attribute(node_id, &attribute.name).as_deref()
+                        != Some(value.as_str())
                     {
                         return false;
                     }
@@ -986,9 +1336,7 @@ impl SimpleSelector {
 
         if !matches!(bytes.first(), Some(b'#' | b'.' | b'[' | b':')) {
             let start = index;
-            while index < bytes.len()
-                && !matches!(bytes[index], b'#' | b'.' | b'[' | b':')
-            {
+            while index < bytes.len() && !matches!(bytes[index], b'#' | b'.' | b'[' | b':') {
                 index += 1;
             }
             let tag_name = token[start..index].trim();
@@ -1002,9 +1350,7 @@ impl SimpleSelector {
                 b'#' => {
                     index += 1;
                     let start = index;
-                    while index < bytes.len()
-                        && is_selector_name_char(bytes[index])
-                    {
+                    while index < bytes.len() && is_selector_name_char(bytes[index]) {
                         index += 1;
                     }
                     selector.id = Some(token[start..index].to_string());
@@ -1012,9 +1358,7 @@ impl SimpleSelector {
                 b'.' => {
                     index += 1;
                     let start = index;
-                    while index < bytes.len()
-                        && is_selector_name_char(bytes[index])
-                    {
+                    while index < bytes.len() && is_selector_name_char(bytes[index]) {
                         index += 1;
                     }
                     selector.classes.push(token[start..index].to_string());
@@ -1041,14 +1385,16 @@ impl SimpleSelector {
 }
 
 fn parse_attribute_selector(input: &str) -> Option<AttributeSelector> {
-    let (name, value) = input.split_once('=').map_or((input, None), |(name, value)| {
-        let value = value
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
-        (name, Some(value))
-    });
+    let (name, value) = input
+        .split_once('=')
+        .map_or((input, None), |(name, value)| {
+            let value = value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+            (name, Some(value))
+        });
     let name = name.trim().to_ascii_lowercase();
     (!name.is_empty()).then_some(AttributeSelector { name, value })
 }
@@ -1166,70 +1512,92 @@ fn install_browser_globals(context: &mut Context) {
         .build();
 
     let global_object = context.global_object();
-    let document = ObjectInitializer::with_native_data(DomNodeHandle { node_id: document_id }, context)
-        .function(
-            NativeFunction::from_fn_ptr(js_document_write),
-            js_string!("write"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_document_writeln),
-            js_string!("writeln"),
-            1,
-        )
-        .accessor(
-            js_string!("title"),
-            Some(title_getter),
-            Some(title_setter),
-            Attribute::all(),
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_dom_query_selector),
-            js_string!("querySelector"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_dom_query_selector_all),
-            js_string!("querySelectorAll"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_document_get_element_by_id),
-            js_string!("getElementById"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_document_create_element),
-            js_string!("createElement"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_document_create_text_node),
-            js_string!("createTextNode"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_add_event_listener),
-            js_string!("addEventListener"),
-            2,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_noop),
-            js_string!("removeEventListener"),
-            2,
-        )
-        .property(js_string!("location"), location.clone(), Attribute::all())
-        .property(js_string!("body"), body_object, Attribute::all())
-        .property(js_string!("head"), head_object, Attribute::all())
-        .property(js_string!("documentElement"), html_object, Attribute::all())
-        .property(js_string!("fonts"), document_fonts, Attribute::all())
-        .property(js_string!("cookie"), js_string!(""), Attribute::all())
-        .property(js_string!("readyState"), js_string!("complete"), Attribute::all())
-        .property(js_string!("compatMode"), js_string!("CSS1Compat"), Attribute::all())
-        .property(js_string!("hidden"), false, Attribute::all())
-        .property(js_string!("visibilityState"), js_string!("visible"), Attribute::all())
-        .property(js_string!("defaultView"), global_object.clone(), Attribute::all())
-        .build();
+    let document = ObjectInitializer::with_native_data(
+        DomNodeHandle {
+            node_id: document_id,
+        },
+        context,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_document_write),
+        js_string!("write"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_document_writeln),
+        js_string!("writeln"),
+        1,
+    )
+    .accessor(
+        js_string!("title"),
+        Some(title_getter),
+        Some(title_setter),
+        Attribute::all(),
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_dom_query_selector),
+        js_string!("querySelector"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_dom_query_selector_all),
+        js_string!("querySelectorAll"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_document_get_element_by_id),
+        js_string!("getElementById"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_document_create_element),
+        js_string!("createElement"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_document_create_text_node),
+        js_string!("createTextNode"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_add_event_listener),
+        js_string!("addEventListener"),
+        2,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_remove_event_listener),
+        js_string!("removeEventListener"),
+        2,
+    )
+    .property(js_string!("location"), location.clone(), Attribute::all())
+    .property(js_string!("body"), body_object, Attribute::all())
+    .property(js_string!("head"), head_object, Attribute::all())
+    .property(js_string!("documentElement"), html_object, Attribute::all())
+    .property(js_string!("fonts"), document_fonts, Attribute::all())
+    .property(js_string!("cookie"), js_string!(""), Attribute::all())
+    .property(
+        js_string!("readyState"),
+        js_string!("complete"),
+        Attribute::all(),
+    )
+    .property(
+        js_string!("compatMode"),
+        js_string!("CSS1Compat"),
+        Attribute::all(),
+    )
+    .property(js_string!("hidden"), false, Attribute::all())
+    .property(
+        js_string!("visibilityState"),
+        js_string!("visible"),
+        Attribute::all(),
+    )
+    .property(
+        js_string!("defaultView"),
+        global_object.clone(),
+        Attribute::all(),
+    )
+    .build();
+    store_dom_node_object(context, document_id, &document);
 
     let console = ObjectInitializer::new(context)
         .function(
@@ -1440,9 +1808,16 @@ fn install_browser_globals(context: &mut Context) {
         .register_global_builtin_callable(
             js_string!("removeEventListener"),
             2,
-            NativeFunction::from_fn_ptr(js_noop),
+            NativeFunction::from_fn_ptr(js_remove_event_listener),
         )
         .expect("removeEventListener should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("dispatchEvent"),
+            1,
+            NativeFunction::from_fn_ptr(js_dom_dispatch_event),
+        )
+        .expect("dispatchEvent should be installable");
     context
         .register_global_builtin_callable(
             js_string!("alert"),
@@ -1482,7 +1857,10 @@ fn install_browser_globals(context: &mut Context) {
         .register_global_property(js_string!("innerWidth"), 1280, Attribute::all())
         .expect("innerWidth should be installable");
     context
-        .register_global_property(js_string!("innerHeight"), 800, Attribute::all())
+        // Note: changed from 720 in a previous version to align with the CSS vh unit
+        // (1vh = 8px at 800px base in css.rs parse_length). Scripts that rely on
+        // window.innerHeight == 720 may behave differently.
+        .register_global_property(js_string!("innerHeight"), 800, Attribute::all()) // must match vh base (800px) in css.rs parse_length
         .expect("innerHeight should be installable");
 
     let crypto_subtle = ObjectInitializer::new(context)
@@ -1556,9 +1934,13 @@ fn install_browser_globals(context: &mut Context) {
         )
         .expect("URLSearchParams should be installable");
 
-    let _ = context.eval(Source::from_bytes(
-        "globalThis.XMLHttpRequest = function XMLHttpRequest(){ return __tobiraCreateXMLHttpRequest(); };",
-    ));
+    context
+        .eval(Source::from_bytes(
+            // Lightweight constructor shim: enough for `new XMLHttpRequest()`, but
+            // prototype/instanceof behavior is still intentionally incomplete.
+            "globalThis.XMLHttpRequest = function XMLHttpRequest(){ return __tobiraCreateXMLHttpRequest(); };",
+        ))
+        .expect("XMLHttpRequest bootstrap should evaluate");
 }
 
 fn build_simple_node_list_stub(context: &mut Context) -> boa_engine::object::JsObject {
@@ -1577,7 +1959,387 @@ fn build_simple_node_list_stub(context: &mut Context) -> boa_engine::object::JsO
         .build()
 }
 
+fn build_event_listener_list_stub(context: &mut Context) -> boa_engine::object::JsObject {
+    ObjectInitializer::new(context)
+        .property(js_string!("length"), 0, Attribute::all())
+        .build()
+}
+
+fn build_event_listener_record(
+    context: &mut Context,
+    callback: JsValue,
+    options: &EventListenerOptions,
+) -> boa_engine::object::JsObject {
+    ObjectInitializer::new(context)
+        .property(js_string!("callback"), callback, Attribute::all())
+        .property(js_string!("capture"), options.capture, Attribute::all())
+        .property(js_string!("once"), options.once, Attribute::all())
+        .property(js_string!("passive"), options.passive, Attribute::all())
+        .build()
+}
+
+fn dom_node_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObject> {
+    let global = context.global_object();
+    let cache_key = js_string!("__tobiraDomNodeCache");
+    let existing = global.get(cache_key.clone(), context)?;
+    if let Some(object) = existing.as_object() {
+        return Ok(object.clone());
+    }
+
+    let cache = ObjectInitializer::new(context).build();
+    global.set(cache_key, cache.clone(), true, context)?;
+    Ok(cache)
+}
+
+fn cached_dom_node_object(
+    context: &mut Context,
+    node_id: usize,
+) -> Option<boa_engine::object::JsObject> {
+    let cache = dom_node_cache(context).ok()?;
+    let key = js_string!(node_id.to_string());
+    cache
+        .get(key, context)
+        .ok()
+        .and_then(|value| value.as_object())
+}
+
+fn store_dom_node_object(
+    context: &mut Context,
+    node_id: usize,
+    object: &boa_engine::object::JsObject,
+) {
+    if let Ok(cache) = dom_node_cache(context) {
+        let _ = cache.set(
+            js_string!(node_id.to_string()),
+            object.clone(),
+            true,
+            context,
+        );
+    }
+}
+
+fn hidden_event_listener_store(
+    target: &boa_engine::object::JsObject,
+    context: &mut Context,
+) -> JsResult<boa_engine::object::JsObject> {
+    let key = js_string!("__tobiraEventListeners");
+    let existing = target.get(key.clone(), context)?;
+    if let Some(object) = existing.as_object() {
+        return Ok(object.clone());
+    }
+
+    let store = ObjectInitializer::new(context).build();
+    target.set(key, store.clone(), true, context)?;
+    Ok(store)
+}
+
+fn hidden_event_listener_list(
+    target: &boa_engine::object::JsObject,
+    event_name: &str,
+    context: &mut Context,
+) -> JsResult<boa_engine::object::JsObject> {
+    let store = hidden_event_listener_store(target, context)?;
+    let key = js_string!(event_name.to_ascii_lowercase());
+    let existing = store.get(key.clone(), context)?;
+    if let Some(object) = existing.as_object() {
+        return Ok(object.clone());
+    }
+
+    let list = build_event_listener_list_stub(context);
+    store.set(key, list.clone(), true, context)?;
+    Ok(list)
+}
+
+fn event_listener_options_from_value(
+    value: Option<&JsValue>,
+    context: &mut Context,
+) -> JsResult<EventListenerOptions> {
+    let Some(value) = value else {
+        return Ok(EventListenerOptions::default());
+    };
+
+    if value.is_undefined() || value.is_null() {
+        return Ok(EventListenerOptions::default());
+    }
+
+    if let Some(object) = value.as_object() {
+        let capture = object
+            .get(js_string!("capture"), context)
+            .unwrap_or_else(|_| JsValue::undefined())
+            .to_boolean();
+        let once = object
+            .get(js_string!("once"), context)
+            .unwrap_or_else(|_| JsValue::undefined())
+            .to_boolean();
+        let passive = object
+            .get(js_string!("passive"), context)
+            .unwrap_or_else(|_| JsValue::undefined())
+            .to_boolean();
+        return Ok(EventListenerOptions {
+            capture,
+            once,
+            passive,
+        });
+    }
+
+    Ok(EventListenerOptions {
+        capture: value.to_boolean(),
+        once: false,
+        passive: false,
+    })
+}
+
+fn is_same_js_callback(lhs: &JsValue, rhs: &JsValue) -> bool {
+    match (lhs.as_object(), rhs.as_object()) {
+        (Some(lhs), Some(rhs)) => boa_engine::object::JsObject::equals(&lhs, &rhs),
+        _ => false,
+    }
+}
+
+fn append_event_listener(
+    target: &boa_engine::object::JsObject,
+    event_name: &str,
+    callback: JsValue,
+    options: EventListenerOptions,
+    context: &mut Context,
+) -> JsResult<()> {
+    let list = hidden_event_listener_list(target, event_name, context)?;
+    let length = list
+        .get(js_string!("length"), context)?
+        .to_length(context)? as usize;
+    for index in 0..length {
+        let existing = list.get(js_string!(index.to_string()), context)?;
+        let Some(existing_record) = existing.as_object() else {
+            continue;
+        };
+        let existing_callback = existing_record.get(js_string!("callback"), context)?;
+        let existing_capture = existing_record
+            .get(js_string!("capture"), context)
+            .unwrap_or_else(|_| JsValue::undefined())
+            .to_boolean();
+        if existing_capture == options.capture && is_same_js_callback(&existing_callback, &callback)
+        {
+            return Ok(());
+        }
+    }
+
+    list.set(
+        js_string!(length.to_string()),
+        JsValue::from(build_event_listener_record(context, callback, &options)),
+        true,
+        context,
+    )?;
+    list.set(
+        js_string!("length"),
+        JsValue::new((length + 1) as i32),
+        true,
+        context,
+    )?;
+    Ok(())
+}
+
+fn remove_event_listener(
+    target: &boa_engine::object::JsObject,
+    event_name: &str,
+    callback: &JsValue,
+    capture: bool,
+    context: &mut Context,
+) -> JsResult<()> {
+    let store = hidden_event_listener_store(target, context)?;
+    let key = js_string!(event_name.to_ascii_lowercase());
+    let existing = store.get(key.clone(), context)?;
+    let Some(list) = existing.as_object() else {
+        return Ok(());
+    };
+
+    let length = list
+        .get(js_string!("length"), context)?
+        .to_length(context)? as usize;
+    let mut retained = Vec::new();
+    for index in 0..length {
+        let value = list.get(js_string!(index.to_string()), context)?;
+        let Some(record) = value.as_object() else {
+            retained.push(value);
+            continue;
+        };
+        let record_callback = record.get(js_string!("callback"), context)?;
+        let record_capture = record
+            .get(js_string!("capture"), context)
+            .unwrap_or_else(|_| JsValue::undefined())
+            .to_boolean();
+        if record_capture != capture || !is_same_js_callback(&record_callback, callback) {
+            retained.push(value);
+        }
+    }
+    let retained_len = retained.len();
+
+    let new_list = build_event_listener_list_stub(context);
+    for (index, value) in retained.into_iter().enumerate() {
+        let _ = new_list.set(js_string!(index.to_string()), value, true, context);
+    }
+    new_list.set(
+        js_string!("length"),
+        JsValue::new(retained_len as i32),
+        true,
+        context,
+    )?;
+    store.set(key, new_list, true, context)?;
+    Ok(())
+}
+
+fn event_listener_entries(
+    target: &boa_engine::object::JsObject,
+    event_name: &str,
+    context: &mut Context,
+) -> JsResult<Vec<EventListenerEntry>> {
+    let store = hidden_event_listener_store(target, context)?;
+    let key = js_string!(event_name);
+    let existing = store.get(key, context)?;
+    let Some(list) = existing.as_object() else {
+        return Ok(Vec::new());
+    };
+
+    let length = list
+        .get(js_string!("length"), context)?
+        .to_length(context)? as usize;
+    let mut entries = Vec::with_capacity(length);
+    for index in 0..length {
+        let value = list.get(js_string!(index.to_string()), context)?;
+        let Some(record) = value.as_object() else {
+            continue;
+        };
+        let callback = record.get(js_string!("callback"), context)?;
+        let options = EventListenerOptions {
+            capture: record
+                .get(js_string!("capture"), context)
+                .unwrap_or_else(|_| JsValue::undefined())
+                .to_boolean(),
+            once: record
+                .get(js_string!("once"), context)
+                .unwrap_or_else(|_| JsValue::undefined())
+                .to_boolean(),
+            passive: record
+                .get(js_string!("passive"), context)
+                .unwrap_or_else(|_| JsValue::undefined())
+                .to_boolean(),
+        };
+        entries.push(EventListenerEntry { callback, options });
+    }
+    Ok(entries)
+}
+
+fn build_dom_event_object(
+    context: &mut Context,
+    request: &DomEventRequest,
+    target: &boa_engine::object::JsObject,
+) -> boa_engine::object::JsObject {
+    let event = ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_event_prevent_default),
+            js_string!("preventDefault"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_event_stop_propagation),
+            js_string!("stopPropagation"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_event_stop_immediate_propagation),
+            js_string!("stopImmediatePropagation"),
+            0,
+        )
+        .property(
+            js_string!("type"),
+            js_string!(request.event_type.as_str()),
+            Attribute::all(),
+        )
+        .property(js_string!("bubbles"), request.bubbles, Attribute::all())
+        .property(
+            js_string!("cancelable"),
+            request.cancelable,
+            Attribute::all(),
+        )
+        .property(js_string!("eventPhase"), 0, Attribute::all())
+        .property(js_string!("defaultPrevented"), false, Attribute::all())
+        .property(js_string!("cancelBubble"), false, Attribute::all())
+        .property(js_string!("propagationStopped"), false, Attribute::all())
+        .property(
+            js_string!("immediatePropagationStopped"),
+            false,
+            Attribute::all(),
+        )
+        .property(js_string!("target"), target.clone(), Attribute::all())
+        .property(
+            js_string!("currentTarget"),
+            target.clone(),
+            Attribute::all(),
+        )
+        .build();
+    if let Some(key) = &request.key {
+        let _ = event.set(js_string!("key"), js_string!(key.as_str()), true, context);
+    }
+    if let Some(code) = &request.code {
+        let _ = event.set(js_string!("code"), js_string!(code.as_str()), true, context);
+    }
+    let _ = event.set(
+        js_string!("repeat"),
+        JsValue::new(request.repeat),
+        true,
+        context,
+    );
+    let _ = event.set(
+        js_string!("altKey"),
+        JsValue::new(request.alt_key),
+        true,
+        context,
+    );
+    let _ = event.set(
+        js_string!("ctrlKey"),
+        JsValue::new(request.ctrl_key),
+        true,
+        context,
+    );
+    let _ = event.set(
+        js_string!("shiftKey"),
+        JsValue::new(request.shift_key),
+        true,
+        context,
+    );
+    let _ = event.set(
+        js_string!("metaKey"),
+        JsValue::new(request.meta_key),
+        true,
+        context,
+    );
+    event
+}
+
+fn event_bool_property(this: &JsValue, name: &str, context: &mut Context) -> bool {
+    this.as_object()
+        .and_then(|object| object.get(js_string!(name), context).ok())
+        .and_then(|value| value.to_boolean().then_some(true).or(Some(false)))
+        .unwrap_or(false)
+}
+
+fn set_event_bool_property(
+    this: &JsValue,
+    name: &str,
+    value: bool,
+    context: &mut Context,
+) -> JsResult<()> {
+    let Some(object) = this.as_object() else {
+        return Ok(());
+    };
+    object.set(js_string!(name), JsValue::new(value), true, context)?;
+    Ok(())
+}
+
 fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::object::JsObject {
+    if let Some(cached) = cached_dom_node_object(context, node_id) {
+        return cached;
+    }
+
     let get_class_list =
         NativeFunction::from_fn_ptr(js_dom_get_class_list).to_js_function(context.realm());
     let get_children =
@@ -1623,7 +2385,7 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
     let get_parent_node =
         NativeFunction::from_fn_ptr(js_dom_get_parent_node).to_js_function(context.realm());
     let style = ObjectInitializer::new(context).build();
-    ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context)
+    let object = ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context)
         .function(
             NativeFunction::from_fn_ptr(js_dom_query_selector),
             js_string!("querySelector"),
@@ -1645,6 +2407,16 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             2,
         )
         .function(
+            NativeFunction::from_fn_ptr(js_add_event_listener),
+            js_string!("addEventListener"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_remove_event_listener),
+            js_string!("removeEventListener"),
+            2,
+        )
+        .function(
             NativeFunction::from_fn_ptr(js_dom_get_attribute),
             js_string!("getAttribute"),
             1,
@@ -1660,17 +2432,20 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             1,
         )
         .function(
-            NativeFunction::from_fn_ptr(js_add_event_listener),
-            js_string!("addEventListener"),
-            2,
+            NativeFunction::from_fn_ptr(js_dom_dispatch_event),
+            js_string!("dispatchEvent"),
+            1,
         )
         .function(
-            NativeFunction::from_fn_ptr(js_noop),
-            js_string!("removeEventListener"),
-            2,
+            NativeFunction::from_fn_ptr(js_dom_focus),
+            js_string!("focus"),
+            0,
         )
-        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("focus"), 0)
-        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("blur"), 0)
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_blur),
+            js_string!("blur"),
+            0,
+        )
         .function(
             NativeFunction::from_fn_ptr(js_dom_remove),
             js_string!("remove"),
@@ -1807,26 +2582,37 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .property(js_string!("clientHeight"), 720, Attribute::all())
         .property(js_string!("scrollWidth"), 1280, Attribute::all())
         .property(js_string!("scrollHeight"), 720, Attribute::all())
-        .build()
+        .build();
+    store_dom_node_object(context, node_id, &object);
+    object
 }
 
 fn build_dom_node_list_object(
     context: &mut Context,
     node_ids: Vec<usize>,
 ) -> boa_engine::object::JsObject {
-    let object = ObjectInitializer::with_native_data(DomNodeListHandle { node_ids: node_ids.clone() }, context)
-        .function(
-            NativeFunction::from_fn_ptr(js_dom_node_list_for_each),
-            js_string!("forEach"),
-            1,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_dom_node_list_item),
-            js_string!("item"),
-            1,
-        )
-        .property(js_string!("length"), node_ids.len() as i32, Attribute::all())
-        .build();
+    let object = ObjectInitializer::with_native_data(
+        DomNodeListHandle {
+            node_ids: node_ids.clone(),
+        },
+        context,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_dom_node_list_for_each),
+        js_string!("forEach"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_dom_node_list_item),
+        js_string!("item"),
+        1,
+    )
+    .property(
+        js_string!("length"),
+        node_ids.len() as i32,
+        Attribute::all(),
+    )
+    .build();
 
     for (index, node_id) in node_ids.into_iter().enumerate() {
         let _ = object.create_data_property_or_throw(
@@ -1917,7 +2703,11 @@ fn build_fetch_response_object(
         )
         .property(js_string!("ok"), ok, Attribute::all())
         .property(js_string!("status"), status, Attribute::all())
-        .property(js_string!("statusText"), js_string!(status_text), Attribute::all())
+        .property(
+            js_string!("statusText"),
+            js_string!(status_text),
+            Attribute::all(),
+        )
         .property(js_string!("url"), js_string!(url), Attribute::all())
         .property(js_string!("headers"), headers, Attribute::all())
         .build()
@@ -1964,14 +2754,26 @@ fn build_xml_http_request_object(context: &mut Context) -> boa_engine::object::J
         },
         context,
     )
-    .function(NativeFunction::from_fn_ptr(js_xhr_open), js_string!("open"), 3)
+    .function(
+        NativeFunction::from_fn_ptr(js_xhr_open),
+        js_string!("open"),
+        3,
+    )
     .function(
         NativeFunction::from_fn_ptr(js_xhr_set_request_header),
         js_string!("setRequestHeader"),
         2,
     )
-    .function(NativeFunction::from_fn_ptr(js_xhr_send), js_string!("send"), 1)
-    .function(NativeFunction::from_fn_ptr(js_xhr_abort), js_string!("abort"), 0)
+    .function(
+        NativeFunction::from_fn_ptr(js_xhr_send),
+        js_string!("send"),
+        1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_xhr_abort),
+        js_string!("abort"),
+        0,
+    )
     .function(
         NativeFunction::from_fn_ptr(js_xhr_get_response_header),
         js_string!("getResponseHeader"),
@@ -1983,7 +2785,12 @@ fn build_xml_http_request_object(context: &mut Context) -> boa_engine::object::J
         None,
         Attribute::all(),
     )
-    .accessor(js_string!("status"), Some(get_status), None, Attribute::all())
+    .accessor(
+        js_string!("status"),
+        Some(get_status),
+        None,
+        Attribute::all(),
+    )
     .accessor(
         js_string!("statusText"),
         Some(get_status_text),
@@ -2010,9 +2817,17 @@ fn build_xml_http_request_object(context: &mut Context) -> boa_engine::object::J
     )
     .property(js_string!("responseType"), js_string!(""), Attribute::all())
     .property(js_string!("withCredentials"), false, Attribute::all())
-    .property(js_string!("onreadystatechange"), JsValue::undefined(), Attribute::all())
+    .property(
+        js_string!("onreadystatechange"),
+        JsValue::undefined(),
+        Attribute::all(),
+    )
     .property(js_string!("onload"), JsValue::undefined(), Attribute::all())
-    .property(js_string!("onerror"), JsValue::undefined(), Attribute::all())
+    .property(
+        js_string!("onerror"),
+        JsValue::undefined(),
+        Attribute::all(),
+    )
     .build()
 }
 
@@ -2290,7 +3105,7 @@ fn js_location_replace(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
 }
 
 fn set_location_href(href: &str, context: &mut Context) {
-    let resolved = current_location_url(context)
+    let resolved = current_document_url(context)
         .and_then(|url| url.resolve(href).ok())
         .map(|url| url.to_string())
         .or_else(|| Url::parse(href).ok().map(|url| url.to_string()))
@@ -2307,11 +3122,19 @@ fn current_location_url(context: &mut Context) -> Option<Url> {
     Url::parse(&href).ok()
 }
 
+fn current_document_url(context: &mut Context) -> Option<Url> {
+    context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().document_url.clone())
+}
+
 fn resolve_requested_url(request: &JsValue, context: &mut Context) -> JsResult<Url> {
     let request_url = if let Some(object) = request.as_object() {
-        match object.get(js_string!("url"), context) {
-            Ok(value) if !value.is_undefined() && !value.is_null() => js_value_to_string(&value, context)?,
-            _ => js_value_to_string(request, context)?,
+        let value = object.get(js_string!("url"), context)?;
+        if !value.is_undefined() && !value.is_null() {
+            js_value_to_string(&value, context)?
+        } else {
+            js_value_to_string(request, context)?
         }
     } else {
         js_value_to_string(request, context)?
@@ -2321,7 +3144,7 @@ fn resolve_requested_url(request: &JsValue, context: &mut Context) -> JsResult<U
         return Ok(url);
     }
 
-    if let Some(base) = current_location_url(context)
+    if let Some(base) = current_document_url(context)
         && let Ok(url) = base.resolve(&request_url)
     {
         return Ok(url);
@@ -2332,12 +3155,88 @@ fn resolve_requested_url(request: &JsValue, context: &mut Context) -> JsResult<U
         .into())
 }
 
+fn reserve_js_network_budget(context: &mut Context) -> JsResult<usize> {
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return Err(JsNativeError::error()
+            .with_message("missing JS runtime host state")
+            .into());
+    };
+
+    let mut state = host.state.borrow_mut();
+    if state.network_request_count >= JS_MAX_NETWORK_REQUESTS {
+        return Err(JsNativeError::error()
+            .with_message(format!(
+                "JS network request limit reached ({JS_MAX_NETWORK_REQUESTS})"
+            ))
+            .into());
+    }
+
+    let remaining =
+        JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES.saturating_sub(state.network_response_bytes);
+    if remaining == 0 {
+        return Err(JsNativeError::error()
+            .with_message(format!(
+                "JS network response budget exhausted ({JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES} bytes)"
+            ))
+            .into());
+    }
+
+    state.network_request_count += 1;
+    Ok(remaining.min(JS_MAX_NETWORK_RESPONSE_BYTES))
+}
+
+fn record_js_network_response_bytes(response_len: usize, context: &mut Context) {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        state.network_response_bytes = state.network_response_bytes.saturating_add(response_len);
+        debug_assert!(state.network_response_bytes <= JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES);
+    }
+}
+
+fn xhr_body_is_supported(body: Option<&JsValue>, context: &mut Context) -> JsResult<bool> {
+    let Some(body) = body else {
+        return Ok(true);
+    };
+    if body.is_undefined() || body.is_null() {
+        return Ok(true);
+    }
+
+    if body.is_string() {
+        return Ok(js_value_to_string(body, context)?.is_empty());
+    }
+
+    Ok(false)
+}
+
+fn ensure_same_origin_script_url(current: &Url, target: &Url, reason: &str) -> JsResult<()> {
+    if current.shares_origin(target) {
+        return Ok(());
+    }
+
+    Err(JsNativeError::error()
+        .with_message(format!("{reason}: {} -> {}", current, target))
+        .into())
+}
+
+fn fetch_for_script(url: &Url, context: &mut Context) -> JsResult<HttpResponse> {
+    let current = current_document_url(context).ok_or_else(|| {
+        JsNativeError::error().with_message("missing current page origin for JS request")
+    })?;
+    ensure_same_origin_script_url(&current, url, "cross-origin JS requests are blocked")?;
+
+    let max_response_bytes = reserve_js_network_budget(context)?;
+    let response = fetch_with_limits_same_origin(url, max_response_bytes, &current)
+        .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
+    record_js_network_response_bytes(response.body.len(), context);
+    Ok(response)
+}
+
 fn js_fetch(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let request = args.first().cloned().unwrap_or_else(JsValue::undefined);
     let url = resolve_requested_url(&request, context);
     let promise = match url {
         Ok(url) => JsPromise::from_result(
-            fetch(&url)
+            fetch_for_script(&url, context)
                 .map(|response| JsValue::from(build_fetch_response_object(context, response)))
                 .map_err(|error| JsNativeError::error().with_message(error.to_string())),
             context,
@@ -2383,9 +3282,10 @@ fn js_fetch_response_json(
         );
         let value = serde_json::from_str::<serde_json::Value>(&text)
             .map_err(|error| JsNativeError::syntax().with_message(error.to_string()))
-            .and_then(|json| JsValue::from_json(&json, context).map_err(|error| {
-                JsNativeError::error().with_message(error.to_string())
-            }));
+            .and_then(|json| {
+                JsValue::from_json(&json, context)
+                    .map_err(|error| JsNativeError::error().with_message(error.to_string()))
+            });
         JsPromise::from_result(value, context)
     } else {
         JsPromise::reject(
@@ -2410,7 +3310,9 @@ fn js_fetch_response_clone(
         )));
     }
 
-    Ok(JsValue::undefined())
+    Err(JsNativeError::typ()
+        .with_message("Response.clone called on non-response object")
+        .into())
 }
 
 fn js_response_headers_get(
@@ -2489,12 +3391,16 @@ fn js_xhr_set_request_header(
     if let Some(object) = this.as_object()
         && let Some(handle) = object.downcast_ref::<XmlHttpRequestHandle>()
     {
-        handle.state.borrow_mut().request_headers.insert(name, value);
+        handle
+            .state
+            .borrow_mut()
+            .request_headers
+            .insert(name, value);
     }
     Ok(JsValue::undefined())
 }
 
-fn js_xhr_send(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let Some(object) = this.as_object() else {
         return Ok(JsValue::undefined());
     };
@@ -2510,11 +3416,13 @@ fn js_xhr_send(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult
         )
     };
 
-    let result = if method.is_empty() || method == "GET" {
+    let result = if !xhr_body_is_supported(args.first(), context)? {
+        Err(JsNativeError::error()
+            .with_message("XMLHttpRequest send(body) is not supported yet")
+            .into())
+    } else if method.is_empty() || method == "GET" {
         resolve_requested_url(&JsValue::from(js_string!(target_url)), context)
-            .and_then(|url| fetch(&url).map_err(|error| {
-                JsNativeError::error().with_message(error.to_string()).into()
-            }))
+            .and_then(|url| fetch_for_script(&url, context))
     } else {
         Err(JsNativeError::error()
             .with_message(format!("unsupported XMLHttpRequest method: {method}"))
@@ -2566,11 +3474,7 @@ fn js_xhr_abort(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsVa
     Ok(JsValue::undefined())
 }
 
-fn js_xhr_get_response_header(
-    _: &JsValue,
-    _: &[JsValue],
-    _: &mut Context,
-) -> JsResult<JsValue> {
+fn js_xhr_get_response_header(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::null())
 }
 
@@ -2588,37 +3492,25 @@ fn js_xhr_get_status(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult
 
 fn js_xhr_get_status_text(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::from(js_string!(
-        xhr_state_value(this, |state| state.status_text.clone())
-            .unwrap_or_default()
+        xhr_state_value(this, |state| state.status_text.clone()).unwrap_or_default()
     )))
 }
 
-fn js_xhr_get_response_text(
-    this: &JsValue,
-    _: &[JsValue],
-    _: &mut Context,
-) -> JsResult<JsValue> {
+fn js_xhr_get_response_text(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::from(js_string!(
-        xhr_state_value(this, |state| state.response_text.clone())
-            .unwrap_or_default()
+        xhr_state_value(this, |state| state.response_text.clone()).unwrap_or_default()
     )))
 }
 
 fn js_xhr_get_response(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::from(js_string!(
-        xhr_state_value(this, |state| state.response_text.clone())
-            .unwrap_or_default()
+        xhr_state_value(this, |state| state.response_text.clone()).unwrap_or_default()
     )))
 }
 
-fn js_xhr_get_response_url(
-    this: &JsValue,
-    _: &[JsValue],
-    _: &mut Context,
-) -> JsResult<JsValue> {
+fn js_xhr_get_response_url(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::from(js_string!(
-        xhr_state_value(this, |state| state.response_url.clone())
-            .unwrap_or_default()
+        xhr_state_value(this, |state| state.response_url.clone()).unwrap_or_default()
     )))
 }
 
@@ -2634,7 +3526,7 @@ fn trigger_xhr_handler(
     context: &mut Context,
 ) -> JsResult<()> {
     let callback = object.get(js_string!(property), context)?;
-    call_js_callback(&callback, &[], context)?;
+    call_js_callback_with_this(&callback, &JsValue::from(object.clone()), &[], context)?;
     Ok(())
 }
 
@@ -2687,7 +3579,7 @@ fn js_clear_timeout(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsV
 }
 
 fn js_add_event_listener(
-    _: &JsValue,
+    this: &JsValue,
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
@@ -2697,14 +3589,151 @@ fn js_add_event_listener(
         .transpose()?
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if matches!(
-        event_name.as_str(),
-        "load" | "domcontentloaded" | "readystatechange" | "script-load-dpj"
-    ) && let Some(callback) = args.get(1)
-    {
-        call_js_callback(callback, &[], context)?;
+    let Some(callback) = args.get(1).cloned() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(target) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    if callback.as_object().is_none() {
+        return Ok(JsValue::undefined());
     }
+    let options = event_listener_options_from_value(args.get(2), context)?;
+    append_event_listener(&target, &event_name, callback, options, context)?;
 
+    Ok(JsValue::undefined())
+}
+
+fn js_remove_event_listener(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let event_name = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let Some(callback) = args.get(1) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(target) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let options = event_listener_options_from_value(args.get(2), context)?;
+    remove_event_listener(&target, &event_name, callback, options.capture, context)?;
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_dispatch_event(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = this.as_object() else {
+        return Ok(JsValue::new(true));
+    };
+    let event_arg = args.first().cloned().unwrap_or_else(JsValue::undefined);
+    let (event_type, bubbles, cancelable) = if let Some(object) = event_arg.as_object() {
+        let event_type = js_value_to_string(&object.get(js_string!("type"), context)?, context)?;
+        let bubbles = object.get(js_string!("bubbles"), context)?.to_boolean();
+        let cancelable = object.get(js_string!("cancelable"), context)?.to_boolean();
+        (event_type, bubbles, cancelable)
+    } else {
+        let event_type = js_value_to_string(&event_arg, context)?;
+        let bubbles = default_event_bubbles(&event_type);
+        let cancelable = default_event_cancelable(&event_type);
+        (event_type, bubbles, cancelable)
+    };
+    let request = DomEventRequest {
+        target_node_id: target
+            .downcast_ref::<DomNodeHandle>()
+            .map(|handle| handle.node_id)
+            .unwrap_or(0),
+        event_type,
+        bubbles,
+        cancelable,
+        ..Default::default()
+    };
+    let prevented = dispatch_dom_event_on_target(target.clone(), &request, context)?;
+    Ok(JsValue::new(!prevented))
+}
+
+fn js_dom_focus(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(target) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    if let Some(node_id) = target
+        .downcast_ref::<DomNodeHandle>()
+        .map(|handle| handle.node_id)
+        && context
+            .get_data::<JavaScriptHostData>()
+            .map(|host| host.state.borrow().dom.is_disabled(node_id))
+            .unwrap_or(false)
+    {
+        return Ok(JsValue::undefined());
+    }
+    let request = DomEventRequest {
+        target_node_id: target
+            .downcast_ref::<DomNodeHandle>()
+            .map(|handle| handle.node_id)
+            .unwrap_or(0),
+        event_type: "focus".to_string(),
+        ..Default::default()
+    };
+    let _ = dispatch_dom_event_on_target(target.clone(), &request, context)?;
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_blur(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(target) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let request = DomEventRequest {
+        target_node_id: target
+            .downcast_ref::<DomNodeHandle>()
+            .map(|handle| handle.node_id)
+            .unwrap_or(0),
+        event_type: "blur".to_string(),
+        ..Default::default()
+    };
+    let _ = dispatch_dom_event_on_target(target.clone(), &request, context)?;
+    Ok(JsValue::undefined())
+}
+
+fn js_event_prevent_default(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if let Some(object) = this.as_object()
+        && !event_flag_value(&object, "cancelable", context)
+    {
+        return Ok(JsValue::undefined());
+    }
+    set_event_bool_property(this, "defaultPrevented", true, context)?;
+    Ok(JsValue::undefined())
+}
+
+fn js_event_stop_propagation(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    set_event_bool_property(this, "propagationStopped", true, context)?;
+    set_event_bool_property(this, "cancelBubble", true, context)?;
+    Ok(JsValue::undefined())
+}
+
+fn js_event_stop_immediate_propagation(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    set_event_bool_property(this, "propagationStopped", true, context)?;
+    set_event_bool_property(this, "immediatePropagationStopped", true, context)?;
+    set_event_bool_property(this, "cancelBubble", true, context)?;
     Ok(JsValue::undefined())
 }
 
@@ -2735,22 +3764,27 @@ fn this_node_id(this: &JsValue) -> Option<usize> {
 }
 
 fn node_id_argument(arg: Option<&JsValue>) -> Option<usize> {
-    arg.and_then(JsValue::as_object)
-        .and_then(|object| object.downcast_ref::<DomNodeHandle>().map(|handle| handle.node_id))
+    arg.and_then(JsValue::as_object).and_then(|object| {
+        object
+            .downcast_ref::<DomNodeHandle>()
+            .map(|handle| handle.node_id)
+    })
 }
 
-fn js_dom_query_selector(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_query_selector(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let selector = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
     let Some(scope_id) = this_node_id(this) else {
         return Ok(JsValue::null());
     };
-    let found = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| {
-            let state = host.state.borrow();
-            let include_scope = scope_id == state.dom.document_id;
-            state.dom.query_selector(scope_id, &selector, include_scope)
-        });
+    let found = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        let state = host.state.borrow();
+        let include_scope = scope_id == state.dom.document_id;
+        state.dom.query_selector(scope_id, &selector, include_scope)
+    });
     Ok(found
         .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
         .unwrap_or_else(JsValue::null))
@@ -2763,14 +3797,19 @@ fn js_dom_query_selector_all(
 ) -> JsResult<JsValue> {
     let selector = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
     let Some(scope_id) = this_node_id(this) else {
-        return Ok(JsValue::from(build_dom_node_list_object(context, Vec::new())));
+        return Ok(JsValue::from(build_dom_node_list_object(
+            context,
+            Vec::new(),
+        )));
     };
     let node_ids = context
         .get_data::<JavaScriptHostData>()
         .map(|host| {
             let state = host.state.borrow();
             let include_scope = scope_id == state.dom.document_id;
-            state.dom.query_selector_all(scope_id, &selector, include_scope)
+            state
+                .dom
+                .query_selector_all(scope_id, &selector, include_scope)
         })
         .unwrap_or_default();
     Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
@@ -2785,9 +3824,12 @@ fn js_document_get_element_by_id(
     let Some(scope_id) = this_node_id(this) else {
         return Ok(JsValue::null());
     };
-    let found = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.get_element_by_id(scope_id, &target_id));
+    let found = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .get_element_by_id(scope_id, &target_id)
+    });
     Ok(found
         .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
         .unwrap_or_else(JsValue::null))
@@ -2831,7 +3873,11 @@ fn js_document_create_stub_object(
     Ok(JsValue::from(build_dom_node_object(context, node_id)))
 }
 
-fn js_dom_append_child(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_append_child(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let Some(parent_id) = this_node_id(this) else {
         return Ok(JsValue::undefined());
     };
@@ -2839,7 +3885,10 @@ fn js_dom_append_child(this: &JsValue, args: &[JsValue], context: &mut Context) 
         return Ok(JsValue::undefined());
     };
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
-        host.state.borrow_mut().dom.append_child(parent_id, child_id);
+        host.state
+            .borrow_mut()
+            .dom
+            .append_child(parent_id, child_id);
     }
     Ok(args.first().cloned().unwrap_or_else(JsValue::undefined))
 }
@@ -2865,7 +3914,11 @@ fn js_dom_insert_before(
     Ok(args.first().cloned().unwrap_or_else(JsValue::undefined))
 }
 
-fn js_dom_get_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_get_attribute(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
     let Some(node_id) = this_node_id(this) else {
         return Ok(JsValue::null());
@@ -2893,13 +3946,20 @@ fn js_dom_get_property_attribute(
     Ok(JsValue::from(js_string!(value)))
 }
 
-fn js_dom_set_attribute(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_set_attribute(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
     let value = js_value_to_string(args.get(1).unwrap_or(&JsValue::undefined()), context)?;
     if let Some(node_id) = this_node_id(this)
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
-        host.state.borrow_mut().dom.set_attribute(node_id, &name, &value);
+        host.state
+            .borrow_mut()
+            .dom
+            .set_attribute(node_id, &name, &value);
     }
     Ok(JsValue::undefined())
 }
@@ -2914,7 +3974,10 @@ fn js_dom_set_property_attribute(
     if let Some(node_id) = this_node_id(this)
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
-        host.state.borrow_mut().dom.set_attribute(node_id, name, &value);
+        host.state
+            .borrow_mut()
+            .dom
+            .set_attribute(node_id, name, &value);
     }
     Ok(JsValue::undefined())
 }
@@ -2942,7 +4005,11 @@ fn js_dom_remove(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
     Ok(JsValue::undefined())
 }
 
-fn js_dom_get_class_list(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_get_class_list(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     Ok(JsValue::from(build_dom_class_list_object(context, node_id)))
 }
@@ -2969,16 +4036,30 @@ fn js_dom_get_children(this: &JsValue, _: &[JsValue], context: &mut Context) -> 
     Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
 }
 
-fn js_dom_get_child_nodes(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_get_child_nodes(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let node_ids = context
         .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.node(node_id).map(|node| node.children.clone()))
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .node(node_id)
+                .map(|node| node.children.clone())
+        })
         .unwrap_or_default();
     Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
 }
 
-fn js_dom_get_text_content(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_get_text_content(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let text = context
         .get_data::<JavaScriptHostData>()
@@ -3000,7 +4081,11 @@ fn js_dom_set_text_content(
     Ok(JsValue::undefined())
 }
 
-fn js_dom_get_inner_html(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_get_inner_html(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let html = context
         .get_data::<JavaScriptHostData>()
@@ -3026,28 +4111,20 @@ fn js_dom_set_inner_html(
 }
 
 fn js_dom_get_id(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    js_dom_get_attribute(
-        this,
-        &[JsValue::from(js_string!("id"))],
-        context,
-    )
+    js_dom_get_attribute(this, &[JsValue::from(js_string!("id"))], context)
 }
 
 fn js_dom_set_id(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let value = args.first().cloned().unwrap_or_else(JsValue::undefined);
-    js_dom_set_attribute(
-        this,
-        &[JsValue::from(js_string!("id")), value],
-        context,
-    )
+    js_dom_set_attribute(this, &[JsValue::from(js_string!("id")), value], context)
 }
 
-fn js_dom_get_class_name(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    js_dom_get_attribute(
-        this,
-        &[JsValue::from(js_string!("class"))],
-        context,
-    )
+fn js_dom_get_class_name(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    js_dom_get_attribute(this, &[JsValue::from(js_string!("class"))], context)
 }
 
 fn js_dom_set_class_name(
@@ -3056,14 +4133,12 @@ fn js_dom_set_class_name(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let value = args.first().cloned().unwrap_or_else(JsValue::undefined);
-    js_dom_set_attribute(
-        this,
-        &[JsValue::from(js_string!("class")), value],
-        context,
-    )
+    js_dom_set_attribute(this, &[JsValue::from(js_string!("class")), value], context)
 }
 
 fn js_dom_get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    // Simplified model: JS `input.value` currently reflects the backing attribute /
+    // default value, not the live GUI editor state while the user is typing.
     js_dom_get_property_attribute(this, "value", context)
 }
 
@@ -3127,16 +4202,30 @@ fn js_dom_get_tag_name(this: &JsValue, _: &[JsValue], context: &mut Context) -> 
     let node_id = this_node_id(this).unwrap_or(0);
     let tag_name = context
         .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.element(node_id).map(|element| element.tag_name.to_ascii_uppercase()))
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .element(node_id)
+                .map(|element| element.tag_name.to_ascii_uppercase())
+        })
         .unwrap_or_default();
     Ok(JsValue::from(js_string!(tag_name)))
 }
 
-fn js_dom_get_parent_node(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+fn js_dom_get_parent_node(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
-    let parent_id = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.node(node_id).and_then(|node| node.parent));
+    let parent_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .node(node_id)
+            .and_then(|node| node.parent)
+    });
     Ok(parent_id
         .map(|parent_id| JsValue::from(build_dom_node_object(context, parent_id)))
         .unwrap_or_else(JsValue::null))
@@ -3148,16 +4237,14 @@ fn js_dom_get_parent_element(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
-    let parent_id = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| {
-            let state = host.state.borrow();
-            state
-                .dom
-                .node(node_id)
-                .and_then(|node| node.parent)
-                .filter(|parent_id| state.dom.element(*parent_id).is_some())
-        });
+    let parent_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        let state = host.state.borrow();
+        state
+            .dom
+            .node(node_id)
+            .and_then(|node| node.parent)
+            .filter(|parent_id| state.dom.element(*parent_id).is_some())
+    });
     Ok(parent_id
         .map(|parent_id| JsValue::from(build_dom_node_object(context, parent_id)))
         .unwrap_or_else(JsValue::null))
@@ -3185,7 +4272,10 @@ fn js_dom_class_list_add(
         && let Some(handle) = object.downcast_ref::<DomClassListHandle>()
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
-        host.state.borrow_mut().dom.add_class(handle.node_id, &class_name);
+        host.state
+            .borrow_mut()
+            .dom
+            .add_class(handle.node_id, &class_name);
     }
     Ok(JsValue::undefined())
 }
@@ -3200,7 +4290,10 @@ fn js_dom_class_list_remove(
         && let Some(handle) = object.downcast_ref::<DomClassListHandle>()
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
-        host.state.borrow_mut().dom.remove_class(handle.node_id, &class_name);
+        host.state
+            .borrow_mut()
+            .dom
+            .remove_class(handle.node_id, &class_name);
     }
     Ok(JsValue::undefined())
 }
@@ -3213,7 +4306,11 @@ fn js_dom_class_list_contains(
     let class_name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
     let contains = this
         .as_object()
-        .and_then(|object| object.downcast_ref::<DomClassListHandle>().map(|handle| handle.node_id))
+        .and_then(|object| {
+            object
+                .downcast_ref::<DomClassListHandle>()
+                .map(|handle| handle.node_id)
+        })
         .and_then(|node_id| {
             context
                 .get_data::<JavaScriptHostData>()
@@ -3260,7 +4357,8 @@ fn js_dom_node_list_for_each(
     for (index, node_id) in handle.node_ids.iter().copied().enumerate() {
         let node_value = JsValue::from(build_dom_node_object(context, node_id));
         let index_value = JsValue::new(index as i32);
-        let list_value = JsValue::from(build_dom_node_list_object(context, handle.node_ids.clone()));
+        let list_value =
+            JsValue::from(build_dom_node_list_object(context, handle.node_ids.clone()));
         let args = [node_value, index_value, list_value];
         call_js_callback(callback, &args, context)?;
     }
@@ -3345,18 +4443,236 @@ fn js_ytcfg_get(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsVa
     Ok(args.get(1).cloned().unwrap_or_else(JsValue::undefined))
 }
 
-fn call_js_callback(
+fn call_js_callback_with_this(
     callback: &JsValue,
+    this_value: &JsValue,
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
     if let Some(object) = callback.as_object()
         && let Some(function) = JsFunction::from_object(object.clone())
     {
-        return function.call(&JsValue::undefined(), args, context);
+        return function.call(this_value, args, context);
     }
 
     Ok(JsValue::undefined())
+}
+
+fn call_js_callback(
+    callback: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    call_js_callback_with_this(callback, &JsValue::undefined(), args, context)
+}
+
+fn default_event_bubbles(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "click" | "input" | "change" | "submit" | "keydown" | "keyup"
+    )
+}
+
+fn default_event_cancelable(event_type: &str) -> bool {
+    matches!(event_type, "click" | "submit" | "keydown" | "keyup")
+}
+
+fn event_flag_value(this: &JsObject, name: &str, context: &mut Context) -> bool {
+    this.get(js_string!(name), context)
+        .ok()
+        .map(|value| value.to_boolean())
+        .unwrap_or(false)
+}
+
+fn set_event_current_target(
+    event: &boa_engine::object::JsObject,
+    target: &boa_engine::object::JsObject,
+    context: &mut Context,
+) -> JsResult<()> {
+    event.set(js_string!("currentTarget"), target.clone(), true, context)?;
+    Ok(())
+}
+
+fn set_event_phase(
+    event: &boa_engine::object::JsObject,
+    phase: EventDispatchPhase,
+    context: &mut Context,
+) -> JsResult<()> {
+    event.set(
+        js_string!("eventPhase"),
+        JsValue::new(phase as i32),
+        true,
+        context,
+    )?;
+    Ok(())
+}
+
+fn dispatch_listeners_on_target(
+    target: &boa_engine::object::JsObject,
+    event_type: &str,
+    event: &boa_engine::object::JsObject,
+    capture_phase: bool,
+    phase: EventDispatchPhase,
+    context: &mut Context,
+) -> JsResult<()> {
+    set_event_phase(event, phase, context)?;
+    let entries = event_listener_entries(target, event_type, context)?;
+    let target_value = JsValue::from(target.clone());
+    let event_value = JsValue::from(event.clone());
+    for entry in entries {
+        if entry.options.capture != capture_phase {
+            continue;
+        }
+        let _ = call_js_callback_with_this(
+            &entry.callback,
+            &target_value,
+            &[event_value.clone()],
+            context,
+        );
+        if entry.options.once {
+            let _ = remove_event_listener(
+                target,
+                event_type,
+                &entry.callback,
+                entry.options.capture,
+                context,
+            );
+        }
+        if event_flag_value(event, "immediatePropagationStopped", context) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn dom_event_path(node_id: usize, context: &mut Context) -> Vec<usize> {
+    let mut path = vec![node_id];
+    let mut current = node_id;
+
+    loop {
+        let Some(parent_id) = context.get_data::<JavaScriptHostData>().and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .node(current)
+                .and_then(|node| node.parent)
+        }) else {
+            break;
+        };
+        path.push(parent_id);
+        current = parent_id;
+    }
+
+    path.reverse();
+    path
+}
+
+fn dispatch_dom_event_on_target(
+    target: boa_engine::object::JsObject,
+    request: &DomEventRequest,
+    context: &mut Context,
+) -> JsResult<bool> {
+    let event = build_dom_event_object(context, request, &target);
+    let listener_event_type = request.event_type.to_ascii_lowercase();
+    if let Some(target_node_id) = target
+        .downcast_ref::<DomNodeHandle>()
+        .map(|handle| handle.node_id)
+    {
+        let path = dom_event_path(target_node_id, context);
+        let ancestors = path
+            .len()
+            .checked_sub(1)
+            .map(|end| &path[..end])
+            .unwrap_or(&[]);
+
+        for ancestor_id in ancestors.iter().copied() {
+            let current_target = build_dom_node_object(context, ancestor_id);
+            set_event_current_target(&event, &current_target, context)?;
+            dispatch_listeners_on_target(
+                &current_target,
+                &listener_event_type,
+                &event,
+                true,
+                EventDispatchPhase::Capturing,
+                context,
+            )?;
+            if event_flag_value(&event, "immediatePropagationStopped", context)
+                || event_flag_value(&event, "propagationStopped", context)
+            {
+                return Ok(event_flag_value(&event, "defaultPrevented", context));
+            }
+        }
+
+        let current_target = target.clone();
+        set_event_current_target(&event, &current_target, context)?;
+        dispatch_listeners_on_target(
+            &current_target,
+            &listener_event_type,
+            &event,
+            true,
+            EventDispatchPhase::AtTarget,
+            context,
+        )?;
+        if event_flag_value(&event, "immediatePropagationStopped", context) {
+            return Ok(event_flag_value(&event, "defaultPrevented", context));
+        }
+        dispatch_listeners_on_target(
+            &current_target,
+            &listener_event_type,
+            &event,
+            false,
+            EventDispatchPhase::AtTarget,
+            context,
+        )?;
+        if event_flag_value(&event, "immediatePropagationStopped", context)
+            || event_flag_value(&event, "propagationStopped", context)
+        {
+            return Ok(event_flag_value(&event, "defaultPrevented", context));
+        }
+
+        if request.bubbles {
+            for ancestor_id in ancestors.iter().rev().copied() {
+                let current_target = build_dom_node_object(context, ancestor_id);
+                set_event_current_target(&event, &current_target, context)?;
+                dispatch_listeners_on_target(
+                    &current_target,
+                    &listener_event_type,
+                    &event,
+                    false,
+                    EventDispatchPhase::Bubbling,
+                    context,
+                )?;
+                if event_flag_value(&event, "immediatePropagationStopped", context)
+                    || event_flag_value(&event, "propagationStopped", context)
+                {
+                    break;
+                }
+            }
+        }
+    } else {
+        let current_target = target.clone();
+        set_event_current_target(&event, &current_target, context)?;
+        dispatch_listeners_on_target(
+            &current_target,
+            &listener_event_type,
+            &event,
+            true,
+            EventDispatchPhase::AtTarget,
+            context,
+        )?;
+        if !event_flag_value(&event, "immediatePropagationStopped", context) {
+            dispatch_listeners_on_target(
+                &current_target,
+                &listener_event_type,
+                &event,
+                false,
+                EventDispatchPhase::AtTarget,
+                context,
+            )?;
+        }
+    }
+
+    Ok(event_flag_value(&event, "defaultPrevented", context))
 }
 
 fn performance_now_ms() -> f64 {
@@ -3372,7 +4688,12 @@ fn js_value_to_string(value: &JsValue, context: &mut Context) -> JsResult<String
 
 #[cfg(test)]
 mod tests {
-    use super::process_document_scripts;
+    use boa_engine::{Context, JsValue, Source, js_string};
+
+    use super::{
+        DomEventRequest, JavaScriptRuntime, current_location_url, ensure_same_origin_script_url,
+        fetch_for_script, process_document_scripts, resolve_requested_url, set_location_href,
+    };
     use crate::url::Url;
 
     #[test]
@@ -3468,6 +4789,128 @@ mod tests {
     }
 
     #[test]
+    fn resolves_script_requests_against_document_url_after_location_changes() {
+        let base_url = Url::parse("https://example.com/start").unwrap();
+        let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
+        set_location_href("https://other.example/app", &mut runtime.context);
+
+        let resolved = resolve_requested_url(
+            &JsValue::from(js_string!("/api/data")),
+            &mut runtime.context,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            Url::parse("https://example.com/api/data").unwrap()
+        );
+    }
+
+    #[test]
+    fn resolves_location_updates_against_original_document_url() {
+        let base_url = Url::parse("https://example.com/notes/start.html").unwrap();
+        let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
+        set_location_href("/first", &mut runtime.context);
+        set_location_href("next.html", &mut runtime.context);
+
+        assert_eq!(
+            current_location_url(&mut runtime.context).unwrap(),
+            Url::parse("https://example.com/notes/next.html").unwrap()
+        );
+    }
+
+    #[test]
+    fn blocks_cross_origin_fetch_requests_even_after_location_changes() {
+        let base_url = Url::parse("https://example.com/start").unwrap();
+        let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
+        set_location_href("https://other.example/app", &mut runtime.context);
+
+        let error = fetch_for_script(
+            &Url::parse("https://other.example/data").unwrap(),
+            &mut runtime.context,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("cross-origin JS requests are blocked")
+        );
+    }
+
+    #[test]
+    fn blocks_cross_origin_redirect_targets() {
+        let current = Url::parse("https://example.com/start").unwrap();
+        let redirect = Url::parse("https://other.example/data").unwrap();
+
+        let error = ensure_same_origin_script_url(
+            &current,
+            &redirect,
+            "cross-origin JS redirects are blocked",
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("cross-origin JS redirects are blocked")
+        );
+    }
+
+    #[test]
+    fn propagates_request_url_getter_errors() {
+        let base_url = Url::parse("https://example.com/start").unwrap();
+        let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
+        let request = runtime
+            .context
+            .eval(Source::from_bytes(
+                "({ get url() { throw new Error('boom'); } })",
+            ))
+            .unwrap();
+
+        let error = resolve_requested_url(&request, &mut runtime.context).unwrap_err();
+
+        assert!(error.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn blocks_cross_origin_fetch_requests() {
+        let processed = process_document_scripts(
+            "<script>fetch('https://other.example/data').catch(function () { document.write('<p>blocked</p>'); });</script>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("<p>blocked</p>"));
+    }
+
+    #[test]
+    fn aborts_runaway_loops_with_runtime_limit() {
+        let processed = process_document_scripts(
+            "<script>for (;;) {}</script>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .console_logs
+                .iter()
+                .any(|entry| entry.contains("Maximum loop iteration limit")),
+            "logs: {:?}",
+            processed.console_logs
+        );
+    }
+
+    #[test]
+    fn rejects_xml_http_request_bodies() {
+        let processed = process_document_scripts(
+            "<script>var xhr = new XMLHttpRequest(); xhr.open('GET', '/api'); xhr.onerror = function () { document.write('<p>xhr blocked</p>'); }; xhr.send('payload');</script>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("<p>xhr blocked</p>"));
+    }
+
+    #[test]
     fn supports_lightweight_dom_like_scripts() {
         let processed = process_document_scripts(
             "<div id=\"demo\"></div><script>document.addEventListener('DOMContentLoaded', function () { var el = document.querySelector('#demo'); if (el) { document.write('<p>Ready</p>'); } });</script>",
@@ -3475,6 +4918,36 @@ mod tests {
         );
 
         assert!(processed.html.contains("<p>Ready</p>"));
+    }
+
+    #[test]
+    fn dispatches_keyboard_events_with_key_metadata() {
+        let mut runtime = JavaScriptRuntime::new(
+            &Url::parse("https://example.com").unwrap(),
+            "<html><body><div id=\"demo\"></div><script>document.addEventListener('keydown', function (event) { document.title = [event.type, event.key, event.code, String(event.ctrlKey), String(event.shiftKey)].join('|'); });</script></body></html>",
+        );
+        runtime.process_loaded_document();
+        runtime.dispatch_initial_load_events();
+
+        let result = runtime.dispatch_dom_event(DomEventRequest {
+            target_node_id: runtime.document_id(),
+            event_type: "keydown".to_string(),
+            bubbles: true,
+            cancelable: true,
+            key: Some("a".to_string()),
+            code: Some("KeyA".to_string()),
+            repeat: false,
+            alt_key: false,
+            ctrl_key: false,
+            shift_key: false,
+            meta_key: false,
+        });
+
+        assert!(!result.default_prevented);
+        assert_eq!(
+            result.snapshot.title_override.as_deref(),
+            Some("keydown|a|KeyA|false|false")
+        );
     }
 
     #[test]
@@ -3507,5 +4980,13 @@ mod tests {
 
         assert!(processed.html.contains("<span class=\"chip\">Hello</span>"));
         assert!(processed.html.contains("<img src=\"/avatar.png\">"));
+    }
+
+    #[test]
+    fn response_clone_errors_on_invalid_receiver() {
+        let mut context = Context::default();
+        let result = super::js_fetch_response_clone(&JsValue::undefined(), &[], &mut context);
+
+        assert!(result.is_err());
     }
 }

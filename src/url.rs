@@ -54,16 +54,20 @@ impl Url {
             return Self::parse(location);
         }
 
+        let current_without_fragment = self.path.split('#').next().unwrap_or(&self.path);
+        let current_path = current_without_fragment
+            .split('?')
+            .next()
+            .unwrap_or(current_without_fragment);
+
         let next_path = if location.starts_with('/') {
             location.to_string()
         } else if location.starts_with('?') {
-            let current_path = self.path.split('?').next().unwrap_or(&self.path);
             format!("{current_path}{location}")
         } else if location.starts_with('#') {
-            self.path.clone()
+            format!("{current_without_fragment}{location}")
         } else {
-            let base = self.path.split('?').next().unwrap_or(&self.path);
-            let directory = match base.rsplit_once('/') {
+            let directory = match current_path.rsplit_once('/') {
                 Some((prefix, _)) if prefix.is_empty() => "/".to_string(),
                 Some((prefix, _)) => format!("{prefix}/"),
                 None => "/".to_string(),
@@ -87,6 +91,12 @@ impl Url {
         } else {
             format!("{}:{}", self.host, self.port)
         }
+    }
+
+    pub fn shares_origin(&self, other: &Self) -> bool {
+        self.scheme == other.scheme
+            && self.port == other.port
+            && self.host.eq_ignore_ascii_case(&other.host)
     }
 }
 
@@ -188,5 +198,36 @@ mod tests {
         let next = base.resolve("../next.html").unwrap();
 
         assert_eq!(next.to_string(), "http://example.com/notes/next.html");
+    }
+
+    #[test]
+    fn resolves_fragment_only_locations() {
+        let base = Url::parse("https://example.com/find?src=home#old").unwrap();
+        let next = base.resolve("#results").unwrap();
+
+        assert_eq!(
+            next.to_string(),
+            "https://example.com/find?src=home#results"
+        );
+    }
+
+    #[test]
+    fn resolves_query_locations_against_fragmented_urls() {
+        let base = Url::parse("https://example.com/find?src=home#old").unwrap();
+        let next = base.resolve("?q=rust").unwrap();
+
+        assert_eq!(next.to_string(), "https://example.com/find?q=rust");
+    }
+
+    #[test]
+    fn compares_same_origin_urls() {
+        let left = Url::parse("https://Example.com/path").unwrap();
+        let same = Url::parse("https://example.com/other").unwrap();
+        let other_port = Url::parse("https://example.com:444/other").unwrap();
+        let explicit_default_port = Url::parse("https://example.com:443/third").unwrap();
+
+        assert!(left.shares_origin(&same));
+        assert!(left.shares_origin(&explicit_default_port));
+        assert!(!left.shares_origin(&other_port));
     }
 }

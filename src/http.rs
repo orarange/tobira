@@ -15,6 +15,7 @@ use crate::url::Url;
 
 const MAX_REDIRECTS: usize = 5;
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Tobira/0.1";
+const RESPONSE_HEADER_SLACK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
@@ -33,10 +34,27 @@ impl HttpResponse {
 }
 
 pub fn fetch(url: &Url) -> Result<HttpResponse> {
-    fetch_inner(url, 0)
+    fetch_inner(url, 0, None, None)
 }
 
-fn fetch_inner(url: &Url, redirect_count: usize) -> Result<HttpResponse> {
+pub fn fetch_with_limits(url: &Url, max_body_bytes: usize) -> Result<HttpResponse> {
+    fetch_inner(url, 0, Some(max_body_bytes), None)
+}
+
+pub fn fetch_with_limits_same_origin(
+    url: &Url,
+    max_body_bytes: usize,
+    origin: &Url,
+) -> Result<HttpResponse> {
+    fetch_inner(url, 0, Some(max_body_bytes), Some(origin))
+}
+
+fn fetch_inner(
+    url: &Url,
+    redirect_count: usize,
+    max_body_bytes: Option<usize>,
+    same_origin: Option<&Url>,
+) -> Result<HttpResponse> {
     if redirect_count > MAX_REDIRECTS {
         return Err(BrowserError::message("too many redirects"));
     }
@@ -56,21 +74,40 @@ fn fetch_inner(url: &Url, redirect_count: usize) -> Result<HttpResponse> {
 
     stream.write_all(request.as_bytes())?;
 
-    let response_bytes = read_response_bytes(&mut stream)?;
+    let response_bytes = read_response_bytes(
+        &mut stream,
+        max_body_bytes.map(|limit| limit.saturating_add(RESPONSE_HEADER_SLACK_BYTES)),
+    )?;
 
-    let response = parse_response(url, &response_bytes)?;
+    let response = parse_response_with_limits(url, &response_bytes, max_body_bytes)?;
 
     if is_redirect(response.status_code) {
         if let Some(location) = response.header("location") {
             let next_url = url.resolve(location)?;
-            return fetch_inner(&next_url, redirect_count + 1);
+            if let Some(origin) = same_origin
+                && !origin.shares_origin(&next_url)
+            {
+                return Err(BrowserError::message(
+                    "cross-origin redirect target is blocked",
+                ));
+            }
+            return fetch_inner(&next_url, redirect_count + 1, max_body_bytes, same_origin);
         }
     }
 
     Ok(response)
 }
 
+#[cfg(test)]
 fn parse_response(url: &Url, bytes: &[u8]) -> Result<HttpResponse> {
+    parse_response_with_limits(url, bytes, None)
+}
+
+fn parse_response_with_limits(
+    url: &Url,
+    bytes: &[u8],
+    max_body_bytes: Option<usize>,
+) -> Result<HttpResponse> {
     let Some(header_end) = find_bytes(bytes, b"\r\n\r\n") else {
         return Err(BrowserError::message(
             "invalid HTTP response: missing header separator",
@@ -103,11 +140,18 @@ fn parse_response(url: &Url, bytes: &[u8]) -> Result<HttpResponse> {
 
     let body = match headers.get("transfer-encoding") {
         Some(value) if value.to_ascii_lowercase().contains("chunked") => {
-            decode_chunked(body_bytes)?
+            decode_chunked(body_bytes, max_body_bytes)?
         }
         _ => body_bytes.to_vec(),
     };
-    let body = decode_content(body, headers.get("content-encoding"))?;
+    if let Some(limit) = max_body_bytes
+        && body.len() > limit
+    {
+        return Err(BrowserError::message(format!(
+            "response body exceeded limit of {limit} bytes"
+        )));
+    }
+    let body = decode_content(body, headers.get("content-encoding"), max_body_bytes)?;
 
     Ok(HttpResponse {
         final_url: url.clone(),
@@ -141,7 +185,11 @@ fn open_stream(url: &Url, tcp_stream: TcpStream) -> Result<Box<dyn ReadWrite>> {
     }
 }
 
-fn decode_content(body: Vec<u8>, content_encoding: Option<&String>) -> Result<Vec<u8>> {
+fn decode_content(
+    body: Vec<u8>,
+    content_encoding: Option<&String>,
+    max_output_bytes: Option<usize>,
+) -> Result<Vec<u8>> {
     let Some(encoding) = content_encoding else {
         return Ok(body);
     };
@@ -151,38 +199,67 @@ fn decode_content(body: Vec<u8>, content_encoding: Option<&String>) -> Result<Ve
 
     match primary {
         "" | "identity" => Ok(body),
-        "gzip" => read_all(GzDecoder::new(Cursor::new(body))),
-        "deflate" => decode_deflate(body),
-        "br" => read_all(Decompressor::new(Cursor::new(body), 4096)),
+        "gzip" => read_all(GzDecoder::new(Cursor::new(body)), max_output_bytes),
+        "deflate" => decode_deflate(body, max_output_bytes),
+        "br" => read_all(Decompressor::new(Cursor::new(body), 4096), max_output_bytes),
         other => Err(BrowserError::message(format!(
             "unsupported content encoding: {other}"
         ))),
     }
 }
 
-fn decode_deflate(body: Vec<u8>) -> Result<Vec<u8>> {
-    let first_try = read_all(ZlibDecoder::new(Cursor::new(body.clone())));
+fn decode_deflate(body: Vec<u8>, max_output_bytes: Option<usize>) -> Result<Vec<u8>> {
+    let first_try = read_all(
+        ZlibDecoder::new(Cursor::new(body.clone())),
+        max_output_bytes,
+    );
     match first_try {
         Ok(decoded) => Ok(decoded),
-        Err(_) => read_all(DeflateDecoder::new(Cursor::new(body))),
+        Err(_) => read_all(DeflateDecoder::new(Cursor::new(body)), max_output_bytes),
     }
 }
 
-fn read_all(reader: impl Read) -> Result<Vec<u8>> {
+fn read_all(reader: impl Read, max_output_bytes: Option<usize>) -> Result<Vec<u8>> {
     let mut reader = reader;
     let mut output = Vec::new();
-    reader.read_to_end(&mut output)?;
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        output.extend_from_slice(&chunk[..read]);
+        if let Some(limit) = max_output_bytes
+            && output.len() > limit
+        {
+            return Err(BrowserError::message(format!(
+                "decoded response exceeded limit of {limit} bytes"
+            )));
+        }
+    }
     Ok(output)
 }
 
-fn read_response_bytes(stream: &mut dyn ReadWrite) -> Result<Vec<u8>> {
+fn read_response_bytes(
+    stream: &mut dyn ReadWrite,
+    max_response_bytes: Option<usize>,
+) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     let mut chunk = [0_u8; 8192];
 
     loop {
         match stream.read(&mut chunk) {
             Ok(0) => break,
-            Ok(read) => output.extend_from_slice(&chunk[..read]),
+            Ok(read) => {
+                output.extend_from_slice(&chunk[..read]);
+                if let Some(limit) = max_response_bytes
+                    && output.len() > limit
+                {
+                    return Err(BrowserError::message(format!(
+                        "raw response exceeded limit of {limit} bytes"
+                    )));
+                }
+            }
             Err(error) if is_tls_close_without_notify(&error) => break,
             Err(error) => return Err(error.into()),
         }
@@ -198,7 +275,7 @@ fn is_tls_close_without_notify(error: &std::io::Error) -> bool {
             .contains("peer closed connection without sending TLS close_notify")
 }
 
-fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
+fn decode_chunked(mut input: &[u8], max_output_bytes: Option<usize>) -> Result<Vec<u8>> {
     let mut output = Vec::new();
 
     loop {
@@ -227,6 +304,13 @@ fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
         }
 
         output.extend_from_slice(&input[..size]);
+        if let Some(limit) = max_output_bytes
+            && output.len() > limit
+        {
+            return Err(BrowserError::message(format!(
+                "chunked response exceeded limit of {limit} bytes"
+            )));
+        }
 
         if &input[size..size + 2] != b"\r\n" {
             return Err(BrowserError::message(
@@ -257,13 +341,13 @@ mod tests {
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
-    use super::{decode_chunked, parse_response};
+    use super::{decode_chunked, parse_response, parse_response_with_limits};
     use crate::url::Url;
 
     #[test]
     fn decodes_chunked_bodies() {
         let bytes = b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
-        let decoded = decode_chunked(bytes).unwrap();
+        let decoded = decode_chunked(bytes, None).unwrap();
 
         assert_eq!(decoded, b"Wikipedia");
     }
@@ -297,5 +381,17 @@ mod tests {
         let response = parse_response(&url, &response_bytes).unwrap();
 
         assert_eq!(response.body, b"hello gzip");
+    }
+
+    #[test]
+    fn rejects_bodies_that_exceed_limit() {
+        let url = Url::parse("https://example.com").unwrap();
+        let response = parse_response_with_limits(
+            &url,
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello world",
+            Some(4),
+        );
+
+        assert!(response.is_err());
     }
 }
