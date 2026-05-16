@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `114` passing tests on `2026-05-16`
+  - `cargo test`: `115` passing tests on `2026-05-16`
   - `cargo build`: success on `2026-05-16`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -70,6 +70,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - script-driven `location.href` follow-up navigation
     - origin-scoped `localStorage`, `sessionStorage`, and `document.cookie`
   - browser chrome history controls for back/forward navigation across full document loads
+  - layout cache invalidates on viewport width or page revision changes
   - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, keyboard event logging, and storage/cookies
   - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
   - site-specific rendering paths for:
@@ -122,7 +123,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward replay and scroll restoration still need depth.
 - Modern app-shell sites still need more DOM APIs, richer history replay, and CSS coverage.
-- CSS is still computed once up front instead of being rebuilt against the live window width.
+- Incremental reflow still needs deeper invalidation for more DOM/style mutations.
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
@@ -217,6 +218,12 @@ git worktree list
 
 - Moved Codex work from `codex/codex` to a fresh branch, `codex/js-event-capture`, so the next JS/event slice can continue cleanly after the previous merge.
 - Keep future Codex implementation work on this branch unless the user explicitly asks to switch again.
+
+### 2026-05-16 - Codex (layout reflow cache)
+
+- Added a lightweight layout cache keyed by viewport width and page revision.
+- Invalidated cached layout when JS-driven DOM snapshots change the page content.
+- Updated the README, roadmap, and handoff notes to reflect the incremental reflow work.
 
 ### 2026-05-16 - Codex (capture listener groundwork)
 

@@ -1631,6 +1631,7 @@ struct DocumentView {
     status_line: String,
     subtitle: String,
     content: DocumentContent,
+    layout_cache: Option<CachedLayout>,
 }
 
 #[derive(Debug, Clone)]
@@ -1638,6 +1639,13 @@ enum DocumentContent {
     Blank,
     Loaded(BrowserPage),
     Error(ErrorDocument),
+}
+
+#[derive(Debug, Clone)]
+struct CachedLayout {
+    width: u32,
+    revision: u64,
+    layout: LayoutDocument,
 }
 
 #[derive(Debug, Clone)]
@@ -1652,6 +1660,7 @@ impl DocumentView {
             status_line: "Status: ready".to_string(),
             subtitle: "Type a URL in the address bar and press Enter.".to_string(),
             content: DocumentContent::Blank,
+            layout_cache: None,
         }
     }
 
@@ -1673,6 +1682,7 @@ impl DocumentView {
             status_line: format!("Status: {}", page.status_text()),
             subtitle: format!("{} | {}", page.url, content_type),
             content: DocumentContent::Loaded(page),
+            layout_cache: None,
         }
     }
 
@@ -1718,6 +1728,7 @@ impl DocumentView {
                     "- some modern CSS and JavaScript features are still incomplete".to_string(),
                 ],
             }),
+            layout_cache: None,
         }
     }
 
@@ -1733,8 +1744,16 @@ impl DocumentView {
         matches!(self.content, DocumentContent::Error(_))
     }
 
-    fn layout(&self, width: u32, fonts: &mut FontContext) -> LayoutDocument {
-        match &self.content {
+    fn layout(&mut self, width: u32, fonts: &mut FontContext) -> LayoutDocument {
+        let revision = self.layout_revision();
+        if let Some(cache) = &self.layout_cache
+            && cache.width == width
+            && cache.revision == revision
+        {
+            return cache.layout.clone();
+        }
+
+        let layout = match &self.content {
             DocumentContent::Blank => LayoutDocument {
                 background_color: DEFAULT_BACKGROUND_COLOR,
                 content_height: 0,
@@ -1748,6 +1767,20 @@ impl DocumentView {
                 layout_styled_document(&page.styled_document, &page.images, width, fonts)
             }
             DocumentContent::Error(error) => layout_error_document(error, width, fonts),
+        };
+
+        self.layout_cache = Some(CachedLayout {
+            width,
+            revision,
+            layout: layout.clone(),
+        });
+        layout
+    }
+
+    fn layout_revision(&self) -> u64 {
+        match &self.content {
+            DocumentContent::Loaded(page) => page.layout_revision(),
+            _ => 0,
         }
     }
 }

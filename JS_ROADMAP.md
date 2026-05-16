@@ -29,13 +29,14 @@ Already working:
 - passive listener semantics
 - `location.hash`, `history.pushState(...)`, `replaceState(...)`, `back()`, and `forward()` for same-document navigation
 - browser-level back/forward navigation across document loads
+- layout cache invalidation keyed by viewport width and page revision
 
 Still missing or shallow:
 
 - richer networking semantics
 - session-history replay polish across full document loads
 - async browser APIs that modern frameworks expect
-- rendering invalidation and layout reflow after DOM mutation
+- rendering invalidation and layout reflow after DOM mutation still need deeper incremental invalidation
 
 ## Phase 1: Real Event Plumbing
 
@@ -124,6 +125,7 @@ Goal: when JS changes the DOM, the page should reflow like a browser.
 
 Tasks:
 
+- viewport-width and page-revision based layout cache invalidation is in place
 - recompute layout after DOM mutations and script-driven style changes
 - invalidate cached layout when width or content changes
 - support more CSS properties that interactive pages depend on

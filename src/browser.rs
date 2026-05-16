@@ -30,6 +30,7 @@ pub struct BrowserPage {
     pub images: ImageStore,
     pub rendered: Option<String>,
     pub javascript_session: Option<JavaScriptSession>,
+    layout_revision: u64,
 }
 
 impl BrowserPage {
@@ -42,6 +43,10 @@ impl BrowserPage {
     pub fn apply_script_snapshot(&mut self, snapshot: ProcessedScriptHtml) {
         let include_rendered_output = self.rendered.is_some();
         let javascript_session = self.javascript_session.take();
+        let layout_revision = self
+            .layout_revision
+            .checked_add(1)
+            .expect("layout revision overflowed");
         let url = snapshot
             .soft_navigation_target
             .as_deref()
@@ -55,9 +60,14 @@ impl BrowserPage {
             &snapshot.html,
             snapshot.title_override.clone(),
             include_rendered_output,
+            layout_revision,
             javascript_session,
         );
         *self = rebuilt;
+    }
+
+    pub(crate) fn layout_revision(&self) -> u64 {
+        self.layout_revision
     }
 
     pub fn dispatch_dom_event(
@@ -147,6 +157,7 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
         source.processed_html.html,
         source.processed_html.title_override,
         include_rendered_output,
+        0,
         source.javascript_session,
     );
     if let Some(soft_target) = source
@@ -168,6 +179,7 @@ fn rebuild_page_from_html(
     html: &str,
     title_override: Option<String>,
     include_rendered_output: bool,
+    layout_revision: u64,
     javascript_session: Option<JavaScriptSession>,
 ) -> BrowserPage {
     let mut parsed_document = parse_document(html);
@@ -195,6 +207,7 @@ fn rebuild_page_from_html(
         html.to_string(),
         title_override,
         include_rendered_output,
+        layout_revision,
         javascript_session,
     )
 }
@@ -208,6 +221,7 @@ fn rebuild_page_from_document(
     html_source: String,
     title_override: Option<String>,
     include_rendered_output: bool,
+    layout_revision: u64,
     javascript_session: Option<JavaScriptSession>,
 ) -> BrowserPage {
     annotate_node_ids(&mut document);
@@ -233,6 +247,7 @@ fn rebuild_page_from_document(
         images,
         rendered,
         javascript_session,
+        layout_revision,
     }
 }
 
@@ -2900,6 +2915,7 @@ mod tests {
             images: crate::image::ImageStore::default(),
             rendered: Some("   ".to_string()),
             javascript_session: None,
+            layout_revision: 0,
         };
 
         assert_eq!(page.body_text(), "[empty document]");
@@ -2918,6 +2934,7 @@ mod tests {
             images: crate::image::ImageStore::default(),
             rendered: Some("# Hello".to_string()),
             javascript_session: None,
+            layout_revision: 0,
         };
 
         let output = page.to_cli_output();
@@ -2949,6 +2966,73 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].src, "menu.htm");
         assert_eq!(frames[1].title.as_deref(), Some("right"));
+    }
+
+    #[test]
+    fn script_snapshots_bump_layout_revision() {
+        let mut page = BrowserPage {
+            url: Url::parse("http://example.com").unwrap(),
+            status_code: 200,
+            reason_phrase: "OK".to_string(),
+            content_type: Some("text/html".to_string()),
+            title: "Hello".to_string(),
+            html_source: "<html><body>Hello</body></html>".to_string(),
+            styled_document: StyledNode::Text(crate::css::StyledText {
+                text: "Hello".to_string(),
+                style: crate::css::ComputedStyle {
+                    display: crate::css::Display::Inline,
+                    color: crate::css::DEFAULT_TEXT_COLOR,
+                    background_color: None,
+                    margin: crate::css::EdgeSizes::default(),
+                    padding: crate::css::EdgeSizes::default(),
+                    width: None,
+                    height: None,
+                    font_size_px: 16,
+                    font_family: crate::css::FontFamilyKind::Sans,
+                    text_align: crate::css::TextAlign::Left,
+                    vertical_align: crate::css::VerticalAlign::Top,
+                    font_weight: false,
+                    underline: false,
+                    white_space: crate::css::WhiteSpaceMode::Normal,
+                    border: crate::css::EdgeSizes::default(),
+                    border_color: 0,
+                    border_style_none: false,
+                    border_radius: 0,
+                    outline_width: 0,
+                    outline_color: None,
+                    line_height: 0,
+                    opacity: 255,
+                    font_style_italic: false,
+                    text_transform: crate::css::TextTransform::None,
+                    text_indent: 0,
+                    letter_spacing: 0,
+                    max_width: None,
+                    min_width: 0,
+                    max_height: None,
+                    min_height: 0,
+                    box_sizing: crate::css::BoxSizing::ContentBox,
+                    overflow: crate::css::Overflow::Visible,
+                    list_style_type: crate::css::ListStyleType::Disc,
+                    cursor_pointer: false,
+                    text_decoration_color: None,
+                },
+            }),
+            images: crate::image::ImageStore::default(),
+            rendered: None,
+            javascript_session: None,
+            layout_revision: 0,
+        };
+        let snapshot = crate::js::ProcessedScriptHtml {
+            html: "<html><body>Updated</body></html>".to_string(),
+            title_override: Some("Updated".to_string()),
+            console_logs: Vec::new(),
+            navigation_target: None,
+            soft_navigation_target: None,
+        };
+
+        page.apply_script_snapshot(snapshot);
+
+        assert_eq!(page.layout_revision(), 1);
     }
 
     #[test]

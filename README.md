@@ -47,6 +47,7 @@ Current capabilities:
   - `localStorage`
   - `sessionStorage`
   - `document.cookie`
+- Layout reflow cache keyed by viewport width and page revision
 - Lightweight mutable DOM support for:
   - `document.querySelector(...)`
   - `document.querySelectorAll(...)`
@@ -62,6 +63,7 @@ Still missing:
 - deeper DOM APIs and event coverage
 - tabs and richer navigation UI
 - session-history replay polish across full document loads
+- incremental reflow for more DOM/style mutations
 - POST forms, complex widgets, and modern app-shell browser APIs
 
 ## Run
@@ -165,7 +167,7 @@ The living JavaScript roadmap is in [JS_ROADMAP.md](JS_ROADMAP.md).
 Short version:
 
 1. Finish richer history/back-forward behavior and document-load replay
-2. Improve networking semantics and reflow after DOM mutation
+2. Improve networking semantics and incremental reflow after DOM mutation
 3. Validate against Google, YouTube, and other app-shell sites
 
 ## JavaScript Scope
