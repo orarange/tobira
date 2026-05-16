@@ -2127,16 +2127,51 @@ fn render_commands(
                 if rect_bottom < scroll_y || rect.y > viewport_bottom {
                     continue;
                 }
-                draw_rect(
-                    buffer,
-                    width,
-                    height,
-                    offset_x.saturating_add(rect.x),
-                    offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
-                    rect.width,
-                    rect.height,
-                    rect.color,
-                );
+                if rect.border_radius > 0 {
+                    if rect.y < scroll_y {
+                        // Partially above viewport: fall back to draw_rect to avoid rendering
+                        // top rounded corners at the viewport edge (wrong position). The
+                        // rounded-rect routine always draws corners from the top of the given
+                        // rect, so clipping by reducing height produces distorted corners.
+                        let clipped = scroll_y.saturating_sub(rect.y);
+                        let draw_h = rect.height.saturating_sub(clipped);
+                        if draw_h > 0 {
+                            draw_rect(
+                                buffer,
+                                width,
+                                height,
+                                offset_x.saturating_add(rect.x),
+                                offset_y, // y=0 since rect.y < scroll_y (fully at viewport top)
+                                rect.width,
+                                draw_h,
+                                rect.color,
+                            );
+                        }
+                    } else {
+                        draw_rounded_rect(
+                            buffer,
+                            width,
+                            height,
+                            offset_x.saturating_add(rect.x),
+                            offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
+                            rect.width,
+                            rect.height,
+                            rect.border_radius,
+                            rect.color,
+                        );
+                    }
+                } else {
+                    draw_rect(
+                        buffer,
+                        width,
+                        height,
+                        offset_x.saturating_add(rect.x),
+                        offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
+                        rect.width,
+                        rect.height,
+                        rect.color,
+                    );
+                }
             }
             DrawCommand::Text(text) => {
                 let text_bottom = text
@@ -2243,12 +2278,38 @@ fn render_layer(
     // Use checked_mul so pathological dimensions (which would overflow usize in release
     // or panic in debug) are caught safely before any allocation attempt.
     let Some(needed) = (ow as usize).checked_mul(oh as usize) else { return; };
+    // Note: we allocate the full layer.width × layer.height even when only visible_w × visible_h
+    // pixels are actually blended back to the screen. This is a deliberate trade-off: allocating
+    // only the visible slice and translating sub-command coordinates by -src_y_start would be
+    // more memory-efficient, but it reintroduces the y-straddling bug (commands that start above
+    // the visible window are clamped to y=0 via saturating_sub, showing the wrong content).
+    // The full-height approach keeps sub-commands at their natural layer-relative coordinates so
+    // the existing viewport culling in render_commands() handles out-of-view commands correctly.
 
     // Safety guard: refuse to allocate an obviously pathological offscreen buffer.
     // 8192×8192 (~67 MP) is well above any screen size we realistically support.
     // A layer larger than this is almost certainly a bug in layout (e.g. height not clamped).
     const MAX_OFFSCREEN_PIXELS: usize = 8192 * 8192;
     if needed > MAX_OFFSCREEN_PIXELS {
+        // Degraded fallback: the layer is too large to allocate an offscreen buffer.
+        // Sub-commands are rendered directly into the main buffer WITHOUT applying
+        // layer.opacity — the element will appear fully opaque rather than at its
+        // declared opacity. This is a rare edge case (>8192×8192 px elements) and
+        // is preferable to silently dropping the element entirely.
+        // A production fix would tile the layer or use a clipped compositing path.
+        //
+        // Layer commands are layer-relative (rebased to origin 0,0 by rebase_commands at
+        // layout time). Pass scroll_y=0 so commands render at their natural layer-relative
+        // coordinates. Account for page scroll by adjusting offset_y by layer.y - scroll_y.
+        render_commands(
+            buffer, buf_width, buf_height,
+            offset_x.saturating_add(layer.x),
+            offset_y.saturating_add(layer.y).saturating_sub(scroll_y),
+            layer.height, // viewport for layer is its own height
+            0,            // layer-relative scroll = 0
+            &layer.commands,
+            page, fonts, scratch, depth + 1,
+        );
         return;
     }
 
@@ -2364,6 +2425,102 @@ fn draw_rect(
         let row_offset = row as usize * width as usize;
         for column in x..max_x {
             buffer[row_offset + column as usize] = color;
+        }
+    }
+}
+
+fn draw_rounded_rect(
+    buffer: &mut [u32],
+    buf_w: u32,
+    buf_h: u32,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    radius: u32,
+    color: u32,
+) {
+    if radius == 0 || w == 0 || h == 0 {
+        draw_rect(buffer, buf_w, buf_h, x, y, w, h, color);
+        return;
+    }
+    let r = radius.min(w / 2).min(h / 2);
+    if r == 0 {
+        draw_rect(buffer, buf_w, buf_h, x, y, w, h, color);
+        return;
+    }
+
+    let x2 = x.saturating_add(w);
+    let y2 = y.saturating_add(h);
+    let cx_left = x.saturating_add(r);
+    let cx_right = x2.saturating_sub(r);
+    let cy_top = y.saturating_add(r);
+    let cy_bottom = y2.saturating_sub(r);
+    let r_sq = (r as i64) * (r as i64);
+
+    // Middle strip: full-width rows — no corner checks needed
+    if cy_top < cy_bottom {
+        draw_rect(buffer, buf_w, buf_h, x, cy_top, w, cy_bottom - cy_top, color);
+    }
+
+    // Top corner strip: rows y..cy_top
+    let py_end_top = cy_top.min(buf_h) as usize;
+    for py in (y.min(buf_h) as usize)..py_end_top {
+        let pv32 = py as u32;
+        // Left corner: x..cx_left
+        for px in (x.min(buf_w) as usize)..(cx_left.min(buf_w) as usize) {
+            let pu32 = px as u32;
+            let dx = cx_left.saturating_sub(pu32) as i64;
+            let dy = cy_top.saturating_sub(pv32) as i64;
+            if dx * dx + dy * dy <= r_sq {
+                let idx = py * buf_w as usize + px;
+                if idx < buffer.len() { buffer[idx] = color; }
+            }
+        }
+        // Middle of row: cx_left..cx_right (always inside)
+        if cx_left < cx_right {
+            draw_rect(buffer, buf_w, buf_h, cx_left, pv32, cx_right - cx_left, 1, color);
+        }
+        // Right corner: cx_right..x2
+        for px in (cx_right.min(buf_w) as usize)..(x2.min(buf_w) as usize) {
+            let pu32 = px as u32;
+            let dx = pu32.saturating_sub(cx_right) as i64;
+            let dy = cy_top.saturating_sub(pv32) as i64;
+            if dx * dx + dy * dy <= r_sq {
+                let idx = py * buf_w as usize + px;
+                if idx < buffer.len() { buffer[idx] = color; }
+            }
+        }
+    }
+
+    // Bottom corner strip: rows cy_bottom..y2
+    let py_start_bot = cy_bottom.min(buf_h) as usize;
+    let py_end_bot = y2.min(buf_h) as usize;
+    for py in py_start_bot..py_end_bot {
+        let pv32 = py as u32;
+        // Left corner
+        for px in (x.min(buf_w) as usize)..(cx_left.min(buf_w) as usize) {
+            let pu32 = px as u32;
+            let dx = cx_left.saturating_sub(pu32) as i64;
+            let dy = pv32.saturating_sub(cy_bottom) as i64;
+            if dx * dx + dy * dy <= r_sq {
+                let idx = py * buf_w as usize + px;
+                if idx < buffer.len() { buffer[idx] = color; }
+            }
+        }
+        // Middle of row
+        if cx_left < cx_right {
+            draw_rect(buffer, buf_w, buf_h, cx_left, pv32, cx_right - cx_left, 1, color);
+        }
+        // Right corner
+        for px in (cx_right.min(buf_w) as usize)..(x2.min(buf_w) as usize) {
+            let pu32 = px as u32;
+            let dx = pu32.saturating_sub(cx_right) as i64;
+            let dy = pv32.saturating_sub(cy_bottom) as i64;
+            if dx * dx + dy * dy <= r_sq {
+                let idx = py * buf_w as usize + px;
+                if idx < buffer.len() { buffer[idx] = color; }
+            }
         }
     }
 }
