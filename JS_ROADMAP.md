@@ -30,6 +30,7 @@ Already working:
 - `location.hash`, `history.pushState(...)`, `replaceState(...)`, `back()`, and `forward()` for same-document navigation
 - browser-level back/forward navigation across document loads
 - layout cache invalidation keyed by viewport width and page revision
+- inline style mutations now reflect back into the DOM snapshot
 
 Still missing or shallow:
 
@@ -126,6 +127,7 @@ Goal: when JS changes the DOM, the page should reflow like a browser.
 Tasks:
 
 - viewport-width and page-revision based layout cache invalidation is in place
+- a native `element.style` bridge now reflects inline CSS changes back into the DOM tree
 - recompute layout after DOM mutations and script-driven style changes
 - invalidate cached layout when width or content changes
 - support more CSS properties that interactive pages depend on

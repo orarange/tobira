@@ -202,6 +202,12 @@ struct DomClassListHandle {
 }
 
 #[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct DomStyleHandle {
+    #[unsafe_ignore_trace]
+    node_id: usize,
+}
+
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
 struct FetchResponseHandle {
     #[unsafe_ignore_trace]
     response: crate::http::HttpResponse,
@@ -2038,6 +2044,19 @@ fn dom_node_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObjec
     Ok(cache)
 }
 
+fn dom_style_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObject> {
+    let global = context.global_object();
+    let cache_key = js_string!("__tobiraDomStyleCache");
+    let existing = global.get(cache_key.clone(), context)?;
+    if let Some(object) = existing.as_object() {
+        return Ok(object.clone());
+    }
+
+    let cache = ObjectInitializer::new(context).build();
+    global.set(cache_key, cache.clone(), true, context)?;
+    Ok(cache)
+}
+
 fn cached_dom_node_object(
     context: &mut Context,
     node_id: usize,
@@ -2056,6 +2075,33 @@ fn store_dom_node_object(
     object: &boa_engine::object::JsObject,
 ) {
     if let Ok(cache) = dom_node_cache(context) {
+        let _ = cache.set(
+            js_string!(node_id.to_string()),
+            object.clone(),
+            true,
+            context,
+        );
+    }
+}
+
+fn cached_dom_style_object(
+    context: &mut Context,
+    node_id: usize,
+) -> Option<boa_engine::object::JsObject> {
+    let cache = dom_style_cache(context).ok()?;
+    let key = js_string!(node_id.to_string());
+    cache
+        .get(key, context)
+        .ok()
+        .and_then(|value| value.as_object())
+}
+
+fn store_dom_style_object(
+    context: &mut Context,
+    node_id: usize,
+    object: &boa_engine::object::JsObject,
+) {
+    if let Ok(cache) = dom_style_cache(context) {
         let _ = cache.set(
             js_string!(node_id.to_string()),
             object.clone(),
@@ -2432,7 +2478,7 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_tag_name).to_js_function(context.realm());
     let get_parent_node =
         NativeFunction::from_fn_ptr(js_dom_get_parent_node).to_js_function(context.realm());
-    let style = ObjectInitializer::new(context).build();
+    let style = build_dom_style_object(context, node_id);
     let object = ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context)
         .function(
             NativeFunction::from_fn_ptr(js_dom_query_selector),
@@ -2632,6 +2678,222 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .property(js_string!("scrollHeight"), 720, Attribute::all())
         .build();
     store_dom_node_object(context, node_id, &object);
+    object
+}
+
+fn build_dom_style_object(context: &mut Context, node_id: usize) -> boa_engine::object::JsObject {
+    if let Some(cached) = cached_dom_style_object(context, node_id) {
+        return cached;
+    }
+
+    let css_text_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_css_text).to_js_function(context.realm());
+    let css_text_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_css_text).to_js_function(context.realm());
+    let display_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_display).to_js_function(context.realm());
+    let display_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_display).to_js_function(context.realm());
+    let color_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_color).to_js_function(context.realm());
+    let color_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_color).to_js_function(context.realm());
+    let background_color_getter = NativeFunction::from_fn_ptr(js_dom_style_get_background_color)
+        .to_js_function(context.realm());
+    let background_color_setter = NativeFunction::from_fn_ptr(js_dom_style_set_background_color)
+        .to_js_function(context.realm());
+    let width_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_width).to_js_function(context.realm());
+    let width_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_width).to_js_function(context.realm());
+    let height_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_height).to_js_function(context.realm());
+    let height_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_height).to_js_function(context.realm());
+    let font_size_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_font_size).to_js_function(context.realm());
+    let font_size_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_font_size).to_js_function(context.realm());
+    let font_weight_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_font_weight).to_js_function(context.realm());
+    let font_weight_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_font_weight).to_js_function(context.realm());
+    let font_family_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_font_family).to_js_function(context.realm());
+    let font_family_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_font_family).to_js_function(context.realm());
+    let text_align_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_text_align).to_js_function(context.realm());
+    let text_align_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_text_align).to_js_function(context.realm());
+    let vertical_align_getter = NativeFunction::from_fn_ptr(js_dom_style_get_vertical_align)
+        .to_js_function(context.realm());
+    let vertical_align_setter = NativeFunction::from_fn_ptr(js_dom_style_set_vertical_align)
+        .to_js_function(context.realm());
+    let margin_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_margin).to_js_function(context.realm());
+    let margin_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_margin).to_js_function(context.realm());
+    let padding_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_padding).to_js_function(context.realm());
+    let padding_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_padding).to_js_function(context.realm());
+    let opacity_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_opacity).to_js_function(context.realm());
+    let opacity_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_opacity).to_js_function(context.realm());
+    let line_height_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_line_height).to_js_function(context.realm());
+    let line_height_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_line_height).to_js_function(context.realm());
+    let white_space_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_white_space).to_js_function(context.realm());
+    let white_space_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_white_space).to_js_function(context.realm());
+    let cursor_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_cursor).to_js_function(context.realm());
+    let cursor_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_cursor).to_js_function(context.realm());
+    let overflow_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_overflow).to_js_function(context.realm());
+    let overflow_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_overflow).to_js_function(context.realm());
+    let position_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_position).to_js_function(context.realm());
+    let position_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_position).to_js_function(context.realm());
+    let object = ObjectInitializer::with_native_data(DomStyleHandle { node_id }, context)
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_style_get_property_value),
+            js_string!("getPropertyValue"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_style_set_property),
+            js_string!("setProperty"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_style_remove_property),
+            js_string!("removeProperty"),
+            1,
+        )
+        .accessor(
+            js_string!("cssText"),
+            Some(css_text_getter),
+            Some(css_text_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("display"),
+            Some(display_getter),
+            Some(display_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("color"),
+            Some(color_getter),
+            Some(color_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("backgroundColor"),
+            Some(background_color_getter),
+            Some(background_color_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("width"),
+            Some(width_getter),
+            Some(width_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("height"),
+            Some(height_getter),
+            Some(height_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("fontSize"),
+            Some(font_size_getter),
+            Some(font_size_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("fontWeight"),
+            Some(font_weight_getter),
+            Some(font_weight_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("fontFamily"),
+            Some(font_family_getter),
+            Some(font_family_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("textAlign"),
+            Some(text_align_getter),
+            Some(text_align_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("verticalAlign"),
+            Some(vertical_align_getter),
+            Some(vertical_align_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("margin"),
+            Some(margin_getter),
+            Some(margin_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("padding"),
+            Some(padding_getter),
+            Some(padding_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("opacity"),
+            Some(opacity_getter),
+            Some(opacity_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("lineHeight"),
+            Some(line_height_getter),
+            Some(line_height_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("whiteSpace"),
+            Some(white_space_getter),
+            Some(white_space_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("cursor"),
+            Some(cursor_getter),
+            Some(cursor_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("overflow"),
+            Some(overflow_getter),
+            Some(overflow_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("position"),
+            Some(position_getter),
+            Some(position_setter),
+            Attribute::all(),
+        )
+        .build();
+    store_dom_style_object(context, node_id, &object);
     object
 }
 
@@ -4498,6 +4760,348 @@ fn js_dom_get_owner_document(
     Ok(JsValue::from(build_dom_node_object(context, document_id)))
 }
 
+fn style_node_id_from_this(this: &JsValue) -> Option<usize> {
+    let object = this.as_object()?;
+    let handle = object.downcast_ref::<DomStyleHandle>()?;
+    Some(handle.node_id)
+}
+
+fn normalize_css_property_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut normalized = String::with_capacity(trimmed.len());
+    for character in trimmed.chars() {
+        if character.is_ascii_uppercase() {
+            if !normalized.is_empty() && !normalized.ends_with('-') {
+                normalized.push('-');
+            }
+            normalized.push(character.to_ascii_lowercase());
+        } else {
+            normalized.push(character);
+        }
+    }
+    normalized.to_ascii_lowercase()
+}
+
+fn parse_inline_style_entries(input: &str) -> Vec<(String, String)> {
+    input
+        .split(';')
+        .filter_map(|entry| {
+            let (property, value) = entry.split_once(':')?;
+            let property = normalize_css_property_name(property);
+            let value = value.trim().to_string();
+            if property.is_empty() || value.is_empty() {
+                return None;
+            }
+            Some((property, value))
+        })
+        .collect()
+}
+
+fn serialize_inline_style_entries(entries: &[(String, String)]) -> String {
+    entries
+        .iter()
+        .map(|(property, value)| format!("{property}: {value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn inline_style_text(context: &mut Context, node_id: usize) -> String {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.get_attribute(node_id, "style"))
+        .unwrap_or_default()
+}
+
+fn set_inline_style_text(context: &mut Context, node_id: usize, text: &str) {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let value = text.trim();
+        if value.is_empty() {
+            state.dom.remove_attribute(node_id, "style");
+        } else {
+            state.dom.set_attribute(node_id, "style", value);
+        }
+    }
+}
+
+fn inline_style_property_value(
+    context: &mut Context,
+    node_id: usize,
+    property_name: &str,
+) -> String {
+    let target = normalize_css_property_name(property_name);
+    let Some(value) = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.get_attribute(node_id, "style"))
+    else {
+        return String::new();
+    };
+
+    parse_inline_style_entries(&value)
+        .into_iter()
+        .rev()
+        .find(|(property, _)| *property == target)
+        .map(|(_, value)| value)
+        .unwrap_or_default()
+}
+
+fn set_inline_style_property(
+    context: &mut Context,
+    node_id: usize,
+    property_name: &str,
+    value: &str,
+) {
+    let target = normalize_css_property_name(property_name);
+    if target.is_empty() {
+        return;
+    }
+
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let current = state
+            .dom
+            .get_attribute(node_id, "style")
+            .unwrap_or_default();
+        let mut entries = parse_inline_style_entries(&current);
+        entries.retain(|(property, _)| *property != target);
+
+        let value = value.trim();
+        if !value.is_empty() {
+            entries.push((target, value.to_string()));
+        }
+
+        if entries.is_empty() {
+            state.dom.remove_attribute(node_id, "style");
+        } else {
+            state
+                .dom
+                .set_attribute(node_id, "style", &serialize_inline_style_entries(&entries));
+        }
+    }
+}
+
+fn remove_inline_style_property(
+    context: &mut Context,
+    node_id: usize,
+    property_name: &str,
+) -> String {
+    let target = normalize_css_property_name(property_name);
+    if target.is_empty() {
+        return String::new();
+    }
+
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return String::new();
+    };
+    let mut state = host.state.borrow_mut();
+    let current = state
+        .dom
+        .get_attribute(node_id, "style")
+        .unwrap_or_default();
+    let mut entries = parse_inline_style_entries(&current);
+    let mut removed = String::new();
+    entries.retain(|(property, value)| {
+        if *property == target {
+            removed = value.clone();
+            false
+        } else {
+            true
+        }
+    });
+
+    if entries.is_empty() {
+        state.dom.remove_attribute(node_id, "style");
+    } else {
+        state
+            .dom
+            .set_attribute(node_id, "style", &serialize_inline_style_entries(&entries));
+    }
+
+    removed
+}
+
+macro_rules! define_style_accessors {
+    ($(($getter:ident, $setter:ident, $css_name:literal)),+ $(,)?) => {
+        $(
+            fn $getter(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+                let value = style_node_id_from_this(this)
+                    .map(|node_id| inline_style_property_value(context, node_id, $css_name))
+                    .unwrap_or_default();
+                Ok(JsValue::from(js_string!(value)))
+            }
+
+            fn $setter(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+                let value = args
+                    .first()
+                    .map(|value| js_value_to_string(value, context))
+                    .transpose()?
+                    .unwrap_or_default();
+                if let Some(node_id) = style_node_id_from_this(this) {
+                    set_inline_style_property(context, node_id, $css_name, &value);
+                }
+                Ok(JsValue::undefined())
+            }
+        )+
+    };
+}
+
+define_style_accessors!(
+    (
+        js_dom_style_get_display,
+        js_dom_style_set_display,
+        "display"
+    ),
+    (js_dom_style_get_color, js_dom_style_set_color, "color"),
+    (
+        js_dom_style_get_background_color,
+        js_dom_style_set_background_color,
+        "background-color"
+    ),
+    (js_dom_style_get_width, js_dom_style_set_width, "width"),
+    (js_dom_style_get_height, js_dom_style_set_height, "height"),
+    (
+        js_dom_style_get_font_size,
+        js_dom_style_set_font_size,
+        "font-size"
+    ),
+    (
+        js_dom_style_get_font_weight,
+        js_dom_style_set_font_weight,
+        "font-weight"
+    ),
+    (
+        js_dom_style_get_font_family,
+        js_dom_style_set_font_family,
+        "font-family"
+    ),
+    (
+        js_dom_style_get_text_align,
+        js_dom_style_set_text_align,
+        "text-align"
+    ),
+    (
+        js_dom_style_get_vertical_align,
+        js_dom_style_set_vertical_align,
+        "vertical-align"
+    ),
+    (js_dom_style_get_margin, js_dom_style_set_margin, "margin"),
+    (
+        js_dom_style_get_padding,
+        js_dom_style_set_padding,
+        "padding"
+    ),
+    (
+        js_dom_style_get_opacity,
+        js_dom_style_set_opacity,
+        "opacity"
+    ),
+    (
+        js_dom_style_get_line_height,
+        js_dom_style_set_line_height,
+        "line-height"
+    ),
+    (
+        js_dom_style_get_white_space,
+        js_dom_style_set_white_space,
+        "white-space"
+    ),
+    (js_dom_style_get_cursor, js_dom_style_set_cursor, "cursor"),
+    (
+        js_dom_style_get_overflow,
+        js_dom_style_set_overflow,
+        "overflow"
+    ),
+    (
+        js_dom_style_get_position,
+        js_dom_style_set_position,
+        "position"
+    ),
+);
+
+fn js_dom_style_get_css_text(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = style_node_id_from_this(this)
+        .map(|node_id| inline_style_text(context, node_id))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(text)))
+}
+
+fn js_dom_style_set_css_text(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(node_id) = style_node_id_from_this(this) {
+        set_inline_style_text(context, node_id, &text);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_style_get_property_value(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    let value = style_node_id_from_this(this)
+        .map(|node_id| inline_style_property_value(context, node_id, &name))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(value)))
+}
+
+fn js_dom_style_set_property(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    let value = args
+        .get(1)
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(node_id) = style_node_id_from_this(this) {
+        set_inline_style_property(context, node_id, &name, &value);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_style_remove_property(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    let removed = style_node_id_from_this(this)
+        .map(|node_id| remove_inline_style_property(context, node_id, &name))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(removed)))
+}
+
 fn js_dom_class_list_add(
     this: &JsValue,
     args: &[JsValue],
@@ -5548,6 +6152,18 @@ mod tests {
 
         assert!(processed.html.contains("class=\"shell ready\""));
         assert!(processed.html.contains("<p>Rendered</p>"));
+    }
+
+    #[test]
+    fn supports_inline_style_mutations() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"app\" style=\"color: #ff0000\"></div><script>var app = document.getElementById('app'); app.style.display = 'none'; app.style.backgroundColor = '#123456'; app.style.setProperty('margin-top', '8px'); app.style.removeProperty('display');</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("background-color: #123456"));
+        assert!(processed.html.contains("margin-top: 8px"));
+        assert!(!processed.html.contains("display: none"));
     }
 
     #[test]

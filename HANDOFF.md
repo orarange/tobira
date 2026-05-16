@@ -73,6 +73,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - layout cache invalidates on viewport width or page revision changes
   - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, keyboard event logging, and storage/cookies
   - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
+  - inline `element.style` mutations now reflect through `cssText`, `setProperty(...)`, and common style accessors
   - site-specific rendering paths for:
     - YouTube watch pages
     - YouTube home shell fallback
@@ -124,6 +125,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - History / back-forward replay and scroll restoration still need depth.
 - Modern app-shell sites still need more DOM APIs, richer history replay, and CSS coverage.
 - Incremental reflow still needs deeper invalidation for more DOM/style mutations.
+- The inline style bridge still needs more of the CSS property matrix to be browser-grade.
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
@@ -224,6 +226,11 @@ git worktree list
 - Added a lightweight layout cache keyed by viewport width and page revision.
 - Invalidated cached layout when JS-driven DOM snapshots change the page content.
 - Updated the README, roadmap, and handoff notes to reflect the incremental reflow work.
+
+### 2026-05-16 - Codex (inline style bridge)
+
+- Added a native `element.style` bridge that reflects inline CSS through `cssText`, `setProperty(...)`, `getPropertyValue(...)`, and common style accessors.
+- Added a regression test that checks inline style mutations serialize back into the DOM snapshot.
 
 ### 2026-05-16 - Codex (capture listener groundwork)
 
