@@ -31,7 +31,6 @@ Already working:
 
 Still missing or shallow:
 
-- storage and cookies
 - richer networking semantics
 - session-history replay across full document loads
 - async browser APIs that modern frameworks expect
@@ -84,8 +83,8 @@ Goal: keep session state and navigation behavior close to a normal browser.
 
 Tasks:
 
-- add cookie store with origin scoping
-- add `localStorage` and `sessionStorage`
+- cookie store with origin scoping is now in place
+- `localStorage` and `sessionStorage` are now in place
 - finish richer session-history replay across full document loads
 - keep `location` updates and history state in sync
 - extend the current soft-navigation handling so it cooperates with browser history instead of only updating the current URL
@@ -93,7 +92,7 @@ Tasks:
 
 Exit criteria:
 
-- login-ish flows keep their session state
+- login-ish flows keep their session state via cookies / storage
 - back/forward works for same-document navigation and hash changes
 - sites that rely on history state stop losing context
 

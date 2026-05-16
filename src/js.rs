@@ -17,6 +17,7 @@ use boa_engine::{
 
 use crate::html::{Node, parse_document};
 use crate::http::{HttpResponse, fetch, fetch_with_limits_same_origin};
+use crate::site_state::{self, StorageKind};
 use crate::text::decode_text_response;
 use crate::url::Url;
 
@@ -210,6 +211,12 @@ struct FetchResponseHandle {
 struct ResponseHeadersHandle {
     #[unsafe_ignore_trace]
     headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct StorageHandle {
+    #[unsafe_ignore_trace]
+    kind: StorageKind,
 }
 
 #[derive(Debug, Trace, Finalize, JsData)]
@@ -1530,6 +1537,10 @@ fn install_browser_globals(context: &mut Context) {
     let document_fonts = ObjectInitializer::new(context)
         .function(NativeFunction::from_fn_ptr(js_noop), js_string!("load"), 2)
         .build();
+    let cookie_getter =
+        NativeFunction::from_fn_ptr(js_document_get_cookie).to_js_function(context.realm());
+    let cookie_setter =
+        NativeFunction::from_fn_ptr(js_document_set_cookie).to_js_function(context.realm());
 
     let global_object = context.global_object();
     let document = ObjectInitializer::with_native_data(
@@ -1594,7 +1605,12 @@ fn install_browser_globals(context: &mut Context) {
     .property(js_string!("head"), head_object, Attribute::all())
     .property(js_string!("documentElement"), html_object, Attribute::all())
     .property(js_string!("fonts"), document_fonts, Attribute::all())
-    .property(js_string!("cookie"), js_string!(""), Attribute::all())
+    .accessor(
+        js_string!("cookie"),
+        Some(cookie_getter),
+        Some(cookie_setter),
+        Attribute::all(),
+    )
     .property(
         js_string!("readyState"),
         js_string!("complete"),
@@ -1663,6 +1679,7 @@ fn install_browser_globals(context: &mut Context) {
         .property(js_string!("languages"), node_list_stub.clone(), Attribute::all())
         .property(js_string!("platform"), js_string!("Win32"), Attribute::all())
         .property(js_string!("vendor"), js_string!("Google Inc."), Attribute::all())
+        .property(js_string!("cookieEnabled"), true, Attribute::all())
         .build();
     let performance_timing = ObjectInitializer::new(context)
         .property(js_string!("navigationStart"), 0, Attribute::all())
@@ -1705,7 +1722,8 @@ fn install_browser_globals(context: &mut Context) {
             Attribute::all(),
         )
         .build();
-    let storage = build_storage_stub(context);
+    let local_storage = build_storage_object(context, StorageKind::Local);
+    let session_storage = build_storage_object(context, StorageKind::Session);
     let ytcfg = ObjectInitializer::new(context)
         .function(
             NativeFunction::from_fn_ptr(js_ytcfg_data),
@@ -1748,14 +1766,14 @@ fn install_browser_globals(context: &mut Context) {
         .register_global_property(js_string!("history"), history, Attribute::all())
         .expect("history should be installable");
     context
-        .register_global_property(
-            js_string!("localStorage"),
-            storage.clone(),
-            Attribute::all(),
-        )
+        .register_global_property(js_string!("localStorage"), local_storage, Attribute::all())
         .expect("localStorage should be installable");
     context
-        .register_global_property(js_string!("sessionStorage"), storage, Attribute::all())
+        .register_global_property(
+            js_string!("sessionStorage"),
+            session_storage,
+            Attribute::all(),
+        )
         .expect("sessionStorage should be installable");
     context
         .register_global_property(js_string!("ytcfg"), ytcfg, Attribute::all())
@@ -2683,25 +2701,41 @@ fn build_dom_class_list_object(
         .build()
 }
 
-fn build_storage_stub(context: &mut Context) -> boa_engine::object::JsObject {
-    ObjectInitializer::new(context)
+fn build_storage_object(context: &mut Context, kind: StorageKind) -> boa_engine::object::JsObject {
+    let length_getter =
+        NativeFunction::from_fn_ptr(js_storage_get_length).to_js_function(context.realm());
+    ObjectInitializer::with_native_data(StorageHandle { kind }, context)
         .function(
-            NativeFunction::from_fn_ptr(js_return_null),
+            NativeFunction::from_fn_ptr(js_storage_get_item),
             js_string!("getItem"),
             1,
         )
         .function(
-            NativeFunction::from_fn_ptr(js_noop),
+            NativeFunction::from_fn_ptr(js_storage_set_item),
             js_string!("setItem"),
             2,
         )
         .function(
-            NativeFunction::from_fn_ptr(js_noop),
+            NativeFunction::from_fn_ptr(js_storage_remove_item),
             js_string!("removeItem"),
             1,
         )
-        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("clear"), 0)
-        .property(js_string!("length"), 0, Attribute::all())
+        .function(
+            NativeFunction::from_fn_ptr(js_storage_clear),
+            js_string!("clear"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_storage_key),
+            js_string!("key"),
+            1,
+        )
+        .accessor(
+            js_string!("length"),
+            Some(length_getter),
+            None,
+            Attribute::all(),
+        )
         .build()
 }
 
@@ -4615,8 +4649,144 @@ fn js_return_undefined(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<
     Ok(JsValue::undefined())
 }
 
+fn js_document_get_cookie(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let cookie = current_document_url(context)
+        .map(|url| site_state::document_cookie_get(&url))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(cookie)))
+}
+
+fn js_document_set_cookie(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(value) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let cookie_line = js_value_to_string(value, context)?;
+    if let Some(url) = current_document_url(context) {
+        site_state::document_cookie_set(&url, &cookie_line);
+    }
+    Ok(JsValue::undefined())
+}
+
 fn js_noop(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::undefined())
+}
+
+fn storage_kind_from_this(this: &JsValue) -> Option<StorageKind> {
+    let object = this.as_object()?;
+    let handle = object.downcast_ref::<StorageHandle>()?;
+    Some(handle.kind)
+}
+
+fn js_storage_get_length(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(kind) = storage_kind_from_this(this) else {
+        return Ok(JsValue::new(0));
+    };
+    let Some(url) = current_document_url(context) else {
+        return Ok(JsValue::new(0));
+    };
+    Ok(JsValue::new(site_state::storage_length(kind, &url) as i32))
+}
+
+fn js_storage_get_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(kind) = storage_kind_from_this(this) else {
+        return Ok(JsValue::null());
+    };
+    let Some(url) = current_document_url(context) else {
+        return Ok(JsValue::null());
+    };
+    let key = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(site_state::storage_get_item(kind, &url, &key)
+        .map(|value| JsValue::from(js_string!(value)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_storage_set_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(kind) = storage_kind_from_this(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(url) = current_document_url(context) else {
+        return Ok(JsValue::undefined());
+    };
+    let key = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    let value = args
+        .get(1)
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    site_state::storage_set_item(kind, &url, key, value);
+    Ok(JsValue::undefined())
+}
+
+fn js_storage_remove_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(kind) = storage_kind_from_this(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(url) = current_document_url(context) else {
+        return Ok(JsValue::undefined());
+    };
+    let key = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    site_state::storage_remove_item(kind, &url, &key);
+    Ok(JsValue::undefined())
+}
+
+fn js_storage_clear(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(kind) = storage_kind_from_this(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(url) = current_document_url(context) else {
+        return Ok(JsValue::undefined());
+    };
+    site_state::storage_clear(kind, &url);
+    Ok(JsValue::undefined())
+}
+
+fn js_storage_key(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(kind) = storage_kind_from_this(this) else {
+        return Ok(JsValue::null());
+    };
+    let Some(url) = current_document_url(context) else {
+        return Ok(JsValue::null());
+    };
+    let index = args
+        .first()
+        .and_then(JsValue::as_number)
+        .map(|value| value as usize)
+        .unwrap_or(0);
+    Ok(site_state::storage_key(kind, &url, index)
+        .map(|value| JsValue::from(js_string!(value)))
+        .unwrap_or_else(JsValue::null))
 }
 
 fn js_crypto_get_random_values(

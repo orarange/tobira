@@ -42,6 +42,10 @@ Current capabilities:
   - bubbling `click`, `input`, `change`, and `submit`
   - target-only `focus` and `blur`
 - Basic JavaScript execution with `boa_engine`
+- Lightweight storage and cookie support:
+  - `localStorage`
+  - `sessionStorage`
+  - `document.cookie`
 - Lightweight mutable DOM support for:
   - `document.querySelector(...)`
   - `document.querySelectorAll(...)`
@@ -108,6 +112,13 @@ python -m http.server 8765
 cargo run -- http://127.0.0.1:8765/demo/events-demo.html
 ```
 
+Local storage / cookie demo:
+
+```bash
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/storage-demo.html
+```
+
 ## GUI Controls
 
 - `Up` / `Down`: scroll
@@ -123,6 +134,8 @@ cargo run -- http://127.0.0.1:8765/demo/events-demo.html
 
 - `src/url.rs`
   URL parsing and relative URL resolution
+- `src/site_state.rs`
+  Origin-scoped storage and cookie state shared across HTTP and JS
 - `src/http.rs`
   HTTP fetch, response parsing, chunked decoding, redirect handling
 - `src/html.rs`
@@ -148,7 +161,7 @@ The living JavaScript roadmap is in [JS_ROADMAP.md](JS_ROADMAP.md).
 
 Short version:
 
-1. Add storage, cookies, and richer history/back-forward behavior
+1. Finish richer history/back-forward behavior and document-load replay
 2. Improve networking semantics and reflow after DOM mutation
 3. Validate against Google, YouTube, and other app-shell sites
 
@@ -159,6 +172,7 @@ Current JS support is intentionally small:
 - inline `<script>`
 - external `<script src>`
 - `document.write()` / `document.writeln()`
+- `localStorage`, `sessionStorage`, and `document.cookie`
 - `document.title`
 - `document.querySelector(...)` / `querySelectorAll(...)`
 - `document.getElementById(...)`

@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `111` passing tests on `2026-05-16`
+  - `cargo test`: `114` passing tests on `2026-05-16`
   - `cargo build`: success on `2026-05-16`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -68,7 +68,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - loop-iteration runtime budget for runaway scripts
     - same-origin request and redirect guards
     - script-driven `location.href` follow-up navigation
-  - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, and keyboard event logging
+    - origin-scoped `localStorage`, `sessionStorage`, and `document.cookie`
+  - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, keyboard event logging, and storage/cookies
   - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
   - site-specific rendering paths for:
     - YouTube watch pages
@@ -92,6 +93,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   JS runtime policy, DOM bridge, fetch/XHR shims, navigation handling.
 - `src/http.rs`
   HTTP/TLS fetch layer and browser-like request headers.
+- `src/site_state.rs`
+  Shared origin-scoped storage and cookie registry used by HTTP and JS.
 - `src/html.rs`
   Hand-rolled HTML parser with raw-text preservation for `script` / `style` / `title` / `textarea`.
 
@@ -117,7 +120,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Native page input typing now syncs `value` into the JS DOM.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward behavior is not yet complete.
-- Modern app-shell sites still need more DOM APIs, cookies/storage, and CSS coverage.
+- Modern app-shell sites still need more DOM APIs, richer history replay, and CSS coverage.
 - CSS is still computed once up front instead of being rebuilt against the live window width.
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
@@ -230,4 +233,10 @@ git worktree list
 
 - Current branch `codex/js-event-capture` is clean and pushed with the latest live input sync work.
 - PR #40 is the active merge target for the current JS/event progress checkpoint.
-- The next likely follow-up after merge is storage/cookies and richer history/back-forward behavior.
+- The next likely follow-up after merge is richer history/back-forward behavior and replay across document loads.
+
+### 2026-05-16 - Codex (storage and cookie support)
+
+- Added origin-scoped `localStorage` and `sessionStorage` backed by shared site state.
+- Added `document.cookie` getter/setter behavior and request/response cookie propagation in the HTTP layer.
+- Added `demo/storage-demo.html` so storage and cookie state can be exercised manually.
