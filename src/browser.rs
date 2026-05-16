@@ -2913,6 +2913,7 @@ mod tests {
                     flex_basis: None,
                     gap: 0,
                     order: 0,
+                    effective_opacity: 255,
                 },
             }),
             images: crate::image::ImageStore::default(),
@@ -3256,6 +3257,7 @@ mod tests {
                 flex_basis: None,
                 gap: 0,
                 order: 0,
+                effective_opacity: 255,
             },
         })
     }
