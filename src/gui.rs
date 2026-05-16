@@ -11,7 +11,7 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, ResizeDirection, Window};
 
 use crate::browser::{BrowserPage, load_page};
-use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind, ObjectFit};
+use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind, InteractiveState, ObjectFit};
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
 use crate::image::DecodedImage;
@@ -96,6 +96,7 @@ struct BrowserApp {
     hovered_target: HitTarget,
     hovered_link_url: Option<String>,
     hovered_link_node_id: Option<usize>,
+    hovered_element_node_id: Option<usize>,
     ime_composing: bool,
     /// Depth-indexed offscreen buffer pool for layer compositing.
     /// scratch[depth] holds the pixel buffer used by the layer at that nesting depth.
@@ -133,6 +134,7 @@ impl BrowserApp {
             hovered_target: HitTarget::None,
             hovered_link_url: None,
             hovered_link_node_id: None,
+            hovered_element_node_id: None,
             ime_composing: false,
             scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
         }
@@ -488,9 +490,29 @@ impl BrowserApp {
         } else {
             (None, None)
         };
+
+        // Determine which element (by node_id) is under the cursor
+        let hovered_element = self.find_hovered_element(window_size);
+
+        let element_changed = hovered_element != self.hovered_element_node_id;
+        // Only relayout when hovered element changes
+        if element_changed {
+            self.hovered_element_node_id = hovered_element;
+            // Trigger a CSS relayout with the new interactive state
+            let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+            let interactive = InteractiveState {
+                hovered_node_id: hovered_element,
+                ..Default::default()
+            };
+            if let DocumentContent::Loaded(page) = &mut self.document.content {
+                page.relayout(content_width, &interactive);
+            }
+        }
+
         let changed = next != self.hovered_target
             || link_url != self.hovered_link_url
-            || link_node_id != self.hovered_link_node_id;
+            || link_node_id != self.hovered_link_node_id
+            || element_changed;
         self.hovered_target = next;
         self.hovered_link_url = link_url;
         self.hovered_link_node_id = link_node_id;
@@ -505,6 +527,29 @@ impl BrowserApp {
             };
             window.set_cursor(icon);
         }
+    }
+
+    fn find_hovered_element(&mut self, window_size: PhysicalSize<u32>) -> Option<usize> {
+        let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
+        let body_top = chrome.height + FRAME_PADDING;
+        let pos_x = self.cursor_position.x;
+        let pos_y = self.cursor_position.y;
+        if pos_y < body_top as f64 {
+            return None;
+        }
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let layout = self.document.layout(content_width, &mut self.fonts);
+        let content_y = (pos_y as u32)
+            .saturating_sub(body_top)
+            .saturating_add(self.scroll_y);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        // Find the deepest (last) hitbox that contains the cursor
+        layout.element_hitboxes.iter().rev()
+            .find(|h| {
+                content_x >= h.x && content_x < h.x + h.width
+                    && content_y >= h.y && content_y < h.y + h.height
+            })
+            .map(|h| h.node_id)
     }
 
     fn hit_test(
@@ -894,6 +939,7 @@ impl BrowserApp {
         self.hovered_target = HitTarget::None;
         self.hovered_link_url = None;
         self.hovered_link_node_id = None;
+        self.hovered_element_node_id = None;
     }
 
     fn blur_page_input(&mut self) {
@@ -1462,6 +1508,13 @@ impl ApplicationHandler for BrowserApp {
                 self.hovered_target = HitTarget::None;
                 self.hovered_link_url = None;
                 self.hovered_link_node_id = None;
+                if self.hovered_element_node_id.is_some() {
+                    self.hovered_element_node_id = None;
+                    let content_width = window.inner_size().width.saturating_sub(FRAME_PADDING * 2).max(1);
+                    if let DocumentContent::Loaded(page) = &mut self.document.content {
+                        page.relayout(content_width, &InteractiveState::default());
+                    }
+                }
                 window.set_cursor(CursorIcon::Default);
                 self.request_redraw();
             }
@@ -1655,6 +1708,7 @@ impl DocumentView {
                 commands: Vec::new(),
                 links: Vec::new(),
                 controls: Vec::new(),
+                element_hitboxes: Vec::new(),
             },
             DocumentContent::Loaded(page) => {
                 layout_styled_document(&page.styled_document, &page.images, width, fonts)
@@ -1710,6 +1764,7 @@ fn layout_error_document(
         commands,
         links: Vec::new(),
         controls: Vec::new(),
+        element_hitboxes: Vec::new(),
     }
 }
 

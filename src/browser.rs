@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::css::{StyledNode, Stylesheet, build_styled_tree, parse_stylesheet};
+use crate::css::{InteractiveState, StyledNode, Stylesheet, build_styled_tree, parse_stylesheet};
 use crate::error::Result;
 use crate::html::{Element, Node, parse_document};
 use crate::http::fetch;
@@ -27,6 +27,8 @@ pub struct BrowserPage {
     pub title: String,
     pub html_source: String,
     pub styled_document: StyledNode,
+    pub raw_document: Node,
+    pub main_stylesheet: Stylesheet,
     pub images: ImageStore,
     pub rendered: Option<String>,
     pub javascript_session: Option<JavaScriptSession>,
@@ -72,6 +74,15 @@ impl BrowserPage {
             self.apply_script_snapshot(result.snapshot.clone());
         }
         result
+    }
+
+    pub fn relayout(&mut self, viewport_width: u32, interactive: &InteractiveState) {
+        self.styled_document = build_styled_tree(
+            &self.raw_document,
+            &self.main_stylesheet,
+            viewport_width,
+            interactive,
+        );
     }
 
     pub fn set_dom_attribute(&mut self, node_id: Option<usize>, name: &str, value: &str) {
@@ -220,7 +231,7 @@ fn rebuild_page_from_document(
     let stylesheet = collect_stylesheet(&document, url);
     let images = collect_image_resources(&document);
     let rendered = include_rendered_output.then(|| render_document(&document));
-    let styled_document = build_styled_tree(&document, &stylesheet, 1280);
+    let styled_document = build_styled_tree(&document, &stylesheet, 1280, &InteractiveState::default());
 
     BrowserPage {
         url: url.clone(),
@@ -230,6 +241,8 @@ fn rebuild_page_from_document(
         title,
         html_source,
         styled_document,
+        raw_document: document,
+        main_stylesheet: stylesheet,
         images,
         rendered,
         javascript_session,
@@ -2920,6 +2933,8 @@ mod tests {
                     object_position_y: 50,
                 },
             }),
+            raw_document: Node::Text(String::new()),
+            main_stylesheet: crate::css::Stylesheet::default(),
             images: crate::image::ImageStore::default(),
             rendered: Some("   ".to_string()),
             javascript_session: None,
@@ -2938,6 +2953,8 @@ mod tests {
             title: "Hello".to_string(),
             html_source: String::new(),
             styled_document: parse_styled_text("Hello"),
+            raw_document: Node::Text(String::new()),
+            main_stylesheet: crate::css::Stylesheet::default(),
             images: crate::image::ImageStore::default(),
             rendered: Some("# Hello".to_string()),
             javascript_session: None,

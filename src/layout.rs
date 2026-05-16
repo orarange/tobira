@@ -26,12 +26,22 @@ pub struct LayerCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElementHitbox {
+    pub node_id: usize,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutDocument {
     pub background_color: Color,
     pub content_height: u32,
     pub commands: Vec<DrawCommand>,
     pub links: Vec<LinkCommand>,
     pub controls: Vec<FormControlCommand>,
+    pub element_hitboxes: Vec<ElementHitbox>,
 }
 
 // Convenience accessors for consumers that need flat lists
@@ -319,6 +329,7 @@ pub fn layout_styled_document(
         commands: context.commands,
         links: context.links,
         controls: context.controls,
+        element_hitboxes: context.element_hitboxes,
     }
 }
 
@@ -327,6 +338,7 @@ struct LayoutContext {
     commands: Vec<DrawCommand>,
     links: Vec<LinkCommand>,
     controls: Vec<FormControlCommand>,
+    element_hitboxes: Vec<ElementHitbox>,
     next_control_id: usize,
     next_form_id: usize,
     containing_block_origin: (u32, u32),
@@ -341,6 +353,7 @@ impl Default for LayoutContext {
             commands: Vec::new(),
             links: Vec::new(),
             controls: Vec::new(),
+            element_hitboxes: Vec::new(),
             next_control_id: 0,
             next_form_id: 0,
             containing_block_origin: (0, 0),
@@ -874,6 +887,7 @@ fn layout_block_element(
             }));
             context.links.extend(sub_context.links);
             context.controls.extend(sub_context.controls);
+            context.element_hitboxes.extend(sub_context.element_hitboxes);
             context.next_control_id = sub_context.next_control_id;
             context.next_form_id = sub_context.next_form_id;
         } else {
@@ -1014,6 +1028,19 @@ fn layout_block_element(
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     let background_height = cursor_y.saturating_sub(background_top).max(1);
+
+    // Emit element hitbox for interactive state (hover/focus) detection
+    if let Some(node_id) = element_node_id(element) {
+        if background_height > 0 {
+            context.element_hitboxes.push(ElementHitbox {
+                node_id,
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: background_height,
+            });
+        }
+    }
 
     if let Some(shadow_idx) = shadow_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(shadow_idx) {
@@ -1456,9 +1483,10 @@ fn layout_block_element_as_layer(
         commands: sub_context.commands,
     }));
 
-    // Propagate links and controls from sub_context to parent (for hit-testing, not compositing)
+    // Propagate links, controls, and element hitboxes from sub_context to parent
     context.links.extend(sub_context.links);
     context.controls.extend(sub_context.controls);
+    context.element_hitboxes.extend(sub_context.element_hitboxes);
     context.next_control_id = sub_context.next_control_id;
     context.next_form_id = sub_context.next_form_id;
 }
@@ -1820,6 +1848,13 @@ fn layout_table_element(
                 background_color: ctrl.background_color,
                 border_color: ctrl.border_color,
             }));
+            context.element_hitboxes.extend(layout.element_hitboxes.iter().map(|h| ElementHitbox {
+                node_id: h.node_id,
+                x: h.x.saturating_add(cell_x).saturating_add(padding),
+                y: h.y.saturating_add(cell_y).saturating_add(padding).saturating_add(vertical_offset),
+                width: h.width,
+                height: h.height,
+            }));
         } else {
             // opacity == 255: emit background rect directly into parent context
             if let Some(background_color) = placement.cell.style.background_color {
@@ -1864,6 +1899,7 @@ struct FragmentLayout {
     commands: Vec<DrawCommand>,
     links: Vec<LinkCommand>,
     controls: Vec<FormControlCommand>,
+    element_hitboxes: Vec<ElementHitbox>,
     next_control_id: usize,
     next_form_id: usize,
 }
@@ -2056,6 +2092,7 @@ fn layout_table_cell(
         commands: context.commands,
         links: context.links,
         controls: context.controls,
+        element_hitboxes: context.element_hitboxes,
         next_control_id: context.next_control_id,
         next_form_id: context.next_form_id,
     }
@@ -2106,6 +2143,15 @@ fn merge_fragment(
             text_color: control.text_color,
             background_color: control.background_color,
             border_color: control.border_color,
+        }));
+    context
+        .element_hitboxes
+        .extend(fragment.element_hitboxes.iter().map(|h| ElementHitbox {
+            node_id: h.node_id,
+            x: h.x.saturating_add(offset_x),
+            y: h.y.saturating_add(offset_y),
+            width: h.width,
+            height: h.height,
         }));
 }
 
@@ -3067,6 +3113,7 @@ fn layout_positioned_element(
     context.positioned_commands.push((z, sub_context.commands));
     context.links.extend(sub_context.links);
     context.controls.extend(sub_context.controls);
+    context.element_hitboxes.extend(sub_context.element_hitboxes);
     context.next_control_id = sub_context.next_control_id;
     context.next_form_id = sub_context.next_form_id;
 }
@@ -3302,7 +3349,7 @@ mod tests {
     fn hides_display_none_content() {
         let document = parse_document("<div><p>Hello</p><span class=\"hide\">Nope</span></div>");
         let stylesheet = parse_stylesheet(".hide { display: none; } p { color: #ff0000; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -3316,7 +3363,7 @@ mod tests {
     fn centers_text_when_requested() {
         let document = parse_document("<p>Hello</p>");
         let stylesheet = parse_stylesheet("p { text-align: center; font-size: 16px; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 200, &mut fonts);
 
@@ -3331,7 +3378,7 @@ mod tests {
     fn wraps_text_across_multiple_lines() {
         let document = parse_document("<p>alpha beta gamma delta epsilon</p>");
         let stylesheet = parse_stylesheet("p { font-size: 16px; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 90, &mut fonts);
 
@@ -3348,7 +3395,7 @@ mod tests {
     fn keeps_text_align_inherited() {
         let document = parse_document("<div><p>Hello</p></div>");
         let stylesheet = parse_stylesheet("div { text-align: right; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
 
         let paragraph = match styled {
             crate::css::StyledNode::Element(ref root) => {
@@ -3363,7 +3410,7 @@ mod tests {
     #[test]
     fn places_table_cells_side_by_side() {
         let document = parse_document("<table><tr><td>Left</td><td>Right</td></tr></table>");
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
+        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
         let texts = layout.texts();
@@ -3385,7 +3432,7 @@ mod tests {
         let document = parse_document(
             "<div><img src=\"https://example.com/pic.jpg\" data-scratch-src=\"https://example.com/pic.jpg\" width=\"40\" height=\"20\"></div>",
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
+        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let mut images = ImageStore::default();
         images.insert(
@@ -3409,7 +3456,7 @@ mod tests {
     fn auto_width_tables_do_not_expand_to_full_container() {
         let document =
             parse_document("<table align=\"center\"><tr><td>Hello</td><td>World</td></tr></table>");
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
+        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 500, &mut fonts);
         let texts = layout.texts();
@@ -3431,7 +3478,7 @@ mod tests {
         let document = parse_document(
             "<table><tr><td valign=\"middle\">short</td><td><br><br><br><br><br>tall</td></tr></table>",
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
+        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
         let texts = layout.texts();
@@ -3448,7 +3495,7 @@ mod tests {
         let document = parse_document(
             "<table><tr><td rowspan=\"2\">Left</td><td>Top</td></tr><tr><td>Bottom</td></tr></table>",
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
+        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
         let texts = layout.texts();
@@ -3470,7 +3517,7 @@ mod tests {
         let document = parse_document("<body><div>Hi</div></body>");
         let stylesheet =
             parse_stylesheet("body { background-color: #000000; } div { background-color: #ff0000; opacity: 0.5; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -3506,7 +3553,7 @@ mod tests {
         let stylesheet = parse_stylesheet(
             "body { background-color: #000000; } div { opacity: 0.5; } span { opacity: 0.5; color: #ffffff; }",
         );
-        let styled = build_styled_tree(&document, &stylesheet, 1280);
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -3536,7 +3583,7 @@ mod tests {
         let document = parse_document(
             r#"<form action="/search"><input name="q" value="rust"><button type="submit">Go</button></form>"#,
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280);
+        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -3576,7 +3623,7 @@ mod tests {
         let html = r#"<div style="overflow:hidden;height:50px;background:#ffffff"><div style="height:100px;background:#ff0000">Content</div></div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 800);
+        let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
@@ -3602,7 +3649,7 @@ mod tests {
         let html = r#"<div style="background:#ff0000;border-radius:10px">Hello</div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 800);
+        let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
@@ -3620,7 +3667,7 @@ mod tests {
         let html = r#"<div style="background:#ffffff;box-shadow:2px 2px #000000">Hello</div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 800);
+        let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
