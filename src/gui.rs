@@ -115,6 +115,7 @@ impl BrowserApp {
                 (None, Vec::new(), None, DocumentView::blank(), address_bar)
             }
         };
+        let scroll_y = document.scroll_position();
 
         Self {
             current_url,
@@ -125,7 +126,7 @@ impl BrowserApp {
             context,
             window: None,
             surface: None,
-            scroll_y: 0,
+            scroll_y,
             modifiers: ModifiersState::default(),
             cursor_position: PhysicalPosition::new(0.0, 0.0),
             address_bar,
@@ -257,8 +258,7 @@ impl BrowserApp {
         self.address_bar.set_text(url.to_string());
         self.address_bar.blur();
         self.clear_page_control_state();
-        self.scroll_y = 0;
-        let _ = self.document.set_scroll_position(self.scroll_y);
+        self.scroll_y = self.document.scroll_position();
         self.sync_viewport_size();
         self.sync_window_title();
         self.sync_input_method();
@@ -392,12 +392,14 @@ impl BrowserApp {
         let size = window.inner_size();
         if self.document.set_viewport_size(size.width, size.height) {
             let _ = self.document.dispatch_window_resize();
+            self.scroll_y = self.document.scroll_position();
         }
     }
 
     fn sync_scroll_position(&mut self) {
         if self.document.set_scroll_position(self.scroll_y) {
             let _ = self.document.dispatch_scroll_event();
+            self.scroll_y = self.document.scroll_position();
         }
     }
 
@@ -1162,6 +1164,7 @@ impl BrowserApp {
             self.replace_current_history_entry(url);
         }
 
+        self.scroll_y = self.document.scroll_position();
         self.document.sync_from_loaded_page();
         self.sync_window_title();
         self.refresh_focused_page_input_from_document();
@@ -1748,6 +1751,13 @@ impl DocumentView {
             subtitle: format!("{} | {}", page.url, content_type),
             content: DocumentContent::Loaded(page),
             layout_cache: None,
+        }
+    }
+
+    fn scroll_position(&self) -> u32 {
+        match &self.content {
+            DocumentContent::Loaded(page) => page.scroll_y(),
+            _ => 0,
         }
     }
 

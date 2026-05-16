@@ -31,6 +31,7 @@ Already working:
 - browser-level back/forward navigation across document loads
 - layout cache invalidation keyed by viewport width and page revision
 - JS-visible viewport and focus state are wired up through `window.innerWidth` / `window.innerHeight`, `window.scrollY` / `window.pageYOffset`, and `document.activeElement`
+- basic script-driven scrolling APIs now exist through `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
 - inline style mutations now reflect back into the DOM snapshot
 - the inline style bridge now exposes more text, size, and border-related properties
 
@@ -139,6 +140,7 @@ Tasks:
 - a native `element.style` bridge now reflects inline CSS changes back into the DOM tree
 - the bridge covers more text, size, and border-related properties that the current layout engine already understands
 - GUI scroll changes now sync back into the JS runtime so scroll listeners can react to the current offset
+- script-driven scroll APIs now feed back into the GUI viewport state as well
 - recompute layout after DOM mutations and script-driven style changes
 - invalidate cached layout when width or content changes
 - support more CSS properties that interactive pages depend on

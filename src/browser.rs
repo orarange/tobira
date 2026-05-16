@@ -31,6 +31,7 @@ pub struct BrowserPage {
     pub rendered: Option<String>,
     pub javascript_session: Option<JavaScriptSession>,
     layout_revision: u64,
+    scroll_y: u32,
 }
 
 impl BrowserPage {
@@ -64,10 +65,15 @@ impl BrowserPage {
             javascript_session,
         );
         *self = rebuilt;
+        self.scroll_y = snapshot.scroll_y;
     }
 
     pub(crate) fn layout_revision(&self) -> u64 {
         self.layout_revision
+    }
+
+    pub(crate) fn scroll_y(&self) -> u32 {
+        self.scroll_y
     }
 
     pub fn dispatch_dom_event(
@@ -192,6 +198,7 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
         0,
         source.javascript_session,
     );
+    page.scroll_y = source.processed_html.scroll_y;
     if let Some(soft_target) = source
         .processed_html
         .soft_navigation_target
@@ -280,6 +287,7 @@ fn rebuild_page_from_document(
         rendered,
         javascript_session,
         layout_revision,
+        scroll_y: 0,
     }
 }
 
@@ -2948,6 +2956,7 @@ mod tests {
             rendered: Some("   ".to_string()),
             javascript_session: None,
             layout_revision: 0,
+            scroll_y: 0,
         };
 
         assert_eq!(page.body_text(), "[empty document]");
@@ -2967,6 +2976,7 @@ mod tests {
             rendered: Some("# Hello".to_string()),
             javascript_session: None,
             layout_revision: 0,
+            scroll_y: 0,
         };
 
         let output = page.to_cli_output();
@@ -3053,6 +3063,7 @@ mod tests {
             rendered: None,
             javascript_session: None,
             layout_revision: 0,
+            scroll_y: 0,
         };
         let snapshot = crate::js::ProcessedScriptHtml {
             html: "<html><body>Updated</body></html>".to_string(),
@@ -3060,6 +3071,7 @@ mod tests {
             console_logs: Vec::new(),
             navigation_target: None,
             soft_navigation_target: None,
+            scroll_y: 0,
         };
 
         page.apply_script_snapshot(snapshot);

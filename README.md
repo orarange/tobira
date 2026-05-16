@@ -47,6 +47,7 @@ Current capabilities:
   - `window.innerWidth` / `window.innerHeight`
   - `window.scrollY` / `window.pageYOffset`
   - `document.activeElement`
+  - `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
 - Lightweight storage and cookie support:
   - `localStorage`
   - `sessionStorage`
@@ -69,7 +70,7 @@ Still missing:
 - tabs and richer navigation UI
 - session-history replay polish across full document loads
 - incremental reflow for more DOM/style mutations
-- scroll restoration and script-driven scrolling still need depth
+- scroll restoration still needs depth, but script-driven scrolling now has basic window / DOM setters
 - inline style mutations still need broader coverage across the full CSS property matrix and computed-style parity
 - POST forms, complex widgets, and modern app-shell browser APIs
 
@@ -121,6 +122,13 @@ Local event demo:
 ```bash
 python -m http.server 8765
 cargo run -- http://127.0.0.1:8765/demo/events-demo.html
+```
+
+Local scroll demo:
+
+```bash
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/scroll-demo.html
 ```
 
 Local storage / cookie demo:

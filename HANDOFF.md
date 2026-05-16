@@ -18,15 +18,15 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-16`
+- Date: `2026-05-17`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
 - Workflow:
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `120` passing tests on `2026-05-16`
-  - `cargo build`: success on `2026-05-16`
+  - `cargo test`: `121` passing tests on `2026-05-17`
+  - `cargo build`: success on `2026-05-17`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -57,6 +57,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `window.innerWidth` / `window.innerHeight`
     - `window.scrollY` / `window.pageYOffset`
     - `document.activeElement`
+    - `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
   - page event listeners now support capture + bubbling, plus `once` listeners and capture-sensitive `removeEventListener(...)`
   - guarded JavaScript execution through `boa_engine`
   - lightweight mutable DOM bridge with:
@@ -76,7 +77,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - origin-scoped `localStorage`, `sessionStorage`, and `document.cookie`
   - browser chrome history controls for back/forward navigation across full document loads
   - layout cache invalidates on viewport width or page revision changes
-  - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, keyboard event logging, and storage/cookies
+  - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, keyboard event logging, storage/cookies, and scroll control
   - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
   - inline `element.style` mutations now reflect through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
   - site-specific rendering paths for:
@@ -129,7 +130,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Native page input typing now syncs `value` into the JS DOM.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward replay and scroll restoration still need depth.
-- Scroll position is now visible to JS, but full scroll restoration / script-driven scrolling still need depth.
+- Script-driven scrolling now has basic window / DOM setter support, but full scroll restoration across history still needs depth.
 - Modern app-shell sites still need more DOM APIs, richer history replay, and CSS Phase 6 visual effects / advanced rendering.
 - Incremental reflow still needs deeper invalidation for more DOM/style mutations.
 - The inline style bridge still needs broader CSS property coverage and computed-style parity to be browser-grade, but the core CSS parser/layout baseline is already considered done on the Claude branch.
@@ -285,6 +286,17 @@ git worktree list
 - Added browser-level history tracking for full document loads.
 - Added back/forward chrome buttons and `Alt+Left` / `Alt+Right` shortcuts.
 - Kept same-document soft navigation in sync with the browser history entry for the current page.
+
+### 2026-05-17 - Codex (script-driven scroll APIs)
+
+- Added `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setter support so scripts can move the viewport directly.
+- Wired JS scroll changes back into the GUI scroll state so the rendered page and `window.scrollY` stay aligned.
+- Added regression coverage for scroll-position getters, setters, and scroll-driven event handling.
+
+### 2026-05-17 - Codex (scroll demo page)
+
+- Added `demo/scroll-demo.html` so the new scroll APIs can be exercised manually without digging through source code.
+- The demo uses a tall DOM tree plus buttons for `scrollTo`, `scrollBy`, and `scrollTop` setter checks.
 
 ### 2026-05-16 - Codex (browser history back/forward)
 

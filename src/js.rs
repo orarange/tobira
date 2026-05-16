@@ -39,6 +39,7 @@ pub struct ProcessedScriptHtml {
     pub console_logs: Vec<String>,
     pub navigation_target: Option<String>,
     pub soft_navigation_target: Option<String>,
+    pub scroll_y: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -416,6 +417,7 @@ fn process_document_scripts_error(html: String, message: String) -> ProcessedScr
         console_logs: vec![message],
         navigation_target: None,
         soft_navigation_target: None,
+        scroll_y: 0,
     }
 }
 
@@ -508,6 +510,7 @@ impl JavaScriptRuntime {
             console_logs: self.take_logs(),
             navigation_target: self.navigation_target(),
             soft_navigation_target: self.take_soft_navigation_target(),
+            scroll_y: scroll_position(&mut self.context),
         }
     }
 
@@ -519,10 +522,14 @@ impl JavaScriptRuntime {
         }
     }
 
-    fn set_scroll_position(&mut self, y: u32) {
+    fn set_scroll_position(&mut self, y: u32) -> bool {
         if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
-            host.state.borrow_mut().scroll_y = y;
+            let mut state = host.state.borrow_mut();
+            let changed = state.scroll_y != y;
+            state.scroll_y = y;
+            return changed;
         }
+        false
     }
 
     fn set_dom_attribute(&mut self, node_id: usize, name: &str, value: &str) {
@@ -2018,6 +2025,27 @@ fn install_browser_globals(context: &mut Context) {
         .expect("prompt should be installable");
     context
         .register_global_builtin_callable(
+            js_string!("scrollTo"),
+            2,
+            NativeFunction::from_fn_ptr(js_window_scroll_to),
+        )
+        .expect("scrollTo should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("scrollBy"),
+            2,
+            NativeFunction::from_fn_ptr(js_window_scroll_by),
+        )
+        .expect("scrollBy should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("scroll"),
+            2,
+            NativeFunction::from_fn_ptr(js_window_scroll_to),
+        )
+        .expect("scroll should be installable");
+    context
+        .register_global_builtin_callable(
             js_string!("fetch"),
             2,
             NativeFunction::from_fn_ptr(js_fetch),
@@ -2626,6 +2654,119 @@ fn js_window_get_page_y_offset(
     js_window_get_scroll_y(&JsValue::undefined(), &[], context)
 }
 
+fn scroll_offset_from_value(value: &JsValue, context: &mut Context) -> JsResult<i64> {
+    let number = value.to_number(context)?;
+    if !number.is_finite() {
+        return Ok(0);
+    }
+    Ok(number.round() as i64)
+}
+
+fn scroll_offset_from_args(args: &[JsValue], context: &mut Context) -> JsResult<i64> {
+    if let Some(first) = args.first()
+        && let Some(object) = first.as_object()
+        && args.len() == 1
+    {
+        let top = object.get(js_string!("top"), context)?;
+        if !top.is_undefined() {
+            return scroll_offset_from_value(&top, context);
+        }
+        let y = object.get(js_string!("y"), context)?;
+        if !y.is_undefined() {
+            return scroll_offset_from_value(&y, context);
+        }
+        return Ok(0);
+    }
+
+    if let Some(second) = args.get(1) {
+        return scroll_offset_from_value(second, context);
+    }
+    if let Some(first) = args.first() {
+        return scroll_offset_from_value(first, context);
+    }
+    Ok(0)
+}
+
+fn js_window_scroll_to(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let target = scroll_offset_from_args(args, context)?.max(0) as u32;
+    let changed = if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let changed = state.scroll_y != target;
+        state.scroll_y = target;
+        changed
+    } else {
+        false
+    };
+    if changed {
+        let _ = runtime_scroll_event(context);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_window_scroll_by(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let delta = scroll_offset_from_args(args, context)?;
+    let changed = if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let current = host.state.borrow().scroll_y;
+        let magnitude = delta.unsigned_abs().min(u32::MAX as u64) as u32;
+        let target = if delta.is_negative() {
+            current.saturating_sub(magnitude)
+        } else {
+            current.saturating_add(magnitude)
+        };
+        let mut state = host.state.borrow_mut();
+        let changed = state.scroll_y != target;
+        state.scroll_y = target;
+        changed
+    } else {
+        false
+    };
+    if changed {
+        let _ = runtime_scroll_event(context);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_set_scroll_top(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if this_node_id(this).is_none() {
+        return Ok(JsValue::undefined());
+    }
+    let target = scroll_offset_from_value(args.first().unwrap_or(&JsValue::undefined()), context)?
+        .max(0) as u32;
+    let changed = if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let changed = state.scroll_y != target;
+        state.scroll_y = target;
+        changed
+    } else {
+        false
+    };
+    if changed {
+        let _ = runtime_scroll_event(context);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn runtime_scroll_event(context: &mut Context) -> JsResult<()> {
+    let target_node_id = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.document_id)
+        .unwrap_or(0);
+    let request = DomEventRequest {
+        target_node_id,
+        event_type: "scroll".to_string(),
+        bubbles: false,
+        cancelable: false,
+        ..Default::default()
+    };
+    let target = context.global_object().clone();
+    let _ = dispatch_dom_event_on_target(target, &request, context)?;
+    Ok(())
+}
+
 fn js_dom_get_scroll_top(
     this: &JsValue,
     _: &[JsValue],
@@ -2793,6 +2934,8 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_scroll_height).to_js_function(context.realm());
     let get_scroll_top =
         NativeFunction::from_fn_ptr(js_dom_get_scroll_top).to_js_function(context.realm());
+    let set_scroll_top =
+        NativeFunction::from_fn_ptr(js_dom_set_scroll_top).to_js_function(context.realm());
     let style = build_dom_style_object(context, node_id);
     let object = ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context)
         .function(
@@ -3002,7 +3145,7 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .accessor(
             js_string!("scrollTop"),
             Some(get_scroll_top),
-            None,
+            Some(set_scroll_top),
             Attribute::all(),
         )
         .accessor(
@@ -6534,6 +6677,17 @@ mod tests {
             .expect("scroll dispatch should succeed");
 
         assert_eq!(result.snapshot.title_override.as_deref(), Some("120"));
+    }
+
+    #[test]
+    fn supports_scroll_to_scroll_by_and_scroll_top_setter() {
+        let processed = process_document_scripts(
+            "<html><body><script>window.scrollTo({ top: 120 }); window.scrollBy({ top: 30 }); document.documentElement.scrollTop = 55; document.title = [String(window.scrollY), String(window.pageYOffset), String(document.documentElement.scrollTop)].join('|');</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(processed.title_override.as_deref(), Some("55|55|55"));
+        assert_eq!(processed.scroll_y, 55);
     }
 
     #[test]
