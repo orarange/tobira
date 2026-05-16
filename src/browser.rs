@@ -2940,6 +2940,9 @@ mod tests {
                     grid_auto_columns: crate::css::GridTrackSize::Auto,
                     grid_column: crate::css::GridPlacement::default(),
                     grid_row: crate::css::GridPlacement::default(),
+                    filter_blur_px: 0,
+                    filter_brightness: 10000,
+                    filter_opacity: 255,
                 },
             }),
             raw_document: Node::Text(String::new()),
@@ -3301,6 +3304,9 @@ mod tests {
                 grid_auto_columns: crate::css::GridTrackSize::Auto,
                 grid_column: crate::css::GridPlacement::default(),
                 grid_row: crate::css::GridPlacement::default(),
+                filter_blur_px: 0,
+                filter_brightness: 10000,
+                filter_opacity: 255,
             },
         })
     }

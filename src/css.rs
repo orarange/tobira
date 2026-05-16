@@ -109,6 +109,8 @@ struct SimpleSelector {
 pub enum PseudoElement {
     Before,
     After,
+    Placeholder,
+    Selection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -509,6 +511,10 @@ pub struct ComputedStyle {
     // Grid item fields
     pub grid_column: GridPlacement,
     pub grid_row: GridPlacement,
+    // Filter effects
+    pub filter_blur_px: u32,       // blur() value in pixels, 0 = no blur
+    pub filter_brightness: u32,    // brightness() in percent * 100 (10000 = 100% = no change)
+    pub filter_opacity: u8,        // opacity() as 0-255, 255 = no change
 }
 
 impl ComputedStyle {
@@ -592,6 +598,10 @@ impl ComputedStyle {
             grid_auto_columns: GridTrackSize::Auto,
             grid_column: GridPlacement::default(),
             grid_row: GridPlacement::default(),
+            // Filter effects
+            filter_blur_px: 0,
+            filter_brightness: 10000,
+            filter_opacity: 255,
         };
 
         match tag_name {
@@ -811,6 +821,21 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                     rule.media = Some(media_cond.clone());
                     rules.push(rule);
                 }
+            } else if at_lower.starts_with("@supports") || at_lower.starts_with("@layer") {
+                // @supports: treat condition as always-true (optimistic: assume all features supported)
+                // @layer: ignore layer name, parse rules as regular rules (no cascade layering)
+                let inner_stylesheet = parse_stylesheet(block_text);
+                if !inner_stylesheet.root_vars.is_empty() {
+                    let inner_map = (*inner_stylesheet.root_vars).clone();
+                    // Treat @supports/@layer root vars as unconditional
+                    for (k, v) in inner_map {
+                        root_vars.entry(k).or_insert(v);
+                    }
+                }
+                for (inner_cond, inner_map) in inner_stylesheet.media_root_vars {
+                    media_root_vars.push((inner_cond, inner_map));
+                }
+                rules.extend(inner_stylesheet.rules);
             }
             // other at-rules are skipped
             continue;
@@ -1161,6 +1186,37 @@ fn collect_pseudo_content(
     content_text.map(|text| (text, pseudo_style))
 }
 
+/// Returns a `ComputedStyle` for the `::placeholder` pseudo-element applied to `element`,
+/// or `None` if no `::placeholder` rule matches. The returned style inherits from
+/// `host_style` and is further modified by matching `::placeholder` declarations.
+pub fn compute_placeholder_style(
+    element: &Element,
+    stylesheet: &Stylesheet,
+    host_style: &ComputedStyle,
+    viewport_width: u32,
+) -> Option<ComputedStyle> {
+    let identity = ElementIdentity::from(element);
+    let ancestors: &[AncestorSlot] = &[];
+    let mut pseudo_style = host_style.clone();
+    let mut has_match = false;
+
+    for rule in &stylesheet.rules {
+        if let Some(cond) = &rule.media {
+            if !cond.matches(viewport_width) { continue; }
+        }
+        let host_matches = rule.selectors.iter().any(|sel| {
+            sel.pseudo_element.as_ref() == Some(&PseudoElement::Placeholder)
+                && sel.matches(&identity, ancestors, 0, 1, &[], &InteractiveState::default())
+        });
+        if !host_matches { continue; }
+        has_match = true;
+        for decl in &rule.declarations {
+            apply_declaration(&mut pseudo_style, decl, host_style.font_size_px);
+        }
+    }
+    if has_match { Some(pseudo_style) } else { None }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compute_style(
     element: &Element,
@@ -1339,6 +1395,59 @@ fn substitute_vars(value: &str, vars: &BTreeMap<String, String>) -> String {
         );
     }
     result
+}
+
+fn parse_filter_value(input: &str, style: &mut ComputedStyle) {
+    let value = input.trim().to_ascii_lowercase();
+    let mut rest = value.as_str();
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        if rest.is_empty() { break; }
+
+        if let Some(inner) = rest.strip_prefix("blur(") {
+            if let Some(end) = inner.find(')') {
+                let arg = &inner[..end];
+                if let Some(px) = parse_length(arg.trim(), 16) {
+                    style.filter_blur_px = px;
+                }
+                rest = &inner[end+1..];
+                continue;
+            }
+        }
+        if let Some(inner) = rest.strip_prefix("brightness(") {
+            if let Some(end) = inner.find(')') {
+                let arg = inner[..end].trim().trim_end_matches('%');
+                let pct = arg.parse::<f32>().ok().unwrap_or(100.0);
+                // If value > 2.0 it's a percentage (e.g. "80%"), otherwise a factor (e.g. "0.8")
+                let factor = if pct <= 2.0 { pct } else { pct / 100.0 };
+                style.filter_brightness = (factor * 10000.0).round() as u32;
+                rest = &inner[end+1..];
+                continue;
+            }
+        }
+        if let Some(inner) = rest.strip_prefix("opacity(") {
+            if let Some(end) = inner.find(')') {
+                let arg = inner[..end].trim().trim_end_matches('%');
+                let pct = arg.parse::<f32>().ok().unwrap_or(1.0);
+                let factor = if pct <= 1.0 { pct } else { pct / 100.0 };
+                style.filter_opacity = (factor.clamp(0.0, 1.0) * 255.0).round() as u8;
+                rest = &inner[end+1..];
+                continue;
+            }
+        }
+        if let Some(inner) = rest.strip_prefix("grayscale(") {
+            if let Some(end) = inner.find(')') {
+                rest = &inner[end+1..];
+                continue;
+            }
+        }
+        // Unknown filter function — skip to next space or closing paren
+        if let Some(pos) = rest.find(|c: char| c == ' ' || c == ')') {
+            rest = rest[pos..].trim_start_matches(')');
+        } else {
+            break;
+        }
+    }
 }
 
 fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, parent_font_size: u32) {
@@ -1871,6 +1980,19 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 _ => ObjectFit::Fill,
             };
         }
+        "filter" | "-webkit-filter" => {
+            parse_filter_value(value, style);
+        }
+        // No-op properties — parsed to prevent warnings, not yet implemented
+        "scroll-behavior" | "overscroll-behavior" | "overscroll-behavior-x" | "overscroll-behavior-y"
+        | "resize" | "writing-mode" | "text-orientation" | "direction" | "unicode-bidi"
+        | "scroll-snap-type" | "scroll-snap-align" | "scroll-padding" | "scroll-padding-top"
+        | "will-change" | "isolation" | "mix-blend-mode" | "backdrop-filter"
+        | "-webkit-overflow-scrolling" | "touch-action" | "user-select" | "-webkit-user-select"
+        | "appearance" | "-webkit-appearance" | "-moz-appearance"
+        | "contain" | "content-visibility" => {
+            // Parsed and ignored — no implementation yet
+        }
         "object-position" => {
             let parse_pct = |s: &str| -> u32 {
                 match s.trim() {
@@ -2186,6 +2308,8 @@ fn parse_simple_selector(input: &str) -> Option<SimpleSelector> {
                     match pe_name.to_ascii_lowercase().as_str() {
                         "before" => selector.pseudo_element = Some(PseudoElement::Before),
                         "after" => selector.pseudo_element = Some(PseudoElement::After),
+                        "placeholder" => selector.pseudo_element = Some(PseudoElement::Placeholder),
+                        "selection" => selector.pseudo_element = Some(PseudoElement::Selection),
                         _ => selector.never_match = true,
                     }
                     continue;
@@ -4596,5 +4720,93 @@ mod tests {
         let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         let div = find_first_element(&styled, "div").unwrap();
         assert!(div.style.pointer_events_none);
+    }
+
+    #[test]
+    fn filter_blur_parsed() {
+        let html = r#"<div style="filter: blur(4px);"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.filter_blur_px, 4);
+    }
+
+    #[test]
+    fn filter_brightness_parsed() {
+        let html = r#"<div style="filter: brightness(0.5);"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.filter_brightness, 5000); // 0.5 * 10000
+    }
+
+    #[test]
+    fn filter_opacity_parsed() {
+        let html = r#"<div style="filter: opacity(0.5);"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.filter_opacity, 128); // round(0.5 * 255) = 128
+    }
+
+    #[test]
+    fn filter_multiple_functions_parsed() {
+        let html = r#"<div style="filter: blur(2px) brightness(0.8);"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.filter_blur_px, 2);
+        assert_eq!(div.style.filter_brightness, 8000);
+    }
+
+    #[test]
+    fn at_supports_rules_applied() {
+        // @supports is treated as always-true so inner rules should apply
+        let html = r#"<div class="box"></div>"#;
+        let css = r#"@supports (display: grid) { .box { color: #ff0000; } }"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.color, 0xff0000);
+    }
+
+    #[test]
+    fn at_layer_rules_applied() {
+        // @layer contents are treated as regular rules
+        let html = r#"<div class="box"></div>"#;
+        let css = r#"@layer base { .box { color: #00ff00; } }"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.color, 0x00ff00);
+    }
+
+    #[test]
+    fn placeholder_pseudo_element_parsed() {
+        // ::placeholder rules should be parsed without errors
+        let css = r#"input::placeholder { color: #999999; }"#;
+        let sheet = parse_stylesheet(css);
+        // Should have one rule with Placeholder pseudo-element
+        assert!(!sheet.rules.is_empty());
+        let rule = &sheet.rules[0];
+        assert!(rule.selectors.iter().any(|s| s.pseudo_element == Some(super::PseudoElement::Placeholder)));
+    }
+
+    #[test]
+    fn no_op_properties_do_not_panic() {
+        // These properties should be silently accepted without panicking
+        let html = r#"<div style="scroll-behavior: smooth; will-change: transform; user-select: none; writing-mode: horizontal-tb; touch-action: pan-y;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        // Just check it doesn't panic and the element is accessible
+        assert_eq!(div.tag_name, "div");
     }
 }
