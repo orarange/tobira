@@ -824,7 +824,7 @@ fn layout_node(
                     }
                 }
                 Display::Flex => {
-                    layout_flex_container(element, x, width, cursor_y, context, images, fonts);
+                    layout_flex_container(element, x, width, cursor_y, context, images, fonts, current_form.clone());
                 }
             }
         }
@@ -1772,6 +1772,31 @@ fn layout_table_element(
                 width: link.width,
                 height: link.height,
                 href: link.href.clone(),
+            }));
+            context.controls.extend(layout.controls.iter().map(|ctrl| FormControlCommand {
+                id: ctrl.id,
+                node_id: ctrl.node_id,
+                form_node_id: ctrl.form_node_id,
+                kind: ctrl.kind,
+                x: ctrl.x.saturating_add(cell_x).saturating_add(padding),
+                y: ctrl.y.saturating_add(cell_y).saturating_add(padding).saturating_add(vertical_offset),
+                width: ctrl.width,
+                height: ctrl.height,
+                name: ctrl.name.clone(),
+                value: ctrl.value.clone(),
+                label: ctrl.label.clone(),
+                placeholder: ctrl.placeholder.clone(),
+                form_id: ctrl.form_id,
+                form_action: ctrl.form_action.clone(),
+                form_method: ctrl.form_method.clone(),
+                activates_submit: ctrl.activates_submit,
+                disabled: ctrl.disabled,
+                masked: ctrl.masked,
+                font_size_px: ctrl.font_size_px,
+                font_family: ctrl.font_family,
+                text_color: ctrl.text_color,
+                background_color: ctrl.background_color,
+                border_color: ctrl.border_color,
             }));
         } else {
             // opacity == 255: emit background rect directly into parent context
@@ -3000,12 +3025,17 @@ fn layout_positioned_element(
 
     let mut sub_context = LayoutContext {
         background_color: context.background_color,
+        next_control_id: context.next_control_id,
+        next_form_id: context.next_form_id,
         ..LayoutContext::default()
     };
     layout_block_element(element, x, elem_width, &mut cursor_y, &mut sub_context, images, fonts, None);
     let z = element.style.z_index.unwrap_or(0);
     context.positioned_commands.push((z, sub_context.commands));
     context.links.extend(sub_context.links);
+    context.controls.extend(sub_context.controls);
+    context.next_control_id = sub_context.next_control_id;
+    context.next_form_id = sub_context.next_form_id;
 }
 
 fn layout_flex_container(
@@ -3016,6 +3046,7 @@ fn layout_flex_container(
     context: &mut LayoutContext,
     images: &ImageStore,
     fonts: &mut FontContext,
+    current_form: Option<FormContext>,
 ) {
     *cursor_y = cursor_y.saturating_add(element.style.margin.top);
     let outer_x = x.saturating_add(element.style.margin.left);
@@ -3095,7 +3126,7 @@ fn layout_flex_container(
                 }).unwrap_or(auto_width).max(1);
                 let mut dummy_y = content_y;
                 let mut dummy_ctx = LayoutContext { background_color: context.background_color, ..LayoutContext::default() };
-                layout_block_element(child, content_x, child_w, &mut dummy_y, &mut dummy_ctx, images, fonts, None);
+                layout_block_element(child, content_x, child_w, &mut dummy_y, &mut dummy_ctx, images, fonts, current_form.clone());
                 dummy_y.saturating_sub(content_y)
             }).collect();
             let max_height = *item_heights.iter().max().unwrap_or(&0);
@@ -3128,7 +3159,7 @@ fn layout_flex_container(
                 };
 
                 let mut child_y = content_y.saturating_add(child_y_offset);
-                layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts, None);
+                layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts, current_form.clone());
                 cursor_x = cursor_x.saturating_add(child_w).saturating_add(item_gap);
             }
 
@@ -3139,7 +3170,7 @@ fn layout_flex_container(
             // Column direction: stack children vertically with gap
             *cursor_y = content_y;
             for (i, child) in children.iter().enumerate() {
-                layout_block_element(child, content_x, content_width, cursor_y, context, images, fonts, None);
+                layout_block_element(child, content_x, content_width, cursor_y, context, images, fonts, current_form.clone());
                 if i < children.len() - 1 {
                     *cursor_y = cursor_y.saturating_add(gap);
                 }
