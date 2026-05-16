@@ -7,9 +7,9 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 - Read this file, `git status --short`, and `git log --oneline -n 20` before making assumptions.
 - Confirm the current branch with `git branch --show-current` before starting work.
-- Codex must stay on branch `codex/codex` unless the user explicitly changes that rule.
-- Codex should use a dedicated worktree for `codex/codex` instead of sharing the user's main checkout.
-- Keep Codex changes isolated to `codex/codex`; Claude may work on its own branch and merge reconciliation happens later through GitHub Copilot or the user's preferred flow.
+- Codex must stay on the active Codex branch listed below unless the user explicitly changes that rule.
+- Codex should use a dedicated worktree for the active Codex branch instead of sharing the user's main checkout.
+- Keep Codex changes isolated to the active Codex branch; Claude may work on its own branch and merge reconciliation happens later through GitHub Copilot or the user's preferred flow.
 - Update the `Current Snapshot` section whenever the high-level state changes.
 - Append a short entry to `Session Log` whenever meaningful work is handed off or resumed.
 - Do not stage unrelated local helper artifacts unless the user explicitly asks for them.
@@ -20,10 +20,10 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 - Date: `2026-05-16`
 - Repo / package name: `tobira`
-- Active Codex branch: `codex/codex`
+- Active Codex branch: `codex/js-event-capture`
 - Workflow:
   - keep the shared root checkout free for the user / Claude side
-  - run Codex implementation from a separate `codex/codex` worktree
+  - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
   - `cargo test`: `103` passing tests on `2026-05-16`
   - `cargo build`: success on `2026-05-16`
@@ -96,6 +96,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 ## Recent Commit Landmarks
 
 - `6981cea` dedicated codex worktree setup documentation complete
+- `c64f16a` event listener capture groundwork complete
 - `5952827` page form controls feature implementation complete
 - `c5266c1` copilot review round two fixes complete
 - `8cb6455` copilot followup cleanup fixes complete
@@ -203,3 +204,8 @@ git worktree list
 - Tightened the GUI event loop so focused page inputs receive `keydown` before default handling and `keyup` after the edit path finishes.
 - Added a regression test that checks keyboard event metadata reaches JS listeners on the document.
 - Updated the living roadmap and demo copy to treat keyboard delivery as a completed milestone and the next phase as richer listener options / capture phase.
+
+### 2026-05-16 - Codex (branch switch after merge)
+
+- Moved Codex work from `codex/codex` to a fresh branch, `codex/js-event-capture`, so the next JS/event slice can continue cleanly after the previous merge.
+- Keep future Codex implementation work on this branch unless the user explicitly asks to switch again.
