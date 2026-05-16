@@ -1,0 +1,13 @@
+{
+  "bundles": {
+    "browser-137": {
+      "name": "browser",
+      "created": "2026-05-13T14:12:21.882Z",
+      "lastUsed": "2026-05-13T14:12:21.882Z",
+      "tags": [],
+      "files": [
+        "src"
+      ]
+    }
+  }
+}

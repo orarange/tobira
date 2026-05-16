@@ -9,10 +9,16 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Confirm the current branch with `git branch --show-current` before starting work.
 - Update the `Current Snapshot` section when the high-level state changes.
 - Append a short entry to `Session Log` whenever you hand off or resume meaningful work.
-- Parallel work with Claude may happen on a different branch. Keep Codex changes isolated to the current branch and let merge reconciliation happen later through GitHub Copilot / the user's chosen merge flow.
+- **Worktree layout** — Claude and Codex each have a dedicated worktree. Always work inside your own:
+  - `browser-claude/`  → branch `claude/modest-pascal-9bf652`  (Claude's workspace)
+  - `browser-codex/`   → branch `codex/codex`                  (Codex's workspace)
+  - `browser/`         → branch `master`                        (canonical history)
+  Never edit files in another agent's worktree. Merge reconciliation goes through GitHub Copilot / user-chosen flow.
 - Do not stage unrelated local helper artifacts unless the user explicitly asks for them.
   Current local artifacts that are present but not part of the tracked repo are:
   `.claude/`, `.repomix/`, `copilot.md`, `gemini.md`, `repomix-output.xmlbrowser.xml`
+- **PR title** — When opening a pull request, always include the agent's name in the title.
+  Example: `[Claude] fix CSS calc() precedence` / `[Codex] add image lazy-loading`
 
 ## Current Snapshot
 
