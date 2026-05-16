@@ -35,6 +35,7 @@ pub struct ProcessedScriptHtml {
     pub title_override: Option<String>,
     pub console_logs: Vec<String>,
     pub navigation_target: Option<String>,
+    pub soft_navigation_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -138,6 +139,9 @@ struct JavaScriptState {
     console_logs: Vec<String>,
     document_url: Url,
     location_href: String,
+    soft_navigation_target: Option<String>,
+    history_entries: Vec<String>,
+    history_index: usize,
     current_script: Option<usize>,
     network_request_count: usize,
     network_response_bytes: usize,
@@ -325,6 +329,7 @@ fn process_document_scripts_error(html: String, message: String) -> ProcessedScr
         title_override: None,
         console_logs: vec![message],
         navigation_target: None,
+        soft_navigation_target: None,
     }
 }
 
@@ -357,6 +362,9 @@ impl JavaScriptRuntime {
                 console_logs: Vec::new(),
                 document_url: base_url.clone(),
                 location_href: base_url.to_string(),
+                soft_navigation_target: None,
+                history_entries: vec![base_url.to_string()],
+                history_index: 0,
                 current_script: None,
                 network_request_count: 0,
                 network_response_bytes: 0,
@@ -409,6 +417,7 @@ impl JavaScriptRuntime {
             title_override: self.title_override(),
             console_logs: self.take_logs(),
             navigation_target: self.navigation_target(),
+            soft_navigation_target: self.take_soft_navigation_target(),
         }
     }
 
@@ -502,9 +511,18 @@ impl JavaScriptRuntime {
 
     fn navigation_target(&self) -> Option<String> {
         let host = self.context.get_data::<JavaScriptHostData>()?;
-        let href = host.state.borrow().location_href.clone();
+        let state = host.state.borrow();
+        if state.soft_navigation_target.is_some() {
+            return None;
+        }
+        let href = state.location_href.clone();
         let document_url = self.document_url().to_string();
         (href != document_url).then_some(href)
+    }
+
+    fn take_soft_navigation_target(&self) -> Option<String> {
+        let host = self.context.get_data::<JavaScriptHostData>()?;
+        host.state.borrow_mut().soft_navigation_target.take()
     }
 
     fn document_url(&self) -> Url {
@@ -1416,6 +1434,8 @@ fn install_browser_globals(context: &mut Context) {
         NativeFunction::from_fn_ptr(js_location_get_search).to_js_function(context.realm());
     let hash_getter =
         NativeFunction::from_fn_ptr(js_location_get_hash).to_js_function(context.realm());
+    let hash_setter =
+        NativeFunction::from_fn_ptr(js_location_set_hash).to_js_function(context.realm());
     let pathname_getter =
         NativeFunction::from_fn_ptr(js_location_get_pathname).to_js_function(context.realm());
     let origin_getter =
@@ -1443,7 +1463,7 @@ fn install_browser_globals(context: &mut Context) {
         .accessor(
             js_string!("hash"),
             Some(hash_getter),
-            None,
+            Some(hash_setter),
             Attribute::all(),
         )
         .accessor(
@@ -1655,22 +1675,34 @@ fn install_browser_globals(context: &mut Context) {
         )
         .property(js_string!("timing"), performance_timing, Attribute::all())
         .build();
+    let history_length_getter =
+        NativeFunction::from_fn_ptr(js_history_length).to_js_function(context.realm());
     let history = ObjectInitializer::new(context)
         .function(
-            NativeFunction::from_fn_ptr(js_noop),
+            NativeFunction::from_fn_ptr(js_history_push_state),
             js_string!("pushState"),
             3,
         )
         .function(
-            NativeFunction::from_fn_ptr(js_noop),
+            NativeFunction::from_fn_ptr(js_history_replace_state),
             js_string!("replaceState"),
             3,
         )
-        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("back"), 0)
         .function(
-            NativeFunction::from_fn_ptr(js_noop),
+            NativeFunction::from_fn_ptr(js_history_back),
+            js_string!("back"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_history_forward),
             js_string!("forward"),
             0,
+        )
+        .accessor(
+            js_string!("length"),
+            Some(history_length_getter),
+            None,
+            Attribute::all(),
         )
         .build();
     let storage = build_storage_stub(context);
@@ -2320,6 +2352,16 @@ fn set_event_bool_property(
         return Ok(());
     };
     object.set(js_string!(name), JsValue::new(value), true, context)?;
+    Ok(())
+}
+
+fn set_event_internal_bool_property(
+    event: &boa_engine::object::JsObject,
+    name: &str,
+    value: bool,
+    context: &mut Context,
+) -> JsResult<()> {
+    event.set(js_string!(name), JsValue::new(value), true, context)?;
     Ok(())
 }
 
@@ -3023,8 +3065,36 @@ fn js_location_get_search(_: &JsValue, _: &[JsValue], context: &mut Context) -> 
     Ok(JsValue::from(js_string!(search)))
 }
 
-fn js_location_get_hash(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
-    Ok(JsValue::from(js_string!("")))
+fn js_location_get_hash(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let hash = current_location_url(context)
+        .and_then(|url| {
+            url.path
+                .split_once('#')
+                .map(|(_, fragment)| format!("#{fragment}"))
+        })
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(hash)))
+}
+
+fn js_location_set_hash(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let mut fragment = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    if fragment.starts_with('#') {
+        fragment.remove(0);
+    }
+
+    let href = if fragment.is_empty() {
+        current_location_url(context)
+            .or_else(|| current_document_url(context))
+            .map(|url| {
+                let base = url.path.split('#').next().unwrap_or(&url.path).to_string();
+                format!("{base}")
+            })
+            .unwrap_or_else(|| "/".to_string())
+    } else {
+        format!("#{fragment}")
+    };
+    set_soft_navigation_href(&href, context);
+    Ok(JsValue::undefined())
 }
 
 fn js_location_get_pathname(
@@ -3092,6 +3162,96 @@ fn js_location_replace(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
     Ok(JsValue::undefined())
 }
 
+fn js_history_push_state(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.get(2) else {
+        return Ok(JsValue::undefined());
+    };
+    if target.is_undefined() || target.is_null() {
+        return Ok(JsValue::undefined());
+    }
+    let href = js_value_to_string(target, context)?;
+    let resolved = resolve_same_origin_soft_navigation_href(&href, context)?;
+    record_soft_navigation_href(&resolved, false, context);
+    Ok(JsValue::undefined())
+}
+
+fn js_history_replace_state(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.get(2) else {
+        return Ok(JsValue::undefined());
+    };
+    if target.is_undefined() || target.is_null() {
+        return Ok(JsValue::undefined());
+    }
+    let href = js_value_to_string(target, context)?;
+    let resolved = resolve_same_origin_soft_navigation_href(&href, context)?;
+    record_soft_navigation_href(&resolved, true, context);
+    Ok(JsValue::undefined())
+}
+
+fn js_history_back(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if let Some(target) = navigate_history(context, -1) {
+        apply_soft_navigation_href_resolved(&target, context);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_history_forward(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if let Some(target) = navigate_history(context, 1) {
+        apply_soft_navigation_href_resolved(&target, context);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_history_length(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let length = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().history_entries.len())
+        .unwrap_or(0);
+    Ok(JsValue::new(length as i32))
+}
+
+fn record_soft_navigation_href(href: &str, replace_current: bool, context: &mut Context) {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        if replace_current {
+            if state.history_entries.is_empty() {
+                state.history_entries.push(href.to_string());
+                state.history_index = 0;
+            } else {
+                let index = state.history_index;
+                if let Some(entry) = state.history_entries.get_mut(index) {
+                    *entry = href.to_string();
+                }
+            }
+        } else {
+            let next_index = state.history_index.saturating_add(1);
+            state.history_entries.truncate(next_index);
+            state.history_entries.push(href.to_string());
+            state.history_index = state.history_entries.len().saturating_sub(1);
+        }
+    }
+    apply_soft_navigation_href_resolved(href, context);
+}
+
+fn navigate_history(context: &mut Context, delta: isize) -> Option<String> {
+    let host = context.get_data::<JavaScriptHostData>()?;
+    let mut state = host.state.borrow_mut();
+    let next = state.history_index as isize + delta;
+    if next < 0 || next as usize >= state.history_entries.len() {
+        return None;
+    }
+    state.history_index = next as usize;
+    state.history_entries.get(state.history_index).cloned()
+}
+
 fn set_location_href(href: &str, context: &mut Context) {
     let resolved = current_document_url(context)
         .and_then(|url| url.resolve(href).ok())
@@ -3099,8 +3259,57 @@ fn set_location_href(href: &str, context: &mut Context) {
         .or_else(|| Url::parse(href).ok().map(|url| url.to_string()))
         .unwrap_or_else(|| href.to_string());
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
-        host.state.borrow_mut().location_href = resolved;
+        let mut state = host.state.borrow_mut();
+        state.location_href = resolved;
+        state.soft_navigation_target = None;
     }
+}
+
+fn set_soft_navigation_href(href: &str, context: &mut Context) {
+    let resolved = current_document_url(context)
+        .and_then(|url| url.resolve(href).ok())
+        .map(|url| url.to_string())
+        .or_else(|| Url::parse(href).ok().map(|url| url.to_string()))
+        .unwrap_or_else(|| href.to_string());
+    record_soft_navigation_href(&resolved, false, context);
+}
+
+fn apply_soft_navigation_href_resolved(resolved: &str, context: &mut Context) {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        state.location_href = resolved.to_string();
+        if let Ok(url) = Url::parse(&resolved) {
+            state.document_url = url;
+        }
+        state.soft_navigation_target = Some(resolved.to_string());
+    }
+}
+
+fn resolve_same_origin_soft_navigation_href(href: &str, context: &mut Context) -> JsResult<String> {
+    let base = current_document_url(context).ok_or_else(|| {
+        boa_engine::JsError::from(
+            JsNativeError::error().with_message("missing document URL for history navigation"),
+        )
+    })?;
+    if href.trim().is_empty() {
+        return Ok(base.to_string());
+    }
+    let resolved = base
+        .resolve(href)
+        .ok()
+        .or_else(|| Url::parse(href).ok())
+        .ok_or_else(|| {
+            boa_engine::JsError::from(
+                JsNativeError::error()
+                    .with_message(format!("invalid history navigation target: {href}")),
+            )
+        })?;
+    if !base.shares_origin(&resolved) {
+        return Err(boa_engine::JsError::from(
+            JsNativeError::error().with_message("history API target must stay same-origin"),
+        ));
+    }
+    Ok(resolved.to_string())
 }
 
 fn current_location_url(context: &mut Context) -> Option<Url> {
@@ -3695,6 +3904,11 @@ fn js_event_prevent_default(
     _: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    if let Some(object) = this.as_object()
+        && event_flag_value(&object, "__tobiraPassiveListener", context)
+    {
+        return Ok(JsValue::undefined());
+    }
     if let Some(object) = this.as_object()
         && !event_flag_value(&object, "cancelable", context)
     {
@@ -4511,12 +4725,20 @@ fn dispatch_listeners_on_target(
         if entry.options.capture != capture_phase {
             continue;
         }
-        let _ = call_js_callback_with_this(
+        let _ = set_event_internal_bool_property(
+            event,
+            "__tobiraPassiveListener",
+            entry.options.passive,
+            context,
+        );
+        let callback_result = call_js_callback_with_this(
             &entry.callback,
             &target_value,
             &[event_value.clone()],
             context,
         );
+        let _ = set_event_internal_bool_property(event, "__tobiraPassiveListener", false, context);
+        callback_result?;
         if entry.options.once {
             let _ = remove_event_listener(
                 target,
@@ -4777,6 +4999,60 @@ mod tests {
     }
 
     #[test]
+    fn updates_location_hash_without_full_navigation() {
+        let processed = process_document_scripts(
+            "<script>location.hash = '#frag'; document.title = location.href + '|' + location.hash;</script>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.soft_navigation_target.as_deref(),
+            Some("https://example.com/start#frag")
+        );
+        assert!(processed.navigation_target.is_none());
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("https://example.com/start#frag|#frag")
+        );
+    }
+
+    #[test]
+    fn push_state_updates_location_without_reload() {
+        let processed = process_document_scripts(
+            "<script>history.pushState({ page: 1 }, '', '/next?from=test#frag'); document.title = location.href + '|' + location.hash;</script>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.soft_navigation_target.as_deref(),
+            Some("https://example.com/next?from=test#frag")
+        );
+        assert!(processed.navigation_target.is_none());
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("https://example.com/next?from=test#frag|#frag")
+        );
+    }
+
+    #[test]
+    fn history_back_and_forward_follow_soft_navigation_stack() {
+        let processed = process_document_scripts(
+            "<script>history.pushState({}, '', '/one'); history.pushState({}, '', '/two'); history.back(); history.forward(); document.title = location.href + '|' + location.hash + '|' + String(history.length);</script>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.soft_navigation_target.as_deref(),
+            Some("https://example.com/two")
+        );
+        assert!(processed.navigation_target.is_none());
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("https://example.com/two||3")
+        );
+    }
+
+    #[test]
     fn resolves_script_requests_against_document_url_after_location_changes() {
         let base_url = Url::parse("https://example.com/start").unwrap();
         let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
@@ -5014,6 +5290,40 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(second.snapshot.title_override.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn passive_event_listeners_ignore_prevent_default() {
+        let mut runtime = JavaScriptRuntime::new(
+            &Url::parse("https://example.com").unwrap(),
+            "<html><body><button id=\"inner\" type=\"button\">Go</button><script>var inner = document.getElementById('inner'); inner.addEventListener('click', function (event) { event.preventDefault(); document.title = String(event.defaultPrevented); }, { passive: true });</script></body></html>",
+        );
+        runtime.process_loaded_document();
+        runtime.dispatch_initial_load_events();
+
+        let button_id = {
+            let host = runtime
+                .context
+                .get_data::<super::JavaScriptHostData>()
+                .unwrap();
+            let document_id = {
+                let state = host.state.borrow();
+                state.dom.document_id
+            };
+            let state = host.state.borrow();
+            state.dom.find_first_tag(document_id, "button").unwrap()
+        };
+
+        let result = runtime.dispatch_dom_event(DomEventRequest {
+            target_node_id: button_id,
+            event_type: "click".to_string(),
+            bubbles: true,
+            cancelable: true,
+            ..Default::default()
+        });
+
+        assert!(!result.default_prevented);
+        assert_eq!(result.snapshot.title_override.as_deref(), Some("false"));
     }
 
     #[test]

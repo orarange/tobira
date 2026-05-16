@@ -111,7 +111,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 ## Known Gaps / Likely Next Work
 
 - JS support is still far from a full browser DOM / framework runtime.
-- GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics and the rest of the option matrix still need depth.
+- GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics are in place, and `location.hash` plus `history.pushState(...)` / `replaceState(...)` now support soft navigation without a reload, while the rest of the option matrix and back/forward stack still need depth.
 - Native page input typing now syncs `value` into the JS DOM, but a few edge cases still need validation.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward behavior is not yet complete.

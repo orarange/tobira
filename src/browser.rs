@@ -42,8 +42,13 @@ impl BrowserPage {
     pub fn apply_script_snapshot(&mut self, snapshot: ProcessedScriptHtml) {
         let include_rendered_output = self.rendered.is_some();
         let javascript_session = self.javascript_session.take();
+        let url = snapshot
+            .soft_navigation_target
+            .as_deref()
+            .and_then(|target| Url::parse(target).ok())
+            .unwrap_or_else(|| self.url.clone());
         let rebuilt = rebuild_page_from_html(
-            &self.url,
+            &url,
             self.status_code,
             self.reason_phrase.clone(),
             self.content_type.clone(),
@@ -133,7 +138,7 @@ pub fn load_page_for_cli(url: &Url) -> Result<BrowserPage> {
 
 fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<BrowserPage> {
     let source = load_document_source(url, 0)?;
-    Ok(rebuild_page_from_document(
+    let mut page = rebuild_page_from_document(
         &source.final_url,
         source.status_code,
         source.reason_phrase,
@@ -143,7 +148,16 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
         source.processed_html.title_override,
         include_rendered_output,
         source.javascript_session,
-    ))
+    );
+    if let Some(soft_target) = source
+        .processed_html
+        .soft_navigation_target
+        .as_deref()
+        .and_then(|target| Url::parse(target).ok())
+    {
+        page.url = soft_target;
+    }
+    Ok(page)
 }
 
 fn rebuild_page_from_html(

@@ -1008,6 +1008,12 @@ impl BrowserApp {
             self.load_url(url);
             return Some(result);
         }
+        if let Some(soft_target) = result.snapshot.soft_navigation_target.clone()
+            && let Ok(url) = Url::parse(&soft_target)
+        {
+            self.current_url = Some(url.clone());
+            self.address_bar.set_text(url.to_string());
+        }
 
         self.document.sync_from_loaded_page();
         self.sync_window_title();

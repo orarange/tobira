@@ -25,14 +25,15 @@ Already working:
 - same-origin navigation checks
 - loop-iteration runtime budget for runaway scripts
 - native GUI form controls for `GET` submissions
+- passive listener semantics
+- `location.hash`, `history.pushState(...)`, `replaceState(...)`, `back()`, and `forward()` for same-document navigation
 
 Still missing or shallow:
 
-- passive listener semantics and the rest of the richer listener option matrix
 - tighter alignment between GUI text editing and live DOM `input.value`
 - storage and cookies
 - richer networking semantics
-- full history/navigation behavior
+- session-history replay across full document loads
 - async browser APIs that modern frameworks expect
 - rendering invalidation and layout reflow after DOM mutation
 
@@ -49,7 +50,7 @@ Tasks:
 
 Still to finish in this phase:
 
-- passive listener semantics and the rest of the richer listener option matrix
+- finish the rest of the richer listener option matrix
 - live GUI typing synchronized into script-visible DOM state in every edit path
 - more complete default-action sequencing for edge cases
 
@@ -86,14 +87,15 @@ Tasks:
 
 - add cookie store with origin scoping
 - add `localStorage` and `sessionStorage`
-- add `history.pushState(...)`, `replaceState(...)`, `back()`, `forward()`
+- finish richer session-history replay across full document loads
 - keep `location` updates and history state in sync
+- extend the current soft-navigation handling so it cooperates with browser history instead of only updating the current URL
 - support hash navigation and same-document scroll targets
 
 Exit criteria:
 
 - login-ish flows keep their session state
-- back/forward works for document navigation and hash changes
+- back/forward works for same-document navigation and hash changes
 - sites that rely on history state stop losing context
 
 ## Phase 4: Networking Semantics

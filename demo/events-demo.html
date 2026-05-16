@@ -111,6 +111,14 @@
           The submit and link handlers call <code>preventDefault()</code> so the
           browser stays on this page and the log keeps growing.
         </small>
+        <div class="row">
+          <button id="passive-button" type="button">Passive click test</button>
+        </div>
+        <small>
+          The passive button listener still calls <code>preventDefault()</code>,
+          but the browser should ignore it and keep
+          <code>defaultPrevented</code> false.
+        </small>
       </form>
 
       <p>

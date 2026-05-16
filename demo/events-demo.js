@@ -5,6 +5,7 @@ const input = document.getElementById("demo-input");
 const form = document.getElementById("demo-form");
 const link = document.getElementById("demo-link");
 const submit = document.getElementById("demo-submit");
+const passiveButton = document.getElementById("passive-button");
 
 function nodeLabel(node) {
   if (!node) {
@@ -143,5 +144,17 @@ link.addEventListener("click", (event) => {
   event.preventDefault();
   appendLine("link: preventDefault() called");
 });
+
+passiveButton.addEventListener(
+  "click",
+  (event) => {
+    record("passive-button", event);
+    event.preventDefault();
+    appendLine(
+      `passive-button: preventDefault() left defaultPrevented=${event.defaultPrevented}`,
+    );
+  },
+  { passive: true },
+);
 
 appendLine("script: listeners attached");

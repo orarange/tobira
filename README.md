@@ -148,8 +148,8 @@ The living JavaScript roadmap is in [JS_ROADMAP.md](JS_ROADMAP.md).
 
 Short version:
 
-1. Tighten passive listener semantics and live `input.value` sync
-2. Add storage, cookies, and history/navigation behavior
+1. Tighten live `input.value` sync and finish the rest of the listener option matrix
+2. Add storage, cookies, and the remaining history/back-forward behavior
 3. Improve networking semantics and reflow after DOM mutation
 4. Validate against Google, YouTube, and other app-shell sites
 
@@ -169,9 +169,10 @@ Current JS support is intentionally small:
 - `document.addEventListener(...)` / capture + bubbling for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`
 - `focus` / `blur` are currently target-only
 - `addEventListener(...)` / `removeEventListener(...)` on page inputs, buttons, links, forms, and document nodes
-- `click`, `focus`, `blur`, `input`, `change`, `submit`, `keydown`, and `keyup` event dispatch, including `once` listeners and capture-phase listeners
+- `click`, `focus`, `blur`, `input`, `change`, `submit`, `keydown`, and `keyup` event dispatch, including `once`, capture-phase, and passive listeners
+- `location.hash` plus `history.pushState(...)` / `replaceState(...)` soft navigation
 - `location.href`
 - `console.log()` / `warn()` / `error()`
 - immediate `setTimeout(...)` fallback
 
-It still does not implement a full browser DOM, passive listener semantics, async networking, live `input.value` reflection for every GUI edit path, or framework-level browser APIs.
+It still does not implement a full browser DOM, async networking, live `input.value` reflection for every GUI edit path, or framework-level browser APIs.
