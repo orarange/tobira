@@ -2531,23 +2531,32 @@ fn layout_preformatted_fragments(
     fonts: &mut FontContext,
 ) {
     let mut line = LineBuilder::default();
+    let mut first_line = true;
+    let text_indent = container_style.text_indent;
 
     for fragment in fragments {
         match fragment {
-            InlineFragment::LineBreak => emit_line(
-                &mut line,
-                container_style,
-                x,
-                width,
-                cursor_y,
-                context,
-                fonts,
-            ),
+            InlineFragment::LineBreak => {
+                emit_line_with_indent(
+                    &mut line, container_style, x, width, cursor_y, context, fonts,
+                    if first_line { text_indent } else { 0 },
+                );
+                first_line = false;
+            }
             InlineFragment::Control(control) => {
                 let (control_width, _) = measure_form_control(control, fonts);
+                let effective_width = if first_line && line.is_empty() {
+                    width.saturating_sub(text_indent)
+                } else {
+                    width
+                };
                 // Only emit current line if the control won't fit inline
-                if !line.is_empty() && line.width.saturating_add(control_width) > width {
-                    emit_line(&mut line, container_style, x, width, cursor_y, context, fonts);
+                if !line.is_empty() && line.width.saturating_add(control_width) > effective_width {
+                    emit_line_with_indent(
+                        &mut line, container_style, x, width, cursor_y, context, fonts,
+                        if first_line { text_indent } else { 0 },
+                    );
+                    first_line = false;
                 }
                 line.push_control(control, fonts);
             }
@@ -2559,29 +2568,21 @@ fn layout_preformatted_fragments(
             } => {
                 for character in text.chars() {
                     if character == '\n' {
-                        emit_line(
-                            &mut line,
-                            container_style,
-                            x,
-                            width,
-                            cursor_y,
-                            context,
-                            fonts,
+                        emit_line_with_indent(
+                            &mut line, container_style, x, width, cursor_y, context, fonts,
+                            if first_line { text_indent } else { 0 },
                         );
+                        first_line = false;
                         continue;
                     }
 
                     let character_width = char_width(style, character, fonts);
                     if !line.is_empty() && line.width.saturating_add(character_width) > width {
-                        emit_line(
-                            &mut line,
-                            container_style,
-                            x,
-                            width,
-                            cursor_y,
-                            context,
-                            fonts,
+                        emit_line_with_indent(
+                            &mut line, container_style, x, width, cursor_y, context, fonts,
+                            if first_line { text_indent } else { 0 },
                         );
+                        first_line = false;
                     }
 
                     let mut buffer = [0_u8; 4];
@@ -2597,7 +2598,7 @@ fn layout_preformatted_fragments(
         }
     }
 
-    emit_line(
+    emit_line_with_indent(
         &mut line,
         container_style,
         x,
@@ -2605,6 +2606,7 @@ fn layout_preformatted_fragments(
         cursor_y,
         context,
         fonts,
+        if first_line { text_indent } else { 0 },
     );
 }
 
@@ -3038,7 +3040,9 @@ fn layout_positioned_element(
         next_form_id: context.next_form_id,
         ..LayoutContext::default()
     };
-    let current_form = form_context_for_element(element, context, current_form);
+    // Use sub_context for form allocation so next_form_id counter stays consistent
+    // when propagated back — avoids form_id going backwards if element is a <form>
+    let current_form = form_context_for_element(element, &mut sub_context, current_form);
     layout_block_element(element, x, elem_width, &mut cursor_y, &mut sub_context, images, fonts, current_form);
     let z = element.style.z_index.unwrap_or(0);
     context.positioned_commands.push((z, sub_context.commands));
@@ -3169,7 +3173,8 @@ fn layout_flex_container(
                 };
 
                 let mut child_y = content_y.saturating_add(child_y_offset);
-                layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts, current_form.clone());
+                let child_form = form_context_for_element(child, context, current_form.clone());
+                layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts, child_form);
                 cursor_x = cursor_x.saturating_add(child_w).saturating_add(item_gap);
             }
 
@@ -3180,7 +3185,8 @@ fn layout_flex_container(
             // Column direction: stack children vertically with gap
             *cursor_y = content_y;
             for (i, child) in children.iter().enumerate() {
-                layout_block_element(child, content_x, content_width, cursor_y, context, images, fonts, current_form.clone());
+                let child_form = form_context_for_element(child, context, current_form.clone());
+                layout_block_element(child, content_x, content_width, cursor_y, context, images, fonts, child_form);
                 if i < children.len() - 1 {
                     *cursor_y = cursor_y.saturating_add(gap);
                 }
