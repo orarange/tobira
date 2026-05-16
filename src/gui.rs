@@ -15,7 +15,7 @@ use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamily
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
 use crate::image::DecodedImage;
-use crate::layout::{LayoutDocument, TextCommand, layout_styled_document};
+use crate::layout::{DrawCommand, LayerCommand, LayoutDocument, TextCommand, layout_styled_document};
 use crate::url::Url;
 
 const WINDOW_WIDTH: u32 = 1100;
@@ -87,6 +87,10 @@ struct BrowserApp {
     hovered_target: HitTarget,
     hovered_link_url: Option<String>,
     ime_composing: bool,
+    /// Depth-indexed offscreen buffer pool for layer compositing.
+    /// scratch[depth] holds the pixel buffer used by the layer at that nesting depth.
+    /// Buffers are reused across frames; no per-frame allocation after the first paint.
+    scratch: Vec<Vec<u32>>,
 }
 
 impl BrowserApp {
@@ -118,6 +122,7 @@ impl BrowserApp {
             hovered_target: HitTarget::None,
             hovered_link_url: None,
             ime_composing: false,
+            scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
         }
     }
 
@@ -127,6 +132,9 @@ impl BrowserApp {
         self.address_bar.set_text(url.to_string());
         self.address_bar.blur();
         self.scroll_y = 0;
+        // Clear scratch pool on navigation: new page may have different layer nesting depth,
+        // and old over-sized buffers would waste memory across the lifetime of the session.
+        self.scratch.clear();
         self.sync_window_title();
         self.sync_input_method();
         self.request_redraw();
@@ -136,6 +144,7 @@ impl BrowserApp {
         let Some(url) = self.current_url.clone() else {
             self.document = DocumentView::blank();
             self.scroll_y = 0;
+            self.scratch.clear();
             self.sync_window_title();
             self.request_redraw();
             return;
@@ -145,6 +154,8 @@ impl BrowserApp {
         self.current_url = Some(url.clone());
         self.address_bar.set_text(url.to_string());
         self.scroll_y = 0;
+        // Clear scratch pool on reload: page structure may have changed.
+        self.scratch.clear();
         self.sync_window_title();
         self.sync_input_method();
         self.request_redraw();
@@ -156,6 +167,7 @@ impl BrowserApp {
             self.current_url = None;
             self.document = DocumentView::blank();
             self.scroll_y = 0;
+            self.scratch.clear();
             self.sync_window_title();
             self.request_redraw();
             return;
@@ -167,6 +179,7 @@ impl BrowserApp {
                 self.document =
                     DocumentView::error(format!("could not navigate to `{entered}`: {error}"));
                 self.scroll_y = 0;
+                self.scratch.clear();
                 self.sync_window_title();
                 self.request_redraw();
             }
@@ -323,6 +336,7 @@ impl BrowserApp {
             viewport_height,
             self.scroll_y,
             &layout,
+            &mut self.scratch,
         );
 
         buffer
@@ -356,7 +370,9 @@ impl BrowserApp {
         }
         let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
-        let content_y = (pos_y as u32).saturating_sub(body_top).saturating_add(self.scroll_y);
+        let content_y = (pos_y as u32)
+            .saturating_sub(body_top)
+            .saturating_add(self.scroll_y);
         let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
         for link in &layout.links {
             if content_x >= link.x
@@ -768,6 +784,8 @@ impl ApplicationHandler for BrowserApp {
                 }
             }
             WindowEvent::Resized(size) => {
+                // Clear scratch pool on resize: buffer dimensions change, old buffers may be wrong size.
+                self.scratch.clear();
                 self.update_hover(size);
                 self.sync_input_method();
                 self.request_redraw();
@@ -905,9 +923,7 @@ impl DocumentView {
             DocumentContent::Blank => LayoutDocument {
                 background_color: DEFAULT_BACKGROUND_COLOR,
                 content_height: 0,
-                rects: Vec::new(),
-                texts: Vec::new(),
-                images: Vec::new(),
+                commands: Vec::new(),
                 links: Vec::new(),
             },
             DocumentContent::Loaded(page) => {
@@ -923,7 +939,7 @@ fn layout_error_document(
     _width: u32,
     fonts: &mut FontContext,
 ) -> LayoutDocument {
-    let mut texts = Vec::new();
+    let mut commands = Vec::new();
     let mut cursor_y: u32 = 0;
 
     for line in &document.lines {
@@ -941,7 +957,7 @@ fn layout_error_document(
             continue;
         }
 
-        texts.push(TextCommand {
+        commands.push(DrawCommand::Text(TextCommand {
             x: 0,
             y: cursor_y,
             width: fonts.text_width_px(line, font_size_px, FontFamilyKind::Sans),
@@ -952,7 +968,7 @@ fn layout_error_document(
             underline: false,
             bold: scale >= 3,
             italic: false,
-        });
+        }));
 
         cursor_y = cursor_y.saturating_add(height);
     }
@@ -960,9 +976,7 @@ fn layout_error_document(
     LayoutDocument {
         background_color: DEFAULT_BACKGROUND_COLOR,
         content_height: cursor_y,
-        rects: Vec::new(),
-        texts,
-        images: Vec::new(),
+        commands,
         links: Vec::new(),
     }
 }
@@ -2066,73 +2080,256 @@ fn paint_layout(
     viewport_height: u32,
     scroll_y: u32,
     layout: &LayoutDocument,
+    scratch: &mut Vec<Vec<u32>>,
+) {
+    let page = if let DocumentContent::Loaded(page) = &document.content {
+        Some(page)
+    } else {
+        None
+    };
+
+    render_commands(
+        buffer,
+        width,
+        height,
+        offset_x,
+        offset_y,
+        viewport_height,
+        scroll_y,
+        &layout.commands,
+        page,
+        fonts,
+        scratch,
+        0,
+    );
+}
+
+fn render_commands(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    offset_x: u32,
+    offset_y: u32,
+    viewport_height: u32,
+    scroll_y: u32,
+    commands: &[DrawCommand],
+    page: Option<&crate::browser::BrowserPage>,
+    fonts: &mut FontContext,
+    scratch: &mut Vec<Vec<u32>>,
+    depth: usize,
 ) {
     let viewport_bottom = scroll_y.saturating_add(viewport_height);
 
-    for rect in &layout.rects {
-        let rect_bottom = rect.y.saturating_add(rect.height);
-        if rect_bottom < scroll_y || rect.y > viewport_bottom {
-            continue;
-        }
-
-        draw_rect(
-            buffer,
-            width,
-            height,
-            offset_x.saturating_add(rect.x),
-            offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
-            rect.width,
-            rect.height,
-            rect.color,
-        );
-    }
-
-    if let DocumentContent::Loaded(page) = &document.content {
-        for image in &layout.images {
-            let image_bottom = image.y.saturating_add(image.height);
-            if image_bottom < scroll_y || image.y > viewport_bottom {
-                continue;
+    for cmd in commands {
+        match cmd {
+            DrawCommand::Rect(rect) => {
+                let rect_bottom = rect.y.saturating_add(rect.height);
+                if rect_bottom < scroll_y || rect.y > viewport_bottom {
+                    continue;
+                }
+                draw_rect(
+                    buffer,
+                    width,
+                    height,
+                    offset_x.saturating_add(rect.x),
+                    offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
+                    rect.width,
+                    rect.height,
+                    rect.color,
+                );
             }
+            DrawCommand::Text(text) => {
+                let text_bottom = text
+                    .y
+                    .saturating_add(fonts.line_height_px(text.font_size_px, text.font_family));
+                if text_bottom < scroll_y || text.y > viewport_bottom {
+                    continue;
+                }
+                fonts.draw_text(
+                    buffer,
+                    width,
+                    height,
+                    offset_x.saturating_add(text.x),
+                    offset_y.saturating_add(text.y.saturating_sub(scroll_y)),
+                    &text.text,
+                    text.font_size_px,
+                    text.color,
+                    text.bold,
+                    text.underline,
+                    text.font_family,
+                );
+            }
+            DrawCommand::Image(image) => {
+                let image_bottom = image.y.saturating_add(image.height);
+                if image_bottom < scroll_y || image.y > viewport_bottom {
+                    continue;
+                }
+                if let Some(page) = page {
+                    if let Some(decoded) = page.images.get(&image.src) {
+                        draw_scaled_image(
+                            buffer,
+                            width,
+                            height,
+                            offset_x.saturating_add(image.x),
+                            offset_y.saturating_add(image.y.saturating_sub(scroll_y)),
+                            image.width,
+                            image.height,
+                            decoded,
+                        );
+                    }
+                }
+            }
+            DrawCommand::Layer(layer) => {
+                render_layer(
+                    buffer, width, height, offset_x, offset_y, scroll_y, layer,
+                    page, fonts, scratch, depth,
+                );
+            }
+        }
+    }
+}
 
-            let Some(decoded) = page.images.get(&image.src) else {
-                continue;
-            };
+fn render_layer(
+    buffer: &mut [u32],
+    buf_width: u32,
+    buf_height: u32,
+    offset_x: u32,
+    offset_y: u32,
+    scroll_y: u32,
+    layer: &LayerCommand,
+    page: Option<&crate::browser::BrowserPage>,
+    fonts: &mut FontContext,
+    scratch: &mut Vec<Vec<u32>>,
+    depth: usize,
+) {
+    // Compute screen-space position using signed arithmetic to handle layers above viewport
+    let layer_screen_y = layer.y as i64 + offset_y as i64 - scroll_y as i64;
+    let layer_screen_x = layer.x as i64 + offset_x as i64;
 
-            draw_scaled_image(
-                buffer,
-                width,
-                height,
-                offset_x.saturating_add(image.x),
-                offset_y.saturating_add(image.y.saturating_sub(scroll_y)),
-                image.width,
-                image.height,
-                decoded,
-            );
+    // Content viewport top/left: the chrome (address bar, etc.) occupies [0, offset_y) rows
+    // and [0, offset_x) cols. Layers must not bleed into the chrome area.
+    let content_top = offset_y as i64;
+    let content_left = offset_x as i64;
+
+    // Skip layers fully below or to the right of viewport/buffer
+    if layer_screen_y >= buf_height as i64 { return; }
+    if layer_screen_x >= buf_width as i64 { return; }
+    // Skip layers fully within the chrome (no part reaches the content area)
+    if layer_screen_y + layer.height as i64 <= content_top { return; }
+    if layer_screen_x + layer.width as i64 <= content_left { return; }
+
+    // Clip: how many rows/cols of the layer are above/left of the content viewport
+    let src_y_start = (content_top - layer_screen_y).max(0) as u32;
+    let src_x_start = (content_left - layer_screen_x).max(0) as u32;
+    // Destination in the main buffer: at least content_top / content_left
+    let dst_y = layer_screen_y.max(content_top) as u32;
+    let dst_x = layer_screen_x.max(content_left) as u32;
+
+    // Visible size: clipped by layer bounds and buffer bounds
+    let visible_h = layer.height.saturating_sub(src_y_start).min(buf_height.saturating_sub(dst_y));
+    let visible_w = layer.width.saturating_sub(src_x_start).min(buf_width.saturating_sub(dst_x));
+    if visible_h == 0 || visible_w == 0 { return; }
+
+    // Offscreen buffer uses the full layer dimensions (layer.width × layer.height) so that
+    // sub-commands are rendered at their natural layer-relative coordinates with scroll_y=0.
+    // This avoids the y-straddling bug where a command starting above src_y_start (e.g. a
+    // large background rect or image) would be shifted to y=0 via saturating_sub, causing
+    // the wrong portion of its content to appear in the visible slice.
+    // We copy the backdrop into the visible rows only, render all commands (scroll_y=0),
+    // then blend only the visible rows back to the main buffer.
+    let ow = layer.width;  // full layer width
+    let oh = layer.height; // full layer height — natural coordinate space
+
+    // Use checked_mul so pathological dimensions (which would overflow usize in release
+    // or panic in debug) are caught safely before any allocation attempt.
+    let Some(needed) = (ow as usize).checked_mul(oh as usize) else { return; };
+
+    // Safety guard: refuse to allocate an obviously pathological offscreen buffer.
+    // 8192×8192 (~67 MP) is well above any screen size we realistically support.
+    // A layer larger than this is almost certainly a bug in layout (e.g. height not clamped).
+    const MAX_OFFSCREEN_PIXELS: usize = 8192 * 8192;
+    if needed > MAX_OFFSCREEN_PIXELS {
+        return;
+    }
+
+    // Depth-indexed pool: scratch[depth] is the reusable offscreen Vec for this level.
+    // Nested DrawCommand::Layer calls use depth+1 so each nesting level has its own slot.
+    // After this frame, the Vec is returned to the pool with its capacity intact,
+    // so subsequent frames skip allocation entirely.
+    if scratch.len() <= depth {
+        scratch.resize_with(depth + 1, Vec::new);
+    }
+
+    // Take the offscreen Vec out of the pool temporarily.
+    // This gives us an exclusive &mut to `offscreen` while leaving `scratch` free to pass
+    // to render_commands for nested layers — no aliasing, no unsafe needed.
+    let mut offscreen = std::mem::take(&mut scratch[depth]);
+    offscreen.resize(needed, 0);
+
+    // Copy backdrop from the main framebuffer into the visible rows of the offscreen.
+    // Offscreen row (src_y_start + r) ↔ buffer row (dst_y + r), for r in 0..visible_h.
+    for row in 0..visible_h {
+        let buf_row = dst_y + row;
+        let off_row = src_y_start + row;
+        let buf_start = (buf_row * buf_width + dst_x) as usize;
+        let off_start = (off_row * ow + src_x_start) as usize;
+        let len = visible_w as usize;
+        if buf_start + len <= buffer.len() && off_start + len <= offscreen.len() {
+            offscreen[off_start..off_start + len]
+                .copy_from_slice(&buffer[buf_start..buf_start + len]);
         }
     }
 
-    for text in &layout.texts {
-        let text_bottom = text
-            .y
-            .saturating_add(fonts.line_height_px(text.font_size_px, text.font_family));
-        if text_bottom < scroll_y || text.y > viewport_bottom {
+    // Render layer's sub-commands into the full-size offscreen buffer at natural coordinates.
+    // Sub-commands are layer-relative (rebased at layout time), so x/y offsets are 0.
+    // scroll_y = 0: commands render at their layer-relative y without any shift.
+    // scratch is free (offscreen was taken via mem::take), so nested layers can use it.
+    render_commands(
+        &mut offscreen,
+        ow,
+        oh,
+        0,  // x offset: sub-commands are layer-relative
+        0,  // y offset: sub-commands are layer-relative
+        oh, // viewport height = full layer height (all commands visible)
+        0,  // scroll_y = 0: render at natural layer-relative coordinates
+        &layer.commands,
+        page,
+        fonts,
+        scratch,
+        depth + 1, // nested layers use the next depth slot
+    );
+
+    // Blend the visible rows of the offscreen back onto the main buffer with opacity.
+    // Visible row r: offscreen row (src_y_start + r) → buffer row (dst_y + r).
+    // Read from src_x_start in the offscreen (horizontal clip offset).
+    let opacity = layer.opacity as u32;
+    let buf_end = buffer.len();
+    let off_end = offscreen.len();
+    for row in 0..visible_h {
+        let buf_row_start = (dst_y + row) as usize * buf_width as usize + dst_x as usize;
+        let off_row_start = (src_y_start + row) as usize * ow as usize + src_x_start as usize;
+        if buf_row_start + visible_w as usize > buf_end || off_row_start + visible_w as usize > off_end {
             continue;
         }
-
-        fonts.draw_text(
-            buffer,
-            width,
-            height,
-            offset_x.saturating_add(text.x),
-            offset_y.saturating_add(text.y.saturating_sub(scroll_y)),
-            &text.text,
-            text.font_size_px,
-            text.color,
-            text.bold,
-            text.underline,
-            text.font_family,
-        );
+        for col in 0..visible_w as usize {
+            let src = offscreen[off_row_start + col];
+            let dst_px = buffer[buf_row_start + col];
+            let r = ((src >> 16 & 0xFF) * opacity + (dst_px >> 16 & 0xFF) * (255 - opacity) + 127) / 255;
+            let g = ((src >> 8 & 0xFF) * opacity + (dst_px >> 8 & 0xFF) * (255 - opacity) + 127) / 255;
+            let b = ((src & 0xFF) * opacity + (dst_px & 0xFF) * (255 - opacity) + 127) / 255;
+            buffer[buf_row_start + col] = (r << 16) | (g << 8) | b;
+        }
     }
+
+    // Return offscreen Vec to the pool so its capacity is reused next frame.
+    // Trim if dramatically over-sized: if the buffer is more than 4× larger than what
+    // this frame needed (and wastes >1 MB), release the excess so a previously-huge
+    // layer (e.g. a tall scrollable body) doesn't permanently inflate RAM after navigation.
+    const MAX_OVERAGE_PIXELS: usize = 256 * 1024; // 1 MB = 256K u32 pixels
+    if offscreen.capacity() > needed * 4 && offscreen.capacity() - needed > MAX_OVERAGE_PIXELS {
+        offscreen.shrink_to(needed * 2);
+    }
+    scratch[depth] = offscreen;
 }
 
 fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {
@@ -2283,7 +2480,7 @@ mod tests {
             &mut fonts,
         );
 
-        assert!(layout.texts.len() >= 2);
+        assert!(layout.texts().len() >= 2);
     }
 
     #[test]
