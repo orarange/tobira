@@ -23,12 +23,12 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Date: `2026-05-16`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
-- Active Claude branch: `claude/phase2-css`
+- Active Claude branch: `claude/add-css-roadmap` (PR #48 open — adds CSS_ROADMAP.md to master)
 - Workflow:
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `111` passing tests on `2026-05-16`
+  - `cargo test`: `134` passing tests on `2026-05-16`
   - `cargo build`: success on `2026-05-16`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -97,6 +97,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Recent Commit Landmarks
 
+- `f51ddca` [Claude] fix: restore lost types, Copilot review fixes (form-context, clipping, offscreen, box-shadow) — PR #47 merged
+- `84d8fca` docs: add CSS_ROADMAP.md to master — PR #48 open
 - `1df11f6` live input value sync implementation complete
 - `c64f16a` event listener capture groundwork complete
 - `48f7141` Merge branch 'codex/codex' into master (resolved conflicts)
@@ -118,7 +120,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
-- Claude's `claude/phase2-css` branch adds `position: relative/absolute/fixed`, `z-index`, and `display: flex` — not yet merged to master.
+- `CSS_ROADMAP.md` is on PR #48 (`claude/add-css-roadmap`); once merged it will be visible on master.
+- JS support still needs storage/cookies, richer history/back-forward, and more DOM depth for app-shell sites.
 
 ## Useful Commands
 
@@ -234,3 +237,21 @@ git log --oneline -n 20
 
 - Merged `codex/js-event-capture` into master, resolving conflicts in HANDOFF.md, README.md, and src/browser.rs.
 - Also merging `claude/phase2-css` (position/z-index/flexbox) — in progress.
+
+### 2026-05-16 - Claude (CSS phase2 merge fix-up + Copilot review pass)
+
+- Fixed deep merge regressions introduced when `claude/phase2-css` was merged into master (`10e3399`):
+  - Restored `FormControlCommand` and `FormControlKind` type definitions that were lost in the merge.
+  - Re-unified `merge_fragment` (bad conflict resolution had split it into two fragments, leaving controls-extend outside any function).
+  - Fixed `layout_preformatted_fragments` Control arm (referenced undeclared variables from a different function).
+  - Fixed `LayoutContext` initialization (missing `..LayoutContext::default()`).
+  - Fixed `layout_block_element` / `layout_mixed_children` call sites (missing `current_form: None` argument).
+  - Fixed `browser.rs` test `ComputedStyle` literals (missing `effective_opacity` field).
+- Addressed 3 remaining Copilot issues flagged before the rate limit:
+  - `BoxShadow.color`: changed `u32` → `Option<u32>` (None = inherit `currentColor`).
+  - `TextCommand.line_height_px`: new field; `clip_commands_to_box` now clips on line height, not font size.
+  - `MAX_OFFSCREEN_PIXELS` in `gui.rs`: reduced from 8192×8192 (268 MB) to 4096×4096 (64 MB).
+- Ran 5 Copilot review rounds (PRs #42 → #43 → #44 → #46 → #47); each round fixed all flagged comments.
+  - Final PR #47 merged with zero Copilot comments.
+- `cargo test`: 134 passing, 0 failed.
+- `CSS_ROADMAP.md` was missing from master (was on `claude/phase2-css` only); PR #48 (`claude/add-css-roadmap`) adds it.
