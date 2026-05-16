@@ -16,11 +16,24 @@ pub const DEFAULT_LINK_COLOR: Color = 0x2A5DB0;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    /// CSS custom properties declared on `:root` or `html` outside any `@media` block.
+    /// Shared via `Rc` so that cloning into each element's `css_variables` map is O(1).
+    pub root_vars: Rc<BTreeMap<String, String>>,
+    /// CSS custom properties declared on `:root` or `html` inside an `@media` block.
+    /// Each entry is `(condition, vars)` and is only applied when the condition matches
+    /// the current viewport width at style-computation time.
+    pub media_root_vars: Vec<(MediaCondition, BTreeMap<String, String>)>,
 }
 
 impl Stylesheet {
     pub fn extend(&mut self, other: Stylesheet) {
         self.rules.extend(other.rules);
+        // Merge unconditional root_vars: make a mutable copy, extend it, then wrap back in Rc
+        let mut merged = (*self.root_vars).clone();
+        merged.extend((*other.root_vars).clone());
+        self.root_vars = Rc::new(merged);
+        // Merge media-conditional root vars
+        self.media_root_vars.extend(other.media_root_vars);
     }
 }
 
@@ -30,10 +43,11 @@ pub struct Rule {
     declarations: Vec<Declaration>,
     /// None = always apply; Some(cond) = apply only when cond matches
     media: Option<MediaCondition>,
+    pub pseudo_element: Option<PseudoElement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum MediaCondition {
+pub(crate) enum MediaCondition {
     MaxWidth(u32),
     MinWidth(u32),
     Screen,
@@ -62,6 +76,7 @@ impl MediaCondition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Selector {
     parts: Vec<SelectorPart>,
+    pseudo_element: Option<PseudoElement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +101,14 @@ struct SimpleSelector {
     universal: bool,
     pseudo_classes: Vec<PseudoClass>,
     attributes: Vec<AttributeCondition>,
-    never_match: bool, // for ::before / ::after pseudo-elements
+    never_match: bool,
+    pseudo_element: Option<PseudoElement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PseudoElement {
+    Before,
+    After,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +274,14 @@ pub enum BoxSizing {
     BorderBox,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoxShadow {
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub blur: u32,
+    pub color: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overflow {
     Visible,
@@ -304,7 +334,7 @@ pub struct ComputedStyle {
     pub font_style_italic: bool,
     pub text_transform: TextTransform,
     pub text_indent: u32,
-    pub letter_spacing: i16,
+    pub letter_spacing: i32,
     pub max_width: Option<u32>,
     pub min_width: u32,
     pub max_height: Option<u32>,
@@ -314,6 +344,8 @@ pub struct ComputedStyle {
     pub list_style_type: ListStyleType,
     pub cursor_pointer: bool,
     pub text_decoration_color: Option<Color>,
+    pub box_shadow: Option<BoxShadow>,
+    pub content: Option<String>,
 }
 
 impl ComputedStyle {
@@ -363,6 +395,8 @@ impl ComputedStyle {
             list_style_type: ListStyleType::Disc,
             cursor_pointer: false,
             text_decoration_color: None,
+            box_shadow: None,
+            content: None,
         };
 
         match tag_name {
@@ -464,7 +498,8 @@ pub struct StyledText {
 /// being split on the inner comma.
 fn split_at_top_level(input: &str, delimiter: char) -> Vec<String> {
     let mut result = Vec::new();
-    let mut depth: u32 = 0;
+    let mut depth_paren: u32 = 0;
+    let mut depth_bracket: u32 = 0;
     let mut in_string: Option<char> = None;
     let mut escaped = false;
     let mut segment_start = 0;
@@ -486,13 +521,19 @@ fn split_at_top_level(input: &str, delimiter: char) -> Vec<String> {
                 in_string = None;
             }
             _ if in_string.is_some() => {}
-            '(' | '[' => {
-                depth += 1;
+            '(' => {
+                depth_paren += 1;
             }
-            ')' | ']' if depth > 0 => {
-                depth -= 1;
+            ')' if depth_paren > 0 => {
+                depth_paren -= 1;
             }
-            c if c == delimiter && depth == 0 => {
+            '[' => {
+                depth_bracket += 1;
+            }
+            ']' if depth_bracket > 0 => {
+                depth_bracket -= 1;
+            }
+            c if c == delimiter && depth_paren == 0 && depth_bracket == 0 => {
                 result.push(input[segment_start..index].to_string());
                 segment_start = index + ch.len_utf8();
             }
@@ -522,6 +563,8 @@ fn find_matching_close_brace(source: &str) -> Option<usize> {
 
 pub fn parse_stylesheet(input: &str) -> Stylesheet {
     let mut rules = Vec::new();
+    let mut root_vars = BTreeMap::new();
+    let mut media_root_vars: Vec<(MediaCondition, BTreeMap<String, String>)> = Vec::new();
     let source = strip_comments(input);
     let mut cursor = 0;
 
@@ -553,6 +596,22 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                 // The block_text is the inner CSS of the @media block
                 // Parse the inner rules and tag them with the media condition
                 let inner_stylesheet = parse_stylesheet(block_text);
+                // Store root vars declared inside this @media block separately so they
+                // are only applied when the media condition matches at runtime.
+                // Previously they were merged unconditionally into root_vars, which caused
+                // `@media (max-width: 600px) { :root { --foo: bar; } }` to always apply.
+                if !inner_stylesheet.root_vars.is_empty() {
+                    let inner_map = (*inner_stylesheet.root_vars).clone();
+                    media_root_vars.push((media_cond.clone(), inner_map));
+                }
+                // Also propagate any nested media_root_vars from the inner stylesheet.
+                // Note: nested @media root vars are stored with the inner condition only.
+                // The conjunction of outer + inner conditions is not computed. Nested @media
+                // is uncommon (non-standard before CSS nesting) and practically rare, so
+                // this approximation is acceptable for now.
+                for (inner_cond, inner_map) in inner_stylesheet.media_root_vars {
+                    media_root_vars.push((inner_cond, inner_map));
+                }
                 for mut rule in inner_stylesheet.rules {
                     rule.media = Some(media_cond.clone());
                     rules.push(rule);
@@ -566,22 +625,42 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
             continue;
         }
 
+        let declarations = parse_inline_declarations(block_text);
+
+        // Collect :root / html custom properties into root_vars.
+        // Check the raw selector text because :root is not a recognized pseudo-class and
+        // will be dropped by parse_selector — we must capture vars before that step.
+        // Media conditions are already respected here: @media rules are handled in the
+        // branch above and their inner stylesheets' root_vars are propagated separately.
+        let is_root = split_at_top_level(selector_text, ',').iter().any(|s| {
+            let s = s.trim().to_ascii_lowercase();
+            s == ":root" || s == "html"
+        });
+        if is_root {
+            for decl in &declarations {
+                if decl.property.starts_with("--") {
+                    root_vars.insert(decl.property.clone(), decl.value.clone());
+                }
+            }
+        }
+
         let selectors = split_at_top_level(selector_text, ',')
             .iter()
             .filter_map(|s| parse_selector(s.trim()))
             .collect::<Vec<_>>();
-        let declarations = parse_inline_declarations(block_text);
 
         if !selectors.is_empty() && !declarations.is_empty() {
+            let pseudo_element = selectors.iter().find_map(|sel| sel.pseudo_element.clone());
             rules.push(Rule {
                 selectors,
                 declarations,
                 media: None,
+                pseudo_element,
             });
         }
     }
 
-    Stylesheet { rules }
+    Stylesheet { rules, root_vars: Rc::new(root_vars), media_root_vars }
 }
 
 fn parse_media_condition(query: &str) -> MediaCondition {
@@ -716,7 +795,7 @@ fn build_node(
 
             let mut elem_sibling_idx = 0;
 
-            let children = element
+            let children: Vec<StyledNode> = element
                 .children
                 .iter()
                 .map(|child| {
@@ -741,6 +820,43 @@ fn build_node(
                 })
                 .collect();
 
+            // Inject ::before and ::after pseudo-element content.
+            // Use the pseudo-element rule's own ComputedStyle (color, font-size, etc.)
+            // rather than the host element's style, so `p::before { color: red; }` works.
+            let mut children = children;
+            if let Some((before_text, pseudo_style)) = collect_pseudo_content(
+                element,
+                stylesheet,
+                ancestors,
+                sibling_index,
+                sibling_count,
+                preceding_siblings,
+                viewport_width,
+                &PseudoElement::Before,
+                &style,
+            ) {
+                children.insert(0, StyledNode::Text(StyledText {
+                    text: before_text,
+                    style: pseudo_style,
+                }));
+            }
+            if let Some((after_text, pseudo_style)) = collect_pseudo_content(
+                element,
+                stylesheet,
+                ancestors,
+                sibling_index,
+                sibling_count,
+                preceding_siblings,
+                viewport_width,
+                &PseudoElement::After,
+                &style,
+            ) {
+                children.push(StyledNode::Text(StyledText {
+                    text: after_text,
+                    style: pseudo_style,
+                }));
+            }
+
             StyledNode::Element(StyledElement {
                 tag_name: element.tag_name.clone(),
                 attributes: element.attributes.clone(),
@@ -749,6 +865,89 @@ fn build_node(
             })
         }
     }
+}
+
+/// Strip a matched pair of surrounding CSS string quotes (`"..."` or `'...'`).
+/// Only removes quotes when the same quote character opens and closes the string.
+/// Unbalanced quotes (e.g. `"foo'`) are left intact.
+fn strip_css_string_quotes(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() >= 2 {
+        let first = s.as_bytes()[0];
+        let last = s.as_bytes()[s.len() - 1];
+        // Safety: `"` and `'` are single-byte ASCII characters, so checking
+        // s.as_bytes()[0] and s.as_bytes()[s.len()-1] is always valid.
+        // Slicing at byte offsets 1 and s.len()-1 is safe because the opening
+        // and closing quotes are each exactly 1 byte, regardless of the content.
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Returns `(content_string, pseudo_element_style)` for the last matching rule,
+/// or `None` if no matching `::before`/`::after` rule with a non-empty `content` exists.
+/// The returned `ComputedStyle` carries the pseudo-element's own declarations
+/// (color, font-size, font-weight, etc.) so callers can apply them to the injected node.
+fn collect_pseudo_content(
+    element: &Element,
+    stylesheet: &Stylesheet,
+    ancestors: &[AncestorSlot],
+    sibling_index: usize,
+    sibling_count: usize,
+    preceding_siblings: &[ElementIdentity],
+    viewport_width: u32,
+    which: &PseudoElement,
+    host_style: &ComputedStyle,
+) -> Option<(String, ComputedStyle)> {
+    let identity = ElementIdentity::from(element);
+    // Inherit from the host element so pseudo-elements pick up color, font-size, etc.
+    // CSS requires pseudo-elements to inherit from their originating element.
+    let mut pseudo_style = host_style.clone();
+    let mut content_text: Option<String> = None;
+
+    for rule in &stylesheet.rules {
+        if let Some(cond) = &rule.media {
+            if !cond.matches(viewport_width) {
+                continue;
+            }
+        }
+        // Check per-selector pseudo_element (not rule-level) to handle
+        // comma-separated selectors like `p::before, div::after { ... }`
+        let host_matches = rule.selectors.iter().any(|sel| {
+            sel.pseudo_element.as_ref() == Some(which)
+                && sel.matches(
+                    &identity,
+                    ancestors,
+                    sibling_index,
+                    sibling_count,
+                    preceding_siblings,
+                )
+        });
+        if !host_matches {
+            continue;
+        }
+        // Apply all declarations in cascade order.
+        // Accumulate `content` text separately to avoid intermediate clones of pseudo_style —
+        // the final (text, pseudo_style) pair is only constructed once at the end.
+        for decl in &rule.declarations {
+            if decl.property == "content" {
+                let v = strip_css_string_quotes(decl.value.trim());
+                if v == "none" || v == "normal" {
+                    content_text = None; // later content: none clears earlier content
+                } else if !v.is_empty() {
+                    content_text = Some(v.to_string());
+                }
+            } else {
+                // Use host_style.font_size_px so em/% units in pseudo-element rules
+                // resolve against the originating element's font size (not a hardcoded 16px).
+                apply_declaration(&mut pseudo_style, decl, host_style.font_size_px);
+            }
+        }
+    }
+    content_text.map(|text| (text, pseudo_style))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -767,10 +966,28 @@ fn compute_style(
     apply_legacy_attributes(&mut style, element, parent_font_size);
 
     let identity = ElementIdentity::from(element);
-    let mut css_variables: BTreeMap<String, String> = BTreeMap::new();
+    // O(1) ref bump — we avoid cloning the full BTreeMap unless this element has its own vars.
+    let root_vars = Rc::clone(&stylesheet.root_vars);
+    let mut element_vars: BTreeMap<String, String> = BTreeMap::new();
+    // Apply media-conditional root vars that match the current viewport width.
+    // These are stored separately from unconditional root_vars so they are only
+    // applied when their @media condition is satisfied.
+    for (cond, vars) in &stylesheet.media_root_vars {
+        if cond.matches(viewport_width) {
+            // CSS cascade: last declaration wins, so use insert (not or_insert_with).
+            // A later matching @media block should override an earlier one for the same var.
+            for (k, v) in vars {
+                element_vars.insert(k.clone(), v.clone());
+            }
+        }
+    }
     let mut applicable: Vec<(usize, usize, Declaration)> = Vec::new();
 
     for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
+        // Skip rules where ALL selectors are pseudo-element rules — they are handled by collect_pseudo_content
+        if rule.selectors.iter().all(|sel| sel.pseudo_element.is_some()) {
+            continue;
+        }
         // Check media condition
         if let Some(cond) = &rule.media {
             if !cond.matches(viewport_width) {
@@ -778,6 +995,13 @@ fn compute_style(
             }
         }
         for selector in &rule.selectors {
+            // Skip pseudo-element selectors (::before/::after) — they are handled
+            // by collect_pseudo_content and must not apply to the host element.
+            // This also prevents mixed rules like `p::before, span { color: red }`
+            // from incorrectly contributing declarations to the host `<p>`.
+            if selector.pseudo_element.is_some() {
+                continue;
+            }
             if selector.matches(
                 &identity,
                 ancestors,
@@ -788,7 +1012,7 @@ fn compute_style(
                 // First pass: collect CSS variables
                 for decl in &rule.declarations {
                     if decl.property.starts_with("--") {
-                        css_variables.insert(decl.property.clone(), decl.value.clone());
+                        element_vars.insert(decl.property.clone(), decl.value.clone());
                     }
                 }
                 applicable.extend(rule.declarations.iter().cloned().enumerate().map(
@@ -810,7 +1034,7 @@ fn compute_style(
         // collect inline CSS variables first
         for decl in &inline_decls {
             if decl.property.starts_with("--") {
-                css_variables.insert(decl.property.clone(), decl.value.clone());
+                element_vars.insert(decl.property.clone(), decl.value.clone());
             }
         }
         applicable.extend(
@@ -823,6 +1047,20 @@ fn compute_style(
 
     applicable.sort_by_key(|(specificity, order, _)| (*specificity, *order));
 
+    // Merge root_vars into element_vars once, before the declaration loop.
+    // element_vars (from matched rules + inline style) takes priority via or_insert_with.
+    // Doing this once here avoids repeated merge attempts on every var()-containing declaration.
+    if !element_vars.is_empty() {
+        for (k, v) in root_vars.iter() {
+            element_vars.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+    let vars_ref: &BTreeMap<String, String> = if element_vars.is_empty() {
+        &*root_vars
+    } else {
+        &element_vars
+    };
+
     for (_, _, mut declaration) in applicable {
         // skip CSS custom properties
         if declaration.property.starts_with("--") {
@@ -830,7 +1068,7 @@ fn compute_style(
         }
         // substitute var() references
         if declaration.value.contains("var(") {
-            declaration.value = substitute_vars(&declaration.value, &css_variables);
+            declaration.value = substitute_vars(&declaration.value, vars_ref);
         }
         apply_declaration(&mut style, &declaration, parent_font_size);
     }
@@ -1170,6 +1408,22 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             // simple: just look for known list-style-type tokens
             style.list_style_type = parse_list_style_type(value);
         }
+        "content" => {
+            let v = strip_css_string_quotes(value.trim());
+            if v == "none" || v == "normal" || v.is_empty() {
+                style.content = None;
+            } else {
+                style.content = Some(v.to_string());
+            }
+        }
+        "box-shadow" => {
+            let v = value.trim().to_ascii_lowercase();
+            if v == "none" {
+                style.box_shadow = None;
+            } else {
+                style.box_shadow = parse_box_shadow(value);
+            }
+        }
         "cursor" => {
             let v = value.trim().to_ascii_lowercase();
             style.cursor_pointer = v == "pointer";
@@ -1397,7 +1651,9 @@ fn parse_selector(input: &str) -> Option<Selector> {
     if parts.is_empty() {
         None
     } else {
-        Some(Selector { parts })
+        // Extract pseudo_element from the last part's simple selector
+        let pseudo_element = parts.last().and_then(|p| p.simple.pseudo_element.clone());
+        Some(Selector { parts, pseudo_element })
     }
 }
 
@@ -1449,11 +1705,17 @@ fn parse_simple_selector(input: &str) -> Option<SimpleSelector> {
                 i += 1;
                 // pseudo-element ::
                 if i < chars.len() && chars[i] == ':' {
-                    // ::before / ::after → never match
-                    selector.never_match = true;
-                    // consume rest
-                    while i < chars.len() {
+                    i += 1; // skip second ':'
+                    // collect pseudo-element name
+                    let mut pe_name = String::new();
+                    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-') {
+                        pe_name.push(chars[i]);
                         i += 1;
+                    }
+                    match pe_name.to_ascii_lowercase().as_str() {
+                        "before" => selector.pseudo_element = Some(PseudoElement::Before),
+                        "after" => selector.pseudo_element = Some(PseudoElement::After),
+                        _ => selector.never_match = true,
                     }
                     continue;
                 }
@@ -1506,6 +1768,7 @@ fn parse_simple_selector(input: &str) -> Option<SimpleSelector> {
         && selector.pseudo_classes.is_empty()
         && selector.attributes.is_empty()
         && !selector.never_match
+        && selector.pseudo_element.is_none()
     {
         None
     } else {
@@ -1975,6 +2238,69 @@ fn parse_list_style_type(input: &str) -> ListStyleType {
     ListStyleType::Disc
 }
 
+fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
+    let v = value.trim();
+    if v.to_ascii_lowercase() == "none" {
+        return None;
+    }
+    // Split tokens at spaces (top-level only, respecting parentheses for rgb()/rgba() colors).
+    // Note: only ASCII space is used as separator; tabs and other whitespace between
+    // tokens are not treated as delimiters. This is an approximation that covers
+    // standard CSS box-shadow syntax. Exotic whitespace (e.g. `2px\t2px`) would
+    // produce unparseable tokens.
+    let tokens: Vec<String> = split_at_top_level(v, ' ')
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Inset shadows are not yet supported; return None so they are silently skipped
+    // rather than being incorrectly drawn as outer shadows.
+    if tokens.iter().any(|t| t.to_ascii_lowercase() == "inset") {
+        return None;
+    }
+
+    let tokens: Vec<&str> = tokens.iter().map(|s| s.as_str()).collect();
+
+    if tokens.len() < 2 {
+        return None;
+    }
+
+    let mut offset_x: i32 = 0;
+    let mut offset_y: i32 = 0;
+    let mut blur: u32 = 0;
+    let mut color: u32 = 0;
+    let mut length_count = 0;
+
+    for token in &tokens {
+        // Note: parse_signed_length uses a hardcoded font-size of 16px,
+        // so `em`/`rem` units in box-shadow offsets resolve against 16px rather
+        // than the element's actual font size. This is a known approximation.
+        if let Some(val) = parse_signed_length(token, 16) {
+            match length_count {
+                0 => offset_x = val,
+                1 => offset_y = val,
+                2 => blur = val.max(0) as u32,
+                _ => {}
+            }
+            length_count += 1;
+        } else if let Some(c) = parse_color(token) {
+            color = c;
+        }
+    }
+
+    if length_count < 2 {
+        return None;
+    }
+
+    Some(BoxShadow {
+        offset_x,
+        offset_y,
+        blur,
+        color,
+    })
+}
+
 fn parse_line_height(input: &str, parent_font_size: u32) -> u32 {
     let v = input.trim().to_ascii_lowercase();
     if v == "normal" {
@@ -2232,7 +2558,7 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
     }
 
     if let Some(number) = value.strip_suffix("vh") {
-        return parse_float(number).map(|p| (p * 800.0 / 100.0).round() as u32);
+        return parse_float(number).map(|p| (p * 800.0 / 100.0).round() as u32); // viewport 800px tall — must match js.rs innerHeight
     }
 
     // rem must be checked before em
@@ -2251,8 +2577,10 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
     parse_float(&value).map(|p| p.round().max(0.0) as u32)
 }
 
-/// Like parse_length but allows negative values; returns i16.
-fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i16> {
+/// Like parse_length but allows negative values; returns i32.
+/// Using i32 rather than i16 avoids silent truncation for large offsets
+/// (e.g. box-shadow offsets > 32767px which are legal in CSS).
+fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i32> {
     let value = input.trim().to_ascii_lowercase();
     if value == "0" {
         return Some(0);
@@ -2260,11 +2588,12 @@ fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i16> {
 
     if value.starts_with('-') {
         let positive = &value[1..];
-        let px = parse_length(positive, parent_font_size)? as i16;
+        let px = parse_length(positive, parent_font_size)?.min(i32::MAX as u32) as i32;
         return Some(-px);
     }
 
-    parse_length(input, parent_font_size).map(|v| v.min(i16::MAX as u32) as i16)
+    // Clamp to i32::MAX before casting so pathological lengths (>= 2^31 px) don't wrap.
+    parse_length(input, parent_font_size).map(|v| v.min(i32::MAX as u32) as i32)
 }
 
 /// Simple calc() evaluator: left-to-right, no precedence.
@@ -3299,5 +3628,51 @@ mod tests {
             em.style.effective_opacity, 128,
             "inline stacking context should reset effective_opacity to child's own opacity"
         );
+    }
+    #[test]
+    fn test_root_css_variable_inheritance() {
+        use crate::html::parse_document;
+        let css_text = r#":root { --color: #ff0000; } p { color: var(--color); }"#;
+        let html = r#"<html><head></head><body><p>Hello</p></body></html>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet(css_text);
+        let styled = build_styled_tree(&doc, &stylesheet, 800);
+
+        fn find_p(node: &StyledNode) -> Option<&StyledElement> {
+            match node {
+                StyledNode::Element(el) if el.tag_name == "p" => Some(el),
+                StyledNode::Element(el) => el.children.iter().find_map(find_p),
+                _ => None,
+            }
+        }
+
+        let p_el = find_p(&styled).expect("Should find <p> element");
+        assert_eq!(p_el.style.color, 0xff0000, "p color should be #ff0000 from :root var");
+    }
+    #[test]
+    fn test_before_pseudo_element_content_injection() {
+        use crate::html::parse_document;
+
+        let css = r#"p::before { content: "-> "; }"#;
+        let html = r#"<p>Hello</p>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &stylesheet, 800);
+
+        fn find_p(node: &StyledNode) -> Option<&StyledElement> {
+            match node {
+                StyledNode::Element(el) if el.tag_name == "p" => Some(el),
+                StyledNode::Element(el) => el.children.iter().find_map(find_p),
+                _ => None,
+            }
+        }
+
+        let p_el = find_p(&styled).expect("Should find <p> element");
+        assert!(!p_el.children.is_empty(), "p should have children");
+        if let StyledNode::Text(first) = &p_el.children[0] {
+            assert_eq!(first.text, "-> ", "First child should be ::before content");
+        } else {
+            panic!("First child should be a text node from ::before");
+        }
     }
 }
