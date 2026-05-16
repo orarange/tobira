@@ -987,13 +987,20 @@ impl BrowserApp {
         cancelable: bool,
     ) -> Option<DomEventDispatchResult> {
         let node_id = node_id?;
-        let result = self.document.dispatch_dom_event(DomEventRequest {
+        self.dispatch_page_dom_event_request(DomEventRequest {
             target_node_id: node_id,
             event_type: event_type.to_string(),
             bubbles,
             cancelable,
             ..Default::default()
-        })?;
+        })
+    }
+
+    fn dispatch_page_dom_event_request(
+        &mut self,
+        request: DomEventRequest,
+    ) -> Option<DomEventDispatchResult> {
+        let result = self.document.dispatch_dom_event(request)?;
 
         if let Some(target_url) = result.snapshot.navigation_target.clone()
             && let Ok(url) = Url::parse(&target_url)
@@ -1021,6 +1028,25 @@ impl BrowserApp {
             .as_ref()
             .and_then(|focused| focused.node_id);
         self.dispatch_page_dom_event(node_id, event_type, bubbles, cancelable)
+    }
+
+    fn dispatch_focused_page_keyboard_event(
+        &mut self,
+        event_type: &str,
+        key_code: KeyCode,
+        repeat: bool,
+    ) -> Option<DomEventDispatchResult> {
+        let node_id = self
+            .focused_page_input
+            .as_ref()
+            .and_then(|focused| focused.node_id)?;
+        self.dispatch_page_dom_event_request(keyboard_dom_event_request(
+            node_id,
+            event_type,
+            key_code,
+            repeat,
+            &self.modifiers,
+        ))
     }
 
     fn focused_page_editor_mut(&mut self) -> Option<&mut AddressBarState> {
@@ -1394,7 +1420,7 @@ impl ApplicationHandler for BrowserApp {
         window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        let Some(window) = &self.window else {
+        let Some(window) = self.window.as_ref().cloned() else {
             return;
         };
 
@@ -1443,20 +1469,58 @@ impl ApplicationHandler for BrowserApp {
             }
             WindowEvent::Ime(ime) => self.handle_ime(ime),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if let PhysicalKey::Code(key_code) = event.physical_key {
-                    if self.handle_key(key_code, window.inner_size(), event.repeat) {
-                        event_loop.exit();
-                        return;
-                    }
+                let physical_key = match event.physical_key {
+                    PhysicalKey::Code(key_code) => Some(key_code),
+                    _ => None,
+                };
+                let focused_page_control_id = self
+                    .focused_page_input
+                    .as_ref()
+                    .map(|focused| focused.control_id);
+                let keydown_result = physical_key.and_then(|key_code| {
+                    focused_page_control_id.and_then(|_| {
+                        self.dispatch_focused_page_keyboard_event("keydown", key_code, event.repeat)
+                    })
+                });
+
+                if keydown_result
+                    .as_ref()
+                    .is_some_and(|result| result.snapshot.navigation_target.is_some())
+                {
+                    return;
                 }
 
-                if let Some(text) = event.text.as_deref() {
-                    if !self.modifiers.control_key()
-                        && !self.modifiers.alt_key()
-                        && !self.modifiers.super_key()
-                    {
-                        self.handle_text_input(text);
-                    }
+                if let Some(key_code) = physical_key
+                    && !keydown_result
+                        .as_ref()
+                        .is_some_and(|result| result.default_prevented)
+                    && self.handle_key(key_code, window.inner_size(), event.repeat)
+                {
+                    event_loop.exit();
+                    return;
+                }
+
+                if let Some(text) = event.text.as_deref()
+                    && !keydown_result
+                        .as_ref()
+                        .is_some_and(|result| result.default_prevented)
+                    && !self.modifiers.control_key()
+                    && !self.modifiers.alt_key()
+                    && !self.modifiers.super_key()
+                {
+                    self.handle_text_input(text);
+                }
+
+                if let (Some(key_code), Some(focused_control_id)) =
+                    (physical_key, focused_page_control_id)
+                    && self
+                        .focused_page_input
+                        .as_ref()
+                        .map(|focused| focused.control_id)
+                        == Some(focused_control_id)
+                {
+                    let _ =
+                        self.dispatch_focused_page_keyboard_event("keyup", key_code, event.repeat);
                 }
             }
             _ => {}
@@ -2292,6 +2356,99 @@ fn percent_encode_form_component(value: &str) -> String {
         }
     }
     encoded
+}
+
+fn keyboard_dom_event_request(
+    node_id: usize,
+    event_type: &str,
+    key_code: KeyCode,
+    repeat: bool,
+    modifiers: &ModifiersState,
+) -> DomEventRequest {
+    DomEventRequest {
+        target_node_id: node_id,
+        event_type: event_type.to_string(),
+        bubbles: true,
+        cancelable: matches!(event_type, "keydown"),
+        key: Some(dom_key_value_for_key_code(key_code, modifiers.shift_key())),
+        code: Some(dom_code_value_for_key_code(key_code)),
+        repeat,
+        alt_key: modifiers.alt_key(),
+        ctrl_key: modifiers.control_key(),
+        shift_key: modifiers.shift_key(),
+        meta_key: modifiers.super_key(),
+    }
+}
+
+fn dom_key_value_for_key_code(key_code: KeyCode, shift: bool) -> String {
+    match key_code {
+        KeyCode::KeyA => if shift { "A" } else { "a" }.to_string(),
+        KeyCode::KeyB => if shift { "B" } else { "b" }.to_string(),
+        KeyCode::KeyC => if shift { "C" } else { "c" }.to_string(),
+        KeyCode::KeyD => if shift { "D" } else { "d" }.to_string(),
+        KeyCode::KeyE => if shift { "E" } else { "e" }.to_string(),
+        KeyCode::KeyF => if shift { "F" } else { "f" }.to_string(),
+        KeyCode::KeyG => if shift { "G" } else { "g" }.to_string(),
+        KeyCode::KeyH => if shift { "H" } else { "h" }.to_string(),
+        KeyCode::KeyI => if shift { "I" } else { "i" }.to_string(),
+        KeyCode::KeyJ => if shift { "J" } else { "j" }.to_string(),
+        KeyCode::KeyK => if shift { "K" } else { "k" }.to_string(),
+        KeyCode::KeyL => if shift { "L" } else { "l" }.to_string(),
+        KeyCode::KeyM => if shift { "M" } else { "m" }.to_string(),
+        KeyCode::KeyN => if shift { "N" } else { "n" }.to_string(),
+        KeyCode::KeyO => if shift { "O" } else { "o" }.to_string(),
+        KeyCode::KeyP => if shift { "P" } else { "p" }.to_string(),
+        KeyCode::KeyQ => if shift { "Q" } else { "q" }.to_string(),
+        KeyCode::KeyR => if shift { "R" } else { "r" }.to_string(),
+        KeyCode::KeyS => if shift { "S" } else { "s" }.to_string(),
+        KeyCode::KeyT => if shift { "T" } else { "t" }.to_string(),
+        KeyCode::KeyU => if shift { "U" } else { "u" }.to_string(),
+        KeyCode::KeyV => if shift { "V" } else { "v" }.to_string(),
+        KeyCode::KeyW => if shift { "W" } else { "w" }.to_string(),
+        KeyCode::KeyX => if shift { "X" } else { "x" }.to_string(),
+        KeyCode::KeyY => if shift { "Y" } else { "y" }.to_string(),
+        KeyCode::KeyZ => if shift { "Z" } else { "z" }.to_string(),
+        KeyCode::Digit1 => if shift { "!" } else { "1" }.to_string(),
+        KeyCode::Digit2 => if shift { "@" } else { "2" }.to_string(),
+        KeyCode::Digit3 => if shift { "#" } else { "3" }.to_string(),
+        KeyCode::Digit4 => if shift { "$" } else { "4" }.to_string(),
+        KeyCode::Digit5 => if shift { "%" } else { "5" }.to_string(),
+        KeyCode::Digit6 => if shift { "^" } else { "6" }.to_string(),
+        KeyCode::Digit7 => if shift { "&" } else { "7" }.to_string(),
+        KeyCode::Digit8 => if shift { "*" } else { "8" }.to_string(),
+        KeyCode::Digit9 => if shift { "(" } else { "9" }.to_string(),
+        KeyCode::Digit0 => if shift { ")" } else { "0" }.to_string(),
+        KeyCode::Minus => if shift { "_" } else { "-" }.to_string(),
+        KeyCode::Equal => if shift { "+" } else { "=" }.to_string(),
+        KeyCode::BracketLeft => if shift { "{" } else { "[" }.to_string(),
+        KeyCode::BracketRight => if shift { "}" } else { "]" }.to_string(),
+        KeyCode::Semicolon => if shift { ":" } else { ";" }.to_string(),
+        KeyCode::Quote => if shift { "\"" } else { "'" }.to_string(),
+        KeyCode::Comma => if shift { "<" } else { "," }.to_string(),
+        KeyCode::Period => if shift { ">" } else { "." }.to_string(),
+        KeyCode::Slash => if shift { "?" } else { "/" }.to_string(),
+        KeyCode::Backquote => if shift { "~" } else { "`" }.to_string(),
+        KeyCode::Backslash => if shift { "|" } else { "\\" }.to_string(),
+        KeyCode::Space => " ".to_string(),
+        KeyCode::Enter | KeyCode::NumpadEnter => "Enter".to_string(),
+        KeyCode::Tab => "Tab".to_string(),
+        KeyCode::Escape => "Escape".to_string(),
+        KeyCode::Backspace => "Backspace".to_string(),
+        KeyCode::Delete => "Delete".to_string(),
+        KeyCode::ArrowLeft => "ArrowLeft".to_string(),
+        KeyCode::ArrowRight => "ArrowRight".to_string(),
+        KeyCode::ArrowUp => "ArrowUp".to_string(),
+        KeyCode::ArrowDown => "ArrowDown".to_string(),
+        KeyCode::Home => "Home".to_string(),
+        KeyCode::End => "End".to_string(),
+        KeyCode::PageUp => "PageUp".to_string(),
+        KeyCode::PageDown => "PageDown".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+fn dom_code_value_for_key_code(key_code: KeyCode) -> String {
+    format!("{key_code:?}")
 }
 
 fn parse_address_input(input: &str) -> Result<Url> {

@@ -95,8 +95,8 @@
       <p>
         This page exercises native page events in Tobira. Try clicking the
         input and link, typing, pressing Enter, and using the submit button.
-        The log should show bubbling for click, input, change, and submit.
-        Focus and blur are logged on the input itself.
+        The log should show bubbling for click, input, change, submit, keydown,
+        and keyup. Focus and blur are logged on the input itself.
       </p>
 
       <form id="demo-form" action="?submitted=1" method="get">
@@ -111,6 +111,11 @@
           browser stays on this page and the log keeps growing.
         </small>
       </form>
+
+      <p>
+        Keyboard test: focus the input and press letters or Backspace to see
+        keydown and keyup flow through the page DOM.
+      </p>
 
       <pre id="log"></pre>
     </main>

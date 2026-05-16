@@ -148,7 +148,7 @@ The living JavaScript roadmap is in [JS_ROADMAP.md](JS_ROADMAP.md).
 
 Short version:
 
-1. Finish keyboard events and richer listener options
+1. Finish richer listener options and capture phase handling
 2. Tighten live `input.value` sync and other DOM fidelity gaps
 3. Add storage, cookies, and history/navigation behavior
 4. Improve networking semantics and reflow after DOM mutation
@@ -167,10 +167,10 @@ Current JS support is intentionally small:
 - `document.createElement(...)`
 - `appendChild(...)` / `insertBefore(...)` / `remove()`
 - `innerHTML`, `textContent`, `classList`, `id`, `className`
-- `document.addEventListener(...)` / bubbling for `click`, `input`, `change`, and `submit`
+- `document.addEventListener(...)` / bubbling for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`
 - `focus` / `blur` are currently target-only
 - `addEventListener(...)` on page inputs, buttons, links, and forms
-- `click`, `focus`, `blur`, `input`, `change`, and `submit` event dispatch
+- `click`, `focus`, `blur`, `input`, `change`, `submit`, `keydown`, and `keyup` event dispatch
 - `location.href`
 - `console.log()` / `warn()` / `error()`
 - immediate `setTimeout(...)` fallback

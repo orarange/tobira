@@ -45,23 +45,22 @@ Goal: make page interaction feel like a browser, not a custom app.
 Tasks:
 
 - `addEventListener(...)` and basic listener registration are in place
-- basic bubbling exists for `click`, `input`, `change`, and `submit`; `focus` and `blur` are target-only
+- basic bubbling exists for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`; `focus` and `blur` are target-only
 - page controls now dispatch DOM events before default actions
 - submit and link clicks can be canceled with `preventDefault()`
 
 Still to finish in this phase:
 
-- `removeEventListener(...)`
-- keyboard events such as `keydown` and `keyup`
 - capture phase / richer listener options
 - live GUI typing synchronized into script-visible DOM state in every edit path
 - more complete default-action sequencing for edge cases
+- `removeEventListener(...)` parity for more option combinations
 
 Exit criteria:
 
 - simple JS-driven buttons and forms work without special-case browser code
 - page scripts can observe user typing and clicks
-- Google-style search boxes can react to input and submit handlers
+- Google-style search boxes can react to input, submit, and keyboard handlers
 
 ## Phase 2: DOM Fidelity
 

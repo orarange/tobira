@@ -27,12 +27,24 @@ function appendLine(line) {
 }
 
 function describeEvent(event) {
-  return [
+  const bits = [
     `type=${event.type}`,
     `target=${nodeLabel(event.target)}`,
     `current=${nodeLabel(event.currentTarget)}`,
     `defaultPrevented=${event.defaultPrevented}`,
-  ].join(" ");
+  ];
+
+  if ("key" in event) {
+    bits.push(`key=${event.key}`);
+  }
+  if ("code" in event) {
+    bits.push(`code=${event.code}`);
+  }
+  if ("repeat" in event) {
+    bits.push(`repeat=${event.repeat}`);
+  }
+
+  return bits.join(" ");
 }
 
 function record(scope, event) {
@@ -67,6 +79,14 @@ document.addEventListener("submit", (event) => {
   record("document", event);
 });
 
+document.addEventListener("keydown", (event) => {
+  record("document", event);
+});
+
+document.addEventListener("keyup", (event) => {
+  record("document", event);
+});
+
 input.addEventListener("focus", (event) => {
   record("input", event);
 });
@@ -80,6 +100,14 @@ input.addEventListener("input", (event) => {
 });
 
 input.addEventListener("change", (event) => {
+  record("input", event);
+});
+
+input.addEventListener("keydown", (event) => {
+  record("input", event);
+});
+
+input.addEventListener("keyup", (event) => {
   record("input", event);
 });
 

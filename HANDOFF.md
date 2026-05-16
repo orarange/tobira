@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/codex` worktree
 - Verification status:
-  - `cargo test`: `102` passing tests on `2026-05-16`
+  - `cargo test`: `103` passing tests on `2026-05-16`
   - `cargo build`: success on `2026-05-16`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -47,6 +47,10 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - caret / selection / clipboard shortcuts
     - IME cursor placement
     - basic `GET` form submission with relative action resolution and query encoding
+    - focused-input keyboard event delivery for `keydown` / `keyup`
+  - page keyboard events:
+    - focused page inputs receive bubbling `keydown` / `keyup`
+    - key metadata includes `key`, `code`, modifier flags, and `repeat`
   - guarded JavaScript execution through `boa_engine`
   - lightweight mutable DOM bridge with:
     - `querySelector(...)`, `querySelectorAll(...)`, `getElementById(...)`
@@ -62,7 +66,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - loop-iteration runtime budget for runaway scripts
     - same-origin request and redirect guards
     - script-driven `location.href` follow-up navigation
-  - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, and event plumbing
+  - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, and keyboard event logging
   - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
   - site-specific rendering paths for:
     - YouTube watch pages
@@ -104,7 +108,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 ## Known Gaps / Likely Next Work
 
 - JS support is still far from a full browser DOM / framework runtime.
-- GUI-to-page event delivery now covers bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`; keyboard events and capture-phase behavior still need depth.
+- GUI-to-page event delivery now covers bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; capture-phase behavior and richer listener options still need depth.
 - Native page input typing now syncs `value` into the JS DOM, but a few edge cases still need validation.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward behavior is not yet complete.
@@ -185,5 +189,17 @@ git worktree list
 ### 2026-05-16 - Codex (event plumbing demo)
 
 - Added a dedicated `demo/events-demo.html` / `demo/events-demo.js` page for verifying native page event plumbing.
-- Updated the docs to reflect that bubbling DOM event dispatch covers `click`, `input`, `change`, and `submit`, while `focus` and `blur` remain target-only.
-- Kept the roadmap and handoff notes in sync with the remaining keyboard, capture-phase, and live-value reflection gaps.
+- Updated the docs to reflect that bubbling DOM event dispatch covers `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, while `focus` and `blur` remain target-only.
+- Kept the roadmap and handoff notes in sync with the remaining capture-phase, richer listener option, and live-value reflection gaps.
+
+### 2026-05-16 - Codex (keyboard event plumbing)
+
+- Added page keyboard event dispatch for focused inputs so scripts can observe `keydown` and `keyup` before browser default actions run.
+- Included keyboard metadata in the event payload (`key`, `code`, modifier flags, and `repeat`) and added demo logging for manual inspection.
+- The next event-system gap is richer listener options and capture-phase dispatch, not basic key delivery.
+
+### 2026-05-16 - Codex (keyboard roadmap step)
+
+- Tightened the GUI event loop so focused page inputs receive `keydown` before default handling and `keyup` after the edit path finishes.
+- Added a regression test that checks keyboard event metadata reaches JS listeners on the document.
+- Updated the living roadmap and demo copy to treat keyboard delivery as a completed milestone and the next phase as richer listener options / capture phase.

@@ -402,20 +402,18 @@ impl JavaScriptRuntime {
     }
 
     fn dispatch_dom_event(&mut self, request: DomEventRequest) -> DomEventDispatchResult {
-        let default_prevented = self
-            .dispatch_dom_event_to_node(
-                request.target_node_id,
-                &request.event_type,
-                request.bubbles,
-                request.cancelable,
-            )
-            .unwrap_or(false);
+        let default_prevented = self.dispatch_dom_event_request(request).unwrap_or(false);
         self.flush_pending_document_writes();
         self.process_loaded_document();
         DomEventDispatchResult {
             snapshot: self.snapshot(),
             default_prevented,
         }
+    }
+
+    fn dispatch_dom_event_request(&mut self, request: DomEventRequest) -> JsResult<bool> {
+        let target = build_dom_node_object(&mut self.context, request.target_node_id);
+        dispatch_dom_event_on_target(target, &request, &mut self.context)
     }
 
     fn execute(&mut self, source: &str) {
@@ -579,15 +577,13 @@ impl JavaScriptRuntime {
         bubbles: bool,
         cancelable: bool,
     ) -> JsResult<bool> {
-        let target = build_dom_node_object(&mut self.context, node_id);
-        let request = DomEventRequest {
+        self.dispatch_dom_event_request(DomEventRequest {
             target_node_id: node_id,
             event_type: event_type.to_string(),
             bubbles,
             cancelable,
             ..Default::default()
-        };
-        dispatch_dom_event_on_target(target, &request, &mut self.context)
+        })
     }
 
     fn dispatch_global_event(
@@ -4449,8 +4445,8 @@ mod tests {
     use boa_engine::{Context, JsValue, Source, js_string};
 
     use super::{
-        JavaScriptRuntime, current_location_url, ensure_same_origin_script_url, fetch_for_script,
-        process_document_scripts, resolve_requested_url, set_location_href,
+        DomEventRequest, JavaScriptRuntime, current_location_url, ensure_same_origin_script_url,
+        fetch_for_script, process_document_scripts, resolve_requested_url, set_location_href,
     };
     use crate::url::Url;
 
@@ -4676,6 +4672,36 @@ mod tests {
         );
 
         assert!(processed.html.contains("<p>Ready</p>"));
+    }
+
+    #[test]
+    fn dispatches_keyboard_events_with_key_metadata() {
+        let mut runtime = JavaScriptRuntime::new(
+            &Url::parse("https://example.com").unwrap(),
+            "<html><body><div id=\"demo\"></div><script>document.addEventListener('keydown', function (event) { document.title = [event.type, event.key, event.code, String(event.ctrlKey), String(event.shiftKey)].join('|'); });</script></body></html>",
+        );
+        runtime.process_loaded_document();
+        runtime.dispatch_initial_load_events();
+
+        let result = runtime.dispatch_dom_event(DomEventRequest {
+            target_node_id: runtime.document_id(),
+            event_type: "keydown".to_string(),
+            bubbles: true,
+            cancelable: true,
+            key: Some("a".to_string()),
+            code: Some("KeyA".to_string()),
+            repeat: false,
+            alt_key: false,
+            ctrl_key: false,
+            shift_key: false,
+            meta_key: false,
+        });
+
+        assert!(!result.default_prevented);
+        assert_eq!(
+            result.snapshot.title_override.as_deref(),
+            Some("keydown|a|KeyA|false|false")
+        );
     }
 
     #[test]
