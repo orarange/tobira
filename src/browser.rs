@@ -426,7 +426,9 @@ fn expand_frameset(
         .attribute("rows")
         .map(|value| parse_frame_tracks(value, frames.len()));
 
-    let mut frame_nodes = Vec::new();
+    // Collect (children, body_style_attrs) tuples so bgcolor/background from each
+    // frame's <body> element can be transferred to the synthetic wrapper <td>.
+    let mut frame_nodes: Vec<(Vec<Node>, BTreeMap<String, String>)> = Vec::new();
     for frame in frames {
         let Some(src) = frame.attribute("src") else {
             continue;
@@ -437,7 +439,9 @@ fn expand_frameset(
         let Ok(frame_document) = load_document_source(&frame_url, frame_depth) else {
             continue;
         };
-        frame_nodes.push(extract_body_children(&frame_document.document));
+        let children = extract_body_children(&frame_document.document);
+        let body_attrs = extract_body_style_attrs(&frame_document.document);
+        frame_nodes.push((children, body_attrs));
     }
 
     if frame_nodes.is_empty() {
@@ -465,7 +469,7 @@ fn expand_frameset(
     }
 
     let mut body_children = Vec::new();
-    for children in frame_nodes {
+    for (children, _) in frame_nodes {
         body_children.extend(children);
         body_children.push(hr_node());
     }
@@ -593,15 +597,23 @@ fn synthetic_document(title: &str, body_children: Vec<Node>) -> Node {
 fn synthetic_frameset_columns_document(
     title: &str,
     tracks: &[FrameTrack],
-    frame_nodes: Vec<Vec<Node>>,
+    frame_nodes: Vec<(Vec<Node>, BTreeMap<String, String>)>,
 ) -> Node {
     let cells = frame_nodes
         .into_iter()
         .zip(tracks.iter())
-        .map(|(children, track)| {
+        .map(|((children, body_attrs), track)| {
+            let mut attrs = table_cell_attributes(track);
+            // Carry bgcolor / text / data-scratch-background from the frame's <body>
+            // so the synthetic <td> inherits the frame's background color.
+            for key in &["bgcolor", "text", "data-scratch-background"] {
+                if let Some(val) = body_attrs.get(*key) {
+                    attrs.insert(key.to_string(), val.clone());
+                }
+            }
             Node::Element(Element {
                 tag_name: "td".to_string(),
-                attributes: table_cell_attributes(track),
+                attributes: attrs,
                 children,
             })
         })
@@ -624,18 +636,24 @@ fn synthetic_frameset_columns_document(
 fn synthetic_frameset_rows_document(
     title: &str,
     tracks: &[FrameTrack],
-    frame_nodes: Vec<Vec<Node>>,
+    frame_nodes: Vec<(Vec<Node>, BTreeMap<String, String>)>,
 ) -> Node {
     let rows = frame_nodes
         .into_iter()
         .zip(tracks.iter())
-        .map(|(children, track)| {
+        .map(|((children, body_attrs), track)| {
+            let mut td_attrs = BTreeMap::new();
+            for key in &["bgcolor", "text", "data-scratch-background"] {
+                if let Some(val) = body_attrs.get(*key) {
+                    td_attrs.insert(key.to_string(), val.clone());
+                }
+            }
             Node::Element(Element {
                 tag_name: "tr".to_string(),
                 attributes: row_attributes(track),
                 children: vec![Node::Element(Element {
                     tag_name: "td".to_string(),
-                    attributes: BTreeMap::new(),
+                    attributes: td_attrs,
                     children,
                 })],
             })
@@ -701,6 +719,33 @@ fn extract_body_children(node: &Node) -> Vec<Node> {
             }
 
             Vec::new()
+        }
+    }
+}
+
+/// Extract style-relevant attributes from the `<body>` element so they can be
+/// transferred to the synthetic `<td>` wrapper when merging frameset frames.
+/// Preserves `bgcolor`, `text` (body text color), and `data-scratch-background`.
+fn extract_body_style_attrs(node: &Node) -> BTreeMap<String, String> {
+    match node {
+        Node::Text(_) => BTreeMap::new(),
+        Node::Element(element) => {
+            if element.tag_name == "body" {
+                let mut attrs = BTreeMap::new();
+                for key in &["bgcolor", "text", "data-scratch-background"] {
+                    if let Some(val) = element.attributes.get(*key) {
+                        attrs.insert(key.to_string(), val.clone());
+                    }
+                }
+                return attrs;
+            }
+            for child in &element.children {
+                let attrs = extract_body_style_attrs(child);
+                if !attrs.is_empty() {
+                    return attrs;
+                }
+            }
+            BTreeMap::new()
         }
     }
 }
