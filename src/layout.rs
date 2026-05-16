@@ -843,6 +843,18 @@ fn layout_node(
                     let current_form = form_context_for_element(element, context, current_form);
                     layout_flex_container(element, x, width, cursor_y, context, images, fonts, current_form.clone());
                 }
+                Display::InlineFlex => {
+                    // Inline-flex: behaves like flex internally but inline in parent flow.
+                    // Treat it as a flex container with full available width here (block-level fallback).
+                    let current_form = form_context_for_element(element, context, current_form);
+                    let inline_width = element.style.width
+                        .map(|w| match w {
+                            LengthValue::Pixels(px) => px,
+                            LengthValue::Percent(pct) => (width as f32 * pct as f32 / 100.0) as u32,
+                        })
+                        .unwrap_or(width);
+                    layout_flex_container(element, x, inline_width, cursor_y, context, images, fonts, current_form.clone());
+                }
             }
         }
     }
@@ -2380,7 +2392,7 @@ fn collect_inline_fragments(
                         );
                     }
                 }
-                Display::Block | Display::ListItem | Display::Flex => {}
+                Display::Block | Display::ListItem | Display::Flex | Display::InlineFlex => {}
             }
         }
     }
@@ -2898,7 +2910,7 @@ fn is_block_level(node: &StyledNode) -> bool {
         node,
         StyledNode::Element(StyledElement {
             style: ComputedStyle {
-                display: Display::Block | Display::ListItem,
+                display: Display::Block | Display::ListItem | Display::Flex | Display::InlineFlex,
                 ..
             },
             ..

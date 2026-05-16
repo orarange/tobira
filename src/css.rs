@@ -120,6 +120,9 @@ enum PseudoClass {
     Hover,
     Focus,
     Active,
+    Checked,
+    Disabled,
+    Enabled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +214,7 @@ pub enum Display {
     ListItem,
     None,
     Flex,
+    InlineFlex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,6 +339,17 @@ impl Default for JustifyContent { fn default() -> Self { JustifyContent::FlexSta
 pub enum AlignSelf { Auto, Stretch, FlexStart, FlexEnd, Center, Baseline }
 impl Default for AlignSelf { fn default() -> Self { AlignSelf::Auto } }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignContent {
+    FlexStart,
+    FlexEnd,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+    Stretch,
+}
+impl Default for AlignContent { fn default() -> Self { AlignContent::Stretch } }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ObjectFit {
     #[default]
@@ -414,6 +429,7 @@ pub struct ComputedStyle {
     pub align_items: AlignItems,
     pub justify_content: JustifyContent,
     pub align_self: AlignSelf,
+    pub align_content: AlignContent,
     pub flex_grow: u32,
     pub flex_shrink: u32,
     pub flex_basis: Option<LengthValue>,
@@ -490,6 +506,7 @@ impl ComputedStyle {
             align_items: AlignItems::Stretch,
             justify_content: JustifyContent::FlexStart,
             align_self: AlignSelf::Auto,
+            align_content: AlignContent::Stretch,
             flex_grow: 0,
             flex_shrink: 100,
             flex_basis: None,
@@ -1609,6 +1626,32 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 _ => AlignSelf::Auto,
             };
         }
+        "align-content" => {
+            style.align_content = match value.trim().to_ascii_lowercase().as_str() {
+                "flex-start" | "start" => AlignContent::FlexStart,
+                "flex-end" | "end" => AlignContent::FlexEnd,
+                "center" => AlignContent::Center,
+                "space-between" => AlignContent::SpaceBetween,
+                "space-around" => AlignContent::SpaceAround,
+                _ => AlignContent::Stretch,
+            };
+        }
+        "flex-flow" => {
+            // flex-flow: <direction> || <wrap>
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            for part in &parts {
+                match part.trim().to_ascii_lowercase().as_str() {
+                    "row" => style.flex_direction = FlexDirection::Row,
+                    "row-reverse" => style.flex_direction = FlexDirection::RowReverse,
+                    "column" => style.flex_direction = FlexDirection::Column,
+                    "column-reverse" => style.flex_direction = FlexDirection::ColumnReverse,
+                    "nowrap" => style.flex_wrap = FlexWrap::NoWrap,
+                    "wrap" => style.flex_wrap = FlexWrap::Wrap,
+                    "wrap-reverse" => style.flex_wrap = FlexWrap::WrapReverse,
+                    _ => {}
+                }
+            }
+        }
         "flex-grow" => {
             if let Ok(f) = value.trim().parse::<f32>() {
                 style.flex_grow = (f * 100.0).round() as u32;
@@ -2083,9 +2126,11 @@ fn parse_pseudo_class(name: &str, args: Option<&str>) -> Option<PseudoClass> {
         "hover" => Some(PseudoClass::Hover),
         "focus" | "focus-visible" | "focus-within" => Some(PseudoClass::Focus),
         "active" => Some(PseudoClass::Active),
+        "checked" => Some(PseudoClass::Checked),
+        "disabled" => Some(PseudoClass::Disabled),
+        "enabled" => Some(PseudoClass::Enabled),
         // Ignored pseudo-classes (no-op)
-        "visited" | "checked" | "disabled" | "enabled" | "link"
-        | "root" | "empty" | "placeholder" => None,
+        "visited" | "link" | "root" | "empty" | "placeholder" => None,
         _ => None,
     }
 }
@@ -2422,6 +2467,9 @@ impl SimpleSelector {
                     slot.element.node_id
                         .is_some_and(|id| interactive.active_node_ids.contains(&id))
                 }
+                PseudoClass::Checked => slot.element.attributes.contains_key("checked"),
+                PseudoClass::Disabled => slot.element.attributes.contains_key("disabled"),
+                PseudoClass::Enabled => !slot.element.attributes.contains_key("disabled"),
             };
             if !matched {
                 return false;
@@ -2466,7 +2514,8 @@ fn parse_display(input: &str) -> Option<Display> {
     match input.trim().to_ascii_lowercase().as_str() {
         "block" | "flow-root" | "grid" | "inline-grid" | "table"
         | "table-row" => Some(Display::Block),
-        "flex" | "inline-flex" => Some(Display::Flex),
+        "flex" => Some(Display::Flex),
+        "inline-flex" => Some(Display::InlineFlex),
         "inline" | "inline-block" | "table-cell" | "contents" => Some(Display::Inline),
         "list-item" => Some(Display::ListItem),
         "none" => Some(Display::None),
@@ -4154,5 +4203,27 @@ mod tests {
         let styled_hovered = build_styled_tree(&doc, &sheet, 1280, &interactive);
         let a_hovered = find_first_element(&styled_hovered, "a").expect("<a> should exist");
         assert_eq!(a_hovered.style.color, 0xFF0000, "color should be red when hovered");
+    }
+
+    #[test]
+    fn flex_flow_sets_direction_and_wrap() {
+        let html = r#"<div style="flex-flow: column wrap;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.flex_direction, FlexDirection::Column);
+        assert_eq!(div.style.flex_wrap, FlexWrap::Wrap);
+    }
+
+    #[test]
+    fn checked_pseudo_class_matches_checked_input() {
+        let html = r#"<input type="checkbox" checked>"#;
+        let css = "input:checked { color: #ff0000; }";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let input = find_first_element(&styled, "input").unwrap();
+        assert_eq!(input.style.color, 0xff0000);
     }
 }
