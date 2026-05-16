@@ -33,6 +33,11 @@ Already working:
 - inline style mutations now reflect back into the DOM snapshot
 - the inline style bridge now exposes more text, size, and border-related properties
 
+CSS baseline note:
+
+- the broad CSS parser / selector / cascade / computed-style foundation is treated as complete on the Claude `claude/phase5-css` branch
+- Codex's Phase 5 work is therefore about JS-driven reflow and rendering feedback on top of that baseline, not reimplementing the CSS engine
+
 Still missing or shallow:
 
 - richer networking semantics
@@ -40,6 +45,7 @@ Still missing or shallow:
 - async browser APIs that modern frameworks expect
 - rendering invalidation and layout reflow after DOM mutation still need deeper incremental invalidation
 - the style bridge still needs the rest of the CSS property matrix and computed-style parity
+- remaining CSS work is mostly Phase 6 visual effects / advanced rendering, not the core parser/layout baseline
 
 ## Phase 1: Real Event Plumbing
 

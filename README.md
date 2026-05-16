@@ -60,7 +60,7 @@ Current capabilities:
 
 Still missing:
 
-- full CSS layout coverage
+- Phase 6 CSS visual effects and advanced rendering
 - deeper DOM APIs and event coverage
 - tabs and richer navigation UI
 - session-history replay polish across full document loads

@@ -37,6 +37,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `@media`
     - `calc(...)`
     - `rgba(...)` blending
+  - CSS Phase 5 baseline is treated as complete on the Claude `claude/phase5-css` branch; Codex should not duplicate the parser/layout engine and should treat Phase 6 as the remaining CSS surface.
   - software-rendered GUI with custom title bar and address bar
   - blank startup page and direct URL entry
   - address bar editing shortcuts including `Ctrl+A`, `Ctrl+C`, `Ctrl+X`, and `Ctrl+V`
@@ -123,9 +124,9 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Native page input typing now syncs `value` into the JS DOM.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward replay and scroll restoration still need depth.
-- Modern app-shell sites still need more DOM APIs, richer history replay, and CSS coverage.
+- Modern app-shell sites still need more DOM APIs, richer history replay, and CSS Phase 6 visual effects / advanced rendering.
 - Incremental reflow still needs deeper invalidation for more DOM/style mutations.
-- The inline style bridge still needs broader CSS property coverage and computed-style parity to be browser-grade.
+- The inline style bridge still needs broader CSS property coverage and computed-style parity to be browser-grade, but the core CSS parser/layout baseline is already considered done on the Claude branch.
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
@@ -236,6 +237,11 @@ git worktree list
 
 - Expanded the inline style bridge to cover more text, size, and border-related properties that the current layout engine already understands.
 - Added regression coverage for the expanded style accessors and the browser-facing serialization path.
+
+### 2026-05-16 - Codex (CSS boundary clarification)
+
+- Confirmed on the Claude `claude/phase5-css` branch that the broad CSS parser/layout foundation should be treated as complete for this repo.
+- Reframed the remaining CSS work for Codex as Phase 6 visual effects / advanced rendering and JS-driven reflow integration, not parser/layout duplication.
 
 ### 2026-05-16 - Codex (capture listener groundwork)
 
