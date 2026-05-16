@@ -2128,14 +2128,22 @@ fn render_commands(
                     continue;
                 }
                 if rect.border_radius > 0 {
+                    // When partially above scroll_y, clamp y and reduce height to avoid
+                    // restarting corner calculations from the wrong position.
+                    let (draw_y, draw_h) = if rect.y < scroll_y {
+                        let clipped = scroll_y.saturating_sub(rect.y);
+                        (0u32, rect.height.saturating_sub(clipped))
+                    } else {
+                        (rect.y.saturating_sub(scroll_y), rect.height)
+                    };
                     draw_rounded_rect(
                         buffer,
                         width,
                         height,
                         offset_x.saturating_add(rect.x),
-                        offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
+                        offset_y.saturating_add(draw_y),
                         rect.width,
-                        rect.height,
+                        draw_h,
                         rect.border_radius,
                         rect.color,
                     );
@@ -2270,6 +2278,18 @@ fn render_layer(
     // A layer larger than this is almost certainly a bug in layout (e.g. height not clamped).
     const MAX_OFFSCREEN_PIXELS: usize = 8192 * 8192;
     if needed > MAX_OFFSCREEN_PIXELS {
+        // Fallback: render without opacity blending to avoid a blank element.
+        // Sub-commands are layer-relative (rebased to origin 0,0), so we translate
+        // by adding layer.x / layer.y to the offsets.
+        render_commands(
+            buffer, buf_width, buf_height,
+            offset_x.saturating_add(layer.x),
+            offset_y.saturating_add(layer.y),
+            buf_height,
+            scroll_y,
+            &layer.commands,
+            page, fonts, scratch, depth + 1,
+        );
         return;
     }
 

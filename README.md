@@ -22,7 +22,7 @@ Current capabilities:
   - pseudo-classes: `:first-child`, `:last-child`, `:nth-child(an+b)`, `:not(...)`
   - chained and mixed combinator chains: `A + B + C`, `A + B > C`, `A ~ B > C`
 - Style support for:
-  - box model: `display`, `margin`, `padding`, `width`, `height`, `max-width`, `min-width`
+  - box model: `display`, `margin`, `padding`, `width`, `max-width`, `min-width` (block height is derived from content flow; `height` applies to images only)
   - color: `color`, `background-color`, `opacity`, `border-color`
   - border: `border`, `border-width`, `border-style`
   - typography: `font-size`, `font-weight`, `font-style`, `font-family`, `text-align`, `text-decoration`, `text-transform`, `text-indent`, `letter-spacing`, `line-height`, `white-space`

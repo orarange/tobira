@@ -180,18 +180,40 @@ pub struct LinkCommand {
     pub href: String,
 }
 
+/// Scan the document root for a body/html element with a solid background color.
+/// Used to fill canvas margins without double-applying opacity.
+fn extract_body_background(doc: &StyledNode) -> Option<u32> {
+    if let StyledNode::Element(el) = doc {
+        for child in &el.children {
+            if let StyledNode::Element(child_el) = child {
+                if (child_el.tag_name == "body" || child_el.tag_name == "html")
+                    && child_el.style.opacity == 255
+                {
+                    if let Some(bg) = child_el.style.background_color {
+                        return Some(bg);
+                    }
+                }
+            }
+        }
+        // Also check the doc element itself
+        if (el.tag_name == "body" || el.tag_name == "html") && el.style.opacity == 255 {
+            return el.style.background_color;
+        }
+    }
+    None
+}
+
 pub fn layout_styled_document(
     document: &StyledNode,
     images: &ImageStore,
     viewport_width: u32,
     fonts: &mut FontContext,
 ) -> LayoutDocument {
-    // Do NOT pre-blend the body background colour here.
-    // When body has an opacity < 1, layout_block_element_as_layer wraps the body in a
-    // LayerCommand which composites it at render time.  Pre-blending here AND compositing
-    // in render_layer would double-apply the opacity (Issue 4).
-    // canvas_bg stays as the default so the body's LayerCommand is the sole source of truth.
-    let canvas_bg = DEFAULT_BACKGROUND_COLOR;
+    // Use body/html background if available and fully opaque.
+    // When body has opacity < 1, layout_block_element_as_layer wraps it in a LayerCommand
+    // which composites at render time, so we keep DEFAULT_BACKGROUND_COLOR to avoid
+    // double-applying opacity.
+    let canvas_bg = extract_body_background(document).unwrap_or(DEFAULT_BACKGROUND_COLOR);
     let mut context = LayoutContext {
         background_color: canvas_bg,
         ..LayoutContext::default()
@@ -538,13 +560,19 @@ fn layout_block_element(
     // Use clip_start_idx (captured before children were laid out) so that child
     // commands are correctly filtered even when there is no background rect.
     if element.style.overflow == Overflow::Hidden {
+        let clip_height = element.style.height
+            .map(|lv| match lv {
+                LengthValue::Pixels(px) => px,
+                LengthValue::Percent(_) => background_height, // can't resolve % without context
+            })
+            .unwrap_or(background_height);
         clip_commands_to_box(
             &mut context.commands,
             clip_start_idx,
             outer_x,
             background_top,
             outer_width,
-            background_height,
+            clip_height,
         );
     }
 
@@ -567,7 +595,7 @@ fn layout_block_element(
                 width: outer_width.max(1),
                 height: border_top_h,
                 color: bc,
-                border_radius: 0,
+                border_radius: element.style.border_radius,
             }));
         }
         if border_bottom_h > 0 {
@@ -577,7 +605,7 @@ fn layout_block_element(
                 width: outer_width.max(1),
                 height: border_bottom_h,
                 color: bc,
-                border_radius: 0,
+                border_radius: element.style.border_radius,
             }));
         }
         if border_left_w > 0 {
@@ -631,36 +659,64 @@ fn clip_commands_to_box(
     let clip_y2 = clip_y.saturating_add(clip_h);
 
     let tail = commands.split_off(start);
-    let filtered = tail.into_iter().filter(|cmd| {
-        let outside = match cmd {
-            DrawCommand::Rect(r) => {
-                r.x >= clip_x2
-                    || r.y >= clip_y2
-                    || r.x.saturating_add(r.width) <= clip_x
-                    || r.y.saturating_add(r.height) <= clip_y
+    let clamped: Vec<DrawCommand> = tail.into_iter().filter_map(|cmd| {
+        match cmd {
+            DrawCommand::Rect(mut r) => {
+                let rx2 = r.x.saturating_add(r.width);
+                let ry2 = r.y.saturating_add(r.height);
+                // entirely outside?
+                if r.x >= clip_x2 || r.y >= clip_y2 || rx2 <= clip_x || ry2 <= clip_y {
+                    return None;
+                }
+                // clamp to clip box
+                let new_x = r.x.max(clip_x);
+                let new_y = r.y.max(clip_y);
+                let new_x2 = rx2.min(clip_x2);
+                let new_y2 = ry2.min(clip_y2);
+                r.x = new_x; r.y = new_y;
+                r.width = new_x2.saturating_sub(new_x).max(1);
+                r.height = new_y2.saturating_sub(new_y).max(1);
+                Some(DrawCommand::Rect(r))
+            }
+            DrawCommand::Image(mut img) => {
+                let ix2 = img.x.saturating_add(img.width);
+                let iy2 = img.y.saturating_add(img.height);
+                if img.x >= clip_x2 || img.y >= clip_y2 || ix2 <= clip_x || iy2 <= clip_y {
+                    return None;
+                }
+                let new_x = img.x.max(clip_x);
+                let new_y = img.y.max(clip_y);
+                img.x = new_x; img.y = new_y;
+                img.width = ix2.min(clip_x2).saturating_sub(new_x).max(1);
+                img.height = iy2.min(clip_y2).saturating_sub(new_y).max(1);
+                Some(DrawCommand::Image(img))
+            }
+            DrawCommand::Layer(mut l) => {
+                let lx2 = l.x.saturating_add(l.width);
+                let ly2 = l.y.saturating_add(l.height);
+                if l.x >= clip_x2 || l.y >= clip_y2 || lx2 <= clip_x || ly2 <= clip_y {
+                    return None;
+                }
+                // Clamp the layer bounding box; render_layer clips at layer dimensions
+                let new_x = l.x.max(clip_x);
+                let new_y = l.y.max(clip_y);
+                l.x = new_x; l.y = new_y;
+                l.width = lx2.min(clip_x2).saturating_sub(new_x).max(1);
+                l.height = ly2.min(clip_y2).saturating_sub(new_y).max(1);
+                Some(DrawCommand::Layer(l))
             }
             DrawCommand::Text(t) => {
-                t.y >= clip_y2
-                    || t.y.saturating_add(t.font_size_px) <= clip_y
-                    || t.x >= clip_x2
-                    || t.x.saturating_add(t.width) <= clip_x
+                let ty2 = t.y.saturating_add(t.font_size_px);
+                let tx2 = t.x.saturating_add(t.width);
+                if t.x >= clip_x2 || t.y >= clip_y2 || tx2 <= clip_x || ty2 <= clip_y {
+                    None
+                } else {
+                    Some(DrawCommand::Text(t))
+                }
             }
-            DrawCommand::Image(img) => {
-                img.x >= clip_x2
-                    || img.y >= clip_y2
-                    || img.x.saturating_add(img.width) <= clip_x
-                    || img.y.saturating_add(img.height) <= clip_y
-            }
-            DrawCommand::Layer(l) => {
-                l.x >= clip_x2
-                    || l.y >= clip_y2
-                    || l.x.saturating_add(l.width) <= clip_x
-                    || l.y.saturating_add(l.height) <= clip_y
-            }
-        };
-        !outside
-    });
-    commands.extend(filtered);
+        }
+    }).collect();
+    commands.extend(clamped);
 }
 
 fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32) {
@@ -709,6 +765,25 @@ fn layout_block_element_as_layer(
         ..LayoutContext::default()
     };
 
+    // box-shadow: push shadow rect before background (so it renders behind it)
+    let shadow_cmd_index = if let Some(ref shadow) = element.style.box_shadow {
+        let blur = shadow.blur;
+        let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64).max(0) as u32;
+        let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64).max(0) as u32;
+        let sw = outer_width.saturating_add(blur.saturating_mul(2)).max(1);
+        sub_context.commands.push(DrawCommand::Rect(RectCommand {
+            x: sx,
+            y: sy,
+            width: sw,
+            height: 1,
+            color: shadow.color,
+            border_radius: element.style.border_radius.saturating_add(blur),
+        }));
+        Some(sub_context.commands.len() - 1)
+    } else {
+        None
+    };
+
     // The element's own background rect goes into the sub-context (raw color, no opacity blend)
     let background_cmd_index = if let Some(background_color) = element.style.background_color {
         // Use raw background color — opacity is applied by the layer compositor
@@ -726,6 +801,9 @@ fn layout_block_element_as_layer(
     } else {
         None
     };
+
+    // Capture clip index BEFORE children so overflow:hidden can clip child commands
+    let clip_start_idx = sub_context.commands.len();
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.top);
 
@@ -786,6 +864,12 @@ fn layout_block_element_as_layer(
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     let final_height = cursor_y.saturating_sub(background_top).max(1);
 
+    if let Some(shadow_idx) = shadow_cmd_index {
+        if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(shadow_idx) {
+            let blur = element.style.box_shadow.as_ref().map(|s| s.blur).unwrap_or(0);
+            rect.height = final_height.saturating_add(blur.saturating_mul(2));
+        }
+    }
     if let Some(background_cmd_index) = background_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(background_cmd_index) {
             rect.height = final_height;
@@ -808,7 +892,7 @@ fn layout_block_element_as_layer(
                 width: outer_width.max(1),
                 height: border_top_h,
                 color: bc,
-                border_radius: 0,
+                border_radius: element.style.border_radius,
             }));
         }
         if border_bottom_h > 0 {
@@ -818,7 +902,7 @@ fn layout_block_element_as_layer(
                 width: outer_width.max(1),
                 height: border_bottom_h,
                 color: bc,
-                border_radius: 0,
+                border_radius: element.style.border_radius,
             }));
         }
         if border_left_w > 0 {
@@ -843,6 +927,24 @@ fn layout_block_element_as_layer(
                 border_radius: 0,
             }));
         }
+    }
+
+    // overflow: hidden — clip child commands within the element box
+    if element.style.overflow == Overflow::Hidden {
+        let clip_height = element.style.height
+            .map(|lv| match lv {
+                LengthValue::Pixels(px) => px,
+                LengthValue::Percent(_) => final_height,
+            })
+            .unwrap_or(final_height);
+        clip_commands_to_box(
+            &mut sub_context.commands,
+            clip_start_idx,
+            outer_x,
+            background_top,
+            outer_width,
+            clip_height,
+        );
     }
 
     // Rebase sub-commands to layer-relative coordinates before wrapping

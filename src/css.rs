@@ -557,6 +557,7 @@ fn find_matching_close_brace(source: &str) -> Option<usize> {
 
 pub fn parse_stylesheet(input: &str) -> Stylesheet {
     let mut rules = Vec::new();
+    let mut root_vars = BTreeMap::new();
     let source = strip_comments(input);
     let mut cursor = 0;
 
@@ -588,6 +589,15 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                 // The block_text is the inner CSS of the @media block
                 // Parse the inner rules and tag them with the media condition
                 let inner_stylesheet = parse_stylesheet(block_text);
+                // Propagate root vars from media block into this stylesheet's root_vars.
+                // They are tagged with the media condition at the rule level so
+                // compute_style can skip them when the condition doesn't match at runtime.
+                // Collecting them here (unconditionally at parse time) mirrors the prior
+                // behaviour; runtime filtering happens in compute_style when the rule is
+                // skipped due to its media condition.
+                for (k, v) in inner_stylesheet.root_vars.iter() {
+                    root_vars.entry(k.clone()).or_insert_with(|| v.clone());
+                }
                 for mut rule in inner_stylesheet.rules {
                     rule.media = Some(media_cond.clone());
                     rules.push(rule);
@@ -601,11 +611,29 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
             continue;
         }
 
+        let declarations = parse_inline_declarations(block_text);
+
+        // Collect :root / html custom properties into root_vars.
+        // Check the raw selector text because :root is not a recognized pseudo-class and
+        // will be dropped by parse_selector — we must capture vars before that step.
+        // Media conditions are already respected here: @media rules are handled in the
+        // branch above and their inner stylesheets' root_vars are propagated separately.
+        let is_root = split_at_top_level(selector_text, ',').iter().any(|s| {
+            let s = s.trim().to_ascii_lowercase();
+            s == ":root" || s == "html"
+        });
+        if is_root {
+            for decl in &declarations {
+                if decl.property.starts_with("--") {
+                    root_vars.insert(decl.property.clone(), decl.value.clone());
+                }
+            }
+        }
+
         let selectors = split_at_top_level(selector_text, ',')
             .iter()
             .filter_map(|s| parse_selector(s.trim()))
             .collect::<Vec<_>>();
-        let declarations = parse_inline_declarations(block_text);
 
         if !selectors.is_empty() && !declarations.is_empty() {
             let pseudo_element = selectors.iter().find_map(|sel| sel.pseudo_element.clone());
@@ -618,34 +646,6 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         }
     }
 
-    // Pre-pass: collect :root and html CSS variables from the raw source
-    let mut root_vars = std::collections::BTreeMap::new();
-    {
-        let source2 = strip_comments(input);
-        let mut cur2 = 0;
-        while let Some(open_off) = source2[cur2..].find('{') {
-            let sel_start = cur2;
-            let sel_end = cur2 + open_off;
-            let blk_start = sel_end + 1;
-            let blk_raw = &source2[blk_start..];
-            let Some(close_off) = find_matching_close_brace(blk_raw) else { break };
-            let blk_end = blk_start + close_off;
-            let sel_text = source2[sel_start..sel_end].trim().to_ascii_lowercase();
-            let blk_text = source2[blk_start..blk_end].trim();
-            cur2 = blk_end + 1;
-            let is_root = sel_text.split(',').any(|s| {
-                let s = s.trim();
-                s == ":root" || s == "html"
-            });
-            if is_root {
-                for decl in parse_inline_declarations(blk_text) {
-                    if decl.property.starts_with("--") {
-                        root_vars.insert(decl.property.clone(), decl.value.clone());
-                    }
-                }
-            }
-        }
-    }
     Stylesheet { rules, root_vars: Rc::new(root_vars) }
 }
 
@@ -813,7 +813,7 @@ fn build_node(
             if let Some((before_text, pseudo_style)) = collect_pseudo_content(
                 element,
                 stylesheet,
-                &next_ancestors,
+                ancestors,
                 sibling_index,
                 sibling_count,
                 preceding_siblings,
@@ -828,7 +828,7 @@ fn build_node(
             if let Some((after_text, pseudo_style)) = collect_pseudo_content(
                 element,
                 stylesheet,
-                &next_ancestors,
+                ancestors,
                 sibling_index,
                 sibling_count,
                 preceding_siblings,
@@ -883,6 +883,7 @@ fn collect_pseudo_content(
 ) -> Option<(String, ComputedStyle)> {
     let identity = ElementIdentity::from(element);
     let mut result: Option<(String, ComputedStyle)> = None;
+    let mut pseudo_style = ComputedStyle::for_element("span", None);
 
     for rule in &stylesheet.rules {
         if let Some(cond) = &rule.media {
@@ -905,26 +906,23 @@ fn collect_pseudo_content(
         if !host_matches {
             continue;
         }
-        // Find the content value in this rule
-        let content_val = rule.declarations.iter().find_map(|decl| {
+        // Apply all declarations in cascade order
+        for decl in &rule.declarations {
             if decl.property == "content" {
                 let v = strip_css_string_quotes(decl.value.trim());
-                if v != "none" && v != "normal" && !v.is_empty() {
-                    return Some(v.to_string());
+                if v == "none" || v == "normal" {
+                    result = None; // later content: none clears earlier content
+                } else if !v.is_empty() {
+                    result = Some((v.to_string(), pseudo_style.clone())); // placeholder, updated below
                 }
+            } else {
+                apply_declaration(&mut pseudo_style, decl, 16);
             }
-            None
-        });
-        if let Some(text) = content_val {
-            // Compute a style from this rule's non-content declarations
-            let mut pseudo_style = ComputedStyle::for_element("span", None);
-            for decl in &rule.declarations {
-                if decl.property != "content" {
-                    apply_declaration(&mut pseudo_style, decl, 16);
-                }
-            }
-            result = Some((text, pseudo_style));
         }
+    }
+    // Update result with the final accumulated pseudo_style
+    if let Some((text, _)) = result {
+        result = Some((text, pseudo_style));
     }
     result
 }
@@ -945,8 +943,9 @@ fn compute_style(
     apply_legacy_attributes(&mut style, element, parent_font_size);
 
     let identity = ElementIdentity::from(element);
-    // Clone the Rc (O(1) reference count bump), then dereference for the mutable local copy.
-    let mut css_variables = (*stylesheet.root_vars).clone();
+    // O(1) ref bump — we avoid cloning the full BTreeMap unless this element has its own vars.
+    let root_vars = Rc::clone(&stylesheet.root_vars);
+    let mut element_vars: BTreeMap<String, String> = BTreeMap::new();
     let mut applicable: Vec<(usize, usize, Declaration)> = Vec::new();
 
     for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
@@ -978,7 +977,7 @@ fn compute_style(
                 // First pass: collect CSS variables
                 for decl in &rule.declarations {
                     if decl.property.starts_with("--") {
-                        css_variables.insert(decl.property.clone(), decl.value.clone());
+                        element_vars.insert(decl.property.clone(), decl.value.clone());
                     }
                 }
                 applicable.extend(rule.declarations.iter().cloned().enumerate().map(
@@ -1000,7 +999,7 @@ fn compute_style(
         // collect inline CSS variables first
         for decl in &inline_decls {
             if decl.property.starts_with("--") {
-                css_variables.insert(decl.property.clone(), decl.value.clone());
+                element_vars.insert(decl.property.clone(), decl.value.clone());
             }
         }
         applicable.extend(
@@ -1020,7 +1019,17 @@ fn compute_style(
         }
         // substitute var() references
         if declaration.value.contains("var(") {
-            declaration.value = substitute_vars(&declaration.value, &css_variables);
+            let vars_ref: &BTreeMap<String, String> = if element_vars.is_empty() {
+                &*root_vars
+            } else {
+                // Merge: element_vars overrides root_vars.
+                // We only pay O(root_vars) once — after this, element_vars is the merged map.
+                for (k, v) in root_vars.iter() {
+                    element_vars.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                &element_vars
+            };
+            declaration.value = substitute_vars(&declaration.value, vars_ref);
         }
         apply_declaration(&mut style, &declaration, parent_font_size);
     }
@@ -2536,7 +2545,7 @@ fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i32> {
 
     if value.starts_with('-') {
         let positive = &value[1..];
-        let px = parse_length(positive, parent_font_size)? as i32;
+        let px = parse_length(positive, parent_font_size)?.min(i32::MAX as u32) as i32;
         return Some(-px);
     }
 
