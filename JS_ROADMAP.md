@@ -30,6 +30,7 @@ Already working:
 - `location.hash`, `history.pushState(...)`, `replaceState(...)`, `back()`, and `forward()` for same-document navigation
 - browser-level back/forward navigation across document loads
 - layout cache invalidation keyed by viewport width and page revision
+- JS-visible viewport and focus state are wired up through `window.innerWidth` / `window.innerHeight`, `window.scrollY` / `window.pageYOffset`, and `document.activeElement`
 - inline style mutations now reflect back into the DOM snapshot
 - the inline style bridge now exposes more text, size, and border-related properties
 
@@ -137,6 +138,7 @@ Tasks:
 - viewport-width and page-revision based layout cache invalidation is in place
 - a native `element.style` bridge now reflects inline CSS changes back into the DOM tree
 - the bridge covers more text, size, and border-related properties that the current layout engine already understands
+- GUI scroll changes now sync back into the JS runtime so scroll listeners can react to the current offset
 - recompute layout after DOM mutations and script-driven style changes
 - invalidate cached layout when width or content changes
 - support more CSS properties that interactive pages depend on

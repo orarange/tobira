@@ -258,6 +258,7 @@ impl BrowserApp {
         self.address_bar.blur();
         self.clear_page_control_state();
         self.scroll_y = 0;
+        let _ = self.document.set_scroll_position(self.scroll_y);
         self.sync_viewport_size();
         self.sync_window_title();
         self.sync_input_method();
@@ -394,6 +395,12 @@ impl BrowserApp {
         }
     }
 
+    fn sync_scroll_position(&mut self) {
+        if self.document.set_scroll_position(self.scroll_y) {
+            let _ = self.document.dispatch_scroll_event();
+        }
+    }
+
     fn scroll_by(&mut self, delta: i32, viewport_height: u32, content_height: u32) {
         let max_scroll = max_scroll(viewport_height, content_height);
         let next = if delta.is_negative() {
@@ -422,7 +429,11 @@ impl BrowserApp {
         let viewport_height = size.height.saturating_sub(body_top + FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let max_scroll_y = max_scroll(viewport_height, layout.content_height);
+        let previous_scroll_y = self.scroll_y;
         self.scroll_y = self.scroll_y.min(max_scroll_y);
+        if self.scroll_y != previous_scroll_y {
+            let _ = self.document.set_scroll_position(self.scroll_y);
+        }
 
         let Some(surface) = self.surface.as_mut() else {
             return Ok(());
@@ -909,20 +920,56 @@ impl BrowserApp {
         let (viewport_height, content_height) = self.content_metrics(window_size);
         match key_code {
             KeyCode::Escape if !repeat => return true,
-            KeyCode::ArrowDown => self.scroll_by(24, viewport_height, content_height),
-            KeyCode::ArrowUp => self.scroll_by(-24, viewport_height, content_height),
-            KeyCode::PageDown => self.scroll_by(
-                viewport_height.saturating_sub(32) as i32,
-                viewport_height,
-                content_height,
-            ),
-            KeyCode::PageUp => self.scroll_by(
-                -(viewport_height.saturating_sub(32) as i32),
-                viewport_height,
-                content_height,
-            ),
-            KeyCode::Home => self.scroll_y = 0,
-            KeyCode::End => self.scroll_y = max_scroll(viewport_height, content_height),
+            KeyCode::ArrowDown => {
+                let previous_scroll_y = self.scroll_y;
+                self.scroll_by(24, viewport_height, content_height);
+                if self.scroll_y != previous_scroll_y {
+                    self.sync_scroll_position();
+                }
+            }
+            KeyCode::ArrowUp => {
+                let previous_scroll_y = self.scroll_y;
+                self.scroll_by(-24, viewport_height, content_height);
+                if self.scroll_y != previous_scroll_y {
+                    self.sync_scroll_position();
+                }
+            }
+            KeyCode::PageDown => {
+                let previous_scroll_y = self.scroll_y;
+                self.scroll_by(
+                    viewport_height.saturating_sub(32) as i32,
+                    viewport_height,
+                    content_height,
+                );
+                if self.scroll_y != previous_scroll_y {
+                    self.sync_scroll_position();
+                }
+            }
+            KeyCode::PageUp => {
+                let previous_scroll_y = self.scroll_y;
+                self.scroll_by(
+                    -(viewport_height.saturating_sub(32) as i32),
+                    viewport_height,
+                    content_height,
+                );
+                if self.scroll_y != previous_scroll_y {
+                    self.sync_scroll_position();
+                }
+            }
+            KeyCode::Home => {
+                let previous_scroll_y = self.scroll_y;
+                self.scroll_y = 0;
+                if self.scroll_y != previous_scroll_y {
+                    self.sync_scroll_position();
+                }
+            }
+            KeyCode::End => {
+                let previous_scroll_y = self.scroll_y;
+                self.scroll_y = max_scroll(viewport_height, content_height);
+                if self.scroll_y != previous_scroll_y {
+                    self.sync_scroll_position();
+                }
+            }
             KeyCode::KeyR | KeyCode::F5 if !repeat => self.reload(),
             KeyCode::KeyL if self.modifiers.control_key() && !repeat => {
                 self.focus_address_bar_select_all();
@@ -1190,6 +1237,7 @@ impl BrowserApp {
 
     fn handle_wheel(&mut self, delta: MouseScrollDelta, window_size: PhysicalSize<u32>) {
         let (viewport_height, content_height) = self.content_metrics(window_size);
+        let previous_scroll_y = self.scroll_y;
         match delta {
             MouseScrollDelta::LineDelta(_, y) => {
                 self.scroll_by((-(y.round() as i32)) * 24, viewport_height, content_height);
@@ -1203,6 +1251,9 @@ impl BrowserApp {
             }
         }
 
+        if self.scroll_y != previous_scroll_y {
+            self.sync_scroll_position();
+        }
         self.request_redraw();
     }
 
@@ -1720,6 +1771,13 @@ impl DocumentView {
         }
     }
 
+    fn set_scroll_position(&mut self, y: u32) -> bool {
+        match &mut self.content {
+            DocumentContent::Loaded(page) => page.set_scroll_position(y),
+            _ => false,
+        }
+    }
+
     fn dispatch_window_resize(&mut self) -> bool {
         let resized = match &mut self.content {
             DocumentContent::Loaded(page) => page.dispatch_window_resize().is_some(),
@@ -1730,6 +1788,18 @@ impl DocumentView {
             self.layout_cache = None;
         }
         resized
+    }
+
+    fn dispatch_scroll_event(&mut self) -> bool {
+        let scrolled = match &mut self.content {
+            DocumentContent::Loaded(page) => page.dispatch_scroll_event().is_some(),
+            _ => false,
+        };
+        if scrolled {
+            self.sync_from_loaded_page();
+            self.layout_cache = None;
+        }
+        scrolled
     }
 
     fn sync_from_loaded_page(&mut self) {

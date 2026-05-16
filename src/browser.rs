@@ -100,11 +100,27 @@ impl BrowserPage {
         false
     }
 
+    pub fn set_scroll_position(&mut self, y: u32) -> bool {
+        if let Some(session) = &self.javascript_session {
+            return session.set_scroll_position(y);
+        }
+        false
+    }
+
     pub fn dispatch_window_resize(&mut self) -> Option<DomEventDispatchResult> {
         let result = self
             .javascript_session
             .as_ref()
             .and_then(|session| session.dispatch_global_event("resize", false, false))?;
+        self.apply_script_snapshot(result.snapshot.clone());
+        Some(result)
+    }
+
+    pub fn dispatch_scroll_event(&mut self) -> Option<DomEventDispatchResult> {
+        let result = self
+            .javascript_session
+            .as_ref()
+            .and_then(|session| session.dispatch_global_event("scroll", false, false))?;
         self.apply_script_snapshot(result.snapshot.clone());
         Some(result)
     }

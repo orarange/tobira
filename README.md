@@ -43,6 +43,10 @@ Current capabilities:
   - bubbling `click`, `input`, `change`, and `submit`
   - target-only `focus` and `blur`
 - Basic JavaScript execution with `boa_engine`
+- JS-visible viewport / focus / scroll state:
+  - `window.innerWidth` / `window.innerHeight`
+  - `window.scrollY` / `window.pageYOffset`
+  - `document.activeElement`
 - Lightweight storage and cookie support:
   - `localStorage`
   - `sessionStorage`
@@ -65,6 +69,7 @@ Still missing:
 - tabs and richer navigation UI
 - session-history replay polish across full document loads
 - incremental reflow for more DOM/style mutations
+- scroll restoration and script-driven scrolling still need depth
 - inline style mutations still need broader coverage across the full CSS property matrix and computed-style parity
 - POST forms, complex widgets, and modern app-shell browser APIs
 

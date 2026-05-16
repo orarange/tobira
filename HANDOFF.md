@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `115` passing tests on `2026-05-16`
+  - `cargo test`: `120` passing tests on `2026-05-16`
   - `cargo build`: success on `2026-05-16`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -53,6 +53,10 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - page keyboard events:
     - focused page inputs receive bubbling `keydown` / `keyup`
     - key metadata includes `key`, `code`, modifier flags, and `repeat`
+  - page and viewport state now stay in sync through JS-facing accessors for:
+    - `window.innerWidth` / `window.innerHeight`
+    - `window.scrollY` / `window.pageYOffset`
+    - `document.activeElement`
   - page event listeners now support capture + bubbling, plus `once` listeners and capture-sensitive `removeEventListener(...)`
   - guarded JavaScript execution through `boa_engine`
   - lightweight mutable DOM bridge with:
@@ -116,6 +120,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - `8751537` address bar clipboard support implementation complete
 - `18f2be6` copilot review runtime limit and fragment fixes complete
 - `1df11f6` live input value sync implementation complete
+- `0cf8113` viewport sync and active element support complete
 
 ## Known Gaps / Likely Next Work
 
@@ -124,6 +129,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Native page input typing now syncs `value` into the JS DOM.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward replay and scroll restoration still need depth.
+- Scroll position is now visible to JS, but full scroll restoration / script-driven scrolling still need depth.
 - Modern app-shell sites still need more DOM APIs, richer history replay, and CSS Phase 6 visual effects / advanced rendering.
 - Incremental reflow still needs deeper invalidation for more DOM/style mutations.
 - The inline style bridge still needs broader CSS property coverage and computed-style parity to be browser-grade, but the core CSS parser/layout baseline is already considered done on the Claude branch.
@@ -216,6 +222,13 @@ git worktree list
 - Tightened the GUI event loop so focused page inputs receive `keydown` before default handling and `keyup` after the edit path finishes.
 - Added a regression test that checks keyboard event metadata reaches JS listeners on the document.
 - Updated the living roadmap and demo copy to treat keyboard delivery as a completed milestone and the next phase as richer listener options / capture phase.
+
+### 2026-05-16 - Codex (viewport, focus, and scroll sync)
+
+- Wired GUI viewport size changes into the JS runtime so `window.innerWidth` / `window.innerHeight` stay current and `resize` listeners fire on actual browser resizes.
+- Added JS-visible focus state through `document.activeElement` and `document.hasFocus()`-style behavior for the currently focused page control.
+- Exposed `window.scrollY`, `window.pageYOffset`, and `scrollTop`-style DOM accessors, plus `scroll` events when the user scrolls the GUI.
+- Added regression coverage for viewport resize, focus / blur, and scroll event handling.
 
 ### 2026-05-16 - Codex (branch switch after merge)
 

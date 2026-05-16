@@ -79,6 +79,9 @@ enum JavaScriptSessionCommand {
         cancelable: bool,
         response_tx: Sender<DomEventDispatchResult>,
     },
+    SetScrollPosition {
+        y: u32,
+    },
     SetViewportSize {
         width: u32,
         height: u32,
@@ -143,6 +146,12 @@ impl JavaScriptSession {
             .is_ok()
     }
 
+    pub(crate) fn set_scroll_position(&self, y: u32) -> bool {
+        self.command_tx
+            .send(JavaScriptSessionCommand::SetScrollPosition { y })
+            .is_ok()
+    }
+
     pub(crate) fn dispatch_global_event(
         &self,
         event_type: &str,
@@ -189,6 +198,7 @@ struct JavaScriptState {
     network_response_bytes: usize,
     viewport_width: u32,
     viewport_height: u32,
+    scroll_y: u32,
     active_element_node_id: Option<usize>,
     dom: DomState,
 }
@@ -356,6 +366,9 @@ pub fn start_document_script_session(
                             );
                             let _ = response_tx.send(result);
                         }
+                        JavaScriptSessionCommand::SetScrollPosition { y } => {
+                            runtime.set_scroll_position(y);
+                        }
                         JavaScriptSessionCommand::SetViewportSize { width, height } => {
                             runtime.set_viewport_size(width, height);
                         }
@@ -443,6 +456,7 @@ impl JavaScriptRuntime {
                 network_response_bytes: 0,
                 viewport_width: DEFAULT_VIEWPORT_WIDTH,
                 viewport_height: DEFAULT_VIEWPORT_HEIGHT,
+                scroll_y: 0,
                 active_element_node_id: None,
                 dom,
             }),
@@ -502,6 +516,12 @@ impl JavaScriptRuntime {
             let mut state = host.state.borrow_mut();
             state.viewport_width = width;
             state.viewport_height = height;
+        }
+    }
+
+    fn set_scroll_position(&mut self, y: u32) {
+        if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+            host.state.borrow_mut().scroll_y = y;
         }
     }
 
@@ -2014,6 +2034,10 @@ fn install_browser_globals(context: &mut Context) {
         NativeFunction::from_fn_ptr(js_window_get_inner_width).to_js_function(context.realm());
     let inner_height_getter =
         NativeFunction::from_fn_ptr(js_window_get_inner_height).to_js_function(context.realm());
+    let scroll_y_getter =
+        NativeFunction::from_fn_ptr(js_window_get_scroll_y).to_js_function(context.realm());
+    let page_y_offset_getter =
+        NativeFunction::from_fn_ptr(js_window_get_page_y_offset).to_js_function(context.realm());
     context
         .global_object()
         .define_property_or_throw(
@@ -2036,6 +2060,28 @@ fn install_browser_globals(context: &mut Context) {
             context,
         )
         .expect("innerHeight should be installable");
+    context
+        .global_object()
+        .define_property_or_throw(
+            js_string!("scrollY"),
+            PropertyDescriptor::builder()
+                .get(scroll_y_getter.clone())
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )
+        .expect("scrollY should be installable");
+    context
+        .global_object()
+        .define_property_or_throw(
+            js_string!("pageYOffset"),
+            PropertyDescriptor::builder()
+                .get(page_y_offset_getter)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )
+        .expect("pageYOffset should be installable");
 
     let crypto_subtle = ObjectInitializer::new(context)
         .function(
@@ -2545,6 +2591,13 @@ fn viewport_height(context: &mut Context) -> u32 {
     viewport_size(context).1
 }
 
+fn scroll_position(context: &mut Context) -> u32 {
+    context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().scroll_y)
+        .unwrap_or(0)
+}
+
 fn js_window_get_inner_width(
     _: &JsValue,
     _: &[JsValue],
@@ -2559,6 +2612,31 @@ fn js_window_get_inner_height(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     Ok(JsValue::new(viewport_height(context)))
+}
+
+fn js_window_get_scroll_y(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::new(scroll_position(context)))
+}
+
+fn js_window_get_page_y_offset(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    js_window_get_scroll_y(&JsValue::undefined(), &[], context)
+}
+
+fn js_dom_get_scroll_top(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let value = if this_node_id(this).is_some() {
+        scroll_position(context)
+    } else {
+        0
+    };
+    Ok(JsValue::new(value))
 }
 
 fn js_dom_get_client_width(
@@ -2713,6 +2791,8 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_scroll_width).to_js_function(context.realm());
     let get_scroll_height =
         NativeFunction::from_fn_ptr(js_dom_get_scroll_height).to_js_function(context.realm());
+    let get_scroll_top =
+        NativeFunction::from_fn_ptr(js_dom_get_scroll_top).to_js_function(context.realm());
     let style = build_dom_style_object(context, node_id);
     let object = ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context)
         .function(
@@ -2916,6 +2996,12 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .accessor(
             js_string!("clientHeight"),
             Some(get_client_height),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("scrollTop"),
+            Some(get_scroll_top),
             None,
             Attribute::all(),
         )
@@ -6430,6 +6516,24 @@ mod tests {
         );
 
         assert_eq!(processed.title_override.as_deref(), Some("BUTTON|BODY"));
+    }
+
+    #[test]
+    fn updates_scroll_accessors_and_scroll_events() {
+        let (processed, session) = start_document_script_session(
+            "<html><body><script>document.title = String(window.scrollY); window.addEventListener('scroll', function () { document.title = String(window.scrollY); });</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(processed.title_override.as_deref(), Some("0"));
+
+        let session = session.expect("session should exist");
+        assert!(session.set_scroll_position(120));
+        let result = session
+            .dispatch_global_event("scroll", false, false)
+            .expect("scroll dispatch should succeed");
+
+        assert_eq!(result.snapshot.title_override.as_deref(), Some("120"));
     }
 
     #[test]
