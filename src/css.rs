@@ -215,6 +215,8 @@ pub enum Display {
     None,
     Flex,
     InlineFlex,
+    Grid,
+    InlineGrid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,6 +372,38 @@ pub enum ListStyleType {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Grid types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single grid track definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GridTrackSize {
+    Pixels(u32),
+    /// Stored as percent * 100 to keep Eq (e.g. 50% → 5000)
+    Percent(u32),
+    /// Fractional unit * 1000 (1fr → 1000, 0.5fr → 500)
+    Fr(u32),
+    Auto,
+    MinContent,
+    MaxContent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GridPlacement {
+    pub start: Option<i32>, // grid line number (1-based), None = auto
+    pub span: Option<u32>,  // span count, None = 1
+}
+
+impl Default for GridPlacement {
+    fn default() -> Self {
+        GridPlacement {
+            start: None,
+            span: None,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ComputedStyle
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -442,6 +476,14 @@ pub struct ComputedStyle {
     pub object_position_x: u32,
     /// object-position y, 0–100 (percentage), default 50 = center
     pub object_position_y: u32,
+    // Grid container fields
+    pub grid_template_columns: Vec<GridTrackSize>,
+    pub grid_template_rows: Vec<GridTrackSize>,
+    pub grid_auto_rows: GridTrackSize,
+    pub grid_auto_columns: GridTrackSize,
+    // Grid item fields
+    pub grid_column: GridPlacement,
+    pub grid_row: GridPlacement,
 }
 
 impl ComputedStyle {
@@ -516,6 +558,13 @@ impl ComputedStyle {
             object_fit: ObjectFit::Fill,
             object_position_x: 50,
             object_position_y: 50,
+            // Grid fields
+            grid_template_columns: Vec::new(),
+            grid_template_rows: Vec::new(),
+            grid_auto_rows: GridTrackSize::Auto,
+            grid_auto_columns: GridTrackSize::Auto,
+            grid_column: GridPlacement::default(),
+            grid_row: GridPlacement::default(),
         };
 
         match tag_name {
@@ -1696,6 +1745,56 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "column-gap" => {}
+        // ── Grid properties ──────────────────────────────────────────────────
+        "grid-template-columns" => {
+            style.grid_template_columns = parse_grid_track_list(value, parent_font_size);
+        }
+        "grid-template-rows" => {
+            style.grid_template_rows = parse_grid_track_list(value, parent_font_size);
+        }
+        "grid-auto-rows" => {
+            style.grid_auto_rows = parse_grid_track_size(value.trim(), parent_font_size)
+                .unwrap_or(GridTrackSize::Auto);
+        }
+        "grid-auto-columns" => {
+            style.grid_auto_columns = parse_grid_track_size(value.trim(), parent_font_size)
+                .unwrap_or(GridTrackSize::Auto);
+        }
+        "grid-column" => {
+            style.grid_column = parse_grid_placement(value);
+        }
+        "grid-row" => {
+            style.grid_row = parse_grid_placement(value);
+        }
+        "grid-column-start" => {
+            style.grid_column.start = parse_grid_line(value);
+        }
+        "grid-column-end" => {
+            if let Some(end) = parse_grid_line(value) {
+                if let Some(start) = style.grid_column.start {
+                    let span = (end - start).max(1) as u32;
+                    style.grid_column.span = Some(span);
+                } else {
+                    style.grid_column.start = Some(end);
+                }
+            }
+        }
+        "grid-row-start" => {
+            style.grid_row.start = parse_grid_line(value);
+        }
+        "grid-row-end" => {
+            if let Some(end) = parse_grid_line(value) {
+                if let Some(start) = style.grid_row.start {
+                    let span = (end - start).max(1) as u32;
+                    style.grid_row.span = Some(span);
+                } else {
+                    style.grid_row.start = Some(end);
+                }
+            }
+        }
+        "grid-template" | "grid" => {
+            // Simplified: skip complex shorthand
+        }
         "order" => {
             if let Ok(n) = value.trim().parse::<i32>() {
                 style.order = n;
@@ -2512,15 +2611,153 @@ impl From<&Element> for ElementIdentity {
 
 fn parse_display(input: &str) -> Option<Display> {
     match input.trim().to_ascii_lowercase().as_str() {
-        "block" | "flow-root" | "grid" | "inline-grid" | "table"
-        | "table-row" => Some(Display::Block),
+        "block" | "flow-root" | "table" | "table-row" => Some(Display::Block),
         "flex" => Some(Display::Flex),
         "inline-flex" => Some(Display::InlineFlex),
+        "grid" => Some(Display::Grid),
+        "inline-grid" => Some(Display::InlineGrid),
         "inline" | "inline-block" | "table-cell" | "contents" => Some(Display::Inline),
         "list-item" => Some(Display::ListItem),
         "none" => Some(Display::None),
         _ => None,
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Grid parsing helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Parse a grid track list like "100px 1fr auto repeat(3, 200px)".
+fn parse_grid_track_list(input: &str, parent_font_size: u32) -> Vec<GridTrackSize> {
+    let mut tracks = Vec::new();
+    let input = input.trim();
+    let chars: Vec<char> = input.chars().collect();
+    let mut buf = String::new();
+    let mut depth = 0usize;
+
+    for &ch in &chars {
+        match ch {
+            '(' => {
+                depth += 1;
+                buf.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                buf.push(ch);
+            }
+            ' ' | '\t' if depth == 0 => {
+                let token = buf.trim().to_string();
+                if !token.is_empty() {
+                    if token.starts_with("repeat(") {
+                        tracks.extend(expand_grid_repeat(&token, parent_font_size));
+                    } else if let Some(size) = parse_grid_track_size(&token, parent_font_size) {
+                        tracks.push(size);
+                    }
+                }
+                buf.clear();
+            }
+            _ => buf.push(ch),
+        }
+    }
+    let token = buf.trim().to_string();
+    if !token.is_empty() {
+        if token.starts_with("repeat(") {
+            tracks.extend(expand_grid_repeat(&token, parent_font_size));
+        } else if let Some(size) = parse_grid_track_size(&token, parent_font_size) {
+            tracks.push(size);
+        }
+    }
+    tracks
+}
+
+/// Expand `repeat(N, track-list)` into N copies.
+fn expand_grid_repeat(token: &str, parent_font_size: u32) -> Vec<GridTrackSize> {
+    let inner = token
+        .strip_prefix("repeat(")
+        .and_then(|s| s.strip_suffix(')'));
+    let inner = match inner {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let comma_pos = inner.find(',');
+    let (count_str, track_str) = match comma_pos {
+        Some(i) => (&inner[..i], &inner[i + 1..]),
+        None => return Vec::new(),
+    };
+    let count: usize = match count_str.trim().parse::<usize>() {
+        Ok(n) if n > 0 => n,
+        _ => 1, // auto-fill/auto-fit: treat as 1
+    };
+    let track_sizes = parse_grid_track_list(track_str.trim(), parent_font_size);
+    if track_sizes.is_empty() {
+        return Vec::new();
+    }
+    track_sizes
+        .into_iter()
+        .cycle()
+        .take(count)
+        .collect()
+}
+
+fn parse_grid_track_size(token: &str, parent_font_size: u32) -> Option<GridTrackSize> {
+    let t = token.trim().to_ascii_lowercase();
+    if t == "auto" {
+        return Some(GridTrackSize::Auto);
+    }
+    if t == "min-content" {
+        return Some(GridTrackSize::MinContent);
+    }
+    if t == "max-content" {
+        return Some(GridTrackSize::MaxContent);
+    }
+    if let Some(n) = t.strip_suffix("fr") {
+        return parse_float(n).map(|f| GridTrackSize::Fr((f * 1000.0).round() as u32));
+    }
+    if let Some(n) = t.strip_suffix('%') {
+        return parse_float(n).map(|f| GridTrackSize::Percent((f * 100.0).round() as u32));
+    }
+    parse_length(&t, parent_font_size).map(GridTrackSize::Pixels)
+}
+
+fn parse_grid_placement(value: &str) -> GridPlacement {
+    let parts: Vec<&str> = value.split('/').collect();
+    match parts.as_slice() {
+        [start_str, end_str] => {
+            let start = parse_grid_line(start_str.trim());
+            let end_val = end_str.trim();
+            let span = if let Some(rest) = end_val.strip_prefix("span") {
+                rest.trim().parse::<u32>().ok()
+            } else if let Some(end_line) = parse_grid_line(end_val) {
+                start.map(|s| (end_line - s).max(1) as u32)
+            } else {
+                None
+            };
+            GridPlacement { start, span }
+        }
+        [single] => {
+            let s = single.trim();
+            if let Some(rest) = s.strip_prefix("span") {
+                GridPlacement {
+                    start: None,
+                    span: rest.trim().parse().ok(),
+                }
+            } else {
+                GridPlacement {
+                    start: parse_grid_line(s),
+                    span: None,
+                }
+            }
+        }
+        _ => GridPlacement::default(),
+    }
+}
+
+fn parse_grid_line(s: &str) -> Option<i32> {
+    let s = s.trim();
+    if s == "auto" {
+        return None;
+    }
+    s.parse::<i32>().ok()
 }
 
 fn parse_font_weight(input: &str) -> Option<bool> {
@@ -4225,5 +4462,53 @@ mod tests {
         let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         let input = find_first_element(&styled, "input").unwrap();
         assert_eq!(input.style.color, 0xff0000);
+    }
+
+    #[test]
+    fn grid_template_columns_parsed() {
+        use super::{GridTrackSize};
+        let html = r#"<div style="display:grid;grid-template-columns:100px 1fr 200px;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.display, Display::Grid);
+        assert_eq!(div.style.grid_template_columns.len(), 3);
+        assert_eq!(div.style.grid_template_columns[0], GridTrackSize::Pixels(100));
+        assert_eq!(div.style.grid_template_columns[1], GridTrackSize::Fr(1000));
+        assert_eq!(div.style.grid_template_columns[2], GridTrackSize::Pixels(200));
+    }
+
+    #[test]
+    fn grid_repeat_expands_tracks() {
+        let html = r#"<div style="display:grid;grid-template-columns:repeat(3,1fr);"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.display, Display::Grid);
+        assert_eq!(div.style.grid_template_columns.len(), 3);
+    }
+
+    #[test]
+    fn grid_inline_grid_display_parsed() {
+        let html = r#"<div style="display:inline-grid;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.display, Display::InlineGrid);
+    }
+
+    #[test]
+    fn grid_placement_parsed() {
+        let html = r#"<div style="grid-column:1/3;grid-row:2;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.grid_column.start, Some(1));
+        assert_eq!(div.style.grid_column.span, Some(2));
+        assert_eq!(div.style.grid_row.start, Some(2));
     }
 }

@@ -1,8 +1,8 @@
 use crate::css::{
-    Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, LengthValue,
-    ObjectFit, Overflow, Position, FlexDirection, AlignItems, AlignSelf, JustifyContent,
-    StyledElement, StyledNode, TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode,
-    apply_text_transform,
+    Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, GridTrackSize,
+    LengthValue, ObjectFit, Overflow, Position, FlexDirection, AlignItems, AlignSelf,
+    JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform, VerticalAlign,
+    WhiteSpaceMode, apply_text_transform,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
@@ -854,6 +854,20 @@ fn layout_node(
                         })
                         .unwrap_or(width);
                     layout_flex_container(element, x, inline_width, cursor_y, context, images, fonts, current_form.clone());
+                }
+                Display::Grid => {
+                    let current_form = form_context_for_element(element, context, current_form);
+                    layout_grid_container(element, x, width, cursor_y, context, images, fonts, current_form);
+                }
+                Display::InlineGrid => {
+                    let current_form = form_context_for_element(element, context, current_form);
+                    let inline_width = element.style.width
+                        .map(|w| match w {
+                            LengthValue::Pixels(px) => px,
+                            LengthValue::Percent(pct) => (width as f32 * pct as f32 / 100.0) as u32,
+                        })
+                        .unwrap_or(width);
+                    layout_grid_container(element, x, inline_width, cursor_y, context, images, fonts, current_form);
                 }
             }
         }
@@ -2392,7 +2406,12 @@ fn collect_inline_fragments(
                         );
                     }
                 }
-                Display::Block | Display::ListItem | Display::Flex | Display::InlineFlex => {}
+                Display::Block
+                | Display::ListItem
+                | Display::Flex
+                | Display::InlineFlex
+                | Display::Grid
+                | Display::InlineGrid => {}
             }
         }
     }
@@ -2910,7 +2929,12 @@ fn is_block_level(node: &StyledNode) -> bool {
         node,
         StyledNode::Element(StyledElement {
             style: ComputedStyle {
-                display: Display::Block | Display::ListItem | Display::Flex | Display::InlineFlex,
+                display: Display::Block
+                    | Display::ListItem
+                    | Display::Flex
+                    | Display::InlineFlex
+                    | Display::Grid
+                    | Display::InlineGrid,
                 ..
             },
             ..
@@ -3128,6 +3152,405 @@ fn layout_positioned_element(
     context.element_hitboxes.extend(sub_context.element_hitboxes);
     context.next_control_id = sub_context.next_control_id;
     context.next_form_id = sub_context.next_form_id;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Grid layout
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn layout_grid_container(
+    element: &StyledElement,
+    x: u32,
+    available_width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+    current_form: Option<FormContext>,
+) {
+    *cursor_y = cursor_y.saturating_add(element.style.margin.top);
+    let outer_x = x.saturating_add(element.style.margin.left);
+    let outer_width = available_width
+        .saturating_sub(element.style.margin.left + element.style.margin.right);
+    let background_top = *cursor_y;
+
+    let border_h = if !element.style.border_style_none {
+        element.style.border.top + element.style.border.bottom
+    } else {
+        0
+    };
+    let border_v = if !element.style.border_style_none {
+        element.style.border.left + element.style.border.right
+    } else {
+        0
+    };
+    let content_x = outer_x
+        .saturating_add(if !element.style.border_style_none { element.style.border.left } else { 0 })
+        .saturating_add(element.style.padding.left);
+    let content_width = outer_width
+        .saturating_sub(border_v + element.style.padding.left + element.style.padding.right)
+        .max(1);
+
+    // ── Resolve column widths ──────────────────────────────────────────────
+    let gap = element.style.gap;
+    let col_tracks = &element.style.grid_template_columns;
+    let col_widths: Vec<u32> = if col_tracks.is_empty() {
+        vec![content_width]
+    } else {
+        resolve_grid_tracks(col_tracks, content_width, gap)
+    };
+    let n_cols = col_widths.len().max(1);
+
+    // ── Collect grid items ─────────────────────────────────────────────────
+    let children: Vec<&StyledElement> = element.children.iter().filter_map(|c| {
+        if let StyledNode::Element(el) = c {
+            if el.style.display != Display::None { Some(el) } else { None }
+        } else {
+            None
+        }
+    }).collect();
+
+    // ── Auto-place items into grid cells ──────────────────────────────────
+    let mut col_cursor = 0usize;
+    let mut row_cursor = 0usize;
+    let mut occupied: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+
+    struct PlacedItem<'a> {
+        element: &'a StyledElement,
+        col: usize,
+        row: usize,
+        col_span: usize,
+        row_span: usize,
+    }
+
+    let mut placed: Vec<PlacedItem> = Vec::new();
+
+    for child in &children {
+        let (col_start, col_span) = {
+            let p = &child.style.grid_column;
+            let span = p.span.unwrap_or(1) as usize;
+            let start = p.start.map(|s| (s - 1).max(0) as usize);
+            (start, span)
+        };
+        let (row_start, row_span) = {
+            let p = &child.style.grid_row;
+            let span = p.span.unwrap_or(1) as usize;
+            let start = p.start.map(|s| (s - 1).max(0) as usize);
+            (start, span)
+        };
+
+        let (final_col, final_row) = if let Some(c) = col_start {
+            let r = row_start.unwrap_or_else(|| {
+                let mut r = row_cursor;
+                loop {
+                    let fits = (c..c + col_span).all(|cc| {
+                        (r..r + row_span).all(|rr| !occupied.contains(&(rr, cc)))
+                    });
+                    if fits { return r; }
+                    r += 1;
+                }
+            });
+            (c, r)
+        } else {
+            let mut c = col_cursor;
+            let mut r = row_cursor;
+            loop {
+                if c + col_span > n_cols {
+                    c = 0;
+                    r += 1;
+                }
+                let fits = (c..c + col_span).all(|cc| {
+                    (r..r + row_span).all(|rr| !occupied.contains(&(rr, cc)))
+                });
+                if fits { break; }
+                c += 1;
+                if c + col_span > n_cols {
+                    c = 0;
+                    r += 1;
+                }
+            }
+            col_cursor = c + col_span;
+            row_cursor = r;
+            if col_cursor >= n_cols {
+                col_cursor = 0;
+                row_cursor += 1;
+            }
+            (c, r)
+        };
+
+        // Mark cells as occupied
+        for rr in final_row..final_row + row_span {
+            for cc in final_col..final_col + col_span.min(n_cols) {
+                occupied.insert((rr, cc));
+            }
+        }
+
+        placed.push(PlacedItem {
+            element: child,
+            col: final_col,
+            row: final_row,
+            col_span: col_span.min(n_cols.saturating_sub(final_col).max(1)),
+            row_span,
+        });
+    }
+
+    // ── Compute row heights ────────────────────────────────────────────────
+    let max_row = placed.iter().map(|p| p.row + p.row_span).max().unwrap_or(0);
+    let auto_row_tracks = &element.style.grid_template_rows;
+    let mut row_heights: Vec<u32> = vec![0u32; max_row];
+
+    // Measure pass
+    struct MeasuredItem<'a> {
+        element: &'a StyledElement,
+        col: usize,
+        row: usize,
+        col_span: usize,
+        row_span: usize,
+        measured_height: u32,
+        cell_width: u32,
+    }
+    let mut measured: Vec<MeasuredItem> = Vec::new();
+
+    for item in &placed {
+        let cell_width: u32 = {
+            let end_col = (item.col + item.col_span).min(n_cols);
+            let w: u32 = if end_col > item.col {
+                col_widths[item.col..end_col].iter().sum()
+            } else {
+                col_widths.get(item.col).copied().unwrap_or(0)
+            };
+            let gaps = gap * (end_col.saturating_sub(item.col).saturating_sub(1)) as u32;
+            w + gaps
+        };
+
+        // Measure item height via a throwaway context
+        let mut dummy_y = 0u32;
+        let mut dummy_ctx = LayoutContext {
+            background_color: context.background_color,
+            next_control_id: context.next_control_id,
+            next_form_id: context.next_form_id,
+            ..LayoutContext::default()
+        };
+        layout_block_element(
+            item.element,
+            0,
+            cell_width,
+            &mut dummy_y,
+            &mut dummy_ctx,
+            images,
+            fonts,
+            None,
+        );
+        let h = dummy_y;
+
+        if item.row_span == 1 {
+            if item.row < row_heights.len() {
+                row_heights[item.row] = row_heights[item.row].max(h);
+            }
+        }
+
+        measured.push(MeasuredItem {
+            element: item.element,
+            col: item.col,
+            row: item.row,
+            col_span: item.col_span,
+            row_span: item.row_span,
+            measured_height: h,
+            cell_width,
+        });
+    }
+
+    // Override with explicit row track sizes
+    for (ri, track) in auto_row_tracks.iter().enumerate() {
+        if ri < row_heights.len() {
+            if let GridTrackSize::Pixels(px) = track {
+                row_heights[ri] = *px;
+            }
+        }
+    }
+    // Apply grid-auto-rows to rows beyond the explicit template
+    for ri in auto_row_tracks.len()..max_row {
+        if ri < row_heights.len() {
+            if let GridTrackSize::Pixels(px) = &element.style.grid_auto_rows {
+                row_heights[ri] = row_heights[ri].max(*px);
+            }
+        }
+    }
+
+    // Background placeholder
+    let bg_cmd_index = if let Some(bg) = element.style.background_color {
+        let blended = apply_opacity(bg, context.background_color, element.style.effective_opacity);
+        context.commands.push(DrawCommand::Rect(RectCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1,
+            color: blended,
+            border_radius: element.style.border_radius,
+        }));
+        Some(context.commands.len() - 1)
+    } else {
+        None
+    };
+
+    let content_top = background_top
+        .saturating_add(if !element.style.border_style_none { element.style.border.top } else { 0 })
+        .saturating_add(element.style.padding.top);
+
+    // ── Render items ──────────────────────────────────────────────────────
+    for item in &measured {
+        let cell_x: u32 = {
+            let x_offset: u32 = col_widths[..item.col].iter().sum::<u32>()
+                + gap * item.col as u32;
+            content_x + x_offset
+        };
+        let cell_y: u32 = {
+            let y_offset: u32 = row_heights[..item.row].iter().sum::<u32>()
+                + gap * item.row as u32;
+            content_top + y_offset
+        };
+
+        let mut item_y = cell_y;
+        let item_form = form_context_for_element(item.element, context, current_form.clone());
+        layout_block_element(
+            item.element,
+            cell_x,
+            item.cell_width,
+            &mut item_y,
+            context,
+            images,
+            fonts,
+            item_form,
+        );
+    }
+
+    // Total content height
+    let total_h: u32 = row_heights.iter().sum::<u32>()
+        + gap * max_row.saturating_sub(1) as u32;
+    let content_bottom = content_top + total_h;
+    let background_bottom = content_bottom
+        .saturating_add(element.style.padding.bottom)
+        .saturating_add(if !element.style.border_style_none { element.style.border.bottom } else { 0 });
+
+    // Fix background rect height
+    if let Some(idx) = bg_cmd_index {
+        if let DrawCommand::Rect(r) = &mut context.commands[idx] {
+            r.height = (background_bottom - background_top).max(1);
+        }
+    }
+
+    // Draw border
+    if !element.style.border_style_none {
+        let bc = apply_opacity(
+            element.style.border_color,
+            context.background_color,
+            element.style.effective_opacity,
+        );
+        let background_height = background_bottom.saturating_sub(background_top).max(1);
+        let border_top_h = if border_h > 0 { element.style.border.top } else { 0 };
+        let border_bottom_h = if border_h > 0 { element.style.border.bottom } else { 0 };
+        let border_left_w = if border_v > 0 { element.style.border.left } else { 0 };
+        let border_right_w = if border_v > 0 { element.style.border.right } else { 0 };
+        if border_top_h > 0 {
+            context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: border_top_h,
+                color: bc,
+                border_radius: element.style.border_radius,
+            }));
+        }
+        if border_bottom_h > 0 {
+            context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x,
+                y: background_bottom.saturating_sub(border_bottom_h),
+                width: outer_width.max(1),
+                height: border_bottom_h,
+                color: bc,
+                border_radius: element.style.border_radius,
+            }));
+        }
+        if border_left_w > 0 {
+            context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x,
+                y: background_top,
+                width: border_left_w,
+                height: background_height,
+                color: bc,
+                border_radius: 0,
+            }));
+        }
+        if border_right_w > 0 {
+            context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x.saturating_add(outer_width).saturating_sub(border_right_w),
+                y: background_top,
+                width: border_right_w,
+                height: background_height,
+                color: bc,
+                border_radius: 0,
+            }));
+        }
+    }
+
+    *cursor_y = background_bottom + element.style.margin.bottom;
+}
+
+/// Resolve grid track sizes into pixel widths, distributing fr units.
+fn resolve_grid_tracks(tracks: &[GridTrackSize], available_px: u32, gap: u32) -> Vec<u32> {
+    let n = tracks.len();
+    let total_gap = gap * n.saturating_sub(1) as u32;
+    let remaining_after_gap = available_px.saturating_sub(total_gap);
+
+    let mut widths = vec![0u32; n];
+    let mut fixed_total = 0u32;
+    let mut fr_total = 0u32;
+    let mut auto_count = 0u32;
+
+    for (i, track) in tracks.iter().enumerate() {
+        match track {
+            GridTrackSize::Pixels(px) => {
+                widths[i] = *px;
+                fixed_total += px;
+            }
+            GridTrackSize::Percent(pct_x100) => {
+                let px = (remaining_after_gap as u64 * *pct_x100 as u64 / 10000) as u32;
+                widths[i] = px;
+                fixed_total += px;
+            }
+            GridTrackSize::Fr(fr_x1000) => {
+                fr_total += fr_x1000;
+            }
+            GridTrackSize::Auto | GridTrackSize::MinContent | GridTrackSize::MaxContent => {
+                auto_count += 1;
+            }
+        }
+    }
+
+    let remaining = remaining_after_gap.saturating_sub(fixed_total);
+    let fr_space = if auto_count == 0 { remaining } else { remaining * 2 / 3 };
+    let auto_space = if auto_count > 0 { remaining - fr_space } else { 0 };
+
+    if fr_total > 0 {
+        for (i, track) in tracks.iter().enumerate() {
+            if let GridTrackSize::Fr(fr_x1000) = track {
+                widths[i] = (fr_space as u64 * *fr_x1000 as u64 / fr_total as u64) as u32;
+            }
+        }
+    }
+    if auto_count > 0 {
+        let per_auto = auto_space / auto_count;
+        for (i, track) in tracks.iter().enumerate() {
+            if matches!(
+                track,
+                GridTrackSize::Auto | GridTrackSize::MinContent | GridTrackSize::MaxContent
+            ) {
+                widths[i] = per_auto;
+            }
+        }
+    }
+
+    widths
 }
 
 fn layout_flex_container(
@@ -3688,5 +4111,57 @@ mod tests {
         let rects = layout.rects();
         let shadow_rect = rects.iter().find(|r| r.color == 0x000000);
         assert!(shadow_rect.is_some(), "Should have a shadow rect with black color");
+    }
+
+    #[test]
+    fn grid_children_placed_side_by_side() {
+        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::html::parse_document;
+
+        // 2-column grid: two children should be placed side by side (different x values)
+        let html = r#"<div style="display:grid;grid-template-columns:200px 200px;gap:0px;"><div>Left</div><div>Right</div></div>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
+
+        let texts = layout.texts();
+        let left = texts.iter().find(|t| t.text.contains("Left")).expect("Left text should be rendered");
+        let right = texts.iter().find(|t| t.text.contains("Right")).expect("Right text should be rendered");
+
+        // Left and Right should have different x positions (side by side)
+        assert_ne!(left.x, right.x, "Grid children should be placed at different x positions");
+        // Right should be to the right of left
+        assert!(right.x > left.x, "Right item should have a larger x than Left item");
+        // They should be on the same row (same y)
+        assert_eq!(left.y, right.y, "Grid children in the same row should have the same y");
+    }
+
+    #[test]
+    fn grid_three_column_equal_fr_layout() {
+        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::html::parse_document;
+
+        let html = r#"<div style="display:grid;grid-template-columns:repeat(3,1fr);"><div>A</div><div>B</div><div>C</div></div>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &stylesheet, 600, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 600, &mut fonts);
+
+        let texts = layout.texts();
+        let a = texts.iter().find(|t| t.text.contains('A')).expect("A should be rendered");
+        let b = texts.iter().find(|t| t.text.contains('B')).expect("B should be rendered");
+        let c = texts.iter().find(|t| t.text.contains('C')).expect("C should be rendered");
+
+        // All three should be on the same row
+        assert_eq!(a.y, b.y, "A and B should be on the same row");
+        assert_eq!(b.y, c.y, "B and C should be on the same row");
+        // They should be at different x positions
+        assert!(b.x > a.x, "B should be to the right of A");
+        assert!(c.x > b.x, "C should be to the right of B");
     }
 }
