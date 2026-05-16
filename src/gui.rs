@@ -11,7 +11,7 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, ResizeDirection, Window};
 
 use crate::browser::{BrowserPage, load_page};
-use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind};
+use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind, ObjectFit};
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
 use crate::image::DecodedImage;
@@ -3371,6 +3371,9 @@ fn render_commands(
                             image.width,
                             image.height,
                             decoded,
+                            image.object_fit,
+                            image.object_position_x,
+                            image.object_position_y,
                         );
                     }
                 }
@@ -3742,20 +3745,115 @@ fn draw_scaled_image(
     draw_width: u32,
     draw_height: u32,
     image: &DecodedImage,
+    object_fit: ObjectFit,
+    object_position_x: u32,
+    object_position_y: u32,
 ) {
     if draw_width == 0 || draw_height == 0 || image.width == 0 || image.height == 0 {
         return;
     }
 
-    let max_x = x.saturating_add(draw_width).min(width);
-    let max_y = y.saturating_add(draw_height).min(height);
+    // Compute the effective source region and destination region based on object-fit
+    // src_* = region within the source image to sample
+    // render_* = region within the destination box to paint
+    let (src_x_off, src_y_off, src_w, src_h, render_x, render_y, render_w, render_h) =
+        match object_fit {
+            ObjectFit::Fill => {
+                // Stretch to fill: use full source, full dest
+                (0u32, 0u32, image.width, image.height, 0u32, 0u32, draw_width, draw_height)
+            }
+            ObjectFit::None => {
+                // No scaling: use natural size, positioned by object-position
+                let natural_w = image.width.min(draw_width);
+                let natural_h = image.height.min(draw_height);
+                // If image is smaller than box, place at object-position
+                let rx = if draw_width > image.width {
+                    ((draw_width - image.width) as f32 * object_position_x as f32 / 100.0).round() as u32
+                } else { 0 };
+                let ry = if draw_height > image.height {
+                    ((draw_height - image.height) as f32 * object_position_y as f32 / 100.0).round() as u32
+                } else { 0 };
+                // source crop when image is larger than box
+                let sx = if image.width > draw_width {
+                    ((image.width - draw_width) as f32 * object_position_x as f32 / 100.0).round() as u32
+                } else { 0 };
+                let sy = if image.height > draw_height {
+                    ((image.height - draw_height) as f32 * object_position_y as f32 / 100.0).round() as u32
+                } else { 0 };
+                (sx, sy, natural_w, natural_h, rx, ry, natural_w, natural_h)
+            }
+            ObjectFit::Contain => {
+                // Scale uniformly to fit inside, with letterboxing
+                let scale_x = draw_width as f32 / image.width as f32;
+                let scale_y = draw_height as f32 / image.height as f32;
+                let scale = scale_x.min(scale_y);
+                let scaled_w = (image.width as f32 * scale).round().max(1.0) as u32;
+                let scaled_h = (image.height as f32 * scale).round().max(1.0) as u32;
+                let rx = ((draw_width.saturating_sub(scaled_w)) as f32 * object_position_x as f32 / 100.0).round() as u32;
+                let ry = ((draw_height.saturating_sub(scaled_h)) as f32 * object_position_y as f32 / 100.0).round() as u32;
+                (0, 0, image.width, image.height, rx, ry, scaled_w, scaled_h)
+            }
+            ObjectFit::Cover => {
+                // Scale uniformly to fill, cropping excess
+                let scale_x = draw_width as f32 / image.width as f32;
+                let scale_y = draw_height as f32 / image.height as f32;
+                let scale = scale_x.max(scale_y);
+                let scaled_w = (image.width as f32 * scale).round().max(1.0) as u32;
+                let scaled_h = (image.height as f32 * scale).round().max(1.0) as u32;
+                // compute source crop to match the visible portion
+                let excess_x = scaled_w.saturating_sub(draw_width);
+                let excess_y = scaled_h.saturating_sub(draw_height);
+                let sx_px = (excess_x as f32 * object_position_x as f32 / 100.0).round() as u32;
+                let sy_px = (excess_y as f32 * object_position_y as f32 / 100.0).round() as u32;
+                // convert back to source coords
+                let sx = (sx_px as f32 / scale).round() as u32;
+                let sy = (sy_px as f32 / scale).round() as u32;
+                let src_w_used = ((draw_width as f32 / scale).round() as u32).min(image.width.saturating_sub(sx)).max(1);
+                let src_h_used = ((draw_height as f32 / scale).round() as u32).min(image.height.saturating_sub(sy)).max(1);
+                (sx, sy, src_w_used, src_h_used, 0, 0, draw_width, draw_height)
+            }
+            ObjectFit::ScaleDown => {
+                // min(none, contain): use natural size if smaller, else contain
+                if image.width <= draw_width && image.height <= draw_height {
+                    // same as none (image fits naturally)
+                    let rx = ((draw_width - image.width) as f32 * object_position_x as f32 / 100.0).round() as u32;
+                    let ry = ((draw_height - image.height) as f32 * object_position_y as f32 / 100.0).round() as u32;
+                    (0, 0, image.width, image.height, rx, ry, image.width, image.height)
+                } else {
+                    // same as contain
+                    let scale_x = draw_width as f32 / image.width as f32;
+                    let scale_y = draw_height as f32 / image.height as f32;
+                    let scale = scale_x.min(scale_y);
+                    let scaled_w = (image.width as f32 * scale).round().max(1.0) as u32;
+                    let scaled_h = (image.height as f32 * scale).round().max(1.0) as u32;
+                    let rx = ((draw_width.saturating_sub(scaled_w)) as f32 * object_position_x as f32 / 100.0).round() as u32;
+                    let ry = ((draw_height.saturating_sub(scaled_h)) as f32 * object_position_y as f32 / 100.0).round() as u32;
+                    (0, 0, image.width, image.height, rx, ry, scaled_w, scaled_h)
+                }
+            }
+        };
 
-    for dest_y in y..max_y {
-        let source_y = ((dest_y - y) as u64 * image.height as u64 / draw_height as u64) as u32;
+    if render_w == 0 || render_h == 0 || src_w == 0 || src_h == 0 {
+        return;
+    }
+
+    let dest_start_x = x.saturating_add(render_x);
+    let dest_start_y = y.saturating_add(render_y);
+    let max_dx = dest_start_x.saturating_add(render_w).min(x.saturating_add(draw_width)).min(width);
+    let max_dy = dest_start_y.saturating_add(render_h).min(y.saturating_add(draw_height)).min(height);
+
+    for dest_y in dest_start_y..max_dy {
+        let local_y = dest_y - dest_start_y;
+        let source_y = (src_y_off as u64
+            + local_y as u64 * src_h as u64 / render_h as u64) as u32;
+        let source_y = source_y.min(image.height.saturating_sub(1));
         let row_offset = dest_y as usize * width as usize;
 
-        for dest_x in x..max_x {
-            let source_x = ((dest_x - x) as u64 * image.width as u64 / draw_width as u64) as u32;
+        for dest_x in dest_start_x..max_dx {
+            let local_x = dest_x - dest_start_x;
+            let source_x = (src_x_off as u64
+                + local_x as u64 * src_w as u64 / render_w as u64) as u32;
+            let source_x = source_x.min(image.width.saturating_sub(1));
             let source_index = ((source_y * image.width + source_x) * 4) as usize;
             let source = &image.rgba[source_index..source_index + 4];
             let alpha = source[3] as u32;

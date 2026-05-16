@@ -323,6 +323,16 @@ impl Default for JustifyContent { fn default() -> Self { JustifyContent::FlexSta
 pub enum AlignSelf { Auto, Stretch, FlexStart, FlexEnd, Center, Baseline }
 impl Default for AlignSelf { fn default() -> Self { AlignSelf::Auto } }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ObjectFit {
+    #[default]
+    Fill,
+    Contain,
+    Cover,
+    ScaleDown,
+    None,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListStyleType {
     Disc,
@@ -397,6 +407,13 @@ pub struct ComputedStyle {
     pub flex_basis: Option<LengthValue>,
     pub gap: u32,
     pub order: i32,
+    /// aspect-ratio as milliratio (ratio * 1000, e.g. 16/9 → 1778); None = auto
+    pub aspect_ratio: Option<u32>,
+    pub object_fit: ObjectFit,
+    /// object-position x, 0–100 (percentage), default 50 = center
+    pub object_position_x: u32,
+    /// object-position y, 0–100 (percentage), default 50 = center
+    pub object_position_y: u32,
 }
 
 impl ComputedStyle {
@@ -466,6 +483,10 @@ impl ComputedStyle {
             flex_basis: None,
             gap: 0,
             order: 0,
+            aspect_ratio: None,
+            object_fit: ObjectFit::Fill,
+            object_position_x: 50,
+            object_position_y: 50,
         };
 
         match tag_name {
@@ -1003,11 +1024,18 @@ fn collect_pseudo_content(
         // the final (text, pseudo_style) pair is only constructed once at the end.
         for decl in &rule.declarations {
             if decl.property == "content" {
-                let v = strip_css_string_quotes(decl.value.trim());
-                if v == "none" || v == "normal" {
-                    content_text = None; // later content: none clears earlier content
-                } else if !v.is_empty() {
-                    content_text = Some(v.to_string());
+                let raw = decl.value.trim();
+                if raw == "none" || raw == "normal" {
+                    content_text = None;
+                } else if let Some(inner) = raw.strip_prefix("attr(").and_then(|s| s.strip_suffix(')')) {
+                    // attr(name) — resolve from element attributes
+                    let attr_name = inner.trim();
+                    content_text = Some(element.attribute(attr_name).unwrap_or("").to_string());
+                } else {
+                    let v = strip_css_string_quotes(raw);
+                    if !v.is_empty() {
+                        content_text = Some(v.to_string());
+                    }
                 }
             } else {
                 // Use host_style.font_size_px so em/% units in pseudo-element rules
@@ -1605,6 +1633,59 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         "order" => {
             if let Ok(n) = value.trim().parse::<i32>() {
                 style.order = n;
+            }
+        }
+        "aspect-ratio" => {
+            let v = value.trim().to_ascii_lowercase();
+            if v == "auto" {
+                style.aspect_ratio = None;
+            } else {
+                let ratio = if let Some((num, den)) = v.split_once('/') {
+                    num.trim().parse::<f32>().ok().zip(den.trim().parse::<f32>().ok())
+                        .and_then(|(n, d)| if d != 0.0 { Some(n / d) } else { None })
+                } else {
+                    v.trim().parse::<f32>().ok().filter(|&r| r > 0.0)
+                };
+                if let Some(r) = ratio {
+                    style.aspect_ratio = Some((r * 1000.0).round() as u32);
+                }
+            }
+        }
+        "object-fit" => {
+            style.object_fit = match value.trim() {
+                "contain" => ObjectFit::Contain,
+                "cover" => ObjectFit::Cover,
+                "scale-down" => ObjectFit::ScaleDown,
+                "none" => ObjectFit::None,
+                _ => ObjectFit::Fill,
+            };
+        }
+        "object-position" => {
+            let parse_pct = |s: &str| -> u32 {
+                match s.trim() {
+                    "left" | "top" => 0,
+                    "center" => 50,
+                    "right" | "bottom" => 100,
+                    other => other
+                        .trim_end_matches('%')
+                        .parse::<f32>()
+                        .ok()
+                        .map(|f| f.clamp(0.0, 100.0).round() as u32)
+                        .unwrap_or(50),
+                }
+            };
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            match parts.as_slice() {
+                [x, y, ..] => {
+                    style.object_position_x = parse_pct(x);
+                    style.object_position_y = parse_pct(y);
+                }
+                [single] => {
+                    let v = parse_pct(single);
+                    style.object_position_x = v;
+                    style.object_position_y = v;
+                }
+                _ => {}
             }
         }
         _ => {}
@@ -2714,7 +2795,53 @@ fn parse_font_family(input: &str) -> Option<FontFamilyKind> {
     }
 }
 
-/// Parse a CSS length. Handles calc(), vw/vh, px, em, rem, %
+/// Split comma-separated CSS function arguments, respecting nested parentheses.
+fn split_css_fn_args(expr: &str) -> Vec<&str> {
+    let mut args: Vec<&str> = Vec::new();
+    let mut depth: u32 = 0;
+    let mut start = 0;
+    for (i, ch) in expr.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                args.push(&expr[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    args.push(&expr[start..]);
+    args
+}
+
+/// CSS `min(a, b, ...)` / `max(a, b, ...)` resolver (is_max=true for max).
+fn parse_css_min_max(expr: &str, parent_font_size: u32, is_max: bool) -> Option<u32> {
+    let mut result: Option<u32> = None;
+    for arg in split_css_fn_args(expr) {
+        if let Some(v) = parse_length(arg.trim(), parent_font_size) {
+            result = Some(match result {
+                None => v,
+                Some(r) => if is_max { r.max(v) } else { r.min(v) },
+            });
+        }
+    }
+    result
+}
+
+/// CSS `clamp(min, val, max)` resolver.
+fn parse_css_clamp(expr: &str, parent_font_size: u32) -> Option<u32> {
+    let args = split_css_fn_args(expr);
+    if args.len() != 3 {
+        return None;
+    }
+    let lo = parse_length(args[0].trim(), parent_font_size)? as f32;
+    let val = parse_length(args[1].trim(), parent_font_size)? as f32;
+    let hi = parse_length(args[2].trim(), parent_font_size)? as f32;
+    Some(val.clamp(lo, hi).round() as u32)
+}
+
+/// Parse a CSS length. Handles calc(), clamp(), min(), max(), vw/vh, px, em, rem, %
 pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
     let value = input.trim().to_ascii_lowercase();
     if value == "0" {
@@ -2727,6 +2854,19 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
         .and_then(|s| s.strip_suffix(')'))
     {
         return parse_calc(inner, parent_font_size);
+    }
+
+    // min()
+    if let Some(inner) = value.strip_prefix("min(").and_then(|s| s.strip_suffix(')')) {
+        return parse_css_min_max(inner, parent_font_size, false);
+    }
+    // max()
+    if let Some(inner) = value.strip_prefix("max(").and_then(|s| s.strip_suffix(')')) {
+        return parse_css_min_max(inner, parent_font_size, true);
+    }
+    // clamp()
+    if let Some(inner) = value.strip_prefix("clamp(").and_then(|s| s.strip_suffix(')')) {
+        return parse_css_clamp(inner, parent_font_size);
     }
 
     if let Some(number) = value.strip_suffix("px") {
@@ -2855,6 +2995,16 @@ fn resolve_calc_operand_f32(token: &str, parent_font_size: u32) -> Option<f32> {
     // Plain number used as multiplier in * or /
     if let Ok(f) = t.parse::<f32>() {
         return Some(f);
+    }
+    // nested min()/max()/clamp() inside calc()
+    if let Some(inner) = t.strip_prefix("min(").and_then(|s| s.strip_suffix(')')) {
+        return parse_css_min_max(inner, parent_font_size, false).map(|v| v as f32);
+    }
+    if let Some(inner) = t.strip_prefix("max(").and_then(|s| s.strip_suffix(')')) {
+        return parse_css_min_max(inner, parent_font_size, true).map(|v| v as f32);
+    }
+    if let Some(inner) = t.strip_prefix("clamp(").and_then(|s| s.strip_suffix(')')) {
+        return parse_css_clamp(inner, parent_font_size).map(|v| v as f32);
     }
     if let Some(n) = t.strip_suffix("px") {
         return parse_float(n);
@@ -3902,5 +4052,35 @@ mod tests {
         let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
         let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
         assert_eq!(style.z_index, Some(10));
+    }
+
+    // ── Phase 5: clamp / min / max ────────────────────────────────────────────
+
+    #[test]
+    fn clamp_resolves_clamped_value() {
+        // clamp(10px, 50px, 100px) = 50px
+        assert_eq!(parse_length("clamp(10px, 50px, 100px)", 16), Some(50));
+        // clamp(10px, 5px, 100px) = 10px (below min)
+        assert_eq!(parse_length("clamp(10px, 5px, 100px)", 16), Some(10));
+        // clamp(10px, 200px, 100px) = 100px (above max)
+        assert_eq!(parse_length("clamp(10px, 200px, 100px)", 16), Some(100));
+    }
+
+    #[test]
+    fn min_max_resolve() {
+        assert_eq!(parse_length("min(30px, 50px)", 16), Some(30));
+        assert_eq!(parse_length("max(30px, 50px)", 16), Some(50));
+        assert_eq!(parse_length("min(100px, 80px, 60px)", 16), Some(60));
+    }
+
+    #[test]
+    fn aspect_ratio_parsed() {
+        let html = r#"<div style="aspect-ratio: 16/9; width: 160px;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280);
+        let div = find_first_element(&styled, "div").unwrap();
+        // 16/9 * 1000 = 1778
+        assert_eq!(div.style.aspect_ratio, Some(1778));
     }
 }

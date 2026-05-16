@@ -1,7 +1,7 @@
 use crate::css::{
     Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, LengthValue,
-    Overflow, Position, FlexDirection, AlignItems, AlignSelf, JustifyContent, StyledElement,
-    StyledNode, TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode,
+    ObjectFit, Overflow, Position, FlexDirection, AlignItems, AlignSelf, JustifyContent,
+    StyledElement, StyledNode, TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode,
     apply_text_transform,
 };
 use crate::font::FontContext;
@@ -193,6 +193,9 @@ pub struct ImageCommand {
     pub width: u32,
     pub height: u32,
     pub src: String,
+    pub object_fit: ObjectFit,
+    pub object_position_x: u32,
+    pub object_position_y: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1497,6 +1500,9 @@ fn layout_image_element(
             width: draw_width,
             height: draw_height,
             src: src.to_string(),
+            object_fit: element.style.object_fit,
+            object_position_x: element.style.object_position_x,
+            object_position_y: element.style.object_position_y,
         });
         context.commands.push(DrawCommand::Layer(LayerCommand {
             x: draw_x,
@@ -1513,6 +1519,9 @@ fn layout_image_element(
             width: draw_width,
             height: draw_height,
             src: src.to_string(),
+            object_fit: element.style.object_fit,
+            object_position_x: element.style.object_position_x,
+            object_position_y: element.style.object_position_y,
         }));
     }
 
@@ -1573,16 +1582,22 @@ fn image_dimensions(
         height_spec.map(|length| resolve_length_value(length, intrinsic_height.max(1)));
 
     let mut width = width_attr.unwrap_or(intrinsic_width.max(1));
-    let mut height = height_attr.unwrap_or_else(|| {
-        scaled_dimension(intrinsic_height.max(1), width, intrinsic_width.max(1))
-    });
+    let mut height = if let Some(ratio_milli) = element.style.aspect_ratio {
+        // CSS aspect-ratio overrides intrinsic ratio for height calculation
+        let ratio = ratio_milli as f32 / 1000.0;
+        height_attr.unwrap_or_else(|| (width as f32 / ratio).round().max(1.0) as u32)
+    } else {
+        height_attr.unwrap_or_else(|| {
+            scaled_dimension(intrinsic_height.max(1), width, intrinsic_width.max(1))
+        })
+    };
 
     if width > max_width && width > 0 {
         height = scaled_dimension(height.max(1), max_width.max(1), width);
         width = max_width.max(1);
     }
 
-    if height_attr.is_some() && width_attr.is_none() {
+    if height_attr.is_some() && width_attr.is_none() && element.style.aspect_ratio.is_none() {
         width = scaled_dimension(
             intrinsic_width.max(1),
             height.max(1),
@@ -2123,6 +2138,9 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             width: image.width,
             height: image.height,
             src: image.src.clone(),
+            object_fit: image.object_fit,
+            object_position_x: image.object_position_x,
+            object_position_y: image.object_position_y,
         }),
         DrawCommand::Layer(layer) => DrawCommand::Layer(LayerCommand {
             x: layer.x.saturating_add(offset_x),

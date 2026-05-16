@@ -2914,6 +2914,10 @@ mod tests {
                     gap: 0,
                     order: 0,
                     effective_opacity: 255,
+                    aspect_ratio: None,
+                    object_fit: crate::css::ObjectFit::Fill,
+                    object_position_x: 50,
+                    object_position_y: 50,
                 },
             }),
             images: crate::image::ImageStore::default(),
@@ -3258,6 +3262,10 @@ mod tests {
                 gap: 0,
                 order: 0,
                 effective_opacity: 255,
+                aspect_ratio: None,
+                object_fit: crate::css::ObjectFit::Fill,
+                object_position_x: 50,
+                object_position_y: 50,
             },
         })
     }
