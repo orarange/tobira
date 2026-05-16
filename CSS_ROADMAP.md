@@ -119,7 +119,16 @@ Branch: `claude/phase5-css` (PR #49)
 | `backdrop-filter` / `clip-path` | 🔧 | Parsed as no-op |
 | `scroll-behavior` / `resize` / `writing-mode` / `user-select` / `appearance` / `contain` | 🔧 | Parsed as no-op (no crash on real-world CSS) |
 
-## Phase 6 — Future Work ❌
+## Phase 6 — Partially Implemented 🔧
+
+### Phase 6 Batch 1 ✅ (Branch: `claude/phase5-css`)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `filter: blur()` rendering | ✅ | Separable box blur in `gui.rs`; `LayerCommand.blur_px` field; triggered when `filter_blur_px > 0` |
+| `filter: brightness()` rendering | ✅ | Per-channel scale in `gui.rs`; `LayerCommand.brightness` field; triggered when `filter_brightness != 10000` |
+
+### Phase 6 Remaining ❌
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
@@ -127,7 +136,6 @@ Branch: `claude/phase5-css` (PR #49)
 | CSS `animation` / `@keyframes` | Low | Requires animation runtime and repaint loop |
 | `transition` interpolation | Low | Requires repaint loop and state diffing |
 | `position: sticky` scroll tracking | Medium | Requires scroll-offset propagation into layout |
-| `filter: blur()` rendering | Medium | Box blur implementation in `gui.rs` (field is parsed) |
 | `grid-template-areas` | Low | Named area placement |
 | `grid-auto-flow` | Low | Dense packing auto-placement |
 | `counter()` / `counters()` | Low | CSS counters for lists |

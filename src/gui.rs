@@ -3484,6 +3484,106 @@ fn render_commands(
     }
 }
 
+/// Apply a separable box blur to an ARGB pixel buffer in-place.
+/// radius = 0 is a no-op.
+fn apply_box_blur(pixels: &mut Vec<u32>, width: u32, height: u32, radius: u32) {
+    if radius == 0 || width == 0 || height == 0 { return; }
+    let w = width as usize;
+    let h = height as usize;
+    let r = radius as usize;
+    let mut tmp = vec![0u32; w * h];
+
+    // Horizontal pass: pixels → tmp
+    for row in 0..h {
+        let base = row * w;
+        let mut sr: u32 = 0;
+        let mut sg: u32 = 0;
+        let mut sb: u32 = 0;
+        let mut cnt: u32 = 0;
+        // Seed window with pixels[0..=min(r, w-1)]
+        let init_end = r.min(w.saturating_sub(1));
+        for k in 0..=init_end {
+            let px = pixels[base + k];
+            sr += (px >> 16) & 0xFF;
+            sg += (px >> 8) & 0xFF;
+            sb += px & 0xFF;
+            cnt += 1;
+        }
+        for x in 0..w {
+            if cnt > 0 {
+                tmp[base + x] = ((sr / cnt) << 16) | ((sg / cnt) << 8) | (sb / cnt);
+            }
+            // Advance: add right edge
+            let add = x + r + 1;
+            if add < w {
+                let px = pixels[base + add];
+                sr += (px >> 16) & 0xFF;
+                sg += (px >> 8) & 0xFF;
+                sb += px & 0xFF;
+                cnt += 1;
+            }
+            // Remove left edge
+            if x >= r {
+                let rem = x - r;
+                let px = pixels[base + rem];
+                sr = sr.saturating_sub((px >> 16) & 0xFF);
+                sg = sg.saturating_sub((px >> 8) & 0xFF);
+                sb = sb.saturating_sub(px & 0xFF);
+                cnt = cnt.saturating_sub(1);
+            }
+        }
+    }
+
+    // Vertical pass: tmp → pixels
+    for col in 0..w {
+        let mut sr: u32 = 0;
+        let mut sg: u32 = 0;
+        let mut sb: u32 = 0;
+        let mut cnt: u32 = 0;
+        let init_end = r.min(h.saturating_sub(1));
+        for k in 0..=init_end {
+            let px = tmp[k * w + col];
+            sr += (px >> 16) & 0xFF;
+            sg += (px >> 8) & 0xFF;
+            sb += px & 0xFF;
+            cnt += 1;
+        }
+        for y in 0..h {
+            if cnt > 0 {
+                pixels[y * w + col] = ((sr / cnt) << 16) | ((sg / cnt) << 8) | (sb / cnt);
+            }
+            let add = y + r + 1;
+            if add < h {
+                let px = tmp[add * w + col];
+                sr += (px >> 16) & 0xFF;
+                sg += (px >> 8) & 0xFF;
+                sb += px & 0xFF;
+                cnt += 1;
+            }
+            if y >= r {
+                let rem = y - r;
+                let px = tmp[rem * w + col];
+                sr = sr.saturating_sub((px >> 16) & 0xFF);
+                sg = sg.saturating_sub((px >> 8) & 0xFF);
+                sb = sb.saturating_sub(px & 0xFF);
+                cnt = cnt.saturating_sub(1);
+            }
+        }
+    }
+}
+
+/// Apply brightness adjustment to an ARGB pixel buffer in-place.
+/// brightness = 10000 is a no-op (100% brightness).
+fn apply_brightness(pixels: &mut [u32], brightness: u32) {
+    if brightness == 10000 { return; }
+    for px in pixels.iter_mut() {
+        let r = ((((*px >> 16) & 0xFF) * brightness / 10000).min(255)) as u32;
+        let g = ((((*px >> 8) & 0xFF) * brightness / 10000).min(255)) as u32;
+        let b = (((*px & 0xFF) * brightness / 10000).min(255)) as u32;
+        *px = (r << 16) | (g << 8) | b;
+    }
+}
+
 fn render_layer(
     buffer: &mut [u32],
     buf_width: u32,
@@ -3619,6 +3719,16 @@ fn render_layer(
         scratch,
         depth + 1, // nested layers use the next depth slot
     );
+
+    // Apply CSS filter effects to the offscreen buffer.
+    // Blur: applied first (uses neighboring pixel values before brightness skews them)
+    if layer.blur_px > 0 {
+        apply_box_blur(&mut offscreen, ow, oh, layer.blur_px);
+    }
+    // Brightness: applied after blur
+    if layer.brightness != 10000 {
+        apply_brightness(&mut offscreen, layer.brightness);
+    }
 
     // Blend the visible rows of the offscreen back onto the main buffer with opacity.
     // Visible row r: offscreen row (src_y_start + r) → buffer row (dst_y + r).

@@ -22,6 +22,8 @@ pub struct LayerCommand {
     pub width: u32,
     pub height: u32,
     pub opacity: u8,
+    pub blur_px: u32,       // CSS filter: blur() radius; 0 = no blur
+    pub brightness: u32,    // CSS filter: brightness() in 1/10000; 10000 = no change
     pub commands: Vec<DrawCommand>,
 }
 
@@ -897,8 +899,8 @@ fn layout_block_element(
     }
 
     if element.tag_name == "table" {
-        if element.style.opacity < 255 {
-            // Table with opacity: render into sub-context and wrap in a LayerCommand
+        if element.style.opacity < 255 || element.style.filter_blur_px > 0 || element.style.filter_brightness != 10000 {
+            // Table with opacity/filter: render into sub-context and wrap in a LayerCommand
             let mut sub_context = LayoutContext {
                 background_color: context.background_color,
                 ..LayoutContext::default()
@@ -916,6 +918,8 @@ fn layout_block_element(
                 width: width.max(1),
                 height: table_height,
                 opacity: element.style.opacity,
+                blur_px: element.style.filter_blur_px,
+                brightness: element.style.filter_brightness,
                 commands: sub_context.commands,
             }));
             context.links.extend(sub_context.links);
@@ -942,8 +946,8 @@ fn layout_block_element(
         .max(element.style.min_width);
     let background_top = *cursor_y;
 
-    // Detect stacking context: element has opacity < 255
-    if element.style.opacity < 255 {
+    // Detect stacking context: element has opacity < 255 or a filter effect
+    if element.style.opacity < 255 || element.style.filter_blur_px > 0 || element.style.filter_brightness != 10000 {
         layout_block_element_as_layer(
             element, outer_x, outer_width, background_top, cursor_y, context, images, fonts, current_form,
         );
@@ -1518,6 +1522,8 @@ fn layout_block_element_as_layer(
         width: outer_width.max(1),
         height: final_height,
         opacity: element.style.opacity,
+        blur_px: element.style.filter_blur_px,
+        brightness: element.style.filter_brightness,
         commands: sub_context.commands,
     }));
 
@@ -1558,8 +1564,8 @@ fn layout_image_element(
         TextAlign::Left => x,
     };
 
-    if element.style.opacity < 255 {
-        // Wrap the image in a LayerCommand so opacity is applied correctly
+    if element.style.opacity < 255 || element.style.filter_blur_px > 0 || element.style.filter_brightness != 10000 {
+        // Wrap the image in a LayerCommand so opacity/filters are applied correctly
         let img_cmd = DrawCommand::Image(ImageCommand {
             x: 0,
             y: 0,
@@ -1576,6 +1582,8 @@ fn layout_image_element(
             width: draw_width,
             height: draw_height,
             opacity: element.style.opacity,
+            blur_px: element.style.filter_blur_px,
+            brightness: element.style.filter_brightness,
             commands: vec![img_cmd],
         }));
     } else {
@@ -1850,6 +1858,8 @@ fn layout_table_element(
                 width: layer_w,
                 height: layer_h,
                 opacity: placement.cell.style.opacity,
+                blur_px: placement.cell.style.filter_blur_px,
+                brightness: placement.cell.style.filter_brightness,
                 commands: layer_commands,
             }));
             // Links are content-relative; shift by cell position + padding/valign
@@ -2234,6 +2244,8 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             width: layer.width,
             height: layer.height,
             opacity: layer.opacity,
+            blur_px: layer.blur_px,
+            brightness: layer.brightness,
             commands: layer.commands.clone(),
         }),
     }
@@ -4196,5 +4208,74 @@ mod tests {
         // They should be at different x positions
         assert!(b.x > a.x, "B should be to the right of A");
         assert!(c.x > b.x, "C should be to the right of B");
+    }
+
+    #[test]
+    fn filter_blur_emits_layer_command_with_blur_px() {
+        use super::LayerCommand;
+
+        let document = parse_document(r#"<div style="filter: blur(4px);">Hello</div>"#);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 320, &mut fonts);
+
+        // Find all LayerCommands recursively
+        fn find_layers(cmds: &[DrawCommand]) -> Vec<&LayerCommand> {
+            let mut result = Vec::new();
+            for cmd in cmds {
+                if let DrawCommand::Layer(layer) = cmd {
+                    result.push(layer);
+                    result.extend(find_layers(&layer.commands));
+                }
+            }
+            result
+        }
+
+        let layers = find_layers(&layout.commands);
+        assert!(!layers.is_empty(), "Expected at least one LayerCommand for filter: blur()");
+        assert!(
+            layers.iter().any(|l| l.blur_px > 0),
+            "Expected a LayerCommand with blur_px > 0, got: {:?}",
+            layers.iter().map(|l| l.blur_px).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn filter_brightness_emits_layer_command_with_brightness() {
+        use super::LayerCommand;
+
+        let document = parse_document(r#"<div style="filter: brightness(0.5);">Hello</div>"#);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 320, &mut fonts);
+
+        fn find_layers(cmds: &[DrawCommand]) -> Vec<&LayerCommand> {
+            let mut result = Vec::new();
+            for cmd in cmds {
+                if let DrawCommand::Layer(layer) = cmd {
+                    result.push(layer);
+                    result.extend(find_layers(&layer.commands));
+                }
+            }
+            result
+        }
+
+        let layers = find_layers(&layout.commands);
+        assert!(!layers.is_empty(), "Expected at least one LayerCommand for filter: brightness()");
+        assert!(
+            layers.iter().any(|l| l.brightness != 10000),
+            "Expected a LayerCommand with brightness != 10000, got: {:?}",
+            layers.iter().map(|l| l.brightness).collect::<Vec<_>>()
+        );
+        // brightness(0.5) => 5000
+        assert!(
+            layers.iter().any(|l| l.brightness == 5000),
+            "Expected brightness = 5000 (50%), got: {:?}",
+            layers.iter().map(|l| l.brightness).collect::<Vec<_>>()
+        );
     }
 }
