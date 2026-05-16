@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `110` passing tests on `2026-05-16`
+  - `cargo test`: `111` passing tests on `2026-05-16`
   - `cargo build`: success on `2026-05-16`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -108,6 +108,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - `d159cf0` dom backed javascript support implementation complete
 - `8751537` address bar clipboard support implementation complete
 - `18f2be6` copilot review runtime limit and fragment fixes complete
+- `1df11f6` live input value sync implementation complete
 
 ## Known Gaps / Likely Next Work
 
@@ -224,3 +225,9 @@ git worktree list
 - Removed the stale page-control value cache so rendered inputs now trust the DOM-backed `value` as the source of truth when they are not focused.
 - Kept focused native editors authoritative during typing, while syncing their live text back into the DOM attribute on each edit path.
 - Added a small regression test to lock in the focused-editor-vs-DOM value precedence.
+
+### 2026-05-16 - Codex (merge prep checkpoint)
+
+- Current branch `codex/js-event-capture` is clean and pushed with the latest live input sync work.
+- PR #40 is the active merge target for the current JS/event progress checkpoint.
+- The next likely follow-up after merge is storage/cookies and richer history/back-forward behavior.
