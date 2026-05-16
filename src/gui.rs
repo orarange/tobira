@@ -3455,7 +3455,7 @@ fn render_layer(
         // Degraded fallback: the layer is too large to allocate an offscreen buffer.
         // Sub-commands are rendered directly into the main buffer WITHOUT applying
         // layer.opacity — the element will appear fully opaque rather than at its
-        // declared opacity. This is a rare edge case (>8192×8192 px elements) and
+        // declared opacity. This is a rare edge case (>4096×4096 px elements) and
         // is preferable to silently dropping the element entirely.
         // A production fix would tile the layer or use a clipped compositing path.
         //

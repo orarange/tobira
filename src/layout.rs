@@ -2545,7 +2545,7 @@ fn layout_preformatted_fragments(
             }
             InlineFragment::Control(control) => {
                 let (control_width, _) = measure_form_control(control, fonts);
-                let effective_width = if first_line && line.is_empty() {
+                let effective_width = if first_line {
                     width.saturating_sub(text_indent)
                 } else {
                     width
@@ -2577,7 +2577,8 @@ fn layout_preformatted_fragments(
                     }
 
                     let character_width = char_width(style, character, fonts);
-                    if !line.is_empty() && line.width.saturating_add(character_width) > width {
+                    let eff_w = if first_line { width.saturating_sub(text_indent) } else { width };
+                    if !line.is_empty() && line.width.saturating_add(character_width) > eff_w {
                         emit_line_with_indent(
                             &mut line, container_style, x, width, cursor_y, context, fonts,
                             if first_line { text_indent } else { 0 },
