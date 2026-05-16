@@ -604,7 +604,11 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                     let inner_map = (*inner_stylesheet.root_vars).clone();
                     media_root_vars.push((media_cond.clone(), inner_map));
                 }
-                // Also propagate any nested media_root_vars from the inner stylesheet
+                // Also propagate any nested media_root_vars from the inner stylesheet.
+                // Note: nested @media root vars are stored with the inner condition only.
+                // The conjunction of outer + inner conditions is not computed. Nested @media
+                // is uncommon (non-standard before CSS nesting) and practically rare, so
+                // this approximation is acceptable for now.
                 for (inner_cond, inner_map) in inner_stylesheet.media_root_vars {
                     media_root_vars.push((inner_cond, inner_map));
                 }
@@ -871,6 +875,10 @@ fn strip_css_string_quotes(s: &str) -> &str {
     if s.len() >= 2 {
         let first = s.as_bytes()[0];
         let last = s.as_bytes()[s.len() - 1];
+        // Safety: `"` and `'` are single-byte ASCII characters, so checking
+        // s.as_bytes()[0] and s.as_bytes()[s.len()-1] is always valid.
+        // Slicing at byte offsets 1 and s.len()-1 is safe because the opening
+        // and closing quotes are each exactly 1 byte, regardless of the content.
         if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
             return &s[1..s.len() - 1];
         }
@@ -895,10 +903,10 @@ fn collect_pseudo_content(
     host_style: &ComputedStyle,
 ) -> Option<(String, ComputedStyle)> {
     let identity = ElementIdentity::from(element);
-    let mut result: Option<(String, ComputedStyle)> = None;
     // Inherit from the host element so pseudo-elements pick up color, font-size, etc.
     // CSS requires pseudo-elements to inherit from their originating element.
     let mut pseudo_style = host_style.clone();
+    let mut content_text: Option<String> = None;
 
     for rule in &stylesheet.rules {
         if let Some(cond) = &rule.media {
@@ -921,25 +929,25 @@ fn collect_pseudo_content(
         if !host_matches {
             continue;
         }
-        // Apply all declarations in cascade order
+        // Apply all declarations in cascade order.
+        // Accumulate `content` text separately to avoid intermediate clones of pseudo_style —
+        // the final (text, pseudo_style) pair is only constructed once at the end.
         for decl in &rule.declarations {
             if decl.property == "content" {
                 let v = strip_css_string_quotes(decl.value.trim());
                 if v == "none" || v == "normal" {
-                    result = None; // later content: none clears earlier content
+                    content_text = None; // later content: none clears earlier content
                 } else if !v.is_empty() {
-                    result = Some((v.to_string(), pseudo_style.clone())); // placeholder, updated below
+                    content_text = Some(v.to_string());
                 }
             } else {
-                apply_declaration(&mut pseudo_style, decl, 16);
+                // Use host_style.font_size_px so em/% units in pseudo-element rules
+                // resolve against the originating element's font size (not a hardcoded 16px).
+                apply_declaration(&mut pseudo_style, decl, host_style.font_size_px);
             }
         }
     }
-    // Update result with the final accumulated pseudo_style
-    if let Some((text, _)) = result {
-        result = Some((text, pseudo_style));
-    }
-    result
+    content_text.map(|text| (text, pseudo_style))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -966,8 +974,10 @@ fn compute_style(
     // applied when their @media condition is satisfied.
     for (cond, vars) in &stylesheet.media_root_vars {
         if cond.matches(viewport_width) {
+            // CSS cascade: last declaration wins, so use insert (not or_insert_with).
+            // A later matching @media block should override an earlier one for the same var.
             for (k, v) in vars {
-                element_vars.entry(k.clone()).or_insert_with(|| v.clone());
+                element_vars.insert(k.clone(), v.clone());
             }
         }
     }
@@ -1037,6 +1047,20 @@ fn compute_style(
 
     applicable.sort_by_key(|(specificity, order, _)| (*specificity, *order));
 
+    // Merge root_vars into element_vars once, before the declaration loop.
+    // element_vars (from matched rules + inline style) takes priority via or_insert_with.
+    // Doing this once here avoids repeated merge attempts on every var()-containing declaration.
+    if !element_vars.is_empty() {
+        for (k, v) in root_vars.iter() {
+            element_vars.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+    let vars_ref: &BTreeMap<String, String> = if element_vars.is_empty() {
+        &*root_vars
+    } else {
+        &element_vars
+    };
+
     for (_, _, mut declaration) in applicable {
         // skip CSS custom properties
         if declaration.property.starts_with("--") {
@@ -1044,16 +1068,6 @@ fn compute_style(
         }
         // substitute var() references
         if declaration.value.contains("var(") {
-            let vars_ref: &BTreeMap<String, String> = if element_vars.is_empty() {
-                &*root_vars
-            } else {
-                // Merge: element_vars overrides root_vars.
-                // We only pay O(root_vars) once — after this, element_vars is the merged map.
-                for (k, v) in root_vars.iter() {
-                    element_vars.entry(k.clone()).or_insert_with(|| v.clone());
-                }
-                &element_vars
-            };
             declaration.value = substitute_vars(&declaration.value, vars_ref);
         }
         apply_declaration(&mut style, &declaration, parent_font_size);
@@ -2229,7 +2243,11 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
     if v.to_ascii_lowercase() == "none" {
         return None;
     }
-    // Split tokens at spaces, respecting parentheses (for rgba/rgb colors)
+    // Split tokens at spaces (top-level only, respecting parentheses for rgb()/rgba() colors).
+    // Note: only ASCII space is used as separator; tabs and other whitespace between
+    // tokens are not treated as delimiters. This is an approximation that covers
+    // standard CSS box-shadow syntax. Exotic whitespace (e.g. `2px\t2px`) would
+    // produce unparseable tokens.
     let tokens: Vec<String> = split_at_top_level(v, ' ')
         .into_iter()
         .map(|s| s.trim().to_string())

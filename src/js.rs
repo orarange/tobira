@@ -1482,6 +1482,9 @@ fn install_browser_globals(context: &mut Context) {
         .register_global_property(js_string!("innerWidth"), 1280, Attribute::all())
         .expect("innerWidth should be installable");
     context
+        // Note: changed from 720 in a previous version to align with the CSS vh unit
+        // (1vh = 8px at 800px base in css.rs parse_length). Scripts that rely on
+        // window.innerHeight == 720 may behave differently.
         .register_global_property(js_string!("innerHeight"), 800, Attribute::all()) // must match vh base (800px) in css.rs parse_length
         .expect("innerHeight should be installable");
 

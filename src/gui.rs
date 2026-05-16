@@ -2291,7 +2291,13 @@ fn render_layer(
     // A layer larger than this is almost certainly a bug in layout (e.g. height not clamped).
     const MAX_OFFSCREEN_PIXELS: usize = 8192 * 8192;
     if needed > MAX_OFFSCREEN_PIXELS {
-        // Fallback: render without opacity blending to avoid a blank element.
+        // Degraded fallback: the layer is too large to allocate an offscreen buffer.
+        // Sub-commands are rendered directly into the main buffer WITHOUT applying
+        // layer.opacity — the element will appear fully opaque rather than at its
+        // declared opacity. This is a rare edge case (>8192×8192 px elements) and
+        // is preferable to silently dropping the element entirely.
+        // A production fix would tile the layer or use a clipped compositing path.
+        //
         // Layer commands are layer-relative (rebased to origin 0,0 by rebase_commands at
         // layout time). Pass scroll_y=0 so commands render at their natural layer-relative
         // coordinates. Account for page scroll by adjusting offset_y by layer.y - scroll_y.

@@ -180,10 +180,20 @@ pub struct LinkCommand {
     pub href: String,
 }
 
-/// Scan the document root for a body/html element with a solid background color.
+/// Scan the document tree for a body/html element with a solid background color.
 /// Used to fill canvas margins without double-applying opacity.
-fn extract_body_background(doc: &StyledNode) -> Option<u32> {
-    if let StyledNode::Element(el) = doc {
+///
+/// Typical documents are `document > html > body`, so `body` is a grandchild of the
+/// root node. We recurse the full tree rather than only checking direct children.
+fn extract_body_background(node: &StyledNode) -> Option<u32> {
+    if let StyledNode::Element(el) = node {
+        // Check this element itself
+        if (el.tag_name == "body" || el.tag_name == "html") && el.style.opacity == 255 {
+            if let Some(bg) = el.style.background_color {
+                return Some(bg);
+            }
+        }
+        // Breadth-first: check direct children before recursing deeper
         for child in &el.children {
             if let StyledNode::Element(child_el) = child {
                 if (child_el.tag_name == "body" || child_el.tag_name == "html")
@@ -195,9 +205,11 @@ fn extract_body_background(doc: &StyledNode) -> Option<u32> {
                 }
             }
         }
-        // Also check the doc element itself
-        if (el.tag_name == "body" || el.tag_name == "html") && el.style.opacity == 255 {
-            return el.style.background_color;
+        // Recurse deeper for documents with extra nesting layers
+        for child in &el.children {
+            if let Some(bg) = extract_body_background(child) {
+                return Some(bg);
+            }
         }
     }
     None
@@ -743,10 +755,12 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
 
 /// Layout a block element that needs opacity compositing via a LayerCommand.
 ///
-/// TODO: this function duplicates significant logic from `layout_block_element`
-/// (padding, bullet indent, border rendering, background rect post-fixup, hr handling).
-/// A future refactor should extract the shared body into a helper that takes
-/// `&mut LayoutContext`, so both code paths stay in sync automatically.
+/// TODO(refactor): This function duplicates ~200 lines from `layout_block_element`:
+/// padding, bullet indent, hr handling, background rect fixup, border drawing,
+/// box-shadow, and overflow clipping. Changes to either path must be manually
+/// mirrored to the other or the two paths will silently diverge.
+/// A shared helper taking a `&mut LayoutContext` (sub-context vs parent context)
+/// would eliminate the duplication.
 fn layout_block_element_as_layer(
     element: &StyledElement,
     outer_x: u32,
