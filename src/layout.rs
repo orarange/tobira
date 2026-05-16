@@ -610,8 +610,15 @@ fn layout_block_element(
 /// Remove draw commands (from index start) that fall entirely outside the given box.
 /// Uses split_off + filter + extend for O(n) performance instead of O(n²) remove().
 ///
-/// TODO: partially-overlapping commands are not truncated — a future improvement
-///       would wrap overflow:hidden subtrees in a LayerCommand with clip rect.
+/// Known limitations:
+/// - Partially-overlapping commands are kept intact (not truncated to the clip box).
+///   A proper fix would wrap the overflow:hidden subtree in a LayerCommand with a clip rect
+///   so the compositor handles cropping at render time.
+/// - DrawCommand::Layer children are not recursed: if a layer's bounding box overlaps
+///   the clip region, the whole layer is kept even if its inner commands extend past the
+///   overflow:hidden boundary. This is partially masked because render_layer already clips
+///   at the layer's own dimensions, but elements with opacity<1 inside overflow:hidden
+///   ancestors may still paint outside the clip in edge cases.
 fn clip_commands_to_box(
     commands: &mut Vec<DrawCommand>,
     start: usize,
@@ -680,6 +687,12 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
     }
 }
 
+/// Layout a block element that needs opacity compositing via a LayerCommand.
+///
+/// TODO: this function duplicates significant logic from `layout_block_element`
+/// (padding, bullet indent, border rendering, background rect post-fixup, hr handling).
+/// A future refactor should extract the shared body into a helper that takes
+/// `&mut LayoutContext`, so both code paths stay in sync automatically.
 fn layout_block_element_as_layer(
     element: &StyledElement,
     outer_x: u32,

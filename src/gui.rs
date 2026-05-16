@@ -2257,6 +2257,13 @@ fn render_layer(
     // Use checked_mul so pathological dimensions (which would overflow usize in release
     // or panic in debug) are caught safely before any allocation attempt.
     let Some(needed) = (ow as usize).checked_mul(oh as usize) else { return; };
+    // Note: we allocate the full layer.width × layer.height even when only visible_w × visible_h
+    // pixels are actually blended back to the screen. This is a deliberate trade-off: allocating
+    // only the visible slice and translating sub-command coordinates by -src_y_start would be
+    // more memory-efficient, but it reintroduces the y-straddling bug (commands that start above
+    // the visible window are clamped to y=0 via saturating_sub, showing the wrong content).
+    // The full-height approach keeps sub-commands at their natural layer-relative coordinates so
+    // the existing viewport culling in render_commands() handles out-of-view commands correctly.
 
     // Safety guard: refuse to allocate an obviously pathological offscreen buffer.
     // 8192×8192 (~67 MP) is well above any screen size we realistically support.

@@ -961,6 +961,13 @@ fn compute_style(
             }
         }
         for selector in &rule.selectors {
+            // Skip pseudo-element selectors (::before/::after) — they are handled
+            // by collect_pseudo_content and must not apply to the host element.
+            // This also prevents mixed rules like `p::before, span { color: red }`
+            // from incorrectly contributing declarations to the host `<p>`.
+            if selector.pseudo_element.is_some() {
+                continue;
+            }
             if selector.matches(
                 &identity,
                 ancestors,
@@ -2195,12 +2202,13 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Skip "inset" keyword
-    let tokens: Vec<&str> = tokens
-        .iter()
-        .filter(|t| t.to_ascii_lowercase() != "inset")
-        .map(|s| s.as_str())
-        .collect();
+    // Inset shadows are not yet supported; return None so they are silently skipped
+    // rather than being incorrectly drawn as outer shadows.
+    if tokens.iter().any(|t| t.to_ascii_lowercase() == "inset") {
+        return None;
+    }
+
+    let tokens: Vec<&str> = tokens.iter().map(|s| s.as_str()).collect();
 
     if tokens.len() < 2 {
         return None;
@@ -2213,12 +2221,14 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
     let mut length_count = 0;
 
     for token in &tokens {
+        // Note: parse_signed_length uses a hardcoded font-size of 16px,
+        // so `em`/`rem` units in box-shadow offsets resolve against 16px rather
+        // than the element's actual font size. This is a known approximation.
         if let Some(val) = parse_signed_length(token, 16) {
-            let val_i32 = val as i32;
             match length_count {
-                0 => offset_x = val_i32,
-                1 => offset_y = val_i32,
-                2 => blur = val_i32.max(0) as u32,
+                0 => offset_x = val,
+                1 => offset_y = val,
+                2 => blur = val.max(0) as u32,
                 _ => {}
             }
             length_count += 1;
@@ -2530,7 +2540,8 @@ fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i32> {
         return Some(-px);
     }
 
-    parse_length(input, parent_font_size).map(|v| v as i32)
+    // Clamp to i32::MAX before casting so pathological lengths (>= 2^31 px) don't wrap.
+    parse_length(input, parent_font_size).map(|v| v.min(i32::MAX as u32) as i32)
 }
 
 /// Simple calc() evaluator: left-to-right, no precedence.
