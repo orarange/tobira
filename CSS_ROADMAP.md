@@ -87,45 +87,56 @@ Branch: `claude/phase2-css` (commit `28597a7`)
 
 ---
 
-## Phase 5 — Future Work ❌
+## Phase 5 — Implemented ✅
 
-Not yet planned or implemented.
+Branch: `claude/phase5-css` (PR #49)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `clamp(a, b, c)` / `min()` / `max()` | ✅ | Works nested inside `calc()` |
+| `aspect-ratio` | ✅ | Stored as milliratio u32 to keep `Eq`; applied in image layout |
+| `object-fit` / `object-position` | ✅ | 5 modes: Fill/Contain/Cover/ScaleDown/None |
+| `content: attr(name)` | ✅ | Resolved from element attributes in `::before`/`::after` |
+| `:hover` / `:focus` / `:active` | ✅ | Real pseudo-classes; `InteractiveState` threaded through cascade; GUI re-layouts on hover change |
+| `:checked` / `:disabled` / `:enabled` | ✅ | Matched via element attributes |
+| `::placeholder` / `::selection` | ✅ | Parsed; `compute_placeholder_style()` API for GUI integration |
+| `display: inline-flex` | ✅ | Inline-level flex container |
+| `display: inline-grid` | ✅ | Inline-level grid container |
+| `display: grid` | ✅ | Full grid layout with auto-placement engine |
+| `grid-template-columns` / `-rows` | ✅ | px, %, fr, auto, min/max-content, `repeat(N, ...)` |
+| `fr` units | ✅ | Two-pass distribution (fixed first, then proportional) |
+| `grid-column` / `grid-row` | ✅ | Explicit placement + `span N` syntax |
+| `grid-auto-rows` / `-columns` | ✅ | Implicit track sizing |
+| `flex-flow` shorthand | ✅ | Sets `flex-direction` + `flex-wrap` |
+| `align-content` | ✅ | Parsed; applied in multi-line flex cross-axis |
+| `min-content` / `max-content` / `fit-content()` | ✅ | `LengthValue` variants; used in width, flex-basis, grid |
+| `position: sticky` | 🔧 | Lays out as relative; scroll-offset stickiness deferred |
+| `cursor` extended | ✅ | `CursorKind` enum with 14 variants; `cursor_kind` on `ComputedStyle` |
+| `pointer-events: none` | ✅ | Gates link + element hitbox emission |
+| `filter: blur() / brightness() / opacity()` | ✅ | Parsed into dedicated fields; rendering deferred |
+| `@supports` | 🔧 | Treated as always-true (optimistic) |
+| `@layer` | 🔧 | Layer name ignored; rules applied as regular rules |
+| `backdrop-filter` / `clip-path` | 🔧 | Parsed as no-op |
+| `scroll-behavior` / `resize` / `writing-mode` / `user-select` / `appearance` / `contain` | 🔧 | Parsed as no-op (no crash on real-world CSS) |
+
+## Phase 6 — Future Work ❌
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
-| `position: sticky` scroll tracking | Medium | Requires scroll-offset propagation into layout |
 | `transform: scale/rotate` rendering | Medium | Needs affine transform in software renderer |
 | CSS `animation` / `@keyframes` | Low | Requires animation runtime and repaint loop |
 | `transition` interpolation | Low | Requires repaint loop and state diffing |
-| `display: inline-flex` | Medium | Inline-level flex container |
-| `display: inline-grid` | Low | Inline-level grid container |
-| `flex-flow` shorthand | Low | Shorthand for `flex-direction` + `flex-wrap` |
-| `align-content` | Low | Multi-line flex alignment |
+| `position: sticky` scroll tracking | Medium | Requires scroll-offset propagation into layout |
+| `filter: blur()` rendering | Medium | Box blur implementation in `gui.rs` (field is parsed) |
 | `grid-template-areas` | Low | Named area placement |
-| `grid-auto-flow` | Low | Auto-placement algorithm |
-| `min-content` / `max-content` | Medium | Intrinsic sizing keywords |
-| `fit-content()` | Low | Clamped intrinsic size |
-| `clamp()` | Medium | `clamp(min, val, max)` in property values |
-| `min()` / `max()` | Medium | CSS math functions |
-| `filter` | Low | `blur()`, `brightness()`, etc. |
-| `clip-path` | Low | Shape clipping |
-| `backdrop-filter` | Low | Behind-element blur |
+| `grid-auto-flow` | Low | Dense packing auto-placement |
 | `counter()` / `counters()` | Low | CSS counters for lists |
-| `content: attr(...)` | Medium | Attribute value in pseudo-elements |
-| `:hover` / `:focus` / `:active` | Medium | Interactive pseudo-classes |
-| `:checked` / `:disabled` | Low | Form state pseudo-classes |
-| `::placeholder` | Low | Input placeholder styling |
-| `::selection` | Low | Selected text styling |
-| CSS `@supports` | Low | Feature queries |
-| CSS `@layer` | Low | Cascade layers |
+| `clip-path` | Low | Shape clipping |
 | `writing-mode` | Low | Vertical text layout |
 | `direction` / `unicode-bidi` | Low | RTL text support |
 | `scroll-behavior: smooth` | Low | Smooth scrolling |
-| `aspect-ratio` | Medium | Intrinsic aspect ratio |
-| `object-fit` / `object-position` | Medium | Image fitting inside box |
-| `resize` | Low | User-resizable elements |
-| `cursor` | Low | Mouse cursor styling |
-| `pointer-events` | Low | Hit-testing control |
+| `::selection` styling | Low | Highlight selected text with custom color |
+| `::placeholder` GUI wiring | Low | Apply `::placeholder` style to input placeholder text |
 
 ---
 

@@ -23,12 +23,12 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Date: `2026-05-16`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
-- Active Claude branch: `claude/add-css-roadmap` (PR #48 open — adds CSS_ROADMAP.md to master)
+- Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
 - Workflow:
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `134` passing tests on `2026-05-16`
+  - `cargo test`: `157` passing tests on `2026-05-16`
   - `cargo build`: success on `2026-05-16`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -97,8 +97,13 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Recent Commit Landmarks
 
+- `0e81ade` feat: Phase 5 Batch 6 — filter, ::placeholder/::selection, @supports/@layer, no-op props — PR #49
+- `737409a` feat: Phase 5 Batch 5 — min/max-content, fit-content(), sticky, cursor, pointer-events
+- `dccc1d1` feat: Phase 5 Batch 4 — CSS Grid layout (fr/repeat/auto-placement)
+- `b14996d` feat: Phase 5 Batch 3 — inline-flex, align-content, flex-flow, :checked/:disabled
+- `7ce1272` feat: Phase 5 Batch 2 — :hover/:focus/:active + element hitboxes + GUI re-layout
+- `de7dbb5` feat: Phase 5 Batch 1 — clamp/min/max, aspect-ratio, object-fit, content:attr()
 - `f51ddca` [Claude] fix: restore lost types, Copilot review fixes (form-context, clipping, offscreen, box-shadow) — PR #47 merged
-- `84d8fca` docs: add CSS_ROADMAP.md to master — PR #48 open
 - `1df11f6` live input value sync implementation complete
 - `c64f16a` event listener capture groundwork complete
 - `48f7141` Merge branch 'codex/codex' into master (resolved conflicts)
@@ -120,7 +125,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
-- `CSS_ROADMAP.md` is on PR #48 (`claude/add-css-roadmap`); once merged it will be visible on master.
+- CSS Phase 5 is on PR #49 (`claude/phase5-css`); once merged, all Phase 5 features land in master.
+- CSS Phase 6 items remain: `transform: scale/rotate` rendering, `animation`/`@keyframes`, `transition`, `filter: blur()` rendering, `grid-template-areas`, RTL text.
 - JS support still needs storage/cookies, richer history/back-forward, and more DOM depth for app-shell sites.
 
 ## Useful Commands
@@ -255,3 +261,41 @@ git log --oneline -n 20
   - Final PR #47 merged with zero Copilot comments.
 - `cargo test`: 134 passing, 0 failed.
 - `CSS_ROADMAP.md` was missing from master (was on `claude/phase2-css` only); PR #48 (`claude/add-css-roadmap`) adds it.
+
+### 2026-05-16 - Claude (Phase 5 CSS roadmap — full implementation)
+
+Implemented all Phase 5 CSS roadmap items across 6 batches on `claude/phase5-css` (PR #49).
+
+- **Batch 1** — CSS math + images:
+  - `clamp()`, `min()`, `max()` in all length contexts, including nested inside `calc()`
+  - `aspect-ratio` (milliratio u32 to keep `Eq`), applied in image layout
+  - `object-fit` / `object-position` with 5 rendering modes in `draw_scaled_image`
+  - `content: attr(name)` resolved from element attributes in `::before`/`::after`
+
+- **Batch 2** — Interactive pseudo-classes + element hitboxes:
+  - `:hover`, `:focus`, `:active` as real pseudo-classes threaded through the entire cascade
+  - `InteractiveState` struct passed into `build_styled_tree` + selector matching
+  - `ElementHitbox` emitted per block element → GUI hit-tests to find hovered node
+  - `BrowserPage.relayout()` + GUI re-renders only when hovered node changes
+
+- **Batch 3** — Flex extensions + form pseudo-classes:
+  - `display: inline-flex`, `align-content`, `flex-flow` shorthand
+  - `:checked`, `:disabled`, `:enabled` pseudo-classes
+
+- **Batch 4** — CSS Grid layout:
+  - Full `display: grid` / `display: inline-grid` with auto-placement engine
+  - `grid-template-columns/rows`, `fr` units (two-pass), `repeat()`, `span N`
+  - `grid-auto-rows/columns`, explicit line-number placement
+
+- **Batch 5** — Intrinsic sizing + sticky + cursor:
+  - `min-content`, `max-content`, `fit-content()` as `LengthValue` variants
+  - `position: sticky` lays out as relative (scroll-offset tracking deferred)
+  - `CursorKind` enum (14 variants), `pointer-events: none` gates hitboxes
+
+- **Batch 6** — Filter + pseudo-elements + parser stubs:
+  - `filter: blur(px)`, `brightness(f)`, `opacity(f)` parsed into dedicated fields
+  - `::placeholder`, `::selection` parsed; `compute_placeholder_style()` API
+  - `@supports` (always-true), `@layer` (name ignored), ~20 no-op properties
+
+- `cargo test`: 157 passing (was 134 at start of session), 0 failed.
+- CSS_ROADMAP.md updated: Phase 5 → ✅, Phase 6 future work documented.
