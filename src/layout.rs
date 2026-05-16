@@ -1,8 +1,8 @@
 use crate::css::{
-    Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, LengthValue,
-    Overflow, Position, FlexDirection, AlignItems, AlignSelf, JustifyContent, StyledElement,
-    StyledNode, TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode,
-    apply_text_transform,
+    Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, GridTrackSize,
+    LengthValue, Overflow, Position, FlexDirection, AlignItems, AlignSelf,
+    JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform, VerticalAlign,
+    WhiteSpaceMode, apply_text_transform,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
@@ -299,7 +299,7 @@ enum InlineFragment {
     LineBreak,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct LineSpan {
     text: String,
     width: u32,
@@ -418,6 +418,9 @@ fn layout_node(
                 }
                 Display::Flex => {
                     layout_flex_container(element, x, width, cursor_y, context, images, fonts);
+                }
+                Display::Grid => {
+                    layout_grid_container(element, x, width, cursor_y, context, images, fonts);
                 }
             }
         }
@@ -694,6 +697,16 @@ fn layout_block_element(
         if dx != 0 || dy != 0 {
             for cmd in &mut context.commands[block_cmd_start..] {
                 shift_command_signed(cmd, dx, dy);
+            }
+        }
+    }
+
+    // Apply CSS transform (translate-only for now; scale/rotate need render-time support)
+    if !element.style.transform.is_identity() && element.style.transform.is_translate_only() {
+        let (tx, ty) = element.style.transform.translation();
+        if tx != 0.0 || ty != 0.0 {
+            for cmd in &mut context.commands[block_cmd_start..] {
+                shift_command_signed(cmd, tx.round() as i32, ty.round() as i32);
             }
         }
     }
@@ -1755,7 +1768,7 @@ fn collect_inline_fragments(
                         collect_inline_fragments(child, output, current_link);
                     }
                 }
-                Display::Block | Display::ListItem | Display::Flex => {}
+                Display::Block | Display::ListItem | Display::Flex | Display::Grid => {}
             }
         }
     }
@@ -2163,7 +2176,7 @@ fn is_block_level(node: &StyledNode) -> bool {
         node,
         StyledNode::Element(StyledElement {
             style: ComputedStyle {
-                display: Display::Block | Display::ListItem,
+                display: Display::Block | Display::ListItem | Display::Flex | Display::Grid,
                 ..
             },
             ..
@@ -2587,6 +2600,161 @@ fn justify_content_offsets(
             (per, per + base_gap)
         }
     }
+}
+
+fn layout_grid_container(
+    element: &StyledElement,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) {
+    *cursor_y = cursor_y.saturating_add(element.style.margin.top);
+    let outer_x     = x.saturating_add(element.style.margin.left);
+    let outer_width = width
+        .saturating_sub(element.style.margin.left + element.style.margin.right);
+    let background_top = *cursor_y;
+
+    let content_x = outer_x
+        .saturating_add(element.style.border.left)
+        .saturating_add(element.style.padding.left);
+    let content_width = outer_width
+        .saturating_sub(
+            element.style.border.left + element.style.border.right
+            + element.style.padding.left + element.style.padding.right,
+        )
+        .max(1);
+    let col_gap = element.style.column_gap.max(element.style.gap);
+    let row_gap = element.style.row_gap.max(element.style.gap);
+
+    // Resolve column track widths
+    let col_widths: Vec<u32> = if let Some(ref tmpl) = element.style.grid_template_columns {
+        resolve_grid_tracks(&tmpl.tracks, content_width, col_gap)
+    } else {
+        vec![content_width] // single column fallback
+    };
+    let num_cols = col_widths.len().max(1);
+
+    // Pre-compute column x offsets
+    let mut col_xs: Vec<u32> = Vec::with_capacity(num_cols);
+    {
+        let mut cx = content_x;
+        for (i, &w) in col_widths.iter().enumerate() {
+            col_xs.push(cx);
+            cx = cx.saturating_add(w);
+            if i + 1 < num_cols { cx = cx.saturating_add(col_gap); }
+        }
+    }
+
+    // Background placeholder
+    let saved_bg = context.background_color;
+    let bg_cmd_idx: Option<usize> = if let Some(bg) = element.style.background_color {
+        context.commands.push(DrawCommand::Rect(RectCommand {
+            x: outer_x, y: background_top,
+            width: outer_width.max(1), height: 1,
+            color: bg,
+            border_radius: element.style.border_radius,
+        }));
+        context.background_color = bg;
+        Some(context.commands.len() - 1)
+    } else {
+        None
+    };
+
+    let content_start_y = background_top
+        .saturating_add(element.style.border.top)
+        .saturating_add(element.style.padding.top);
+
+    let mut row_y   = content_start_y;
+    let mut col_idx = 0usize;
+    let mut row_max_h: u32 = 0;
+
+    // Collect eligible children
+    let children: Vec<&StyledElement> = element.children.iter().filter_map(|c| {
+        if let StyledNode::Element(el) = c {
+            if el.style.display != Display::None { Some(el) } else { None }
+        } else {
+            None
+        }
+    }).collect();
+
+    for child in &children {
+        // Span: negative grid_column_end encodes span count
+        let span = {
+            let raw_end = child.style.grid_column_end.unwrap_or(-1);
+            if raw_end < 0 { (-raw_end) as usize } else { 1 }
+        }
+        .max(1)
+        .min(num_cols.saturating_sub(col_idx));
+
+        // Compute child width across the span
+        let end_col = (col_idx + span).min(num_cols);
+        let child_w = (col_xs[end_col - 1]
+            .saturating_add(col_widths[end_col - 1]))
+            .saturating_sub(col_xs[col_idx])
+            .max(1);
+
+        let child_x = col_xs[col_idx];
+        let mut child_cursor_y = row_y;
+        layout_block_element(child, child_x, child_w, &mut child_cursor_y,
+                              context, images, fonts);
+        let child_h = child_cursor_y.saturating_sub(row_y);
+        row_max_h = row_max_h.max(child_h);
+
+        col_idx += span;
+        if col_idx >= num_cols {
+            row_y    = row_y.saturating_add(row_max_h).saturating_add(row_gap);
+            col_idx  = 0;
+            row_max_h = 0;
+        }
+    }
+
+    // Advance past last partial row
+    if col_idx > 0 { row_y = row_y.saturating_add(row_max_h); }
+
+    *cursor_y = row_y
+        .saturating_add(element.style.padding.bottom);
+    let background_height = cursor_y.saturating_sub(background_top).max(1);
+
+    if let Some(idx) = bg_cmd_idx {
+        if let Some(DrawCommand::Rect(r)) = context.commands.get_mut(idx) {
+            r.height = background_height;
+        }
+    }
+    context.background_color = saved_bg;
+    *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+}
+
+/// Resolve grid track sizes into pixel widths.
+fn resolve_grid_tracks(tracks: &[GridTrackSize], available: u32, gap: u32) -> Vec<u32> {
+    let n = tracks.len();
+    let total_gap = gap.saturating_mul(n.saturating_sub(1) as u32);
+    let avail = available.saturating_sub(total_gap);
+
+    // First pass: sum fixed widths and total fr units
+    let mut fixed_sum: u32 = 0;
+    let mut fr_sum: u32 = 0;
+    for t in tracks {
+        match t {
+            GridTrackSize::Pixels(px) => fixed_sum = fixed_sum.saturating_add(*px),
+            GridTrackSize::Percent(p) =>
+                fixed_sum = fixed_sum.saturating_add((avail as u64 * *p as u64 / 10_000) as u32),
+            GridTrackSize::Fr(f) => fr_sum = fr_sum.saturating_add(*f),
+            GridTrackSize::Auto => fr_sum = fr_sum.saturating_add(100), // 1fr equivalent
+        }
+    }
+    let fr_space = avail.saturating_sub(fixed_sum);
+
+    tracks.iter().map(|t| match t {
+        GridTrackSize::Pixels(px) => *px,
+        GridTrackSize::Percent(p) => (avail as u64 * *p as u64 / 10_000) as u32,
+        GridTrackSize::Fr(f) =>
+            if fr_sum > 0 { (fr_space as u64 * *f as u64 / fr_sum as u64) as u32 } else { 0 },
+        GridTrackSize::Auto =>
+            if fr_sum > 0 { (fr_space as u64 * 100 / fr_sum as u64) as u32 } else { 0 },
+    }).collect()
 }
 
 #[cfg(test)]

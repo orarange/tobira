@@ -199,6 +199,7 @@ pub enum Display {
     ListItem,
     None,
     Flex,
+    Grid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,10 +298,103 @@ pub enum Position {
     Relative,
     Absolute,
     Fixed,
+    Sticky,
 }
 
 impl Default for Position {
     fn default() -> Self { Position::Static }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Grid types
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GridTrackSize {
+    Fr(u32),      // * 100 fixed-point (1fr = 100)
+    Pixels(u32),
+    Percent(u32), // * 100 fixed-point (50% = 5000)
+    Auto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GridTemplate {
+    pub tracks: Vec<GridTrackSize>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Transform types
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum TransformFunction {
+    Translate(f32, f32),
+    TranslateX(f32),
+    TranslateY(f32),
+    Scale(f32, f32),
+    ScaleX(f32),
+    ScaleY(f32),
+    Rotate(f32),   // degrees
+    SkewX(f32),
+    SkewY(f32),
+}
+
+impl PartialEq for TransformFunction {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Translate(x1, y1), Self::Translate(x2, y2)) =>
+                x1.to_bits() == x2.to_bits() && y1.to_bits() == y2.to_bits(),
+            (Self::TranslateX(a), Self::TranslateX(b)) => a.to_bits() == b.to_bits(),
+            (Self::TranslateY(a), Self::TranslateY(b)) => a.to_bits() == b.to_bits(),
+            (Self::Scale(x1, y1), Self::Scale(x2, y2)) =>
+                x1.to_bits() == x2.to_bits() && y1.to_bits() == y2.to_bits(),
+            (Self::ScaleX(a), Self::ScaleX(b)) => a.to_bits() == b.to_bits(),
+            (Self::ScaleY(a), Self::ScaleY(b)) => a.to_bits() == b.to_bits(),
+            (Self::Rotate(a), Self::Rotate(b)) => a.to_bits() == b.to_bits(),
+            (Self::SkewX(a), Self::SkewX(b)) => a.to_bits() == b.to_bits(),
+            (Self::SkewY(a), Self::SkewY(b)) => a.to_bits() == b.to_bits(),
+            _ => false,
+        }
+    }
+}
+impl Eq for TransformFunction {}
+
+#[derive(Debug, Clone, Default)]
+pub struct Transform {
+    pub functions: Vec<TransformFunction>,
+}
+
+impl PartialEq for Transform {
+    fn eq(&self, other: &Self) -> bool {
+        self.functions == other.functions
+    }
+}
+impl Eq for Transform {}
+
+impl Transform {
+    pub fn is_identity(&self) -> bool { self.functions.is_empty() }
+
+    pub fn translation(&self) -> (f32, f32) {
+        let mut tx = 0.0f32;
+        let mut ty = 0.0f32;
+        for f in &self.functions {
+            match f {
+                TransformFunction::Translate(x, y) => { tx += x; ty += y; }
+                TransformFunction::TranslateX(x)   => { tx += x; }
+                TransformFunction::TranslateY(y)   => { ty += y; }
+                _ => {}
+            }
+        }
+        (tx, ty)
+    }
+
+    pub fn is_translate_only(&self) -> bool {
+        self.functions.iter().all(|f| matches!(f,
+            TransformFunction::Translate(..) |
+            TransformFunction::TranslateX(..) |
+            TransformFunction::TranslateY(..)
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,7 +430,7 @@ pub enum ListStyleType {
 // ComputedStyle
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
     pub display: Display,
     pub color: Color,
@@ -397,6 +491,21 @@ pub struct ComputedStyle {
     pub flex_basis: Option<LengthValue>,
     pub gap: u32,
     pub order: i32,
+    // Grid
+    pub grid_template_columns: Option<GridTemplate>,
+    pub grid_template_rows:    Option<GridTemplate>,
+    pub grid_column_start:     Option<i32>,  // None=auto; negative = span N
+    pub grid_column_end:       Option<i32>,
+    pub grid_row_start:        Option<i32>,
+    pub grid_row_end:          Option<i32>,
+    pub grid_auto_rows:        Option<u32>,  // px
+    pub column_gap:            u32,
+    pub row_gap:               u32,
+    // Transform
+    pub transform:           Transform,
+    pub transform_origin_x:  f32,  // 0.0–1.0, default 0.5
+    pub transform_origin_y:  f32,
+    pub transition:          Option<String>,  // raw value, not animated
 }
 
 impl ComputedStyle {
@@ -466,6 +575,21 @@ impl ComputedStyle {
             flex_basis: None,
             gap: 0,
             order: 0,
+            // Grid fields
+            grid_template_columns: None,
+            grid_template_rows: None,
+            grid_column_start: None,
+            grid_column_end: None,
+            grid_row_start: None,
+            grid_row_end: None,
+            grid_auto_rows: None,
+            column_gap: 0,
+            row_gap: 0,
+            // Transform fields
+            transform: Transform::default(),
+            transform_origin_x: 0.5,
+            transform_origin_y: 0.5,
+            transition: None,
         };
 
         match tag_name {
@@ -538,13 +662,13 @@ impl ComputedStyle {
 // StyledNode tree
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StyledNode {
     Element(StyledElement),
     Text(StyledText),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StyledElement {
     pub tag_name: String,
     pub attributes: BTreeMap<String, String>,
@@ -552,7 +676,7 @@ pub struct StyledElement {
     pub children: Vec<StyledNode>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StyledText {
     pub text: String,
     pub style: ComputedStyle,
@@ -1502,6 +1626,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 "relative" => Position::Relative,
                 "absolute" => Position::Absolute,
                 "fixed" => Position::Fixed,
+                "sticky" | "-webkit-sticky" => Position::Sticky,
                 _ => Position::Static,
             };
         }
@@ -1594,18 +1719,64 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         "gap" | "grid-gap" => {
             if let Some(px) = parse_length(value, parent_font_size) {
                 style.gap = px;
+                style.row_gap = px;
+                style.column_gap = px;
             }
         }
         "row-gap" => {
             if let Some(px) = parse_length(value, parent_font_size) {
                 style.gap = px;
+                style.row_gap = px;
             }
         }
-        "column-gap" => {}
+        "column-gap" => {
+            if let Some(px) = parse_length(value, parent_font_size) {
+                style.column_gap = px;
+            }
+        }
         "order" => {
             if let Ok(n) = value.trim().parse::<i32>() {
                 style.order = n;
             }
+        }
+        "grid-template-columns" => {
+            style.grid_template_columns = parse_grid_template(value, parent_font_size);
+        }
+        "grid-template-rows" => {
+            style.grid_template_rows = parse_grid_template(value, parent_font_size);
+        }
+        "grid-column" => {
+            parse_grid_line_shorthand(value,
+                &mut style.grid_column_start, &mut style.grid_column_end);
+        }
+        "grid-row" => {
+            parse_grid_line_shorthand(value,
+                &mut style.grid_row_start, &mut style.grid_row_end);
+        }
+        "grid-column-start" => { style.grid_column_start = parse_grid_line(value); }
+        "grid-column-end"   => { style.grid_column_end   = parse_grid_line(value); }
+        "grid-row-start"    => { style.grid_row_start     = parse_grid_line(value); }
+        "grid-row-end"      => { style.grid_row_end       = parse_grid_line(value); }
+        "grid-auto-rows"    => { style.grid_auto_rows = parse_length(value, parent_font_size); }
+        "transform" => {
+            style.transform = if value.trim().to_ascii_lowercase() == "none" {
+                Transform::default()
+            } else {
+                parse_transform_value(value)
+            };
+        }
+        "transform-origin" => {
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            style.transform_origin_x = parse_transform_origin_value(
+                parts.first().copied().unwrap_or("50%"));
+            style.transform_origin_y = parse_transform_origin_value(
+                parts.get(1).copied().unwrap_or("50%"));
+        }
+        "transition" => { style.transition = Some(value.trim().to_string()); }
+        "will-change" | "animation" | "animation-name" | "animation-duration"
+        | "animation-timing-function" | "animation-delay" | "animation-iteration-count"
+        | "animation-fill-mode" | "backface-visibility" => {
+            // parsed but not applied at runtime
         }
         _ => {}
     }
@@ -2335,8 +2506,9 @@ impl From<&Element> for ElementIdentity {
 
 fn parse_display(input: &str) -> Option<Display> {
     match input.trim().to_ascii_lowercase().as_str() {
-        "block" | "flow-root" | "grid" | "inline-grid" | "table"
+        "block" | "flow-root" | "table"
         | "table-row" => Some(Display::Block),
+        "grid" | "inline-grid" => Some(Display::Grid),
         "flex" | "inline-flex" => Some(Display::Flex),
         "inline" | "inline-block" | "table-cell" | "contents" => Some(Display::Inline),
         "list-item" => Some(Display::ListItem),
@@ -2891,6 +3063,129 @@ fn parse_float(input: &str) -> Option<f32> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Grid helper functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn parse_grid_template(value: &str, parent_font_size: u32) -> Option<GridTemplate> {
+    let v = value.trim().to_ascii_lowercase();
+    if v == "none" || v == "auto" { return None; }
+    // Expand repeat(N, ...)
+    let expanded = expand_grid_repeat(&v);
+    let tracks: Vec<GridTrackSize> = expanded.split_whitespace()
+        .filter_map(|tok| parse_grid_track(tok, parent_font_size))
+        .collect();
+    if tracks.is_empty() { None } else { Some(GridTemplate { tracks }) }
+}
+
+fn expand_grid_repeat(s: &str) -> String {
+    // "repeat(3, 1fr)" → "1fr 1fr 1fr"
+    let mut out = s.to_string();
+    while let Some(start) = out.find("repeat(") {
+        let rest = &out[start + 7..];
+        let Some(end) = rest.find(')') else { break };
+        let inner = &rest[..end];
+        let Some(comma) = inner.find(',') else { break };
+        let count: usize = inner[..comma].trim().parse().unwrap_or(1);
+        let pattern = inner[comma + 1..].trim();
+        let expanded = std::iter::repeat(pattern)
+            .take(count).collect::<Vec<_>>().join(" ");
+        let after = &out[start + 7 + end + 1..];
+        out = format!("{}{}{}", &out[..start], expanded, after);
+    }
+    out
+}
+
+fn parse_grid_track(token: &str, parent_font_size: u32) -> Option<GridTrackSize> {
+    let t = token.trim().to_ascii_lowercase();
+    match t.as_str() {
+        "auto" | "min-content" | "max-content" => return Some(GridTrackSize::Auto),
+        _ => {}
+    }
+    if let Some(s) = t.strip_suffix("fr") {
+        return s.parse::<f32>().ok().map(|f| GridTrackSize::Fr((f * 100.0) as u32));
+    }
+    if let Some(s) = t.strip_suffix('%') {
+        return s.parse::<f32>().ok().map(|f| GridTrackSize::Percent((f * 100.0) as u32));
+    }
+    parse_length(token, parent_font_size).map(GridTrackSize::Pixels)
+}
+
+fn parse_grid_line(value: &str) -> Option<i32> {
+    let v = value.trim().to_ascii_lowercase();
+    if v == "auto" { return None; }
+    if let Some(n) = v.strip_prefix("span ") {
+        return n.trim().parse::<i32>().ok().map(|n| -n); // negative = span
+    }
+    v.parse::<i32>().ok()
+}
+
+fn parse_grid_line_shorthand(value: &str, start: &mut Option<i32>, end: &mut Option<i32>) {
+    let parts: Vec<&str> = value.splitn(2, '/').collect();
+    *start = parse_grid_line(parts[0].trim());
+    if parts.len() >= 2 { *end = parse_grid_line(parts[1].trim()); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Transform helper functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn parse_transform_value(value: &str) -> Transform {
+    let mut functions = Vec::new();
+    // Split on ')' boundaries
+    for chunk in value.split(')') {
+        let chunk = chunk.trim();
+        if chunk.is_empty() { continue; }
+        let Some(paren) = chunk.find('(') else { continue };
+        let name = chunk[..paren].trim().to_ascii_lowercase();
+        let args: Vec<f32> = chunk[paren + 1..].split(',')
+            .filter_map(|a| {
+                let a = a.trim().to_ascii_lowercase();
+                let stripped = a
+                    .trim_end_matches("px")
+                    .trim_end_matches("deg")
+                    .trim_end_matches("rad")
+                    .trim_end_matches('%');
+                stripped.parse::<f32>().ok()
+            })
+            .collect();
+        let func = match name.as_str() {
+            "translate" => Some(TransformFunction::Translate(
+                args.first().copied().unwrap_or(0.0),
+                args.get(1).copied().unwrap_or(0.0))),
+            "translatex" => args.first().map(|&x| TransformFunction::TranslateX(x)),
+            "translatey" => args.first().map(|&y| TransformFunction::TranslateY(y)),
+            "scale"  => {
+                let x = args.first().copied().unwrap_or(1.0);
+                Some(TransformFunction::Scale(x, args.get(1).copied().unwrap_or(x)))
+            }
+            "scalex" => args.first().map(|&x| TransformFunction::ScaleX(x)),
+            "scaley" => args.first().map(|&y| TransformFunction::ScaleY(y)),
+            "rotate" | "rotatez" => args.first().map(|&d| TransformFunction::Rotate(d)),
+            "skewx" => args.first().map(|&d| TransformFunction::SkewX(d)),
+            "skewy" => args.first().map(|&d| TransformFunction::SkewY(d)),
+            _ => None,
+        };
+        if let Some(f) = func { functions.push(f); }
+    }
+    Transform { functions }
+}
+
+fn parse_transform_origin_value(v: &str) -> f32 {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "left" | "top"    => 0.0,
+        "center"          => 0.5,
+        "right" | "bottom"=> 1.0,
+        s => {
+            if let Some(p) = s.strip_suffix('%') {
+                p.parse::<f32>().unwrap_or(50.0) / 100.0
+            } else {
+                0.5
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Color parsing
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3252,8 +3547,8 @@ pub fn apply_text_transform(text: &str, transform: TextTransform) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, JustifyContent, LengthValue,
-        Position, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
+        AlignItems, Display, FlexDirection, GridTrackSize, JustifyContent,
+        LengthValue, Position, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
         build_styled_tree, compute_style, parse_color, parse_length, parse_stylesheet,
         split_at_top_level,
     };
@@ -3901,5 +4196,64 @@ mod tests {
         let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
         let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
         assert_eq!(style.z_index, Some(10));
+    }
+
+    #[test]
+    fn test_grid_display_parsed() {
+        let ss = parse_stylesheet("div { display: grid; gap: 16px; }");
+        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
+        assert_eq!(style.display, Display::Grid);
+        assert_eq!(style.gap, 16);
+    }
+
+    #[test]
+    fn test_grid_template_columns_fr() {
+        let ss = parse_stylesheet("div { display: grid; grid-template-columns: 1fr 2fr; }");
+        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
+        let cols = style.grid_template_columns.expect("should parse grid-template-columns");
+        assert_eq!(cols.tracks.len(), 2);
+        assert_eq!(cols.tracks[0], GridTrackSize::Fr(100));
+        assert_eq!(cols.tracks[1], GridTrackSize::Fr(200));
+    }
+
+    #[test]
+    fn test_grid_repeat_expands() {
+        let ss = parse_stylesheet("div { display: grid; grid-template-columns: repeat(3, 1fr); }");
+        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
+        let cols = style.grid_template_columns.expect("should parse repeat");
+        assert_eq!(cols.tracks.len(), 3);
+    }
+
+    #[test]
+    fn test_transform_translate_parsed() {
+        let ss = parse_stylesheet("div { transform: translate(10px, 20px); }");
+        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
+        assert!(!style.transform.is_identity());
+        assert!(style.transform.is_translate_only());
+        let (tx, ty) = style.transform.translation();
+        assert!((tx - 10.0).abs() < 0.5);
+        assert!((ty - 20.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn test_transform_rotate_non_translate() {
+        let ss = parse_stylesheet("div { transform: rotate(45deg); }");
+        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
+        assert!(!style.transform.is_identity());
+        assert!(!style.transform.is_translate_only());
+    }
+
+    #[test]
+    fn test_sticky_position_parsed() {
+        let ss = parse_stylesheet("div { position: sticky; top: 0px; }");
+        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
+        assert_eq!(style.position, Position::Sticky);
+        assert_eq!(style.top, Some(0));
     }
 }
