@@ -206,15 +206,7 @@ Whenever a phase lands or a new blocker shows up:
 | Phase 6: Framework Compat | ❌ Not started |
 | Phase 7: Media & APIs | ❌ Not started |
 
-CSS progress (Claude's track, separate from this file):
 
-| Stage | Status |
-|---|---|
-| Basic CSS (color, font, box model) | ✅ Complete |
-| Opacity / layer compositing | ✅ Complete |
-| border-radius, box-shadow, overflow, pseudo-elements, CSS vars | ✅ Complete |
-| position: relative/absolute/fixed, z-index, display: flex | ✅ Complete (merged 2026-05-16) |
-| display: grid, transform, transition/animation | ❌ No roadmap entry yet |
 
 ### Critical Gap: Phase 5 is Understated
 
@@ -228,7 +220,7 @@ The current architecture computes layout **once** at page load and never again. 
 
 None of these are small. Option 2 is the simplest to implement but will be slow on large pages. Option 1 is what real browsers do but takes months to build correctly. This is not a "Tasks: 4 bullet points" problem — it is an **architectural redesign** of the rendering pipeline, and it must be planned before Phase 3 and 4 work is finished, or the project will stall.
 
-Additionally, the CSS roadmap has no entries for `display: grid`, `transform`, `transition`, or `animation` — all of which are used heavily by Google and YouTube. Without them, Phase 6's exit criteria cannot be met even if the JS phases are completed.
+
 
 ---
 
@@ -265,20 +257,7 @@ Exit: login-ish flows and session-dependent pages retain state across navigation
 
 Exit: API-driven pages can load data without special-case rewrites.
 
-### **NEW Phase 5a: CSS Completeness (before reflow)**
-
-Before tackling reflow, close the CSS gaps that block even a static render of modern pages.
-
-- `display: grid` — basic 12-column and auto-placement
-- `position: sticky`
-- `transform: translate/scale/rotate` (static, no animation)
-- `transition` and `animation` (at minimum: opacity and transform)
-- `clip-path: inset()`
-- `z-index` stacking across flex/grid containers
-
-Exit: the visual layout of Google search results and YouTube home renders recognizably without JS interaction.
-
-### **NEW Phase 5b: Incremental Reflow (architecture decision required)**
+### **NEW Phase 5: Incremental Reflow (architecture decision required)**
 
 This phase requires an **explicit design decision** before implementation begins. The recommended approach:
 
@@ -328,10 +307,9 @@ Exit: video-centric pages stop crashing on feature detection; canvas-based UI el
 
 If time is limited, tackle in this order:
 
-1. **Phase 5b (reflow)** — unblocks everything else; do this before Phase 3/4 if possible
-2. **Phase 5a (CSS grid + transform)** — needed for static render of target sites
-3. **Phase 3 (storage)** — relatively self-contained, high user-visible impact
-4. **Phase 2 (DOM fidelity)** — fill gaps as they appear in real-site testing
-5. **Phase 4 (networking)** — improve as real sites expose gaps
-6. **Phase 6 (real-site testing)** — ongoing validation, not a one-time phase
-7. **Phase 7 (media)** — lower priority unless YouTube video is a specific goal
+1. **Phase 5 (reflow)** — unblocks everything else; do this before Phase 3/4 if possible
+2. **Phase 3 (storage)** — relatively self-contained, high user-visible impact
+3. **Phase 2 (DOM fidelity)** — fill gaps as they appear in real-site testing
+4. **Phase 4 (networking)** — improve as real sites expose gaps
+5. **Phase 6 (real-site testing)** — ongoing validation, not a one-time phase
+6. **Phase 7 (media)** — lower priority unless YouTube video is a specific goal
