@@ -56,7 +56,7 @@ Current capabilities:
   - `appendChild(...)`, `insertBefore(...)`, `remove()`
   - `innerHTML`, `textContent`, `classList`, `id`, `className`
   - recursive `document.write(...)`
-  - inline `element.style` updates through `cssText`, `setProperty(...)`, and common style accessors
+  - inline `element.style` updates through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
 
 Still missing:
 
@@ -65,7 +65,7 @@ Still missing:
 - tabs and richer navigation UI
 - session-history replay polish across full document loads
 - incremental reflow for more DOM/style mutations
-- inline style mutations still need broader coverage across the CSS property matrix
+- inline style mutations still need broader coverage across the full CSS property matrix and computed-style parity
 - POST forms, complex widgets, and modern app-shell browser APIs
 
 ## Run

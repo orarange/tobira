@@ -73,7 +73,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - layout cache invalidates on viewport width or page revision changes
   - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, keyboard event logging, and storage/cookies
   - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
-  - inline `element.style` mutations now reflect through `cssText`, `setProperty(...)`, and common style accessors
+  - inline `element.style` mutations now reflect through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
   - site-specific rendering paths for:
     - YouTube watch pages
     - YouTube home shell fallback
@@ -125,7 +125,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - History / back-forward replay and scroll restoration still need depth.
 - Modern app-shell sites still need more DOM APIs, richer history replay, and CSS coverage.
 - Incremental reflow still needs deeper invalidation for more DOM/style mutations.
-- The inline style bridge still needs more of the CSS property matrix to be browser-grade.
+- The inline style bridge still needs broader CSS property coverage and computed-style parity to be browser-grade.
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
@@ -231,6 +231,11 @@ git worktree list
 
 - Added a native `element.style` bridge that reflects inline CSS through `cssText`, `setProperty(...)`, `getPropertyValue(...)`, and common style accessors.
 - Added a regression test that checks inline style mutations serialize back into the DOM snapshot.
+
+### 2026-05-16 - Codex (style property matrix expansion)
+
+- Expanded the inline style bridge to cover more text, size, and border-related properties that the current layout engine already understands.
+- Added regression coverage for the expanded style accessors and the browser-facing serialization path.
 
 ### 2026-05-16 - Codex (capture listener groundwork)
 

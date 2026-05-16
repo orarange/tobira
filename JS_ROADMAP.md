@@ -31,6 +31,7 @@ Already working:
 - browser-level back/forward navigation across document loads
 - layout cache invalidation keyed by viewport width and page revision
 - inline style mutations now reflect back into the DOM snapshot
+- the inline style bridge now exposes more text, size, and border-related properties
 
 Still missing or shallow:
 
@@ -38,6 +39,7 @@ Still missing or shallow:
 - session-history replay polish across full document loads
 - async browser APIs that modern frameworks expect
 - rendering invalidation and layout reflow after DOM mutation still need deeper incremental invalidation
+- the style bridge still needs the rest of the CSS property matrix and computed-style parity
 
 ## Phase 1: Real Event Plumbing
 
@@ -128,6 +130,7 @@ Tasks:
 
 - viewport-width and page-revision based layout cache invalidation is in place
 - a native `element.style` bridge now reflects inline CSS changes back into the DOM tree
+- the bridge covers more text, size, and border-related properties that the current layout engine already understands
 - recompute layout after DOM mutations and script-driven style changes
 - invalidate cached layout when width or content changes
 - support more CSS properties that interactive pages depend on

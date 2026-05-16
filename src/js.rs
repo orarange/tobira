@@ -2698,6 +2698,54 @@ fn build_dom_style_object(context: &mut Context, node_id: usize) -> boa_engine::
         NativeFunction::from_fn_ptr(js_dom_style_get_color).to_js_function(context.realm());
     let color_setter =
         NativeFunction::from_fn_ptr(js_dom_style_set_color).to_js_function(context.realm());
+    let font_style_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_font_style).to_js_function(context.realm());
+    let font_style_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_font_style).to_js_function(context.realm());
+    let text_decoration_getter = NativeFunction::from_fn_ptr(js_dom_style_get_text_decoration)
+        .to_js_function(context.realm());
+    let text_decoration_setter = NativeFunction::from_fn_ptr(js_dom_style_set_text_decoration)
+        .to_js_function(context.realm());
+    let text_transform_getter = NativeFunction::from_fn_ptr(js_dom_style_get_text_transform)
+        .to_js_function(context.realm());
+    let text_transform_setter = NativeFunction::from_fn_ptr(js_dom_style_set_text_transform)
+        .to_js_function(context.realm());
+    let text_indent_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_text_indent).to_js_function(context.realm());
+    let text_indent_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_text_indent).to_js_function(context.realm());
+    let letter_spacing_getter = NativeFunction::from_fn_ptr(js_dom_style_get_letter_spacing)
+        .to_js_function(context.realm());
+    let letter_spacing_setter = NativeFunction::from_fn_ptr(js_dom_style_set_letter_spacing)
+        .to_js_function(context.realm());
+    let max_width_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_max_width).to_js_function(context.realm());
+    let max_width_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_max_width).to_js_function(context.realm());
+    let min_width_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_min_width).to_js_function(context.realm());
+    let min_width_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_min_width).to_js_function(context.realm());
+    let max_height_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_max_height).to_js_function(context.realm());
+    let max_height_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_max_height).to_js_function(context.realm());
+    let min_height_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_min_height).to_js_function(context.realm());
+    let min_height_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_min_height).to_js_function(context.realm());
+    let border_width_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_border_width).to_js_function(context.realm());
+    let border_width_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_border_width).to_js_function(context.realm());
+    let border_color_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_border_color).to_js_function(context.realm());
+    let border_color_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_border_color).to_js_function(context.realm());
+    let border_style_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_border_style).to_js_function(context.realm());
+    let border_style_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_border_style).to_js_function(context.realm());
     let background_color_getter = NativeFunction::from_fn_ptr(js_dom_style_get_background_color)
         .to_js_function(context.realm());
     let background_color_setter = NativeFunction::from_fn_ptr(js_dom_style_set_background_color)
@@ -2797,6 +2845,36 @@ fn build_dom_style_object(context: &mut Context, node_id: usize) -> boa_engine::
             Attribute::all(),
         )
         .accessor(
+            js_string!("fontStyle"),
+            Some(font_style_getter),
+            Some(font_style_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("textDecoration"),
+            Some(text_decoration_getter),
+            Some(text_decoration_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("textTransform"),
+            Some(text_transform_getter),
+            Some(text_transform_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("textIndent"),
+            Some(text_indent_getter),
+            Some(text_indent_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("letterSpacing"),
+            Some(letter_spacing_getter),
+            Some(letter_spacing_setter),
+            Attribute::all(),
+        )
+        .accessor(
             js_string!("backgroundColor"),
             Some(background_color_getter),
             Some(background_color_setter),
@@ -2812,6 +2890,30 @@ fn build_dom_style_object(context: &mut Context, node_id: usize) -> boa_engine::
             js_string!("height"),
             Some(height_getter),
             Some(height_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("maxWidth"),
+            Some(max_width_getter),
+            Some(max_width_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("minWidth"),
+            Some(min_width_getter),
+            Some(min_width_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("maxHeight"),
+            Some(max_height_getter),
+            Some(max_height_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("minHeight"),
+            Some(min_height_getter),
+            Some(min_height_setter),
             Attribute::all(),
         )
         .accessor(
@@ -2854,6 +2956,24 @@ fn build_dom_style_object(context: &mut Context, node_id: usize) -> boa_engine::
             js_string!("padding"),
             Some(padding_getter),
             Some(padding_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("borderWidth"),
+            Some(border_width_getter),
+            Some(border_width_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("borderColor"),
+            Some(border_color_getter),
+            Some(border_color_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("borderStyle"),
+            Some(border_style_getter),
+            Some(border_style_setter),
             Attribute::all(),
         )
         .accessor(
@@ -4957,12 +5077,57 @@ define_style_accessors!(
     ),
     (js_dom_style_get_color, js_dom_style_set_color, "color"),
     (
+        js_dom_style_get_font_style,
+        js_dom_style_set_font_style,
+        "font-style"
+    ),
+    (
+        js_dom_style_get_text_decoration,
+        js_dom_style_set_text_decoration,
+        "text-decoration"
+    ),
+    (
+        js_dom_style_get_text_transform,
+        js_dom_style_set_text_transform,
+        "text-transform"
+    ),
+    (
+        js_dom_style_get_text_indent,
+        js_dom_style_set_text_indent,
+        "text-indent"
+    ),
+    (
+        js_dom_style_get_letter_spacing,
+        js_dom_style_set_letter_spacing,
+        "letter-spacing"
+    ),
+    (
         js_dom_style_get_background_color,
         js_dom_style_set_background_color,
         "background-color"
     ),
     (js_dom_style_get_width, js_dom_style_set_width, "width"),
     (js_dom_style_get_height, js_dom_style_set_height, "height"),
+    (
+        js_dom_style_get_max_width,
+        js_dom_style_set_max_width,
+        "max-width"
+    ),
+    (
+        js_dom_style_get_min_width,
+        js_dom_style_set_min_width,
+        "min-width"
+    ),
+    (
+        js_dom_style_get_max_height,
+        js_dom_style_set_max_height,
+        "max-height"
+    ),
+    (
+        js_dom_style_get_min_height,
+        js_dom_style_set_min_height,
+        "min-height"
+    ),
     (
         js_dom_style_get_font_size,
         js_dom_style_set_font_size,
@@ -4993,6 +5158,21 @@ define_style_accessors!(
         js_dom_style_get_padding,
         js_dom_style_set_padding,
         "padding"
+    ),
+    (
+        js_dom_style_get_border_width,
+        js_dom_style_set_border_width,
+        "border-width"
+    ),
+    (
+        js_dom_style_get_border_color,
+        js_dom_style_set_border_color,
+        "border-color"
+    ),
+    (
+        js_dom_style_get_border_style,
+        js_dom_style_set_border_style,
+        "border-style"
     ),
     (
         js_dom_style_get_opacity,
@@ -6157,13 +6337,39 @@ mod tests {
     #[test]
     fn supports_inline_style_mutations() {
         let processed = process_document_scripts(
-            "<html><body><div id=\"app\" style=\"color: #ff0000\"></div><script>var app = document.getElementById('app'); app.style.display = 'none'; app.style.backgroundColor = '#123456'; app.style.setProperty('margin-top', '8px'); app.style.removeProperty('display');</script></body></html>",
+            "<html><body><div id=\"app\" style=\"color: #ff0000\"></div><script>var app = document.getElementById('app'); app.style.display = 'none'; app.style.backgroundColor = '#123456'; app.style.setProperty('margin-top', '8px'); app.style.fontStyle = 'italic'; app.style.textDecoration = 'underline'; app.style.textTransform = 'uppercase'; app.style.textIndent = '10px'; app.style.letterSpacing = '2px'; app.style.maxWidth = '120px'; app.style.minHeight = '24px'; app.style.borderWidth = '2px'; app.style.borderColor = '#abcdef'; app.style.borderStyle = 'solid'; app.style.removeProperty('display');</script></body></html>",
             &Url::parse("https://example.com").unwrap(),
         );
 
         assert!(processed.html.contains("background-color: #123456"));
         assert!(processed.html.contains("margin-top: 8px"));
+        assert!(processed.html.contains("font-style: italic"));
+        assert!(processed.html.contains("text-decoration: underline"));
+        assert!(processed.html.contains("text-transform: uppercase"));
+        assert!(processed.html.contains("text-indent: 10px"));
+        assert!(processed.html.contains("letter-spacing: 2px"));
+        assert!(processed.html.contains("max-width: 120px"));
+        assert!(processed.html.contains("min-height: 24px"));
+        assert!(processed.html.contains("border-width: 2px"));
+        assert!(processed.html.contains("border-color: #abcdef"));
+        assert!(processed.html.contains("border-style: solid"));
         assert!(!processed.html.contains("display: none"));
+    }
+
+    #[test]
+    fn supports_extended_inline_style_accessors() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"app\"></div><script>var app = document.getElementById('app'); app.style.maxWidth = '320px'; app.style.minWidth = '120px'; app.style.maxHeight = '480px'; app.style.minHeight = '64px'; app.style.borderWidth = '3px'; app.style.borderColor = '#112233'; app.style.borderStyle = 'dashed';</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("max-width: 320px"));
+        assert!(processed.html.contains("min-width: 120px"));
+        assert!(processed.html.contains("max-height: 480px"));
+        assert!(processed.html.contains("min-height: 64px"));
+        assert!(processed.html.contains("border-width: 3px"));
+        assert!(processed.html.contains("border-color: #112233"));
+        assert!(processed.html.contains("border-style: dashed"));
     }
 
     #[test]
