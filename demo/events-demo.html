@@ -95,8 +95,9 @@
       <p>
         This page exercises native page events in Tobira. Try clicking the
         input and link, typing, pressing Enter, and using the submit button.
-        The log should show bubbling for click, input, change, submit, keydown,
-        and keyup. Focus and blur are logged on the input itself.
+        The log should show capture + bubbling for click, input, change,
+        submit, keydown, and keyup. Focus and blur are logged on the input
+        itself, and the first input click also exercises a once listener.
       </p>
 
       <form id="demo-form" action="?submitted=1" method="get">
@@ -110,11 +111,20 @@
           The submit and link handlers call <code>preventDefault()</code> so the
           browser stays on this page and the log keeps growing.
         </small>
+        <div class="row">
+          <button id="passive-button" type="button">Passive click test</button>
+        </div>
+        <small>
+          The passive button listener still calls <code>preventDefault()</code>,
+          but the browser should ignore it and keep
+          <code>defaultPrevented</code> false.
+        </small>
       </form>
 
       <p>
         Keyboard test: focus the input and press letters or Backspace to see
-        keydown and keyup flow through the page DOM.
+        keydown and keyup flow through the page DOM, including eventPhase in
+        the log.
       </p>
 
       <pre id="log"></pre>

@@ -19,22 +19,21 @@ Already working:
 - inline and external scripts
 - recursive `document.write(...)`
 - lightweight DOM mutation helpers
-- basic DOM event plumbing for bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`
+- native GUI typing stays in sync with live DOM `input.value`
+- basic DOM event plumbing for capture + bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`
 - `Promise` job flushing
 - guarded `fetch(...)` and `XMLHttpRequest`
 - same-origin navigation checks
 - loop-iteration runtime budget for runaway scripts
 - native GUI form controls for `GET` submissions
+- passive listener semantics
+- `location.hash`, `history.pushState(...)`, `replaceState(...)`, `back()`, and `forward()` for same-document navigation
 
 Still missing or shallow:
 
-- `removeEventListener(...)`
-- keyboard events such as `keydown` and `keyup`
-- capture phase / richer listener options
-- tighter alignment between GUI text editing and live DOM `input.value`
 - storage and cookies
 - richer networking semantics
-- full history/navigation behavior
+- session-history replay across full document loads
 - async browser APIs that modern frameworks expect
 - rendering invalidation and layout reflow after DOM mutation
 
@@ -45,22 +44,21 @@ Goal: make page interaction feel like a browser, not a custom app.
 Tasks:
 
 - `addEventListener(...)` and basic listener registration are in place
-- basic bubbling exists for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`; `focus` and `blur` are target-only
+- basic capture + bubbling exists for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`; `focus` and `blur` are target-only
 - page controls now dispatch DOM events before default actions
 - submit and link clicks can be canceled with `preventDefault()`
 
 Still to finish in this phase:
 
-- capture phase / richer listener options
-- live GUI typing synchronized into script-visible DOM state in every edit path
+- finish the rest of the richer listener option matrix
 - more complete default-action sequencing for edge cases
-- `removeEventListener(...)` parity for more option combinations
 
 Exit criteria:
 
 - simple JS-driven buttons and forms work without special-case browser code
 - page scripts can observe user typing and clicks
 - Google-style search boxes can react to input, submit, and keyboard handlers
+- capture-phase and once listeners behave like the browser for the common page-control cases
 
 ## Phase 2: DOM Fidelity
 
@@ -88,14 +86,15 @@ Tasks:
 
 - add cookie store with origin scoping
 - add `localStorage` and `sessionStorage`
-- add `history.pushState(...)`, `replaceState(...)`, `back()`, `forward()`
+- finish richer session-history replay across full document loads
 - keep `location` updates and history state in sync
+- extend the current soft-navigation handling so it cooperates with browser history instead of only updating the current URL
 - support hash navigation and same-document scroll targets
 
 Exit criteria:
 
 - login-ish flows keep their session state
-- back/forward works for document navigation and hash changes
+- back/forward works for same-document navigation and hash changes
 - sites that rely on history state stop losing context
 
 ## Phase 4: Networking Semantics

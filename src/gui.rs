@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
@@ -93,7 +92,6 @@ struct BrowserApp {
     modifiers: ModifiersState,
     cursor_position: PhysicalPosition<f64>,
     address_bar: AddressBarState,
-    page_control_values: BTreeMap<usize, String>,
     focused_page_input: Option<FocusedPageInput>,
     hovered_target: HitTarget,
     hovered_link_url: Option<String>,
@@ -131,7 +129,6 @@ impl BrowserApp {
             modifiers: ModifiersState::default(),
             cursor_position: PhysicalPosition::new(0.0, 0.0),
             address_bar,
-            page_control_values: BTreeMap::new(),
             focused_page_input: None,
             hovered_target: HitTarget::None,
             hovered_link_url: None,
@@ -397,7 +394,6 @@ impl BrowserApp {
             viewport_height,
             self.scroll_y,
             &layout,
-            &self.page_control_values,
             self.focused_page_input.as_ref(),
             self.hovered_target,
             &mut self.scratch,
@@ -893,7 +889,6 @@ impl BrowserApp {
     }
 
     fn clear_page_control_state(&mut self) {
-        self.page_control_values.clear();
         self.focused_page_input = None;
         self.ime_composing = false;
         self.hovered_target = HitTarget::None;
@@ -919,16 +914,13 @@ impl BrowserApp {
     }
 
     fn control_current_value(&self, control: &FormControlCommand) -> String {
-        if let Some(focused) = &self.focused_page_input
-            && focused.control_id == control.id
-        {
-            return focused.editor.text().to_string();
-        }
-
-        self.page_control_values
-            .get(&control.id)
-            .cloned()
-            .unwrap_or_else(|| control.value.clone())
+        resolve_text_input_value(
+            self.focused_page_input
+                .as_ref()
+                .filter(|focused| focused.control_id == control.id)
+                .map(|focused| &focused.editor),
+            &control.value,
+        )
     }
 
     fn focus_page_input_at(&mut self, control: &FormControlCommand, char_index: Option<usize>) {
@@ -952,17 +944,14 @@ impl BrowserApp {
     }
 
     fn sync_page_input_value(&mut self) {
-        let Some((control_id, node_id, value)) = self.focused_page_input.as_ref().map(|focused| {
-            (
-                focused.control_id,
-                focused.node_id,
-                focused.editor.text().to_string(),
-            )
-        }) else {
+        let Some((node_id, value)) = self
+            .focused_page_input
+            .as_ref()
+            .map(|focused| (focused.node_id, focused.editor.text().to_string()))
+        else {
             return;
         };
 
-        self.page_control_values.insert(control_id, value.clone());
         self.document.set_dom_attribute(node_id, "value", &value);
     }
 
@@ -1021,6 +1010,12 @@ impl BrowserApp {
         {
             self.load_url(url);
             return Some(result);
+        }
+        if let Some(soft_target) = result.snapshot.soft_navigation_target.clone()
+            && let Ok(url) = Url::parse(&soft_target)
+        {
+            self.current_url = Some(url.clone());
+            self.address_bar.set_text(url.to_string());
         }
 
         self.document.sync_from_loaded_page();
@@ -1727,8 +1722,8 @@ struct AddressBarState {
 
 #[derive(Debug, Clone)]
 struct FocusedPageInput {
-    // While a page input is focused, this native editor state is the source of truth
-    // until we wire live DOM/event synchronization for script-driven value changes.
+    // While a page input is focused, this native editor state is the immediate
+    // source of truth; sync_page_input_value keeps the DOM attribute in step.
     control_id: usize,
     node_id: Option<usize>,
     initial_value: String,
@@ -3006,7 +3001,6 @@ fn paint_page_control(
     offset_y: u32,
     scroll_y: u32,
     control: &FormControlCommand,
-    page_control_values: &BTreeMap<usize, String>,
     focused_page_input: Option<&FocusedPageInput>,
     hovered_target: HitTarget,
 ) {
@@ -3066,10 +3060,8 @@ fn paint_page_control(
             let text_y = absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
             let available_width = control.width.saturating_sub(CONTROL_PADDING_X * 2);
 
-            let actual_value = focused
-                .map(|focused| focused.editor.text().to_string())
-                .or_else(|| page_control_values.get(&control.id).cloned())
-                .unwrap_or_else(|| control.value.clone());
+            let actual_value =
+                resolve_text_input_value(focused.map(|focused| &focused.editor), &control.value);
             let display_value = if control.masked {
                 "*".repeat(actual_value.chars().count())
             } else {
@@ -3225,7 +3217,6 @@ fn paint_layout(
     viewport_height: u32,
     scroll_y: u32,
     layout: &LayoutDocument,
-    page_control_values: &BTreeMap<usize, String>,
     focused_page_input: Option<&FocusedPageInput>,
     hovered_target: HitTarget,
     scratch: &mut Vec<Vec<u32>>,
@@ -3267,7 +3258,6 @@ fn paint_layout(
             offset_y,
             scroll_y,
             control,
-            page_control_values,
             focused_page_input,
             hovered_target,
         );
@@ -3567,6 +3557,15 @@ fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {
     content_height.saturating_sub(viewport_height)
 }
 
+fn resolve_text_input_value(
+    focused_editor: Option<&AddressBarState>,
+    control_value: &str,
+) -> String {
+    focused_editor
+        .map(|editor| editor.text().to_string())
+        .unwrap_or_else(|| control_value.to_string())
+}
+
 fn read_clipboard_text() -> Option<String> {
     let mut clipboard = Clipboard::new().ok()?;
     clipboard.get_text().ok()
@@ -3787,6 +3786,7 @@ mod tests {
     use super::{
         AddressBarState, build_get_form_submission_url, cursor_index_for_address_x,
         layout_error_document, looks_like_local_address, max_scroll, parse_address_input,
+        resolve_text_input_value,
     };
     use crate::font::FontContext;
 
@@ -3853,6 +3853,15 @@ mod tests {
         assert!(state.insert_text("https://youtube.com"));
         assert_eq!(state.text(), "https://youtube.com");
         assert!(state.selection_range().is_none());
+    }
+
+    #[test]
+    fn text_input_value_prefers_live_editor_text() {
+        let mut editor = AddressBarState::new("live".to_string());
+        editor.focus_at(editor.char_len());
+
+        assert_eq!(resolve_text_input_value(Some(&editor), "dom"), "live");
+        assert_eq!(resolve_text_input_value(None, "dom"), "dom");
     }
 
     #[test]

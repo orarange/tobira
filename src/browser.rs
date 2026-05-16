@@ -7,7 +7,10 @@ use crate::error::Result;
 use crate::html::{Element, Node, parse_document};
 use crate::http::fetch;
 use crate::image::{ImageStore, decode_image};
-use crate::js::process_document_scripts;
+use crate::js::{
+    DomEventDispatchResult, DomEventRequest, JavaScriptSession, ProcessedScriptHtml,
+    start_document_script_session,
+};
 use crate::render::render_document;
 use crate::text::decode_text_response;
 use crate::url::Url;
@@ -22,9 +25,11 @@ pub struct BrowserPage {
     pub reason_phrase: String,
     pub content_type: Option<String>,
     pub title: String,
+    pub html_source: String,
     pub styled_document: StyledNode,
     pub images: ImageStore,
     pub rendered: Option<String>,
+    pub javascript_session: Option<JavaScriptSession>,
 }
 
 impl BrowserPage {
@@ -32,6 +37,50 @@ impl BrowserPage {
         format!("{} {}", self.status_code, self.reason_phrase)
             .trim()
             .to_string()
+    }
+
+    pub fn apply_script_snapshot(&mut self, snapshot: ProcessedScriptHtml) {
+        let include_rendered_output = self.rendered.is_some();
+        let javascript_session = self.javascript_session.take();
+        let url = snapshot
+            .soft_navigation_target
+            .as_deref()
+            .and_then(|target| Url::parse(target).ok())
+            .unwrap_or_else(|| self.url.clone());
+        let rebuilt = rebuild_page_from_html(
+            &url,
+            self.status_code,
+            self.reason_phrase.clone(),
+            self.content_type.clone(),
+            &snapshot.html,
+            snapshot.title_override.clone(),
+            include_rendered_output,
+            javascript_session,
+        );
+        *self = rebuilt;
+    }
+
+    pub fn dispatch_dom_event(
+        &mut self,
+        request: DomEventRequest,
+    ) -> Option<DomEventDispatchResult> {
+        let result = self
+            .javascript_session
+            .as_ref()
+            .and_then(|session| session.dispatch_event(request));
+        if let Some(result) = result.clone() {
+            self.apply_script_snapshot(result.snapshot.clone());
+        }
+        result
+    }
+
+    pub fn set_dom_attribute(&mut self, node_id: Option<usize>, name: &str, value: &str) {
+        let Some(node_id) = node_id else {
+            return;
+        };
+        if let Some(session) = &self.javascript_session {
+            let _ = session.set_attribute(node_id, name, value);
+        }
     }
 
     pub fn body_text(&self) -> &str {
@@ -68,8 +117,9 @@ struct LoadedDocumentSource {
     status_code: u16,
     reason_phrase: String,
     content_type: Option<String>,
-    title: String,
     document: Node,
+    processed_html: ProcessedScriptHtml,
+    javascript_session: Option<JavaScriptSession>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,21 +138,102 @@ pub fn load_page_for_cli(url: &Url) -> Result<BrowserPage> {
 
 fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<BrowserPage> {
     let source = load_document_source(url, 0)?;
-    let stylesheet = collect_stylesheet(&source.document, &source.final_url);
-    let images = collect_image_resources(&source.document);
-    let rendered = include_rendered_output.then(|| render_document(&source.document));
-    let styled_document = build_styled_tree(&source.document, &stylesheet, 1280);
+    let mut page = rebuild_page_from_document(
+        &source.final_url,
+        source.status_code,
+        source.reason_phrase,
+        source.content_type,
+        source.document,
+        source.processed_html.html,
+        source.processed_html.title_override,
+        include_rendered_output,
+        source.javascript_session,
+    );
+    if let Some(soft_target) = source
+        .processed_html
+        .soft_navigation_target
+        .as_deref()
+        .and_then(|target| Url::parse(target).ok())
+    {
+        page.url = soft_target;
+    }
+    Ok(page)
+}
 
-    Ok(BrowserPage {
-        url: source.final_url,
-        status_code: source.status_code,
-        reason_phrase: source.reason_phrase,
-        content_type: source.content_type,
-        title: source.title,
+fn rebuild_page_from_html(
+    url: &Url,
+    status_code: u16,
+    reason_phrase: String,
+    content_type: Option<String>,
+    html: &str,
+    title_override: Option<String>,
+    include_rendered_output: bool,
+    javascript_session: Option<JavaScriptSession>,
+) -> BrowserPage {
+    let mut parsed_document = parse_document(html);
+    if let Some(rewritten) = build_site_specific_document(&parsed_document, html, url) {
+        parsed_document = rewritten;
+    } else if is_google_host(url) && !document_has_meaningful_body(&parsed_document) {
+        parsed_document = build_google_document_from_html(html, url);
+    } else if is_youtube_host(url)
+        && !is_youtube_watch_url(url)
+        && !document_has_meaningful_body(&parsed_document)
+    {
+        parsed_document = build_youtube_generic_document_from_html(html, url);
+    }
+    annotate_resource_urls(&mut parsed_document, url);
+    let document = expand_frames(&parsed_document, url, 1)
+        .ok()
+        .flatten()
+        .unwrap_or(parsed_document);
+    rebuild_page_from_document(
+        url,
+        status_code,
+        reason_phrase,
+        content_type,
+        document,
+        html.to_string(),
+        title_override,
+        include_rendered_output,
+        javascript_session,
+    )
+}
+
+fn rebuild_page_from_document(
+    url: &Url,
+    status_code: u16,
+    reason_phrase: String,
+    content_type: Option<String>,
+    mut document: Node,
+    html_source: String,
+    title_override: Option<String>,
+    include_rendered_output: bool,
+    javascript_session: Option<JavaScriptSession>,
+) -> BrowserPage {
+    annotate_node_ids(&mut document);
+    let original_title = title_override.or_else(|| document_title(&document));
+    let title = original_title
+        .or_else(|| document_title(&document))
+        .or_else(|| first_heading(&document))
+        .unwrap_or_else(|| "Tobira".to_string());
+
+    let stylesheet = collect_stylesheet(&document, url);
+    let images = collect_image_resources(&document);
+    let rendered = include_rendered_output.then(|| render_document(&document));
+    let styled_document = build_styled_tree(&document, &stylesheet, 1280);
+
+    BrowserPage {
+        url: url.clone(),
+        status_code,
+        reason_phrase,
+        content_type,
+        title,
+        html_source,
         styled_document,
         images,
         rendered,
-    })
+        javascript_session,
+    }
 }
 
 fn load_document_source(url: &Url, frame_depth: usize) -> Result<LoadedDocumentSource> {
@@ -117,84 +248,69 @@ fn load_document_source_with_script_navigation(
     let response = fetch(url)?;
     let content_type = response.header("content-type").map(str::to_string);
     let text = decode_text_response(&response.body, response.header("content-type"));
-    if is_youtube_watch_url(&response.final_url)
-        && let Some(data) = extract_youtube_watch_data_from_html(&text, &response.final_url)
-    {
-        let title = data.title.clone();
-        return Ok(LoadedDocumentSource {
-            final_url: response.final_url,
-            status_code: response.status_code,
-            reason_phrase: response.reason_phrase,
-            content_type,
-            title,
-            document: build_youtube_watch_document(&data),
-        });
-    }
-    if is_google_host(&response.final_url) {
-        let document = build_google_document_from_html(&text, &response.final_url);
-        let title = document_title(&document).unwrap_or_else(|| "Google".to_string());
-        return Ok(LoadedDocumentSource {
-            final_url: response.final_url,
-            status_code: response.status_code,
-            reason_phrase: response.reason_phrase,
-            content_type,
-            title,
-            document,
-        });
-    }
-    if is_youtube_host(&response.final_url) && !is_youtube_watch_url(&response.final_url) {
-        let document = build_youtube_generic_document_from_html(&text, &response.final_url);
-        let title = document_title(&document).unwrap_or_else(|| "YouTube".to_string());
-        return Ok(LoadedDocumentSource {
-            final_url: response.final_url,
-            status_code: response.status_code,
-            reason_phrase: response.reason_phrase,
-            content_type,
-            title,
-            document,
-        });
-    }
-    let scripted = process_document_scripts(&text, &response.final_url);
+    let (scripted, javascript_session) = start_document_script_session(&text, &response.final_url);
     if let Some(target) = scripted.navigation_target.as_deref()
         && target != response.final_url.to_string()
         && script_navigation_depth < MAX_SCRIPT_NAVIGATION_DEPTH
         && let Ok(next_url) = Url::parse(target)
     {
-        return load_document_source_with_script_navigation(
-            &next_url,
-            frame_depth,
-            script_navigation_depth + 1,
-        );
+        if should_follow_script_navigation(&response.final_url, &next_url) {
+            return load_document_source_with_script_navigation(
+                &next_url,
+                frame_depth,
+                script_navigation_depth + 1,
+            );
+        }
     }
     let mut parsed_document = parse_document(&scripted.html);
     if let Some(rewritten) =
         build_site_specific_document(&parsed_document, &text, &response.final_url)
     {
         parsed_document = rewritten;
+    } else if is_google_host(&response.final_url) && !document_has_meaningful_body(&parsed_document)
+    {
+        parsed_document = build_google_document_from_html(&text, &response.final_url);
+    } else if is_youtube_host(&response.final_url)
+        && !is_youtube_watch_url(&response.final_url)
+        && !document_has_meaningful_body(&parsed_document)
+    {
+        parsed_document = build_youtube_generic_document_from_html(&text, &response.final_url);
     }
     annotate_resource_urls(&mut parsed_document, &response.final_url);
-    let original_title = scripted
-        .title_override
-        .or_else(|| document_title(&parsed_document));
     let document = if frame_depth < MAX_FRAME_DEPTH {
         expand_frames(&parsed_document, &response.final_url, frame_depth + 1)?
             .unwrap_or(parsed_document)
     } else {
         parsed_document
     };
-    let title = original_title
-        .or_else(|| document_title(&document))
-        .or_else(|| first_heading(&document))
-        .unwrap_or_else(|| "Tobira".to_string());
-
     Ok(LoadedDocumentSource {
         final_url: response.final_url,
         status_code: response.status_code,
         reason_phrase: response.reason_phrase,
         content_type,
-        title,
         document,
+        processed_html: scripted,
+        javascript_session,
     })
+}
+
+fn annotate_node_ids(document: &mut Node) {
+    fn walk(node: &mut Node, next_id: &mut usize) {
+        if let Node::Element(element) = node {
+            element
+                .attributes
+                .insert("data-tobira-node-id".to_string(), next_id.to_string());
+            *next_id = next_id
+                .checked_add(1)
+                .expect("document node id counter overflowed");
+            for child in &mut element.children {
+                walk(child, next_id);
+            }
+        }
+    }
+
+    let mut next_id = 1;
+    walk(document, &mut next_id);
 }
 
 fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<Option<Node>> {
@@ -390,14 +506,18 @@ fn section_heading_node(title: &str) -> Node {
 }
 
 fn frame_section_title(frame: &FrameSpec, frame_document: &LoadedDocumentSource) -> Option<String> {
+    let frame_title = document_title(&frame_document.document)
+        .or_else(|| first_heading(&frame_document.document))
+        .unwrap_or_default();
+
     if let Some(first_heading) = first_heading(&frame_document.document)
-        && first_heading == frame_document.title
+        && first_heading == frame_title
     {
         return None;
     }
 
-    if !frame_document.title.trim().is_empty() && frame_document.title != "Tobira" {
-        return Some(frame_document.title.clone());
+    if !frame_title.trim().is_empty() && frame_title != "Tobira" {
+        return Some(frame_title);
     }
 
     frame
@@ -831,10 +951,6 @@ fn build_site_specific_document(document: &Node, html: &str, url: &Url) -> Optio
         return Some(build_youtube_watch_document(&data));
     }
 
-    if is_youtube_host(url) {
-        return Some(build_youtube_generic_document(document, html, url));
-    }
-
     None
 }
 
@@ -850,6 +966,49 @@ fn is_google_host(url: &Url) -> bool {
 
 fn is_youtube_watch_url(url: &Url) -> bool {
     is_youtube_host(url) && url.path.starts_with("/watch")
+}
+
+fn should_follow_script_navigation(current_url: &Url, target_url: &Url) -> bool {
+    current_url.shares_origin(target_url)
+}
+
+fn document_has_meaningful_body(document: &Node) -> bool {
+    extract_body_children(document)
+        .iter()
+        .any(node_has_meaningful_content)
+}
+
+fn node_has_meaningful_content(node: &Node) -> bool {
+    match node {
+        Node::Text(text) => !text.trim().is_empty(),
+        Node::Element(element) => {
+            if matches!(
+                element.tag_name.as_str(),
+                "script" | "style" | "meta" | "link" | "noscript" | "head" | "title"
+            ) {
+                return false;
+            }
+
+            if matches!(
+                element.tag_name.as_str(),
+                "img"
+                    | "input"
+                    | "button"
+                    | "textarea"
+                    | "select"
+                    | "option"
+                    | "video"
+                    | "audio"
+                    | "canvas"
+                    | "svg"
+                    | "iframe"
+            ) {
+                return true;
+            }
+
+            element.children.iter().any(node_has_meaningful_content)
+        }
+    }
 }
 
 fn extract_youtube_watch_data_from_html(html: &str, url: &Url) -> Option<YouTubeWatchData> {
@@ -1215,64 +1374,6 @@ fn build_youtube_watch_document(data: &YouTubeWatchData) -> Node {
             })],
         })],
     )
-}
-
-fn build_youtube_generic_document(document: &Node, html: &str, url: &Url) -> Node {
-    if let Some(data) = extract_youtube_home_data_from_html(html, url) {
-        return build_youtube_home_document(&data, url);
-    }
-
-    let title = document_title(document).unwrap_or_else(|| "YouTube".to_string());
-    let description = find_meta_content(document, "name", "description")
-        .or_else(|| find_meta_content(document, "property", "og:description"))
-        .unwrap_or_else(|| {
-            "This YouTube page relies on a large app shell. Tobira currently renders specific watch URLs more accurately than the full home feed.".to_string()
-        });
-
-    let mut body_children = vec![
-        simple_text_element("h1", &title),
-        simple_text_element("p", &description),
-        simple_text_element(
-            "p",
-            "Tip: open a specific https://www.youtube.com/watch?v=... URL for a richer video summary.",
-        ),
-    ];
-
-    let watch_links = extract_html_attribute_values(html, "href=\"/watch?v=", '"', 10)
-        .into_iter()
-        .map(|path| {
-            if path.starts_with("http://") || path.starts_with("https://") {
-                path
-            } else {
-                format!("https://www.youtube.com{path}")
-            }
-        })
-        .collect::<Vec<_>>();
-
-    if !watch_links.is_empty() {
-        body_children.push(hr_node());
-        body_children.push(simple_text_element("h2", "Watch Links"));
-        let items = watch_links
-            .into_iter()
-            .map(|href| {
-                Node::Element(Element {
-                    tag_name: "li".to_string(),
-                    attributes: BTreeMap::new(),
-                    children: vec![Node::Text(href)],
-                })
-            })
-            .collect();
-        body_children.push(Node::Element(Element {
-            tag_name: "ul".to_string(),
-            attributes: BTreeMap::new(),
-            children: items,
-        }));
-    }
-
-    body_children.push(hr_node());
-    body_children.push(simple_text_element("p", &format!("URL: {}", url)));
-
-    synthetic_document(&title, body_children)
 }
 
 fn build_youtube_generic_document_from_html(html: &str, url: &Url) -> Node {
@@ -2740,8 +2841,8 @@ fn collect_raw_text_into(node: &Node, output: &mut String) {
 mod tests {
     use super::{
         BrowserPage, build_site_specific_document, build_youtube_generic_document_from_html,
-        collect_frame_specs, collect_stylesheet, document_title, extract_body_children,
-        synthetic_document,
+        collect_frame_specs, collect_stylesheet, document_has_meaningful_body, document_title,
+        extract_body_children, should_follow_script_navigation, synthetic_document,
     };
     use crate::css::StyledNode;
     use crate::html::{Node, parse_document};
@@ -2755,6 +2856,7 @@ mod tests {
             reason_phrase: "OK".to_string(),
             content_type: Some("text/html".to_string()),
             title: "Example".to_string(),
+            html_source: String::new(),
             styled_document: StyledNode::Text(crate::css::StyledText {
                 text: String::new(),
                 style: crate::css::ComputedStyle {
@@ -2780,7 +2882,6 @@ mod tests {
                     outline_color: None,
                     line_height: 0,
                     opacity: 255,
-                    effective_opacity: 255,
                     font_style_italic: false,
                     text_transform: crate::css::TextTransform::None,
                     text_indent: 0,
@@ -2794,12 +2895,11 @@ mod tests {
                     list_style_type: crate::css::ListStyleType::Disc,
                     cursor_pointer: false,
                     text_decoration_color: None,
-                    box_shadow: None,
-                    content: None,
                 },
             }),
             images: crate::image::ImageStore::default(),
             rendered: Some("   ".to_string()),
+            javascript_session: None,
         };
 
         assert_eq!(page.body_text(), "[empty document]");
@@ -2813,9 +2913,11 @@ mod tests {
             reason_phrase: "OK".to_string(),
             content_type: Some("text/html".to_string()),
             title: "Hello".to_string(),
+            html_source: String::new(),
             styled_document: parse_styled_text("Hello"),
             images: crate::image::ImageStore::default(),
             rendered: Some("# Hello".to_string()),
+            javascript_session: None,
         };
 
         let output = page.to_cli_output();
@@ -2928,6 +3030,48 @@ mod tests {
         assert!(rendered.contains("1,234,567"));
         assert!(rendered.contains("3:34"));
         assert!(rendered.contains("2026-05-13"));
+    }
+
+    #[test]
+    fn does_not_rewrite_generic_youtube_pages_through_site_specific_path() {
+        let html = "<html><body><div id=\"app\">Real shell</div></body></html>";
+        let document = parse_document(html);
+
+        let rewritten = build_site_specific_document(
+            &document,
+            html,
+            &Url::parse("https://www.youtube.com/").unwrap(),
+        );
+
+        assert!(rewritten.is_none());
+    }
+
+    #[test]
+    fn meaningful_body_detection_ignores_script_only_shells() {
+        let document = parse_document(
+            "<html><head><title>Demo</title></head><body><script>boot()</script></body></html>",
+        );
+
+        assert!(!document_has_meaningful_body(&document));
+    }
+
+    #[test]
+    fn meaningful_body_detection_accepts_interactive_shell_markup() {
+        let document = parse_document(
+            "<html><body><div id=\"app\"></div><input type=\"text\" value=\"search\"></body></html>",
+        );
+
+        assert!(document_has_meaningful_body(&document));
+    }
+
+    #[test]
+    fn only_follows_same_origin_script_navigation() {
+        let current = Url::parse("https://www.youtube.com/watch?v=demo").unwrap();
+        let same_origin = Url::parse("https://www.youtube.com/results?search_query=rust").unwrap();
+        let cross_origin = Url::parse("https://accounts.google.com/signin").unwrap();
+
+        assert!(should_follow_script_navigation(&current, &same_origin));
+        assert!(!should_follow_script_navigation(&current, &cross_origin));
     }
 
     #[test]
@@ -3063,7 +3207,6 @@ mod tests {
                 outline_color: None,
                 line_height: 0,
                 opacity: 255,
-                effective_opacity: 255,
                 font_style_italic: false,
                 text_transform: crate::css::TextTransform::None,
                 text_indent: 0,
@@ -3077,8 +3220,6 @@ mod tests {
                 list_style_type: crate::css::ListStyleType::Disc,
                 cursor_pointer: false,
                 text_decoration_color: None,
-                box_shadow: None,
-                content: None,
             },
         })
     }

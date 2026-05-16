@@ -122,3 +122,38 @@ cargo run -- http://127.0.0.1:8765/demo/dom-demo.html
 - `src/js.rs` — Sandboxed JS execution, block-list filter, mutable DOM bridge, browser-ish stubs
 - `src/render.rs` — Plain text fallback renderer for CLI mode
 - `src/main.rs` — Application entry point
+
+## Next Steps
+
+The living JavaScript roadmap is in [JS_ROADMAP.md](JS_ROADMAP.md).
+
+Short version:
+
+1. Add storage, cookies, and richer history/back-forward behavior
+2. Improve networking semantics and reflow after DOM mutation
+3. Validate against Google, YouTube, and other app-shell sites
+
+## JavaScript Scope
+
+Current JS support is intentionally small:
+
+- inline `<script>`
+- external `<script src>`
+- `document.write()` / `document.writeln()`
+- `document.title`
+- `document.querySelector(...)` / `querySelectorAll(...)`
+- `document.getElementById(...)`
+- `document.createElement(...)`
+- `appendChild(...)` / `insertBefore(...)` / `remove()`
+- `innerHTML`, `textContent`, `classList`, `id`, `className`
+- `document.addEventListener(...)` / capture + bubbling for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`
+- `focus` / `blur` are currently target-only
+- `addEventListener(...)` / `removeEventListener(...)` on page inputs, buttons, links, forms, and document nodes
+- `click`, `focus`, `blur`, `input`, `change`, `submit`, `keydown`, and `keyup` event dispatch, including `once`, capture-phase, and passive listeners
+- native GUI typing stays in sync with DOM `input.value`
+- `location.hash` plus `history.pushState(...)` / `replaceState(...)` soft navigation
+- `location.href`
+- `console.log()` / `warn()` / `error()`
+- immediate `setTimeout(...)` fallback
+
+It still does not implement a full browser DOM, async networking, or framework-level browser APIs.

@@ -5,6 +5,7 @@ const input = document.getElementById("demo-input");
 const form = document.getElementById("demo-form");
 const link = document.getElementById("demo-link");
 const submit = document.getElementById("demo-submit");
+const passiveButton = document.getElementById("passive-button");
 
 function nodeLabel(node) {
   if (!node) {
@@ -31,6 +32,7 @@ function describeEvent(event) {
     `type=${event.type}`,
     `target=${nodeLabel(event.target)}`,
     `current=${nodeLabel(event.currentTarget)}`,
+    `phase=${event.eventPhase}`,
     `defaultPrevented=${event.defaultPrevented}`,
   ];
 
@@ -75,6 +77,14 @@ document.addEventListener("click", (event) => {
   record("document", event);
 });
 
+document.addEventListener(
+  "click",
+  (event) => {
+    record("document-capture", event);
+  },
+  true,
+);
+
 document.addEventListener("submit", (event) => {
   record("document", event);
 });
@@ -111,6 +121,14 @@ input.addEventListener("keyup", (event) => {
   record("input", event);
 });
 
+input.addEventListener(
+  "click",
+  (event) => {
+    record("input-once", event);
+  },
+  { once: true },
+);
+
 submit.addEventListener("click", (event) => {
   record("submit", event);
 });
@@ -126,5 +144,17 @@ link.addEventListener("click", (event) => {
   event.preventDefault();
   appendLine("link: preventDefault() called");
 });
+
+passiveButton.addEventListener(
+  "click",
+  (event) => {
+    record("passive-button", event);
+    event.preventDefault();
+    appendLine(
+      `passive-button: preventDefault() left defaultPrevented=${event.defaultPrevented}`,
+    );
+  },
+  { passive: true },
+);
 
 appendLine("script: listeners attached");
