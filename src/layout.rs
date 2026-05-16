@@ -1,6 +1,7 @@
 use crate::css::{
     Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, LengthValue,
-    Overflow, StyledElement, StyledNode, TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode,
+    Overflow, Position, FlexDirection, AlignItems, AlignSelf, JustifyContent, StyledElement,
+    StyledNode, TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode,
     apply_text_transform,
 };
 use crate::font::FontContext;
@@ -77,6 +78,27 @@ fn shift_command(cmd: &mut DrawCommand, dx: u32, dy: u32) {
         DrawCommand::Layer(l) => {
             l.x = l.x.saturating_add(dx);
             l.y = l.y.saturating_add(dy);
+        }
+    }
+}
+
+fn shift_command_signed(cmd: &mut DrawCommand, dx: i32, dy: i32) {
+    match cmd {
+        DrawCommand::Rect(r) => {
+            r.x = (r.x as i64 + dx as i64).max(0) as u32;
+            r.y = (r.y as i64 + dy as i64).max(0) as u32;
+        }
+        DrawCommand::Text(t) => {
+            t.x = (t.x as i64 + dx as i64).max(0) as u32;
+            t.y = (t.y as i64 + dy as i64).max(0) as u32;
+        }
+        DrawCommand::Image(i) => {
+            i.x = (i.x as i64 + dx as i64).max(0) as u32;
+            i.y = (i.y as i64 + dy as i64).max(0) as u32;
+        }
+        DrawCommand::Layer(l) => {
+            l.x = (l.x as i64 + dx as i64).max(0) as u32;
+            l.y = (l.y as i64 + dy as i64).max(0) as u32;
         }
     }
 }
@@ -242,6 +264,13 @@ pub fn layout_styled_document(
         fonts,
     );
 
+    // Append absolutely/fixed positioned elements sorted by z-index
+    let mut positioned = std::mem::take(&mut context.positioned_commands);
+    positioned.sort_by_key(|(z, _)| *z);
+    for (_, cmds) in positioned {
+        context.commands.extend(cmds);
+    }
+
     LayoutDocument {
         background_color: canvas_bg,
         content_height: cursor_y,
@@ -255,6 +284,9 @@ struct LayoutContext {
     background_color: Color,
     commands: Vec<DrawCommand>,
     links: Vec<LinkCommand>,
+    containing_block_origin: (u32, u32),
+    scroll_y_for_fixed: u32,
+    positioned_commands: Vec<(i32, Vec<DrawCommand>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -343,6 +375,12 @@ fn layout_node(
                 return;
             }
 
+            // Handle positioned elements (absolute/fixed) — they don't contribute to flow
+            if element.style.position == Position::Absolute || element.style.position == Position::Fixed {
+                layout_positioned_element(element, x, width, cursor_y, context, images, fonts);
+                return;
+            }
+
             match element.style.display {
                 Display::None => {}
                 Display::Inline => {
@@ -377,6 +415,9 @@ fn layout_node(
                             });
                         }
                     }
+                }
+                Display::Flex => {
+                    layout_flex_container(element, x, width, cursor_y, context, images, fonts);
                 }
             }
         }
@@ -422,6 +463,8 @@ fn layout_block_element(
         }
         return;
     }
+
+    let block_cmd_start = context.commands.len();
 
     *cursor_y = cursor_y.saturating_add(element.style.margin.top);
 
@@ -641,6 +684,17 @@ fn layout_block_element(
                 color: bc,
                 border_radius: 0,
             }));
+        }
+    }
+
+    // position: relative — apply visual offset without affecting flow
+    if element.style.position == Position::Relative {
+        let dx = element.style.left.unwrap_or(0) - element.style.right.unwrap_or(0);
+        let dy = element.style.top.unwrap_or(0) - element.style.bottom.unwrap_or(0);
+        if dx != 0 || dy != 0 {
+            for cmd in &mut context.commands[block_cmd_start..] {
+                shift_command_signed(cmd, dx, dy);
+            }
         }
     }
 
@@ -1701,7 +1755,7 @@ fn collect_inline_fragments(
                         collect_inline_fragments(child, output, current_link);
                     }
                 }
-                Display::Block | Display::ListItem => {}
+                Display::Block | Display::ListItem | Display::Flex => {}
             }
         }
     }
@@ -2282,6 +2336,258 @@ fn apply_opacity(color: Color, background: Color, opacity: u8) -> Color {
 
 // find_document_background was removed: we no longer pre-blend body background
 // in layout_styled_document (Issue 4 — double compositing fix).
+
+fn layout_positioned_element(
+    element: &StyledElement,
+    _x: u32,
+    container_width: u32,
+    _cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) {
+    let (base_x, base_y) = if element.style.position == Position::Fixed {
+        (0u32, context.scroll_y_for_fixed)
+    } else {
+        context.containing_block_origin
+    };
+
+    let elem_width = element.style.width
+        .as_ref()
+        .and_then(|lv| match lv {
+            LengthValue::Pixels(px) => Some(*px),
+            LengthValue::Percent(p) => Some((container_width as f32 * (*p as f32) / 100.0) as u32),
+        })
+        .unwrap_or(container_width);
+
+    let x = (base_x as i64 + element.style.left.unwrap_or(0) as i64).max(0) as u32;
+    let mut cursor_y = (base_y as i64 + element.style.top.unwrap_or(0) as i64).max(0) as u32;
+
+    let mut sub_context = LayoutContext {
+        background_color: context.background_color,
+        ..LayoutContext::default()
+    };
+    layout_block_element(element, x, elem_width, &mut cursor_y, &mut sub_context, images, fonts);
+    let z = element.style.z_index.unwrap_or(0);
+    context.positioned_commands.push((z, sub_context.commands));
+    context.links.extend(sub_context.links);
+}
+
+fn layout_flex_container(
+    element: &StyledElement,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) {
+    *cursor_y = cursor_y.saturating_add(element.style.margin.top);
+    let outer_x = x.saturating_add(element.style.margin.left);
+    let outer_width = width.saturating_sub(
+        element.style.margin.left + element.style.margin.right
+    );
+    let background_top = *cursor_y;
+
+    let border_left = if !element.style.border_style_none { element.style.border.left } else { 0 };
+    let border_right = if !element.style.border_style_none { element.style.border.right } else { 0 };
+    let border_top = if !element.style.border_style_none { element.style.border.top } else { 0 };
+    let border_bottom_sz = if !element.style.border_style_none { element.style.border.bottom } else { 0 };
+
+    let content_x = outer_x
+        .saturating_add(border_left)
+        .saturating_add(element.style.padding.left);
+    let content_width = outer_width
+        .saturating_sub(border_left + border_right + element.style.padding.left + element.style.padding.right)
+        .max(1);
+    let content_y = background_top
+        .saturating_add(border_top)
+        .saturating_add(element.style.padding.top);
+
+    let gap = element.style.gap;
+    let is_row = matches!(element.style.flex_direction, FlexDirection::Row | FlexDirection::RowReverse);
+
+    // Collect visible flex items (only element children, not text nodes)
+    let children: Vec<&StyledElement> = element.children.iter().filter_map(|child| {
+        if let StyledNode::Element(el) = child {
+            if el.style.display != Display::None { Some(el) } else { None }
+        } else { None }
+    }).collect();
+
+    // Reserve a slot for background rect — insert placeholder now, update height later
+    let bg_cmd_index = if let Some(background_color) = element.style.background_color {
+        let blended = apply_opacity(background_color, context.background_color, element.style.effective_opacity);
+        context.commands.push(DrawCommand::Rect(RectCommand {
+            x: outer_x, y: background_top,
+            width: outer_width.max(1), height: 1,
+            color: blended,
+            border_radius: element.style.border_radius,
+        }));
+        Some(context.commands.len() - 1)
+    } else {
+        None
+    };
+
+    let saved_bg = context.background_color;
+    if let Some(bg) = element.style.background_color {
+        if element.style.effective_opacity == 255 {
+            context.background_color = bg;
+        }
+    }
+
+    if !children.is_empty() {
+        if is_row {
+            let n = children.len();
+            let total_gap = gap.saturating_mul((n.saturating_sub(1)) as u32);
+
+            // Calculate total width of children with explicit widths (+ margins)
+            let total_fixed: u32 = children.iter().map(|child| {
+                child.style.width.as_ref().and_then(|lv| match lv {
+                    LengthValue::Pixels(px) => Some(*px),
+                    LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
+                }).unwrap_or(0)
+                + child.style.margin.left + child.style.margin.right
+            }).sum();
+            let n_auto = children.iter().filter(|child| child.style.width.is_none()).count() as u32;
+            let remaining = content_width.saturating_sub(total_fixed).saturating_sub(total_gap);
+            let auto_width = if n_auto > 0 { remaining / n_auto } else { 0 };
+
+            // First pass: measure heights for alignment
+            let item_heights: Vec<u32> = children.iter().map(|child| {
+                let child_w = child.style.width.as_ref().and_then(|lv| match lv {
+                    LengthValue::Pixels(px) => Some(*px),
+                    LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
+                }).unwrap_or(auto_width).max(1);
+                let mut dummy_y = content_y;
+                let mut dummy_ctx = LayoutContext { background_color: context.background_color, ..LayoutContext::default() };
+                layout_block_element(child, content_x, child_w, &mut dummy_y, &mut dummy_ctx, images, fonts);
+                dummy_y.saturating_sub(content_y)
+            }).collect();
+            let max_height = *item_heights.iter().max().unwrap_or(&0);
+
+            // Compute justify-content offsets
+            let (start_offset, item_gap) = justify_content_offsets(
+                element.style.justify_content, content_width, total_fixed, total_gap, n as u32
+            );
+
+            // Second pass: actual layout
+            let mut cursor_x = content_x.saturating_add(start_offset);
+            for (i, child) in children.iter().enumerate() {
+                let child_w = child.style.width.as_ref().and_then(|lv| match lv {
+                    LengthValue::Pixels(px) => Some(*px),
+                    LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
+                }).unwrap_or(auto_width).max(1);
+
+                let self_align = match child.style.align_self {
+                    AlignSelf::Auto => element.style.align_items,
+                    AlignSelf::FlexStart => AlignItems::FlexStart,
+                    AlignSelf::FlexEnd => AlignItems::FlexEnd,
+                    AlignSelf::Center => AlignItems::Center,
+                    AlignSelf::Stretch => AlignItems::Stretch,
+                    AlignSelf::Baseline => AlignItems::Baseline,
+                };
+                let child_y_offset = match self_align {
+                    AlignItems::Center => (max_height.saturating_sub(item_heights[i])) / 2,
+                    AlignItems::FlexEnd => max_height.saturating_sub(item_heights[i]),
+                    _ => 0,
+                };
+
+                let mut child_y = content_y.saturating_add(child_y_offset);
+                layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts);
+                cursor_x = cursor_x.saturating_add(child_w).saturating_add(item_gap);
+            }
+
+            *cursor_y = content_y.saturating_add(max_height)
+                .saturating_add(element.style.padding.bottom)
+                .saturating_add(border_bottom_sz);
+        } else {
+            // Column direction: stack children vertically with gap
+            *cursor_y = content_y;
+            for (i, child) in children.iter().enumerate() {
+                layout_block_element(child, content_x, content_width, cursor_y, context, images, fonts);
+                if i < children.len() - 1 {
+                    *cursor_y = cursor_y.saturating_add(gap);
+                }
+            }
+            *cursor_y = cursor_y.saturating_add(element.style.padding.bottom)
+                .saturating_add(border_bottom_sz);
+        }
+    } else {
+        *cursor_y = content_y.saturating_add(element.style.padding.bottom).saturating_add(border_bottom_sz);
+    }
+
+    // Update background rect height
+    let background_height = cursor_y.saturating_sub(background_top).max(1);
+    if let Some(idx) = bg_cmd_index {
+        if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(idx) {
+            rect.height = background_height;
+        }
+    }
+
+    context.background_color = saved_bg;
+
+    // Draw borders
+    if !element.style.border_style_none {
+        let bc = apply_opacity(element.style.border_color, context.background_color, element.style.effective_opacity);
+        if border_top > 0 {
+            context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x, y: background_top,
+                width: outer_width.max(1), height: border_top,
+                color: bc, border_radius: element.style.border_radius,
+            }));
+        }
+        if border_bottom_sz > 0 {
+            context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x, y: cursor_y.saturating_sub(border_bottom_sz),
+                width: outer_width.max(1), height: border_bottom_sz,
+                color: bc, border_radius: element.style.border_radius,
+            }));
+        }
+        if border_left > 0 {
+            context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x, y: background_top,
+                width: border_left, height: background_height,
+                color: bc, border_radius: 0,
+            }));
+        }
+        if border_right > 0 {
+            context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x.saturating_add(outer_width).saturating_sub(border_right),
+                y: background_top,
+                width: border_right, height: background_height,
+                color: bc, border_radius: 0,
+            }));
+        }
+    }
+
+    *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+}
+
+fn justify_content_offsets(
+    justify: JustifyContent,
+    container_w: u32,
+    total_fixed: u32,
+    total_gap: u32,
+    n: u32,
+) -> (u32, u32) {
+    // Returns (start_offset, gap_between_items)
+    let free = container_w.saturating_sub(total_fixed).saturating_sub(total_gap);
+    let base_gap = if n > 1 { total_gap / (n - 1) } else { 0 };
+    match justify {
+        JustifyContent::FlexStart => (0, base_gap),
+        JustifyContent::FlexEnd => (free, base_gap),
+        JustifyContent::Center => (free / 2, base_gap),
+        JustifyContent::SpaceBetween => (0, if n > 1 { (free + total_gap) / (n - 1) } else { 0 }),
+        JustifyContent::SpaceAround => {
+            let per = free / n.max(1);
+            (per / 2, per + base_gap)
+        }
+        JustifyContent::SpaceEvenly => {
+            let per = free / (n + 1).max(1);
+            (per, per + base_gap)
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

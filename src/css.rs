@@ -198,6 +198,7 @@ pub enum Display {
     Inline,
     ListItem,
     None,
+    Flex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,6 +292,38 @@ pub enum Overflow {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position {
+    Static,
+    Relative,
+    Absolute,
+    Fixed,
+}
+
+impl Default for Position {
+    fn default() -> Self { Position::Static }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexDirection { Row, Column, RowReverse, ColumnReverse }
+impl Default for FlexDirection { fn default() -> Self { FlexDirection::Row } }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexWrap { NoWrap, Wrap, WrapReverse }
+impl Default for FlexWrap { fn default() -> Self { FlexWrap::NoWrap } }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignItems { Stretch, FlexStart, FlexEnd, Center, Baseline }
+impl Default for AlignItems { fn default() -> Self { AlignItems::Stretch } }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JustifyContent { FlexStart, FlexEnd, Center, SpaceBetween, SpaceAround, SpaceEvenly }
+impl Default for JustifyContent { fn default() -> Self { JustifyContent::FlexStart } }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignSelf { Auto, Stretch, FlexStart, FlexEnd, Center, Baseline }
+impl Default for AlignSelf { fn default() -> Self { AlignSelf::Auto } }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListStyleType {
     Disc,
     Circle,
@@ -346,6 +379,24 @@ pub struct ComputedStyle {
     pub text_decoration_color: Option<Color>,
     pub box_shadow: Option<BoxShadow>,
     pub content: Option<String>,
+    // Position
+    pub position: Position,
+    pub z_index: Option<i32>,
+    pub top: Option<i32>,
+    pub right: Option<i32>,
+    pub bottom: Option<i32>,
+    pub left: Option<i32>,
+    // Flexbox
+    pub flex_direction: FlexDirection,
+    pub flex_wrap: FlexWrap,
+    pub align_items: AlignItems,
+    pub justify_content: JustifyContent,
+    pub align_self: AlignSelf,
+    pub flex_grow: u32,
+    pub flex_shrink: u32,
+    pub flex_basis: Option<LengthValue>,
+    pub gap: u32,
+    pub order: i32,
 }
 
 impl ComputedStyle {
@@ -397,6 +448,24 @@ impl ComputedStyle {
             text_decoration_color: None,
             box_shadow: None,
             content: None,
+            // Position fields
+            position: Position::Static,
+            z_index: None,
+            top: None,
+            right: None,
+            bottom: None,
+            left: None,
+            // Flexbox fields
+            flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::NoWrap,
+            align_items: AlignItems::Stretch,
+            justify_content: JustifyContent::FlexStart,
+            align_self: AlignSelf::Auto,
+            flex_grow: 0,
+            flex_shrink: 100,
+            flex_basis: None,
+            gap: 0,
+            order: 0,
         };
 
         match tag_name {
@@ -1428,6 +1497,116 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             let v = value.trim().to_ascii_lowercase();
             style.cursor_pointer = v == "pointer";
         }
+        "position" => {
+            style.position = match value.trim().to_ascii_lowercase().as_str() {
+                "relative" => Position::Relative,
+                "absolute" => Position::Absolute,
+                "fixed" => Position::Fixed,
+                _ => Position::Static,
+            };
+        }
+        "z-index" => {
+            if let Ok(n) = value.trim().parse::<i32>() {
+                style.z_index = Some(n);
+            }
+        }
+        "top" => { style.top = parse_signed_length(value, parent_font_size); }
+        "right" => { style.right = parse_signed_length(value, parent_font_size); }
+        "bottom" => { style.bottom = parse_signed_length(value, parent_font_size); }
+        "left" => { style.left = parse_signed_length(value, parent_font_size); }
+        "flex-direction" => {
+            style.flex_direction = match value.trim().to_ascii_lowercase().as_str() {
+                "column" => FlexDirection::Column,
+                "row-reverse" => FlexDirection::RowReverse,
+                "column-reverse" => FlexDirection::ColumnReverse,
+                _ => FlexDirection::Row,
+            };
+        }
+        "flex-wrap" => {
+            style.flex_wrap = match value.trim().to_ascii_lowercase().as_str() {
+                "wrap" => FlexWrap::Wrap,
+                "wrap-reverse" => FlexWrap::WrapReverse,
+                _ => FlexWrap::NoWrap,
+            };
+        }
+        "align-items" => {
+            style.align_items = match value.trim().to_ascii_lowercase().as_str() {
+                "flex-start" | "start" => AlignItems::FlexStart,
+                "flex-end" | "end" => AlignItems::FlexEnd,
+                "center" => AlignItems::Center,
+                "baseline" => AlignItems::Baseline,
+                _ => AlignItems::Stretch,
+            };
+        }
+        "justify-content" => {
+            style.justify_content = match value.trim().to_ascii_lowercase().as_str() {
+                "flex-end" | "end" => JustifyContent::FlexEnd,
+                "center" => JustifyContent::Center,
+                "space-between" => JustifyContent::SpaceBetween,
+                "space-around" => JustifyContent::SpaceAround,
+                "space-evenly" => JustifyContent::SpaceEvenly,
+                _ => JustifyContent::FlexStart,
+            };
+        }
+        "align-self" => {
+            style.align_self = match value.trim().to_ascii_lowercase().as_str() {
+                "flex-start" | "start" => AlignSelf::FlexStart,
+                "flex-end" | "end" => AlignSelf::FlexEnd,
+                "center" => AlignSelf::Center,
+                "baseline" => AlignSelf::Baseline,
+                "stretch" => AlignSelf::Stretch,
+                _ => AlignSelf::Auto,
+            };
+        }
+        "flex-grow" => {
+            if let Ok(f) = value.trim().parse::<f32>() {
+                style.flex_grow = (f * 100.0).round() as u32;
+            }
+        }
+        "flex-shrink" => {
+            if let Ok(f) = value.trim().parse::<f32>() {
+                style.flex_shrink = (f * 100.0).round() as u32;
+            }
+        }
+        "flex-basis" => {
+            if value.trim().to_ascii_lowercase() == "auto" {
+                style.flex_basis = None;
+            } else {
+                style.flex_basis = parse_length_value(value, parent_font_size);
+            }
+        }
+        "flex" => {
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            if parts.len() >= 1 {
+                if let Ok(g) = parts[0].parse::<f32>() {
+                    style.flex_grow = (g * 100.0).round() as u32;
+                }
+            }
+            if parts.len() >= 2 {
+                if let Ok(s) = parts[1].parse::<f32>() {
+                    style.flex_shrink = (s * 100.0).round() as u32;
+                }
+            }
+            if parts.len() >= 3 {
+                style.flex_basis = parse_length_value(parts[2], parent_font_size);
+            }
+        }
+        "gap" | "grid-gap" => {
+            if let Some(px) = parse_length(value, parent_font_size) {
+                style.gap = px;
+            }
+        }
+        "row-gap" => {
+            if let Some(px) = parse_length(value, parent_font_size) {
+                style.gap = px;
+            }
+        }
+        "column-gap" => {}
+        "order" => {
+            if let Ok(n) = value.trim().parse::<i32>() {
+                style.order = n;
+            }
+        }
         _ => {}
     }
 }
@@ -2156,8 +2335,9 @@ impl From<&Element> for ElementIdentity {
 
 fn parse_display(input: &str) -> Option<Display> {
     match input.trim().to_ascii_lowercase().as_str() {
-        "block" | "flow-root" | "flex" | "inline-flex" | "grid" | "inline-grid" | "table"
+        "block" | "flow-root" | "grid" | "inline-grid" | "table"
         | "table-row" => Some(Display::Block),
+        "flex" | "inline-flex" => Some(Display::Flex),
         "inline" | "inline-block" | "table-cell" | "contents" => Some(Display::Inline),
         "list-item" => Some(Display::ListItem),
         "none" => Some(Display::None),
@@ -3072,10 +3252,12 @@ pub fn apply_text_transform(text: &str, transform: TextTransform) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Display, LengthValue, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
-        build_styled_tree, parse_color, parse_length, parse_stylesheet, split_at_top_level,
+        AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, JustifyContent, LengthValue,
+        Position, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
+        build_styled_tree, compute_style, parse_color, parse_length, parse_stylesheet,
+        split_at_top_level,
     };
-    use crate::html::{Node, parse_document};
+    use crate::html::{Element, Node, parse_document};
 
     fn find_first_element<'a>(
         node: &'a StyledNode,
@@ -3674,5 +3856,50 @@ mod tests {
         } else {
             panic!("First child should be a text node from ::before");
         }
+    }
+
+    #[test]
+    fn test_position_relative_parsed() {
+        let ss = parse_stylesheet("div { position: relative; top: 10px; left: 20px; }");
+        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
+        assert_eq!(style.position, Position::Relative);
+        assert_eq!(style.top, Some(10));
+        assert_eq!(style.left, Some(20));
+    }
+
+    #[test]
+    fn test_position_absolute_parsed() {
+        let ss = parse_stylesheet("div { position: absolute; top: 0px; }");
+        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
+        assert_eq!(style.position, Position::Absolute);
+    }
+
+    #[test]
+    fn test_flex_display_parsed() {
+        let ss = parse_stylesheet("div { display: flex; flex-direction: column; gap: 8px; }");
+        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
+        assert_eq!(style.display, Display::Flex);
+        assert_eq!(style.flex_direction, FlexDirection::Column);
+        assert_eq!(style.gap, 8);
+    }
+
+    #[test]
+    fn test_justify_content_parsed() {
+        let ss = parse_stylesheet("div { display: flex; justify-content: space-between; align-items: center; }");
+        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
+        assert_eq!(style.justify_content, JustifyContent::SpaceBetween);
+        assert_eq!(style.align_items, AlignItems::Center);
+    }
+
+    #[test]
+    fn test_z_index_parsed() {
+        let ss = parse_stylesheet("div { position: absolute; z-index: 10; }");
+        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280);
+        assert_eq!(style.z_index, Some(10));
     }
 }
