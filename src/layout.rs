@@ -1,4 +1,4 @@
-﻿use crate::css::{
+use crate::css::{
     Color, ComputedStyle, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, LengthValue,
     Overflow, StyledElement, StyledNode, TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode,
     apply_text_transform,
@@ -635,18 +635,16 @@ fn layout_block_element(
     *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
 }
 
-/// Remove draw commands (from index start) that fall entirely outside the given box.
-/// Uses split_off + filter + extend for O(n) performance instead of O(n²) remove().
+/// Remove or clamp draw commands (from index `start`) to the given clip box.
+/// Commands entirely outside the box are removed.
+/// Rect, Image, and Layer commands that partially overlap are clamped to the clip bounds.
+/// Text commands are filtered by bounding box only (not clamped horizontally).
 ///
-/// Known limitations:
-/// - Partially-overlapping commands are kept intact (not truncated to the clip box).
-///   A proper fix would wrap the overflow:hidden subtree in a LayerCommand with a clip rect
-///   so the compositor handles cropping at render time.
-/// - DrawCommand::Layer children are not recursed: if a layer's bounding box overlaps
-///   the clip region, the whole layer is kept even if its inner commands extend past the
-///   overflow:hidden boundary. This is partially masked because render_layer already clips
-///   at the layer's own dimensions, but elements with opacity<1 inside overflow:hidden
-///   ancestors may still paint outside the clip in edge cases.
+/// Note: Image clamping changes the destination rect size, which will rescale the image
+/// at render time rather than cropping it. For pixel-perfect image overflow, a source-rect
+/// crop would be needed.
+/// Note: Layer clamping adjusts width/height but does not rebase inner commands; the
+/// compositor clips at the layer's new dimensions.
 fn clip_commands_to_box(
     commands: &mut Vec<DrawCommand>,
     start: usize,
@@ -678,18 +676,17 @@ fn clip_commands_to_box(
                 r.height = new_y2.saturating_sub(new_y).max(1);
                 Some(DrawCommand::Rect(r))
             }
-            DrawCommand::Image(mut img) => {
+            DrawCommand::Image(img) => {
                 let ix2 = img.x.saturating_add(img.width);
                 let iy2 = img.y.saturating_add(img.height);
+                // Only discard entirely-outside images; don't resize (clamping x/y/width/height
+                // would rescale the full image into a smaller rect instead of cropping it).
+                // Pixel-accurate cropping would require source-rect support in the renderer.
                 if img.x >= clip_x2 || img.y >= clip_y2 || ix2 <= clip_x || iy2 <= clip_y {
-                    return None;
+                    None
+                } else {
+                    Some(DrawCommand::Image(img))
                 }
-                let new_x = img.x.max(clip_x);
-                let new_y = img.y.max(clip_y);
-                img.x = new_x; img.y = new_y;
-                img.width = ix2.min(clip_x2).saturating_sub(new_x).max(1);
-                img.height = iy2.min(clip_y2).saturating_sub(new_y).max(1);
-                Some(DrawCommand::Image(img))
             }
             DrawCommand::Layer(mut l) => {
                 let lx2 = l.x.saturating_add(l.width);
@@ -697,12 +694,13 @@ fn clip_commands_to_box(
                 if l.x >= clip_x2 || l.y >= clip_y2 || lx2 <= clip_x || ly2 <= clip_y {
                     return None;
                 }
-                // Clamp the layer bounding box; render_layer clips at layer dimensions
-                let new_x = l.x.max(clip_x);
-                let new_y = l.y.max(clip_y);
-                l.x = new_x; l.y = new_y;
-                l.width = lx2.min(clip_x2).saturating_sub(new_x).max(1);
-                l.height = ly2.min(clip_y2).saturating_sub(new_y).max(1);
+                // Clamp width/height only — do NOT change x/y.
+                // Changing x/y would shift the layer's screen position without rebasing inner
+                // commands (which are layer-relative), causing them to render at the wrong position.
+                // The compositor clips at the layer's dimensions, so reducing width/height is enough
+                // to limit the visible area.
+                l.width = lx2.min(clip_x2).saturating_sub(l.x).max(1);
+                l.height = ly2.min(clip_y2).saturating_sub(l.y).max(1);
                 Some(DrawCommand::Layer(l))
             }
             DrawCommand::Text(t) => {
@@ -768,8 +766,16 @@ fn layout_block_element_as_layer(
     // box-shadow: push shadow rect before background (so it renders behind it)
     let shadow_cmd_index = if let Some(ref shadow) = element.style.box_shadow {
         let blur = shadow.blur;
-        let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64).max(0) as u32;
-        let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64).max(0) as u32;
+        // Clamp shadow origin to the element's own top-left corner.
+        // Without clamping, a shadow with a negative offset or large blur can produce
+        // sx < outer_x or sy < background_top. The subsequent rebase_commands call uses
+        // saturating_sub(outer_x, background_top), which clamps negative offsets to 0 and
+        // corrupts the shadow position. By clamping to the element box we lose shadow that
+        // extends above/left of the element, but avoid rebase corruption.
+        let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64)
+            .max(outer_x as i64) as u32; // don't go left of element
+        let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64)
+            .max(background_top as i64) as u32; // don't go above element
         let sw = outer_width.saturating_add(blur.saturating_mul(2)).max(1);
         sub_context.commands.push(DrawCommand::Rect(RectCommand {
             x: sx,

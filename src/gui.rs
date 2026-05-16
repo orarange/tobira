@@ -1,4 +1,4 @@
-﻿use std::num::NonZeroU32;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 
 use arboard::Clipboard;
@@ -2128,25 +2128,38 @@ fn render_commands(
                     continue;
                 }
                 if rect.border_radius > 0 {
-                    // When partially above scroll_y, clamp y and reduce height to avoid
-                    // restarting corner calculations from the wrong position.
-                    let (draw_y, draw_h) = if rect.y < scroll_y {
+                    if rect.y < scroll_y {
+                        // Partially above viewport: fall back to draw_rect to avoid rendering
+                        // top rounded corners at the viewport edge (wrong position). The
+                        // rounded-rect routine always draws corners from the top of the given
+                        // rect, so clipping by reducing height produces distorted corners.
                         let clipped = scroll_y.saturating_sub(rect.y);
-                        (0u32, rect.height.saturating_sub(clipped))
+                        let draw_h = rect.height.saturating_sub(clipped);
+                        if draw_h > 0 {
+                            draw_rect(
+                                buffer,
+                                width,
+                                height,
+                                offset_x.saturating_add(rect.x),
+                                offset_y, // y=0 since rect.y < scroll_y (fully at viewport top)
+                                rect.width,
+                                draw_h,
+                                rect.color,
+                            );
+                        }
                     } else {
-                        (rect.y.saturating_sub(scroll_y), rect.height)
-                    };
-                    draw_rounded_rect(
-                        buffer,
-                        width,
-                        height,
-                        offset_x.saturating_add(rect.x),
-                        offset_y.saturating_add(draw_y),
-                        rect.width,
-                        draw_h,
-                        rect.border_radius,
-                        rect.color,
-                    );
+                        draw_rounded_rect(
+                            buffer,
+                            width,
+                            height,
+                            offset_x.saturating_add(rect.x),
+                            offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
+                            rect.width,
+                            rect.height,
+                            rect.border_radius,
+                            rect.color,
+                        );
+                    }
                 } else {
                     draw_rect(
                         buffer,
@@ -2279,14 +2292,15 @@ fn render_layer(
     const MAX_OFFSCREEN_PIXELS: usize = 8192 * 8192;
     if needed > MAX_OFFSCREEN_PIXELS {
         // Fallback: render without opacity blending to avoid a blank element.
-        // Sub-commands are layer-relative (rebased to origin 0,0), so we translate
-        // by adding layer.x / layer.y to the offsets.
+        // Layer commands are layer-relative (rebased to origin 0,0 by rebase_commands at
+        // layout time). Pass scroll_y=0 so commands render at their natural layer-relative
+        // coordinates. Account for page scroll by adjusting offset_y by layer.y - scroll_y.
         render_commands(
             buffer, buf_width, buf_height,
             offset_x.saturating_add(layer.x),
-            offset_y.saturating_add(layer.y),
-            buf_height,
-            scroll_y,
+            offset_y.saturating_add(layer.y).saturating_sub(scroll_y),
+            layer.height, // viewport for layer is its own height
+            0,            // layer-relative scroll = 0
             &layer.commands,
             page, fonts, scratch, depth + 1,
         );

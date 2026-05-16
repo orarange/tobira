@@ -1,4 +1,4 @@
-﻿use std::collections::BTreeMap;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::html::{Element, Node};
@@ -16,18 +16,24 @@ pub const DEFAULT_LINK_COLOR: Color = 0x2A5DB0;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
-    /// CSS custom properties declared on `:root` or `html`.
+    /// CSS custom properties declared on `:root` or `html` outside any `@media` block.
     /// Shared via `Rc` so that cloning into each element's `css_variables` map is O(1).
     pub root_vars: Rc<BTreeMap<String, String>>,
+    /// CSS custom properties declared on `:root` or `html` inside an `@media` block.
+    /// Each entry is `(condition, vars)` and is only applied when the condition matches
+    /// the current viewport width at style-computation time.
+    pub media_root_vars: Vec<(MediaCondition, BTreeMap<String, String>)>,
 }
 
 impl Stylesheet {
     pub fn extend(&mut self, other: Stylesheet) {
         self.rules.extend(other.rules);
-        // Merge root_vars: make a mutable copy, extend it, then wrap back in Rc
+        // Merge unconditional root_vars: make a mutable copy, extend it, then wrap back in Rc
         let mut merged = (*self.root_vars).clone();
         merged.extend((*other.root_vars).clone());
         self.root_vars = Rc::new(merged);
+        // Merge media-conditional root vars
+        self.media_root_vars.extend(other.media_root_vars);
     }
 }
 
@@ -41,7 +47,7 @@ pub struct Rule {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum MediaCondition {
+pub(crate) enum MediaCondition {
     MaxWidth(u32),
     MinWidth(u32),
     Screen,
@@ -558,6 +564,7 @@ fn find_matching_close_brace(source: &str) -> Option<usize> {
 pub fn parse_stylesheet(input: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut root_vars = BTreeMap::new();
+    let mut media_root_vars: Vec<(MediaCondition, BTreeMap<String, String>)> = Vec::new();
     let source = strip_comments(input);
     let mut cursor = 0;
 
@@ -589,14 +596,17 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                 // The block_text is the inner CSS of the @media block
                 // Parse the inner rules and tag them with the media condition
                 let inner_stylesheet = parse_stylesheet(block_text);
-                // Propagate root vars from media block into this stylesheet's root_vars.
-                // They are tagged with the media condition at the rule level so
-                // compute_style can skip them when the condition doesn't match at runtime.
-                // Collecting them here (unconditionally at parse time) mirrors the prior
-                // behaviour; runtime filtering happens in compute_style when the rule is
-                // skipped due to its media condition.
-                for (k, v) in inner_stylesheet.root_vars.iter() {
-                    root_vars.entry(k.clone()).or_insert_with(|| v.clone());
+                // Store root vars declared inside this @media block separately so they
+                // are only applied when the media condition matches at runtime.
+                // Previously they were merged unconditionally into root_vars, which caused
+                // `@media (max-width: 600px) { :root { --foo: bar; } }` to always apply.
+                if !inner_stylesheet.root_vars.is_empty() {
+                    let inner_map = (*inner_stylesheet.root_vars).clone();
+                    media_root_vars.push((media_cond.clone(), inner_map));
+                }
+                // Also propagate any nested media_root_vars from the inner stylesheet
+                for (inner_cond, inner_map) in inner_stylesheet.media_root_vars {
+                    media_root_vars.push((inner_cond, inner_map));
                 }
                 for mut rule in inner_stylesheet.rules {
                     rule.media = Some(media_cond.clone());
@@ -646,7 +656,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         }
     }
 
-    Stylesheet { rules, root_vars: Rc::new(root_vars) }
+    Stylesheet { rules, root_vars: Rc::new(root_vars), media_root_vars }
 }
 
 fn parse_media_condition(query: &str) -> MediaCondition {
@@ -819,6 +829,7 @@ fn build_node(
                 preceding_siblings,
                 viewport_width,
                 &PseudoElement::Before,
+                &style,
             ) {
                 children.insert(0, StyledNode::Text(StyledText {
                     text: before_text,
@@ -834,6 +845,7 @@ fn build_node(
                 preceding_siblings,
                 viewport_width,
                 &PseudoElement::After,
+                &style,
             ) {
                 children.push(StyledNode::Text(StyledText {
                     text: after_text,
@@ -880,10 +892,13 @@ fn collect_pseudo_content(
     preceding_siblings: &[ElementIdentity],
     viewport_width: u32,
     which: &PseudoElement,
+    host_style: &ComputedStyle,
 ) -> Option<(String, ComputedStyle)> {
     let identity = ElementIdentity::from(element);
     let mut result: Option<(String, ComputedStyle)> = None;
-    let mut pseudo_style = ComputedStyle::for_element("span", None);
+    // Inherit from the host element so pseudo-elements pick up color, font-size, etc.
+    // CSS requires pseudo-elements to inherit from their originating element.
+    let mut pseudo_style = host_style.clone();
 
     for rule in &stylesheet.rules {
         if let Some(cond) = &rule.media {
@@ -946,6 +961,16 @@ fn compute_style(
     // O(1) ref bump — we avoid cloning the full BTreeMap unless this element has its own vars.
     let root_vars = Rc::clone(&stylesheet.root_vars);
     let mut element_vars: BTreeMap<String, String> = BTreeMap::new();
+    // Apply media-conditional root vars that match the current viewport width.
+    // These are stored separately from unconditional root_vars so they are only
+    // applied when their @media condition is satisfied.
+    for (cond, vars) in &stylesheet.media_root_vars {
+        if cond.matches(viewport_width) {
+            for (k, v) in vars {
+                element_vars.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
     let mut applicable: Vec<(usize, usize, Declaration)> = Vec::new();
 
     for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
