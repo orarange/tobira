@@ -30,11 +30,14 @@ Already working:
 - `location.hash`, `history.pushState(...)`, `replaceState(...)`, `back()`, and `forward()` for same-document navigation
 - same-document history back/forward now restores stored scroll positions
 - browser-level back/forward navigation across document loads
+- browser-level history entries now also remember scroll positions across document loads
 - layout cache invalidation keyed by viewport width and page revision
 - JS-visible viewport and focus state are wired up through `window.innerWidth` / `window.innerHeight`, `window.scrollY` / `window.pageYOffset`, and `document.activeElement`
 - basic script-driven scrolling APIs now exist through `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
 - inline style mutations now reflect back into the DOM snapshot
 - the inline style bridge now exposes more text, size, and border-related properties
+- `getComputedStyle(...)` snapshots now expose common layout-sensitive values
+- `toggleAttribute(...)` and richer `classList` helpers (`value`, `length`, `item(...)`, `toString()`, `replace(...)`) are in place
 - GUI-driven DOM attribute mutations now refresh the live page snapshot so reflow invalidation can happen immediately after mutation notifications
 
 CSS baseline note:
@@ -49,14 +52,14 @@ Still missing or shallow:
 - session-history replay polish across full document loads
 - async browser APIs that modern frameworks expect
 - rendering invalidation and layout reflow after DOM mutation still need deeper incremental invalidation
-- the style bridge still needs the rest of the CSS property matrix and computed-style parity
+- the style bridge still needs the rest of the CSS property matrix and more computed-style parity
 - remaining CSS work is mostly Phase 6 visual effects / advanced rendering, not the core parser/layout baseline
 
 ## Execution Order (Simple -> Hard)
 
 If we want to keep momentum and avoid getting stuck on the biggest browser gaps too early, the practical implementation order is:
 
-1. attribute / DOM introspection helpers like `hasAttribute(...)`, `getAttributeNames(...)`, and broader property reflection
+1. attribute / DOM introspection helpers like `hasAttribute(...)`, `hasAttributes(...)`, `getAttributeNames(...)`, `toggleAttribute(...)`, and broader property reflection
 2. event-delegation helpers like `matches(...)`, `closest(...)`, `contains(...)`, and element traversal accessors
 3. basic listener-option edge cases and default-action sequencing
 4. `document.body` / `document.head` / `document.documentElement` consistency and `innerHTML` edge cases
@@ -101,7 +104,7 @@ Tasks:
 
 - expand node/element APIs that are commonly used
 - DOM traversal helpers like `matches(...)`, `closest(...)`, `contains(...)`, and element sibling accessors are now in place
-- improve `classList`, `dataset`, `attributes`, and property reflection
+- improve `classList`, `dataset`, `attributes`, and property reflection beyond the current helper surface
 - add `querySelector(...)` coverage for more selectors if needed
 - support `document.body`, `document.head`, `document.documentElement` consistently
 - add mutation notifications for DOM changes when they affect layout or event targets
@@ -121,7 +124,7 @@ Tasks:
 - cookie store with origin scoping is now in place
 - `localStorage` and `sessionStorage` are now in place
 - browser history stack and back/forward UI are now in place for full document loads
-- same-document scroll restoration is now in place; finish replay polish for full-document loads and richer history syncing
+- same-document scroll restoration is now in place, and browser-level history now restores scroll too; finish replay polish for richer history syncing
 - keep `location` updates and history state in sync
 - extend the current soft-navigation handling so it cooperates with browser history instead of only updating the current URL
 - support hash navigation and same-document scroll targets

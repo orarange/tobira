@@ -32,12 +32,13 @@ Current capabilities:
   - `text-align`
   - `text-decoration`
   - `white-space`
+  - `getComputedStyle(...)` snapshots for common layout-sensitive values
 - Lightweight GUI window with `winit`
 - Software rendering with `softbuffer`
 - System font rendering with TrueType / OpenType fonts via `fontdue`
 - Plain text CLI renderer with `--cli`
 - Custom title bar and address bar
-- Browser back/forward buttons and Alt+Left/Alt+Right history navigation, with same-document scroll restoration on back/forward
+- Browser back/forward buttons and Alt+Left/Alt+Right history navigation, with scroll restoration for both same-document and full-document history entries
 - Clickable page links plus basic GUI form controls for `GET` submissions
 - Basic DOM event plumbing for page controls:
   - bubbling `click`, `input`, `change`, and `submit`
@@ -61,9 +62,11 @@ Current capabilities:
   - `appendChild(...)`, `insertBefore(...)`, `remove()`
   - dynamic `document.body`, `document.head`, and `document.documentElement`
   - `hasAttribute(...)`, `getAttributeNames(...)`
+  - `toggleAttribute(...)`
   - `matches(...)`, `closest(...)`, `contains(...)`
   - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
   - `innerHTML`, `textContent`, `classList`, `id`, `className`
+  - `classList.value`, `classList.length`, `classList.item(...)`, `classList.toString()`, `classList.replace(...)`
   - recursive `document.write(...)`
   - GUI-driven DOM attribute changes now refresh the live page snapshot, so reflow follows mutation notifications instead of waiting for a reload
   - inline `element.style` updates through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
@@ -73,9 +76,9 @@ Still missing:
 - Phase 6 CSS visual effects and advanced rendering
 - deeper DOM APIs and event coverage
 - tabs and richer navigation UI
-- session-history replay polish across full document loads
+- session-history replay polish across full document loads still needs depth, but scroll restoration is now in place
 - incremental reflow for more DOM/style mutations
-- scroll restoration still needs depth, but script-driven scrolling now has basic window / DOM setters
+- deeper scroll restoration beyond the current full-document / same-document history support
 - inline style mutations still need broader coverage across the full CSS property matrix and computed-style parity
 - POST forms, complex widgets, and modern app-shell browser APIs
 
@@ -204,9 +207,11 @@ Current JS support is intentionally small:
 - `document.createElement(...)`
 - `appendChild(...)` / `insertBefore(...)` / `remove()`
 - `hasAttribute(...)` / `getAttributeNames(...)`
+- `toggleAttribute(...)`
 - `matches(...)`, `closest(...)`, `contains(...)`
 - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
 - `innerHTML`, `textContent`, `classList`, `id`, `className`
+- `classList.value`, `classList.length`, `classList.item(...)`, `classList.toString()`, `classList.replace(...)`
 - `document.addEventListener(...)` / capture + bubbling for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`
 - `focus` / `blur` are currently target-only
 - `addEventListener(...)` / `removeEventListener(...)` on page inputs, buttons, links, forms, and document nodes

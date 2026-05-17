@@ -83,7 +83,7 @@ pub fn run(initial_url: Option<Url>) -> Result<()> {
 
 struct BrowserApp {
     current_url: Option<Url>,
-    history: Vec<Url>,
+    history: Vec<HistoryEntry>,
     history_index: Option<usize>,
     document: DocumentView,
     fonts: FontContext,
@@ -101,13 +101,25 @@ struct BrowserApp {
     ime_composing: bool,
 }
 
+#[derive(Debug, Clone)]
+struct HistoryEntry {
+    url: Url,
+    scroll_y: u32,
+}
+
 impl BrowserApp {
     fn new(initial_url: Option<Url>, context: Context<OwnedDisplayHandle>) -> Self {
         let (current_url, history, history_index, document, address_bar) = match initial_url {
             Some(url) => {
                 let document = DocumentView::load(url.clone());
                 let address_bar = AddressBarState::new(url.to_string());
-                (Some(url.clone()), vec![url], Some(0), document, address_bar)
+                (
+                    Some(url.clone()),
+                    vec![HistoryEntry { url, scroll_y: 0 }],
+                    Some(0),
+                    document,
+                    address_bar,
+                )
             }
             None => {
                 let mut address_bar = AddressBarState::new(String::new());
@@ -140,7 +152,7 @@ impl BrowserApp {
 
     fn load_url(&mut self, url: Url) {
         self.record_history_visit(url.clone());
-        self.load_document(url);
+        self.load_document(url, None);
     }
 
     fn reload(&mut self) {
@@ -152,7 +164,7 @@ impl BrowserApp {
             return;
         };
 
-        self.load_document(url);
+        self.load_document(url, self.current_history_scroll());
     }
 
     fn navigate_to_address(&mut self) {
@@ -203,18 +215,18 @@ impl BrowserApp {
                 if self
                     .history
                     .get(index)
-                    .is_some_and(|current| current == &url)
+                    .is_some_and(|current| current.url == url)
                 {
                     return;
                 }
                 let next_index = index.saturating_add(1);
                 self.history.truncate(next_index);
-                self.history.push(url);
+                self.history.push(HistoryEntry { url, scroll_y: 0 });
                 self.history_index = self.history.len().checked_sub(1);
             }
             None => {
                 self.history.clear();
-                self.history.push(url);
+                self.history.push(HistoryEntry { url, scroll_y: 0 });
                 self.history_index = Some(0);
             }
         }
@@ -224,15 +236,15 @@ impl BrowserApp {
         match self.history_index {
             Some(index) => {
                 if let Some(entry) = self.history.get_mut(index) {
-                    *entry = url;
+                    entry.url = url;
                 } else {
-                    self.history.push(url);
+                    self.history.push(HistoryEntry { url, scroll_y: 0 });
                     self.history_index = Some(self.history.len().saturating_sub(1));
                 }
             }
             None => {
                 self.history.clear();
-                self.history.push(url);
+                self.history.push(HistoryEntry { url, scroll_y: 0 });
                 self.history_index = Some(0);
             }
         }
@@ -247,18 +259,36 @@ impl BrowserApp {
             return;
         }
         let next_index = next as usize;
-        let url = self.history[next_index].clone();
+        let entry = self.history[next_index].clone();
         self.history_index = Some(next_index);
-        self.load_document(url);
+        self.load_document(entry.url, Some(entry.scroll_y));
     }
 
-    fn load_document(&mut self, url: Url) {
+    fn sync_current_history_scroll(&mut self) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+        if let Some(entry) = self.history.get_mut(index) {
+            entry.scroll_y = self.scroll_y;
+        }
+    }
+
+    fn current_history_scroll(&self) -> Option<u32> {
+        let index = self.history_index?;
+        self.history.get(index).map(|entry| entry.scroll_y)
+    }
+
+    fn load_document(&mut self, url: Url, restore_scroll: Option<u32>) {
         self.document = DocumentView::load(url.clone());
         self.current_url = Some(url.clone());
         self.address_bar.set_text(url.to_string());
         self.address_bar.blur();
         self.clear_page_control_state();
-        self.scroll_y = self.document.scroll_position();
+        self.scroll_y = restore_scroll.unwrap_or_else(|| self.document.scroll_position());
+        if restore_scroll.is_some() {
+            let _ = self.document.set_scroll_position(self.scroll_y);
+        }
+        self.sync_current_history_scroll();
         self.sync_viewport_size();
         self.sync_window_title();
         self.sync_input_method();
@@ -393,6 +423,7 @@ impl BrowserApp {
         if self.document.set_viewport_size(size.width, size.height) {
             let _ = self.document.dispatch_window_resize();
             self.scroll_y = self.document.scroll_position();
+            self.sync_current_history_scroll();
         }
     }
 
@@ -401,6 +432,7 @@ impl BrowserApp {
             let _ = self.document.dispatch_scroll_event();
             self.scroll_y = self.document.scroll_position();
         }
+        self.sync_current_history_scroll();
     }
 
     fn scroll_by(&mut self, delta: i32, viewport_height: u32, content_height: u32) {
@@ -411,6 +443,7 @@ impl BrowserApp {
             self.scroll_y.saturating_add(delta as u32)
         };
         self.scroll_y = next.min(max_scroll);
+        self.sync_current_history_scroll();
     }
 
     fn draw(&mut self) -> Result<()> {
@@ -435,6 +468,7 @@ impl BrowserApp {
         self.scroll_y = self.scroll_y.min(max_scroll_y);
         if self.scroll_y != previous_scroll_y {
             let _ = self.document.set_scroll_position(self.scroll_y);
+            self.sync_current_history_scroll();
         }
 
         let Some(surface) = self.surface.as_mut() else {
@@ -1165,6 +1199,7 @@ impl BrowserApp {
         }
 
         self.scroll_y = self.document.scroll_position();
+        self.sync_current_history_scroll();
         self.document.sync_from_loaded_page();
         self.sync_window_title();
         self.refresh_focused_page_input_from_document();

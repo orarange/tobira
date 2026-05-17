@@ -263,7 +263,19 @@ struct DomClassListHandle {
 }
 
 #[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct DomDatasetHandle {
+    #[unsafe_ignore_trace]
+    node_id: usize,
+}
+
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
 struct DomStyleHandle {
+    #[unsafe_ignore_trace]
+    node_id: usize,
+}
+
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct ComputedStyleHandle {
     #[unsafe_ignore_trace]
     node_id: usize,
 }
@@ -1035,6 +1047,44 @@ impl DomState {
         }
     }
 
+    fn insert_fragment_after(&mut self, target_id: usize, html: &str) {
+        let parent_id = self.node(target_id).and_then(|node| node.parent);
+        let Some(parent_id) = parent_id else {
+            return;
+        };
+        let next_sibling_id = self.node(parent_id).and_then(|parent| {
+            parent
+                .children
+                .iter()
+                .position(|child_id| *child_id == target_id)
+                .and_then(|index| parent.children.get(index + 1).copied())
+        });
+        let fragment = parse_document(html);
+        let fragment_root_id = self.push_node(None, &fragment);
+        let fragment_children = self
+            .node(fragment_root_id)
+            .map(|node| node.children.clone())
+            .unwrap_or_default();
+        for child_id in fragment_children {
+            self.insert_before(parent_id, child_id, next_sibling_id);
+        }
+    }
+
+    fn insert_fragment_at_start(&mut self, parent_id: usize, html: &str) {
+        let fragment = parse_document(html);
+        let fragment_root_id = self.push_node(None, &fragment);
+        let fragment_children = self
+            .node(fragment_root_id)
+            .map(|node| node.children.clone())
+            .unwrap_or_default();
+        let first_child = self
+            .node(parent_id)
+            .and_then(|node| node.children.first().copied());
+        for child_id in fragment_children {
+            self.insert_before(parent_id, child_id, first_child);
+        }
+    }
+
     fn append_fragment(&mut self, parent_id: usize, html: &str) {
         let fragment = parse_document(html);
         let fragment_root_id = self.push_node(None, &fragment);
@@ -1350,6 +1400,18 @@ impl DomState {
             self.add_class(node_id, class_name);
             true
         }
+    }
+
+    fn replace_class(&mut self, node_id: usize, old_class: &str, new_class: &str) -> bool {
+        if !self.has_class(node_id, old_class) {
+            return false;
+        }
+        if old_class == new_class {
+            return true;
+        }
+        self.remove_class(node_id, old_class);
+        self.add_class(node_id, new_class);
+        true
     }
 
     fn query_selector(
@@ -2114,6 +2176,13 @@ fn install_browser_globals(context: &mut Context) {
         .expect("matchMedia should be installable");
     context
         .register_global_builtin_callable(
+            js_string!("getComputedStyle"),
+            2,
+            NativeFunction::from_fn_ptr(js_window_get_computed_style),
+        )
+        .expect("getComputedStyle should be installable");
+    context
+        .register_global_builtin_callable(
             js_string!("addEventListener"),
             2,
             NativeFunction::from_fn_ptr(js_add_event_listener),
@@ -2383,6 +2452,19 @@ fn dom_style_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObje
     Ok(cache)
 }
 
+fn dom_dataset_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObject> {
+    let global = context.global_object();
+    let cache_key = js_string!("__tobiraDomDatasetCache");
+    let existing = global.get(cache_key.clone(), context)?;
+    if let Some(object) = existing.as_object() {
+        return Ok(object.clone());
+    }
+
+    let cache = ObjectInitializer::new(context).build();
+    global.set(cache_key, cache.clone(), true, context)?;
+    Ok(cache)
+}
+
 fn cached_dom_node_object(
     context: &mut Context,
     node_id: usize,
@@ -2435,6 +2517,216 @@ fn store_dom_style_object(
             context,
         );
     }
+}
+
+fn cached_dom_dataset_object(
+    context: &mut Context,
+    node_id: usize,
+) -> Option<boa_engine::object::JsObject> {
+    let cache = dom_dataset_cache(context).ok()?;
+    let key = js_string!(node_id.to_string());
+    cache
+        .get(key, context)
+        .ok()
+        .and_then(|value| value.as_object())
+}
+
+fn store_dom_dataset_object(
+    context: &mut Context,
+    node_id: usize,
+    object: &boa_engine::object::JsObject,
+) {
+    if let Ok(cache) = dom_dataset_cache(context) {
+        let _ = cache.set(
+            js_string!(node_id.to_string()),
+            object.clone(),
+            true,
+            context,
+        );
+    }
+}
+
+fn build_dom_dataset_object(context: &mut Context, node_id: usize) -> boa_engine::object::JsObject {
+    if let Some(cached) = cached_dom_dataset_object(context, node_id) {
+        return cached;
+    }
+
+    let target = ObjectInitializer::new(context)
+        .property(
+            js_string!("__tobiraNodeId"),
+            js_string!(node_id.to_string()),
+            Attribute::all(),
+        )
+        .build();
+    let handler = ObjectInitializer::with_native_data(DomDatasetHandle { node_id }, context)
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_dataset_get),
+            js_string!("get"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_dataset_set),
+            js_string!("set"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_dataset_has),
+            js_string!("has"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_dataset_delete_property),
+            js_string!("deleteProperty"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_dataset_own_keys),
+            js_string!("ownKeys"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_dataset_get_own_property_descriptor),
+            js_string!("getOwnPropertyDescriptor"),
+            2,
+        )
+        .build();
+
+    let global = context.global_object();
+    let target_key = js_string!("__tobiraDatasetTarget");
+    let handler_key = js_string!("__tobiraDatasetHandler");
+    let proxy = (|| -> JsResult<JsObject> {
+        global.set(target_key.clone(), target.clone(), true, context)?;
+        global.set(handler_key.clone(), handler.clone(), true, context)?;
+        let proxy_value = context.eval(Source::from_bytes(
+            "new Proxy(globalThis.__tobiraDatasetTarget, globalThis.__tobiraDatasetHandler);",
+        ))?;
+        proxy_value.as_object().ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("dataset proxy bootstrap did not return an object")
+                .into()
+        })
+    })();
+
+    let _ = global.delete_property_or_throw(target_key, context);
+    let _ = global.delete_property_or_throw(handler_key, context);
+
+    match proxy {
+        Ok(proxy) => {
+            store_dom_dataset_object(context, node_id, &proxy);
+            proxy
+        }
+        Err(_) => target,
+    }
+}
+
+const COMPUTED_STYLE_PROPERTIES: &[(&str, &str)] = &[
+    ("display", "display"),
+    ("position", "position"),
+    ("visibility", "visibility"),
+    ("color", "color"),
+    ("backgroundColor", "background-color"),
+    ("fontSize", "font-size"),
+    ("fontWeight", "font-weight"),
+    ("fontFamily", "font-family"),
+    ("fontStyle", "font-style"),
+    ("textDecoration", "text-decoration"),
+    ("textTransform", "text-transform"),
+    ("textIndent", "text-indent"),
+    ("letterSpacing", "letter-spacing"),
+    ("lineHeight", "line-height"),
+    ("textAlign", "text-align"),
+    ("whiteSpace", "white-space"),
+    ("pointerEvents", "pointer-events"),
+    ("opacity", "opacity"),
+    ("overflow", "overflow"),
+    ("width", "width"),
+    ("height", "height"),
+    ("maxWidth", "max-width"),
+    ("minWidth", "min-width"),
+    ("maxHeight", "max-height"),
+    ("minHeight", "min-height"),
+    ("verticalAlign", "vertical-align"),
+    ("marginTop", "margin-top"),
+    ("marginRight", "margin-right"),
+    ("marginBottom", "margin-bottom"),
+    ("marginLeft", "margin-left"),
+    ("margin", "margin"),
+    ("paddingTop", "padding-top"),
+    ("paddingRight", "padding-right"),
+    ("paddingBottom", "padding-bottom"),
+    ("paddingLeft", "padding-left"),
+    ("padding", "padding"),
+    ("borderTopWidth", "border-top-width"),
+    ("borderRightWidth", "border-right-width"),
+    ("borderBottomWidth", "border-bottom-width"),
+    ("borderLeftWidth", "border-left-width"),
+    ("borderWidth", "border-width"),
+    ("borderTopStyle", "border-top-style"),
+    ("borderRightStyle", "border-right-style"),
+    ("borderBottomStyle", "border-bottom-style"),
+    ("borderLeftStyle", "border-left-style"),
+    ("borderStyle", "border-style"),
+    ("borderTopColor", "border-top-color"),
+    ("borderRightColor", "border-right-color"),
+    ("borderBottomColor", "border-bottom-color"),
+    ("borderLeftColor", "border-left-color"),
+    ("borderColor", "border-color"),
+];
+
+fn build_computed_style_object(
+    context: &mut Context,
+    node_id: usize,
+) -> boa_engine::object::JsObject {
+    let object = ObjectInitializer::with_native_data(ComputedStyleHandle { node_id }, context)
+        .function(
+            NativeFunction::from_fn_ptr(js_computed_style_get_property_value),
+            js_string!("getPropertyValue"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_computed_style_get_property_priority),
+            js_string!("getPropertyPriority"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_computed_style_item),
+            js_string!("item"),
+            1,
+        )
+        .build();
+
+    let mut property_count = 0;
+    for (js_name, css_name) in COMPUTED_STYLE_PROPERTIES {
+        let value = computed_style_property_value(context, node_id, css_name);
+        let _ = object.set(
+            js_string!(*js_name),
+            js_string!(value.clone()),
+            true,
+            context,
+        );
+        if js_name != css_name {
+            let _ = object.set(js_string!(*css_name), js_string!(value), true, context);
+        }
+        property_count += 1;
+    }
+
+    let css_text = COMPUTED_STYLE_PROPERTIES
+        .iter()
+        .map(|(_, css_name)| {
+            let value = computed_style_property_value(context, node_id, css_name);
+            format!("{css_name}: {value}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let _ = object.set(js_string!("cssText"), js_string!(css_text), true, context);
+    let _ = object.set(
+        js_string!("length"),
+        JsValue::new(property_count as u32),
+        true,
+        context,
+    );
+
+    object
 }
 
 fn hidden_event_listener_store(
@@ -3074,12 +3366,18 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_inner_html).to_js_function(context.realm());
     let set_inner_html =
         NativeFunction::from_fn_ptr(js_dom_set_inner_html).to_js_function(context.realm());
+    let get_outer_html =
+        NativeFunction::from_fn_ptr(js_dom_get_outer_html).to_js_function(context.realm());
+    let set_outer_html =
+        NativeFunction::from_fn_ptr(js_dom_set_outer_html).to_js_function(context.realm());
     let get_id = NativeFunction::from_fn_ptr(js_dom_get_id).to_js_function(context.realm());
     let set_id = NativeFunction::from_fn_ptr(js_dom_set_id).to_js_function(context.realm());
     let get_class_name =
         NativeFunction::from_fn_ptr(js_dom_get_class_name).to_js_function(context.realm());
     let set_class_name =
         NativeFunction::from_fn_ptr(js_dom_set_class_name).to_js_function(context.realm());
+    let get_dataset =
+        NativeFunction::from_fn_ptr(js_dom_get_dataset).to_js_function(context.realm());
     let get_value = NativeFunction::from_fn_ptr(js_dom_get_value).to_js_function(context.realm());
     let set_value = NativeFunction::from_fn_ptr(js_dom_set_value).to_js_function(context.realm());
     let get_src = NativeFunction::from_fn_ptr(js_dom_get_src).to_js_function(context.realm());
@@ -3169,6 +3467,11 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             1,
         )
         .function(
+            NativeFunction::from_fn_ptr(js_dom_has_attributes),
+            js_string!("hasAttributes"),
+            0,
+        )
+        .function(
             NativeFunction::from_fn_ptr(js_dom_get_attribute_names),
             js_string!("getAttributeNames"),
             0,
@@ -3189,6 +3492,11 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             1,
         )
         .function(
+            NativeFunction::from_fn_ptr(js_dom_toggle_attribute),
+            js_string!("toggleAttribute"),
+            2,
+        )
+        .function(
             NativeFunction::from_fn_ptr(js_dom_dispatch_event),
             js_string!("dispatchEvent"),
             1,
@@ -3207,6 +3515,11 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             NativeFunction::from_fn_ptr(js_dom_remove),
             js_string!("remove"),
             0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_insert_adjacent_html),
+            js_string!("insertAdjacentHTML"),
+            2,
         )
         .function(
             NativeFunction::from_fn_ptr(js_return_dom_rect_stub),
@@ -3273,6 +3586,12 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             Attribute::all(),
         )
         .accessor(
+            js_string!("outerHTML"),
+            Some(get_outer_html),
+            Some(set_outer_html),
+            Attribute::all(),
+        )
+        .accessor(
             js_string!("id"),
             Some(get_id),
             Some(set_id),
@@ -3282,6 +3601,12 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             js_string!("className"),
             Some(get_class_name),
             Some(set_class_name),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("dataset"),
+            Some(get_dataset),
+            None,
             Attribute::all(),
         )
         .accessor(
@@ -3772,6 +4097,12 @@ fn build_dom_class_list_object(
     context: &mut Context,
     node_id: usize,
 ) -> boa_engine::object::JsObject {
+    let get_value_getter =
+        NativeFunction::from_fn_ptr(js_dom_class_list_get_value).to_js_function(context.realm());
+    let set_value_setter =
+        NativeFunction::from_fn_ptr(js_dom_class_list_set_value).to_js_function(context.realm());
+    let get_length_getter =
+        NativeFunction::from_fn_ptr(js_dom_class_list_get_length).to_js_function(context.realm());
     ObjectInitializer::with_native_data(DomClassListHandle { node_id }, context)
         .function(
             NativeFunction::from_fn_ptr(js_dom_class_list_add),
@@ -3792,6 +4123,33 @@ fn build_dom_class_list_object(
             NativeFunction::from_fn_ptr(js_dom_class_list_toggle),
             js_string!("toggle"),
             1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_class_list_replace),
+            js_string!("replace"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_class_list_item),
+            js_string!("item"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_class_list_to_string),
+            js_string!("toString"),
+            0,
+        )
+        .accessor(
+            js_string!("value"),
+            Some(get_value_getter),
+            Some(set_value_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("length"),
+            Some(get_length_getter),
+            None,
+            Attribute::all(),
         )
         .build()
 }
@@ -5114,6 +5472,31 @@ fn js_match_media(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     Ok(JsValue::from(build_match_media_stub(context, media)))
 }
 
+fn js_window_get_computed_style(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = node_id_argument(args.first()) else {
+        return Err(JsNativeError::typ()
+            .with_message("getComputedStyle requires an Element")
+            .into());
+    };
+
+    if let Some(pseudo) = args.get(1) {
+        if !pseudo.is_undefined() && !pseudo.is_null() {
+            let pseudo_text = js_value_to_string(pseudo, context)?;
+            if !pseudo_text.trim().is_empty() {
+                return Err(JsNativeError::typ()
+                    .with_message("pseudo-element computed styles are unsupported")
+                    .into());
+            }
+        }
+    }
+
+    Ok(JsValue::from(build_computed_style_object(context, node_id)))
+}
+
 fn this_node_id(this: &JsValue) -> Option<usize> {
     this.as_object()?
         .downcast_ref::<DomNodeHandle>()
@@ -5358,6 +5741,21 @@ fn js_dom_has_attribute(
     Ok(JsValue::new(has_attribute))
 }
 
+fn js_dom_has_attributes(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::new(false));
+    };
+    let has_attributes = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| !host.state.borrow().dom.attribute_names(node_id).is_empty())
+        .unwrap_or(false);
+    Ok(JsValue::new(has_attributes))
+}
+
 fn js_dom_get_attribute_names(
     this: &JsValue,
     _: &[JsValue],
@@ -5397,6 +5795,39 @@ fn js_dom_set_attribute(
     Ok(JsValue::undefined())
 }
 
+fn js_dom_toggle_attribute(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let force = args.get(1).map(JsValue::to_boolean);
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::new(false));
+    };
+    let toggled = if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        if let Some(force) = force {
+            if force {
+                state.dom.set_attribute(node_id, &name, "");
+                true
+            } else {
+                state.dom.remove_attribute(node_id, &name);
+                false
+            }
+        } else if state.dom.has_attribute(node_id, &name) {
+            state.dom.remove_attribute(node_id, &name);
+            false
+        } else {
+            state.dom.set_attribute(node_id, &name, "");
+            true
+        }
+    } else {
+        false
+    };
+    Ok(JsValue::new(toggled))
+}
+
 fn js_dom_set_property_attribute(
     this: &JsValue,
     args: &[JsValue],
@@ -5434,6 +5865,30 @@ fn js_dom_remove(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
         host.state.borrow_mut().dom.detach_node(node_id);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_insert_adjacent_html(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let position = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?
+        .to_ascii_lowercase();
+    let html = js_value_to_string(args.get(1).unwrap_or(&JsValue::undefined()), context)?;
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        match position.as_str() {
+            "beforebegin" => state.dom.insert_fragment_before(node_id, &html),
+            "afterbegin" => state.dom.insert_fragment_at_start(node_id, &html),
+            "beforeend" => state.dom.append_fragment(node_id, &html),
+            "afterend" => state.dom.insert_fragment_after(node_id, &html),
+            _ => {}
+        }
     }
     Ok(JsValue::undefined())
 }
@@ -5586,6 +6041,43 @@ fn js_dom_set_inner_html(
     Ok(JsValue::undefined())
 }
 
+fn js_dom_get_outer_html(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let html = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.serialize_node(node_id))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(html)))
+}
+
+fn js_dom_set_outer_html(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let html = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        if state
+            .dom
+            .node(node_id)
+            .and_then(|node| node.parent)
+            .is_some()
+        {
+            state.dom.insert_fragment_before(node_id, &html);
+            state.dom.detach_node(node_id);
+        } else {
+            state.dom.replace_children_with_fragment(node_id, &html);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
 fn js_dom_get_id(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     js_dom_get_attribute(this, &[JsValue::from(js_string!("id"))], context)
 }
@@ -5610,6 +6102,11 @@ fn js_dom_set_class_name(
 ) -> JsResult<JsValue> {
     let value = args.first().cloned().unwrap_or_else(JsValue::undefined);
     js_dom_set_attribute(this, &[JsValue::from(js_string!("class")), value], context)
+}
+
+fn js_dom_get_dataset(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    Ok(JsValue::from(build_dom_dataset_object(context, node_id)))
 }
 
 fn js_dom_get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -5738,9 +6235,270 @@ fn js_dom_get_owner_document(
     Ok(JsValue::from(build_dom_node_object(context, document_id)))
 }
 
+fn dataset_node_id(this: &JsValue, context: &mut Context) -> Option<usize> {
+    let object = this.as_object()?;
+    if let Some(handle) = object.downcast_ref::<DomDatasetHandle>() {
+        return Some(handle.node_id);
+    }
+    let value = object.get(js_string!("__tobiraNodeId"), context).ok()?;
+    let node_id = js_value_to_string(&value, context).ok()?;
+    node_id.parse().ok()
+}
+
+fn dataset_property_to_attribute_name(property: &str) -> Option<String> {
+    if property.is_empty() {
+        return None;
+    }
+
+    let mut attribute = String::from("data-");
+    for character in property.chars() {
+        if character.is_ascii_uppercase() {
+            attribute.push('-');
+            attribute.push(character.to_ascii_lowercase());
+        } else {
+            attribute.push(character);
+        }
+    }
+    Some(attribute)
+}
+
+fn dataset_attribute_to_property_name(attribute: &str) -> Option<String> {
+    let remainder = attribute.strip_prefix("data-")?;
+    if remainder.is_empty() {
+        return None;
+    }
+
+    let mut property = String::with_capacity(remainder.len());
+    let mut characters = remainder.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '-'
+            && let Some(next) = characters.peek().copied()
+            && next.is_ascii_lowercase()
+        {
+            property.push(next.to_ascii_uppercase());
+            let _ = characters.next();
+            continue;
+        }
+        property.push(character);
+    }
+
+    if property.is_empty() {
+        None
+    } else {
+        Some(property)
+    }
+}
+
+fn js_dom_dataset_get(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(node_id) = dataset_node_id(target, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let target = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    if !target.is_string() {
+        return Ok(JsValue::undefined());
+    }
+
+    let property = js_value_to_string(&target, context)?;
+    let Some(attribute_name) = dataset_property_to_attribute_name(&property) else {
+        return Ok(args
+            .first()
+            .and_then(JsValue::as_object)
+            .map(|object| object.get(js_string!(property), context))
+            .transpose()?
+            .unwrap_or_else(JsValue::undefined));
+    };
+    let value = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .get_attribute(node_id, &attribute_name)
+    });
+    if let Some(value) = value {
+        Ok(JsValue::from(js_string!(value)))
+    } else {
+        Ok(args
+            .first()
+            .and_then(JsValue::as_object)
+            .map(|object| object.get(js_string!(property), context))
+            .transpose()?
+            .unwrap_or_else(JsValue::undefined))
+    }
+}
+
+fn js_dom_dataset_set(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::new(false));
+    };
+    let Some(node_id) = dataset_node_id(target, context) else {
+        return Ok(JsValue::new(false));
+    };
+    let target = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    if !target.is_string() {
+        return Ok(JsValue::new(false));
+    }
+
+    let property = js_value_to_string(&target, context)?;
+    let Some(attribute_name) = dataset_property_to_attribute_name(&property) else {
+        return Ok(JsValue::new(false));
+    };
+    let value = js_value_to_string(args.get(2).unwrap_or(&JsValue::undefined()), context)?;
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state
+            .borrow_mut()
+            .dom
+            .set_attribute(node_id, &attribute_name, &value);
+    }
+    Ok(JsValue::new(true))
+}
+
+fn js_dom_dataset_has(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::new(false));
+    };
+    let Some(node_id) = dataset_node_id(target, context) else {
+        return Ok(JsValue::new(false));
+    };
+    let target = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    if !target.is_string() {
+        return Ok(JsValue::new(false));
+    }
+
+    let property = js_value_to_string(&target, context)?;
+    let Some(attribute_name) = dataset_property_to_attribute_name(&property) else {
+        return Ok(JsValue::new(false));
+    };
+    let has_attribute = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| {
+            host.state
+                .borrow()
+                .dom
+                .has_attribute(node_id, &attribute_name)
+        })
+        .unwrap_or(false);
+    Ok(JsValue::new(has_attribute))
+}
+
+fn js_dom_dataset_delete_property(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::new(false));
+    };
+    let Some(node_id) = dataset_node_id(target, context) else {
+        return Ok(JsValue::new(false));
+    };
+    let target = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    if !target.is_string() {
+        return Ok(JsValue::new(false));
+    }
+
+    let property = js_value_to_string(&target, context)?;
+    let Some(attribute_name) = dataset_property_to_attribute_name(&property) else {
+        return Ok(JsValue::new(false));
+    };
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state
+            .borrow_mut()
+            .dom
+            .remove_attribute(node_id, &attribute_name);
+    }
+    Ok(JsValue::new(true))
+}
+
+fn js_dom_dataset_own_keys(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let Some(node_id) = dataset_node_id(target, context) else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let keys = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| {
+            host.state
+                .borrow()
+                .dom
+                .attribute_names(node_id)
+                .into_iter()
+                .filter_map(|attribute| dataset_attribute_to_property_name(&attribute))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let array = JsArray::from_iter(
+        keys.into_iter().map(|key| JsValue::from(js_string!(key))),
+        context,
+    );
+    Ok(JsValue::from(array))
+}
+
+fn js_dom_dataset_get_own_property_descriptor(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(node_id) = dataset_node_id(target, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let target = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    if !target.is_string() {
+        return Ok(JsValue::undefined());
+    }
+
+    let property = js_value_to_string(&target, context)?;
+    let Some(attribute_name) = dataset_property_to_attribute_name(&property) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(value) = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .get_attribute(node_id, &attribute_name)
+    }) else {
+        return Ok(JsValue::undefined());
+    };
+    let descriptor = ObjectInitializer::new(context)
+        .property(js_string!("value"), js_string!(value), Attribute::all())
+        .property(js_string!("writable"), true, Attribute::all())
+        .property(js_string!("enumerable"), true, Attribute::all())
+        .property(js_string!("configurable"), true, Attribute::all())
+        .build();
+    Ok(JsValue::from(descriptor))
+}
+
 fn style_node_id_from_this(this: &JsValue) -> Option<usize> {
     let object = this.as_object()?;
     let handle = object.downcast_ref::<DomStyleHandle>()?;
+    Some(handle.node_id)
+}
+
+fn computed_style_node_id_from_this(this: &JsValue) -> Option<usize> {
+    let object = this.as_object()?;
+    let handle = object.downcast_ref::<ComputedStyleHandle>()?;
     Some(handle.node_id)
 }
 
@@ -5825,6 +6583,209 @@ fn inline_style_property_value(
         .find(|(property, _)| *property == target)
         .map(|(_, value)| value)
         .unwrap_or_default()
+}
+
+fn default_display_for_tag(tag_name: &str) -> &'static str {
+    match tag_name {
+        "html" | "body" | "div" | "section" | "article" | "aside" | "main" | "header"
+        | "footer" | "nav" | "p" | "ul" | "ol" | "form" | "fieldset" | "legend" | "pre"
+        | "blockquote" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "block",
+        "table" => "table",
+        "tr" => "table-row",
+        "td" | "th" => "table-cell",
+        "thead" | "tbody" | "tfoot" => "table-row-group",
+        "li" => "list-item",
+        "img" | "button" | "input" | "select" | "textarea" => "inline-block",
+        "span" | "a" | "b" | "i" | "u" | "strong" | "em" | "small" | "code" | "abbr" | "label"
+        | "sup" | "sub" | "mark" => "inline",
+        "script" | "style" | "head" | "meta" | "link" | "title" | "template" => "none",
+        _ => "inline",
+    }
+}
+
+fn default_font_size_for_tag(tag_name: &str) -> &'static str {
+    match tag_name {
+        "h1" => "2em",
+        "h2" => "1.5em",
+        "h3" => "1.17em",
+        "h4" => "1em",
+        "h5" => "0.83em",
+        "h6" => "0.67em",
+        _ => "16px",
+    }
+}
+
+fn default_font_weight_for_tag(tag_name: &str) -> &'static str {
+    match tag_name {
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "strong" | "b" | "th" => "700",
+        _ => "400",
+    }
+}
+
+fn default_background_color_for_tag(tag_name: &str) -> &'static str {
+    match tag_name {
+        "html" | "body" => "rgb(255, 255, 255)",
+        _ => "rgba(0, 0, 0, 0)",
+    }
+}
+
+fn box_shorthand_value(top: &str, right: &str, bottom: &str, left: &str) -> String {
+    if top == right && right == bottom && bottom == left {
+        top.to_string()
+    } else if top == bottom && right == left {
+        format!("{top} {right}")
+    } else if right == left {
+        format!("{top} {right} {bottom}")
+    } else {
+        format!("{top} {right} {bottom} {left}")
+    }
+}
+
+fn computed_style_parent_value(
+    context: &mut Context,
+    node_id: usize,
+    property_name: &str,
+) -> Option<String> {
+    let parent_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .node(node_id)
+            .and_then(|node| node.parent)
+    })?;
+    Some(computed_style_property_value(
+        context,
+        parent_id,
+        property_name,
+    ))
+}
+
+fn computed_style_property_value(
+    context: &mut Context,
+    node_id: usize,
+    property_name: &str,
+) -> String {
+    let normalized = normalize_css_property_name(property_name);
+    let inline = inline_style_property_value(context, node_id, &normalized);
+    if !inline.is_empty() {
+        if inline.eq_ignore_ascii_case("inherit") {
+            return computed_style_parent_value(context, node_id, &normalized).unwrap_or_default();
+        }
+        return inline;
+    }
+
+    let tag_name = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .element(node_id)
+                .map(|element| element.tag_name.clone())
+        })
+        .unwrap_or_default();
+
+    match normalized.as_str() {
+        "display" => {
+            if context
+                .get_data::<JavaScriptHostData>()
+                .map(|host| host.state.borrow().dom.has_attribute(node_id, "hidden"))
+                .unwrap_or(false)
+            {
+                "none".to_string()
+            } else {
+                default_display_for_tag(&tag_name).to_string()
+            }
+        }
+        "position" => "static".to_string(),
+        "visibility" => computed_style_parent_value(context, node_id, "visibility")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "visible".to_string()),
+        "color" => computed_style_parent_value(context, node_id, "color")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "rgb(0, 0, 0)".to_string()),
+        "background-color" => default_background_color_for_tag(&tag_name).to_string(),
+        "font-size" => match tag_name.as_str() {
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                default_font_size_for_tag(&tag_name).to_string()
+            }
+            _ => computed_style_parent_value(context, node_id, "font-size")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "16px".to_string()),
+        },
+        "font-weight" => match tag_name.as_str() {
+            "strong" | "b" | "th" => default_font_weight_for_tag(&tag_name).to_string(),
+            _ => computed_style_parent_value(context, node_id, "font-weight")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "400".to_string()),
+        },
+        "font-family" => computed_style_parent_value(context, node_id, "font-family")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "sans-serif".to_string()),
+        "font-style" => "normal".to_string(),
+        "line-height" => computed_style_parent_value(context, node_id, "line-height")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "normal".to_string()),
+        "text-align" => computed_style_parent_value(context, node_id, "text-align")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "left".to_string()),
+        "white-space" => computed_style_parent_value(context, node_id, "white-space")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "normal".to_string()),
+        "text-decoration" => "none".to_string(),
+        "text-transform" => "none".to_string(),
+        "text-indent" => "0px".to_string(),
+        "letter-spacing" => "normal".to_string(),
+        "pointer-events" => "auto".to_string(),
+        "opacity" => "1".to_string(),
+        "overflow" => "visible".to_string(),
+        "width" | "height" => "auto".to_string(),
+        "max-width" | "min-width" | "max-height" | "min-height" => "none".to_string(),
+        "margin-top" | "margin-right" | "margin-bottom" | "margin-left" | "padding-top"
+        | "padding-right" | "padding-bottom" | "padding-left" => "0px".to_string(),
+        "margin" => box_shorthand_value(
+            &computed_style_property_value(context, node_id, "margin-top"),
+            &computed_style_property_value(context, node_id, "margin-right"),
+            &computed_style_property_value(context, node_id, "margin-bottom"),
+            &computed_style_property_value(context, node_id, "margin-left"),
+        ),
+        "padding" => box_shorthand_value(
+            &computed_style_property_value(context, node_id, "padding-top"),
+            &computed_style_property_value(context, node_id, "padding-right"),
+            &computed_style_property_value(context, node_id, "padding-bottom"),
+            &computed_style_property_value(context, node_id, "padding-left"),
+        ),
+        "border-top-width" | "border-right-width" | "border-bottom-width" | "border-left-width" => {
+            "0px".to_string()
+        }
+        "border-width" => box_shorthand_value(
+            &computed_style_property_value(context, node_id, "border-top-width"),
+            &computed_style_property_value(context, node_id, "border-right-width"),
+            &computed_style_property_value(context, node_id, "border-bottom-width"),
+            &computed_style_property_value(context, node_id, "border-left-width"),
+        ),
+        "border-top-style" | "border-right-style" | "border-bottom-style" | "border-left-style" => {
+            "none".to_string()
+        }
+        "border-style" => box_shorthand_value(
+            &computed_style_property_value(context, node_id, "border-top-style"),
+            &computed_style_property_value(context, node_id, "border-right-style"),
+            &computed_style_property_value(context, node_id, "border-bottom-style"),
+            &computed_style_property_value(context, node_id, "border-left-style"),
+        ),
+        "border-top-color" | "border-right-color" | "border-bottom-color" | "border-left-color" => {
+            "currentcolor".to_string()
+        }
+        "border-color" => box_shorthand_value(
+            &computed_style_property_value(context, node_id, "border-top-color"),
+            &computed_style_property_value(context, node_id, "border-right-color"),
+            &computed_style_property_value(context, node_id, "border-bottom-color"),
+            &computed_style_property_value(context, node_id, "border-left-color"),
+        ),
+        "vertical-align" => "baseline".to_string(),
+        "cursor" => "auto".to_string(),
+        _ => String::new(),
+    }
 }
 
 fn set_inline_style_property(
@@ -6140,6 +7101,51 @@ fn js_dom_style_remove_property(
     Ok(JsValue::from(js_string!(removed)))
 }
 
+fn js_computed_style_get_property_value(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    let value = computed_style_node_id_from_this(this)
+        .map(|node_id| computed_style_property_value(context, node_id, &name))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(value)))
+}
+
+fn js_computed_style_get_property_priority(
+    _this: &JsValue,
+    _: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::from(js_string!("")))
+}
+
+fn js_computed_style_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if computed_style_node_id_from_this(this).is_none() {
+        return Ok(JsValue::undefined());
+    }
+    let index = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(usize::MAX);
+    if index == usize::MAX || index >= COMPUTED_STYLE_PROPERTIES.len() {
+        return Ok(JsValue::undefined());
+    }
+    let (_, css_name) = COMPUTED_STYLE_PROPERTIES[index];
+    Ok(JsValue::from(js_string!(css_name)))
+}
+
 fn js_dom_class_list_add(
     this: &JsValue,
     args: &[JsValue],
@@ -6204,18 +7210,148 @@ fn js_dom_class_list_toggle(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let class_name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let has_force = args.get(1).is_some();
+    let force = args.get(1).map(JsValue::to_boolean);
     let toggled = if let Some(object) = this.as_object()
+        && let Some(handle) = object.downcast_ref::<DomClassListHandle>()
+        && let Some(host) = context.get_data::<JavaScriptHostData>()
+    {
+        let mut state = host.state.borrow_mut();
+        if has_force {
+            if force.unwrap_or(false) {
+                state.dom.add_class(handle.node_id, &class_name);
+                true
+            } else {
+                state.dom.remove_class(handle.node_id, &class_name);
+                false
+            }
+        } else {
+            state.dom.toggle_class(handle.node_id, &class_name)
+        }
+    } else {
+        false
+    };
+    Ok(JsValue::new(toggled))
+}
+
+fn js_dom_class_list_replace(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let old_class = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let new_class = js_value_to_string(args.get(1).unwrap_or(&JsValue::undefined()), context)?;
+    let replaced = if let Some(object) = this.as_object()
         && let Some(handle) = object.downcast_ref::<DomClassListHandle>()
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
         host.state
             .borrow_mut()
             .dom
-            .toggle_class(handle.node_id, &class_name)
+            .replace_class(handle.node_id, &old_class, &new_class)
     } else {
         false
     };
-    Ok(JsValue::new(toggled))
+    Ok(JsValue::new(replaced))
+}
+
+fn class_list_node_id_from_this(this: &JsValue) -> Option<usize> {
+    this.as_object()?
+        .downcast_ref::<DomClassListHandle>()
+        .map(|handle| handle.node_id)
+}
+
+fn class_list_value(context: &mut Context, node_id: usize) -> String {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.get_attribute(node_id, "class"))
+        .unwrap_or_default()
+}
+
+fn set_class_list_value(context: &mut Context, node_id: usize, value: &str) {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let value = value.trim();
+        if value.is_empty() {
+            state.dom.remove_attribute(node_id, "class");
+        } else {
+            state.dom.set_attribute(node_id, "class", value);
+        }
+    }
+}
+
+fn js_dom_class_list_get_value(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = class_list_node_id_from_this(this) else {
+        return Ok(JsValue::from(js_string!("")));
+    };
+    Ok(JsValue::from(js_string!(class_list_value(
+        context, node_id
+    ))))
+}
+
+fn js_dom_class_list_set_value(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let value = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    if let Some(node_id) = class_list_node_id_from_this(this) {
+        set_class_list_value(context, node_id, &value);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_class_list_get_length(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = class_list_node_id_from_this(this) else {
+        return Ok(JsValue::new(0));
+    };
+    let length = class_list_value(context, node_id)
+        .split_ascii_whitespace()
+        .filter(|class_name| !class_name.is_empty())
+        .count();
+    Ok(JsValue::new(length as i32))
+}
+
+fn js_dom_class_list_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let index = args
+        .first()
+        .and_then(JsValue::as_number)
+        .map(|value| value as usize)
+        .unwrap_or(usize::MAX);
+    let Some(node_id) = class_list_node_id_from_this(this) else {
+        return Ok(JsValue::null());
+    };
+    let token = class_list_value(context, node_id)
+        .split_ascii_whitespace()
+        .filter(|class_name| !class_name.is_empty())
+        .nth(index)
+        .map(|class_name| JsValue::from(js_string!(class_name)));
+    Ok(token.unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_class_list_to_string(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = class_list_node_id_from_this(this) else {
+        return Ok(JsValue::from(js_string!("")));
+    };
+    Ok(JsValue::from(js_string!(class_list_value(
+        context, node_id
+    ))))
 }
 
 fn js_dom_node_list_for_each(
@@ -7328,6 +8464,22 @@ mod tests {
     }
 
     #[test]
+    fn supports_get_computed_style_snapshot_and_inheritance() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"outer\" style=\"color: rgb(1, 2, 3); font-size: 24px; text-align: center; white-space: pre;\"><span id=\"inner\">Hello</span><strong id=\"bold\">Bold</strong></div><script>var outer = document.getElementById('outer'); var inner = document.getElementById('inner'); var bold = document.getElementById('bold'); var outerStyle = getComputedStyle(outer); var innerStyle = getComputedStyle(inner); var boldStyle = getComputedStyle(bold); document.body.setAttribute('data-computed', [outerStyle.display, innerStyle.display, innerStyle.fontSize, innerStyle.color, innerStyle.getPropertyValue('font-size'), innerStyle.getPropertyValue('color'), boldStyle.fontWeight, boldStyle.getPropertyValue('font-weight')].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed.html.contains(
+                "data-computed=\"block|inline|24px|rgb(1, 2, 3)|24px|rgb(1, 2, 3)|700|700\""
+            ),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
     fn supports_create_text_node_and_property_reflection() {
         let processed = process_document_scripts(
             "<html><body><div id=\"app\"></div><script>var app = document.getElementById('app'); var span = document.createElement('span'); span.className = 'chip'; var text = document.createTextNode('Hello'); span.appendChild(text); var img = document.createElement('img'); img.src = '/avatar.png'; app.appendChild(span); app.appendChild(img);</script></body></html>",
@@ -7336,6 +8488,23 @@ mod tests {
 
         assert!(processed.html.contains("<span class=\"chip\">Hello</span>"));
         assert!(processed.html.contains("<img src=\"/avatar.png\">"));
+    }
+
+    #[test]
+    fn supports_outer_html_and_insert_adjacent_html() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"app\"><p id=\"a\">A</p></div><script>var app = document.getElementById('app'); var p = document.getElementById('a'); var before = p.outerHTML; p.outerHTML = '<span id=\"b\">B</span>'; app.insertAdjacentHTML('afterbegin', '<em id=\"c\">C</em>'); app.insertAdjacentHTML('beforeend', '<strong id=\"d\">D</strong>'); document.body.setAttribute('data-html', [before, app.innerHTML].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("data-html="), "{}", processed.html);
+        assert!(
+            processed
+                .html
+                .contains("<em id=\"c\">C</em><span id=\"b\">B</span><strong id=\"d\">D</strong>"),
+            "{}",
+            processed.html
+        );
     }
 
     #[test]
@@ -7361,6 +8530,51 @@ mod tests {
             processed
                 .html
                 .contains("data-attrs=\"false|true|aria-label|data-a|data-b|data-c|id|role\"")
+        );
+    }
+
+    #[test]
+    fn supports_toggle_attribute_and_class_list_replace() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\" class=\"one two\" data-a=\"1\"></div><script>var box = document.getElementById('box'); var toggledOn = box.toggleAttribute('hidden'); var toggledOff = box.toggleAttribute('hidden', false); var replaced = box.classList.replace('one', 'uno'); var forced = box.classList.toggle('two', false); var value = box.classList.value; var length = box.classList.length; var first = box.classList.item(0); var asString = box.classList.toString(); document.body.setAttribute('data-toggle', [toggledOn, toggledOff, box.hasAttributes(), replaced, value, length, first, asString, box.getAttribute('class'), box.classList.contains('uno'), box.classList.contains('two'), box.toggleAttribute('data-swap', true), box.toggleAttribute('data-swap')].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed.html.contains(
+                "data-toggle=\"true|false|true|true|uno|1|uno|uno|uno|true|false|true|false\""
+            ),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_dataset_live_reflection_and_updates() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\" data-foo-bar=\"one\"></div><script>var box = document.getElementById('box'); var before = box.dataset.fooBar; var builtin = box.dataset.toString === Object.prototype.toString; box.dataset.fooBar = 'updated'; var after = box.getAttribute('data-foo-bar'); var live = box.dataset.fooBar; document.body.setAttribute('data-before', before); document.body.setAttribute('data-after', after); document.body.setAttribute('data-live', live); document.body.setAttribute('data-builtin', builtin);</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed.html.contains("data-before=\"one\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-after=\"updated\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-live=\"updated\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-builtin=\"true\""),
+            "{}",
+            processed.html
         );
     }
 
