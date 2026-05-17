@@ -34,6 +34,7 @@ Already working:
 - same-document history back/forward now restores stored scroll positions
 - browser-level back/forward navigation across document loads
 - browser-level history entries now also remember scroll positions across document loads
+- generic YouTube home / non-watch pages use a synthetic fast path instead of running the heavy app shell through the JS worker
 - layout cache invalidation keyed by viewport width and page revision
 - JS-visible viewport and focus state are wired up through `window.innerWidth` / `window.innerHeight`, `window.scrollY` / `window.pageYOffset`, and `document.activeElement`
 - basic script-driven scrolling APIs now exist through `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes

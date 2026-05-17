@@ -226,5 +226,6 @@ Current JS support is intentionally small:
 - lightweight response header iteration plus XHR `getResponseHeader(...)` / `getAllResponseHeaders()`
 - `console.log()` / `warn()` / `error()`
 - immediate `setTimeout(...)` fallback
+- YouTube generic home pages now take a synthetic fast path before the heavy JS session, which keeps the app responsive on startup
 
 It still does not implement a full browser DOM, async networking, or framework-level browser APIs.

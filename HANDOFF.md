@@ -102,6 +102,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - YouTube home shell fallback
     - lightweight Google shell fallback
     - legacy frame/table-heavy pages such as the Abe Hiroshi site
+  - generic YouTube home / non-watch pages now take a synthetic fast path before the heavy JS session so the app does not spin on the full app shell
   - generic `google.com` and `youtube.com` now try the real JS/HTML path before synthetic fallback
   - living JS roadmap tracked in `JS_ROADMAP.md`
 
@@ -390,6 +391,12 @@ git worktree list
 - Added `history.state` support for same-document session history entries.
 - Dispatched `popstate` on history back/forward and `hashchange` on same-document fragment changes.
 - Added regression coverage for `hashchange` and `popstate` dispatch behavior.
+
+### 2026-05-17 - Codex (YouTube synthetic fast path)
+
+- Short-circuited generic YouTube home / non-watch loads to a synthetic shell before starting the heavy JS session.
+- Kept the watch-page summary path intact while avoiding the runaway memory growth seen on the full YouTube app shell.
+- Verified the new path with a process-memory smoke test that stabilized instead of growing without bound.
 
 ### 2026-05-16 - Codex (browser history back/forward)
 

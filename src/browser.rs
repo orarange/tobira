@@ -308,6 +308,33 @@ fn load_document_source_with_script_navigation(
     let response = fetch(url)?;
     let content_type = response.header("content-type").map(str::to_string);
     let text = decode_text_response(&response.body, response.header("content-type"));
+    if is_youtube_host(&response.final_url) && !is_youtube_watch_url(&response.final_url) {
+        let mut parsed_document =
+            build_youtube_generic_document_from_html(&text, &response.final_url);
+        annotate_resource_urls(&mut parsed_document, &response.final_url);
+        let document = if frame_depth < MAX_FRAME_DEPTH {
+            expand_frames(&parsed_document, &response.final_url, frame_depth + 1)?
+                .unwrap_or(parsed_document)
+        } else {
+            parsed_document
+        };
+        return Ok(LoadedDocumentSource {
+            final_url: response.final_url,
+            status_code: response.status_code,
+            reason_phrase: response.reason_phrase,
+            content_type,
+            document,
+            processed_html: ProcessedScriptHtml {
+                html: text,
+                title_override: None,
+                console_logs: Vec::new(),
+                navigation_target: None,
+                soft_navigation_target: None,
+                scroll_y: 0,
+            },
+            javascript_session: None,
+        });
+    }
     let (scripted, javascript_session) = start_document_script_session(&text, &response.final_url);
     if let Some(target) = scripted.navigation_target.as_deref()
         && target != response.final_url.to_string()
