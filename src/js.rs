@@ -208,6 +208,7 @@ struct JavaScriptState {
 struct HistoryEntry {
     href: String,
     scroll_y: u32,
+    state: JsValue,
 }
 
 #[derive(Debug, Trace, Finalize, JsData)]
@@ -315,6 +316,7 @@ struct XmlHttpRequestState {
     method: String,
     url: Option<String>,
     request_headers: BTreeMap<String, String>,
+    response_headers: BTreeMap<String, String>,
     ready_state: u8,
     status: u16,
     status_text: String,
@@ -478,6 +480,7 @@ impl JavaScriptRuntime {
                 history_entries: vec![HistoryEntry {
                     href: base_url.to_string(),
                     scroll_y: 0,
+                    state: JsValue::null(),
                 }],
                 history_index: 0,
                 current_script: None,
@@ -788,7 +791,6 @@ impl JavaScriptRuntime {
         bubbles: bool,
         cancelable: bool,
     ) -> JsResult<bool> {
-        let target = self.context.global_object();
         let request = DomEventRequest {
             target_node_id: self.document_id(),
             event_type: event_type.to_string(),
@@ -796,30 +798,9 @@ impl JavaScriptRuntime {
             cancelable,
             ..Default::default()
         };
+        let target = self.context.global_object();
         let event = build_dom_event_object(&mut self.context, &request, &target);
-        dispatch_listeners_on_target(
-            &target,
-            &event_type.to_ascii_lowercase(),
-            &event,
-            true,
-            EventDispatchPhase::AtTarget,
-            &mut self.context,
-        )?;
-        if !event_flag_value(&event, "immediatePropagationStopped", &mut self.context) {
-            dispatch_listeners_on_target(
-                &target,
-                &event_type.to_ascii_lowercase(),
-                &event,
-                false,
-                EventDispatchPhase::AtTarget,
-                &mut self.context,
-            )?;
-        }
-        Ok(event_flag_value(
-            &event,
-            "defaultPrevented",
-            &mut self.context,
-        ))
+        dispatch_global_event_object(&mut self.context, event_type, bubbles, cancelable, &event)
     }
 
     fn serialize_html(&self) -> String {
@@ -2027,6 +2008,8 @@ fn install_browser_globals(context: &mut Context) {
         .build();
     let history_length_getter =
         NativeFunction::from_fn_ptr(js_history_length).to_js_function(context.realm());
+    let history_state_getter =
+        NativeFunction::from_fn_ptr(js_history_state).to_js_function(context.realm());
     let history = ObjectInitializer::new(context)
         .function(
             NativeFunction::from_fn_ptr(js_history_push_state),
@@ -2051,6 +2034,12 @@ fn install_browser_globals(context: &mut Context) {
         .accessor(
             js_string!("length"),
             Some(history_length_getter),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("state"),
+            Some(history_state_getter),
             None,
             Attribute::all(),
         )
@@ -4389,6 +4378,31 @@ fn build_response_headers_object(
             js_string!("has"),
             1,
         )
+        .function(
+            NativeFunction::from_fn_ptr(js_response_headers_entries),
+            js_string!("entries"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_response_headers_keys),
+            js_string!("keys"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_response_headers_values),
+            js_string!("values"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_response_headers_for_each),
+            js_string!("forEach"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_response_headers_to_string),
+            js_string!("toString"),
+            0,
+        )
         .build()
 }
 
@@ -4436,6 +4450,11 @@ fn build_xml_http_request_object(context: &mut Context) -> boa_engine::object::J
         js_string!("getResponseHeader"),
         1,
     )
+    .function(
+        NativeFunction::from_fn_ptr(js_xhr_get_all_response_headers),
+        js_string!("getAllResponseHeaders"),
+        0,
+    )
     .accessor(
         js_string!("readyState"),
         Some(get_ready_state),
@@ -4481,7 +4500,17 @@ fn build_xml_http_request_object(context: &mut Context) -> boa_engine::object::J
     )
     .property(js_string!("onload"), JsValue::undefined(), Attribute::all())
     .property(
+        js_string!("onloadend"),
+        JsValue::undefined(),
+        Attribute::all(),
+    )
+    .property(
         js_string!("onerror"),
+        JsValue::undefined(),
+        Attribute::all(),
+    )
+    .property(
+        js_string!("onabort"),
         JsValue::undefined(),
         Attribute::all(),
     )
@@ -4785,7 +4814,7 @@ fn js_location_assign(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 
 fn js_location_replace(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let href = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
-    set_location_href(&href, context);
+    navigate_location_href(&href, true, context);
     Ok(JsValue::undefined())
 }
 
@@ -4802,7 +4831,8 @@ fn js_history_push_state(
     }
     let href = js_value_to_string(target, context)?;
     let resolved = resolve_same_origin_soft_navigation_href(&href, context)?;
-    record_soft_navigation_href(&resolved, false, context);
+    let state = args.first().cloned();
+    record_soft_navigation_href(&resolved, false, state, false, context);
     Ok(JsValue::undefined())
 }
 
@@ -4819,20 +4849,27 @@ fn js_history_replace_state(
     }
     let href = js_value_to_string(target, context)?;
     let resolved = resolve_same_origin_soft_navigation_href(&href, context)?;
-    record_soft_navigation_href(&resolved, true, context);
+    let state = args.first().cloned();
+    record_soft_navigation_href(&resolved, true, state, false, context);
     Ok(JsValue::undefined())
 }
 
 fn js_history_back(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let previous_href = current_location_url(context).map(|url| url.to_string());
     if let Some(target) = navigate_history(context, -1) {
         apply_soft_navigation_entry(&target, context);
+        dispatch_history_popstate_event(context, target.state.clone());
+        dispatch_hashchange_if_needed(previous_href.as_deref(), &target.href, context);
     }
     Ok(JsValue::undefined())
 }
 
 fn js_history_forward(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let previous_href = current_location_url(context).map(|url| url.to_string());
     if let Some(target) = navigate_history(context, 1) {
         apply_soft_navigation_entry(&target, context);
+        dispatch_history_popstate_event(context, target.state.clone());
+        dispatch_hashchange_if_needed(previous_href.as_deref(), &target.href, context);
     }
     Ok(JsValue::undefined())
 }
@@ -4845,15 +4882,34 @@ fn js_history_length(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsRes
     Ok(JsValue::new(length as i32))
 }
 
-fn record_soft_navigation_href(href: &str, replace_current: bool, context: &mut Context) {
+fn js_history_state(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(current_history_entry_state(context).unwrap_or_else(JsValue::null))
+}
+
+fn record_soft_navigation_href(
+    href: &str,
+    replace_current: bool,
+    state_override: Option<JsValue>,
+    fire_hashchange: bool,
+    context: &mut Context,
+) {
+    let previous_href = current_location_url(context).map(|url| url.to_string());
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
         let current_scroll_y = state.scroll_y;
+        let entry_state = state_override.unwrap_or_else(|| {
+            state
+                .history_entries
+                .get(state.history_index)
+                .map(|entry| entry.state.clone())
+                .unwrap_or_else(JsValue::null)
+        });
         if replace_current {
             if state.history_entries.is_empty() {
                 state.history_entries.push(HistoryEntry {
                     href: href.to_string(),
                     scroll_y: current_scroll_y,
+                    state: entry_state,
                 });
                 state.history_index = 0;
             } else {
@@ -4861,6 +4917,7 @@ fn record_soft_navigation_href(href: &str, replace_current: bool, context: &mut 
                 if let Some(entry) = state.history_entries.get_mut(index) {
                     entry.href = href.to_string();
                     entry.scroll_y = current_scroll_y;
+                    entry.state = entry_state;
                 }
             }
         } else {
@@ -4869,11 +4926,15 @@ fn record_soft_navigation_href(href: &str, replace_current: bool, context: &mut 
             state.history_entries.push(HistoryEntry {
                 href: href.to_string(),
                 scroll_y: current_scroll_y,
+                state: entry_state,
             });
             state.history_index = state.history_entries.len().saturating_sub(1);
         }
     }
     apply_soft_navigation_href_resolved(href, context);
+    if fire_hashchange {
+        dispatch_hashchange_if_needed(previous_href.as_deref(), href, context);
+    }
 }
 
 fn navigate_history(context: &mut Context, delta: isize) -> Option<HistoryEntry> {
@@ -4887,12 +4948,38 @@ fn navigate_history(context: &mut Context, delta: isize) -> Option<HistoryEntry>
     state.history_entries.get(state.history_index).cloned()
 }
 
+fn current_history_entry_state(context: &mut Context) -> Option<JsValue> {
+    let host = context.get_data::<JavaScriptHostData>()?;
+    let state = host.state.borrow();
+    state
+        .history_entries
+        .get(state.history_index)
+        .map(|entry| entry.state.clone())
+}
+
+fn same_document_href_base(href: &str) -> &str {
+    href.split('#').next().unwrap_or(href)
+}
+
 fn set_location_href(href: &str, context: &mut Context) {
+    navigate_location_href(href, false, context);
+}
+
+fn navigate_location_href(href: &str, replace_current: bool, context: &mut Context) {
+    let previous_href = current_location_url(context).map(|url| url.to_string());
     let resolved = current_document_url(context)
         .and_then(|url| url.resolve(href).ok())
         .map(|url| url.to_string())
         .or_else(|| Url::parse(href).ok().map(|url| url.to_string()))
         .unwrap_or_else(|| href.to_string());
+    let same_document = previous_href
+        .as_deref()
+        .map(|previous| same_document_href_base(previous) == same_document_href_base(&resolved))
+        .unwrap_or(false);
+    if same_document {
+        record_soft_navigation_href(&resolved, replace_current, None, true, context);
+        return;
+    }
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
         state.location_href = resolved;
@@ -4906,7 +4993,7 @@ fn set_soft_navigation_href(href: &str, context: &mut Context) {
         .map(|url| url.to_string())
         .or_else(|| Url::parse(href).ok().map(|url| url.to_string()))
         .unwrap_or_else(|| href.to_string());
-    record_soft_navigation_href(&resolved, false, context);
+    record_soft_navigation_href(&resolved, false, None, true, context);
 }
 
 fn apply_soft_navigation_href_resolved(resolved: &str, context: &mut Context) {
@@ -4930,6 +5017,83 @@ fn apply_soft_navigation_entry(entry: &HistoryEntry, context: &mut Context) {
         }
         state.soft_navigation_target = Some(entry.href.clone());
     }
+}
+
+fn dispatch_global_event_object(
+    context: &mut Context,
+    event_type: &str,
+    bubbles: bool,
+    cancelable: bool,
+    event: &boa_engine::object::JsObject,
+) -> JsResult<bool> {
+    let target = context.global_object();
+    dispatch_listeners_on_target(
+        &target,
+        &event_type.to_ascii_lowercase(),
+        event,
+        true,
+        EventDispatchPhase::AtTarget,
+        context,
+    )?;
+    if !event_flag_value(event, "immediatePropagationStopped", context) {
+        dispatch_listeners_on_target(
+            &target,
+            &event_type.to_ascii_lowercase(),
+            event,
+            false,
+            EventDispatchPhase::AtTarget,
+            context,
+        )?;
+    }
+    let _ = (bubbles, cancelable);
+    Ok(event_flag_value(event, "defaultPrevented", context))
+}
+
+fn dispatch_history_popstate_event(context: &mut Context, state: JsValue) {
+    let target = context.global_object();
+    let request = DomEventRequest {
+        target_node_id: 0,
+        event_type: "popstate".to_string(),
+        bubbles: false,
+        cancelable: false,
+        ..Default::default()
+    };
+    let event = build_dom_event_object(context, &request, &target);
+    let _ = event.set(js_string!("state"), state, true, context);
+    let _ = dispatch_global_event_object(context, "popstate", false, false, &event);
+}
+
+fn dispatch_hashchange_if_needed(
+    previous_href: Option<&str>,
+    next_href: &str,
+    context: &mut Context,
+) {
+    let Some(previous_href) = previous_href else {
+        return;
+    };
+    if same_document_href_base(previous_href) != same_document_href_base(next_href) {
+        return;
+    }
+    if previous_href == next_href {
+        return;
+    }
+    let target = context.global_object();
+    let request = DomEventRequest {
+        target_node_id: 0,
+        event_type: "hashchange".to_string(),
+        bubbles: false,
+        cancelable: false,
+        ..Default::default()
+    };
+    let event = build_dom_event_object(context, &request, &target);
+    let _ = event.set(
+        js_string!("oldURL"),
+        js_string!(previous_href),
+        true,
+        context,
+    );
+    let _ = event.set(js_string!("newURL"), js_string!(next_href), true, context);
+    let _ = dispatch_global_event_object(context, "hashchange", false, false, &event);
 }
 
 fn sync_current_history_entry_scroll(state: &mut JavaScriptState) {
@@ -5202,6 +5366,122 @@ fn js_response_headers_has(
     Ok(JsValue::new(has))
 }
 
+fn response_headers_entries(handle: &ResponseHeadersHandle) -> Vec<(String, String)> {
+    handle
+        .headers
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+fn js_response_headers_entries(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let Some(handle) = object.downcast_ref::<ResponseHeadersHandle>() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let mut entries = Vec::new();
+    for (name, value) in response_headers_entries(&handle) {
+        let pair = JsArray::from_iter(
+            [
+                JsValue::from(js_string!(name)),
+                JsValue::from(js_string!(value)),
+            ],
+            context,
+        );
+        entries.push(JsValue::from(pair));
+    }
+    Ok(JsValue::from(JsArray::from_iter(entries, context)))
+}
+
+fn js_response_headers_keys(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let Some(handle) = object.downcast_ref::<ResponseHeadersHandle>() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let keys = response_headers_entries(&handle)
+        .into_iter()
+        .map(|(name, _)| JsValue::from(js_string!(name)));
+    Ok(JsValue::from(JsArray::from_iter(keys, context)))
+}
+
+fn js_response_headers_values(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let Some(handle) = object.downcast_ref::<ResponseHeadersHandle>() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let values = response_headers_entries(&handle)
+        .into_iter()
+        .map(|(_, value)| JsValue::from(js_string!(value)));
+    Ok(JsValue::from(JsArray::from_iter(values, context)))
+}
+
+fn js_response_headers_for_each(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(callback) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let this_arg = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(handle) = object.downcast_ref::<ResponseHeadersHandle>() else {
+        return Ok(JsValue::undefined());
+    };
+    for (name, value) in response_headers_entries(&handle) {
+        let _ = call_js_callback_with_this(
+            callback,
+            &this_arg,
+            &[
+                JsValue::from(js_string!(value)),
+                JsValue::from(js_string!(name)),
+                JsValue::from(object.clone()),
+            ],
+            context,
+        )?;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_response_headers_to_string(
+    this: &JsValue,
+    _: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::from(js_string!("")));
+    };
+    let Some(handle) = object.downcast_ref::<ResponseHeadersHandle>() else {
+        return Ok(JsValue::from(js_string!("")));
+    };
+    let text = response_headers_entries(&handle)
+        .into_iter()
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    Ok(JsValue::from(js_string!(text)))
+}
+
 fn js_create_xml_http_request(
     _: &JsValue,
     _: &[JsValue],
@@ -5226,6 +5506,7 @@ fn js_xhr_open(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
         state.response_text.clear();
         state.response_url.clear();
         state.request_headers.clear();
+        state.response_headers.clear();
     }
     Ok(JsValue::undefined())
 }
@@ -5289,9 +5570,15 @@ fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
                 state.status_text = response.reason_phrase.clone();
                 state.response_text = text;
                 state.response_url = response.final_url.to_string();
+                state.response_headers = response
+                    .headers
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect();
             }
             trigger_xhr_handler(&object, "onreadystatechange", context)?;
             trigger_xhr_handler(&object, "onload", context)?;
+            trigger_xhr_handler(&object, "onloadend", context)?;
         }
         Err(error) => {
             {
@@ -5301,16 +5588,18 @@ fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
                 state.status_text = error.to_string();
                 state.response_text.clear();
                 state.response_url.clear();
+                state.response_headers.clear();
             }
             trigger_xhr_handler(&object, "onreadystatechange", context)?;
             trigger_xhr_handler(&object, "onerror", context)?;
+            trigger_xhr_handler(&object, "onloadend", context)?;
         }
     }
 
     Ok(JsValue::undefined())
 }
 
-fn js_xhr_abort(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+fn js_xhr_abort(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(object) = this.as_object()
         && let Some(handle) = object.downcast_ref::<XmlHttpRequestHandle>()
     {
@@ -5320,12 +5609,41 @@ fn js_xhr_abort(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsVa
         state.status_text.clear();
         state.response_text.clear();
         state.response_url.clear();
+        state.response_headers.clear();
+    }
+    if let Some(object) = this.as_object() {
+        let _ = trigger_xhr_handler(&object, "onabort", context);
+        let _ = trigger_xhr_handler(&object, "onloadend", context);
     }
     Ok(JsValue::undefined())
 }
 
-fn js_xhr_get_response_header(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
-    Ok(JsValue::null())
+fn js_xhr_get_response_header(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?
+        .to_ascii_lowercase();
+    let value = xhr_state_value(this, |state| state.response_headers.get(&name).cloned())
+        .unwrap_or_default();
+    Ok(value
+        .map(|value| JsValue::from(js_string!(value)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_xhr_get_all_response_headers(
+    this: &JsValue,
+    _: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let headers = xhr_state_value(this, |state| state.response_headers.clone()).unwrap_or_default();
+    let text = headers
+        .into_iter()
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    Ok(JsValue::from(js_string!(text)))
 }
 
 fn js_xhr_get_ready_state(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
@@ -8310,8 +8628,10 @@ mod tests {
     use boa_engine::{Context, JsValue, Source, js_string};
 
     use super::{
-        DomEventRequest, JavaScriptRuntime, current_location_url, ensure_same_origin_script_url,
-        fetch_for_script, process_document_scripts, resolve_requested_url, set_location_href,
+        DomEventRequest, HttpResponse, JavaScriptRuntime, XmlHttpRequestHandle,
+        build_fetch_response_object, build_xml_http_request_object, current_location_url,
+        ensure_same_origin_script_url, fetch_for_script, js_value_to_string,
+        process_document_scripts, resolve_requested_url, set_location_href,
         start_document_script_session,
     };
     use crate::url::Url;
@@ -8427,6 +8747,19 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_hashchange_for_location_hash_updates() {
+        let processed = process_document_scripts(
+            "<script>window.addEventListener('hashchange', function () { document.title = location.href + '|' + location.hash; }); location.hash = '#frag';</script>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("https://example.com/start#frag|#frag")
+        );
+    }
+
+    #[test]
     fn push_state_updates_location_without_reload() {
         let processed = process_document_scripts(
             "<script>history.pushState({ page: 1 }, '', '/next?from=test#frag'); document.title = location.href + '|' + location.hash;</script>",
@@ -8441,6 +8774,23 @@ mod tests {
         assert_eq!(
             processed.title_override.as_deref(),
             Some("https://example.com/next?from=test#frag|#frag")
+        );
+    }
+
+    #[test]
+    fn history_state_tracks_push_state_and_popstate() {
+        let processed = process_document_scripts(
+            "<script>window.addEventListener('popstate', function () { document.title = location.href + '|' + String(history.state.page); }); history.pushState({ page: 1 }, '', '/one'); history.pushState({ page: 2 }, '', '/two'); history.back();</script>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.soft_navigation_target.as_deref(),
+            Some("https://example.com/one")
+        );
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("https://example.com/one|1")
         );
     }
 
@@ -9051,5 +9401,84 @@ mod tests {
         let result = super::js_fetch_response_clone(&JsValue::undefined(), &[], &mut context);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn supports_response_headers_iteration_and_xhr_header_access() {
+        let mut runtime = JavaScriptRuntime::new(
+            &Url::parse("https://example.com").unwrap(),
+            "<html><body></body></html>",
+        );
+        let response = HttpResponse {
+            final_url: Url::parse("https://example.com/data").unwrap(),
+            status_code: 200,
+            reason_phrase: "OK".to_string(),
+            headers: std::collections::HashMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("x-demo".to_string(), "one".to_string()),
+            ]),
+            set_cookie_headers: Vec::new(),
+            body: br#"{"ok":true}"#.to_vec(),
+        };
+        let response_object = build_fetch_response_object(&mut runtime.context, response);
+        runtime
+            .context
+            .global_object()
+            .set(
+                js_string!("resp"),
+                JsValue::from(response_object),
+                true,
+                &mut runtime.context,
+            )
+            .unwrap();
+
+        let fetch_summary = runtime
+            .context
+            .eval(Source::from_bytes(
+                "(()=>{var h=resp.headers; var seen=[]; h.forEach(function(value, name, source){ seen.push(name+'='+value+'='+(source===h)); }); return [h.get('content-type'), h.has('x-demo'), h.keys().join('|'), h.values().join('|'), h.entries().map(function(pair){ return pair[0]+'='+pair[1]; }).join('|'), h.toString(), seen.join('|')].join('||'); })()",
+            ))
+            .unwrap();
+        let fetch_summary = js_value_to_string(&fetch_summary, &mut runtime.context).unwrap();
+        assert!(fetch_summary.contains(
+            "application/json||true||content-type|x-demo||application/json|one||content-type=application/json|x-demo=one||content-type: application/json"
+        ));
+
+        let xhr_object = build_xml_http_request_object(&mut runtime.context);
+        {
+            let handle = xhr_object
+                .downcast_ref::<XmlHttpRequestHandle>()
+                .expect("xhr handle");
+            let mut state = handle.state.borrow_mut();
+            state.ready_state = 4;
+            state.status = 200;
+            state.status_text = "OK".to_string();
+            state.response_text = "payload".to_string();
+            state.response_url = "https://example.com/data".to_string();
+            state.response_headers = std::collections::HashMap::from([
+                ("content-type".to_string(), "text/plain".to_string()),
+                ("x-demo".to_string(), "two".to_string()),
+            ])
+            .into_iter()
+            .collect();
+        }
+        runtime
+            .context
+            .global_object()
+            .set(
+                js_string!("xhr"),
+                JsValue::from(xhr_object),
+                true,
+                &mut runtime.context,
+            )
+            .unwrap();
+
+        let xhr_summary = runtime
+            .context
+            .eval(Source::from_bytes(
+                "(()=>[xhr.getResponseHeader('content-type'), xhr.getResponseHeader('x-demo'), xhr.getAllResponseHeaders()].join('|'))()",
+            ))
+            .unwrap();
+        let xhr_summary = js_value_to_string(&xhr_summary, &mut runtime.context).unwrap();
+        assert!(xhr_summary.contains("text/plain|two|content-type: text/plain"));
     }
 }

@@ -220,7 +220,10 @@ Current JS support is intentionally small:
 - `click`, `focus`, `blur`, `input`, `change`, `submit`, `keydown`, and `keyup` event dispatch, including `once`, capture-phase, and passive listeners
 - native GUI typing stays in sync with DOM `input.value`
 - `location.hash` plus `history.pushState(...)` / `replaceState(...)` soft navigation
+- `history.state`
+- `popstate` / `hashchange`
 - `location.href`
+- lightweight response header iteration plus XHR `getResponseHeader(...)` / `getAllResponseHeaders()`
 - `console.log()` / `warn()` / `error()`
 - immediate `setTimeout(...)` fallback
 

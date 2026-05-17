@@ -30,7 +30,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `131` passing tests on `2026-05-17`
+  - `cargo test`: `134` passing tests on `2026-05-17`
   - `cargo build`: success on `2026-05-17`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -82,12 +82,14 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - Promise job flushing
     - lightweight `fetch(...)`
     - lightweight `XMLHttpRequest`
+    - response headers iteration plus XHR `getResponseHeader(...)` / `getAllResponseHeaders()`
     - loop-iteration runtime budget for runaway scripts
     - same-origin request and redirect guards
     - script-driven `location.href` follow-up navigation
     - origin-scoped `localStorage`, `sessionStorage`, and `document.cookie`
   - browser chrome history controls for back/forward navigation across full document loads
   - browser-level history entries now remember scroll positions and restore them on back/forward
+  - same-document history entries now expose `history.state` and dispatch `popstate` / `hashchange`
   - same-document history back/forward now restores the stored scroll position for each entry
   - layout cache invalidates on viewport width or page revision changes
   - GUI-driven DOM attribute updates now push a fresh runtime snapshot back into the page, so mutation notifications can invalidate reflow immediately
@@ -376,6 +378,18 @@ git worktree list
 - Added a live `element.attributes` collection with `length`, `item(...)`, `getNamedItem(...)`, named lookup, and array-like iteration support.
 - Added regression coverage for attributes collection indexing, named lookup, and iteration order.
 - Updated the README and roadmap notes to reflect that live attribute collection support is now available.
+
+### 2026-05-17 - Codex (fetch/XHR response headers)
+
+- Added response header iteration helpers to the lightweight fetch response surface.
+- Added XHR `getResponseHeader(...)` and `getAllResponseHeaders()` support backed by the stored response header map.
+- Added regression coverage for response header iteration plus XHR header access.
+
+### 2026-05-17 - Codex (history state and hashchange/popstate)
+
+- Added `history.state` support for same-document session history entries.
+- Dispatched `popstate` on history back/forward and `hashchange` on same-document fragment changes.
+- Added regression coverage for `hashchange` and `popstate` dispatch behavior.
 
 ### 2026-05-16 - Codex (browser history back/forward)
 
