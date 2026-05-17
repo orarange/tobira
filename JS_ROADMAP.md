@@ -28,12 +28,14 @@ Already working:
 - native GUI form controls for `GET` submissions
 - passive listener semantics
 - `location.hash`, `history.pushState(...)`, `replaceState(...)`, `back()`, and `forward()` for same-document navigation
+- same-document history back/forward now restores stored scroll positions
 - browser-level back/forward navigation across document loads
 - layout cache invalidation keyed by viewport width and page revision
 - JS-visible viewport and focus state are wired up through `window.innerWidth` / `window.innerHeight`, `window.scrollY` / `window.pageYOffset`, and `document.activeElement`
 - basic script-driven scrolling APIs now exist through `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
 - inline style mutations now reflect back into the DOM snapshot
 - the inline style bridge now exposes more text, size, and border-related properties
+- GUI-driven DOM attribute mutations now refresh the live page snapshot so reflow invalidation can happen immediately after mutation notifications
 
 CSS baseline note:
 
@@ -119,7 +121,7 @@ Tasks:
 - cookie store with origin scoping is now in place
 - `localStorage` and `sessionStorage` are now in place
 - browser history stack and back/forward UI are now in place for full document loads
-- finish replay polish for same-document states and scroll restoration
+- same-document scroll restoration is now in place; finish replay polish for full-document loads and richer history syncing
 - keep `location` updates and history state in sync
 - extend the current soft-navigation handling so it cooperates with browser history instead of only updating the current URL
 - support hash navigation and same-document scroll targets
@@ -159,7 +161,7 @@ Tasks:
 - the bridge covers more text, size, and border-related properties that the current layout engine already understands
 - GUI scroll changes now sync back into the JS runtime so scroll listeners can react to the current offset
 - script-driven scroll APIs now feed back into the GUI viewport state as well
-- recompute layout after DOM mutations and script-driven style changes
+- DOM mutation notifications now refresh the live snapshot after GUI-driven attribute changes; deeper incremental invalidation for other mutation paths is still to do
 - invalidate cached layout when width or content changes
 - support more CSS properties that interactive pages depend on
 - add better inline/block mixing and table/layout stability

@@ -94,8 +94,13 @@ impl BrowserPage {
         let Some(node_id) = node_id else {
             return;
         };
-        if let Some(session) = &self.javascript_session {
-            let _ = session.set_attribute(node_id, name, value);
+        let Some(session) = self.javascript_session.as_ref().cloned() else {
+            return;
+        };
+        if session.set_attribute(node_id, name, value)
+            && let Some(snapshot) = session.snapshot()
+        {
+            self.apply_script_snapshot(snapshot);
         }
     }
 
@@ -2897,10 +2902,12 @@ mod tests {
     use super::{
         BrowserPage, build_site_specific_document, build_youtube_generic_document_from_html,
         collect_frame_specs, collect_stylesheet, document_has_meaningful_body, document_title,
-        extract_body_children, should_follow_script_navigation, synthetic_document,
+        extract_body_children, rebuild_page_from_html, should_follow_script_navigation,
+        synthetic_document,
     };
     use crate::css::StyledNode;
     use crate::html::{Node, parse_document};
+    use crate::js::start_document_script_session;
     use crate::url::Url;
 
     #[test]
@@ -3077,6 +3084,31 @@ mod tests {
         page.apply_script_snapshot(snapshot);
 
         assert_eq!(page.layout_revision(), 1);
+    }
+
+    #[test]
+    fn set_dom_attribute_rebuilds_live_page_snapshot() {
+        let html = "<html><body><input id=\"name\" value=\"a\"></body></html>";
+        let url = Url::parse("https://example.com").unwrap();
+        let (processed, session) = start_document_script_session(html, &url);
+        let mut page = rebuild_page_from_html(
+            &url,
+            200,
+            "OK".to_string(),
+            Some("text/html".to_string()),
+            &processed.html,
+            processed.title_override.clone(),
+            true,
+            0,
+            session,
+        );
+
+        let initial_html = page.html_source.clone();
+        page.set_dom_attribute(Some(1), "data-test", "updated");
+
+        assert_eq!(page.layout_revision(), 1);
+        assert_ne!(page.html_source, initial_html);
+        assert!(page.html_source.contains("data-test=\"updated\""));
     }
 
     #[test]

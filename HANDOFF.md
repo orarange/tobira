@@ -30,7 +30,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `123` passing tests on `2026-05-17`
+  - `cargo test`: `126` passing tests on `2026-05-17`
   - `cargo build`: success on `2026-05-17`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -69,6 +69,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `querySelector(...)`, `querySelectorAll(...)`, `getElementById(...)`
     - `createElement(...)`, `createTextNode(...)`
     - `appendChild(...)`, `insertBefore(...)`, `remove()`
+    - dynamic `document.body`, `document.head`, and `document.documentElement`
     - `hasAttribute(...)`, `getAttributeNames(...)`
     - `matches(...)`, `closest(...)`, `contains(...)`
     - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
@@ -84,7 +85,9 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - script-driven `location.href` follow-up navigation
     - origin-scoped `localStorage`, `sessionStorage`, and `document.cookie`
   - browser chrome history controls for back/forward navigation across full document loads
+  - same-document history back/forward now restores the stored scroll position for each entry
   - layout cache invalidates on viewport width or page revision changes
+  - GUI-driven DOM attribute updates now push a fresh runtime snapshot back into the page, so mutation notifications can invalidate reflow immediately
   - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, keyboard event logging, storage/cookies, and scroll control
   - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
   - inline `element.style` mutations now reflect through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
@@ -332,6 +335,24 @@ git worktree list
 - Defined a clearer boundary for CSS work: treat the Claude `claude/phase5-css` branch as the CSS parser/layout owner and avoid broad or destructive CSS edits from Codex.
 - Documented the exception workflow for JS tasks that genuinely need CSS-facing integration: keep the diff minimal, request Copilot review, and log touched files in `change.md`.
 - Kept the current update CSS-neutral; this change only tightened coordination rules and documentation.
+
+### 2026-05-17 - Codex (dynamic document root getters)
+
+- Converted `document.body`, `document.head`, and `document.documentElement` to dynamic getters so they stay consistent if the DOM is extended after load.
+- Added a regression test that creates body/head nodes after startup and verifies the getters track the live tree.
+- Updated the roadmap and README to reflect the current DOM consistency surface.
+
+### 2026-05-17 - Codex (mutation snapshot refresh)
+
+- Made GUI-driven DOM attribute writes refresh the live page snapshot so mutation notifications can bump layout revision and invalidate cached reflow immediately.
+- Added a regression test that mutates the root element, then verifies the refreshed page snapshot and layout revision update together.
+- Recorded the new snapshot-refresh behavior in the README and roadmap notes.
+
+### 2026-05-17 - Codex (same-document history scroll restore)
+
+- Extended same-document history entries to store scroll positions, and restored them on `history.back()` / `history.forward()`.
+- Added a regression test that walks a same-document history stack and verifies the stored scroll position comes back with each entry.
+- Updated the README and roadmap notes to mention same-document scroll restoration.
 
 ### 2026-05-16 - Codex (browser history back/forward)
 

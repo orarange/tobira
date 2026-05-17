@@ -192,7 +192,7 @@ struct JavaScriptState {
     document_url: Url,
     location_href: String,
     soft_navigation_target: Option<String>,
-    history_entries: Vec<String>,
+    history_entries: Vec<HistoryEntry>,
     history_index: usize,
     current_script: Option<usize>,
     network_request_count: usize,
@@ -202,6 +202,12 @@ struct JavaScriptState {
     scroll_y: u32,
     active_element_node_id: Option<usize>,
     dom: DomState,
+}
+
+#[derive(Debug, Clone)]
+struct HistoryEntry {
+    href: String,
+    scroll_y: u32,
 }
 
 #[derive(Debug, Trace, Finalize, JsData)]
@@ -451,7 +457,10 @@ impl JavaScriptRuntime {
                 document_url: base_url.clone(),
                 location_href: base_url.to_string(),
                 soft_navigation_target: None,
-                history_entries: vec![base_url.to_string()],
+                history_entries: vec![HistoryEntry {
+                    href: base_url.to_string(),
+                    scroll_y: 0,
+                }],
                 history_index: 0,
                 current_script: None,
                 network_request_count: 0,
@@ -527,6 +536,9 @@ impl JavaScriptRuntime {
             let mut state = host.state.borrow_mut();
             let changed = state.scroll_y != y;
             state.scroll_y = y;
+            if changed {
+                sync_current_history_entry_scroll(&mut state);
+            }
             return changed;
         }
         false
@@ -1752,21 +1764,6 @@ fn install_browser_globals(context: &mut Context) {
         .get_data::<JavaScriptHostData>()
         .map(|host| host.state.borrow().dom.document_id)
         .unwrap_or(0);
-    let body_id = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.body_id)
-        .unwrap_or(document_id);
-    let head_id = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.head_id)
-        .unwrap_or(document_id);
-    let html_id = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.html_id)
-        .unwrap_or(document_id);
-    let body_object = build_dom_node_object(context, body_id);
-    let head_object = build_dom_node_object(context, head_id);
-    let html_object = build_dom_node_object(context, html_id);
     let node_list_stub = build_simple_node_list_stub(context);
     let document_fonts = ObjectInitializer::new(context)
         .function(NativeFunction::from_fn_ptr(js_noop), js_string!("load"), 2)
@@ -1777,6 +1774,12 @@ fn install_browser_globals(context: &mut Context) {
         NativeFunction::from_fn_ptr(js_document_set_cookie).to_js_function(context.realm());
     let active_element_getter =
         NativeFunction::from_fn_ptr(js_document_get_active_element).to_js_function(context.realm());
+    let body_getter =
+        NativeFunction::from_fn_ptr(js_document_get_body).to_js_function(context.realm());
+    let head_getter =
+        NativeFunction::from_fn_ptr(js_document_get_head).to_js_function(context.realm());
+    let document_element_getter = NativeFunction::from_fn_ptr(js_document_get_document_element)
+        .to_js_function(context.realm());
 
     let global_object = context.global_object();
     let document = ObjectInitializer::with_native_data(
@@ -1842,9 +1845,24 @@ fn install_browser_globals(context: &mut Context) {
         2,
     )
     .property(js_string!("location"), location.clone(), Attribute::all())
-    .property(js_string!("body"), body_object, Attribute::all())
-    .property(js_string!("head"), head_object, Attribute::all())
-    .property(js_string!("documentElement"), html_object, Attribute::all())
+    .accessor(
+        js_string!("body"),
+        Some(body_getter),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("head"),
+        Some(head_getter),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("documentElement"),
+        Some(document_element_getter),
+        None,
+        Attribute::all(),
+    )
     .accessor(
         js_string!("activeElement"),
         Some(active_element_getter),
@@ -2806,6 +2824,9 @@ fn js_window_scroll_to(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         let mut state = host.state.borrow_mut();
         let changed = state.scroll_y != target;
         state.scroll_y = target;
+        if changed {
+            sync_current_history_entry_scroll(&mut state);
+        }
         changed
     } else {
         false
@@ -2829,6 +2850,9 @@ fn js_window_scroll_by(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
         let mut state = host.state.borrow_mut();
         let changed = state.scroll_y != target;
         state.scroll_y = target;
+        if changed {
+            sync_current_history_entry_scroll(&mut state);
+        }
         changed
     } else {
         false
@@ -2853,6 +2877,9 @@ fn js_dom_set_scroll_top(
         let mut state = host.state.borrow_mut();
         let changed = state.scroll_y != target;
         state.scroll_y = target;
+        if changed {
+            sync_current_history_entry_scroll(&mut state);
+        }
         changed
     } else {
         false
@@ -2943,6 +2970,37 @@ fn active_element_node_id(context: &mut Context) -> Option<usize> {
         .or(state.dom.body_id)
         .or(state.dom.html_id)
         .or(Some(state.dom.document_id))
+}
+
+fn document_tag_node_id(context: &mut Context, tag_name: &str) -> Option<usize> {
+    let host = context.get_data::<JavaScriptHostData>()?;
+    let state = host.state.borrow();
+    state.dom.find_first_tag(state.dom.document_id, tag_name)
+}
+
+fn js_document_get_body(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = document_tag_node_id(context, "body") else {
+        return Ok(JsValue::null());
+    };
+    Ok(JsValue::from(build_dom_node_object(context, node_id)))
+}
+
+fn js_document_get_head(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = document_tag_node_id(context, "head") else {
+        return Ok(JsValue::null());
+    };
+    Ok(JsValue::from(build_dom_node_object(context, node_id)))
+}
+
+fn js_document_get_document_element(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = document_tag_node_id(context, "html") else {
+        return Ok(JsValue::null());
+    };
+    Ok(JsValue::from(build_dom_node_object(context, node_id)))
 }
 
 fn js_document_get_active_element(
@@ -4269,14 +4327,14 @@ fn js_history_replace_state(
 
 fn js_history_back(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(target) = navigate_history(context, -1) {
-        apply_soft_navigation_href_resolved(&target, context);
+        apply_soft_navigation_entry(&target, context);
     }
     Ok(JsValue::undefined())
 }
 
 fn js_history_forward(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(target) = navigate_history(context, 1) {
-        apply_soft_navigation_href_resolved(&target, context);
+        apply_soft_navigation_entry(&target, context);
     }
     Ok(JsValue::undefined())
 }
@@ -4292,27 +4350,35 @@ fn js_history_length(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsRes
 fn record_soft_navigation_href(href: &str, replace_current: bool, context: &mut Context) {
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
+        let current_scroll_y = state.scroll_y;
         if replace_current {
             if state.history_entries.is_empty() {
-                state.history_entries.push(href.to_string());
+                state.history_entries.push(HistoryEntry {
+                    href: href.to_string(),
+                    scroll_y: current_scroll_y,
+                });
                 state.history_index = 0;
             } else {
                 let index = state.history_index;
                 if let Some(entry) = state.history_entries.get_mut(index) {
-                    *entry = href.to_string();
+                    entry.href = href.to_string();
+                    entry.scroll_y = current_scroll_y;
                 }
             }
         } else {
             let next_index = state.history_index.saturating_add(1);
             state.history_entries.truncate(next_index);
-            state.history_entries.push(href.to_string());
+            state.history_entries.push(HistoryEntry {
+                href: href.to_string(),
+                scroll_y: current_scroll_y,
+            });
             state.history_index = state.history_entries.len().saturating_sub(1);
         }
     }
     apply_soft_navigation_href_resolved(href, context);
 }
 
-fn navigate_history(context: &mut Context, delta: isize) -> Option<String> {
+fn navigate_history(context: &mut Context, delta: isize) -> Option<HistoryEntry> {
     let host = context.get_data::<JavaScriptHostData>()?;
     let mut state = host.state.borrow_mut();
     let next = state.history_index as isize + delta;
@@ -4353,6 +4419,24 @@ fn apply_soft_navigation_href_resolved(resolved: &str, context: &mut Context) {
             state.document_url = url;
         }
         state.soft_navigation_target = Some(resolved.to_string());
+    }
+}
+
+fn apply_soft_navigation_entry(entry: &HistoryEntry, context: &mut Context) {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        state.location_href = entry.href.clone();
+        state.scroll_y = entry.scroll_y;
+        if let Ok(url) = Url::parse(&entry.href) {
+            state.document_url = url;
+        }
+        state.soft_navigation_target = Some(entry.href.clone());
+    }
+}
+
+fn sync_current_history_entry_scroll(state: &mut JavaScriptState) {
+    if let Some(entry) = state.history_entries.get_mut(state.history_index) {
+        entry.scroll_y = state.scroll_y;
     }
 }
 
@@ -6792,6 +6876,21 @@ mod tests {
     }
 
     #[test]
+    fn history_back_and_forward_restore_scroll_positions() {
+        let processed = process_document_scripts(
+            "<script>window.scrollTo(0, 120); history.pushState({}, '', '/one'); window.scrollTo(0, 240); history.pushState({}, '', '/two'); history.back(); var firstBack = location.href + '|' + String(window.scrollY); history.back(); var secondBack = location.href + '|' + String(window.scrollY); history.forward(); var forward = location.href + '|' + String(window.scrollY); document.title = firstBack + '||' + secondBack + '||' + forward;</script>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some(
+                "https://example.com/one|240||https://example.com/start|120||https://example.com/one|240"
+            )
+        );
+    }
+
+    #[test]
     fn resolves_script_requests_against_document_url_after_location_changes() {
         let base_url = Url::parse("https://example.com/start").unwrap();
         let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
@@ -7174,6 +7273,20 @@ mod tests {
 
         assert!(processed.html.contains("class=\"shell ready\""));
         assert!(processed.html.contains("<p>Rendered</p>"));
+    }
+
+    #[test]
+    fn supports_dynamic_document_body_head_and_document_element_getters() {
+        let processed = process_document_scripts(
+            "<html><script>var root = document.documentElement; var initialBody = document.body; var initialHead = document.head; var head = document.createElement('head'); var body = document.createElement('body'); root.appendChild(head); root.appendChild(body); document.body.setAttribute('data-live', [initialBody === null, initialHead === null, document.documentElement === root, document.body === body, document.head === head].join('|'));</script></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-live=\"true|true|true|true|true\"")
+        );
     }
 
     #[test]

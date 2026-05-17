@@ -37,7 +37,7 @@ Current capabilities:
 - System font rendering with TrueType / OpenType fonts via `fontdue`
 - Plain text CLI renderer with `--cli`
 - Custom title bar and address bar
-- Browser back/forward buttons and Alt+Left/Alt+Right history navigation
+- Browser back/forward buttons and Alt+Left/Alt+Right history navigation, with same-document scroll restoration on back/forward
 - Clickable page links plus basic GUI form controls for `GET` submissions
 - Basic DOM event plumbing for page controls:
   - bubbling `click`, `input`, `change`, and `submit`
@@ -59,11 +59,13 @@ Current capabilities:
   - `document.getElementById(...)`
   - `document.createElement(...)`
   - `appendChild(...)`, `insertBefore(...)`, `remove()`
+  - dynamic `document.body`, `document.head`, and `document.documentElement`
   - `hasAttribute(...)`, `getAttributeNames(...)`
   - `matches(...)`, `closest(...)`, `contains(...)`
   - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
   - `innerHTML`, `textContent`, `classList`, `id`, `className`
   - recursive `document.write(...)`
+  - GUI-driven DOM attribute changes now refresh the live page snapshot, so reflow follows mutation notifications instead of waiting for a reload
   - inline `element.style` updates through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
 
 Still missing:
