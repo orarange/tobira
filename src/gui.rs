@@ -1792,8 +1792,10 @@ fn layout_error_document(
             font_family: FontFamilyKind::Sans,
             color,
             underline: false,
+            line_through: false,
             bold: scale >= 3,
             italic: false,
+            text_shadow: None,
         }));
 
         cursor_y = cursor_y.saturating_add(height);
@@ -2732,6 +2734,7 @@ fn paint_chrome(
         COLOR_HEADER_TEXT,
         true,
         false,
+        false,
         FontFamilyKind::Sans,
     );
 
@@ -2768,6 +2771,7 @@ fn paint_chrome(
             &page_title,
             TITLE_FONT_SIZE,
             COLOR_HEADER_MUTED,
+            false,
             false,
             false,
             FontFamilyKind::Sans,
@@ -2876,6 +2880,7 @@ fn paint_chrome(
         COLOR_ADDRESS_BAR_TEXT,
         false,
         false,
+        false,
         FontFamilyKind::Sans,
     );
     if address_bar.focused {
@@ -2907,6 +2912,7 @@ fn paint_chrome(
                 &address_view.text,
                 ADDRESS_BAR_FONT_SIZE,
                 COLOR_ADDRESS_BAR_TEXT,
+                false,
                 false,
                 false,
                 FontFamilyKind::Sans,
@@ -2951,6 +2957,7 @@ fn paint_chrome(
         COLOR_HEADER_MUTED,
         false,
         false,
+        false,
         FontFamilyKind::Sans,
     );
 
@@ -2976,6 +2983,7 @@ fn paint_chrome(
         } else {
             COLOR_HEADER_TEXT
         },
+        false,
         false,
         false,
         FontFamilyKind::Sans,
@@ -3085,6 +3093,7 @@ fn paint_button(
         COLOR_HEADER_TEXT,
         true,
         false,
+        false,
         FontFamilyKind::Sans,
     );
 }
@@ -3190,6 +3199,7 @@ fn paint_page_control(
                     COLOR_CONTROL_PLACEHOLDER,
                     false,
                     false,
+                    false,
                     control.font_family,
                 );
             } else {
@@ -3244,6 +3254,7 @@ fn paint_page_control(
                     control.text_color,
                     false,
                     false,
+                    false,
                     control.font_family,
                 );
                 if focused.is_some() {
@@ -3295,6 +3306,7 @@ fn paint_page_control(
                 control.font_size_px,
                 control.text_color,
                 true,
+                false,
                 false,
                 control.font_family,
             );
@@ -3437,17 +3449,39 @@ fn render_commands(
                 if text_bottom < scroll_y || text.y > viewport_bottom {
                     continue;
                 }
+                let text_draw_x = offset_x.saturating_add(text.x);
+                let text_draw_y = offset_y.saturating_add(text.y.saturating_sub(scroll_y));
+                // Draw text shadow first (behind main text)
+                if let Some(ref shadow) = text.text_shadow {
+                    let shadow_x = (text_draw_x as i64 + shadow.offset_x as i64).max(0) as u32;
+                    let shadow_y = (text_draw_y as i64 + shadow.offset_y as i64).max(0) as u32;
+                    fonts.draw_text(
+                        buffer,
+                        width,
+                        height,
+                        shadow_x,
+                        shadow_y,
+                        &text.text,
+                        text.font_size_px,
+                        shadow.color,
+                        false,
+                        false,
+                        false,
+                        text.font_family,
+                    );
+                }
                 fonts.draw_text(
                     buffer,
                     width,
                     height,
-                    offset_x.saturating_add(text.x),
-                    offset_y.saturating_add(text.y.saturating_sub(scroll_y)),
+                    text_draw_x,
+                    text_draw_y,
                     &text.text,
                     text.font_size_px,
                     text.color,
                     text.bold,
                     text.underline,
+                    text.line_through,
                     text.font_family,
                 );
             }
@@ -3479,6 +3513,132 @@ fn render_commands(
                     buffer, width, height, offset_x, offset_y, scroll_y, layer,
                     page, fonts, scratch, depth,
                 );
+            }
+            DrawCommand::Gradient(g) => {
+                let grad_bottom = g.y.saturating_add(g.height);
+                if grad_bottom < scroll_y || g.y > viewport_bottom {
+                    continue;
+                }
+                // Convert angle (stored as degrees * 1000) to radians using f64
+                let angle_rad = (g.angle_deg_x1000 as f64 / 1000.0_f64).to_radians();
+                let dx = angle_rad.sin();
+                let dy = angle_rad.cos();
+                let gw = g.width as f64;
+                let gh = g.height as f64;
+                // Project length: length of the gradient vector across the box
+                let proj_len = (dx * gw).abs() + (dy * gh).abs();
+                let proj_len = if proj_len < 0.001 { 1.0 } else { proj_len };
+
+                // border_radius corner check setup
+                let r = g.border_radius.min(g.width / 2).min(g.height / 2) as i64;
+                let r_sq = r * r;
+                let cx_left = g.x as i64 + r;
+                let cx_right = (g.x + g.width) as i64 - r;
+                let cy_top = g.y as i64 + r;
+                let cy_bottom = (g.y + g.height) as i64 - r;
+
+                let gx = g.x;
+                let gy = g.y;
+                let gw_u = g.width;
+                let gh_u = g.height;
+
+                let py_start = g.y.max(scroll_y);
+                let py_end = grad_bottom.min(viewport_bottom);
+
+                for py in py_start..py_end {
+                    for px in gx..(gx + gw_u) {
+                        // border_radius: skip corner pixels
+                        if r > 0 {
+                            let ipx = px as i64;
+                            let ipy = py as i64;
+                            let in_top_strip = ipy < cy_top;
+                            let in_bot_strip = ipy >= cy_bottom;
+                            let in_left_strip = ipx < cx_left;
+                            let in_right_strip = ipx >= cx_right;
+                            if in_top_strip && in_left_strip {
+                                let ddx = cx_left - ipx;
+                                let ddy = cy_top - ipy;
+                                if ddx * ddx + ddy * ddy > r_sq { continue; }
+                            } else if in_top_strip && in_right_strip {
+                                let ddx = ipx - cx_right + 1;
+                                let ddy = cy_top - ipy;
+                                if ddx * ddx + ddy * ddy > r_sq { continue; }
+                            } else if in_bot_strip && in_left_strip {
+                                let ddx = cx_left - ipx;
+                                let ddy = ipy - cy_bottom + 1;
+                                if ddx * ddx + ddy * ddy > r_sq { continue; }
+                            } else if in_bot_strip && in_right_strip {
+                                let ddx = ipx - cx_right + 1;
+                                let ddy = ipy - cy_bottom + 1;
+                                if ddx * ddx + ddy * ddy > r_sq { continue; }
+                            }
+                        }
+
+                        // Compute gradient t in [0,1]
+                        let rel_x = px as f64 - gx as f64;
+                        let rel_y = py as f64 - gy as f64;
+                        // Project pixel position onto gradient direction
+                        // t = (dx*(rel_x - cx) + dy*(rel_y - cy) + proj_len/2) / proj_len
+                        // Simpler: use dot product with direction vector, offset so that center of box = 0.5
+                        let dot = dx * rel_x + dy * rel_y;
+                        // Range of dot across box: from 0 to proj_len (approximately)
+                        let t_raw = dot / proj_len;
+                        let t = t_raw.clamp(0.0, 1.0);
+
+                        // Interpolate color between stops
+                        let stops = &g.stops;
+                        let color = if stops.is_empty() {
+                            0u32
+                        } else if stops.len() == 1 {
+                            stops[0].color
+                        } else {
+                            // find which two stops t falls between
+                            let t_pos = (t * 1000.0) as u32;
+                            let mut color = stops[0].color;
+                            for i in 0..stops.len().saturating_sub(1) {
+                                let s0 = &stops[i];
+                                let s1 = &stops[i + 1];
+                                if t_pos <= s0.position {
+                                    color = s0.color;
+                                    break;
+                                }
+                                if t_pos <= s1.position {
+                                    // lerp between s0 and s1
+                                    let range = s1.position.saturating_sub(s0.position);
+                                    if range == 0 {
+                                        color = s1.color;
+                                    } else {
+                                        let frac = (t_pos - s0.position) as u64 * 1000 / range as u64;
+                                        let r0 = (s0.color >> 16) & 0xFF;
+                                        let g0 = (s0.color >> 8) & 0xFF;
+                                        let b0 = s0.color & 0xFF;
+                                        let r1 = (s1.color >> 16) & 0xFF;
+                                        let g1 = (s1.color >> 8) & 0xFF;
+                                        let b1 = s1.color & 0xFF;
+                                        let ri = (r0 as u64 * (1000 - frac) + r1 as u64 * frac) / 1000;
+                                        let gi = (g0 as u64 * (1000 - frac) + g1 as u64 * frac) / 1000;
+                                        let bi = (b0 as u64 * (1000 - frac) + b1 as u64 * frac) / 1000;
+                                        color = ((ri as u32) << 16) | ((gi as u32) << 8) | (bi as u32);
+                                    }
+                                    break;
+                                }
+                                if i + 1 == stops.len() - 1 {
+                                    color = s1.color;
+                                }
+                            }
+                            color
+                        };
+
+                        let draw_px = offset_x.saturating_add(px);
+                        let draw_py = offset_y.saturating_add(py.saturating_sub(scroll_y));
+                        if draw_px < width && draw_py < height {
+                            let idx = draw_py as usize * width as usize + draw_px as usize;
+                            if idx < buffer.len() {
+                                buffer[idx] = color;
+                            }
+                        }
+                    }
+                }
             }
         }
     }

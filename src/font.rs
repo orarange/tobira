@@ -22,6 +22,8 @@ const WINDOWS_MONOSPACE_FONT_FILES: &[&str] = &[
     "cour.ttf",
 ];
 
+const WINDOWS_SERIF_FONT_FILES: &[&str] = &["georgia.ttf", "times.ttf", "timesbd.ttf"];
+
 const UNIX_SANS_FONT_PATHS: &[&str] = &[
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -37,11 +39,19 @@ const UNIX_MONOSPACE_FONT_PATHS: &[&str] = &[
     "/System/Library/Fonts/Supplemental/Courier New.ttf",
 ];
 
+const UNIX_SERIF_FONT_PATHS: &[&str] = &[
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+    "/Library/Fonts/Times New Roman.ttf",
+];
+
 pub struct FontContext {
     sans_fonts: Vec<Font>,
     monospace_fonts: Vec<Font>,
+    serif_fonts: Vec<Font>,
     sans_pending: VecDeque<PathBuf>,
     monospace_pending: VecDeque<PathBuf>,
+    serif_pending: VecDeque<PathBuf>,
     glyph_cache: HashMap<GlyphKey, CachedGlyph>,
     line_metrics_cache: HashMap<(FontFamilyKind, u32), CachedLineMetrics>,
 }
@@ -86,16 +96,23 @@ impl FontContext {
         let sans_fonts = load_initial_fonts(&mut sans_pending, 1);
         let mut monospace_pending = VecDeque::from(font_candidates(FontFamilyKind::Monospace));
         let mut monospace_fonts = load_initial_fonts(&mut monospace_pending, 1);
+        let mut serif_pending = VecDeque::from(font_candidates(FontFamilyKind::Serif));
+        let mut serif_fonts = load_initial_fonts(&mut serif_pending, 1);
 
         if monospace_fonts.is_empty() {
             monospace_fonts = sans_fonts.clone();
+        }
+        if serif_fonts.is_empty() {
+            serif_fonts = sans_fonts.clone();
         }
 
         Self {
             sans_fonts,
             monospace_fonts,
+            serif_fonts,
             sans_pending,
             monospace_pending,
+            serif_pending,
             glyph_cache: HashMap::new(),
             line_metrics_cache: HashMap::new(),
         }
@@ -113,6 +130,7 @@ impl FontContext {
         color: Color,
         bold: bool,
         underline: bool,
+        line_through: bool,
         font_family: FontFamilyKind,
     ) {
         let mut cursor_x = x;
@@ -158,6 +176,20 @@ impl FontContext {
                 height,
                 x,
                 underline_y,
+                self.text_width_px(text, font_size_px, font_family),
+                (font_size_px / 12).max(1),
+                color,
+            );
+        }
+
+        if line_through && !text.is_empty() {
+            let line_through_y = y.saturating_add(font_size_px * 55 / 100);
+            draw_rect(
+                buffer,
+                width,
+                height,
+                x,
+                line_through_y,
                 self.text_width_px(text, font_size_px, font_family),
                 (font_size_px / 12).max(1),
                 color,
@@ -311,6 +343,7 @@ impl FontContext {
     fn fonts_for(&self, font_family: FontFamilyKind) -> &[Font] {
         match font_family {
             FontFamilyKind::Sans => &self.sans_fonts,
+            FontFamilyKind::Serif => &self.serif_fonts,
             FontFamilyKind::Monospace => &self.monospace_fonts,
         }
     }
@@ -318,6 +351,7 @@ impl FontContext {
     fn ensure_font_for(&mut self, character: char, font_family: FontFamilyKind) {
         let (fonts, pending) = match font_family {
             FontFamilyKind::Sans => (&mut self.sans_fonts, &mut self.sans_pending),
+            FontFamilyKind::Serif => (&mut self.serif_fonts, &mut self.serif_pending),
             FontFamilyKind::Monospace => (&mut self.monospace_fonts, &mut self.monospace_pending),
         };
 
@@ -352,6 +386,7 @@ pub fn estimated_glyph_advance_px(
 ) -> u32 {
     let base = match font_family {
         FontFamilyKind::Sans => ((font_size_px as f32) * 0.56).round() as u32,
+        FontFamilyKind::Serif => ((font_size_px as f32) * 0.56).round() as u32,
         FontFamilyKind::Monospace => ((font_size_px as f32) * 0.62).round() as u32,
     }
     .max(MIN_ADVANCE_PX);
@@ -387,6 +422,7 @@ fn font_candidates(font_family: FontFamilyKind) -> Vec<PathBuf> {
         let fonts_dir = windows_root.join("Fonts");
         let files = match font_family {
             FontFamilyKind::Sans => WINDOWS_SANS_FONT_FILES,
+            FontFamilyKind::Serif => WINDOWS_SERIF_FONT_FILES,
             FontFamilyKind::Monospace => WINDOWS_MONOSPACE_FONT_FILES,
         };
 
@@ -395,6 +431,7 @@ fn font_candidates(font_family: FontFamilyKind) -> Vec<PathBuf> {
 
     let files = match font_family {
         FontFamilyKind::Sans => UNIX_SANS_FONT_PATHS,
+        FontFamilyKind::Serif => UNIX_SERIF_FONT_PATHS,
         FontFamilyKind::Monospace => UNIX_MONOSPACE_FONT_PATHS,
     };
 
@@ -633,6 +670,7 @@ mod tests {
             "Hello",
             18,
             0x00112233,
+            false,
             false,
             false,
             FontFamilyKind::Sans,

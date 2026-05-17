@@ -1,11 +1,28 @@
 use crate::css::{
-    Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display, FontFamilyKind, GridTrackSize,
-    LengthValue, ObjectFit, Overflow, Position, FlexDirection, AlignItems, AlignSelf,
-    JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform, VerticalAlign,
-    WhiteSpaceMode, apply_text_transform,
+    BackgroundSize, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
+    FontFamilyKind, GridTrackSize, LengthValue, ObjectFit, Overflow, Position, FlexDirection,
+    AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
+    VerticalAlign, WhiteSpaceMode, apply_text_transform,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GradientStop {
+    pub color: u32,
+    pub position: u32, // 0-1000 (thousandths)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GradientCommand {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub border_radius: u32,
+    pub angle_deg_x1000: i32,
+    pub stops: Vec<GradientStop>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DrawCommand {
@@ -13,6 +30,7 @@ pub enum DrawCommand {
     Text(TextCommand),
     Image(ImageCommand),
     Layer(LayerCommand),
+    Gradient(GradientCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +111,10 @@ fn shift_command(cmd: &mut DrawCommand, dx: u32, dy: u32) {
             l.x = l.x.saturating_add(dx);
             l.y = l.y.saturating_add(dy);
         }
+        DrawCommand::Gradient(g) => {
+            g.x = g.x.saturating_add(dx);
+            g.y = g.y.saturating_add(dy);
+        }
     }
 }
 
@@ -113,6 +135,10 @@ fn shift_command_signed(cmd: &mut DrawCommand, dx: i32, dy: i32) {
         DrawCommand::Layer(l) => {
             l.x = (l.x as i64 + dx as i64).max(0) as u32;
             l.y = (l.y as i64 + dy as i64).max(0) as u32;
+        }
+        DrawCommand::Gradient(g) => {
+            g.x = (g.x as i64 + dx as i64).max(0) as u32;
+            g.y = (g.y as i64 + dy as i64).max(0) as u32;
         }
     }
 }
@@ -195,8 +221,10 @@ pub struct TextCommand {
     pub font_family: FontFamilyKind,
     pub color: Color,
     pub underline: bool,
+    pub line_through: bool,
     pub bold: bool,
     pub italic: bool,
+    pub text_shadow: Option<crate::css::TextShadow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1092,6 +1120,42 @@ fn layout_block_element(
         }
     }
 
+    // Emit gradient overlay if background_gradient is set
+    if let Some(ref gradient) = element.style.background_gradient {
+        let stops: Vec<GradientStop> = gradient.stops.iter().map(|(c, p)| GradientStop {
+            color: *c,
+            position: *p,
+        }).collect();
+        context.commands.push(DrawCommand::Gradient(GradientCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: background_height,
+            border_radius: element.style.border_radius,
+            angle_deg_x1000: gradient.angle_deg_x1000,
+            stops,
+        }));
+    }
+
+    // Emit background image if background_image_url is set
+    if let Some(ref url) = element.style.background_image_url {
+        let object_fit = match element.style.background_size {
+            BackgroundSize::Cover => ObjectFit::Cover,
+            BackgroundSize::Contain => ObjectFit::Contain,
+            BackgroundSize::Auto => ObjectFit::Fill,
+        };
+        context.commands.push(DrawCommand::Image(ImageCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: background_height,
+            src: url.clone(),
+            object_fit,
+            object_position_x: element.style.background_position_x,
+            object_position_y: element.style.background_position_y,
+        }));
+    }
+
     // Restore parent background color after children are rendered
     context.background_color = saved_bg;
 
@@ -1265,6 +1329,21 @@ fn clip_commands_to_box(
                     Some(DrawCommand::Text(t))
                 }
             }
+            DrawCommand::Gradient(mut g) => {
+                let gx2 = g.x.saturating_add(g.width);
+                let gy2 = g.y.saturating_add(g.height);
+                if g.x >= clip_x2 || g.y >= clip_y2 || gx2 <= clip_x || gy2 <= clip_y {
+                    return None;
+                }
+                let new_x = g.x.max(clip_x);
+                let new_y = g.y.max(clip_y);
+                let new_x2 = gx2.min(clip_x2);
+                let new_y2 = gy2.min(clip_y2);
+                g.x = new_x; g.y = new_y;
+                g.width = new_x2.saturating_sub(new_x).max(1);
+                g.height = new_y2.saturating_sub(new_y).max(1);
+                Some(DrawCommand::Gradient(g))
+            }
         }
     }).collect();
     commands.extend(clamped);
@@ -1289,6 +1368,10 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
                 l.x = l.x.saturating_sub(origin_x);
                 l.y = l.y.saturating_sub(origin_y);
                 // Do NOT recurse into l.commands — they're already layer-relative
+            }
+            DrawCommand::Gradient(g) => {
+                g.x = g.x.saturating_sub(origin_x);
+                g.y = g.y.saturating_sub(origin_y);
             }
         }
     }
@@ -1439,6 +1522,42 @@ fn layout_block_element_as_layer(
         if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(background_cmd_index) {
             rect.height = final_height;
         }
+    }
+
+    // Emit gradient overlay if background_gradient is set
+    if let Some(ref gradient) = element.style.background_gradient {
+        let stops: Vec<GradientStop> = gradient.stops.iter().map(|(c, p)| GradientStop {
+            color: *c,
+            position: *p,
+        }).collect();
+        sub_context.commands.push(DrawCommand::Gradient(GradientCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: final_height,
+            border_radius: element.style.border_radius,
+            angle_deg_x1000: gradient.angle_deg_x1000,
+            stops,
+        }));
+    }
+
+    // Emit background image if background_image_url is set
+    if let Some(ref url) = element.style.background_image_url {
+        let object_fit = match element.style.background_size {
+            BackgroundSize::Cover => ObjectFit::Cover,
+            BackgroundSize::Contain => ObjectFit::Contain,
+            BackgroundSize::Auto => ObjectFit::Fill,
+        };
+        sub_context.commands.push(DrawCommand::Image(ImageCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: final_height,
+            src: url.clone(),
+            object_fit,
+            object_position_x: element.style.background_position_x,
+            object_position_y: element.style.background_position_y,
+        }));
     }
 
     // Draw borders into the sub-context (they are part of the composited layer)
@@ -2225,8 +2344,10 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             font_family: text.font_family,
             color: text.color,
             underline: text.underline,
+            line_through: text.line_through,
             bold: text.bold,
             italic: text.italic,
+            text_shadow: text.text_shadow.clone(),
         }),
         DrawCommand::Image(image) => DrawCommand::Image(ImageCommand {
             x: image.x.saturating_add(offset_x),
@@ -2247,6 +2368,15 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             blur_px: layer.blur_px,
             brightness: layer.brightness,
             commands: layer.commands.clone(),
+        }),
+        DrawCommand::Gradient(g) => DrawCommand::Gradient(GradientCommand {
+            x: g.x.saturating_add(offset_x),
+            y: g.y.saturating_add(offset_y),
+            width: g.width,
+            height: g.height,
+            border_radius: g.border_radius,
+            angle_deg_x1000: g.angle_deg_x1000,
+            stops: g.stops.clone(),
         }),
     }
 }
@@ -2476,6 +2606,16 @@ fn layout_inline_fragments(
             context,
             fonts,
         );
+    } else if container_style.white_space == WhiteSpaceMode::NoWrap {
+        layout_nowrap_fragments(
+            fragments,
+            container_style,
+            x,
+            width,
+            cursor_y,
+            context,
+            fonts,
+        );
     } else {
         layout_normal_fragments(
             fragments,
@@ -2489,7 +2629,7 @@ fn layout_inline_fragments(
     }
 }
 
-fn layout_normal_fragments(
+fn layout_nowrap_fragments(
     fragments: &[InlineFragment],
     container_style: &ComputedStyle,
     x: u32,
@@ -2499,25 +2639,89 @@ fn layout_normal_fragments(
     fonts: &mut FontContext,
 ) {
     let mut line = LineBuilder::default();
-    let mut pending_space = false;
     let text_indent = container_style.text_indent;
     let mut first_line = true;
+    let mut pending_space = false;
 
     for fragment in fragments {
         match fragment {
             InlineFragment::LineBreak => {
-                emit_line_with_indent(
-                    &mut line,
-                    container_style,
-                    x,
-                    width,
-                    cursor_y,
-                    context,
-                    fonts,
-                    if first_line { text_indent } else { 0 },
-                );
-                first_line = false;
-                pending_space = false;
+                // nowrap: ignore line breaks
+            }
+            InlineFragment::Control(control) => {
+                if pending_space && !line.is_empty() {
+                    line.push_span(" ", &control.style, fonts, None, None);
+                }
+                line.push_control(control, fonts);
+                pending_space = true;
+            }
+            InlineFragment::Text { text, style, link_href, link_node_id } => {
+                let had_whitespace = text.chars().any(char::is_whitespace);
+                for word in text.split_whitespace() {
+                    if pending_space && !line.is_empty() {
+                        line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
+                    }
+                    line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
+                    pending_space = true;
+                }
+                if had_whitespace {
+                    pending_space = true;
+                }
+            }
+        }
+    }
+
+    emit_line_with_indent(
+        &mut line,
+        container_style,
+        x,
+        width,
+        cursor_y,
+        context,
+        fonts,
+        if first_line { text_indent } else { 0 },
+    );
+    let _ = first_line; // suppress unused warning
+}
+
+fn layout_normal_fragments(
+    fragments: &[InlineFragment],
+    container_style: &ComputedStyle,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    fonts: &mut FontContext,
+) {
+    let ellipsis_mode = container_style.text_overflow_ellipsis && container_style.overflow == Overflow::Hidden;
+    let mut line = LineBuilder::default();
+    let mut pending_space = false;
+    let text_indent = container_style.text_indent;
+    let mut first_line = true;
+    let mut ellipsis_done = false; // in ellipsis mode, once we clip, we're done
+
+    'outer: for fragment in fragments {
+        if ellipsis_mode && ellipsis_done {
+            break;
+        }
+        match fragment {
+            InlineFragment::LineBreak => {
+                if ellipsis_mode {
+                    // In ellipsis mode, ignore line breaks
+                } else {
+                    emit_line_with_indent(
+                        &mut line,
+                        container_style,
+                        x,
+                        width,
+                        cursor_y,
+                        context,
+                        fonts,
+                        if first_line { text_indent } else { 0 },
+                    );
+                    first_line = false;
+                    pending_space = false;
+                }
             }
             InlineFragment::Control(control) => {
                 let (control_width, _) = measure_form_control(control, fonts);
@@ -2531,6 +2735,12 @@ fn layout_normal_fragments(
                 if pending_space_before_control {
                     let space_width = char_width(&control.style, ' ', fonts);
                     if line.width.saturating_add(space_width) > effective_width {
+                        if ellipsis_mode {
+                            // Apply ellipsis and stop
+                            apply_ellipsis_to_line(&mut line, effective_width, container_style, fonts);
+                            ellipsis_done = true;
+                            break 'outer;
+                        }
                         emit_line_with_indent(
                             &mut line,
                             container_style,
@@ -2553,6 +2763,11 @@ fn layout_normal_fragments(
                     width
                 };
                 if !line.is_empty() && line.width.saturating_add(control_width) > effective_width {
+                    if ellipsis_mode {
+                        apply_ellipsis_to_line(&mut line, effective_width, container_style, fonts);
+                        ellipsis_done = true;
+                        break 'outer;
+                    }
                     emit_line_with_indent(
                         &mut line,
                         container_style,
@@ -2572,10 +2787,14 @@ fn layout_normal_fragments(
                 text,
                 style,
                 link_href,
-                link_node_id,            } => {
+                link_node_id,
+            } => {
                 let had_whitespace = text.chars().any(char::is_whitespace);
 
                 for word in text.split_whitespace() {
+                    if ellipsis_mode && ellipsis_done {
+                        break;
+                    }
                     let effective_width = if first_line && line.is_empty() {
                         width.saturating_sub(text_indent)
                     } else {
@@ -2585,6 +2804,11 @@ fn layout_normal_fragments(
                     if pending_space && !line.is_empty() {
                         let space_width = char_width(style, ' ', fonts);
                         if line.width.saturating_add(space_width) > effective_width {
+                            if ellipsis_mode {
+                                apply_ellipsis_to_line(&mut line, effective_width, container_style, fonts);
+                                ellipsis_done = true;
+                                break;
+                            }
                             emit_line_with_indent(
                                 &mut line,
                                 container_style,
@@ -2601,26 +2825,47 @@ fn layout_normal_fragments(
                         }
                     }
 
+                    if ellipsis_done { break; }
+
                     let effective_width2 = if first_line && line.is_empty() {
                         width.saturating_sub(text_indent)
                     } else {
                         width
                     };
 
-                    push_wrapped_word(
-                        word,
-                        style,
-                        link_href.as_deref(),
-                        *link_node_id,
-                        container_style,
-                        x,
-                        effective_width2,
-                        cursor_y,
-                        context,
-                        &mut line,
-                        fonts,
-                    );
-                    pending_space = true;
+                    if ellipsis_mode {
+                        // Check if word fits; if not, apply ellipsis
+                        let word_width = text_width(style, word, fonts);
+                        let ellipsis_width = text_width(style, "...", fonts);
+                        if line.width.saturating_add(word_width) > effective_width2 {
+                            // Word doesn't fit - apply ellipsis to current line
+                            apply_ellipsis_to_line(&mut line, effective_width2, container_style, fonts);
+                            ellipsis_done = true;
+                            break;
+                        } else if line.width.saturating_add(word_width).saturating_add(ellipsis_width) > effective_width2 {
+                            // Word fits but we can't guarantee another word will fit - add it
+                            line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
+                            pending_space = true;
+                        } else {
+                            line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
+                            pending_space = true;
+                        }
+                    } else {
+                        push_wrapped_word(
+                            word,
+                            style,
+                            link_href.as_deref(),
+                            *link_node_id,
+                            container_style,
+                            x,
+                            effective_width2,
+                            cursor_y,
+                            context,
+                            &mut line,
+                            fonts,
+                        );
+                        pending_space = true;
+                    }
                 }
 
                 if had_whitespace {
@@ -2628,6 +2873,11 @@ fn layout_normal_fragments(
                 }
             }
         }
+    }
+
+    if ellipsis_mode && !ellipsis_done && !line.is_empty() {
+        let eff_width = width.saturating_sub(text_indent);
+        apply_ellipsis_to_line(&mut line, eff_width, container_style, fonts);
     }
 
     emit_line_with_indent(
@@ -2640,6 +2890,67 @@ fn layout_normal_fragments(
         fonts,
         if first_line { text_indent } else { 0 },
     );
+}
+
+/// Truncate the last span in `line` so total width fits within `max_width`, then append "...".
+fn apply_ellipsis_to_line(
+    line: &mut LineBuilder,
+    max_width: u32,
+    container_style: &ComputedStyle,
+    fonts: &mut FontContext,
+) {
+    let ellipsis = "...";
+    // Find a style to use for ellipsis (last span or container style)
+    let ellipsis_style = line.spans.last().map(|s| s.style.clone()).unwrap_or_else(|| container_style.clone());
+    let ellipsis_width = text_width(&ellipsis_style, ellipsis, fonts);
+    let target = max_width.saturating_sub(ellipsis_width);
+
+    // Trim spans to fit within `target` width
+    let mut used = 0u32;
+    let mut truncated = false;
+    for span in &mut line.spans {
+        if used >= target {
+            span.text.clear();
+            span.width = 0;
+            truncated = true;
+        } else {
+            let available = target.saturating_sub(used);
+            if span.width <= available {
+                used = used.saturating_add(span.width);
+            } else {
+                // Truncate this span
+                let mut truncated_text = String::new();
+                let mut tw = 0u32;
+                for ch in span.text.chars() {
+                    let cw = fonts.glyph_advance_px(ch, span.style.font_size_px, span.style.font_family);
+                    if tw.saturating_add(cw) > available {
+                        break;
+                    }
+                    tw += cw;
+                    truncated_text.push(ch);
+                }
+                span.text = truncated_text;
+                span.width = tw;
+                used = used.saturating_add(tw);
+                truncated = true;
+            }
+        }
+    }
+    // Remove empty trailing spans
+    line.spans.retain(|s| !s.text.is_empty() || s.control.is_some());
+    // Append ellipsis as a new span
+    let mut ellipsis_span = LineSpan {
+        text: ellipsis.to_string(),
+        width: ellipsis_width,
+        height: text_line_height(&ellipsis_style, fonts),
+        style: ellipsis_style,
+        link_href: None,
+        link_node_id: None,
+        control: None,
+    };
+    line.spans.push(ellipsis_span);
+    // Recompute line width
+    line.width = line.spans.iter().map(|s| s.width).sum();
 }
 
 fn layout_preformatted_fragments(
@@ -2919,8 +3230,10 @@ fn emit_line_impl(
             font_family: span.style.font_family,
             color: apply_opacity(span.style.color, context.background_color, span_opacity),
             underline: span.style.underline,
+            line_through: span.style.line_through,
             bold: span.style.font_weight,
             italic: span.style.font_style_italic,
+            text_shadow: span.style.text_shadow.clone(),
         }));
 
         if let Some(href) = &span.link_href {
