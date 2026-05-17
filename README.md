@@ -63,6 +63,7 @@ Current capabilities:
   - dynamic `document.body`, `document.head`, and `document.documentElement`
   - `hasAttribute(...)`, `getAttributeNames(...)`
   - `toggleAttribute(...)`
+  - `element.attributes` as a live NamedNodeMap-style collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
   - `matches(...)`, `closest(...)`, `contains(...)`
   - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
   - `innerHTML`, `textContent`, `classList`, `id`, `className`
@@ -212,6 +213,7 @@ Current JS support is intentionally small:
 - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
 - `innerHTML`, `textContent`, `classList`, `id`, `className`
 - `classList.value`, `classList.length`, `classList.item(...)`, `classList.toString()`, `classList.replace(...)`
+- `element.attributes` as a live NamedNodeMap-style collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
 - `document.addEventListener(...)` / capture + bubbling for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`
 - `focus` / `blur` are currently target-only
 - `addEventListener(...)` / `removeEventListener(...)` on page inputs, buttons, links, forms, and document nodes

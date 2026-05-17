@@ -30,7 +30,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `130` passing tests on `2026-05-17`
+  - `cargo test`: `131` passing tests on `2026-05-17`
   - `cargo build`: success on `2026-05-17`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -75,6 +75,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
     - `innerHTML`, `textContent`, `classList`, `id`, `className`
     - `classList.value`, `classList.length`, `classList.item(...)`, `classList.toString()`, `classList.replace(...)`
+    - `element.attributes` as a live NamedNodeMap-style collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
     - reflected `value`, `src`, `href`, `rel`, `type`, `name`, `content`
     - recursive `document.write(...)`
   - JS runtime support for:
@@ -144,7 +145,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics are in place, and `location.hash` plus `history.pushState(...)` / `replaceState(...)` now support soft navigation without a reload, while the rest of the option matrix and back/forward stack still need depth.
 - Native page input typing now syncs `value` into the JS DOM.
 - DOM traversal APIs now include `matches(...)`, `closest(...)`, `contains(...)`, and element sibling / child accessors for event delegation and framework-style code paths.
-- The richer `attributes` / `dataset` surface still needs deeper parity, even though `hasAttributes(...)` and `toggleAttribute(...)` now exist.
+- The richer `attributes` / `dataset` surface still needs deeper parity, even though `element.attributes` is now a live collection and `hasAttributes(...)` / `toggleAttribute(...)` now exist.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward replay still needs depth beyond the current scroll restoration work.
 - Script-driven scrolling now has basic window / DOM setter support, and full-document / same-document history scroll restoration is in place.
@@ -369,6 +370,12 @@ git worktree list
 - Extended `classList` with `value`, `length`, `item(...)`, `toString()`, `replace(...)`, and force-aware `toggle(...)`.
 - Added `hasAttributes(...)` and `toggleAttribute(...)` on elements so scripts can introspect and flip attributes without manual DOM plumbing.
 - Updated the README and roadmap notes to reflect the broader DOM / computed-style surface.
+
+### 2026-05-17 - Codex (attribute collection live bridge)
+
+- Added a live `element.attributes` collection with `length`, `item(...)`, `getNamedItem(...)`, named lookup, and array-like iteration support.
+- Added regression coverage for attributes collection indexing, named lookup, and iteration order.
+- Updated the README and roadmap notes to reflect that live attribute collection support is now available.
 
 ### 2026-05-16 - Codex (browser history back/forward)
 

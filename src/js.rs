@@ -269,6 +269,12 @@ struct DomDatasetHandle {
 }
 
 #[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct DomAttributesHandle {
+    #[unsafe_ignore_trace]
+    node_id: usize,
+}
+
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
 struct DomStyleHandle {
     #[unsafe_ignore_trace]
     node_id: usize,
@@ -2465,6 +2471,19 @@ fn dom_dataset_cache(context: &mut Context) -> JsResult<boa_engine::object::JsOb
     Ok(cache)
 }
 
+fn dom_attributes_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObject> {
+    let global = context.global_object();
+    let cache_key = js_string!("__tobiraDomAttributesCache");
+    let existing = global.get(cache_key.clone(), context)?;
+    if let Some(object) = existing.as_object() {
+        return Ok(object.clone());
+    }
+
+    let cache = ObjectInitializer::new(context).build();
+    global.set(cache_key, cache.clone(), true, context)?;
+    Ok(cache)
+}
+
 fn cached_dom_node_object(
     context: &mut Context,
     node_id: usize,
@@ -2546,6 +2565,33 @@ fn store_dom_dataset_object(
     }
 }
 
+fn cached_dom_attributes_object(
+    context: &mut Context,
+    node_id: usize,
+) -> Option<boa_engine::object::JsObject> {
+    let cache = dom_attributes_cache(context).ok()?;
+    let key = js_string!(node_id.to_string());
+    cache
+        .get(key, context)
+        .ok()
+        .and_then(|value| value.as_object())
+}
+
+fn store_dom_attributes_object(
+    context: &mut Context,
+    node_id: usize,
+    object: &boa_engine::object::JsObject,
+) {
+    if let Ok(cache) = dom_attributes_cache(context) {
+        let _ = cache.set(
+            js_string!(node_id.to_string()),
+            object.clone(),
+            true,
+            context,
+        );
+    }
+}
+
 fn build_dom_dataset_object(context: &mut Context, node_id: usize) -> boa_engine::object::JsObject {
     if let Some(cached) = cached_dom_dataset_object(context, node_id) {
         return cached;
@@ -2613,6 +2659,92 @@ fn build_dom_dataset_object(context: &mut Context, node_id: usize) -> boa_engine
     match proxy {
         Ok(proxy) => {
             store_dom_dataset_object(context, node_id, &proxy);
+            proxy
+        }
+        Err(_) => target,
+    }
+}
+
+fn build_dom_attributes_object(
+    context: &mut Context,
+    node_id: usize,
+) -> boa_engine::object::JsObject {
+    if let Some(cached) = cached_dom_attributes_object(context, node_id) {
+        return cached;
+    }
+
+    let target = ObjectInitializer::with_native_data(DomAttributesHandle { node_id }, context)
+        .property(
+            js_string!("__tobiraNodeId"),
+            js_string!(node_id.to_string()),
+            Attribute::all(),
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_item),
+            js_string!("item"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_get_named_item),
+            js_string!("getNamedItem"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_get_named_item),
+            js_string!("namedItem"),
+            1,
+        )
+        .build();
+    let handler = ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_get),
+            js_string!("get"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_set),
+            js_string!("set"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_has),
+            js_string!("has"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_own_keys),
+            js_string!("ownKeys"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_get_own_property_descriptor),
+            js_string!("getOwnPropertyDescriptor"),
+            2,
+        )
+        .build();
+
+    let global = context.global_object();
+    let target_key = js_string!("__tobiraAttributesTarget");
+    let handler_key = js_string!("__tobiraAttributesHandler");
+    let proxy = (|| -> JsResult<JsObject> {
+        global.set(target_key.clone(), target.clone(), true, context)?;
+        global.set(handler_key.clone(), handler.clone(), true, context)?;
+        let proxy_value = context.eval(Source::from_bytes(
+            "new Proxy(globalThis.__tobiraAttributesTarget, globalThis.__tobiraAttributesHandler);",
+        ))?;
+        proxy_value.as_object().ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("attributes proxy bootstrap did not return an object")
+                .into()
+        })
+    })();
+
+    let _ = global.delete_property_or_throw(target_key, context);
+    let _ = global.delete_property_or_throw(handler_key, context);
+
+    match proxy {
+        Ok(proxy) => {
+            store_dom_attributes_object(context, node_id, &proxy);
             proxy
         }
         Err(_) => target,
@@ -3376,6 +3508,8 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_class_name).to_js_function(context.realm());
     let set_class_name =
         NativeFunction::from_fn_ptr(js_dom_set_class_name).to_js_function(context.realm());
+    let get_attributes =
+        NativeFunction::from_fn_ptr(js_dom_get_attributes).to_js_function(context.realm());
     let get_dataset =
         NativeFunction::from_fn_ptr(js_dom_get_dataset).to_js_function(context.realm());
     let get_value = NativeFunction::from_fn_ptr(js_dom_get_value).to_js_function(context.realm());
@@ -3601,6 +3735,12 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             js_string!("className"),
             Some(get_class_name),
             Some(set_class_name),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("attributes"),
+            Some(get_attributes),
+            None,
             Attribute::all(),
         )
         .accessor(
@@ -5756,6 +5896,15 @@ fn js_dom_has_attributes(
     Ok(JsValue::new(has_attributes))
 }
 
+fn js_dom_get_attributes(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    Ok(JsValue::from(build_dom_attributes_object(context, node_id)))
+}
+
 fn js_dom_get_attribute_names(
     this: &JsValue,
     _: &[JsValue],
@@ -6245,6 +6394,68 @@ fn dataset_node_id(this: &JsValue, context: &mut Context) -> Option<usize> {
     node_id.parse().ok()
 }
 
+fn attributes_node_id(this: &JsValue, context: &mut Context) -> Option<usize> {
+    let object = this.as_object()?;
+    if let Some(handle) = object.downcast_ref::<DomAttributesHandle>() {
+        return Some(handle.node_id);
+    }
+    let value = object.get(js_string!("__tobiraNodeId"), context).ok()?;
+    let node_id = js_value_to_string(&value, context).ok()?;
+    node_id.parse().ok()
+}
+
+fn attribute_entries(context: &mut Context, node_id: usize) -> Vec<(String, String)> {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.node_attributes(node_id).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
+fn attribute_entry_at(
+    context: &mut Context,
+    node_id: usize,
+    index: usize,
+) -> Option<(String, String)> {
+    attribute_entries(context, node_id).into_iter().nth(index)
+}
+
+fn attribute_entry_named(
+    context: &mut Context,
+    node_id: usize,
+    name: &str,
+) -> Option<(String, String)> {
+    context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .node_attributes(node_id)
+            .cloned()
+            .and_then(|attributes| {
+                attributes
+                    .get(name)
+                    .cloned()
+                    .map(|value| (name.to_string(), value))
+            })
+    })
+}
+
+fn build_dom_attribute_object(
+    context: &mut Context,
+    name: &str,
+    value: &str,
+) -> boa_engine::object::JsObject {
+    ObjectInitializer::new(context)
+        .property(js_string!("name"), js_string!(name), Attribute::all())
+        .property(js_string!("nodeName"), js_string!(name), Attribute::all())
+        .property(js_string!("localName"), js_string!(name), Attribute::all())
+        .property(js_string!("value"), js_string!(value), Attribute::all())
+        .property(js_string!("nodeValue"), js_string!(value), Attribute::all())
+        .property(js_string!("specified"), true, Attribute::all())
+        .build()
+}
+
 fn dataset_property_to_attribute_name(property: &str) -> Option<String> {
     if property.is_empty() {
         return None;
@@ -6488,6 +6699,246 @@ fn js_dom_dataset_get_own_property_descriptor(
         .property(js_string!("configurable"), true, Attribute::all())
         .build();
     Ok(JsValue::from(descriptor))
+}
+
+fn js_dom_attributes_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = attributes_node_id(this, context) else {
+        return Ok(JsValue::null());
+    };
+    let Some(index_value) = args.first() else {
+        return Ok(JsValue::null());
+    };
+    let index = js_value_to_string(index_value, context)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok());
+    let Some(index) = index else {
+        return Ok(JsValue::null());
+    };
+    Ok(attribute_entry_at(context, node_id, index)
+        .map(|(name, value)| JsValue::from(build_dom_attribute_object(context, &name, &value)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_attributes_get_named_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = attributes_node_id(this, context) else {
+        return Ok(JsValue::null());
+    };
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    Ok(attribute_entry_named(context, node_id, &name)
+        .map(|(name, value)| JsValue::from(build_dom_attribute_object(context, &name, &value)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_attributes_get(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(node_id) = attributes_node_id(target, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(property) = args.get(1) else {
+        return Ok(JsValue::undefined());
+    };
+    if !property.is_string() {
+        return Ok(JsValue::undefined());
+    }
+
+    let property = js_value_to_string(property, context)?;
+    if property == "length" {
+        return Ok(JsValue::new(
+            attribute_entries(context, node_id).len() as u32
+        ));
+    }
+
+    if let Some((name, value)) = property
+        .parse::<usize>()
+        .ok()
+        .and_then(|index| attribute_entry_at(context, node_id, index))
+    {
+        return Ok(JsValue::from(build_dom_attribute_object(
+            context, &name, &value,
+        )));
+    }
+
+    if let Some((name, value)) = attribute_entry_named(context, node_id, &property) {
+        return Ok(JsValue::from(build_dom_attribute_object(
+            context, &name, &value,
+        )));
+    }
+
+    Ok(target
+        .as_object()
+        .map(|object| object.get(js_string!(property), context))
+        .transpose()?
+        .unwrap_or_else(JsValue::undefined))
+}
+
+fn js_dom_attributes_set(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::new(false))
+}
+
+fn js_dom_attributes_has(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::new(false));
+    };
+    let Some(node_id) = attributes_node_id(target, context) else {
+        return Ok(JsValue::new(false));
+    };
+    let Some(property) = args.get(1) else {
+        return Ok(JsValue::new(false));
+    };
+    if !property.is_string() {
+        return Ok(JsValue::new(false));
+    }
+
+    let property = js_value_to_string(property, context)?;
+    if property == "length" {
+        return Ok(JsValue::new(true));
+    }
+    if property.parse::<usize>().is_ok() {
+        return Ok(JsValue::new(
+            attribute_entry_at(context, node_id, property.parse().unwrap_or(usize::MAX)).is_some(),
+        ));
+    }
+    if attribute_entry_named(context, node_id, &property).is_some() {
+        return Ok(JsValue::new(true));
+    }
+
+    Ok(target
+        .as_object()
+        .map(|object| object.get(js_string!(property), context))
+        .transpose()?
+        .map(|value| !value.is_undefined())
+        .unwrap_or(false)
+        .into())
+}
+
+fn js_dom_attributes_own_keys(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let Some(node_id) = attributes_node_id(target, context) else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let length = attribute_entries(context, node_id).len();
+    let mut keys = Vec::with_capacity(length + 4);
+    keys.push(JsValue::from(js_string!("length")));
+    keys.push(JsValue::from(js_string!("item")));
+    keys.push(JsValue::from(js_string!("getNamedItem")));
+    keys.push(JsValue::from(js_string!("namedItem")));
+    for index in 0..length {
+        keys.push(JsValue::from(js_string!(index.to_string())));
+    }
+    let array = JsArray::from_iter(keys, context);
+    Ok(JsValue::from(array))
+}
+
+fn js_dom_attributes_get_own_property_descriptor(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(node_id) = attributes_node_id(target, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(property) = args.get(1) else {
+        return Ok(JsValue::undefined());
+    };
+    if !property.is_string() {
+        return Ok(JsValue::undefined());
+    }
+
+    let property = js_value_to_string(property, context)?;
+    if property == "length" {
+        let length = attribute_entries(context, node_id).len() as u32;
+        let descriptor = ObjectInitializer::new(context)
+            .property(js_string!("value"), JsValue::new(length), Attribute::all())
+            .property(js_string!("writable"), false, Attribute::all())
+            .property(js_string!("enumerable"), false, Attribute::all())
+            .property(js_string!("configurable"), true, Attribute::all())
+            .build();
+        return Ok(JsValue::from(descriptor));
+    }
+
+    if property == "item" || property == "getNamedItem" || property == "namedItem" {
+        let function = target
+            .as_object()
+            .map(|object| object.get(js_string!(property), context))
+            .transpose()?;
+        if let Some(function) = function {
+            let descriptor = ObjectInitializer::new(context)
+                .property(js_string!("value"), function, Attribute::all())
+                .property(js_string!("writable"), true, Attribute::all())
+                .property(js_string!("enumerable"), false, Attribute::all())
+                .property(js_string!("configurable"), true, Attribute::all())
+                .build();
+            return Ok(JsValue::from(descriptor));
+        }
+        return Ok(JsValue::undefined());
+    }
+
+    if let Some((name, value)) = property
+        .parse::<usize>()
+        .ok()
+        .and_then(|index| attribute_entry_at(context, node_id, index))
+    {
+        let attribute = build_dom_attribute_object(context, &name, &value);
+        let descriptor = ObjectInitializer::new(context)
+            .property(
+                js_string!("value"),
+                JsValue::from(attribute),
+                Attribute::all(),
+            )
+            .property(js_string!("writable"), false, Attribute::all())
+            .property(js_string!("enumerable"), true, Attribute::all())
+            .property(js_string!("configurable"), true, Attribute::all())
+            .build();
+        return Ok(JsValue::from(descriptor));
+    }
+
+    if let Some((name, value)) = attribute_entry_named(context, node_id, &property) {
+        let attribute = build_dom_attribute_object(context, &name, &value);
+        let descriptor = ObjectInitializer::new(context)
+            .property(
+                js_string!("value"),
+                JsValue::from(attribute),
+                Attribute::all(),
+            )
+            .property(js_string!("writable"), false, Attribute::all())
+            .property(js_string!("enumerable"), true, Attribute::all())
+            .property(js_string!("configurable"), true, Attribute::all())
+            .build();
+        return Ok(JsValue::from(descriptor));
+    }
+
+    Ok(JsValue::undefined())
 }
 
 fn style_node_id_from_this(this: &JsValue) -> Option<usize> {
@@ -8530,6 +8981,22 @@ mod tests {
             processed
                 .html
                 .contains("data-attrs=\"false|true|aria-label|data-a|data-b|data-c|id|role\"")
+        );
+    }
+
+    #[test]
+    fn supports_attribute_collection_accessors_and_iteration() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\" data-foo-bar=\"one\" title=\"x\"></div><script>var box = document.getElementById('box'); var attrs = box.attributes; var named = attrs.getNamedItem('data-foo-bar'); var from = Array.from(attrs).map(function(attr) { return attr.name + '=' + attr.value; }).join('|'); document.body.setAttribute('data-attrs', [attrs.length, attrs.item(0).name, named.value, attrs['title'].value, from].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-attrs=\"3|data-foo-bar|one|x|data-foo-bar=one|id=box|title=x\""),
+            "{}",
+            processed.html
         );
     }
 

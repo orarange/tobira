@@ -19,6 +19,7 @@ Already working:
 - inline and external scripts
 - recursive `document.write(...)`
 - lightweight DOM mutation helpers
+- live `element.attributes` collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
 - native GUI typing stays in sync with live DOM `input.value`
 - basic DOM event plumbing for capture + bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`
 - `Promise` job flushing
@@ -59,7 +60,7 @@ Still missing or shallow:
 
 If we want to keep momentum and avoid getting stuck on the biggest browser gaps too early, the practical implementation order is:
 
-1. attribute / DOM introspection helpers like `hasAttribute(...)`, `hasAttributes(...)`, `getAttributeNames(...)`, `toggleAttribute(...)`, and broader property reflection
+1. attribute / DOM introspection helpers like `hasAttribute(...)`, `hasAttributes(...)`, `getAttributeNames(...)`, `toggleAttribute(...)`, live `element.attributes`, and broader property reflection
 2. event-delegation helpers like `matches(...)`, `closest(...)`, `contains(...)`, and element traversal accessors
 3. basic listener-option edge cases and default-action sequencing
 4. `document.body` / `document.head` / `document.documentElement` consistency and `innerHTML` edge cases
@@ -104,7 +105,7 @@ Tasks:
 
 - expand node/element APIs that are commonly used
 - DOM traversal helpers like `matches(...)`, `closest(...)`, `contains(...)`, and element sibling accessors are now in place
-- improve `classList`, `dataset`, `attributes`, and property reflection beyond the current helper surface
+- improve `classList`, `dataset`, `attributes`, and property reflection beyond the current helper surface; live `element.attributes` is now in place, but deeper parity is still open
 - add `querySelector(...)` coverage for more selectors if needed
 - support `document.body`, `document.head`, `document.documentElement` consistently
 - add mutation notifications for DOM changes when they affect layout or event targets
