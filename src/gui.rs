@@ -11,13 +11,17 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, ResizeDirection, Window};
 
 use crate::browser::{BrowserPage, load_page};
-use crate::css::{Color, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind};
+use crate::css::{
+    Color, CursorKind, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind,
+    InteractiveState, ObjectFit,
+};
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
 use crate::image::DecodedImage;
 use crate::js::{DomEventDispatchResult, DomEventRequest};
 use crate::layout::{
-    FormControlCommand, FormControlKind, LayoutDocument, TextCommand, layout_styled_document,
+    DrawCommand, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument, TextCommand,
+    layout_styled_document,
 };
 use crate::url::Url;
 
@@ -98,7 +102,12 @@ struct BrowserApp {
     hovered_target: HitTarget,
     hovered_link_url: Option<String>,
     hovered_link_node_id: Option<usize>,
+    hovered_element_node_id: Option<usize>,
     ime_composing: bool,
+    /// Depth-indexed offscreen buffer pool for layer compositing.
+    /// scratch[depth] holds the pixel buffer used by the layer at that nesting depth.
+    /// Buffers are reused across frames; no per-frame allocation after the first paint.
+    scratch: Vec<Vec<u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,7 +155,9 @@ impl BrowserApp {
             hovered_target: HitTarget::None,
             hovered_link_url: None,
             hovered_link_node_id: None,
+            hovered_element_node_id: None,
             ime_composing: false,
+            scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
         }
     }
 
@@ -159,6 +170,7 @@ impl BrowserApp {
         let Some(url) = self.current_url.clone() else {
             self.document = DocumentView::blank();
             self.scroll_y = 0;
+            self.scratch.clear();
             self.sync_window_title();
             self.request_redraw();
             return;
@@ -174,6 +186,7 @@ impl BrowserApp {
             self.document = DocumentView::blank();
             self.clear_page_control_state();
             self.scroll_y = 0;
+            self.scratch.clear();
             self.sync_window_title();
             self.request_redraw();
             return;
@@ -186,6 +199,7 @@ impl BrowserApp {
                     DocumentView::error(format!("could not navigate to `{entered}`: {error}"));
                 self.clear_page_control_state();
                 self.scroll_y = 0;
+                self.scratch.clear();
                 self.sync_window_title();
                 self.request_redraw();
             }
@@ -288,6 +302,8 @@ impl BrowserApp {
         if restore_scroll.is_some() {
             let _ = self.document.set_scroll_position(self.scroll_y);
         }
+        // Clear scratch pool on navigation/reload to avoid wasting memory.
+        self.scratch.clear();
         self.sync_current_history_scroll();
         self.sync_viewport_size();
         self.sync_window_title();
@@ -520,6 +536,7 @@ impl BrowserApp {
             &layout,
             self.focused_page_input.as_ref(),
             self.hovered_target,
+            &mut self.scratch,
         );
 
         buffer
@@ -611,23 +628,117 @@ impl BrowserApp {
         } else {
             (None, None)
         };
+
+        // Determine which element (by node_id) is under the cursor
+        let hovered_element = self.find_hovered_element(window_size);
+
+        let element_changed = hovered_element != self.hovered_element_node_id;
+        // Only relayout when hovered element changes
+        if element_changed {
+            self.hovered_element_node_id = hovered_element;
+            // Trigger a CSS relayout with the new interactive state
+            let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+            let interactive = InteractiveState {
+                hovered_node_id: hovered_element,
+                ..Default::default()
+            };
+            if let DocumentContent::Loaded(page) = &mut self.document.content {
+                page.relayout(content_width, &interactive);
+            }
+        }
+
         let changed = next != self.hovered_target
             || link_url != self.hovered_link_url
-            || link_node_id != self.hovered_link_node_id;
+            || link_node_id != self.hovered_link_node_id
+            || element_changed;
         self.hovered_target = next;
         self.hovered_link_url = link_url;
         self.hovered_link_node_id = link_node_id;
         if changed {
             self.request_redraw();
         }
+        // Determine cursor icon before borrowing self.window
+        let icon = if self.hovered_link_url.is_some() {
+            CursorIcon::Pointer
+        } else if next == HitTarget::None {
+            let elem_cursor = self.find_hovered_element_cursor(window_size);
+            match elem_cursor {
+                CursorKind::Pointer => CursorIcon::Pointer,
+                CursorKind::Text => CursorIcon::Text,
+                CursorKind::Move => CursorIcon::Move,
+                CursorKind::Crosshair => CursorIcon::Crosshair,
+                CursorKind::Wait => CursorIcon::Wait,
+                CursorKind::Help => CursorIcon::Help,
+                CursorKind::NotAllowed => CursorIcon::NotAllowed,
+                CursorKind::Grab => CursorIcon::Grab,
+                CursorKind::Grabbing => CursorIcon::Grabbing,
+                CursorKind::ZoomIn => CursorIcon::ZoomIn,
+                CursorKind::ZoomOut => CursorIcon::ZoomOut,
+                CursorKind::None | CursorKind::Default => CursorIcon::Default,
+                CursorKind::Auto => cursor_icon_for_target(next),
+            }
+        } else {
+            cursor_icon_for_target(next)
+        };
         if let Some(window) = &self.window {
-            let icon = if self.hovered_link_url.is_some() {
-                CursorIcon::Pointer
-            } else {
-                cursor_icon_for_target(next)
-            };
             window.set_cursor(icon);
         }
+    }
+
+    fn find_hovered_element_cursor(&mut self, window_size: PhysicalSize<u32>) -> CursorKind {
+        let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
+        let body_top = chrome.height + FRAME_PADDING;
+        let pos_x = self.cursor_position.x;
+        let pos_y = self.cursor_position.y;
+        if pos_y < body_top as f64 {
+            return CursorKind::Auto;
+        }
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let layout = self.document.layout(content_width, &mut self.fonts);
+        let content_y = (pos_y as u32)
+            .saturating_sub(body_top)
+            .saturating_add(self.scroll_y);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        layout
+            .element_hitboxes
+            .iter()
+            .rev()
+            .find(|h| {
+                content_x >= h.x
+                    && content_x < h.x + h.width
+                    && content_y >= h.y
+                    && content_y < h.y + h.height
+            })
+            .map(|h| h.cursor_kind)
+            .unwrap_or(CursorKind::Auto)
+    }
+
+    fn find_hovered_element(&mut self, window_size: PhysicalSize<u32>) -> Option<usize> {
+        let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
+        let body_top = chrome.height + FRAME_PADDING;
+        let pos_x = self.cursor_position.x;
+        let pos_y = self.cursor_position.y;
+        if pos_y < body_top as f64 {
+            return None;
+        }
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let layout = self.document.layout(content_width, &mut self.fonts);
+        let content_y = (pos_y as u32)
+            .saturating_sub(body_top)
+            .saturating_add(self.scroll_y);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        // Find the deepest (last) hitbox that contains the cursor
+        layout
+            .element_hitboxes
+            .iter()
+            .rev()
+            .find(|h| {
+                content_x >= h.x
+                    && content_x < h.x + h.width
+                    && content_y >= h.y
+                    && content_y < h.y + h.height
+            })
+            .map(|h| h.node_id)
     }
 
     fn hit_test(
@@ -1073,6 +1184,7 @@ impl BrowserApp {
         self.hovered_target = HitTarget::None;
         self.hovered_link_url = None;
         self.hovered_link_node_id = None;
+        self.hovered_element_node_id = None;
     }
 
     fn blur_page_input(&mut self) {
@@ -1638,6 +1750,8 @@ impl ApplicationHandler for BrowserApp {
                 }
             }
             WindowEvent::Resized(size) => {
+                // Clear scratch pool on resize: buffer dimensions change, old buffers may be wrong size.
+                self.scratch.clear();
                 self.update_hover(size);
                 self.sync_viewport_size();
                 self.sync_input_method();
@@ -1651,6 +1765,17 @@ impl ApplicationHandler for BrowserApp {
                 self.hovered_target = HitTarget::None;
                 self.hovered_link_url = None;
                 self.hovered_link_node_id = None;
+                if self.hovered_element_node_id.is_some() {
+                    self.hovered_element_node_id = None;
+                    let content_width = window
+                        .inner_size()
+                        .width
+                        .saturating_sub(FRAME_PADDING * 2)
+                        .max(1);
+                    if let DocumentContent::Loaded(page) = &mut self.document.content {
+                        page.relayout(content_width, &InteractiveState::default());
+                    }
+                }
                 window.set_cursor(CursorIcon::Default);
                 self.request_redraw();
             }
@@ -1905,11 +2030,10 @@ impl DocumentView {
             DocumentContent::Blank => LayoutDocument {
                 background_color: DEFAULT_BACKGROUND_COLOR,
                 content_height: 0,
-                rects: Vec::new(),
-                texts: Vec::new(),
-                images: Vec::new(),
+                commands: Vec::new(),
                 links: Vec::new(),
                 controls: Vec::new(),
+                element_hitboxes: Vec::new(),
             },
             DocumentContent::Loaded(page) => {
                 layout_styled_document(&page.styled_document, &page.images, width, fonts)
@@ -1938,7 +2062,7 @@ fn layout_error_document(
     _width: u32,
     fonts: &mut FontContext,
 ) -> LayoutDocument {
-    let mut texts = Vec::new();
+    let mut commands = Vec::new();
     let mut cursor_y: u32 = 0;
 
     for line in &document.lines {
@@ -1956,18 +2080,19 @@ fn layout_error_document(
             continue;
         }
 
-        texts.push(TextCommand {
+        commands.push(DrawCommand::Text(TextCommand {
             x: 0,
             y: cursor_y,
             width: fonts.text_width_px(line, font_size_px, FontFamilyKind::Sans),
             text: line.clone(),
             font_size_px,
+            line_height_px: height,
             font_family: FontFamilyKind::Sans,
             color,
             underline: false,
             bold: scale >= 3,
             italic: false,
-        });
+        }));
 
         cursor_y = cursor_y.saturating_add(height);
     }
@@ -1975,11 +2100,10 @@ fn layout_error_document(
     LayoutDocument {
         background_color: DEFAULT_BACKGROUND_COLOR,
         content_height: cursor_y,
-        rects: Vec::new(),
-        texts,
-        images: Vec::new(),
+        commands,
         links: Vec::new(),
         controls: Vec::new(),
+        element_hitboxes: Vec::new(),
     }
 }
 
@@ -3544,74 +3668,30 @@ fn paint_layout(
     layout: &LayoutDocument,
     focused_page_input: Option<&FocusedPageInput>,
     hovered_target: HitTarget,
+    scratch: &mut Vec<Vec<u32>>,
 ) {
+    let page = if let DocumentContent::Loaded(page) = &document.content {
+        Some(page)
+    } else {
+        None
+    };
+
+    render_commands(
+        buffer,
+        width,
+        height,
+        offset_x,
+        offset_y,
+        viewport_height,
+        scroll_y,
+        &layout.commands,
+        page,
+        fonts,
+        scratch,
+        0,
+    );
+
     let viewport_bottom = scroll_y.saturating_add(viewport_height);
-
-    for rect in &layout.rects {
-        let rect_bottom = rect.y.saturating_add(rect.height);
-        if rect_bottom < scroll_y || rect.y > viewport_bottom {
-            continue;
-        }
-
-        draw_rect(
-            buffer,
-            width,
-            height,
-            offset_x.saturating_add(rect.x),
-            offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
-            rect.width,
-            rect.height,
-            rect.color,
-        );
-    }
-
-    if let DocumentContent::Loaded(page) = &document.content {
-        for image in &layout.images {
-            let image_bottom = image.y.saturating_add(image.height);
-            if image_bottom < scroll_y || image.y > viewport_bottom {
-                continue;
-            }
-
-            let Some(decoded) = page.images.get(&image.src) else {
-                continue;
-            };
-
-            draw_scaled_image(
-                buffer,
-                width,
-                height,
-                offset_x.saturating_add(image.x),
-                offset_y.saturating_add(image.y.saturating_sub(scroll_y)),
-                image.width,
-                image.height,
-                decoded,
-            );
-        }
-    }
-
-    for text in &layout.texts {
-        let text_bottom = text
-            .y
-            .saturating_add(fonts.line_height_px(text.font_size_px, text.font_family));
-        if text_bottom < scroll_y || text.y > viewport_bottom {
-            continue;
-        }
-
-        fonts.draw_text(
-            buffer,
-            width,
-            height,
-            offset_x.saturating_add(text.x),
-            offset_y.saturating_add(text.y.saturating_sub(scroll_y)),
-            &text.text,
-            text.font_size_px,
-            text.color,
-            text.bold,
-            text.underline,
-            text.font_family,
-        );
-    }
-
     for control in &layout.controls {
         let control_bottom = control.y.saturating_add(control.height);
         if control_bottom < scroll_y || control.y > viewport_bottom {
@@ -3631,6 +3711,325 @@ fn paint_layout(
             hovered_target,
         );
     }
+}
+
+fn render_commands(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    offset_x: u32,
+    offset_y: u32,
+    viewport_height: u32,
+    scroll_y: u32,
+    commands: &[DrawCommand],
+    page: Option<&crate::browser::BrowserPage>,
+    fonts: &mut FontContext,
+    scratch: &mut Vec<Vec<u32>>,
+    depth: usize,
+) {
+    let viewport_bottom = scroll_y.saturating_add(viewport_height);
+
+    for cmd in commands {
+        match cmd {
+            DrawCommand::Rect(rect) => {
+                let rect_bottom = rect.y.saturating_add(rect.height);
+                if rect_bottom < scroll_y || rect.y > viewport_bottom {
+                    continue;
+                }
+                if rect.border_radius > 0 {
+                    if rect.y < scroll_y {
+                        // Partially above viewport: fall back to draw_rect to avoid rendering
+                        // top rounded corners at the viewport edge (wrong position). The
+                        // rounded-rect routine always draws corners from the top of the given
+                        // rect, so clipping by reducing height produces distorted corners.
+                        let clipped = scroll_y.saturating_sub(rect.y);
+                        let draw_h = rect.height.saturating_sub(clipped);
+                        if draw_h > 0 {
+                            draw_rect(
+                                buffer,
+                                width,
+                                height,
+                                offset_x.saturating_add(rect.x),
+                                offset_y, // y=0 since rect.y < scroll_y (fully at viewport top)
+                                rect.width,
+                                draw_h,
+                                rect.color,
+                            );
+                        }
+                    } else {
+                        draw_rounded_rect(
+                            buffer,
+                            width,
+                            height,
+                            offset_x.saturating_add(rect.x),
+                            offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
+                            rect.width,
+                            rect.height,
+                            rect.border_radius,
+                            rect.color,
+                        );
+                    }
+                } else {
+                    draw_rect(
+                        buffer,
+                        width,
+                        height,
+                        offset_x.saturating_add(rect.x),
+                        offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
+                        rect.width,
+                        rect.height,
+                        rect.color,
+                    );
+                }
+            }
+            DrawCommand::Text(text) => {
+                let text_bottom = text
+                    .y
+                    .saturating_add(fonts.line_height_px(text.font_size_px, text.font_family));
+                if text_bottom < scroll_y || text.y > viewport_bottom {
+                    continue;
+                }
+                fonts.draw_text(
+                    buffer,
+                    width,
+                    height,
+                    offset_x.saturating_add(text.x),
+                    offset_y.saturating_add(text.y.saturating_sub(scroll_y)),
+                    &text.text,
+                    text.font_size_px,
+                    text.color,
+                    text.bold,
+                    text.underline,
+                    text.font_family,
+                );
+            }
+            DrawCommand::Image(image) => {
+                let image_bottom = image.y.saturating_add(image.height);
+                if image_bottom < scroll_y || image.y > viewport_bottom {
+                    continue;
+                }
+                if let Some(page) = page {
+                    if let Some(decoded) = page.images.get(&image.src) {
+                        draw_scaled_image(
+                            buffer,
+                            width,
+                            height,
+                            offset_x.saturating_add(image.x),
+                            offset_y.saturating_add(image.y.saturating_sub(scroll_y)),
+                            image.width,
+                            image.height,
+                            decoded,
+                            image.object_fit,
+                            image.object_position_x,
+                            image.object_position_y,
+                        );
+                    }
+                }
+            }
+            DrawCommand::Layer(layer) => {
+                render_layer(
+                    buffer, width, height, offset_x, offset_y, scroll_y, layer, page, fonts,
+                    scratch, depth,
+                );
+            }
+        }
+    }
+}
+
+fn render_layer(
+    buffer: &mut [u32],
+    buf_width: u32,
+    buf_height: u32,
+    offset_x: u32,
+    offset_y: u32,
+    scroll_y: u32,
+    layer: &LayerCommand,
+    page: Option<&crate::browser::BrowserPage>,
+    fonts: &mut FontContext,
+    scratch: &mut Vec<Vec<u32>>,
+    depth: usize,
+) {
+    // Compute screen-space position using signed arithmetic to handle layers above viewport
+    let layer_screen_y = layer.y as i64 + offset_y as i64 - scroll_y as i64;
+    let layer_screen_x = layer.x as i64 + offset_x as i64;
+
+    // Content viewport top/left: the chrome (address bar, etc.) occupies [0, offset_y) rows
+    // and [0, offset_x) cols. Layers must not bleed into the chrome area.
+    let content_top = offset_y as i64;
+    let content_left = offset_x as i64;
+
+    // Skip layers fully below or to the right of viewport/buffer
+    if layer_screen_y >= buf_height as i64 {
+        return;
+    }
+    if layer_screen_x >= buf_width as i64 {
+        return;
+    }
+    // Skip layers fully within the chrome (no part reaches the content area)
+    if layer_screen_y + layer.height as i64 <= content_top {
+        return;
+    }
+    if layer_screen_x + layer.width as i64 <= content_left {
+        return;
+    }
+
+    // Clip: how many rows/cols of the layer are above/left of the content viewport
+    let src_y_start = (content_top - layer_screen_y).max(0) as u32;
+    let src_x_start = (content_left - layer_screen_x).max(0) as u32;
+    // Destination in the main buffer: at least content_top / content_left
+    let dst_y = layer_screen_y.max(content_top) as u32;
+    let dst_x = layer_screen_x.max(content_left) as u32;
+
+    // Visible size: clipped by layer bounds and buffer bounds
+    let visible_h = layer
+        .height
+        .saturating_sub(src_y_start)
+        .min(buf_height.saturating_sub(dst_y));
+    let visible_w = layer
+        .width
+        .saturating_sub(src_x_start)
+        .min(buf_width.saturating_sub(dst_x));
+    if visible_h == 0 || visible_w == 0 {
+        return;
+    }
+
+    // Offscreen buffer uses the full layer dimensions (layer.width × layer.height) so that
+    // sub-commands are rendered at their natural layer-relative coordinates with scroll_y=0.
+    // This avoids the y-straddling bug where a command starting above src_y_start (e.g. a
+    // large background rect or image) would be shifted to y=0 via saturating_sub, causing
+    // the wrong portion of its content to appear in the visible slice.
+    // We copy the backdrop into the visible rows only, render all commands (scroll_y=0),
+    // then blend only the visible rows back to the main buffer.
+    let ow = layer.width; // full layer width
+    let oh = layer.height; // full layer height — natural coordinate space
+
+    // Use checked_mul so pathological dimensions (which would overflow usize in release
+    // or panic in debug) are caught safely before any allocation attempt.
+    let Some(needed) = (ow as usize).checked_mul(oh as usize) else {
+        return;
+    };
+    // Note: we allocate the full layer.width × layer.height even when only visible_w × visible_h
+    // pixels are actually blended back to the screen. This is a deliberate trade-off: allocating
+    // only the visible slice and translating sub-command coordinates by -src_y_start would be
+    // more memory-efficient, but it reintroduces the y-straddling bug (commands that start above
+    // the visible window are clamped to y=0 via saturating_sub, showing the wrong content).
+    // The full-height approach keeps sub-commands at their natural layer-relative coordinates so
+    // the existing viewport culling in render_commands() handles out-of-view commands correctly.
+
+    // Safety guard: refuse to allocate an obviously pathological offscreen buffer.
+    // 4096×4096 (~16 MP) is well above any screen size we realistically support (~64MB max).
+    // A layer larger than this is almost certainly a bug in layout (e.g. height not clamped).
+    const MAX_OFFSCREEN_PIXELS: usize = 4096 * 4096;
+    if needed > MAX_OFFSCREEN_PIXELS {
+        // Degraded fallback: the layer is too large to allocate an offscreen buffer.
+        // Sub-commands are rendered directly into the main buffer WITHOUT applying
+        // layer.opacity — the element will appear fully opaque rather than at its
+        // declared opacity. This is a rare edge case (>4096×4096 px elements) and
+        // is preferable to silently dropping the element entirely.
+        // A production fix would tile the layer or use a clipped compositing path.
+        //
+        // Layer commands are layer-relative (rebased to origin 0,0 by rebase_commands at
+        // layout time). Pass scroll_y=0 so commands render at their natural layer-relative
+        // coordinates. Account for page scroll by adjusting offset_y by layer.y - scroll_y.
+        render_commands(
+            buffer,
+            buf_width,
+            buf_height,
+            offset_x.saturating_add(layer.x),
+            offset_y.saturating_add(layer.y).saturating_sub(scroll_y),
+            layer.height, // viewport for layer is its own height
+            0,            // layer-relative scroll = 0
+            &layer.commands,
+            page,
+            fonts,
+            scratch,
+            depth + 1,
+        );
+        return;
+    }
+
+    // Depth-indexed pool: scratch[depth] is the reusable offscreen Vec for this level.
+    // Nested DrawCommand::Layer calls use depth+1 so each nesting level has its own slot.
+    // After this frame, the Vec is returned to the pool with its capacity intact,
+    // so subsequent frames skip allocation entirely.
+    if scratch.len() <= depth {
+        scratch.resize_with(depth + 1, Vec::new);
+    }
+
+    // Take the offscreen Vec out of the pool temporarily.
+    // This gives us an exclusive &mut to `offscreen` while leaving `scratch` free to pass
+    // to render_commands for nested layers — no aliasing, no unsafe needed.
+    let mut offscreen = std::mem::take(&mut scratch[depth]);
+    offscreen.resize(needed, 0);
+
+    // Copy backdrop from the main framebuffer into the visible rows of the offscreen.
+    // Offscreen row (src_y_start + r) ↔ buffer row (dst_y + r), for r in 0..visible_h.
+    for row in 0..visible_h {
+        let buf_row = dst_y + row;
+        let off_row = src_y_start + row;
+        let buf_start = (buf_row * buf_width + dst_x) as usize;
+        let off_start = (off_row * ow + src_x_start) as usize;
+        let len = visible_w as usize;
+        if buf_start + len <= buffer.len() && off_start + len <= offscreen.len() {
+            offscreen[off_start..off_start + len]
+                .copy_from_slice(&buffer[buf_start..buf_start + len]);
+        }
+    }
+
+    // Render layer's sub-commands into the full-size offscreen buffer at natural coordinates.
+    // Sub-commands are layer-relative (rebased at layout time), so x/y offsets are 0.
+    // scroll_y = 0: commands render at their layer-relative y without any shift.
+    // scratch is free (offscreen was taken via mem::take), so nested layers can use it.
+    render_commands(
+        &mut offscreen,
+        ow,
+        oh,
+        0,  // x offset: sub-commands are layer-relative
+        0,  // y offset: sub-commands are layer-relative
+        oh, // viewport height = full layer height (all commands visible)
+        0,  // scroll_y = 0: render at natural layer-relative coordinates
+        &layer.commands,
+        page,
+        fonts,
+        scratch,
+        depth + 1, // nested layers use the next depth slot
+    );
+
+    // Blend the visible rows of the offscreen back onto the main buffer with opacity.
+    // Visible row r: offscreen row (src_y_start + r) → buffer row (dst_y + r).
+    // Read from src_x_start in the offscreen (horizontal clip offset).
+    let opacity = layer.opacity as u32;
+    let buf_end = buffer.len();
+    let off_end = offscreen.len();
+    for row in 0..visible_h {
+        let buf_row_start = (dst_y + row) as usize * buf_width as usize + dst_x as usize;
+        let off_row_start = (src_y_start + row) as usize * ow as usize + src_x_start as usize;
+        if buf_row_start + visible_w as usize > buf_end
+            || off_row_start + visible_w as usize > off_end
+        {
+            continue;
+        }
+        for col in 0..visible_w as usize {
+            let src = offscreen[off_row_start + col];
+            let dst_px = buffer[buf_row_start + col];
+            let r = ((src >> 16 & 0xFF) * opacity + (dst_px >> 16 & 0xFF) * (255 - opacity) + 127)
+                / 255;
+            let g =
+                ((src >> 8 & 0xFF) * opacity + (dst_px >> 8 & 0xFF) * (255 - opacity) + 127) / 255;
+            let b = ((src & 0xFF) * opacity + (dst_px & 0xFF) * (255 - opacity) + 127) / 255;
+            buffer[buf_row_start + col] = (r << 16) | (g << 8) | b;
+        }
+    }
+
+    // Return offscreen Vec to the pool so its capacity is reused next frame.
+    // Trim if dramatically over-sized: if the buffer is more than 4× larger than what
+    // this frame needed (and wastes >1 MB), release the excess so a previously-huge
+    // layer (e.g. a tall scrollable body) doesn't permanently inflate RAM after navigation.
+    const MAX_OVERAGE_PIXELS: usize = 256 * 1024; // 1 MB = 256K u32 pixels
+    if offscreen.capacity() > needed * 4 && offscreen.capacity() - needed > MAX_OVERAGE_PIXELS {
+        offscreen.shrink_to(needed * 2);
+    }
+    scratch[depth] = offscreen;
 }
 
 fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {
@@ -3674,6 +4073,137 @@ fn draw_rect(
         let row_offset = row as usize * width as usize;
         for column in x..max_x {
             buffer[row_offset + column as usize] = color;
+        }
+    }
+}
+
+fn draw_rounded_rect(
+    buffer: &mut [u32],
+    buf_w: u32,
+    buf_h: u32,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    radius: u32,
+    color: u32,
+) {
+    if radius == 0 || w == 0 || h == 0 {
+        draw_rect(buffer, buf_w, buf_h, x, y, w, h, color);
+        return;
+    }
+    let r = radius.min(w / 2).min(h / 2);
+    if r == 0 {
+        draw_rect(buffer, buf_w, buf_h, x, y, w, h, color);
+        return;
+    }
+
+    let x2 = x.saturating_add(w);
+    let y2 = y.saturating_add(h);
+    let cx_left = x.saturating_add(r);
+    let cx_right = x2.saturating_sub(r);
+    let cy_top = y.saturating_add(r);
+    let cy_bottom = y2.saturating_sub(r);
+    let r_sq = (r as i64) * (r as i64);
+
+    // Middle strip: full-width rows — no corner checks needed
+    if cy_top < cy_bottom {
+        draw_rect(
+            buffer,
+            buf_w,
+            buf_h,
+            x,
+            cy_top,
+            w,
+            cy_bottom - cy_top,
+            color,
+        );
+    }
+
+    // Top corner strip: rows y..cy_top
+    let py_end_top = cy_top.min(buf_h) as usize;
+    for py in (y.min(buf_h) as usize)..py_end_top {
+        let pv32 = py as u32;
+        // Left corner: x..cx_left
+        for px in (x.min(buf_w) as usize)..(cx_left.min(buf_w) as usize) {
+            let pu32 = px as u32;
+            let dx = cx_left.saturating_sub(pu32) as i64;
+            let dy = cy_top.saturating_sub(pv32) as i64;
+            if dx * dx + dy * dy <= r_sq {
+                let idx = py * buf_w as usize + px;
+                if idx < buffer.len() {
+                    buffer[idx] = color;
+                }
+            }
+        }
+        // Middle of row: cx_left..cx_right (always inside)
+        if cx_left < cx_right {
+            draw_rect(
+                buffer,
+                buf_w,
+                buf_h,
+                cx_left,
+                pv32,
+                cx_right - cx_left,
+                1,
+                color,
+            );
+        }
+        // Right corner: cx_right..x2
+        for px in (cx_right.min(buf_w) as usize)..(x2.min(buf_w) as usize) {
+            let pu32 = px as u32;
+            let dx = pu32.saturating_sub(cx_right) as i64;
+            let dy = cy_top.saturating_sub(pv32) as i64;
+            if dx * dx + dy * dy <= r_sq {
+                let idx = py * buf_w as usize + px;
+                if idx < buffer.len() {
+                    buffer[idx] = color;
+                }
+            }
+        }
+    }
+
+    // Bottom corner strip: rows cy_bottom..y2
+    let py_start_bot = cy_bottom.min(buf_h) as usize;
+    let py_end_bot = y2.min(buf_h) as usize;
+    for py in py_start_bot..py_end_bot {
+        let pv32 = py as u32;
+        // Left corner
+        for px in (x.min(buf_w) as usize)..(cx_left.min(buf_w) as usize) {
+            let pu32 = px as u32;
+            let dx = cx_left.saturating_sub(pu32) as i64;
+            let dy = pv32.saturating_sub(cy_bottom) as i64;
+            if dx * dx + dy * dy <= r_sq {
+                let idx = py * buf_w as usize + px;
+                if idx < buffer.len() {
+                    buffer[idx] = color;
+                }
+            }
+        }
+        // Middle of row
+        if cx_left < cx_right {
+            draw_rect(
+                buffer,
+                buf_w,
+                buf_h,
+                cx_left,
+                pv32,
+                cx_right - cx_left,
+                1,
+                color,
+            );
+        }
+        // Right corner
+        for px in (cx_right.min(buf_w) as usize)..(x2.min(buf_w) as usize) {
+            let pu32 = px as u32;
+            let dx = pu32.saturating_sub(cx_right) as i64;
+            let dy = pv32.saturating_sub(cy_bottom) as i64;
+            if dx * dx + dy * dy <= r_sq {
+                let idx = py * buf_w as usize + px;
+                if idx < buffer.len() {
+                    buffer[idx] = color;
+                }
+            }
         }
     }
 }
@@ -3725,20 +4255,176 @@ fn draw_scaled_image(
     draw_width: u32,
     draw_height: u32,
     image: &DecodedImage,
+    object_fit: ObjectFit,
+    object_position_x: u32,
+    object_position_y: u32,
 ) {
     if draw_width == 0 || draw_height == 0 || image.width == 0 || image.height == 0 {
         return;
     }
 
-    let max_x = x.saturating_add(draw_width).min(width);
-    let max_y = y.saturating_add(draw_height).min(height);
+    // Compute the effective source region and destination region based on object-fit
+    // src_* = region within the source image to sample
+    // render_* = region within the destination box to paint
+    let (src_x_off, src_y_off, src_w, src_h, render_x, render_y, render_w, render_h) =
+        match object_fit {
+            ObjectFit::Fill => {
+                // Stretch to fill: use full source, full dest
+                (
+                    0u32,
+                    0u32,
+                    image.width,
+                    image.height,
+                    0u32,
+                    0u32,
+                    draw_width,
+                    draw_height,
+                )
+            }
+            ObjectFit::None => {
+                // No scaling: use natural size, positioned by object-position
+                let natural_w = image.width.min(draw_width);
+                let natural_h = image.height.min(draw_height);
+                // If image is smaller than box, place at object-position
+                let rx = if draw_width > image.width {
+                    ((draw_width - image.width) as f32 * object_position_x as f32 / 100.0).round()
+                        as u32
+                } else {
+                    0
+                };
+                let ry = if draw_height > image.height {
+                    ((draw_height - image.height) as f32 * object_position_y as f32 / 100.0).round()
+                        as u32
+                } else {
+                    0
+                };
+                // source crop when image is larger than box
+                let sx = if image.width > draw_width {
+                    ((image.width - draw_width) as f32 * object_position_x as f32 / 100.0).round()
+                        as u32
+                } else {
+                    0
+                };
+                let sy = if image.height > draw_height {
+                    ((image.height - draw_height) as f32 * object_position_y as f32 / 100.0).round()
+                        as u32
+                } else {
+                    0
+                };
+                (sx, sy, natural_w, natural_h, rx, ry, natural_w, natural_h)
+            }
+            ObjectFit::Contain => {
+                // Scale uniformly to fit inside, with letterboxing
+                let scale_x = draw_width as f32 / image.width as f32;
+                let scale_y = draw_height as f32 / image.height as f32;
+                let scale = scale_x.min(scale_y);
+                let scaled_w = (image.width as f32 * scale).round().max(1.0) as u32;
+                let scaled_h = (image.height as f32 * scale).round().max(1.0) as u32;
+                let rx = ((draw_width.saturating_sub(scaled_w)) as f32 * object_position_x as f32
+                    / 100.0)
+                    .round() as u32;
+                let ry = ((draw_height.saturating_sub(scaled_h)) as f32 * object_position_y as f32
+                    / 100.0)
+                    .round() as u32;
+                (0, 0, image.width, image.height, rx, ry, scaled_w, scaled_h)
+            }
+            ObjectFit::Cover => {
+                // Scale uniformly to fill, cropping excess
+                let scale_x = draw_width as f32 / image.width as f32;
+                let scale_y = draw_height as f32 / image.height as f32;
+                let scale = scale_x.max(scale_y);
+                let scaled_w = (image.width as f32 * scale).round().max(1.0) as u32;
+                let scaled_h = (image.height as f32 * scale).round().max(1.0) as u32;
+                // compute source crop to match the visible portion
+                let excess_x = scaled_w.saturating_sub(draw_width);
+                let excess_y = scaled_h.saturating_sub(draw_height);
+                let sx_px = (excess_x as f32 * object_position_x as f32 / 100.0).round() as u32;
+                let sy_px = (excess_y as f32 * object_position_y as f32 / 100.0).round() as u32;
+                // convert back to source coords
+                let sx = (sx_px as f32 / scale).round() as u32;
+                let sy = (sy_px as f32 / scale).round() as u32;
+                let src_w_used = ((draw_width as f32 / scale).round() as u32)
+                    .min(image.width.saturating_sub(sx))
+                    .max(1);
+                let src_h_used = ((draw_height as f32 / scale).round() as u32)
+                    .min(image.height.saturating_sub(sy))
+                    .max(1);
+                (
+                    sx,
+                    sy,
+                    src_w_used,
+                    src_h_used,
+                    0,
+                    0,
+                    draw_width,
+                    draw_height,
+                )
+            }
+            ObjectFit::ScaleDown => {
+                // min(none, contain): use natural size if smaller, else contain
+                if image.width <= draw_width && image.height <= draw_height {
+                    // same as none (image fits naturally)
+                    let rx = ((draw_width - image.width) as f32 * object_position_x as f32 / 100.0)
+                        .round() as u32;
+                    let ry = ((draw_height - image.height) as f32 * object_position_y as f32
+                        / 100.0)
+                        .round() as u32;
+                    (
+                        0,
+                        0,
+                        image.width,
+                        image.height,
+                        rx,
+                        ry,
+                        image.width,
+                        image.height,
+                    )
+                } else {
+                    // same as contain
+                    let scale_x = draw_width as f32 / image.width as f32;
+                    let scale_y = draw_height as f32 / image.height as f32;
+                    let scale = scale_x.min(scale_y);
+                    let scaled_w = (image.width as f32 * scale).round().max(1.0) as u32;
+                    let scaled_h = (image.height as f32 * scale).round().max(1.0) as u32;
+                    let rx = ((draw_width.saturating_sub(scaled_w)) as f32
+                        * object_position_x as f32
+                        / 100.0)
+                        .round() as u32;
+                    let ry = ((draw_height.saturating_sub(scaled_h)) as f32
+                        * object_position_y as f32
+                        / 100.0)
+                        .round() as u32;
+                    (0, 0, image.width, image.height, rx, ry, scaled_w, scaled_h)
+                }
+            }
+        };
 
-    for dest_y in y..max_y {
-        let source_y = ((dest_y - y) as u64 * image.height as u64 / draw_height as u64) as u32;
+    if render_w == 0 || render_h == 0 || src_w == 0 || src_h == 0 {
+        return;
+    }
+
+    let dest_start_x = x.saturating_add(render_x);
+    let dest_start_y = y.saturating_add(render_y);
+    let max_dx = dest_start_x
+        .saturating_add(render_w)
+        .min(x.saturating_add(draw_width))
+        .min(width);
+    let max_dy = dest_start_y
+        .saturating_add(render_h)
+        .min(y.saturating_add(draw_height))
+        .min(height);
+
+    for dest_y in dest_start_y..max_dy {
+        let local_y = dest_y - dest_start_y;
+        let source_y = (src_y_off as u64 + local_y as u64 * src_h as u64 / render_h as u64) as u32;
+        let source_y = source_y.min(image.height.saturating_sub(1));
         let row_offset = dest_y as usize * width as usize;
 
-        for dest_x in x..max_x {
-            let source_x = ((dest_x - x) as u64 * image.width as u64 / draw_width as u64) as u32;
+        for dest_x in dest_start_x..max_dx {
+            let local_x = dest_x - dest_start_x;
+            let source_x =
+                (src_x_off as u64 + local_x as u64 * src_w as u64 / render_w as u64) as u32;
+            let source_x = source_x.min(image.width.saturating_sub(1));
             let source_index = ((source_y * image.width + source_x) * 4) as usize;
             let source = &image.rgba[source_index..source_index + 4];
             let alpha = source[3] as u32;
@@ -3791,7 +4477,7 @@ mod tests {
             &mut fonts,
         );
 
-        assert!(layout.texts.len() >= 2);
+        assert!(layout.texts().len() >= 2);
     }
 
     #[test]

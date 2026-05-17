@@ -2272,6 +2272,7 @@ fn install_browser_globals(context: &mut Context) {
             context,
         )
         .expect("innerWidth should be installable");
+    // Note: innerHeight is dynamically retrieved via inner_height_getter (which aligns with the CSS 800px vh base in css.rs).
     context
         .global_object()
         .define_property_or_throw(

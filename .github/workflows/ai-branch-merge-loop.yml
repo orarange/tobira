@@ -1,0 +1,153 @@
+name: AI Branch Auto-Merge
+
+# Trigger: when a push lands on codex/* or claude/* branches,
+# or on a schedule every 10 minutes to catch branches that were
+# already there when this workflow was first added.
+on:
+  push:
+    branches:
+      - "codex/**"
+      - "claude/**"
+  schedule:
+    # every 10 minutes – GitHub's minimum is 5 min but 10 is safer for quotas
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (do not actually merge)"
+        required: false
+        default: "false"
+
+jobs:
+  detect-branches:
+    name: Detect unmerged AI branches
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find unmerged codex/claude branches
+        id: find
+        run: |
+          git fetch --all --prune
+          # Get all remote branches matching codex/* or claude/*
+          BRANCHES=$(git branch -r \
+            | grep -E 'origin/(codex|claude)/' \
+            | sed 's|origin/||' \
+            | tr -d ' ' \
+            | while read br; do
+                # Skip branches already merged into origin/master
+                if git merge-base --is-ancestor "origin/$br" origin/master 2>/dev/null; then
+                  echo "skip: $br already merged" >&2
+                else
+                  echo "$br"
+                fi
+              done)
+
+          if [ -z "$BRANCHES" ]; then
+            echo "No unmerged AI branches found."
+            echo 'matrix={"branch":[]}' >> $GITHUB_OUTPUT
+          else
+            # Build JSON matrix
+            JSON=$(echo "$BRANCHES" | jq -R . | jq -sc '{"branch":.}')
+            echo "matrix=$JSON" >> $GITHUB_OUTPUT
+            echo "Branches to evaluate: $BRANCHES"
+          fi
+
+  evaluate-and-merge:
+    name: Evaluate ${{ matrix.branch }}
+    needs: detect-branches
+    if: ${{ fromJson(needs.detect-branches.outputs.matrix).branch[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-branches.outputs.matrix) }}
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Fetch branch
+        run: |
+          git fetch origin ${{ matrix.branch }}
+          git checkout -b ${{ matrix.branch }} origin/${{ matrix.branch }}
+
+      - name: Check for code changes
+        id: diff
+        run: |
+          FILES=$(git diff master...${{ matrix.branch }} --name-only | grep -E '\.(rs|toml|html|js|css)$' || true)
+          if [ -z "$FILES" ]; then
+            echo "has_code=false" >> $GITHUB_OUTPUT
+            echo "No code changes in ${{ matrix.branch }}"
+          else
+            echo "has_code=true" >> $GITHUB_OUTPUT
+            echo "Code changes:"
+            git diff master...${{ matrix.branch }} --stat
+          fi
+
+      - name: Run cargo test on branch
+        if: steps.diff.outputs.has_code == 'true'
+        id: test
+        run: |
+          cargo test 2>&1 | tee test-output.txt
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Merge into master (if tests passed)
+        if: >
+          steps.diff.outputs.has_code == 'true' &&
+          steps.test.outputs.exit_code == '0' &&
+          github.event.inputs.dry_run != 'true'
+        run: |
+          git config user.name  "merge-loop[bot]"
+          git config user.email "merge-loop@tobira"
+          git checkout master
+          git merge --no-ff ${{ matrix.branch }} \
+            -m "Auto-merge ${{ matrix.branch }} via AI branch merge loop
+
+Tests: passed
+Branch: ${{ matrix.branch }}
+Triggered by: ${{ github.event_name }}"
+          git push origin master
+
+      - name: Push nothing (dry-run mode)
+        if: >
+          steps.diff.outputs.has_code == 'true' &&
+          steps.test.outputs.exit_code == '0' &&
+          github.event.inputs.dry_run == 'true'
+        run: |
+          echo "[DRY-RUN] Would have merged ${{ matrix.branch }} into master"
+
+      - name: Comment on failure
+        if: >
+          steps.diff.outputs.has_code == 'true' &&
+          steps.test.outputs.exit_code != '0'
+        run: |
+          echo "::warning::Branch ${{ matrix.branch }} failed tests - not merged"
+          echo "=== Test output ==="
+          cat test-output.txt || true

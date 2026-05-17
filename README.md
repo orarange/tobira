@@ -16,49 +16,62 @@ Current capabilities:
   - `style=""` inline declarations
   - `link rel="stylesheet"` over `http://` and `https://`
 - Selector support for:
-  - tag selectors
-  - `.class`
-  - `#id`
-  - descendant selectors
-  - child selectors with `>`
+  - tag, `.class`, `#id`, `*` universal
+  - descendant (` `), child (`>`), adjacent sibling (`+`), general sibling (`~`)
+  - attribute selectors: `[attr]`, `[attr=val]`, `[attr*=val]`, `[attr^=val]`, `[attr$=val]`
+  - pseudo-classes: `:first-child`, `:last-child`, `:nth-child(an+b)`, `:not(...)`
+  - pseudo-elements: `::before`, `::after` (with `content`, `display`, `color`, `background-color`)
+  - chained and mixed combinator chains: `A + B + C`, `A + B > C`, `A ~ B > C`
 - Style support for:
-  - `display`
-  - `color`
-  - `background-color`
-  - `margin`
-  - `padding`
-  - `font-size`
-  - `font-weight`
-  - `text-align`
-  - `text-decoration`
-  - `white-space`
+  - box model: `display`, `margin`, `padding`, `width`, `max-width`, `min-width` (block height is derived from content flow; `height` applies to images and `overflow:hidden` clip boxes)
+  - color: `color`, `background-color`, `opacity`, `border-color`
+  - border: `border`, `border-width`, `border-style`, `border-radius`
+  - shadows: `box-shadow` (offset, blur, color)
+  - overflow: `overflow: hidden` (clips child content to element bounds)
+  - typography: `font-size`, `font-weight`, `font-style`, `font-family`, `text-align`, `text-decoration`, `text-transform`, `text-indent`, `letter-spacing`, `line-height`, `white-space`
+  - layout: `list-style-type`, `vertical-align`
+  - color values: hex (`#rgb`, `#rrggbb`, `#rgba`, `#rrggbbaa`), `rgb()`, `rgba()` (alpha blended), `hsl()`, `hsla()`, 140+ named colors
+  - CSS custom properties (`--var`) and `var(--name, fallback)` with `:root` variable inheritance
+  - `calc()` with correct operator precedence (`*`/`/` before `+`/`-`)
+  - viewport units: `vw`, `vh` (consistent 1280×800 base)
+  - `@media` with `max-width`, `min-width`, `screen`, `print`
   - `getComputedStyle(...)` snapshots for common layout-sensitive values
 - Lightweight GUI window with `winit`
 - Software rendering with `softbuffer`
 - System font rendering with TrueType / OpenType fonts via `fontdue`
 - Plain text CLI renderer with `--cli`
-- Custom title bar and address bar
-- Browser back/forward buttons and Alt+Left/Alt+Right history navigation, with scroll restoration for both same-document and full-document history entries
-- Clickable page links plus basic GUI form controls for `GET` submissions
-- Basic DOM event plumbing for page controls:
-  - bubbling `click`, `input`, `change`, and `submit`
-  - target-only `focus` and `blur`
-- Basic JavaScript execution with `boa_engine`
-- JS-visible viewport / focus / scroll state:
-  - `window.innerWidth` / `window.innerHeight`
-  - `window.scrollY` / `window.pageYOffset`
-  - `document.activeElement`
-  - `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
-- Lightweight storage and cookie support:
-  - `localStorage`
-  - `sessionStorage`
-  - `document.cookie`
-- Layout reflow cache keyed by viewport width and page revision
+- JavaScript execution via `boa_engine` & sandboxed DOM/API support:
+  - inline `<script>` and external `<script src>`
+  - block-list filter (allows most utility scripts; blocks known-dangerous APIs)
+  - `document.write()` / `document.writeln()` with recursive expansion
+  - `document.title`, `location.href`
+  - `window.crypto` stubs (`getRandomValues`, `randomUUID`)
+  - `URLSearchParams` stub
+  - `console.log()` / `warn()` / `error()`
+  - immediate `setTimeout(...)` fallback
+  - JS-visible viewport / focus / scroll state:
+    - `window.innerWidth` / `window.innerHeight`
+    - `window.scrollY` / `window.pageYOffset`
+    - `document.activeElement`
+    - `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
+  - Lightweight storage and cookie support:
+    - origin-scoped `localStorage` and `sessionStorage`
+    - `document.cookie` read/write and HTTP cookie propagation
+  - Network APIs:
+    - Promise-backed `fetch(...)` with response headers iteration
+    - minimal `XMLHttpRequest` supporting `getResponseHeader(...)` / `getAllResponseHeaders()`
+- Advanced Chrome & Browser GUI features:
+  - Custom title bar and address bar
+  - Browser back/forward buttons and `Alt+Left` / `Alt+Right` history navigation
+  - Scroll restoration for both same-document and full-document history entries
+  - Clickable page links plus basic GUI form controls for `GET` submissions
+  - Basic DOM event plumbing (bubbles `click`, `input`, `change`, `submit`; target-only `focus`, `blur`)
+  - Layout reflow cache keyed by viewport width and page revision
 - Lightweight mutable DOM support for:
-  - `document.querySelector(...)`
-  - `document.querySelectorAll(...)`
+  - `document.querySelector(...)` / `querySelectorAll(...)`
   - `document.getElementById(...)`
   - `document.createElement(...)`
+  - `document.createTextNode(...)`
   - `appendChild(...)`, `insertBefore(...)`, `remove()`
   - dynamic `document.body`, `document.head`, and `document.documentElement`
   - `hasAttribute(...)`, `getAttributeNames(...)`
@@ -67,18 +80,19 @@ Current capabilities:
   - `matches(...)`, `closest(...)`, `contains(...)`
   - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
   - `innerHTML`, `textContent`, `classList`, `id`, `className`
+  - reflected DOM properties such as `src`, `href`, `rel`, `type`, `name`, `value`, `content`
   - `classList.value`, `classList.length`, `classList.item(...)`, `classList.toString()`, `classList.replace(...)`
   - recursive `document.write(...)`
   - GUI-driven DOM attribute changes now refresh the live page snapshot, so reflow follows mutation notifications instead of waiting for a reload
   - inline `element.style` updates through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
+- Site-specific rendering paths for YouTube and Google
 
 Still missing:
 
 - Phase 6 CSS visual effects and advanced rendering
 - deeper DOM APIs and event coverage
 - tabs and richer navigation UI
-- session-history replay polish across full document loads still needs depth, but scroll restoration is now in place
-- incremental reflow for more DOM/style mutations
+- session-history replay polish across full document loads (basic scroll restoration is now in place)
 - deeper scroll restoration beyond the current full-document / same-document history support
 - inline style mutations still need broader coverage across the full CSS property matrix and computed-style parity
 - POST forms, complex widgets, and modern app-shell browser APIs
@@ -146,7 +160,6 @@ Local storage / cookie demo:
 python -m http.server 8765
 cargo run -- http://127.0.0.1:8765/demo/storage-demo.html
 ```
-
 ## GUI Controls
 
 - `Up` / `Down`: scroll
@@ -161,28 +174,18 @@ cargo run -- http://127.0.0.1:8765/demo/storage-demo.html
 
 ## Project Structure
 
-- `src/url.rs`
-  URL parsing and relative URL resolution
-- `src/site_state.rs`
-  Origin-scoped storage and cookie state shared across HTTP and JS
-- `src/http.rs`
-  HTTP fetch, response parsing, chunked decoding, redirect handling
-- `src/html.rs`
-  HTML tokenization and DOM-like tree building
-- `src/css.rs`
-  CSS parsing, selector matching, cascade, and computed styles
-- `src/font.rs`
-  System font loading, glyph rasterization, and text measurement helpers
-- `src/layout.rs`
-  Styled text layout and block rendering model
-- `src/browser.rs`
-  Page loading, stylesheet collection, and browser page model
-- `src/gui.rs`
-  `winit` event loop and software drawing
-- `src/render.rs`
-  Plain text fallback renderer for CLI mode
-- `src/main.rs`
-  Application entry point
+- `src/url.rs` — URL parsing and relative URL resolution
+- `src/site_state.rs` — Origin-scoped storage and cookie state shared across HTTP and JS
+- `src/http.rs` — HTTP fetch, response parsing, chunked decoding, redirect handling
+- `src/html.rs` — HTML tokenization and DOM-like tree building
+- `src/css.rs` — CSS parsing, selector matching, cascade, computed styles, `@media`, `calc()`, color parsing
+- `src/layout.rs` — Styled text layout, block rendering, tables, image placement, background/border drawing, link hitboxes
+- `src/font.rs` — System font loading, glyph rasterization, and text measurement helpers
+- `src/browser.rs` — Page loading pipeline, stylesheet collection, site-specific rewrites, YouTube/Google synthetic documents
+- `src/gui.rs` — `winit` event loop, address bar, input handling, software rendering
+- `src/js.rs` — Sandboxed JS execution, block-list filter, mutable DOM bridge, browser-ish stubs
+- `src/render.rs` — Plain text fallback renderer for CLI mode
+- `src/main.rs` — Application entry point
 
 ## Next Steps
 

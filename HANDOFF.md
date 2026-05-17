@@ -5,7 +5,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Handoff Rules
 
-- Read this file, `git status --short`, and `git log --oneline -n 20` before making assumptions.
+- Read this file, `git status --short`, and the latest `git log --oneline -n 20` before making assumptions.
 - Confirm the current branch with `git branch --show-current` before starting work.
 - Codex must stay on the active Codex branch listed below unless the user explicitly changes that rule.
 - Codex should use a dedicated worktree for the active Codex branch instead of sharing the user's main checkout.
@@ -18,28 +18,31 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Update the `Current Snapshot` section whenever the high-level state changes.
 - Append a short entry to `Session Log` whenever meaningful work is handed off or resumed.
 - Do not stage unrelated local helper artifacts unless the user explicitly asks for them.
-  Current known local-only artifacts:
+  Current local artifacts that are present but not part of the tracked repo are:
   `.claude/`, `.repomix/`, `copilot.md`, `gemini.md`, `repomix-output.xmlbrowser.xml`
+- **PR title** — When opening a pull request, always include the agent's name in the title.
+  Example: `[Claude] fix CSS calc() precedence` / `[Codex] add image lazy-loading`
 
 ## Current Snapshot
 
 - Date: `2026-05-17`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
+- Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
 - Workflow:
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `134` passing tests on `2026-05-17`
+  - `cargo test`: `157` passing tests on `2026-05-17`
   - `cargo build`: success on `2026-05-17`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
-  - CSS engine with:
+  - CSS engine with broader selector and expression support than the original README says
     - descendant / child selectors
     - attribute selectors
     - `:first-child`, `:last-child`, `:nth-child(...)`, `:not(...)`
-    - `@media`
+    - `@media` handling
     - `calc(...)`
     - `rgba(...)` blending
   - CSS Phase 5 baseline is treated as complete on the Claude `claude/phase5-css` branch; Codex should not duplicate the parser/layout engine and should treat Phase 6 as the remaining CSS surface.
@@ -76,13 +79,14 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `innerHTML`, `textContent`, `classList`, `id`, `className`
     - `classList.value`, `classList.length`, `classList.item(...)`, `classList.toString()`, `classList.replace(...)`
     - `element.attributes` as a live NamedNodeMap-style collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
+    - `document.write(...)` with recursive script expansion
+    - DOM mutations serialized back into the HTML pipeline after JS runs
     - reflected `value`, `src`, `href`, `rel`, `type`, `name`, `content`
-    - recursive `document.write(...)`
-  - JS runtime support for:
-    - Promise job flushing
-    - lightweight `fetch(...)`
-    - lightweight `XMLHttpRequest`
-    - response headers iteration plus XHR `getResponseHeader(...)` / `getAllResponseHeaders()`
+  - JS execution / runtime support for:
+    - dedicated larger-stack worker thread
+    - Promise job flushing (drained after top-level script eval via `context.run_jobs()`)
+    - lightweight `fetch(...)` with response headers iteration
+    - lightweight `XMLHttpRequest` with `getResponseHeader(...)` / `getAllResponseHeaders()`
     - loop-iteration runtime budget for runaway scripts
     - same-origin request and redirect guards
     - script-driven `location.href` follow-up navigation
@@ -99,8 +103,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - `getComputedStyle(...)` snapshots now expose common layout-sensitive values for DOM-driven callers
   - site-specific rendering paths for:
     - YouTube watch pages
-    - YouTube home shell fallback
-    - lightweight Google shell fallback
+    - YouTube home shell / cards / nudge UI
+    - lightweight Google shell
     - legacy frame/table-heavy pages such as the Abe Hiroshi site
   - generic YouTube home / non-watch pages now take a synthetic fast path before the heavy JS session so the app does not spin on the full app shell
   - generic `google.com` and `youtube.com` now try the real JS/HTML path before synthetic fallback
@@ -109,41 +113,46 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 ## Important Modules
 
 - `src/browser.rs`
-  Main page-loading pipeline, fallback heuristics, legacy page handling, site-specific rewrites.
+  Main page-loading pipeline, site-specific rewrites, legacy page handling, YouTube/Google synthetic documents.
 - `src/css.rs`
-  CSS parser, selector matching, cascade, `@media`, `calc(...)`, color parsing.
+  CSS parser, selector matching, computed styles, `@media`, `calc(...)`, color parsing.
 - `src/layout.rs`
-  Layout pipeline, text flow, tables, images, inline controls, hitbox generation.
+  Layout pipeline, text flow, tables, image placement, background drawing, link hitbox generation.
 - `src/gui.rs`
-  Custom chrome, address bar state, page control input handling, painting, hover/click navigation.
+  Custom chrome, address bar state, input handling, hover/click navigation, rendering integration.
 - `src/js.rs`
-  JS runtime policy, DOM bridge, fetch/XHR shims, navigation handling.
+  Sandboxed JS execution policy plus the mutable DOM bridge used during script execution.
+- `src/html.rs`
+  Hand-rolled HTML parser. Now preserves raw text for `script` / `style` / `title` / `textarea`, which matters for JS and CSS correctness.
 - `src/http.rs`
   HTTP/TLS fetch layer and browser-like request headers.
 - `src/site_state.rs`
   Shared origin-scoped storage and cookie registry used by HTTP and JS.
-- `src/html.rs`
-  Hand-rolled HTML parser with raw-text preservation for `script` / `style` / `title` / `textarea`.
 
 ## Recent Commit Landmarks
 
-- `7af71f3` dom traversal api implementation complete
-- `6981cea` dedicated codex worktree setup documentation complete
-- `c64f16a` event listener capture groundwork complete
-- `d864ed6` codex branch switch handoff update complete
-- `5952827` page form controls feature implementation complete
-- `c5266c1` copilot review round two fixes complete
-- `8cb6455` copilot followup cleanup fixes complete
-- `51b60ed` copilot review security fixes complete
-- `fd5c362` real js first host pipeline update complete
-- `d159cf0` dom backed javascript support implementation complete
-- `8751537` address bar clipboard support implementation complete
-- `18f2be6` copilot review runtime limit and fragment fixes complete
+- `1616499` mutation notifications and history scroll restoration implementation complete (Codex JS/Event capture)
+- `e2558bf` docs: update HANDOFF + CSS_ROADMAP for Phase 5 completion (Claude Phase 5 CSS)
+- `0e81ade` feat: Phase 5 Batch 6 — filter, ::placeholder/::selection, @supports/@layer, no-op props — PR #49
+- `737409a` feat: Phase 5 Batch 5 — min/max-content, fit-content(), sticky, cursor, pointer-events
+- `dccc1d1` feat: Phase 5 Batch 4 — CSS Grid layout (fr/repeat/auto-placement)
+- `b14996d` feat: Phase 5 Batch 3 — inline-flex, align-content, flex-flow, :checked/:disabled
+- `7ce1272` feat: Phase 5 Batch 2 — :hover/:focus/:active + element hitboxes + GUI re-layout
+- `de7dbb5` feat: Phase 5 Batch 1 — clamp/min/max, aspect-ratio, object-fit, content:attr()
+- `7af71f3` dom traversal api implementation complete (Codex JS/Event capture)
+- `0cf8113` viewport sync and active element support complete (Codex JS/Event)
+- `f51ddca` [Claude] fix: restore lost types, Copilot review fixes (form-context, clipping, offscreen, box-shadow) — PR #47 merged
 - `1df11f6` live input value sync implementation complete
-- `0cf8113` viewport sync and active element support complete
+- `c64f16a` event listener capture groundwork complete
+- `48f7141` Merge branch 'codex/codex' into master (resolved conflicts)
+- `4b2c68b` Claude/phase2 css (#41)
+- `91cc671` Merge branch `claude/modest-pascal-9bf652`
+- `5952827` page form controls feature implementation complete
+- `d159cf0` dom backed javascript support implementation complete
 
 ## Known Gaps / Likely Next Work
 
+- README capability list is partially stale; prefer this file for the latest snapshot.
 - JS support is still far from a full browser DOM / framework runtime.
 - GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics are in place, and `location.hash` plus `history.pushState(...)` / `replaceState(...)` now support soft navigation without a reload, while the rest of the option matrix and back/forward stack still need depth.
 - Native page input typing now syncs `value` into the JS DOM.
@@ -158,74 +167,78 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
-- `fetch(...)` / `XMLHttpRequest` remain intentionally conservative; cross-origin app shells are still blocked until a safer policy exists.
+- CSS Phase 5 is on PR #49 (`claude/phase5-css`); once merged, all Phase 5 features land in master.
+- CSS Phase 6 items remain: `transform: scale/rotate` rendering, `animation`/`@keyframes`, `transition`, `filter: blur()` rendering, `grid-template-areas`, RTL text.
+- JS support still needs storage/cookies, richer history/back-forward, and more DOM depth for app-shell sites.
 
 ## Useful Commands
 
 ```powershell
 cargo run
-cargo run -- https://www.google.com/
 cargo run -- https://www.youtube.com/
-cargo run -- --cli https://www.google.com/
-python -m http.server 8765
-cargo run -- http://127.0.0.1:8765/demo/forms-demo.html
-cargo run -- http://127.0.0.1:8765/demo/events-demo.html
+cargo run -- --cli https://www.youtube.com/
 cargo test
 cargo build
 git status --short
 git log --oneline -n 20
-git worktree list
+
+# AI branch merge loop (runs every 5 min, merges codex/* and claude/* if tests pass)
+.\scripts\merge-loop.ps1 -IntervalSeconds 300
+# Single cycle (dry-run preview)
+.\scripts\merge-loop.ps1 -Once -DryRun
 ```
 
 ## Session Log
 
 ### 2026-05-14 - Codex
 
-- Inspected the repo after a context gap and confirmed the project had already moved to the `tobira` name.
-- Added the original handoff file and linked it from `README.md`.
-- Reworked `src/js.rs` around a lightweight mutable DOM instead of mostly fake JS stubs.
-- Added DOM-backed support for selectors, element creation, child insertion/removal, `innerHTML`, `textContent`, `classList`, and recursive `document.write(...)`.
-- Added `demo/dom-demo.html` and `demo/dom-demo.js`.
-- Added address-bar clipboard support backed by the OS clipboard.
+- Inspected the repo after user said Claude had advanced implementation during a context gap.
+- Confirmed the repo has moved to the `tobira` name and the current branch head is `91cc671`.
+- Confirmed `cargo test` is green with `74` passing tests.
+- Added this handoff file and linked it from `README.md`.
+- Established the rule that this file should be updated on every handoff / resume.
 
-### 2026-05-15 - Codex (real JS-first pipeline)
+### 2026-05-14 - Codex (DOM / JS pass)
 
-- Cherry-picked the larger-stack JS worker, Promise job flushing, `fetch`, `XMLHttpRequest`, `createTextNode`, DOM property reflection, and script-driven navigation handling onto `codex/codex`.
-- Relaxed the browser pipeline so generic `google.com` and `youtube.com` try the real JS/HTML path first and only fall back when the post-script body is still effectively empty.
-- Addressed Copilot review rounds around same-origin checks, redirect blocking, request getter errors, and XHR bootstrap/error behavior.
-- Added `Url::shares_origin(...)`, limited HTTP fetches for JS, and regression coverage around same-origin request policy.
+- Reworked `src/js.rs` so script execution runs against a lightweight mutable DOM instead of mostly fake stubs.
+- Added DOM-backed support for selectors, element creation, child insertion/removal, `innerHTML`, `textContent`, `classList`, and ID/class mutation.
+- Changed `document.write(...)` handling to mutate the DOM and recursively execute script tags written by scripts.
+- Fixed a parsing correctness bug by teaching `src/html.rs` to keep raw-text contents for `script`, `style`, `title`, and `textarea`.
+- Verified the current state with `cargo test` (`77` passing tests) and `cargo build`.
 
-### 2026-05-15 - Codex (page form controls pass)
+### 2026-05-14 - Codex (DOM demo follow-up)
 
-- Promoted page inputs and buttons to first-class layout commands so the GUI can hit-test and paint them separately from static text.
-- Added native rendering for page text inputs and buttons, including focus border, caret, selection highlight, placeholder text, clipboard shortcuts, and IME placement.
-- Added basic `GET` form submission with relative action resolution and query-string encoding.
-- Added `demo/forms-demo.html` and regression tests for form-control emission and GET form URL building.
+- Added `demo/dom-demo.html` and `demo/dom-demo.js` to exercise the new DOM-backed JS path locally.
+- Updated `README.md` so the documented JS scope matches the current implementation better and includes the new DOM demo command.
 
-### 2026-05-15 - Codex (dedicated worktree setup)
+### 2026-05-14 - Codex (clipboard fix)
 
-- Moved the shared root checkout back to `master`.
-- Created a dedicated Codex worktree on branch `codex/codex`.
-- Future Codex implementation and review work should happen from that dedicated worktree so local file edits no longer collide with Claude's branch checkout or the user's main shell.
+- Added address-bar clipboard support backed by the OS clipboard via `arboard`.
+- `Ctrl+C`, `Ctrl+X`, and `Ctrl+V` now work against the current address-bar selection / insertion point.
+- Added focused tests for selected-text and cut-selection behavior in `src/gui.rs`.
 
-### 2026-05-15 - Codex (PR #25 follow-up fixes)
+### 2026-05-15 - Codex (parallel branch workflow)
 
-- Fixed the inline-control wrap branch in `src/layout.rs` and removed duplicate layout-time control rectangle painting so GUI controls render from a single source of truth.
-- Reduced page-form submission overhead to a single layout pass, fixed empty button-submission values, and surfaced unsupported non-GET form methods in the GUI status line.
-- Made `location.href` assignments resolve relative URLs against the immutable document URL for consistency with the same-origin security model.
-- Added regression coverage for same-origin URLs with explicit default ports and repeated `location.href` updates resolved from the original document URL.
+- Confirmed the current Codex branch is `codex/codex`.
+- Recorded the new workflow: Codex and Claude may implement in parallel on separate branches, with merge reconciliation handled later through GitHub Copilot / the user's preferred merge flow.
+- Future handoffs should always note the active branch before assuming current repo state.
 
-### 2026-05-16 - Codex (PR #29 Copilot follow-up)
+### 2026-05-15 - Codex (JS runtime foundation pass)
 
-- Replaced saturating form/control ID allocation with checked overflow guards so pathological layouts fail fast instead of silently reusing IDs.
-- Fixed `Url::resolve(...)` for fragment-only and query-only targets when the current URL already carries a fragment.
-- Added regression coverage for fragment-preserving GET form submissions and fragmented base-URL resolution.
-- Added a `boa_engine` loop-iteration runtime budget so runaway `for` / `while` scripts bail out with a JS error instead of hanging the browser worker indefinitely.
+- Moved `process_document_scripts` onto a dedicated larger-stack worker thread to reduce the chance of crashing on large bundles.
+- Raised script execution budgets and removed the old pattern-based prefilter that used to skip `fetch` / `XMLHttpRequest` scripts outright.
+- Added Promise job draining after top-level eval, Promise-backed `fetch`, and a minimal `XMLHttpRequest` object.
+- Added JS navigation propagation so `location.href` changes can trigger a follow-up page load during initial script processing.
+- Added DOM property reflection and `document.createTextNode()` support to improve dynamic script insertion and general DOM compatibility.
 
-### 2026-05-16 - Codex (JS roadmap)
+### 2026-05-15 - Copilot (merge-loop setup)
 
 - Added `JS_ROADMAP.md` as the living plan for taking JavaScript support from lightweight and useful to browser-grade.
 - Linked the roadmap from `README.md` so future sessions can find the priority order quickly.
+- Created `scripts/merge-loop.ps1` — a PowerShell loop that runs every N seconds, finds unmerged `codex/*` + `claude/*` branches, runs `cargo test`, and merges passing ones into master.
+  - Usage: `.\scripts\merge-loop.ps1 -IntervalSeconds 300` (default 5 min)
+  - Flags: `-Once` (single cycle), `-DryRun` (no actual commit/push)
+- Created `.github/workflows/ai-branch-merge-loop.yml` — GitHub Actions version that triggers on push to AI branches and on a 10-minute cron schedule.
 
 ### 2026-05-16 - Codex (event plumbing demo)
 
@@ -294,7 +307,68 @@ git worktree list
 
 - Current branch `codex/js-event-capture` is clean and pushed with the latest live input sync work.
 - PR #40 is the active merge target for the current JS/event progress checkpoint.
-- The next likely follow-up after merge is richer history/back-forward behavior and replay across document loads.
+- The next likely follow-up after merge is storage/cookies and richer history/back-forward behavior.
+
+### 2026-05-16 - Gemini (branch merge)
+
+- Merged `codex/js-event-capture` into master, resolving conflicts in HANDOFF.md, README.md, and src/browser.rs.
+- Also merging `claude/phase2-css` (position/z-index/flexbox) — in progress.
+
+### 2026-05-16 - Claude (CSS phase2 merge fix-up + Copilot review pass)
+
+- Fixed deep merge regressions introduced when `claude/phase2-css` was merged into master (`10e3399`):
+  - Restored `FormControlCommand` and `FormControlKind` type definitions that were lost in the merge.
+  - Re-unified `merge_fragment` (bad conflict resolution had split it into two fragments, leaving controls-extend outside any function).
+  - Fixed `layout_preformatted_fragments` Control arm (referenced undeclared variables from a different function).
+  - Fixed `LayoutContext` initialization (missing `..LayoutContext::default()`).
+  - Fixed `layout_block_element` / `layout_mixed_children` call sites (missing `current_form: None` argument).
+  - Fixed `browser.rs` test `ComputedStyle` literals (missing `effective_opacity` field).
+- Addressed 3 remaining Copilot issues flagged before the rate limit:
+  - `BoxShadow.color`: changed `u32` → `Option<u32>` (None = inherit `currentColor`).
+  - `TextCommand.line_height_px`: new field; `clip_commands_to_box` now clips on line height, not font size.
+  - `MAX_OFFSCREEN_PIXELS` in `gui.rs`: reduced from 8192×8192 (268 MB) to 4096×4096 (64 MB).
+- Ran 5 Copilot review rounds (PRs #42 → #43 → #44 → #46 → #47); each round fixed all flagged comments.
+  - Final PR #47 merged with zero Copilot comments.
+- `cargo test`: 134 passing, 0 failed.
+- `CSS_ROADMAP.md` was missing from master (was on `claude/phase2-css` only); PR #48 (`claude/add-css-roadmap`) adds it.
+
+### 2026-05-16 - Claude (Phase 5 CSS roadmap — full implementation)
+
+Implemented all Phase 5 CSS roadmap items across 6 batches on `claude/phase5-css` (PR #49).
+
+- **Batch 1** — CSS math + images:
+  - `clamp()`, `min()`, `max()` in all length contexts, including nested inside `calc()`
+  - `aspect-ratio` (milliratio u32 to keep `Eq`), applied in image layout
+  - `object-fit` / `object-position` with 5 rendering modes in `draw_scaled_image`
+  - `content: attr(name)` resolved from element attributes in `::before`/`::after`
+
+- **Batch 2** — Interactive pseudo-classes + element hitboxes:
+  - `:hover`, `:focus`, `:active` as real pseudo-classes threaded through the entire cascade
+  - `InteractiveState` struct passed into `build_styled_tree` + selector matching
+  - `ElementHitbox` emitted per block element → GUI hit-tests to find hovered node
+  - `BrowserPage.relayout()` + GUI re-renders only when hovered node changes
+
+- **Batch 3** — Flex extensions + form pseudo-classes:
+  - `display: inline-flex`, `align-content`, `flex-flow` shorthand
+  - `:checked`, `:disabled`, `:enabled` pseudo-classes
+
+- **Batch 4** — CSS Grid layout:
+  - Full `display: grid` / `display: inline-grid` with auto-placement engine
+  - `grid-template-columns/rows`, `fr` units (two-pass), `repeat()`, `span N`
+  - `grid-auto-rows/columns`, explicit line-number placement
+
+- **Batch 5** — Intrinsic sizing + sticky + cursor:
+  - `min-content`, `max-content`, `fit-content()` as `LengthValue` variants
+  - `position: sticky` lays out as relative (scroll-offset tracking deferred)
+  - `CursorKind` enum (14 variants), `pointer-events: none` gates hitboxes
+
+- **Batch 6** — Filter + pseudo-elements + parser stubs:
+  - `filter: blur(px)`, `brightness(f)`, `opacity(f)` parsed into dedicated fields
+  - `::placeholder`, `::selection` parsed; `compute_placeholder_style()` API
+  - `@supports` (always-true), `@layer` (name ignored), ~20 no-op properties
+
+- `cargo test`: 157 passing (was 134 at start of session), 0 failed.
+- CSS_ROADMAP.md updated: Phase 5 → ✅, Phase 6 future work documented.
 
 ### 2026-05-16 - Codex (storage and cookie support)
 
@@ -308,19 +382,23 @@ git worktree list
 - Added back/forward chrome buttons and `Alt+Left` / `Alt+Right` shortcuts.
 - Kept same-document soft navigation in sync with the browser history entry for the current page.
 
-### 2026-05-17 - Codex (DOM traversal APIs)
+### 2026-05-17 - Codex (DOM traversal & manipulation APIs)
 
 - Added `matches(...)`, `closest(...)`, and `contains(...)` to the DOM bridge so selector-driven event delegation code can walk the tree without special cases.
 - Added `firstElementChild`, `lastElementChild`, `previousElementSibling`, and `nextElementSibling` accessors for framework-style traversal.
-- Added a regression test that exercises selector matching, ancestor lookup, containment, and sibling traversal together on a nested DOM tree.
+- Added dynamic `document.body`, `document.head`, and `document.documentElement` getters to stay consistent as the DOM grows.
+- Extended `classList` with live helpers (`value`, `length`, `item(...)`, `toString()`, `replace(...)`, `toggle(...)`).
+- Added live NamedNodeMap-style `element.attributes` collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration.
+- Added `hasAttribute(...)`, `hasAttributes(...)`, `getAttributeNames(...)`, and `toggleAttribute(...)` to elements.
+- Added regression coverage for DOM traversal, sibling lookup, attributes collection, token list, and dynamic getters.
 
-### 2026-05-17 - Codex (attribute introspection)
+### 2026-05-17 - Codex (script-driven scroll & history scroll restore)
 
-- Added `hasAttribute(...)` and `getAttributeNames(...)` to the DOM bridge so scripts can inspect element attributes without special casing.
-- Kept the new work CSS-neutral and stayed on the `codex/js-event-capture` branch.
-- Updated the JS roadmap to put attribute/introspection helpers before harder browser gaps like history replay and reflow invalidation.
+- Added `window.scrollTo(...)`, `window.scrollBy(...)`, and node `scrollTop` setter support, wired back into GUI viewport scroll state.
+- Extended same-document and browser-level history entries to store and restore scroll positions on `history.back()` / `history.forward()`.
+- Added `demo/scroll-demo.html` so the new scroll APIs can be exercised manually.
 
-### 2026-05-17 - Codex (DOM traversal APIs)
+### 2026-05-17 - Codex (computed style, header and state APIs)
 
 - Added `matches(...)`, `closest(...)`, and `contains(...)` to the lightweight DOM bridge so event delegation code can inspect and climb the tree without special cases.
 - Added `firstElementChild`, `lastElementChild`, `previousElementSibling`, and `nextElementSibling` accessors so framework-style traversal paths can read the surrounding element structure.
