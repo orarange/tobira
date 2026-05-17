@@ -22,6 +22,7 @@ pub struct LayerCommand {
     pub width: u32,
     pub height: u32,
     pub opacity: u8,
+    pub blur_px: u32,  // 0 = no blur
     pub commands: Vec<DrawCommand>,
 }
 
@@ -897,8 +898,8 @@ fn layout_block_element(
     }
 
     if element.tag_name == "table" {
-        if element.style.opacity < 255 {
-            // Table with opacity: render into sub-context and wrap in a LayerCommand
+        if element.style.opacity < 255 || element.style.filter_blur_px > 0 {
+            // Table with opacity or blur: render into sub-context and wrap in a LayerCommand
             let mut sub_context = LayoutContext {
                 background_color: context.background_color,
                 ..LayoutContext::default()
@@ -916,6 +917,7 @@ fn layout_block_element(
                 width: width.max(1),
                 height: table_height,
                 opacity: element.style.opacity,
+                blur_px: element.style.filter_blur_px,
                 commands: sub_context.commands,
             }));
             context.links.extend(sub_context.links);
@@ -942,8 +944,9 @@ fn layout_block_element(
         .max(element.style.min_width);
     let background_top = *cursor_y;
 
-    // Detect stacking context: element has opacity < 255
-    if element.style.opacity < 255 {
+    // Detect stacking context: element has opacity < 255 or filter: blur()
+    let needs_layer = element.style.opacity < 255 || element.style.filter_blur_px > 0;
+    if needs_layer {
         layout_block_element_as_layer(
             element, outer_x, outer_width, background_top, cursor_y, context, images, fonts, current_form,
         );
@@ -1518,6 +1521,7 @@ fn layout_block_element_as_layer(
         width: outer_width.max(1),
         height: final_height,
         opacity: element.style.opacity,
+        blur_px: element.style.filter_blur_px,
         commands: sub_context.commands,
     }));
 
@@ -1576,6 +1580,7 @@ fn layout_image_element(
             width: draw_width,
             height: draw_height,
             opacity: element.style.opacity,
+            blur_px: 0,
             commands: vec![img_cmd],
         }));
     } else {
@@ -1850,6 +1855,7 @@ fn layout_table_element(
                 width: layer_w,
                 height: layer_h,
                 opacity: placement.cell.style.opacity,
+                blur_px: 0,
                 commands: layer_commands,
             }));
             // Links are content-relative; shift by cell position + padding/valign
@@ -2234,6 +2240,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             width: layer.width,
             height: layer.height,
             opacity: layer.opacity,
+            blur_px: layer.blur_px,
             commands: layer.commands.clone(),
         }),
     }
