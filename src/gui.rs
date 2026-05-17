@@ -3503,32 +3503,17 @@ fn render_commands(
                                 decoded,
                             );
                         } else {
-                            // Non-tiled: scaled/fitted image with proper scroll clipping
-                            let render_y_signed = offset_y as i32 + image.y as i32 - scroll_y as i32;
-                            let render_x_signed = offset_x as i32 + image.x as i32;
-
-                            // Skip if fully outside viewport
-                            if render_y_signed >= height as i32 || render_x_signed >= width as i32 {
-                                // skip
-                            } else if render_y_signed + image.height as i32 > 0 && render_x_signed + image.width as i32 > 0 {
-                                let clip_top = (-render_y_signed).max(0) as u32;
-                                let clip_left = (-render_x_signed).max(0) as u32;
-                                let draw_x = render_x_signed.max(0) as u32;
-                                let draw_y = render_y_signed.max(0) as u32;
-                                let draw_w = image.width.saturating_sub(clip_left).min(width.saturating_sub(draw_x));
-                                let draw_h = image.height.saturating_sub(clip_top).min(height.saturating_sub(draw_y));
-                                if draw_w > 0 && draw_h > 0 {
-                                    draw_scaled_image(
-                                        buffer, width, height,
-                                        draw_x, draw_y,
-                                        draw_w, draw_h,
-                                        decoded,
-                                        image.object_fit,
-                                        image.object_position_x,
-                                        image.object_position_y,
-                                    );
-                                }
-                            }
+                            let sx = offset_x as i32 + image.x as i32;
+                            let sy = offset_y as i32 + image.y as i32 - scroll_y as i32;
+                            draw_scaled_image(
+                                buffer, width, height,
+                                sx, sy,
+                                image.width, image.height,
+                                decoded,
+                                image.object_fit,
+                                image.object_position_x,
+                                image.object_position_y,
+                            );
                         }
                     }
                 }
@@ -4185,8 +4170,8 @@ fn draw_scaled_image(
     buffer: &mut [u32],
     width: u32,
     height: u32,
-    x: u32,
-    y: u32,
+    x: i32,
+    y: i32,
     draw_width: u32,
     draw_height: u32,
     image: &DecodedImage,
@@ -4282,20 +4267,41 @@ fn draw_scaled_image(
         return;
     }
 
-    let dest_start_x = x.saturating_add(render_x);
-    let dest_start_y = y.saturating_add(render_y);
-    let max_dx = dest_start_x.saturating_add(render_w).min(x.saturating_add(draw_width)).min(width);
-    let max_dy = dest_start_y.saturating_add(render_h).min(y.saturating_add(draw_height)).min(height);
+    // dest_start in global buffer coordinates (signed)
+    let dest_start_x_signed = x + render_x as i32;
+    let dest_start_y_signed = y + render_y as i32;
+
+    // Clip to buffer and draw-box bounds
+    let dest_end_x_signed = (dest_start_x_signed + render_w as i32)
+        .min(x + draw_width as i32)
+        .min(width as i32);
+    let dest_end_y_signed = (dest_start_y_signed + render_h as i32)
+        .min(y + draw_height as i32)
+        .min(height as i32);
+
+    // Actual buffer start (clamped to 0)
+    let dest_start_x = dest_start_x_signed.max(0) as u32;
+    let dest_start_y = dest_start_y_signed.max(0) as u32;
+    let max_dx = dest_end_x_signed.max(0) as u32;
+    let max_dy = dest_end_y_signed.max(0) as u32;
+
+    // How many dest rows/cols were skipped due to negative start (used to advance source)
+    let y_skip = (-dest_start_y_signed).max(0) as u32;
+    let x_skip = (-dest_start_x_signed).max(0) as u32;
+
+    if max_dx <= dest_start_x || max_dy <= dest_start_y {
+        return;
+    }
 
     for dest_y in dest_start_y..max_dy {
-        let local_y = dest_y - dest_start_y;
+        let local_y = (dest_y - dest_start_y) + y_skip; // includes skipped rows
         let source_y = (src_y_off as u64
             + local_y as u64 * src_h as u64 / render_h as u64) as u32;
         let source_y = source_y.min(image.height.saturating_sub(1));
         let row_offset = dest_y as usize * width as usize;
 
         for dest_x in dest_start_x..max_dx {
-            let local_x = dest_x - dest_start_x;
+            let local_x = (dest_x - dest_start_x) + x_skip; // includes skipped cols
             let source_x = (src_x_off as u64
                 + local_x as u64 * src_w as u64 / render_w as u64) as u32;
             let source_x = source_x.min(image.width.saturating_sub(1));
