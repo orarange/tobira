@@ -3954,6 +3954,11 @@ fn render_layer(
         depth + 1, // nested layers use the next depth slot
     );
 
+    // Apply filter: blur() if set
+    if layer.blur_px > 0 {
+        box_blur(&mut offscreen, ow, oh, layer.blur_px);
+    }
+
     // Blend the visible rows of the offscreen back onto the main buffer with opacity.
     // Visible row r: offscreen row (src_y_start + r) → buffer row (dst_y + r).
     // Read from src_x_start in the offscreen (horizontal clip offset).
@@ -3985,6 +3990,56 @@ fn render_layer(
         offscreen.shrink_to(needed * 2);
     }
     scratch[depth] = offscreen;
+}
+
+/// Apply a separable box blur of radius `r` pixels to `buf` (width x height).
+/// Uses a simple per-pixel averaging approach for correctness.
+fn box_blur(buf: &mut [u32], width: u32, height: u32, r: u32) {
+    if r == 0 || width == 0 || height == 0 {
+        return;
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let radius = r as usize;
+    let mut tmp = vec![0u32; buf.len()];
+
+    // Horizontal pass: buf -> tmp
+    for y in 0..h {
+        for x in 0..w {
+            let x_start = x.saturating_sub(radius);
+            let x_end = (x + radius + 1).min(w);
+            let count = (x_end - x_start) as u32;
+            let mut r_sum = 0u32;
+            let mut g_sum = 0u32;
+            let mut b_sum = 0u32;
+            for kx in x_start..x_end {
+                let p = buf[y * w + kx];
+                r_sum += (p >> 16) & 0xFF;
+                g_sum += (p >> 8) & 0xFF;
+                b_sum += p & 0xFF;
+            }
+            tmp[y * w + x] = ((r_sum / count) << 16) | ((g_sum / count) << 8) | (b_sum / count);
+        }
+    }
+
+    // Vertical pass: tmp -> buf
+    for y in 0..h {
+        for x in 0..w {
+            let y_start = y.saturating_sub(radius);
+            let y_end = (y + radius + 1).min(h);
+            let count = (y_end - y_start) as u32;
+            let mut r_sum = 0u32;
+            let mut g_sum = 0u32;
+            let mut b_sum = 0u32;
+            for ky in y_start..y_end {
+                let p = tmp[ky * w + x];
+                r_sum += (p >> 16) & 0xFF;
+                g_sum += (p >> 8) & 0xFF;
+                b_sum += p & 0xFF;
+            }
+            buf[y * w + x] = ((r_sum / count) << 16) | ((g_sum / count) << 8) | (b_sum / count);
+        }
+    }
 }
 
 fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {
