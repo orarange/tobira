@@ -2268,6 +2268,13 @@ fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_
         style.color = color;
     }
 
+    // <body background="..."> — annotate_resource_urls pre-resolves this to an absolute URL
+    // stored in data-scratch-background; wire it up as background_image_url so it gets
+    // fetched and drawn just like CSS background-image: url(...).
+    if let Some(bg_url) = element.attribute("data-scratch-background") {
+        style.background_image_url = Some(bg_url.to_string());
+    }
+
     if element.tag_name == "font" {
         if let Some(color) = element.attribute("color").and_then(parse_color) {
             style.color = color;
