@@ -974,11 +974,8 @@ fn layout_block_element(
         LengthValue::FitContent(max_px) => width.min(max_px),
     });
 
-    // Compute outer_width: explicit width takes priority; fall back to container-derived.
-    let outer_width = if let Some(ew) = explicit_width {
-        ew.min(element.style.max_width.unwrap_or(u32::MAX))
-          .max(element.style.min_width)
-    } else {
+    // Container-derived width (what the element would be without explicit width)
+    let container_derived_width = {
         let ml = if element.style.margin_left_auto { 0 } else { element.style.margin.left };
         let mr = if element.style.margin_right_auto { 0 } else { element.style.margin.right };
         width.saturating_sub(ml + mr)
@@ -986,12 +983,25 @@ fn layout_block_element(
              .max(element.style.min_width)
     };
 
-    // Compute outer_x: center when both margins are auto (classic margin:0 auto centering).
-    let outer_x = if element.style.margin_left_auto && element.style.margin_right_auto {
+    // Compute outer_width: only use explicit width when it actually constrains (is narrower).
+    // This prevents HTML width="" attributes from incorrectly shrinking table-allocated cells.
+    let (outer_width, width_is_constrained) = if let Some(ew) = explicit_width {
+        let clamped = ew.min(element.style.max_width.unwrap_or(u32::MAX))
+                        .max(element.style.min_width);
+        if clamped < container_derived_width {
+            (clamped, true)
+        } else {
+            (container_derived_width, false)
+        }
+    } else {
+        (container_derived_width, false)
+    };
+
+    // Compute outer_x: center when both margins are auto AND width is actually constrained.
+    let outer_x = if element.style.margin_left_auto && element.style.margin_right_auto && width_is_constrained {
         let total_margin = width.saturating_sub(outer_width);
         x.saturating_add(total_margin / 2)
-    } else if element.style.margin_right_auto {
-        // Only right is auto: left margin is fixed, right absorbs space.
+    } else if element.style.margin_right_auto && !element.style.margin_left_auto {
         x.saturating_add(element.style.margin.left)
     } else {
         x.saturating_add(element.style.margin.left)
