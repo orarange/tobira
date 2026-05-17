@@ -3503,19 +3503,32 @@ fn render_commands(
                                 decoded,
                             );
                         } else {
-                            draw_scaled_image(
-                                buffer,
-                                width,
-                                height,
-                                offset_x.saturating_add(image.x),
-                                offset_y.saturating_add(image.y.saturating_sub(scroll_y)),
-                                image.width,
-                                image.height,
-                                decoded,
-                                image.object_fit,
-                                image.object_position_x,
-                                image.object_position_y,
-                            );
+                            // Non-tiled: scaled/fitted image with proper scroll clipping
+                            let render_y_signed = offset_y as i32 + image.y as i32 - scroll_y as i32;
+                            let render_x_signed = offset_x as i32 + image.x as i32;
+
+                            // Skip if fully outside viewport
+                            if render_y_signed >= height as i32 || render_x_signed >= width as i32 {
+                                // skip
+                            } else if render_y_signed + image.height as i32 > 0 && render_x_signed + image.width as i32 > 0 {
+                                let clip_top = (-render_y_signed).max(0) as u32;
+                                let clip_left = (-render_x_signed).max(0) as u32;
+                                let draw_x = render_x_signed.max(0) as u32;
+                                let draw_y = render_y_signed.max(0) as u32;
+                                let draw_w = image.width.saturating_sub(clip_left).min(width.saturating_sub(draw_x));
+                                let draw_h = image.height.saturating_sub(clip_top).min(height.saturating_sub(draw_y));
+                                if draw_w > 0 && draw_h > 0 {
+                                    draw_scaled_image(
+                                        buffer, width, height,
+                                        draw_x, draw_y,
+                                        draw_w, draw_h,
+                                        decoded,
+                                        image.object_fit,
+                                        image.object_position_x,
+                                        image.object_position_y,
+                                    );
+                                }
+                            }
                         }
                     }
                 }

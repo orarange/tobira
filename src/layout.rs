@@ -1066,6 +1066,32 @@ fn layout_block_element(
         None
     };
 
+    // Insert background image placeholder BEFORE children so it renders behind them.
+    let bg_img_tile = matches!(element.style.background_repeat,
+        BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
+    let bg_img_object_fit = if bg_img_tile { ObjectFit::None } else {
+        match element.style.background_size {
+            BackgroundSize::Cover => ObjectFit::Cover,
+            BackgroundSize::Contain => ObjectFit::Contain,
+            BackgroundSize::Auto => ObjectFit::Fill,
+        }
+    };
+    let bg_image_cmd_idx: Option<usize> = element.style.background_image_url.as_ref().map(|url| {
+        let idx = context.commands.len();
+        context.commands.push(DrawCommand::Image(ImageCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1, // placeholder; updated after children
+            src: url.clone(),
+            object_fit: bg_img_object_fit,
+            object_position_x: element.style.background_position_x,
+            object_position_y: element.style.background_position_y,
+            tile: bg_img_tile,
+        }));
+        idx
+    });
+
     // Capture clip start BEFORE children are laid out, so overflow:hidden can correctly
     // filter commands added by children (even when there is no background rect).
     let clip_start_idx = context.commands.len();
@@ -1155,6 +1181,11 @@ fn layout_block_element(
             rect.height = background_height;
         }
     }
+    if let Some(idx) = bg_image_cmd_idx {
+        if let DrawCommand::Image(ref mut img) = context.commands[idx] {
+            img.height = background_height;
+        }
+    }
 
     // Emit gradient overlay if background_gradient is set
     if let Some(ref gradient) = element.style.background_gradient {
@@ -1170,31 +1201,6 @@ fn layout_block_element(
             border_radius: element.style.border_radius,
             angle_deg_x1000: gradient.angle_deg_x1000,
             stops,
-        }));
-    }
-
-    // Emit background image if background_image_url is set
-    if let Some(ref url) = element.style.background_image_url {
-        let tile = matches!(element.style.background_repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
-        let object_fit = if tile {
-            ObjectFit::None
-        } else {
-            match element.style.background_size {
-                BackgroundSize::Cover => ObjectFit::Cover,
-                BackgroundSize::Contain => ObjectFit::Contain,
-                BackgroundSize::Auto => ObjectFit::Fill,
-            }
-        };
-        context.commands.push(DrawCommand::Image(ImageCommand {
-            x: outer_x,
-            y: background_top,
-            width: outer_width.max(1),
-            height: background_height,
-            src: url.clone(),
-            object_fit,
-            object_position_x: element.style.background_position_x,
-            object_position_y: element.style.background_position_y,
-            tile,
         }));
     }
 
