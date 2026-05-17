@@ -493,6 +493,8 @@ pub struct ComputedStyle {
     pub color: Color,
     pub background_color: Option<Color>,
     pub margin: EdgeSizes,
+    pub margin_left_auto: bool,
+    pub margin_right_auto: bool,
     pub padding: EdgeSizes,
     pub width: Option<LengthValue>,
     pub height: Option<LengthValue>,
@@ -589,6 +591,8 @@ impl ComputedStyle {
             color: parent.map(|s| s.color).unwrap_or(DEFAULT_TEXT_COLOR),
             background_color: None,
             margin: default_margin(tag_name),
+            margin_left_auto: false,
+            margin_right_auto: false,
             padding: EdgeSizes::default(),
             width: None,
             height: None,
@@ -1716,9 +1720,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "margin" => {
-            if let Some(edges) = parse_box_shorthand(value, parent_font_size) {
-                style.margin = edges;
-            }
+            parse_margin_shorthand(style, value, parent_font_size);
         }
         "padding" => {
             if let Some(edges) = parse_box_shorthand(value, parent_font_size) {
@@ -1731,7 +1733,12 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "margin-right" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            let v = value.trim().to_ascii_lowercase();
+            if v == "auto" {
+                style.margin_right_auto = true;
+                style.margin.right = 0;
+            } else if let Some(v) = parse_length(value, parent_font_size) {
+                style.margin_right_auto = false;
                 style.margin.right = v;
             }
         }
@@ -1741,7 +1748,12 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "margin-left" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            let v = value.trim().to_ascii_lowercase();
+            if v == "auto" {
+                style.margin_left_auto = true;
+                style.margin.left = 0;
+            } else if let Some(v) = parse_length(value, parent_font_size) {
+                style.margin_left_auto = false;
                 style.margin.left = v;
             }
         }
@@ -3379,6 +3391,67 @@ fn parse_font_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size
         if let Some(ff) = parse_font_family(token) {
             style.font_family = ff;
         }
+    }
+}
+
+fn parse_margin_shorthand(style: &mut ComputedStyle, input: &str, parent_font_size: u32) {
+    // Reset auto flags
+    style.margin_left_auto = false;
+    style.margin_right_auto = false;
+
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    // Parse each token as length or auto (None means auto)
+    let parsed: Vec<Option<u32>> = tokens.iter()
+        .map(|t| {
+            if t.to_ascii_lowercase() == "auto" {
+                None // auto
+            } else {
+                parse_length(t, parent_font_size)
+            }
+        })
+        .collect();
+
+    // Apply CSS box shorthand rules (1/2/3/4 values)
+    // None means "auto" (0px, flag set separately)
+    let resolve = |v: Option<u32>| v.unwrap_or(0);
+    match parsed.as_slice() {
+        [all] => {
+            let v = resolve(*all);
+            style.margin = EdgeSizes::all(v);
+            if all.is_none() {
+                style.margin_left_auto = true;
+                style.margin_right_auto = true;
+            }
+        }
+        [vertical, horizontal] => {
+            style.margin.top = resolve(*vertical);
+            style.margin.bottom = resolve(*vertical);
+            style.margin.left = resolve(*horizontal);
+            style.margin.right = resolve(*horizontal);
+            if horizontal.is_none() {
+                style.margin_left_auto = true;
+                style.margin_right_auto = true;
+            }
+        }
+        [top, horizontal, bottom] => {
+            style.margin.top = resolve(*top);
+            style.margin.bottom = resolve(*bottom);
+            style.margin.left = resolve(*horizontal);
+            style.margin.right = resolve(*horizontal);
+            if horizontal.is_none() {
+                style.margin_left_auto = true;
+                style.margin_right_auto = true;
+            }
+        }
+        [top, right, bottom, left] => {
+            style.margin.top = resolve(*top);
+            style.margin.right = resolve(*right);
+            style.margin.bottom = resolve(*bottom);
+            style.margin.left = resolve(*left);
+            if left.is_none() { style.margin_left_auto = true; }
+            if right.is_none() { style.margin_right_auto = true; }
+        }
+        _ => {} // invalid, leave unchanged
     }
 }
 
@@ -5172,5 +5245,21 @@ mod tests {
         let div = find_first_element(&styled, "div").unwrap();
         // Just check it doesn't panic and the element is accessible
         assert_eq!(div.tag_name, "div");
+    }
+
+    #[test]
+    fn margin_auto_sets_auto_flags() {
+        // 5em at 16px = 80px; "auto" for horizontal → both auto flags set
+        let html = r#"<div style="margin: 5em auto;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.margin.top, 80, "5em at 16px base = 80px");
+        assert_eq!(div.style.margin.bottom, 80, "5em at 16px base = 80px");
+        assert_eq!(div.style.margin.left, 0, "auto resolves to 0 in parsed value");
+        assert_eq!(div.style.margin.right, 0, "auto resolves to 0 in parsed value");
+        assert!(div.style.margin_left_auto, "margin-left should be auto");
+        assert!(div.style.margin_right_auto, "margin-right should be auto");
     }
 }

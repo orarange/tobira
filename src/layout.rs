@@ -965,13 +965,38 @@ fn layout_block_element(
 
     *cursor_y = cursor_y.saturating_add(element.style.margin.top);
 
-    let outer_x = x.saturating_add(element.style.margin.left);
-    let raw_outer_width =
-        width.saturating_sub(element.style.margin.left + element.style.margin.right);
-    // Apply min/max-width
-    let outer_width = raw_outer_width
-        .min(element.style.max_width.unwrap_or(u32::MAX))
-        .max(element.style.min_width);
+    // Resolve explicit width from style.width (LengthValue → px)
+    let explicit_width: Option<u32> = element.style.width.map(|w| match w {
+        LengthValue::Pixels(px) => px,
+        LengthValue::Percent(pct) => (width as u64 * pct as u64 / 100).min(width as u64) as u32,
+        LengthValue::MinContent => 0,
+        LengthValue::MaxContent => width,
+        LengthValue::FitContent(max_px) => width.min(max_px),
+    });
+
+    // Compute outer_width: explicit width takes priority; fall back to container-derived.
+    let outer_width = if let Some(ew) = explicit_width {
+        ew.min(element.style.max_width.unwrap_or(u32::MAX))
+          .max(element.style.min_width)
+    } else {
+        let ml = if element.style.margin_left_auto { 0 } else { element.style.margin.left };
+        let mr = if element.style.margin_right_auto { 0 } else { element.style.margin.right };
+        width.saturating_sub(ml + mr)
+             .min(element.style.max_width.unwrap_or(u32::MAX))
+             .max(element.style.min_width)
+    };
+
+    // Compute outer_x: center when both margins are auto (classic margin:0 auto centering).
+    let outer_x = if element.style.margin_left_auto && element.style.margin_right_auto {
+        let total_margin = width.saturating_sub(outer_width);
+        x.saturating_add(total_margin / 2)
+    } else if element.style.margin_right_auto {
+        // Only right is auto: left margin is fixed, right absorbs space.
+        x.saturating_add(element.style.margin.left)
+    } else {
+        x.saturating_add(element.style.margin.left)
+    };
+
     let background_top = *cursor_y;
 
     // Detect stacking context: element has opacity < 255 or a filter effect
@@ -4590,5 +4615,35 @@ mod tests {
             "Expected brightness = 5000 (50%), got: {:?}",
             layers.iter().map(|l| l.brightness).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn block_with_explicit_width_is_constrained() {
+        let document = parse_document(r#"<div style="width:200px;background:red;">x</div>"#);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
+
+        let rects = layout.rects();
+        let bg = rects.iter().find(|r| r.color == 0xFF0000)
+            .expect("red background rect should exist");
+        assert_eq!(bg.width, 200, "div should be 200px wide, got {}", bg.width);
+    }
+
+    #[test]
+    fn margin_auto_centers_block_element() {
+        let document = parse_document(r#"<div style="width:200px;margin:0 auto;background:red;">x</div>"#);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
+
+        let rects = layout.rects();
+        let bg = rects.iter().find(|r| r.color == 0xFF0000)
+            .expect("red background rect should exist");
+        // (800 - 200) / 2 = 300
+        assert_eq!(bg.x, 300, "div should be centered at x=300, got {}", bg.x);
+        assert_eq!(bg.width, 200, "div width should be 200px");
     }
 }
