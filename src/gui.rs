@@ -3492,19 +3492,31 @@ fn render_commands(
                 }
                 if let Some(page) = page {
                     if let Some(decoded) = page.images.get(&image.src) {
-                        draw_scaled_image(
-                            buffer,
-                            width,
-                            height,
-                            offset_x.saturating_add(image.x),
-                            offset_y.saturating_add(image.y.saturating_sub(scroll_y)),
-                            image.width,
-                            image.height,
-                            decoded,
-                            image.object_fit,
-                            image.object_position_x,
-                            image.object_position_y,
-                        );
+                        if image.tile {
+                            // Tiled background: draw at natural size, repeated across element
+                            let sx = offset_x as i32 + image.x as i32;
+                            let sy = offset_y as i32 + image.y as i32 - scroll_y as i32;
+                            draw_tiled_image(
+                                buffer, width, height,
+                                sx, sy,
+                                image.width, image.height,
+                                decoded,
+                            );
+                        } else {
+                            draw_scaled_image(
+                                buffer,
+                                width,
+                                height,
+                                offset_x.saturating_add(image.x),
+                                offset_y.saturating_add(image.y.saturating_sub(scroll_y)),
+                                image.width,
+                                image.height,
+                                decoded,
+                                image.object_fit,
+                                image.object_position_x,
+                                image.object_position_y,
+                            );
+                        }
                     }
                 }
             }
@@ -4100,6 +4112,60 @@ fn draw_rect_outline(
         rect_height,
         color,
     );
+}
+
+/// Draw an image tiled at its natural pixel size to fill the region
+/// [x, x+draw_width) × [y, y+draw_height) in the buffer.
+/// x and y are signed so callers can pass scroll-adjusted coords that may be negative.
+fn draw_tiled_image(
+    buffer: &mut [u32],
+    buf_width: u32,
+    buf_height: u32,
+    x: i32,
+    y: i32,
+    draw_width: u32,
+    draw_height: u32,
+    image: &DecodedImage,
+) {
+    let tile_w = image.width as i32;
+    let tile_h = image.height as i32;
+    if tile_w == 0 || tile_h == 0 || draw_width == 0 || draw_height == 0 {
+        return;
+    }
+
+    let start_x = x.max(0) as u32;
+    let start_y = y.max(0) as u32;
+    let end_x = (x + draw_width as i32).max(0).min(buf_width as i32) as u32;
+    let end_y = (y + draw_height as i32).max(0).min(buf_height as i32) as u32;
+
+    for sy in start_y..end_y {
+        for sx in start_x..end_x {
+            // Compute offset within this tile using rem_euclid to handle negative x/y
+            let px = ((sx as i32 - x).rem_euclid(tile_w)) as u32;
+            let py = ((sy as i32 - y).rem_euclid(tile_h)) as u32;
+            let src_idx = (py * image.width + px) as usize * 4;
+            if src_idx + 3 >= image.rgba.len() {
+                continue;
+            }
+            let r = image.rgba[src_idx] as u32;
+            let g = image.rgba[src_idx + 1] as u32;
+            let b = image.rgba[src_idx + 2] as u32;
+            let a = image.rgba[src_idx + 3] as u32;
+            let dst_idx = (sy * buf_width + sx) as usize;
+            if a == 255 {
+                buffer[dst_idx] = (r << 16) | (g << 8) | b;
+            } else if a > 0 {
+                let bg = buffer[dst_idx];
+                let bg_r = (bg >> 16) & 0xFF;
+                let bg_g = (bg >> 8) & 0xFF;
+                let bg_b = bg & 0xFF;
+                let out_r = (r * a + bg_r * (255 - a)) / 255;
+                let out_g = (g * a + bg_g * (255 - a)) / 255;
+                let out_b = (b * a + bg_b * (255 - a)) / 255;
+                buffer[dst_idx] = (out_r << 16) | (out_g << 8) | out_b;
+            }
+        }
+    }
 }
 
 fn draw_scaled_image(

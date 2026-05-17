@@ -1,5 +1,5 @@
 use crate::css::{
-    BackgroundSize, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
+    BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
     FontFamilyKind, GridTrackSize, LengthValue, ObjectFit, Overflow, Position, FlexDirection,
     AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
     VerticalAlign, WhiteSpaceMode, apply_text_transform,
@@ -237,6 +237,7 @@ pub struct ImageCommand {
     pub object_fit: ObjectFit,
     pub object_position_x: u32,
     pub object_position_y: u32,
+    pub tile: bool,  // true = background-repeat tile at natural size
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1174,10 +1175,15 @@ fn layout_block_element(
 
     // Emit background image if background_image_url is set
     if let Some(ref url) = element.style.background_image_url {
-        let object_fit = match element.style.background_size {
-            BackgroundSize::Cover => ObjectFit::Cover,
-            BackgroundSize::Contain => ObjectFit::Contain,
-            BackgroundSize::Auto => ObjectFit::Fill,
+        let tile = matches!(element.style.background_repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
+        let object_fit = if tile {
+            ObjectFit::None
+        } else {
+            match element.style.background_size {
+                BackgroundSize::Cover => ObjectFit::Cover,
+                BackgroundSize::Contain => ObjectFit::Contain,
+                BackgroundSize::Auto => ObjectFit::Fill,
+            }
         };
         context.commands.push(DrawCommand::Image(ImageCommand {
             x: outer_x,
@@ -1188,6 +1194,7 @@ fn layout_block_element(
             object_fit,
             object_position_x: element.style.background_position_x,
             object_position_y: element.style.background_position_y,
+            tile,
         }));
     }
 
@@ -1578,10 +1585,15 @@ fn layout_block_element_as_layer(
 
     // Emit background image if background_image_url is set
     if let Some(ref url) = element.style.background_image_url {
-        let object_fit = match element.style.background_size {
-            BackgroundSize::Cover => ObjectFit::Cover,
-            BackgroundSize::Contain => ObjectFit::Contain,
-            BackgroundSize::Auto => ObjectFit::Fill,
+        let tile = matches!(element.style.background_repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
+        let object_fit = if tile {
+            ObjectFit::None
+        } else {
+            match element.style.background_size {
+                BackgroundSize::Cover => ObjectFit::Cover,
+                BackgroundSize::Contain => ObjectFit::Contain,
+                BackgroundSize::Auto => ObjectFit::Fill,
+            }
         };
         sub_context.commands.push(DrawCommand::Image(ImageCommand {
             x: outer_x,
@@ -1592,6 +1604,7 @@ fn layout_block_element_as_layer(
             object_fit,
             object_position_x: element.style.background_position_x,
             object_position_y: element.style.background_position_y,
+            tile,
         }));
     }
 
@@ -1729,6 +1742,7 @@ fn layout_image_element(
             object_fit: element.style.object_fit,
             object_position_x: element.style.object_position_x,
             object_position_y: element.style.object_position_y,
+            tile: false,
         });
         context.commands.push(DrawCommand::Layer(LayerCommand {
             x: draw_x,
@@ -1750,6 +1764,7 @@ fn layout_image_element(
             object_fit: element.style.object_fit,
             object_position_x: element.style.object_position_x,
             object_position_y: element.style.object_position_y,
+            tile: false,
         }));
     }
 
@@ -1999,10 +2014,15 @@ fn layout_table_element(
                 }));
             }
             if let Some(ref url) = placement.cell.style.background_image_url {
-                let object_fit = match placement.cell.style.background_size {
-                    BackgroundSize::Cover => ObjectFit::Cover,
-                    BackgroundSize::Contain => ObjectFit::Contain,
-                    BackgroundSize::Auto => ObjectFit::Fill,
+                let tile = matches!(placement.cell.style.background_repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
+                let object_fit = if tile {
+                    ObjectFit::None
+                } else {
+                    match placement.cell.style.background_size {
+                        BackgroundSize::Cover => ObjectFit::Cover,
+                        BackgroundSize::Contain => ObjectFit::Contain,
+                        BackgroundSize::Auto => ObjectFit::Fill,
+                    }
                 };
                 layer_commands.push(DrawCommand::Image(ImageCommand {
                     x: 0,
@@ -2013,6 +2033,7 @@ fn layout_table_element(
                     object_fit,
                     object_position_x: placement.cell.style.background_position_x,
                     object_position_y: placement.cell.style.background_position_y,
+                    tile,
                 }));
             }
             // Content commands are (0,0)-relative within the cell; offset by padding/valign
@@ -2093,10 +2114,15 @@ fn layout_table_element(
                 }));
             }
             if let Some(ref url) = placement.cell.style.background_image_url {
-                let object_fit = match placement.cell.style.background_size {
-                    BackgroundSize::Cover => ObjectFit::Cover,
-                    BackgroundSize::Contain => ObjectFit::Contain,
-                    BackgroundSize::Auto => ObjectFit::Fill,
+                let tile = matches!(placement.cell.style.background_repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
+                let object_fit = if tile {
+                    ObjectFit::None
+                } else {
+                    match placement.cell.style.background_size {
+                        BackgroundSize::Cover => ObjectFit::Cover,
+                        BackgroundSize::Contain => ObjectFit::Contain,
+                        BackgroundSize::Auto => ObjectFit::Fill,
+                    }
                 };
                 context.commands.push(DrawCommand::Image(ImageCommand {
                     x: cell_x,
@@ -2107,6 +2133,7 @@ fn layout_table_element(
                     object_fit,
                     object_position_x: placement.cell.style.background_position_x,
                     object_position_y: placement.cell.style.background_position_y,
+                    tile,
                 }));
             }
             merge_fragment(context, layout, content_x, content_y);
@@ -2427,6 +2454,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             object_fit: image.object_fit,
             object_position_x: image.object_position_x,
             object_position_y: image.object_position_y,
+            tile: image.tile,
         }),
         DrawCommand::Layer(layer) => DrawCommand::Layer(LayerCommand {
             x: layer.x.saturating_add(offset_x),
