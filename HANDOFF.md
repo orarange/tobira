@@ -10,6 +10,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Codex must stay on the active Codex branch listed below unless the user explicitly changes that rule.
 - Codex should use a dedicated worktree for the active Codex branch instead of sharing the user's main checkout.
 - Keep Codex changes isolated to the active Codex branch; Claude may work on its own branch and merge reconciliation happens later through GitHub Copilot or the user's preferred flow.
+- CSS boundary:
+  - treat the Claude `claude/phase5-css` branch as the owner of the CSS parser/layout baseline
+  - do not edit CSS-engine files or other Claude-owned CSS work by default
+  - if a JS task genuinely needs CSS-facing integration, keep the change minimal and non-destructive, open/update a PR, request Copilot review before broadening the diff, and log the exact touched files plus the reason in `change.md`
+  - read-only inspection of CSS files is fine; destructive or broad CSS edits are not
 - Update the `Current Snapshot` section whenever the high-level state changes.
 - Append a short entry to `Session Log` whenever meaningful work is handed off or resumed.
 - Do not stage unrelated local helper artifacts unless the user explicitly asks for them.
@@ -20,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-16`
+- Date: `2026-05-17`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
 - Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
@@ -28,8 +33,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `157` passing tests on `2026-05-16`
-  - `cargo build`: success on `2026-05-16`
+  - `cargo test`: `157` passing tests on `2026-05-17`
+  - `cargo build`: success on `2026-05-17`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -40,6 +45,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `@media` handling
     - `calc(...)`
     - `rgba(...)` blending
+  - CSS Phase 5 baseline is treated as complete on the Claude `claude/phase5-css` branch; Codex should not duplicate the parser/layout engine and should treat Phase 6 as the remaining CSS surface.
   - software-rendered GUI with custom title bar and address bar
   - blank startup page and direct URL entry
   - address bar editing shortcuts including `Ctrl+A`, `Ctrl+C`, `Ctrl+X`, and `Ctrl+V`
@@ -55,23 +61,46 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - page keyboard events:
     - focused page inputs receive bubbling `keydown` / `keyup`
     - key metadata includes `key`, `code`, modifier flags, and `repeat`
+  - page and viewport state now stay in sync through JS-facing accessors for:
+    - `window.innerWidth` / `window.innerHeight`
+    - `window.scrollY` / `window.pageYOffset`
+    - `document.activeElement`
+    - `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
   - page event listeners now support capture + bubbling, plus `once` listeners and capture-sensitive `removeEventListener(...)`
   - guarded JavaScript execution through `boa_engine`
   - lightweight mutable DOM bridge with:
     - `querySelector(...)`, `querySelectorAll(...)`, `getElementById(...)`
     - `createElement(...)`, `createTextNode(...)`
     - `appendChild(...)`, `insertBefore(...)`, `remove()`
+    - dynamic `document.body`, `document.head`, and `document.documentElement`
+    - `hasAttribute(...)`, `hasAttributes(...)`, `getAttributeNames(...)`, `toggleAttribute(...)`
+    - `matches(...)`, `closest(...)`, `contains(...)`
+    - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
     - `innerHTML`, `textContent`, `classList`, `id`, `className`
+    - `classList.value`, `classList.length`, `classList.item(...)`, `classList.toString()`, `classList.replace(...)`
+    - `element.attributes` as a live NamedNodeMap-style collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
     - `document.write(...)` with recursive script expansion
     - DOM mutations serialized back into the HTML pipeline after JS runs
-  - JS execution now runs inside a dedicated larger-stack worker thread
-  - Promise jobs are drained after top-level script eval via `context.run_jobs()`
-  - initial network-facing JS support:
-    - Promise-backed `fetch(...)`
-    - minimal `XMLHttpRequest` constructor / `open()` / `send()` / `onload`
-    - JS-triggered `location.href` / `assign()` / `replace()` can request a follow-up page load
-    - common DOM property reflection for `src`, `href`, `rel`, `type`, `name`, `value`, `content`
-  - local test pages for CSS, basic JS, and DOM mutation coverage under `demo/`
+    - reflected `value`, `src`, `href`, `rel`, `type`, `name`, `content`
+  - JS execution / runtime support for:
+    - dedicated larger-stack worker thread
+    - Promise job flushing (drained after top-level script eval via `context.run_jobs()`)
+    - lightweight `fetch(...)` with response headers iteration
+    - lightweight `XMLHttpRequest` with `getResponseHeader(...)` / `getAllResponseHeaders()`
+    - loop-iteration runtime budget for runaway scripts
+    - same-origin request and redirect guards
+    - script-driven `location.href` follow-up navigation
+    - origin-scoped `localStorage`, `sessionStorage`, and `document.cookie`
+  - browser chrome history controls for back/forward navigation across full document loads
+  - browser-level history entries now remember scroll positions and restore them on back/forward
+  - same-document history entries now expose `history.state` and dispatch `popstate` / `hashchange`
+  - same-document history back/forward now restores the stored scroll position for each entry
+  - layout cache invalidates on viewport width or page revision changes
+  - GUI-driven DOM attribute updates now push a fresh runtime snapshot back into the page, so mutation notifications can invalidate reflow immediately
+  - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, keyboard event logging, storage/cookies, and scroll control
+  - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
+  - inline `element.style` mutations now reflect through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
+  - `getComputedStyle(...)` snapshots now expose common layout-sensitive values for DOM-driven callers
   - site-specific rendering paths for:
     - YouTube watch pages
     - YouTube home shell / cards / nudge UI
@@ -94,15 +123,21 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   Hand-rolled HTML parser. Now preserves raw text for `script` / `style` / `title` / `textarea`, which matters for JS and CSS correctness.
 - `src/http.rs`
   HTTP/TLS fetch layer and browser-like request headers.
+- `src/site_state.rs`
+  Shared origin-scoped storage and cookie registry used by HTTP and JS.
 
 ## Recent Commit Landmarks
 
+- `1616499` mutation notifications and history scroll restoration implementation complete (Codex JS/Event capture)
+- `e2558bf` docs: update HANDOFF + CSS_ROADMAP for Phase 5 completion (Claude Phase 5 CSS)
 - `0e81ade` feat: Phase 5 Batch 6 — filter, ::placeholder/::selection, @supports/@layer, no-op props — PR #49
 - `737409a` feat: Phase 5 Batch 5 — min/max-content, fit-content(), sticky, cursor, pointer-events
 - `dccc1d1` feat: Phase 5 Batch 4 — CSS Grid layout (fr/repeat/auto-placement)
 - `b14996d` feat: Phase 5 Batch 3 — inline-flex, align-content, flex-flow, :checked/:disabled
 - `7ce1272` feat: Phase 5 Batch 2 — :hover/:focus/:active + element hitboxes + GUI re-layout
 - `de7dbb5` feat: Phase 5 Batch 1 — clamp/min/max, aspect-ratio, object-fit, content:attr()
+- `7af71f3` dom traversal api implementation complete (Codex JS/Event capture)
+- `0cf8113` viewport sync and active element support complete (Codex JS/Event)
 - `f51ddca` [Claude] fix: restore lost types, Copilot review fixes (form-context, clipping, offscreen, box-shadow) — PR #47 merged
 - `1df11f6` live input value sync implementation complete
 - `c64f16a` event listener capture groundwork complete
@@ -118,10 +153,14 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - JS support is still far from a full browser DOM / framework runtime.
 - GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics are in place, and `location.hash` plus `history.pushState(...)` / `replaceState(...)` now support soft navigation without a reload, while the rest of the option matrix and back/forward stack still need depth.
 - Native page input typing now syncs `value` into the JS DOM.
+- DOM traversal APIs now include `matches(...)`, `closest(...)`, `contains(...)`, and element sibling / child accessors for event delegation and framework-style code paths.
+- The richer `attributes` / `dataset` surface still needs deeper parity, even though `element.attributes` is now a live collection and `hasAttributes(...)` / `toggleAttribute(...)` now exist.
 - Framework-facing browser APIs still need a lot more depth.
-- History / back-forward behavior is not yet complete.
-- Modern app-shell sites still need more DOM APIs, cookies/storage, and CSS coverage.
-- CSS is still computed once up front instead of being rebuilt against the live window width.
+- History / back-forward replay still needs depth beyond the current scroll restoration work.
+- Script-driven scrolling now has basic window / DOM setter support, and full-document / same-document history scroll restoration is in place.
+- Modern app-shell sites still need more DOM APIs, richer history replay, and CSS Phase 6 visual effects / advanced rendering.
+- Incremental reflow still needs deeper invalidation for more DOM/style mutations.
+- The inline style bridge still needs broader CSS property coverage and more computed-style parity to be browser-grade, but the core CSS parser/layout baseline is already considered done on the Claude branch.
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
@@ -216,10 +255,38 @@ git log --oneline -n 20
 - Added a regression test that checks keyboard event metadata reaches JS listeners on the document.
 - Updated the living roadmap and demo copy to treat keyboard delivery as a completed milestone and the next phase as richer listener options / capture phase.
 
+### 2026-05-16 - Codex (viewport, focus, and scroll sync)
+
+- Wired GUI viewport size changes into the JS runtime so `window.innerWidth` / `window.innerHeight` stay current and `resize` listeners fire on actual browser resizes.
+- Added JS-visible focus state through `document.activeElement` and `document.hasFocus()`-style behavior for the currently focused page control.
+- Exposed `window.scrollY`, `window.pageYOffset`, and `scrollTop`-style DOM accessors, plus `scroll` events when the user scrolls the GUI.
+- Added regression coverage for viewport resize, focus / blur, and scroll event handling.
+
 ### 2026-05-16 - Codex (branch switch after merge)
 
 - Moved Codex work from `codex/codex` to a fresh branch, `codex/js-event-capture`, so the next JS/event slice can continue cleanly after the previous merge.
 - Keep future Codex implementation work on this branch unless the user explicitly asks to switch again.
+
+### 2026-05-16 - Codex (layout reflow cache)
+
+- Added a lightweight layout cache keyed by viewport width and page revision.
+- Invalidated cached layout when JS-driven DOM snapshots change the page content.
+- Updated the README, roadmap, and handoff notes to reflect the incremental reflow work.
+
+### 2026-05-16 - Codex (inline style bridge)
+
+- Added a native `element.style` bridge that reflects inline CSS through `cssText`, `setProperty(...)`, `getPropertyValue(...)`, and common style accessors.
+- Added a regression test that checks inline style mutations serialize back into the DOM snapshot.
+
+### 2026-05-16 - Codex (style property matrix expansion)
+
+- Expanded the inline style bridge to cover more text, size, and border-related properties that the current layout engine already understands.
+- Added regression coverage for the expanded style accessors and the browser-facing serialization path.
+
+### 2026-05-16 - Codex (CSS boundary clarification)
+
+- Confirmed on the Claude `claude/phase5-css` branch that the broad CSS parser/layout foundation should be treated as complete for this repo.
+- Reframed the remaining CSS work for Codex as Phase 6 visual effects / advanced rendering and JS-driven reflow integration, not parser/layout duplication.
 
 ### 2026-05-16 - Codex (capture listener groundwork)
 
@@ -299,3 +366,39 @@ Implemented all Phase 5 CSS roadmap items across 6 batches on `claude/phase5-css
 
 - `cargo test`: 157 passing (was 134 at start of session), 0 failed.
 - CSS_ROADMAP.md updated: Phase 5 → ✅, Phase 6 future work documented.
+
+### 2026-05-16 - Codex (storage and cookie support)
+
+- Added origin-scoped `localStorage` and `sessionStorage` backed by shared site state.
+- Added `document.cookie` getter/setter behavior and request/response cookie propagation in the HTTP layer.
+- Added `demo/storage-demo.html` so storage and cookie state can be exercised manually.
+
+### 2026-05-16 - Codex (browser history back/forward)
+
+- Added browser-level history tracking for full document loads.
+- Added back/forward chrome buttons and `Alt+Left` / `Alt+Right` shortcuts.
+- Kept same-document soft navigation in sync with the browser history entry for the current page.
+
+### 2026-05-17 - Codex (DOM traversal & manipulation APIs)
+
+- Added `matches(...)`, `closest(...)`, and `contains(...)` to the DOM bridge so selector-driven event delegation code can walk the tree without special cases.
+- Added `firstElementChild`, `lastElementChild`, `previousElementSibling`, and `nextElementSibling` accessors for framework-style traversal.
+- Added dynamic `document.body`, `document.head`, and `document.documentElement` getters to stay consistent as the DOM grows.
+- Extended `classList` with live helpers (`value`, `length`, `item(...)`, `toString()`, `replace(...)`, `toggle(...)`).
+- Added live NamedNodeMap-style `element.attributes` collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration.
+- Added `hasAttribute(...)`, `hasAttributes(...)`, `getAttributeNames(...)`, and `toggleAttribute(...)` to elements.
+- Added regression coverage for DOM traversal, sibling lookup, attributes collection, token list, and dynamic getters.
+
+### 2026-05-17 - Codex (script-driven scroll & history scroll restore)
+
+- Added `window.scrollTo(...)`, `window.scrollBy(...)`, and node `scrollTop` setter support, wired back into GUI viewport scroll state.
+- Extended same-document and browser-level history entries to store and restore scroll positions on `history.back()` / `history.forward()`.
+- Added `demo/scroll-demo.html` so the new scroll APIs can be exercised manually.
+
+### 2026-05-17 - Codex (computed style, header and state APIs)
+
+- Added `getComputedStyle(...)` snapshots exposing layout-sensitive color / font / box spacing.
+- Added response header iteration to fetch response and XHR `getResponseHeader(...)` / `getAllResponseHeaders()`.
+- Added `history.state` support and dispatched `popstate` on history transitions and `hashchange` on same-document fragments.
+- Made GUI-driven DOM attribute updates refresh the live snapshot to trigger immediate reflow invalidation.
+- Defined a clearer CSS boundary coordination policy to treat the Claude branch as the layout/parser owner.

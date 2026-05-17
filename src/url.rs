@@ -93,6 +93,18 @@ impl Url {
         }
     }
 
+    pub fn origin(&self) -> String {
+        let scheme = self.scheme.to_ascii_lowercase();
+        let host = self.host.to_ascii_lowercase();
+        if (self.scheme == "http" && self.port == 80)
+            || (self.scheme == "https" && self.port == 443)
+        {
+            format!("{scheme}://{host}")
+        } else {
+            format!("{scheme}://{host}:{}", self.port)
+        }
+    }
+
     pub fn shares_origin(&self, other: &Self) -> bool {
         self.scheme == other.scheme
             && self.port == other.port
@@ -229,5 +241,12 @@ mod tests {
         assert!(left.shares_origin(&same));
         assert!(left.shares_origin(&explicit_default_port));
         assert!(!left.shares_origin(&other_port));
+    }
+
+    #[test]
+    fn formats_origin_without_path() {
+        let url = Url::parse("https://Example.com:443/path?query#frag").unwrap();
+
+        assert_eq!(url.origin(), "https://example.com");
     }
 }

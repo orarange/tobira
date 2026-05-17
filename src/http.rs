@@ -11,6 +11,7 @@ use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use rustls_platform_verifier::ConfigVerifierExt;
 
 use crate::error::{BrowserError, Result};
+use crate::site_state;
 use crate::url::Url;
 
 const MAX_REDIRECTS: usize = 5;
@@ -23,6 +24,7 @@ pub struct HttpResponse {
     pub status_code: u16,
     pub reason_phrase: String,
     pub headers: HashMap<String, String>,
+    pub set_cookie_headers: Vec<String>,
     pub body: Vec<u8>,
 }
 
@@ -64,9 +66,12 @@ fn fetch_inner(
     tcp_stream.set_read_timeout(Some(Duration::from_secs(20)))?;
     tcp_stream.set_write_timeout(Some(Duration::from_secs(20)))?;
     let mut stream = open_stream(url, tcp_stream)?;
+    let cookie_header = site_state::cookie_header_for_url(url)
+        .map(|value| format!("Cookie: {value}\r\n"))
+        .unwrap_or_default();
 
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8\r\nAccept-Language: ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: gzip, deflate, br\r\nCache-Control: no-cache\r\nPragma: no-cache\r\nConnection: close\r\nUpgrade-Insecure-Requests: 1\r\nSec-CH-UA: \"Chromium\";v=\"136\", \"Google Chrome\";v=\"136\", \"Not/A)Brand\";v=\"99\"\r\nSec-CH-UA-Mobile: ?0\r\nSec-CH-UA-Platform: \"Windows\"\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8\r\nAccept-Language: ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: gzip, deflate, br\r\nCache-Control: no-cache\r\nPragma: no-cache\r\nConnection: close\r\nUpgrade-Insecure-Requests: 1\r\nSec-CH-UA: \"Chromium\";v=\"136\", \"Google Chrome\";v=\"136\", \"Not/A)Brand\";v=\"99\"\r\nSec-CH-UA-Mobile: ?0\r\nSec-CH-UA-Platform: \"Windows\"\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\n{cookie_header}\r\n",
         url.path,
         url.host_header(),
         USER_AGENT
@@ -80,6 +85,7 @@ fn fetch_inner(
     )?;
 
     let response = parse_response_with_limits(url, &response_bytes, max_body_bytes)?;
+    site_state::apply_response_set_cookie_headers(url, &response.set_cookie_headers);
 
     if is_redirect(response.status_code) {
         if let Some(location) = response.header("location") {
@@ -132,9 +138,15 @@ fn parse_response_with_limits(
     let reason_phrase = status_parts.next().unwrap_or("").to_string();
 
     let mut headers = HashMap::new();
+    let mut set_cookie_headers = Vec::new();
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+            let name = name.trim().to_ascii_lowercase();
+            let value = value.trim().to_string();
+            if name == "set-cookie" {
+                set_cookie_headers.push(value.clone());
+            }
+            headers.insert(name, value);
         }
     }
 
@@ -158,6 +170,7 @@ fn parse_response_with_limits(
         status_code,
         reason_phrase,
         headers,
+        set_cookie_headers,
         body,
     })
 }

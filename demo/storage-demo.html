@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Storage and Cookie Demo</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 32px;
+      background: #f6f3ea;
+      color: #24324a;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 36px;
+    }
+
+    .panel {
+      background: #fff;
+      border: 1px solid #d8d1bf;
+      border-radius: 12px;
+      padding: 20px;
+      margin-top: 20px;
+      box-shadow: 0 10px 24px rgba(36, 50, 74, 0.08);
+    }
+
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 16px;
+      background: #24324a;
+      color: #fff;
+      cursor: pointer;
+    }
+
+    code {
+      background: #f1ede3;
+      padding: 0 4px;
+      border-radius: 4px;
+    }
+
+    pre {
+      background: #111827;
+      color: #f8fafc;
+      border-radius: 12px;
+      padding: 16px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <h1>Storage and Cookie Demo</h1>
+  <p>This page exercises <code>localStorage</code>, <code>sessionStorage</code>, and <code>document.cookie</code>.</p>
+
+  <div class="panel">
+    <div class="row">
+      <button id="set-storage">Set storage</button>
+      <button id="read-storage">Read storage</button>
+      <button id="clear-storage">Clear storage</button>
+    </div>
+    <div class="row">
+      <button id="set-cookie">Set cookie</button>
+      <button id="read-cookie">Read cookie</button>
+      <button id="clear-cookie">Clear cookie</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <strong>State</strong>
+    <pre id="output">Ready.</pre>
+  </div>
+
+  <script>
+    const KEY = "tobira-demo";
+    const COOKIE = "tobira_demo_cookie";
+    const output = document.getElementById("output");
+
+    function render() {
+      output.textContent = [
+        `localStorage.length = ${localStorage.length}`,
+        `localStorage.getItem(KEY) = ${localStorage.getItem(KEY)}`,
+        `sessionStorage.getItem(KEY) = ${sessionStorage.getItem(KEY)}`,
+        `document.cookie = ${document.cookie || "(empty)"}`,
+      ].join("\n");
+    }
+
+    document.getElementById("set-storage").addEventListener("click", () => {
+      localStorage.setItem(KEY, "local-value");
+      sessionStorage.setItem(KEY, "session-value");
+      render();
+    });
+
+    document.getElementById("read-storage").addEventListener("click", render);
+
+    document.getElementById("clear-storage").addEventListener("click", () => {
+      localStorage.removeItem(KEY);
+      sessionStorage.removeItem(KEY);
+      render();
+    });
+
+    document.getElementById("set-cookie").addEventListener("click", () => {
+      document.cookie = `${COOKIE}=cookie-value; path=/`;
+      render();
+    });
+
+    document.getElementById("read-cookie").addEventListener("click", render);
+
+    document.getElementById("clear-cookie").addEventListener("click", () => {
+      document.cookie = `${COOKIE}=; path=/; max-age=0`;
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>

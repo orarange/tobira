@@ -35,32 +35,67 @@ Current capabilities:
   - `calc()` with correct operator precedence (`*`/`/` before `+`/`-`)
   - viewport units: `vw`, `vh` (consistent 1280×800 base)
   - `@media` with `max-width`, `min-width`, `screen`, `print`
+  - `getComputedStyle(...)` snapshots for common layout-sensitive values
 - Lightweight GUI window with `winit`
 - Software rendering with `softbuffer`
 - System font rendering with TrueType / OpenType fonts via `fontdue`
 - Plain text CLI renderer with `--cli`
-- JavaScript execution via `boa_engine`:
+- JavaScript execution via `boa_engine` & sandboxed DOM/API support:
   - inline `<script>` and external `<script src>`
   - block-list filter (allows most utility scripts; blocks known-dangerous APIs)
   - `document.write()` / `document.writeln()` with recursive expansion
   - `document.title`, `location.href`
   - `window.crypto` stubs (`getRandomValues`, `randomUUID`)
   - `URLSearchParams` stub
-  - `document.cookie` read stub
   - `console.log()` / `warn()` / `error()`
   - immediate `setTimeout(...)` fallback
+  - JS-visible viewport / focus / scroll state:
+    - `window.innerWidth` / `window.innerHeight`
+    - `window.scrollY` / `window.pageYOffset`
+    - `document.activeElement`
+    - `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
+  - Lightweight storage and cookie support:
+    - origin-scoped `localStorage` and `sessionStorage`
+    - `document.cookie` read/write and HTTP cookie propagation
+  - Network APIs:
+    - Promise-backed `fetch(...)` with response headers iteration
+    - minimal `XMLHttpRequest` supporting `getResponseHeader(...)` / `getAllResponseHeaders()`
+- Advanced Chrome & Browser GUI features:
+  - Custom title bar and address bar
+  - Browser back/forward buttons and `Alt+Left` / `Alt+Right` history navigation
+  - Scroll restoration for both same-document and full-document history entries
+  - Clickable page links plus basic GUI form controls for `GET` submissions
+  - Basic DOM event plumbing (bubbles `click`, `input`, `change`, `submit`; target-only `focus`, `blur`)
+  - Layout reflow cache keyed by viewport width and page revision
 - Lightweight mutable DOM support for:
   - `document.querySelector(...)` / `querySelectorAll(...)`
   - `document.getElementById(...)`
   - `document.createElement(...)`
   - `document.createTextNode(...)`
   - `appendChild(...)`, `insertBefore(...)`, `remove()`
+  - dynamic `document.body`, `document.head`, and `document.documentElement`
+  - `hasAttribute(...)`, `getAttributeNames(...)`
+  - `toggleAttribute(...)`
+  - `element.attributes` as a live NamedNodeMap-style collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
+  - `matches(...)`, `closest(...)`, `contains(...)`
+  - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
   - `innerHTML`, `textContent`, `classList`, `id`, `className`
-  - reflected DOM properties such as `src`, `href`, `type`, and `value`
+  - reflected DOM properties such as `src`, `href`, `rel`, `type`, `name`, `value`, `content`
+  - `classList.value`, `classList.length`, `classList.item(...)`, `classList.toString()`, `classList.replace(...)`
   - recursive `document.write(...)`
-  - Promise-backed `fetch(...)`
-  - minimal `XMLHttpRequest`
+  - GUI-driven DOM attribute changes now refresh the live page snapshot, so reflow follows mutation notifications instead of waiting for a reload
+  - inline `element.style` updates through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
 - Site-specific rendering paths for YouTube and Google
+
+Still missing:
+
+- Phase 6 CSS visual effects and advanced rendering
+- deeper DOM APIs and event coverage
+- tabs and richer navigation UI
+- session-history replay polish across full document loads (basic scroll restoration is now in place)
+- deeper scroll restoration beyond the current full-document / same-document history support
+- inline style mutations still need broader coverage across the full CSS property matrix and computed-style parity
+- POST forms, complex widgets, and modern app-shell browser APIs
 
 ## Run
 
@@ -98,6 +133,33 @@ python -m http.server 8765
 cargo run -- http://127.0.0.1:8765/demo/dom-demo.html
 ```
 
+Local forms demo:
+
+```bash
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/forms-demo.html
+```
+
+Local event demo:
+
+```bash
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/events-demo.html
+```
+
+Local scroll demo:
+
+```bash
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/scroll-demo.html
+```
+
+Local storage / cookie demo:
+
+```bash
+python -m http.server 8765
+cargo run -- http://127.0.0.1:8765/demo/storage-demo.html
+```
 ## GUI Controls
 
 - `Up` / `Down`: scroll
@@ -105,19 +167,21 @@ cargo run -- http://127.0.0.1:8765/demo/dom-demo.html
 - `Home` / `End`: jump to top or bottom
 - `R`: reload
 - `Ctrl+L`: focus the address bar
-- `Ctrl+A`: select all text in the address bar
-- `Ctrl+C` / `Ctrl+X` / `Ctrl+V`: copy, cut, and paste inside the address bar
-- `Esc`: quit
+- `Ctrl+A`: select all text in the address bar or a focused page input
+- `Ctrl+C` / `Ctrl+X` / `Ctrl+V`: copy, cut, and paste inside the address bar or a focused page input
+- `Alt+Left` / `Alt+Right`: browser back and forward
+- `Esc`: blur a focused page input, otherwise quit
 
 ## Project Structure
 
 - `src/url.rs` — URL parsing and relative URL resolution
+- `src/site_state.rs` — Origin-scoped storage and cookie state shared across HTTP and JS
 - `src/http.rs` — HTTP fetch, response parsing, chunked decoding, redirect handling
 - `src/html.rs` — HTML tokenization and DOM-like tree building
 - `src/css.rs` — CSS parsing, selector matching, cascade, computed styles, `@media`, `calc()`, color parsing
-- `src/layout.rs` — Layout pipeline, text flow, tables, image placement, background/border drawing, link hitboxes
-- `src/font.rs` — System font loading, glyph rasterization, text measurement
-- `src/browser.rs` — Page loading pipeline, site-specific rewrites, YouTube/Google synthetic documents
+- `src/layout.rs` — Styled text layout, block rendering, tables, image placement, background/border drawing, link hitboxes
+- `src/font.rs` — System font loading, glyph rasterization, and text measurement helpers
+- `src/browser.rs` — Page loading pipeline, stylesheet collection, site-specific rewrites, YouTube/Google synthetic documents
 - `src/gui.rs` — `winit` event loop, address bar, input handling, software rendering
 - `src/js.rs` — Sandboxed JS execution, block-list filter, mutable DOM bridge, browser-ish stubs
 - `src/render.rs` — Plain text fallback renderer for CLI mode
@@ -129,8 +193,8 @@ The living JavaScript roadmap is in [JS_ROADMAP.md](JS_ROADMAP.md).
 
 Short version:
 
-1. Add storage, cookies, and richer history/back-forward behavior
-2. Improve networking semantics and reflow after DOM mutation
+1. Finish richer history/back-forward behavior and document-load replay
+2. Improve networking semantics and incremental reflow after DOM mutation
 3. Validate against Google, YouTube, and other app-shell sites
 
 ## JavaScript Scope
@@ -140,19 +204,29 @@ Current JS support is intentionally small:
 - inline `<script>`
 - external `<script src>`
 - `document.write()` / `document.writeln()`
+- `localStorage`, `sessionStorage`, and `document.cookie`
 - `document.title`
 - `document.querySelector(...)` / `querySelectorAll(...)`
 - `document.getElementById(...)`
 - `document.createElement(...)`
 - `appendChild(...)` / `insertBefore(...)` / `remove()`
+- `hasAttribute(...)` / `getAttributeNames(...)`
+- `toggleAttribute(...)`
+- `matches(...)`, `closest(...)`, `contains(...)`
+- `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
 - `innerHTML`, `textContent`, `classList`, `id`, `className`
+- `classList.value`, `classList.length`, `classList.item(...)`, `classList.toString()`, `classList.replace(...)`
+- `element.attributes` as a live NamedNodeMap-style collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
 - `document.addEventListener(...)` / capture + bubbling for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`
 - `focus` / `blur` are currently target-only
 - `addEventListener(...)` / `removeEventListener(...)` on page inputs, buttons, links, forms, and document nodes
 - `click`, `focus`, `blur`, `input`, `change`, `submit`, `keydown`, and `keyup` event dispatch, including `once`, capture-phase, and passive listeners
 - native GUI typing stays in sync with DOM `input.value`
 - `location.hash` plus `history.pushState(...)` / `replaceState(...)` soft navigation
+- `history.state`
+- `popstate` / `hashchange`
 - `location.href`
+- lightweight response header iteration plus XHR `getResponseHeader(...)` / `getAllResponseHeaders()`
 - `console.log()` / `warn()` / `error()`
 - immediate `setTimeout(...)` fallback
 

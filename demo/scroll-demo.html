@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Scroll Demo</title>
+</head>
+<body>
+  <h1>Scroll Demo</h1>
+  <p>This page exercises `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters.</p>
+
+  <p>
+    <button id="scroll-to">scrollTo 320</button>
+    <button id="scroll-by">scrollBy 180</button>
+    <button id="scroll-top">set scrollTop 60</button>
+  </p>
+
+  <p id="status"></p>
+  <div id="filler"></div>
+
+  <script>
+    const status = document.getElementById('status');
+    const filler = document.getElementById('filler');
+
+    for (let i = 0; i < 80; i += 1) {
+      const line = document.createElement('p');
+      line.textContent = 'Scrollable line ' + (i + 1);
+      filler.appendChild(line);
+    }
+
+    function update() {
+      status.textContent =
+        'scrollY=' + window.scrollY +
+        ' pageYOffset=' + window.pageYOffset +
+        ' body.scrollTop=' + document.body.scrollTop +
+        ' documentElement.scrollTop=' + document.documentElement.scrollTop;
+    }
+
+    document.getElementById('scroll-to').addEventListener('click', function () {
+      window.scrollTo({ top: 320 });
+      update();
+    });
+
+    document.getElementById('scroll-by').addEventListener('click', function () {
+      window.scrollBy({ top: 180 });
+      update();
+    });
+
+    document.getElementById('scroll-top').addEventListener('click', function () {
+      document.documentElement.scrollTop = 60;
+      update();
+    });
+
+    window.addEventListener('scroll', update);
+    update();
+  </script>
+</body>
+</html>

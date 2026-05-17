@@ -7,9 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use boa_engine::object::{
     JsObject, ObjectInitializer,
-    builtins::{JsFunction, JsPromise},
+    builtins::{JsArray, JsFunction, JsPromise},
 };
-use boa_engine::property::Attribute;
+use boa_engine::property::{Attribute, PropertyDescriptor};
 use boa_engine::{
     Context, Finalize, JsData, JsNativeError, JsResult, JsValue, NativeFunction, Source, Trace,
     js_string,
@@ -17,6 +17,7 @@ use boa_engine::{
 
 use crate::html::{Node, parse_document};
 use crate::http::{HttpResponse, fetch, fetch_with_limits_same_origin};
+use crate::site_state::{self, StorageKind};
 use crate::text::decode_text_response;
 use crate::url::Url;
 
@@ -28,6 +29,8 @@ const JS_LOOP_ITERATION_LIMIT: u64 = 100_000;
 const JS_MAX_NETWORK_REQUESTS: usize = 8;
 const JS_MAX_NETWORK_RESPONSE_BYTES: usize = 256 * 1024;
 const JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES: usize = 512 * 1024;
+const DEFAULT_VIEWPORT_WIDTH: u32 = 1280;
+const DEFAULT_VIEWPORT_HEIGHT: u32 = 720;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessedScriptHtml {
@@ -36,6 +39,7 @@ pub struct ProcessedScriptHtml {
     pub console_logs: Vec<String>,
     pub navigation_target: Option<String>,
     pub soft_navigation_target: Option<String>,
+    pub scroll_y: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -69,6 +73,19 @@ enum JavaScriptSessionCommand {
     DispatchEvent {
         request: DomEventRequest,
         response_tx: Sender<DomEventDispatchResult>,
+    },
+    DispatchGlobalEvent {
+        event_type: String,
+        bubbles: bool,
+        cancelable: bool,
+        response_tx: Sender<DomEventDispatchResult>,
+    },
+    SetScrollPosition {
+        y: u32,
+    },
+    SetViewportSize {
+        width: u32,
+        height: u32,
     },
     SetAttribute {
         node_id: usize,
@@ -123,6 +140,41 @@ impl JavaScriptSession {
             })
             .is_ok()
     }
+
+    pub(crate) fn set_viewport_size(&self, width: u32, height: u32) -> bool {
+        self.command_tx
+            .send(JavaScriptSessionCommand::SetViewportSize { width, height })
+            .is_ok()
+    }
+
+    pub(crate) fn set_scroll_position(&self, y: u32) -> bool {
+        self.command_tx
+            .send(JavaScriptSessionCommand::SetScrollPosition { y })
+            .is_ok()
+    }
+
+    pub(crate) fn dispatch_global_event(
+        &self,
+        event_type: &str,
+        bubbles: bool,
+        cancelable: bool,
+    ) -> Option<DomEventDispatchResult> {
+        let (response_tx, response_rx) = mpsc::channel();
+        if self
+            .command_tx
+            .send(JavaScriptSessionCommand::DispatchGlobalEvent {
+                event_type: event_type.to_string(),
+                bubbles,
+                cancelable,
+                response_tx,
+            })
+            .is_err()
+        {
+            return None;
+        }
+
+        response_rx.recv().ok()
+    }
 }
 
 impl Drop for JavaScriptSession {
@@ -140,12 +192,23 @@ struct JavaScriptState {
     document_url: Url,
     location_href: String,
     soft_navigation_target: Option<String>,
-    history_entries: Vec<String>,
+    history_entries: Vec<HistoryEntry>,
     history_index: usize,
     current_script: Option<usize>,
     network_request_count: usize,
     network_response_bytes: usize,
+    viewport_width: u32,
+    viewport_height: u32,
+    scroll_y: u32,
+    active_element_node_id: Option<usize>,
     dom: DomState,
+}
+
+#[derive(Debug, Clone)]
+struct HistoryEntry {
+    href: String,
+    scroll_y: u32,
+    state: JsValue,
 }
 
 #[derive(Debug, Trace, Finalize, JsData)]
@@ -201,6 +264,30 @@ struct DomClassListHandle {
 }
 
 #[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct DomDatasetHandle {
+    #[unsafe_ignore_trace]
+    node_id: usize,
+}
+
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct DomAttributesHandle {
+    #[unsafe_ignore_trace]
+    node_id: usize,
+}
+
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct DomStyleHandle {
+    #[unsafe_ignore_trace]
+    node_id: usize,
+}
+
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct ComputedStyleHandle {
+    #[unsafe_ignore_trace]
+    node_id: usize,
+}
+
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
 struct FetchResponseHandle {
     #[unsafe_ignore_trace]
     response: crate::http::HttpResponse,
@@ -210,6 +297,12 @@ struct FetchResponseHandle {
 struct ResponseHeadersHandle {
     #[unsafe_ignore_trace]
     headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct StorageHandle {
+    #[unsafe_ignore_trace]
+    kind: StorageKind,
 }
 
 #[derive(Debug, Trace, Finalize, JsData)]
@@ -223,6 +316,7 @@ struct XmlHttpRequestState {
     method: String,
     url: Option<String>,
     request_headers: BTreeMap<String, String>,
+    response_headers: BTreeMap<String, String>,
     ready_state: u8,
     status: u16,
     status_text: String,
@@ -286,6 +380,25 @@ pub fn start_document_script_session(
                             let result = runtime.dispatch_dom_event(request);
                             let _ = response_tx.send(result);
                         }
+                        JavaScriptSessionCommand::DispatchGlobalEvent {
+                            event_type,
+                            bubbles,
+                            cancelable,
+                            response_tx,
+                        } => {
+                            let result = runtime.dispatch_global_event_request(
+                                &event_type,
+                                bubbles,
+                                cancelable,
+                            );
+                            let _ = response_tx.send(result);
+                        }
+                        JavaScriptSessionCommand::SetScrollPosition { y } => {
+                            runtime.set_scroll_position(y);
+                        }
+                        JavaScriptSessionCommand::SetViewportSize { width, height } => {
+                            runtime.set_viewport_size(width, height);
+                        }
                         JavaScriptSessionCommand::SetAttribute {
                             node_id,
                             name,
@@ -330,6 +443,7 @@ fn process_document_scripts_error(html: String, message: String) -> ProcessedScr
         console_logs: vec![message],
         navigation_target: None,
         soft_navigation_target: None,
+        scroll_y: 0,
     }
 }
 
@@ -363,11 +477,19 @@ impl JavaScriptRuntime {
                 document_url: base_url.clone(),
                 location_href: base_url.to_string(),
                 soft_navigation_target: None,
-                history_entries: vec![base_url.to_string()],
+                history_entries: vec![HistoryEntry {
+                    href: base_url.to_string(),
+                    scroll_y: 0,
+                    state: JsValue::null(),
+                }],
                 history_index: 0,
                 current_script: None,
                 network_request_count: 0,
                 network_response_bytes: 0,
+                viewport_width: DEFAULT_VIEWPORT_WIDTH,
+                viewport_height: DEFAULT_VIEWPORT_HEIGHT,
+                scroll_y: 0,
+                active_element_node_id: None,
                 dom,
             }),
         });
@@ -418,7 +540,29 @@ impl JavaScriptRuntime {
             console_logs: self.take_logs(),
             navigation_target: self.navigation_target(),
             soft_navigation_target: self.take_soft_navigation_target(),
+            scroll_y: scroll_position(&mut self.context),
         }
+    }
+
+    fn set_viewport_size(&mut self, width: u32, height: u32) {
+        if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+            let mut state = host.state.borrow_mut();
+            state.viewport_width = width;
+            state.viewport_height = height;
+        }
+    }
+
+    fn set_scroll_position(&mut self, y: u32) -> bool {
+        if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+            let mut state = host.state.borrow_mut();
+            let changed = state.scroll_y != y;
+            state.scroll_y = y;
+            if changed {
+                sync_current_history_entry_scroll(&mut state);
+            }
+            return changed;
+        }
+        false
     }
 
     fn set_dom_attribute(&mut self, node_id: usize, name: &str, value: &str) {
@@ -443,6 +587,23 @@ impl JavaScriptRuntime {
     fn dispatch_dom_event_request(&mut self, request: DomEventRequest) -> JsResult<bool> {
         let target = build_dom_node_object(&mut self.context, request.target_node_id);
         dispatch_dom_event_on_target(target, &request, &mut self.context)
+    }
+
+    fn dispatch_global_event_request(
+        &mut self,
+        event_type: &str,
+        bubbles: bool,
+        cancelable: bool,
+    ) -> DomEventDispatchResult {
+        let default_prevented = self
+            .dispatch_global_event(event_type, bubbles, cancelable)
+            .unwrap_or(false);
+        self.flush_pending_document_writes();
+        self.process_loaded_document();
+        DomEventDispatchResult {
+            snapshot: self.snapshot(),
+            default_prevented,
+        }
     }
 
     fn execute(&mut self, source: &str) {
@@ -630,7 +791,6 @@ impl JavaScriptRuntime {
         bubbles: bool,
         cancelable: bool,
     ) -> JsResult<bool> {
-        let target = self.context.global_object();
         let request = DomEventRequest {
             target_node_id: self.document_id(),
             event_type: event_type.to_string(),
@@ -638,30 +798,9 @@ impl JavaScriptRuntime {
             cancelable,
             ..Default::default()
         };
+        let target = self.context.global_object();
         let event = build_dom_event_object(&mut self.context, &request, &target);
-        dispatch_listeners_on_target(
-            &target,
-            &event_type.to_ascii_lowercase(),
-            &event,
-            true,
-            EventDispatchPhase::AtTarget,
-            &mut self.context,
-        )?;
-        if !event_flag_value(&event, "immediatePropagationStopped", &mut self.context) {
-            dispatch_listeners_on_target(
-                &target,
-                &event_type.to_ascii_lowercase(),
-                &event,
-                false,
-                EventDispatchPhase::AtTarget,
-                &mut self.context,
-            )?;
-        }
-        Ok(event_flag_value(
-            &event,
-            "defaultPrevented",
-            &mut self.context,
-        ))
+        dispatch_global_event_object(&mut self.context, event_type, bubbles, cancelable, &event)
     }
 
     fn serialize_html(&self) -> String {
@@ -895,6 +1034,44 @@ impl DomState {
         }
     }
 
+    fn insert_fragment_after(&mut self, target_id: usize, html: &str) {
+        let parent_id = self.node(target_id).and_then(|node| node.parent);
+        let Some(parent_id) = parent_id else {
+            return;
+        };
+        let next_sibling_id = self.node(parent_id).and_then(|parent| {
+            parent
+                .children
+                .iter()
+                .position(|child_id| *child_id == target_id)
+                .and_then(|index| parent.children.get(index + 1).copied())
+        });
+        let fragment = parse_document(html);
+        let fragment_root_id = self.push_node(None, &fragment);
+        let fragment_children = self
+            .node(fragment_root_id)
+            .map(|node| node.children.clone())
+            .unwrap_or_default();
+        for child_id in fragment_children {
+            self.insert_before(parent_id, child_id, next_sibling_id);
+        }
+    }
+
+    fn insert_fragment_at_start(&mut self, parent_id: usize, html: &str) {
+        let fragment = parse_document(html);
+        let fragment_root_id = self.push_node(None, &fragment);
+        let fragment_children = self
+            .node(fragment_root_id)
+            .map(|node| node.children.clone())
+            .unwrap_or_default();
+        let first_child = self
+            .node(parent_id)
+            .and_then(|node| node.children.first().copied());
+        for child_id in fragment_children {
+            self.insert_before(parent_id, child_id, first_child);
+        }
+    }
+
     fn append_fragment(&mut self, parent_id: usize, html: &str) {
         let fragment = parse_document(html);
         let fragment_root_id = self.push_node(None, &fragment);
@@ -1035,6 +1212,16 @@ impl DomState {
             .cloned()
     }
 
+    fn has_attribute(&self, node_id: usize, name: &str) -> bool {
+        self.get_attribute(node_id, name).is_some()
+    }
+
+    fn attribute_names(&self, node_id: usize) -> Vec<String> {
+        self.element(node_id)
+            .map(|element| element.attributes.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     fn is_disabled(&self, node_id: usize) -> bool {
         self.get_attribute(node_id, "disabled").is_some()
     }
@@ -1061,6 +1248,109 @@ impl DomState {
                     .any(|existing| existing == class_name)
             })
             .unwrap_or(false)
+    }
+
+    fn tree_root(&self, node_id: usize) -> usize {
+        let mut current = node_id;
+        while let Some(parent_id) = self.node(current).and_then(|node| node.parent) {
+            current = parent_id;
+        }
+        current
+    }
+
+    fn contains_node(&self, ancestor_id: usize, node_id: usize) -> bool {
+        if ancestor_id == node_id {
+            return self.node(ancestor_id).is_some();
+        }
+        let mut cursor = self.node(node_id).and_then(|node| node.parent);
+        while let Some(parent_id) = cursor {
+            if parent_id == ancestor_id {
+                return true;
+            }
+            cursor = self.node(parent_id).and_then(|node| node.parent);
+        }
+        false
+    }
+
+    fn element_children(&self, node_id: usize) -> Vec<usize> {
+        self.node(node_id)
+            .map(|node| {
+                node.children
+                    .iter()
+                    .copied()
+                    .filter(|child_id| self.element(*child_id).is_some())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn first_element_child(&self, node_id: usize) -> Option<usize> {
+        self.node(node_id).and_then(|node| {
+            node.children
+                .iter()
+                .copied()
+                .find(|child_id| self.element(*child_id).is_some())
+        })
+    }
+
+    fn last_element_child(&self, node_id: usize) -> Option<usize> {
+        self.node(node_id).and_then(|node| {
+            node.children
+                .iter()
+                .rev()
+                .copied()
+                .find(|child_id| self.element(*child_id).is_some())
+        })
+    }
+
+    fn previous_element_sibling(&self, node_id: usize) -> Option<usize> {
+        let parent_id = self.node(node_id)?.parent?;
+        let parent = self.node(parent_id)?;
+        let index = parent
+            .children
+            .iter()
+            .position(|child_id| *child_id == node_id)?;
+        parent.children[..index]
+            .iter()
+            .rev()
+            .copied()
+            .find(|sibling_id| self.element(*sibling_id).is_some())
+    }
+
+    fn next_element_sibling(&self, node_id: usize) -> Option<usize> {
+        let parent_id = self.node(node_id)?.parent?;
+        let parent = self.node(parent_id)?;
+        let index = parent
+            .children
+            .iter()
+            .position(|child_id| *child_id == node_id)?;
+        parent.children[index + 1..]
+            .iter()
+            .copied()
+            .find(|sibling_id| self.element(*sibling_id).is_some())
+    }
+
+    fn matches_selector(&self, node_id: usize, selector: &str) -> bool {
+        let Some(selector) = ParsedSelector::parse(selector) else {
+            return false;
+        };
+        let scope_id = self.tree_root(node_id);
+        self.matches_selector_in_scope(node_id, scope_id, &selector)
+    }
+
+    fn closest_selector(&self, node_id: usize, selector: &str) -> Option<usize> {
+        let selector = ParsedSelector::parse(selector)?;
+        let scope_id = self.tree_root(node_id);
+        let mut current = Some(node_id);
+        while let Some(candidate_id) = current {
+            if self.element(candidate_id).is_some()
+                && self.matches_selector_in_scope(candidate_id, scope_id, &selector)
+            {
+                return Some(candidate_id);
+            }
+            current = self.node(candidate_id).and_then(|node| node.parent);
+        }
+        None
     }
 
     fn add_class(&mut self, node_id: usize, class_name: &str) {
@@ -1097,6 +1387,18 @@ impl DomState {
             self.add_class(node_id, class_name);
             true
         }
+    }
+
+    fn replace_class(&mut self, node_id: usize, old_class: &str, new_class: &str) -> bool {
+        if !self.has_class(node_id, old_class) {
+            return false;
+        }
+        if old_class == new_class {
+            return true;
+        }
+        self.remove_class(node_id, old_class);
+        self.add_class(node_id, new_class);
+        true
     }
 
     fn query_selector(
@@ -1511,25 +1813,22 @@ fn install_browser_globals(context: &mut Context) {
         .get_data::<JavaScriptHostData>()
         .map(|host| host.state.borrow().dom.document_id)
         .unwrap_or(0);
-    let body_id = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.body_id)
-        .unwrap_or(document_id);
-    let head_id = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.head_id)
-        .unwrap_or(document_id);
-    let html_id = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.html_id)
-        .unwrap_or(document_id);
-    let body_object = build_dom_node_object(context, body_id);
-    let head_object = build_dom_node_object(context, head_id);
-    let html_object = build_dom_node_object(context, html_id);
     let node_list_stub = build_simple_node_list_stub(context);
     let document_fonts = ObjectInitializer::new(context)
         .function(NativeFunction::from_fn_ptr(js_noop), js_string!("load"), 2)
         .build();
+    let cookie_getter =
+        NativeFunction::from_fn_ptr(js_document_get_cookie).to_js_function(context.realm());
+    let cookie_setter =
+        NativeFunction::from_fn_ptr(js_document_set_cookie).to_js_function(context.realm());
+    let active_element_getter =
+        NativeFunction::from_fn_ptr(js_document_get_active_element).to_js_function(context.realm());
+    let body_getter =
+        NativeFunction::from_fn_ptr(js_document_get_body).to_js_function(context.realm());
+    let head_getter =
+        NativeFunction::from_fn_ptr(js_document_get_head).to_js_function(context.realm());
+    let document_element_getter = NativeFunction::from_fn_ptr(js_document_get_document_element)
+        .to_js_function(context.realm());
 
     let global_object = context.global_object();
     let document = ObjectInitializer::with_native_data(
@@ -1580,6 +1879,11 @@ fn install_browser_globals(context: &mut Context) {
         1,
     )
     .function(
+        NativeFunction::from_fn_ptr(js_document_has_focus),
+        js_string!("hasFocus"),
+        0,
+    )
+    .function(
         NativeFunction::from_fn_ptr(js_add_event_listener),
         js_string!("addEventListener"),
         2,
@@ -1590,11 +1894,37 @@ fn install_browser_globals(context: &mut Context) {
         2,
     )
     .property(js_string!("location"), location.clone(), Attribute::all())
-    .property(js_string!("body"), body_object, Attribute::all())
-    .property(js_string!("head"), head_object, Attribute::all())
-    .property(js_string!("documentElement"), html_object, Attribute::all())
+    .accessor(
+        js_string!("body"),
+        Some(body_getter),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("head"),
+        Some(head_getter),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("documentElement"),
+        Some(document_element_getter),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("activeElement"),
+        Some(active_element_getter),
+        None,
+        Attribute::all(),
+    )
     .property(js_string!("fonts"), document_fonts, Attribute::all())
-    .property(js_string!("cookie"), js_string!(""), Attribute::all())
+    .accessor(
+        js_string!("cookie"),
+        Some(cookie_getter),
+        Some(cookie_setter),
+        Attribute::all(),
+    )
     .property(
         js_string!("readyState"),
         js_string!("complete"),
@@ -1663,6 +1993,7 @@ fn install_browser_globals(context: &mut Context) {
         .property(js_string!("languages"), node_list_stub.clone(), Attribute::all())
         .property(js_string!("platform"), js_string!("Win32"), Attribute::all())
         .property(js_string!("vendor"), js_string!("Google Inc."), Attribute::all())
+        .property(js_string!("cookieEnabled"), true, Attribute::all())
         .build();
     let performance_timing = ObjectInitializer::new(context)
         .property(js_string!("navigationStart"), 0, Attribute::all())
@@ -1677,6 +2008,8 @@ fn install_browser_globals(context: &mut Context) {
         .build();
     let history_length_getter =
         NativeFunction::from_fn_ptr(js_history_length).to_js_function(context.realm());
+    let history_state_getter =
+        NativeFunction::from_fn_ptr(js_history_state).to_js_function(context.realm());
     let history = ObjectInitializer::new(context)
         .function(
             NativeFunction::from_fn_ptr(js_history_push_state),
@@ -1704,8 +2037,15 @@ fn install_browser_globals(context: &mut Context) {
             None,
             Attribute::all(),
         )
+        .accessor(
+            js_string!("state"),
+            Some(history_state_getter),
+            None,
+            Attribute::all(),
+        )
         .build();
-    let storage = build_storage_stub(context);
+    let local_storage = build_storage_object(context, StorageKind::Local);
+    let session_storage = build_storage_object(context, StorageKind::Session);
     let ytcfg = ObjectInitializer::new(context)
         .function(
             NativeFunction::from_fn_ptr(js_ytcfg_data),
@@ -1748,14 +2088,14 @@ fn install_browser_globals(context: &mut Context) {
         .register_global_property(js_string!("history"), history, Attribute::all())
         .expect("history should be installable");
     context
-        .register_global_property(
-            js_string!("localStorage"),
-            storage.clone(),
-            Attribute::all(),
-        )
+        .register_global_property(js_string!("localStorage"), local_storage, Attribute::all())
         .expect("localStorage should be installable");
     context
-        .register_global_property(js_string!("sessionStorage"), storage, Attribute::all())
+        .register_global_property(
+            js_string!("sessionStorage"),
+            session_storage,
+            Attribute::all(),
+        )
         .expect("sessionStorage should be installable");
     context
         .register_global_property(js_string!("ytcfg"), ytcfg, Attribute::all())
@@ -1831,6 +2171,13 @@ fn install_browser_globals(context: &mut Context) {
         .expect("matchMedia should be installable");
     context
         .register_global_builtin_callable(
+            js_string!("getComputedStyle"),
+            2,
+            NativeFunction::from_fn_ptr(js_window_get_computed_style),
+        )
+        .expect("getComputedStyle should be installable");
+    context
+        .register_global_builtin_callable(
             js_string!("addEventListener"),
             2,
             NativeFunction::from_fn_ptr(js_add_event_listener),
@@ -1873,6 +2220,27 @@ fn install_browser_globals(context: &mut Context) {
         .expect("prompt should be installable");
     context
         .register_global_builtin_callable(
+            js_string!("scrollTo"),
+            2,
+            NativeFunction::from_fn_ptr(js_window_scroll_to),
+        )
+        .expect("scrollTo should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("scrollBy"),
+            2,
+            NativeFunction::from_fn_ptr(js_window_scroll_by),
+        )
+        .expect("scrollBy should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("scroll"),
+            2,
+            NativeFunction::from_fn_ptr(js_window_scroll_to),
+        )
+        .expect("scroll should be installable");
+    context
+        .register_global_builtin_callable(
             js_string!("fetch"),
             2,
             NativeFunction::from_fn_ptr(js_fetch),
@@ -1885,15 +2253,58 @@ fn install_browser_globals(context: &mut Context) {
             NativeFunction::from_fn_ptr(js_create_xml_http_request),
         )
         .expect("XMLHttpRequest factory should be installable");
+    let inner_width_getter =
+        NativeFunction::from_fn_ptr(js_window_get_inner_width).to_js_function(context.realm());
+    let inner_height_getter =
+        NativeFunction::from_fn_ptr(js_window_get_inner_height).to_js_function(context.realm());
+    let scroll_y_getter =
+        NativeFunction::from_fn_ptr(js_window_get_scroll_y).to_js_function(context.realm());
+    let page_y_offset_getter =
+        NativeFunction::from_fn_ptr(js_window_get_page_y_offset).to_js_function(context.realm());
     context
-        .register_global_property(js_string!("innerWidth"), 1280, Attribute::all())
+        .global_object()
+        .define_property_or_throw(
+            js_string!("innerWidth"),
+            PropertyDescriptor::builder()
+                .get(inner_width_getter)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )
         .expect("innerWidth should be installable");
-    context
-        // Note: changed from 720 in a previous version to align with the CSS vh unit
-        // (1vh = 8px at 800px base in css.rs parse_length). Scripts that rely on
-        // window.innerHeight == 720 may behave differently.
-        .register_global_property(js_string!("innerHeight"), 800, Attribute::all()) // must match vh base (800px) in css.rs parse_length
+        // Note: innerHeight is dynamically retrieved via inner_height_getter (which aligns with the CSS 800px vh base in css.rs).
+        .global_object()
+        .define_property_or_throw(
+            js_string!("innerHeight"),
+            PropertyDescriptor::builder()
+                .get(inner_height_getter)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )
         .expect("innerHeight should be installable");
+    context
+        .global_object()
+        .define_property_or_throw(
+            js_string!("scrollY"),
+            PropertyDescriptor::builder()
+                .get(scroll_y_getter.clone())
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )
+        .expect("scrollY should be installable");
+    context
+        .global_object()
+        .define_property_or_throw(
+            js_string!("pageYOffset"),
+            PropertyDescriptor::builder()
+                .get(page_y_offset_getter)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )
+        .expect("pageYOffset should be installable");
 
     let crypto_subtle = ObjectInitializer::new(context)
         .function(
@@ -2023,6 +2434,45 @@ fn dom_node_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObjec
     Ok(cache)
 }
 
+fn dom_style_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObject> {
+    let global = context.global_object();
+    let cache_key = js_string!("__tobiraDomStyleCache");
+    let existing = global.get(cache_key.clone(), context)?;
+    if let Some(object) = existing.as_object() {
+        return Ok(object.clone());
+    }
+
+    let cache = ObjectInitializer::new(context).build();
+    global.set(cache_key, cache.clone(), true, context)?;
+    Ok(cache)
+}
+
+fn dom_dataset_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObject> {
+    let global = context.global_object();
+    let cache_key = js_string!("__tobiraDomDatasetCache");
+    let existing = global.get(cache_key.clone(), context)?;
+    if let Some(object) = existing.as_object() {
+        return Ok(object.clone());
+    }
+
+    let cache = ObjectInitializer::new(context).build();
+    global.set(cache_key, cache.clone(), true, context)?;
+    Ok(cache)
+}
+
+fn dom_attributes_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObject> {
+    let global = context.global_object();
+    let cache_key = js_string!("__tobiraDomAttributesCache");
+    let existing = global.get(cache_key.clone(), context)?;
+    if let Some(object) = existing.as_object() {
+        return Ok(object.clone());
+    }
+
+    let cache = ObjectInitializer::new(context).build();
+    global.set(cache_key, cache.clone(), true, context)?;
+    Ok(cache)
+}
+
 fn cached_dom_node_object(
     context: &mut Context,
     node_id: usize,
@@ -2048,6 +2498,356 @@ fn store_dom_node_object(
             context,
         );
     }
+}
+
+fn cached_dom_style_object(
+    context: &mut Context,
+    node_id: usize,
+) -> Option<boa_engine::object::JsObject> {
+    let cache = dom_style_cache(context).ok()?;
+    let key = js_string!(node_id.to_string());
+    cache
+        .get(key, context)
+        .ok()
+        .and_then(|value| value.as_object())
+}
+
+fn store_dom_style_object(
+    context: &mut Context,
+    node_id: usize,
+    object: &boa_engine::object::JsObject,
+) {
+    if let Ok(cache) = dom_style_cache(context) {
+        let _ = cache.set(
+            js_string!(node_id.to_string()),
+            object.clone(),
+            true,
+            context,
+        );
+    }
+}
+
+fn cached_dom_dataset_object(
+    context: &mut Context,
+    node_id: usize,
+) -> Option<boa_engine::object::JsObject> {
+    let cache = dom_dataset_cache(context).ok()?;
+    let key = js_string!(node_id.to_string());
+    cache
+        .get(key, context)
+        .ok()
+        .and_then(|value| value.as_object())
+}
+
+fn store_dom_dataset_object(
+    context: &mut Context,
+    node_id: usize,
+    object: &boa_engine::object::JsObject,
+) {
+    if let Ok(cache) = dom_dataset_cache(context) {
+        let _ = cache.set(
+            js_string!(node_id.to_string()),
+            object.clone(),
+            true,
+            context,
+        );
+    }
+}
+
+fn cached_dom_attributes_object(
+    context: &mut Context,
+    node_id: usize,
+) -> Option<boa_engine::object::JsObject> {
+    let cache = dom_attributes_cache(context).ok()?;
+    let key = js_string!(node_id.to_string());
+    cache
+        .get(key, context)
+        .ok()
+        .and_then(|value| value.as_object())
+}
+
+fn store_dom_attributes_object(
+    context: &mut Context,
+    node_id: usize,
+    object: &boa_engine::object::JsObject,
+) {
+    if let Ok(cache) = dom_attributes_cache(context) {
+        let _ = cache.set(
+            js_string!(node_id.to_string()),
+            object.clone(),
+            true,
+            context,
+        );
+    }
+}
+
+fn build_dom_dataset_object(context: &mut Context, node_id: usize) -> boa_engine::object::JsObject {
+    if let Some(cached) = cached_dom_dataset_object(context, node_id) {
+        return cached;
+    }
+
+    let target = ObjectInitializer::new(context)
+        .property(
+            js_string!("__tobiraNodeId"),
+            js_string!(node_id.to_string()),
+            Attribute::all(),
+        )
+        .build();
+    let handler = ObjectInitializer::with_native_data(DomDatasetHandle { node_id }, context)
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_dataset_get),
+            js_string!("get"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_dataset_set),
+            js_string!("set"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_dataset_has),
+            js_string!("has"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_dataset_delete_property),
+            js_string!("deleteProperty"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_dataset_own_keys),
+            js_string!("ownKeys"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_dataset_get_own_property_descriptor),
+            js_string!("getOwnPropertyDescriptor"),
+            2,
+        )
+        .build();
+
+    let global = context.global_object();
+    let target_key = js_string!("__tobiraDatasetTarget");
+    let handler_key = js_string!("__tobiraDatasetHandler");
+    let proxy = (|| -> JsResult<JsObject> {
+        global.set(target_key.clone(), target.clone(), true, context)?;
+        global.set(handler_key.clone(), handler.clone(), true, context)?;
+        let proxy_value = context.eval(Source::from_bytes(
+            "new Proxy(globalThis.__tobiraDatasetTarget, globalThis.__tobiraDatasetHandler);",
+        ))?;
+        proxy_value.as_object().ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("dataset proxy bootstrap did not return an object")
+                .into()
+        })
+    })();
+
+    let _ = global.delete_property_or_throw(target_key, context);
+    let _ = global.delete_property_or_throw(handler_key, context);
+
+    match proxy {
+        Ok(proxy) => {
+            store_dom_dataset_object(context, node_id, &proxy);
+            proxy
+        }
+        Err(_) => target,
+    }
+}
+
+fn build_dom_attributes_object(
+    context: &mut Context,
+    node_id: usize,
+) -> boa_engine::object::JsObject {
+    if let Some(cached) = cached_dom_attributes_object(context, node_id) {
+        return cached;
+    }
+
+    let target = ObjectInitializer::with_native_data(DomAttributesHandle { node_id }, context)
+        .property(
+            js_string!("__tobiraNodeId"),
+            js_string!(node_id.to_string()),
+            Attribute::all(),
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_item),
+            js_string!("item"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_get_named_item),
+            js_string!("getNamedItem"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_get_named_item),
+            js_string!("namedItem"),
+            1,
+        )
+        .build();
+    let handler = ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_get),
+            js_string!("get"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_set),
+            js_string!("set"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_has),
+            js_string!("has"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_own_keys),
+            js_string!("ownKeys"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_attributes_get_own_property_descriptor),
+            js_string!("getOwnPropertyDescriptor"),
+            2,
+        )
+        .build();
+
+    let global = context.global_object();
+    let target_key = js_string!("__tobiraAttributesTarget");
+    let handler_key = js_string!("__tobiraAttributesHandler");
+    let proxy = (|| -> JsResult<JsObject> {
+        global.set(target_key.clone(), target.clone(), true, context)?;
+        global.set(handler_key.clone(), handler.clone(), true, context)?;
+        let proxy_value = context.eval(Source::from_bytes(
+            "new Proxy(globalThis.__tobiraAttributesTarget, globalThis.__tobiraAttributesHandler);",
+        ))?;
+        proxy_value.as_object().ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("attributes proxy bootstrap did not return an object")
+                .into()
+        })
+    })();
+
+    let _ = global.delete_property_or_throw(target_key, context);
+    let _ = global.delete_property_or_throw(handler_key, context);
+
+    match proxy {
+        Ok(proxy) => {
+            store_dom_attributes_object(context, node_id, &proxy);
+            proxy
+        }
+        Err(_) => target,
+    }
+}
+
+const COMPUTED_STYLE_PROPERTIES: &[(&str, &str)] = &[
+    ("display", "display"),
+    ("position", "position"),
+    ("visibility", "visibility"),
+    ("color", "color"),
+    ("backgroundColor", "background-color"),
+    ("fontSize", "font-size"),
+    ("fontWeight", "font-weight"),
+    ("fontFamily", "font-family"),
+    ("fontStyle", "font-style"),
+    ("textDecoration", "text-decoration"),
+    ("textTransform", "text-transform"),
+    ("textIndent", "text-indent"),
+    ("letterSpacing", "letter-spacing"),
+    ("lineHeight", "line-height"),
+    ("textAlign", "text-align"),
+    ("whiteSpace", "white-space"),
+    ("pointerEvents", "pointer-events"),
+    ("opacity", "opacity"),
+    ("overflow", "overflow"),
+    ("width", "width"),
+    ("height", "height"),
+    ("maxWidth", "max-width"),
+    ("minWidth", "min-width"),
+    ("maxHeight", "max-height"),
+    ("minHeight", "min-height"),
+    ("verticalAlign", "vertical-align"),
+    ("marginTop", "margin-top"),
+    ("marginRight", "margin-right"),
+    ("marginBottom", "margin-bottom"),
+    ("marginLeft", "margin-left"),
+    ("margin", "margin"),
+    ("paddingTop", "padding-top"),
+    ("paddingRight", "padding-right"),
+    ("paddingBottom", "padding-bottom"),
+    ("paddingLeft", "padding-left"),
+    ("padding", "padding"),
+    ("borderTopWidth", "border-top-width"),
+    ("borderRightWidth", "border-right-width"),
+    ("borderBottomWidth", "border-bottom-width"),
+    ("borderLeftWidth", "border-left-width"),
+    ("borderWidth", "border-width"),
+    ("borderTopStyle", "border-top-style"),
+    ("borderRightStyle", "border-right-style"),
+    ("borderBottomStyle", "border-bottom-style"),
+    ("borderLeftStyle", "border-left-style"),
+    ("borderStyle", "border-style"),
+    ("borderTopColor", "border-top-color"),
+    ("borderRightColor", "border-right-color"),
+    ("borderBottomColor", "border-bottom-color"),
+    ("borderLeftColor", "border-left-color"),
+    ("borderColor", "border-color"),
+];
+
+fn build_computed_style_object(
+    context: &mut Context,
+    node_id: usize,
+) -> boa_engine::object::JsObject {
+    let object = ObjectInitializer::with_native_data(ComputedStyleHandle { node_id }, context)
+        .function(
+            NativeFunction::from_fn_ptr(js_computed_style_get_property_value),
+            js_string!("getPropertyValue"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_computed_style_get_property_priority),
+            js_string!("getPropertyPriority"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_computed_style_item),
+            js_string!("item"),
+            1,
+        )
+        .build();
+
+    let mut property_count = 0;
+    for (js_name, css_name) in COMPUTED_STYLE_PROPERTIES {
+        let value = computed_style_property_value(context, node_id, css_name);
+        let _ = object.set(
+            js_string!(*js_name),
+            js_string!(value.clone()),
+            true,
+            context,
+        );
+        if js_name != css_name {
+            let _ = object.set(js_string!(*css_name), js_string!(value), true, context);
+        }
+        property_count += 1;
+    }
+
+    let css_text = COMPUTED_STYLE_PROPERTIES
+        .iter()
+        .map(|(_, css_name)| {
+            let value = computed_style_property_value(context, node_id, css_name);
+            format!("{css_name}: {value}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let _ = object.set(js_string!("cssText"), js_string!(css_text), true, context);
+    let _ = object.set(
+        js_string!("length"),
+        JsValue::new(property_count as u32),
+        true,
+        context,
+    );
+
+    object
 }
 
 fn hidden_event_listener_store(
@@ -2345,6 +3145,297 @@ fn event_bool_property(this: &JsValue, name: &str, context: &mut Context) -> boo
         .unwrap_or(false)
 }
 
+fn viewport_size(context: &mut Context) -> (u32, u32) {
+    context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| {
+            let state = host.state.borrow();
+            (state.viewport_width, state.viewport_height)
+        })
+        .unwrap_or((DEFAULT_VIEWPORT_WIDTH, DEFAULT_VIEWPORT_HEIGHT))
+}
+
+fn viewport_width(context: &mut Context) -> u32 {
+    viewport_size(context).0
+}
+
+fn viewport_height(context: &mut Context) -> u32 {
+    viewport_size(context).1
+}
+
+fn scroll_position(context: &mut Context) -> u32 {
+    context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().scroll_y)
+        .unwrap_or(0)
+}
+
+fn js_window_get_inner_width(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::new(viewport_width(context)))
+}
+
+fn js_window_get_inner_height(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::new(viewport_height(context)))
+}
+
+fn js_window_get_scroll_y(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::new(scroll_position(context)))
+}
+
+fn js_window_get_page_y_offset(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    js_window_get_scroll_y(&JsValue::undefined(), &[], context)
+}
+
+fn scroll_offset_from_value(value: &JsValue, context: &mut Context) -> JsResult<i64> {
+    let number = value.to_number(context)?;
+    if !number.is_finite() {
+        return Ok(0);
+    }
+    Ok(number.round() as i64)
+}
+
+fn scroll_offset_from_args(args: &[JsValue], context: &mut Context) -> JsResult<i64> {
+    if let Some(first) = args.first()
+        && let Some(object) = first.as_object()
+        && args.len() == 1
+    {
+        let top = object.get(js_string!("top"), context)?;
+        if !top.is_undefined() {
+            return scroll_offset_from_value(&top, context);
+        }
+        let y = object.get(js_string!("y"), context)?;
+        if !y.is_undefined() {
+            return scroll_offset_from_value(&y, context);
+        }
+        return Ok(0);
+    }
+
+    if let Some(second) = args.get(1) {
+        return scroll_offset_from_value(second, context);
+    }
+    if let Some(first) = args.first() {
+        return scroll_offset_from_value(first, context);
+    }
+    Ok(0)
+}
+
+fn js_window_scroll_to(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let target = scroll_offset_from_args(args, context)?.max(0) as u32;
+    let changed = if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let changed = state.scroll_y != target;
+        state.scroll_y = target;
+        if changed {
+            sync_current_history_entry_scroll(&mut state);
+        }
+        changed
+    } else {
+        false
+    };
+    if changed {
+        let _ = runtime_scroll_event(context);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_window_scroll_by(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let delta = scroll_offset_from_args(args, context)?;
+    let changed = if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let current = host.state.borrow().scroll_y;
+        let magnitude = delta.unsigned_abs().min(u32::MAX as u64) as u32;
+        let target = if delta.is_negative() {
+            current.saturating_sub(magnitude)
+        } else {
+            current.saturating_add(magnitude)
+        };
+        let mut state = host.state.borrow_mut();
+        let changed = state.scroll_y != target;
+        state.scroll_y = target;
+        if changed {
+            sync_current_history_entry_scroll(&mut state);
+        }
+        changed
+    } else {
+        false
+    };
+    if changed {
+        let _ = runtime_scroll_event(context);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_set_scroll_top(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if this_node_id(this).is_none() {
+        return Ok(JsValue::undefined());
+    }
+    let target = scroll_offset_from_value(args.first().unwrap_or(&JsValue::undefined()), context)?
+        .max(0) as u32;
+    let changed = if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let changed = state.scroll_y != target;
+        state.scroll_y = target;
+        if changed {
+            sync_current_history_entry_scroll(&mut state);
+        }
+        changed
+    } else {
+        false
+    };
+    if changed {
+        let _ = runtime_scroll_event(context);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn runtime_scroll_event(context: &mut Context) -> JsResult<()> {
+    let target_node_id = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.document_id)
+        .unwrap_or(0);
+    let request = DomEventRequest {
+        target_node_id,
+        event_type: "scroll".to_string(),
+        bubbles: false,
+        cancelable: false,
+        ..Default::default()
+    };
+    let target = context.global_object().clone();
+    let _ = dispatch_dom_event_on_target(target, &request, context)?;
+    Ok(())
+}
+
+fn js_dom_get_scroll_top(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let value = if this_node_id(this).is_some() {
+        scroll_position(context)
+    } else {
+        0
+    };
+    Ok(JsValue::new(value))
+}
+
+fn js_dom_get_client_width(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let width = if this_node_id(this).is_some() {
+        viewport_width(context)
+    } else {
+        DEFAULT_VIEWPORT_WIDTH
+    };
+    Ok(JsValue::new(width))
+}
+
+fn js_dom_get_client_height(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let height = if this_node_id(this).is_some() {
+        viewport_height(context)
+    } else {
+        DEFAULT_VIEWPORT_HEIGHT
+    };
+    Ok(JsValue::new(height))
+}
+
+fn js_dom_get_scroll_width(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    js_dom_get_client_width(this, &[], context)
+}
+
+fn js_dom_get_scroll_height(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    js_dom_get_client_height(this, &[], context)
+}
+
+fn active_element_node_id(context: &mut Context) -> Option<usize> {
+    let host = context.get_data::<JavaScriptHostData>()?;
+    let state = host.state.borrow();
+    state
+        .active_element_node_id
+        .or(state.dom.body_id)
+        .or(state.dom.html_id)
+        .or(Some(state.dom.document_id))
+}
+
+fn document_tag_node_id(context: &mut Context, tag_name: &str) -> Option<usize> {
+    let host = context.get_data::<JavaScriptHostData>()?;
+    let state = host.state.borrow();
+    state.dom.find_first_tag(state.dom.document_id, tag_name)
+}
+
+fn js_document_get_body(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = document_tag_node_id(context, "body") else {
+        return Ok(JsValue::null());
+    };
+    Ok(JsValue::from(build_dom_node_object(context, node_id)))
+}
+
+fn js_document_get_head(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = document_tag_node_id(context, "head") else {
+        return Ok(JsValue::null());
+    };
+    Ok(JsValue::from(build_dom_node_object(context, node_id)))
+}
+
+fn js_document_get_document_element(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = document_tag_node_id(context, "html") else {
+        return Ok(JsValue::null());
+    };
+    Ok(JsValue::from(build_dom_node_object(context, node_id)))
+}
+
+fn js_document_get_active_element(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = active_element_node_id(context) else {
+        return Ok(JsValue::null());
+    };
+    Ok(JsValue::from(build_dom_node_object(context, node_id)))
+}
+
+fn js_document_has_focus(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::new(
+        context
+            .get_data::<JavaScriptHostData>()
+            .map(|host| host.state.borrow().active_element_node_id.is_some())
+            .unwrap_or(false),
+    ))
+}
+
 fn set_event_bool_property(
     this: &JsValue,
     name: &str,
@@ -2379,6 +3470,15 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_children).to_js_function(context.realm());
     let get_child_nodes =
         NativeFunction::from_fn_ptr(js_dom_get_child_nodes).to_js_function(context.realm());
+    let get_first_element_child =
+        NativeFunction::from_fn_ptr(js_dom_get_first_element_child).to_js_function(context.realm());
+    let get_last_element_child =
+        NativeFunction::from_fn_ptr(js_dom_get_last_element_child).to_js_function(context.realm());
+    let get_previous_element_sibling =
+        NativeFunction::from_fn_ptr(js_dom_get_previous_element_sibling)
+            .to_js_function(context.realm());
+    let get_next_element_sibling = NativeFunction::from_fn_ptr(js_dom_get_next_element_sibling)
+        .to_js_function(context.realm());
     let get_text_content =
         NativeFunction::from_fn_ptr(js_dom_get_text_content).to_js_function(context.realm());
     let set_text_content =
@@ -2387,12 +3487,20 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_inner_html).to_js_function(context.realm());
     let set_inner_html =
         NativeFunction::from_fn_ptr(js_dom_set_inner_html).to_js_function(context.realm());
+    let get_outer_html =
+        NativeFunction::from_fn_ptr(js_dom_get_outer_html).to_js_function(context.realm());
+    let set_outer_html =
+        NativeFunction::from_fn_ptr(js_dom_set_outer_html).to_js_function(context.realm());
     let get_id = NativeFunction::from_fn_ptr(js_dom_get_id).to_js_function(context.realm());
     let set_id = NativeFunction::from_fn_ptr(js_dom_set_id).to_js_function(context.realm());
     let get_class_name =
         NativeFunction::from_fn_ptr(js_dom_get_class_name).to_js_function(context.realm());
     let set_class_name =
         NativeFunction::from_fn_ptr(js_dom_set_class_name).to_js_function(context.realm());
+    let get_attributes =
+        NativeFunction::from_fn_ptr(js_dom_get_attributes).to_js_function(context.realm());
+    let get_dataset =
+        NativeFunction::from_fn_ptr(js_dom_get_dataset).to_js_function(context.realm());
     let get_value = NativeFunction::from_fn_ptr(js_dom_get_value).to_js_function(context.realm());
     let set_value = NativeFunction::from_fn_ptr(js_dom_set_value).to_js_function(context.realm());
     let get_src = NativeFunction::from_fn_ptr(js_dom_get_src).to_js_function(context.realm());
@@ -2417,7 +3525,19 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_tag_name).to_js_function(context.realm());
     let get_parent_node =
         NativeFunction::from_fn_ptr(js_dom_get_parent_node).to_js_function(context.realm());
-    let style = ObjectInitializer::new(context).build();
+    let get_client_width =
+        NativeFunction::from_fn_ptr(js_dom_get_client_width).to_js_function(context.realm());
+    let get_client_height =
+        NativeFunction::from_fn_ptr(js_dom_get_client_height).to_js_function(context.realm());
+    let get_scroll_width =
+        NativeFunction::from_fn_ptr(js_dom_get_scroll_width).to_js_function(context.realm());
+    let get_scroll_height =
+        NativeFunction::from_fn_ptr(js_dom_get_scroll_height).to_js_function(context.realm());
+    let get_scroll_top =
+        NativeFunction::from_fn_ptr(js_dom_get_scroll_top).to_js_function(context.realm());
+    let set_scroll_top =
+        NativeFunction::from_fn_ptr(js_dom_set_scroll_top).to_js_function(context.realm());
+    let style = build_dom_style_object(context, node_id);
     let object = ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context)
         .function(
             NativeFunction::from_fn_ptr(js_dom_query_selector),
@@ -2427,6 +3547,21 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .function(
             NativeFunction::from_fn_ptr(js_dom_query_selector_all),
             js_string!("querySelectorAll"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_matches),
+            js_string!("matches"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_closest),
+            js_string!("closest"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_contains),
+            js_string!("contains"),
             1,
         )
         .function(
@@ -2450,6 +3585,21 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             2,
         )
         .function(
+            NativeFunction::from_fn_ptr(js_dom_has_attribute),
+            js_string!("hasAttribute"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_has_attributes),
+            js_string!("hasAttributes"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_get_attribute_names),
+            js_string!("getAttributeNames"),
+            0,
+        )
+        .function(
             NativeFunction::from_fn_ptr(js_dom_get_attribute),
             js_string!("getAttribute"),
             1,
@@ -2463,6 +3613,11 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             NativeFunction::from_fn_ptr(js_dom_remove_attribute),
             js_string!("removeAttribute"),
             1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_toggle_attribute),
+            js_string!("toggleAttribute"),
+            2,
         )
         .function(
             NativeFunction::from_fn_ptr(js_dom_dispatch_event),
@@ -2483,6 +3638,11 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             NativeFunction::from_fn_ptr(js_dom_remove),
             js_string!("remove"),
             0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_insert_adjacent_html),
+            js_string!("insertAdjacentHTML"),
+            2,
         )
         .function(
             NativeFunction::from_fn_ptr(js_return_dom_rect_stub),
@@ -2513,6 +3673,30 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             Attribute::all(),
         )
         .accessor(
+            js_string!("firstElementChild"),
+            Some(get_first_element_child),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("lastElementChild"),
+            Some(get_last_element_child),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("previousElementSibling"),
+            Some(get_previous_element_sibling),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("nextElementSibling"),
+            Some(get_next_element_sibling),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
             js_string!("textContent"),
             Some(get_text_content),
             Some(set_text_content),
@@ -2525,6 +3709,12 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             Attribute::all(),
         )
         .accessor(
+            js_string!("outerHTML"),
+            Some(get_outer_html),
+            Some(set_outer_html),
+            Attribute::all(),
+        )
+        .accessor(
             js_string!("id"),
             Some(get_id),
             Some(set_id),
@@ -2534,6 +3724,18 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             js_string!("className"),
             Some(get_class_name),
             Some(set_class_name),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("attributes"),
+            Some(get_attributes),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("dataset"),
+            Some(get_dataset),
+            None,
             Attribute::all(),
         )
         .accessor(
@@ -2611,12 +3813,374 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .property(js_string!("style"), style, Attribute::all())
         .property(js_string!("checked"), false, Attribute::all())
         .property(js_string!("hidden"), false, Attribute::all())
-        .property(js_string!("clientWidth"), 1280, Attribute::all())
-        .property(js_string!("clientHeight"), 720, Attribute::all())
-        .property(js_string!("scrollWidth"), 1280, Attribute::all())
-        .property(js_string!("scrollHeight"), 720, Attribute::all())
+        .accessor(
+            js_string!("clientWidth"),
+            Some(get_client_width),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("clientHeight"),
+            Some(get_client_height),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("scrollTop"),
+            Some(get_scroll_top),
+            Some(set_scroll_top),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("scrollWidth"),
+            Some(get_scroll_width),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("scrollHeight"),
+            Some(get_scroll_height),
+            None,
+            Attribute::all(),
+        )
         .build();
     store_dom_node_object(context, node_id, &object);
+    object
+}
+
+fn build_dom_style_object(context: &mut Context, node_id: usize) -> boa_engine::object::JsObject {
+    if let Some(cached) = cached_dom_style_object(context, node_id) {
+        return cached;
+    }
+
+    let css_text_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_css_text).to_js_function(context.realm());
+    let css_text_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_css_text).to_js_function(context.realm());
+    let display_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_display).to_js_function(context.realm());
+    let display_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_display).to_js_function(context.realm());
+    let color_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_color).to_js_function(context.realm());
+    let color_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_color).to_js_function(context.realm());
+    let font_style_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_font_style).to_js_function(context.realm());
+    let font_style_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_font_style).to_js_function(context.realm());
+    let text_decoration_getter = NativeFunction::from_fn_ptr(js_dom_style_get_text_decoration)
+        .to_js_function(context.realm());
+    let text_decoration_setter = NativeFunction::from_fn_ptr(js_dom_style_set_text_decoration)
+        .to_js_function(context.realm());
+    let text_transform_getter = NativeFunction::from_fn_ptr(js_dom_style_get_text_transform)
+        .to_js_function(context.realm());
+    let text_transform_setter = NativeFunction::from_fn_ptr(js_dom_style_set_text_transform)
+        .to_js_function(context.realm());
+    let text_indent_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_text_indent).to_js_function(context.realm());
+    let text_indent_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_text_indent).to_js_function(context.realm());
+    let letter_spacing_getter = NativeFunction::from_fn_ptr(js_dom_style_get_letter_spacing)
+        .to_js_function(context.realm());
+    let letter_spacing_setter = NativeFunction::from_fn_ptr(js_dom_style_set_letter_spacing)
+        .to_js_function(context.realm());
+    let max_width_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_max_width).to_js_function(context.realm());
+    let max_width_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_max_width).to_js_function(context.realm());
+    let min_width_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_min_width).to_js_function(context.realm());
+    let min_width_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_min_width).to_js_function(context.realm());
+    let max_height_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_max_height).to_js_function(context.realm());
+    let max_height_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_max_height).to_js_function(context.realm());
+    let min_height_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_min_height).to_js_function(context.realm());
+    let min_height_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_min_height).to_js_function(context.realm());
+    let border_width_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_border_width).to_js_function(context.realm());
+    let border_width_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_border_width).to_js_function(context.realm());
+    let border_color_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_border_color).to_js_function(context.realm());
+    let border_color_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_border_color).to_js_function(context.realm());
+    let border_style_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_border_style).to_js_function(context.realm());
+    let border_style_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_border_style).to_js_function(context.realm());
+    let background_color_getter = NativeFunction::from_fn_ptr(js_dom_style_get_background_color)
+        .to_js_function(context.realm());
+    let background_color_setter = NativeFunction::from_fn_ptr(js_dom_style_set_background_color)
+        .to_js_function(context.realm());
+    let width_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_width).to_js_function(context.realm());
+    let width_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_width).to_js_function(context.realm());
+    let height_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_height).to_js_function(context.realm());
+    let height_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_height).to_js_function(context.realm());
+    let font_size_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_font_size).to_js_function(context.realm());
+    let font_size_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_font_size).to_js_function(context.realm());
+    let font_weight_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_font_weight).to_js_function(context.realm());
+    let font_weight_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_font_weight).to_js_function(context.realm());
+    let font_family_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_font_family).to_js_function(context.realm());
+    let font_family_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_font_family).to_js_function(context.realm());
+    let text_align_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_text_align).to_js_function(context.realm());
+    let text_align_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_text_align).to_js_function(context.realm());
+    let vertical_align_getter = NativeFunction::from_fn_ptr(js_dom_style_get_vertical_align)
+        .to_js_function(context.realm());
+    let vertical_align_setter = NativeFunction::from_fn_ptr(js_dom_style_set_vertical_align)
+        .to_js_function(context.realm());
+    let margin_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_margin).to_js_function(context.realm());
+    let margin_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_margin).to_js_function(context.realm());
+    let padding_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_padding).to_js_function(context.realm());
+    let padding_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_padding).to_js_function(context.realm());
+    let opacity_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_opacity).to_js_function(context.realm());
+    let opacity_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_opacity).to_js_function(context.realm());
+    let line_height_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_line_height).to_js_function(context.realm());
+    let line_height_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_line_height).to_js_function(context.realm());
+    let white_space_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_white_space).to_js_function(context.realm());
+    let white_space_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_white_space).to_js_function(context.realm());
+    let cursor_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_cursor).to_js_function(context.realm());
+    let cursor_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_cursor).to_js_function(context.realm());
+    let overflow_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_overflow).to_js_function(context.realm());
+    let overflow_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_overflow).to_js_function(context.realm());
+    let position_getter =
+        NativeFunction::from_fn_ptr(js_dom_style_get_position).to_js_function(context.realm());
+    let position_setter =
+        NativeFunction::from_fn_ptr(js_dom_style_set_position).to_js_function(context.realm());
+    let object = ObjectInitializer::with_native_data(DomStyleHandle { node_id }, context)
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_style_get_property_value),
+            js_string!("getPropertyValue"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_style_set_property),
+            js_string!("setProperty"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_style_remove_property),
+            js_string!("removeProperty"),
+            1,
+        )
+        .accessor(
+            js_string!("cssText"),
+            Some(css_text_getter),
+            Some(css_text_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("display"),
+            Some(display_getter),
+            Some(display_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("color"),
+            Some(color_getter),
+            Some(color_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("fontStyle"),
+            Some(font_style_getter),
+            Some(font_style_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("textDecoration"),
+            Some(text_decoration_getter),
+            Some(text_decoration_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("textTransform"),
+            Some(text_transform_getter),
+            Some(text_transform_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("textIndent"),
+            Some(text_indent_getter),
+            Some(text_indent_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("letterSpacing"),
+            Some(letter_spacing_getter),
+            Some(letter_spacing_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("backgroundColor"),
+            Some(background_color_getter),
+            Some(background_color_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("width"),
+            Some(width_getter),
+            Some(width_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("height"),
+            Some(height_getter),
+            Some(height_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("maxWidth"),
+            Some(max_width_getter),
+            Some(max_width_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("minWidth"),
+            Some(min_width_getter),
+            Some(min_width_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("maxHeight"),
+            Some(max_height_getter),
+            Some(max_height_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("minHeight"),
+            Some(min_height_getter),
+            Some(min_height_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("fontSize"),
+            Some(font_size_getter),
+            Some(font_size_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("fontWeight"),
+            Some(font_weight_getter),
+            Some(font_weight_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("fontFamily"),
+            Some(font_family_getter),
+            Some(font_family_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("textAlign"),
+            Some(text_align_getter),
+            Some(text_align_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("verticalAlign"),
+            Some(vertical_align_getter),
+            Some(vertical_align_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("margin"),
+            Some(margin_getter),
+            Some(margin_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("padding"),
+            Some(padding_getter),
+            Some(padding_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("borderWidth"),
+            Some(border_width_getter),
+            Some(border_width_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("borderColor"),
+            Some(border_color_getter),
+            Some(border_color_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("borderStyle"),
+            Some(border_style_getter),
+            Some(border_style_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("opacity"),
+            Some(opacity_getter),
+            Some(opacity_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("lineHeight"),
+            Some(line_height_getter),
+            Some(line_height_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("whiteSpace"),
+            Some(white_space_getter),
+            Some(white_space_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("cursor"),
+            Some(cursor_getter),
+            Some(cursor_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("overflow"),
+            Some(overflow_getter),
+            Some(overflow_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("position"),
+            Some(position_getter),
+            Some(position_setter),
+            Attribute::all(),
+        )
+        .build();
+    store_dom_style_object(context, node_id, &object);
     object
 }
 
@@ -2662,6 +4226,12 @@ fn build_dom_class_list_object(
     context: &mut Context,
     node_id: usize,
 ) -> boa_engine::object::JsObject {
+    let get_value_getter =
+        NativeFunction::from_fn_ptr(js_dom_class_list_get_value).to_js_function(context.realm());
+    let set_value_setter =
+        NativeFunction::from_fn_ptr(js_dom_class_list_set_value).to_js_function(context.realm());
+    let get_length_getter =
+        NativeFunction::from_fn_ptr(js_dom_class_list_get_length).to_js_function(context.realm());
     ObjectInitializer::with_native_data(DomClassListHandle { node_id }, context)
         .function(
             NativeFunction::from_fn_ptr(js_dom_class_list_add),
@@ -2683,28 +4253,71 @@ fn build_dom_class_list_object(
             js_string!("toggle"),
             1,
         )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_class_list_replace),
+            js_string!("replace"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_class_list_item),
+            js_string!("item"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_class_list_to_string),
+            js_string!("toString"),
+            0,
+        )
+        .accessor(
+            js_string!("value"),
+            Some(get_value_getter),
+            Some(set_value_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("length"),
+            Some(get_length_getter),
+            None,
+            Attribute::all(),
+        )
         .build()
 }
 
-fn build_storage_stub(context: &mut Context) -> boa_engine::object::JsObject {
-    ObjectInitializer::new(context)
+fn build_storage_object(context: &mut Context, kind: StorageKind) -> boa_engine::object::JsObject {
+    let length_getter =
+        NativeFunction::from_fn_ptr(js_storage_get_length).to_js_function(context.realm());
+    ObjectInitializer::with_native_data(StorageHandle { kind }, context)
         .function(
-            NativeFunction::from_fn_ptr(js_return_null),
+            NativeFunction::from_fn_ptr(js_storage_get_item),
             js_string!("getItem"),
             1,
         )
         .function(
-            NativeFunction::from_fn_ptr(js_noop),
+            NativeFunction::from_fn_ptr(js_storage_set_item),
             js_string!("setItem"),
             2,
         )
         .function(
-            NativeFunction::from_fn_ptr(js_noop),
+            NativeFunction::from_fn_ptr(js_storage_remove_item),
             js_string!("removeItem"),
             1,
         )
-        .function(NativeFunction::from_fn_ptr(js_noop), js_string!("clear"), 0)
-        .property(js_string!("length"), 0, Attribute::all())
+        .function(
+            NativeFunction::from_fn_ptr(js_storage_clear),
+            js_string!("clear"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_storage_key),
+            js_string!("key"),
+            1,
+        )
+        .accessor(
+            js_string!("length"),
+            Some(length_getter),
+            None,
+            Attribute::all(),
+        )
         .build()
 }
 
@@ -2765,6 +4378,31 @@ fn build_response_headers_object(
             js_string!("has"),
             1,
         )
+        .function(
+            NativeFunction::from_fn_ptr(js_response_headers_entries),
+            js_string!("entries"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_response_headers_keys),
+            js_string!("keys"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_response_headers_values),
+            js_string!("values"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_response_headers_for_each),
+            js_string!("forEach"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_response_headers_to_string),
+            js_string!("toString"),
+            0,
+        )
         .build()
 }
 
@@ -2812,6 +4450,11 @@ fn build_xml_http_request_object(context: &mut Context) -> boa_engine::object::J
         js_string!("getResponseHeader"),
         1,
     )
+    .function(
+        NativeFunction::from_fn_ptr(js_xhr_get_all_response_headers),
+        js_string!("getAllResponseHeaders"),
+        0,
+    )
     .accessor(
         js_string!("readyState"),
         Some(get_ready_state),
@@ -2857,7 +4500,17 @@ fn build_xml_http_request_object(context: &mut Context) -> boa_engine::object::J
     )
     .property(js_string!("onload"), JsValue::undefined(), Attribute::all())
     .property(
+        js_string!("onloadend"),
+        JsValue::undefined(),
+        Attribute::all(),
+    )
+    .property(
         js_string!("onerror"),
+        JsValue::undefined(),
+        Attribute::all(),
+    )
+    .property(
+        js_string!("onabort"),
         JsValue::undefined(),
         Attribute::all(),
     )
@@ -3161,7 +4814,7 @@ fn js_location_assign(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
 
 fn js_location_replace(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let href = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
-    set_location_href(&href, context);
+    navigate_location_href(&href, true, context);
     Ok(JsValue::undefined())
 }
 
@@ -3178,7 +4831,8 @@ fn js_history_push_state(
     }
     let href = js_value_to_string(target, context)?;
     let resolved = resolve_same_origin_soft_navigation_href(&href, context)?;
-    record_soft_navigation_href(&resolved, false, context);
+    let state = args.first().cloned();
+    record_soft_navigation_href(&resolved, false, state, false, context);
     Ok(JsValue::undefined())
 }
 
@@ -3195,20 +4849,27 @@ fn js_history_replace_state(
     }
     let href = js_value_to_string(target, context)?;
     let resolved = resolve_same_origin_soft_navigation_href(&href, context)?;
-    record_soft_navigation_href(&resolved, true, context);
+    let state = args.first().cloned();
+    record_soft_navigation_href(&resolved, true, state, false, context);
     Ok(JsValue::undefined())
 }
 
 fn js_history_back(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let previous_href = current_location_url(context).map(|url| url.to_string());
     if let Some(target) = navigate_history(context, -1) {
-        apply_soft_navigation_href_resolved(&target, context);
+        apply_soft_navigation_entry(&target, context);
+        dispatch_history_popstate_event(context, target.state.clone());
+        dispatch_hashchange_if_needed(previous_href.as_deref(), &target.href, context);
     }
     Ok(JsValue::undefined())
 }
 
 fn js_history_forward(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let previous_href = current_location_url(context).map(|url| url.to_string());
     if let Some(target) = navigate_history(context, 1) {
-        apply_soft_navigation_href_resolved(&target, context);
+        apply_soft_navigation_entry(&target, context);
+        dispatch_history_popstate_event(context, target.state.clone());
+        dispatch_hashchange_if_needed(previous_href.as_deref(), &target.href, context);
     }
     Ok(JsValue::undefined())
 }
@@ -3221,30 +4882,62 @@ fn js_history_length(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsRes
     Ok(JsValue::new(length as i32))
 }
 
-fn record_soft_navigation_href(href: &str, replace_current: bool, context: &mut Context) {
+fn js_history_state(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    Ok(current_history_entry_state(context).unwrap_or_else(JsValue::null))
+}
+
+fn record_soft_navigation_href(
+    href: &str,
+    replace_current: bool,
+    state_override: Option<JsValue>,
+    fire_hashchange: bool,
+    context: &mut Context,
+) {
+    let previous_href = current_location_url(context).map(|url| url.to_string());
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
+        let current_scroll_y = state.scroll_y;
+        let entry_state = state_override.unwrap_or_else(|| {
+            state
+                .history_entries
+                .get(state.history_index)
+                .map(|entry| entry.state.clone())
+                .unwrap_or_else(JsValue::null)
+        });
         if replace_current {
             if state.history_entries.is_empty() {
-                state.history_entries.push(href.to_string());
+                state.history_entries.push(HistoryEntry {
+                    href: href.to_string(),
+                    scroll_y: current_scroll_y,
+                    state: entry_state,
+                });
                 state.history_index = 0;
             } else {
                 let index = state.history_index;
                 if let Some(entry) = state.history_entries.get_mut(index) {
-                    *entry = href.to_string();
+                    entry.href = href.to_string();
+                    entry.scroll_y = current_scroll_y;
+                    entry.state = entry_state;
                 }
             }
         } else {
             let next_index = state.history_index.saturating_add(1);
             state.history_entries.truncate(next_index);
-            state.history_entries.push(href.to_string());
+            state.history_entries.push(HistoryEntry {
+                href: href.to_string(),
+                scroll_y: current_scroll_y,
+                state: entry_state,
+            });
             state.history_index = state.history_entries.len().saturating_sub(1);
         }
     }
     apply_soft_navigation_href_resolved(href, context);
+    if fire_hashchange {
+        dispatch_hashchange_if_needed(previous_href.as_deref(), href, context);
+    }
 }
 
-fn navigate_history(context: &mut Context, delta: isize) -> Option<String> {
+fn navigate_history(context: &mut Context, delta: isize) -> Option<HistoryEntry> {
     let host = context.get_data::<JavaScriptHostData>()?;
     let mut state = host.state.borrow_mut();
     let next = state.history_index as isize + delta;
@@ -3255,12 +4948,38 @@ fn navigate_history(context: &mut Context, delta: isize) -> Option<String> {
     state.history_entries.get(state.history_index).cloned()
 }
 
+fn current_history_entry_state(context: &mut Context) -> Option<JsValue> {
+    let host = context.get_data::<JavaScriptHostData>()?;
+    let state = host.state.borrow();
+    state
+        .history_entries
+        .get(state.history_index)
+        .map(|entry| entry.state.clone())
+}
+
+fn same_document_href_base(href: &str) -> &str {
+    href.split('#').next().unwrap_or(href)
+}
+
 fn set_location_href(href: &str, context: &mut Context) {
+    navigate_location_href(href, false, context);
+}
+
+fn navigate_location_href(href: &str, replace_current: bool, context: &mut Context) {
+    let previous_href = current_location_url(context).map(|url| url.to_string());
     let resolved = current_document_url(context)
         .and_then(|url| url.resolve(href).ok())
         .map(|url| url.to_string())
         .or_else(|| Url::parse(href).ok().map(|url| url.to_string()))
         .unwrap_or_else(|| href.to_string());
+    let same_document = previous_href
+        .as_deref()
+        .map(|previous| same_document_href_base(previous) == same_document_href_base(&resolved))
+        .unwrap_or(false);
+    if same_document {
+        record_soft_navigation_href(&resolved, replace_current, None, true, context);
+        return;
+    }
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
         state.location_href = resolved;
@@ -3274,7 +4993,7 @@ fn set_soft_navigation_href(href: &str, context: &mut Context) {
         .map(|url| url.to_string())
         .or_else(|| Url::parse(href).ok().map(|url| url.to_string()))
         .unwrap_or_else(|| href.to_string());
-    record_soft_navigation_href(&resolved, false, context);
+    record_soft_navigation_href(&resolved, false, None, true, context);
 }
 
 fn apply_soft_navigation_href_resolved(resolved: &str, context: &mut Context) {
@@ -3285,6 +5004,101 @@ fn apply_soft_navigation_href_resolved(resolved: &str, context: &mut Context) {
             state.document_url = url;
         }
         state.soft_navigation_target = Some(resolved.to_string());
+    }
+}
+
+fn apply_soft_navigation_entry(entry: &HistoryEntry, context: &mut Context) {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        state.location_href = entry.href.clone();
+        state.scroll_y = entry.scroll_y;
+        if let Ok(url) = Url::parse(&entry.href) {
+            state.document_url = url;
+        }
+        state.soft_navigation_target = Some(entry.href.clone());
+    }
+}
+
+fn dispatch_global_event_object(
+    context: &mut Context,
+    event_type: &str,
+    bubbles: bool,
+    cancelable: bool,
+    event: &boa_engine::object::JsObject,
+) -> JsResult<bool> {
+    let target = context.global_object();
+    dispatch_listeners_on_target(
+        &target,
+        &event_type.to_ascii_lowercase(),
+        event,
+        true,
+        EventDispatchPhase::AtTarget,
+        context,
+    )?;
+    if !event_flag_value(event, "immediatePropagationStopped", context) {
+        dispatch_listeners_on_target(
+            &target,
+            &event_type.to_ascii_lowercase(),
+            event,
+            false,
+            EventDispatchPhase::AtTarget,
+            context,
+        )?;
+    }
+    let _ = (bubbles, cancelable);
+    Ok(event_flag_value(event, "defaultPrevented", context))
+}
+
+fn dispatch_history_popstate_event(context: &mut Context, state: JsValue) {
+    let target = context.global_object();
+    let request = DomEventRequest {
+        target_node_id: 0,
+        event_type: "popstate".to_string(),
+        bubbles: false,
+        cancelable: false,
+        ..Default::default()
+    };
+    let event = build_dom_event_object(context, &request, &target);
+    let _ = event.set(js_string!("state"), state, true, context);
+    let _ = dispatch_global_event_object(context, "popstate", false, false, &event);
+}
+
+fn dispatch_hashchange_if_needed(
+    previous_href: Option<&str>,
+    next_href: &str,
+    context: &mut Context,
+) {
+    let Some(previous_href) = previous_href else {
+        return;
+    };
+    if same_document_href_base(previous_href) != same_document_href_base(next_href) {
+        return;
+    }
+    if previous_href == next_href {
+        return;
+    }
+    let target = context.global_object();
+    let request = DomEventRequest {
+        target_node_id: 0,
+        event_type: "hashchange".to_string(),
+        bubbles: false,
+        cancelable: false,
+        ..Default::default()
+    };
+    let event = build_dom_event_object(context, &request, &target);
+    let _ = event.set(
+        js_string!("oldURL"),
+        js_string!(previous_href),
+        true,
+        context,
+    );
+    let _ = event.set(js_string!("newURL"), js_string!(next_href), true, context);
+    let _ = dispatch_global_event_object(context, "hashchange", false, false, &event);
+}
+
+fn sync_current_history_entry_scroll(state: &mut JavaScriptState) {
+    if let Some(entry) = state.history_entries.get_mut(state.history_index) {
+        entry.scroll_y = state.scroll_y;
     }
 }
 
@@ -3552,6 +5366,122 @@ fn js_response_headers_has(
     Ok(JsValue::new(has))
 }
 
+fn response_headers_entries(handle: &ResponseHeadersHandle) -> Vec<(String, String)> {
+    handle
+        .headers
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+fn js_response_headers_entries(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let Some(handle) = object.downcast_ref::<ResponseHeadersHandle>() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let mut entries = Vec::new();
+    for (name, value) in response_headers_entries(&handle) {
+        let pair = JsArray::from_iter(
+            [
+                JsValue::from(js_string!(name)),
+                JsValue::from(js_string!(value)),
+            ],
+            context,
+        );
+        entries.push(JsValue::from(pair));
+    }
+    Ok(JsValue::from(JsArray::from_iter(entries, context)))
+}
+
+fn js_response_headers_keys(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let Some(handle) = object.downcast_ref::<ResponseHeadersHandle>() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let keys = response_headers_entries(&handle)
+        .into_iter()
+        .map(|(name, _)| JsValue::from(js_string!(name)));
+    Ok(JsValue::from(JsArray::from_iter(keys, context)))
+}
+
+fn js_response_headers_values(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let Some(handle) = object.downcast_ref::<ResponseHeadersHandle>() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let values = response_headers_entries(&handle)
+        .into_iter()
+        .map(|(_, value)| JsValue::from(js_string!(value)));
+    Ok(JsValue::from(JsArray::from_iter(values, context)))
+}
+
+fn js_response_headers_for_each(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(callback) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let this_arg = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(handle) = object.downcast_ref::<ResponseHeadersHandle>() else {
+        return Ok(JsValue::undefined());
+    };
+    for (name, value) in response_headers_entries(&handle) {
+        let _ = call_js_callback_with_this(
+            callback,
+            &this_arg,
+            &[
+                JsValue::from(js_string!(value)),
+                JsValue::from(js_string!(name)),
+                JsValue::from(object.clone()),
+            ],
+            context,
+        )?;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_response_headers_to_string(
+    this: &JsValue,
+    _: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::from(js_string!("")));
+    };
+    let Some(handle) = object.downcast_ref::<ResponseHeadersHandle>() else {
+        return Ok(JsValue::from(js_string!("")));
+    };
+    let text = response_headers_entries(&handle)
+        .into_iter()
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    Ok(JsValue::from(js_string!(text)))
+}
+
 fn js_create_xml_http_request(
     _: &JsValue,
     _: &[JsValue],
@@ -3576,6 +5506,7 @@ fn js_xhr_open(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
         state.response_text.clear();
         state.response_url.clear();
         state.request_headers.clear();
+        state.response_headers.clear();
     }
     Ok(JsValue::undefined())
 }
@@ -3639,9 +5570,15 @@ fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
                 state.status_text = response.reason_phrase.clone();
                 state.response_text = text;
                 state.response_url = response.final_url.to_string();
+                state.response_headers = response
+                    .headers
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect();
             }
             trigger_xhr_handler(&object, "onreadystatechange", context)?;
             trigger_xhr_handler(&object, "onload", context)?;
+            trigger_xhr_handler(&object, "onloadend", context)?;
         }
         Err(error) => {
             {
@@ -3651,16 +5588,18 @@ fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
                 state.status_text = error.to_string();
                 state.response_text.clear();
                 state.response_url.clear();
+                state.response_headers.clear();
             }
             trigger_xhr_handler(&object, "onreadystatechange", context)?;
             trigger_xhr_handler(&object, "onerror", context)?;
+            trigger_xhr_handler(&object, "onloadend", context)?;
         }
     }
 
     Ok(JsValue::undefined())
 }
 
-fn js_xhr_abort(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+fn js_xhr_abort(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(object) = this.as_object()
         && let Some(handle) = object.downcast_ref::<XmlHttpRequestHandle>()
     {
@@ -3670,12 +5609,41 @@ fn js_xhr_abort(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsVa
         state.status_text.clear();
         state.response_text.clear();
         state.response_url.clear();
+        state.response_headers.clear();
+    }
+    if let Some(object) = this.as_object() {
+        let _ = trigger_xhr_handler(&object, "onabort", context);
+        let _ = trigger_xhr_handler(&object, "onloadend", context);
     }
     Ok(JsValue::undefined())
 }
 
-fn js_xhr_get_response_header(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
-    Ok(JsValue::null())
+fn js_xhr_get_response_header(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?
+        .to_ascii_lowercase();
+    let value = xhr_state_value(this, |state| state.response_headers.get(&name).cloned())
+        .unwrap_or_default();
+    Ok(value
+        .map(|value| JsValue::from(js_string!(value)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_xhr_get_all_response_headers(
+    this: &JsValue,
+    _: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let headers = xhr_state_value(this, |state| state.response_headers.clone()).unwrap_or_default();
+    let text = headers
+        .into_iter()
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    Ok(JsValue::from(js_string!(text)))
 }
 
 fn js_xhr_get_ready_state(this: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
@@ -3962,6 +5930,31 @@ fn js_match_media(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     Ok(JsValue::from(build_match_media_stub(context, media)))
 }
 
+fn js_window_get_computed_style(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = node_id_argument(args.first()) else {
+        return Err(JsNativeError::typ()
+            .with_message("getComputedStyle requires an Element")
+            .into());
+    };
+
+    if let Some(pseudo) = args.get(1) {
+        if !pseudo.is_undefined() && !pseudo.is_null() {
+            let pseudo_text = js_value_to_string(pseudo, context)?;
+            if !pseudo_text.trim().is_empty() {
+                return Err(JsNativeError::typ()
+                    .with_message("pseudo-element computed styles are unsupported")
+                    .into());
+            }
+        }
+    }
+
+    Ok(JsValue::from(build_computed_style_object(context, node_id)))
+}
+
 fn this_node_id(this: &JsValue) -> Option<usize> {
     this.as_object()?
         .downcast_ref::<DomNodeHandle>()
@@ -4038,6 +6031,45 @@ fn js_document_get_element_by_id(
     Ok(found
         .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
         .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_matches(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let selector = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::new(false));
+    };
+    let matches = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.matches_selector(node_id, &selector))
+        .unwrap_or(false);
+    Ok(JsValue::new(matches))
+}
+
+fn js_dom_closest(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let selector = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    let closest = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.closest_selector(node_id, &selector));
+    Ok(closest
+        .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_contains(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::new(false));
+    };
+    let Some(target_id) = node_id_argument(args.first()) else {
+        return Ok(JsValue::new(false));
+    };
+    let contains = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.contains_node(node_id, target_id))
+        .unwrap_or(false);
+    Ok(JsValue::new(contains))
 }
 
 fn js_document_create_element(
@@ -4151,6 +6183,67 @@ fn js_dom_get_property_attribute(
     Ok(JsValue::from(js_string!(value)))
 }
 
+fn js_dom_has_attribute(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::new(false));
+    };
+    let has_attribute = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.has_attribute(node_id, &name))
+        .unwrap_or(false);
+    Ok(JsValue::new(has_attribute))
+}
+
+fn js_dom_has_attributes(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::new(false));
+    };
+    let has_attributes = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| !host.state.borrow().dom.attribute_names(node_id).is_empty())
+        .unwrap_or(false);
+    Ok(JsValue::new(has_attributes))
+}
+
+fn js_dom_get_attributes(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    Ok(JsValue::from(build_dom_attributes_object(context, node_id)))
+}
+
+fn js_dom_get_attribute_names(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let names = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.attribute_names(node_id))
+        .unwrap_or_default();
+    let array = JsArray::from_iter(
+        names
+            .into_iter()
+            .map(|name| JsValue::from(js_string!(name))),
+        context,
+    );
+    Ok(JsValue::from(array))
+}
+
 fn js_dom_set_attribute(
     this: &JsValue,
     args: &[JsValue],
@@ -4167,6 +6260,39 @@ fn js_dom_set_attribute(
             .set_attribute(node_id, &name, &value);
     }
     Ok(JsValue::undefined())
+}
+
+fn js_dom_toggle_attribute(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let force = args.get(1).map(JsValue::to_boolean);
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::new(false));
+    };
+    let toggled = if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        if let Some(force) = force {
+            if force {
+                state.dom.set_attribute(node_id, &name, "");
+                true
+            } else {
+                state.dom.remove_attribute(node_id, &name);
+                false
+            }
+        } else if state.dom.has_attribute(node_id, &name) {
+            state.dom.remove_attribute(node_id, &name);
+            false
+        } else {
+            state.dom.set_attribute(node_id, &name, "");
+            true
+        }
+    } else {
+        false
+    };
+    Ok(JsValue::new(toggled))
 }
 
 fn js_dom_set_property_attribute(
@@ -4210,6 +6336,30 @@ fn js_dom_remove(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
     Ok(JsValue::undefined())
 }
 
+fn js_dom_insert_adjacent_html(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let position = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?
+        .to_ascii_lowercase();
+    let html = js_value_to_string(args.get(1).unwrap_or(&JsValue::undefined()), context)?;
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        match position.as_str() {
+            "beforebegin" => state.dom.insert_fragment_before(node_id, &html),
+            "afterbegin" => state.dom.insert_fragment_at_start(node_id, &html),
+            "beforeend" => state.dom.append_fragment(node_id, &html),
+            "afterend" => state.dom.insert_fragment_after(node_id, &html),
+            _ => {}
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
 fn js_dom_get_class_list(
     this: &JsValue,
     _: &[JsValue],
@@ -4223,20 +6373,7 @@ fn js_dom_get_children(this: &JsValue, _: &[JsValue], context: &mut Context) -> 
     let node_id = this_node_id(this).unwrap_or(0);
     let node_ids = context
         .get_data::<JavaScriptHostData>()
-        .map(|host| {
-            let state = host.state.borrow();
-            state
-                .dom
-                .node(node_id)
-                .map(|node| {
-                    node.children
-                        .iter()
-                        .copied()
-                        .filter(|child_id| state.dom.element(*child_id).is_some())
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
+        .map(|host| host.state.borrow().dom.element_children(node_id))
         .unwrap_or_default();
     Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
 }
@@ -4258,6 +6395,62 @@ fn js_dom_get_child_nodes(
         })
         .unwrap_or_default();
     Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
+}
+
+fn js_dom_get_first_element_child(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let child_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.first_element_child(node_id));
+    Ok(child_id
+        .map(|child_id| JsValue::from(build_dom_node_object(context, child_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_get_last_element_child(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let child_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.last_element_child(node_id));
+    Ok(child_id
+        .map(|child_id| JsValue::from(build_dom_node_object(context, child_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_get_previous_element_sibling(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let sibling_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.previous_element_sibling(node_id));
+    Ok(sibling_id
+        .map(|sibling_id| JsValue::from(build_dom_node_object(context, sibling_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_get_next_element_sibling(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let sibling_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.next_element_sibling(node_id));
+    Ok(sibling_id
+        .map(|sibling_id| JsValue::from(build_dom_node_object(context, sibling_id)))
+        .unwrap_or_else(JsValue::null))
 }
 
 fn js_dom_get_text_content(
@@ -4315,6 +6508,43 @@ fn js_dom_set_inner_html(
     Ok(JsValue::undefined())
 }
 
+fn js_dom_get_outer_html(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let html = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.serialize_node(node_id))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(html)))
+}
+
+fn js_dom_set_outer_html(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let html = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        if state
+            .dom
+            .node(node_id)
+            .and_then(|node| node.parent)
+            .is_some()
+        {
+            state.dom.insert_fragment_before(node_id, &html);
+            state.dom.detach_node(node_id);
+        } else {
+            state.dom.replace_children_with_fragment(node_id, &html);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
 fn js_dom_get_id(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     js_dom_get_attribute(this, &[JsValue::from(js_string!("id"))], context)
 }
@@ -4339,6 +6569,11 @@ fn js_dom_set_class_name(
 ) -> JsResult<JsValue> {
     let value = args.first().cloned().unwrap_or_else(JsValue::undefined);
     js_dom_set_attribute(this, &[JsValue::from(js_string!("class")), value], context)
+}
+
+fn js_dom_get_dataset(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    Ok(JsValue::from(build_dom_dataset_object(context, node_id)))
 }
 
 fn js_dom_get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -4467,6 +6702,1219 @@ fn js_dom_get_owner_document(
     Ok(JsValue::from(build_dom_node_object(context, document_id)))
 }
 
+fn dataset_node_id(this: &JsValue, context: &mut Context) -> Option<usize> {
+    let object = this.as_object()?;
+    if let Some(handle) = object.downcast_ref::<DomDatasetHandle>() {
+        return Some(handle.node_id);
+    }
+    let value = object.get(js_string!("__tobiraNodeId"), context).ok()?;
+    let node_id = js_value_to_string(&value, context).ok()?;
+    node_id.parse().ok()
+}
+
+fn attributes_node_id(this: &JsValue, context: &mut Context) -> Option<usize> {
+    let object = this.as_object()?;
+    if let Some(handle) = object.downcast_ref::<DomAttributesHandle>() {
+        return Some(handle.node_id);
+    }
+    let value = object.get(js_string!("__tobiraNodeId"), context).ok()?;
+    let node_id = js_value_to_string(&value, context).ok()?;
+    node_id.parse().ok()
+}
+
+fn attribute_entries(context: &mut Context, node_id: usize) -> Vec<(String, String)> {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.node_attributes(node_id).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
+fn attribute_entry_at(
+    context: &mut Context,
+    node_id: usize,
+    index: usize,
+) -> Option<(String, String)> {
+    attribute_entries(context, node_id).into_iter().nth(index)
+}
+
+fn attribute_entry_named(
+    context: &mut Context,
+    node_id: usize,
+    name: &str,
+) -> Option<(String, String)> {
+    context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .node_attributes(node_id)
+            .cloned()
+            .and_then(|attributes| {
+                attributes
+                    .get(name)
+                    .cloned()
+                    .map(|value| (name.to_string(), value))
+            })
+    })
+}
+
+fn build_dom_attribute_object(
+    context: &mut Context,
+    name: &str,
+    value: &str,
+) -> boa_engine::object::JsObject {
+    ObjectInitializer::new(context)
+        .property(js_string!("name"), js_string!(name), Attribute::all())
+        .property(js_string!("nodeName"), js_string!(name), Attribute::all())
+        .property(js_string!("localName"), js_string!(name), Attribute::all())
+        .property(js_string!("value"), js_string!(value), Attribute::all())
+        .property(js_string!("nodeValue"), js_string!(value), Attribute::all())
+        .property(js_string!("specified"), true, Attribute::all())
+        .build()
+}
+
+fn dataset_property_to_attribute_name(property: &str) -> Option<String> {
+    if property.is_empty() {
+        return None;
+    }
+
+    let mut attribute = String::from("data-");
+    for character in property.chars() {
+        if character.is_ascii_uppercase() {
+            attribute.push('-');
+            attribute.push(character.to_ascii_lowercase());
+        } else {
+            attribute.push(character);
+        }
+    }
+    Some(attribute)
+}
+
+fn dataset_attribute_to_property_name(attribute: &str) -> Option<String> {
+    let remainder = attribute.strip_prefix("data-")?;
+    if remainder.is_empty() {
+        return None;
+    }
+
+    let mut property = String::with_capacity(remainder.len());
+    let mut characters = remainder.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '-'
+            && let Some(next) = characters.peek().copied()
+            && next.is_ascii_lowercase()
+        {
+            property.push(next.to_ascii_uppercase());
+            let _ = characters.next();
+            continue;
+        }
+        property.push(character);
+    }
+
+    if property.is_empty() {
+        None
+    } else {
+        Some(property)
+    }
+}
+
+fn js_dom_dataset_get(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(node_id) = dataset_node_id(target, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let target = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    if !target.is_string() {
+        return Ok(JsValue::undefined());
+    }
+
+    let property = js_value_to_string(&target, context)?;
+    let Some(attribute_name) = dataset_property_to_attribute_name(&property) else {
+        return Ok(args
+            .first()
+            .and_then(JsValue::as_object)
+            .map(|object| object.get(js_string!(property), context))
+            .transpose()?
+            .unwrap_or_else(JsValue::undefined));
+    };
+    let value = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .get_attribute(node_id, &attribute_name)
+    });
+    if let Some(value) = value {
+        Ok(JsValue::from(js_string!(value)))
+    } else {
+        Ok(args
+            .first()
+            .and_then(JsValue::as_object)
+            .map(|object| object.get(js_string!(property), context))
+            .transpose()?
+            .unwrap_or_else(JsValue::undefined))
+    }
+}
+
+fn js_dom_dataset_set(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::new(false));
+    };
+    let Some(node_id) = dataset_node_id(target, context) else {
+        return Ok(JsValue::new(false));
+    };
+    let target = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    if !target.is_string() {
+        return Ok(JsValue::new(false));
+    }
+
+    let property = js_value_to_string(&target, context)?;
+    let Some(attribute_name) = dataset_property_to_attribute_name(&property) else {
+        return Ok(JsValue::new(false));
+    };
+    let value = js_value_to_string(args.get(2).unwrap_or(&JsValue::undefined()), context)?;
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state
+            .borrow_mut()
+            .dom
+            .set_attribute(node_id, &attribute_name, &value);
+    }
+    Ok(JsValue::new(true))
+}
+
+fn js_dom_dataset_has(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::new(false));
+    };
+    let Some(node_id) = dataset_node_id(target, context) else {
+        return Ok(JsValue::new(false));
+    };
+    let target = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    if !target.is_string() {
+        return Ok(JsValue::new(false));
+    }
+
+    let property = js_value_to_string(&target, context)?;
+    let Some(attribute_name) = dataset_property_to_attribute_name(&property) else {
+        return Ok(JsValue::new(false));
+    };
+    let has_attribute = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| {
+            host.state
+                .borrow()
+                .dom
+                .has_attribute(node_id, &attribute_name)
+        })
+        .unwrap_or(false);
+    Ok(JsValue::new(has_attribute))
+}
+
+fn js_dom_dataset_delete_property(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::new(false));
+    };
+    let Some(node_id) = dataset_node_id(target, context) else {
+        return Ok(JsValue::new(false));
+    };
+    let target = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    if !target.is_string() {
+        return Ok(JsValue::new(false));
+    }
+
+    let property = js_value_to_string(&target, context)?;
+    let Some(attribute_name) = dataset_property_to_attribute_name(&property) else {
+        return Ok(JsValue::new(false));
+    };
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state
+            .borrow_mut()
+            .dom
+            .remove_attribute(node_id, &attribute_name);
+    }
+    Ok(JsValue::new(true))
+}
+
+fn js_dom_dataset_own_keys(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let Some(node_id) = dataset_node_id(target, context) else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let keys = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| {
+            host.state
+                .borrow()
+                .dom
+                .attribute_names(node_id)
+                .into_iter()
+                .filter_map(|attribute| dataset_attribute_to_property_name(&attribute))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let array = JsArray::from_iter(
+        keys.into_iter().map(|key| JsValue::from(js_string!(key))),
+        context,
+    );
+    Ok(JsValue::from(array))
+}
+
+fn js_dom_dataset_get_own_property_descriptor(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(node_id) = dataset_node_id(target, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let target = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    if !target.is_string() {
+        return Ok(JsValue::undefined());
+    }
+
+    let property = js_value_to_string(&target, context)?;
+    let Some(attribute_name) = dataset_property_to_attribute_name(&property) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(value) = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .get_attribute(node_id, &attribute_name)
+    }) else {
+        return Ok(JsValue::undefined());
+    };
+    let descriptor = ObjectInitializer::new(context)
+        .property(js_string!("value"), js_string!(value), Attribute::all())
+        .property(js_string!("writable"), true, Attribute::all())
+        .property(js_string!("enumerable"), true, Attribute::all())
+        .property(js_string!("configurable"), true, Attribute::all())
+        .build();
+    Ok(JsValue::from(descriptor))
+}
+
+fn js_dom_attributes_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = attributes_node_id(this, context) else {
+        return Ok(JsValue::null());
+    };
+    let Some(index_value) = args.first() else {
+        return Ok(JsValue::null());
+    };
+    let index = js_value_to_string(index_value, context)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok());
+    let Some(index) = index else {
+        return Ok(JsValue::null());
+    };
+    Ok(attribute_entry_at(context, node_id, index)
+        .map(|(name, value)| JsValue::from(build_dom_attribute_object(context, &name, &value)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_attributes_get_named_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = attributes_node_id(this, context) else {
+        return Ok(JsValue::null());
+    };
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    Ok(attribute_entry_named(context, node_id, &name)
+        .map(|(name, value)| JsValue::from(build_dom_attribute_object(context, &name, &value)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_attributes_get(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(node_id) = attributes_node_id(target, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(property) = args.get(1) else {
+        return Ok(JsValue::undefined());
+    };
+    if !property.is_string() {
+        return Ok(JsValue::undefined());
+    }
+
+    let property = js_value_to_string(property, context)?;
+    if property == "length" {
+        return Ok(JsValue::new(
+            attribute_entries(context, node_id).len() as u32
+        ));
+    }
+
+    if let Some((name, value)) = property
+        .parse::<usize>()
+        .ok()
+        .and_then(|index| attribute_entry_at(context, node_id, index))
+    {
+        return Ok(JsValue::from(build_dom_attribute_object(
+            context, &name, &value,
+        )));
+    }
+
+    if let Some((name, value)) = attribute_entry_named(context, node_id, &property) {
+        return Ok(JsValue::from(build_dom_attribute_object(
+            context, &name, &value,
+        )));
+    }
+
+    Ok(target
+        .as_object()
+        .map(|object| object.get(js_string!(property), context))
+        .transpose()?
+        .unwrap_or_else(JsValue::undefined))
+}
+
+fn js_dom_attributes_set(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::new(false))
+}
+
+fn js_dom_attributes_has(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::new(false));
+    };
+    let Some(node_id) = attributes_node_id(target, context) else {
+        return Ok(JsValue::new(false));
+    };
+    let Some(property) = args.get(1) else {
+        return Ok(JsValue::new(false));
+    };
+    if !property.is_string() {
+        return Ok(JsValue::new(false));
+    }
+
+    let property = js_value_to_string(property, context)?;
+    if property == "length" {
+        return Ok(JsValue::new(true));
+    }
+    if property.parse::<usize>().is_ok() {
+        return Ok(JsValue::new(
+            attribute_entry_at(context, node_id, property.parse().unwrap_or(usize::MAX)).is_some(),
+        ));
+    }
+    if attribute_entry_named(context, node_id, &property).is_some() {
+        return Ok(JsValue::new(true));
+    }
+
+    Ok(target
+        .as_object()
+        .map(|object| object.get(js_string!(property), context))
+        .transpose()?
+        .map(|value| !value.is_undefined())
+        .unwrap_or(false)
+        .into())
+}
+
+fn js_dom_attributes_own_keys(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let Some(node_id) = attributes_node_id(target, context) else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let length = attribute_entries(context, node_id).len();
+    let mut keys = Vec::with_capacity(length + 4);
+    keys.push(JsValue::from(js_string!("length")));
+    keys.push(JsValue::from(js_string!("item")));
+    keys.push(JsValue::from(js_string!("getNamedItem")));
+    keys.push(JsValue::from(js_string!("namedItem")));
+    for index in 0..length {
+        keys.push(JsValue::from(js_string!(index.to_string())));
+    }
+    let array = JsArray::from_iter(keys, context);
+    Ok(JsValue::from(array))
+}
+
+fn js_dom_attributes_get_own_property_descriptor(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(node_id) = attributes_node_id(target, context) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(property) = args.get(1) else {
+        return Ok(JsValue::undefined());
+    };
+    if !property.is_string() {
+        return Ok(JsValue::undefined());
+    }
+
+    let property = js_value_to_string(property, context)?;
+    if property == "length" {
+        let length = attribute_entries(context, node_id).len() as u32;
+        let descriptor = ObjectInitializer::new(context)
+            .property(js_string!("value"), JsValue::new(length), Attribute::all())
+            .property(js_string!("writable"), false, Attribute::all())
+            .property(js_string!("enumerable"), false, Attribute::all())
+            .property(js_string!("configurable"), true, Attribute::all())
+            .build();
+        return Ok(JsValue::from(descriptor));
+    }
+
+    if property == "item" || property == "getNamedItem" || property == "namedItem" {
+        let function = target
+            .as_object()
+            .map(|object| object.get(js_string!(property), context))
+            .transpose()?;
+        if let Some(function) = function {
+            let descriptor = ObjectInitializer::new(context)
+                .property(js_string!("value"), function, Attribute::all())
+                .property(js_string!("writable"), true, Attribute::all())
+                .property(js_string!("enumerable"), false, Attribute::all())
+                .property(js_string!("configurable"), true, Attribute::all())
+                .build();
+            return Ok(JsValue::from(descriptor));
+        }
+        return Ok(JsValue::undefined());
+    }
+
+    if let Some((name, value)) = property
+        .parse::<usize>()
+        .ok()
+        .and_then(|index| attribute_entry_at(context, node_id, index))
+    {
+        let attribute = build_dom_attribute_object(context, &name, &value);
+        let descriptor = ObjectInitializer::new(context)
+            .property(
+                js_string!("value"),
+                JsValue::from(attribute),
+                Attribute::all(),
+            )
+            .property(js_string!("writable"), false, Attribute::all())
+            .property(js_string!("enumerable"), true, Attribute::all())
+            .property(js_string!("configurable"), true, Attribute::all())
+            .build();
+        return Ok(JsValue::from(descriptor));
+    }
+
+    if let Some((name, value)) = attribute_entry_named(context, node_id, &property) {
+        let attribute = build_dom_attribute_object(context, &name, &value);
+        let descriptor = ObjectInitializer::new(context)
+            .property(
+                js_string!("value"),
+                JsValue::from(attribute),
+                Attribute::all(),
+            )
+            .property(js_string!("writable"), false, Attribute::all())
+            .property(js_string!("enumerable"), true, Attribute::all())
+            .property(js_string!("configurable"), true, Attribute::all())
+            .build();
+        return Ok(JsValue::from(descriptor));
+    }
+
+    Ok(JsValue::undefined())
+}
+
+fn style_node_id_from_this(this: &JsValue) -> Option<usize> {
+    let object = this.as_object()?;
+    let handle = object.downcast_ref::<DomStyleHandle>()?;
+    Some(handle.node_id)
+}
+
+fn computed_style_node_id_from_this(this: &JsValue) -> Option<usize> {
+    let object = this.as_object()?;
+    let handle = object.downcast_ref::<ComputedStyleHandle>()?;
+    Some(handle.node_id)
+}
+
+fn normalize_css_property_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut normalized = String::with_capacity(trimmed.len());
+    for character in trimmed.chars() {
+        if character.is_ascii_uppercase() {
+            if !normalized.is_empty() && !normalized.ends_with('-') {
+                normalized.push('-');
+            }
+            normalized.push(character.to_ascii_lowercase());
+        } else {
+            normalized.push(character);
+        }
+    }
+    normalized.to_ascii_lowercase()
+}
+
+fn parse_inline_style_entries(input: &str) -> Vec<(String, String)> {
+    input
+        .split(';')
+        .filter_map(|entry| {
+            let (property, value) = entry.split_once(':')?;
+            let property = normalize_css_property_name(property);
+            let value = value.trim().to_string();
+            if property.is_empty() || value.is_empty() {
+                return None;
+            }
+            Some((property, value))
+        })
+        .collect()
+}
+
+fn serialize_inline_style_entries(entries: &[(String, String)]) -> String {
+    entries
+        .iter()
+        .map(|(property, value)| format!("{property}: {value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn inline_style_text(context: &mut Context, node_id: usize) -> String {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.get_attribute(node_id, "style"))
+        .unwrap_or_default()
+}
+
+fn set_inline_style_text(context: &mut Context, node_id: usize, text: &str) {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let value = text.trim();
+        if value.is_empty() {
+            state.dom.remove_attribute(node_id, "style");
+        } else {
+            state.dom.set_attribute(node_id, "style", value);
+        }
+    }
+}
+
+fn inline_style_property_value(
+    context: &mut Context,
+    node_id: usize,
+    property_name: &str,
+) -> String {
+    let target = normalize_css_property_name(property_name);
+    let Some(value) = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.get_attribute(node_id, "style"))
+    else {
+        return String::new();
+    };
+
+    parse_inline_style_entries(&value)
+        .into_iter()
+        .rev()
+        .find(|(property, _)| *property == target)
+        .map(|(_, value)| value)
+        .unwrap_or_default()
+}
+
+fn default_display_for_tag(tag_name: &str) -> &'static str {
+    match tag_name {
+        "html" | "body" | "div" | "section" | "article" | "aside" | "main" | "header"
+        | "footer" | "nav" | "p" | "ul" | "ol" | "form" | "fieldset" | "legend" | "pre"
+        | "blockquote" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "block",
+        "table" => "table",
+        "tr" => "table-row",
+        "td" | "th" => "table-cell",
+        "thead" | "tbody" | "tfoot" => "table-row-group",
+        "li" => "list-item",
+        "img" | "button" | "input" | "select" | "textarea" => "inline-block",
+        "span" | "a" | "b" | "i" | "u" | "strong" | "em" | "small" | "code" | "abbr" | "label"
+        | "sup" | "sub" | "mark" => "inline",
+        "script" | "style" | "head" | "meta" | "link" | "title" | "template" => "none",
+        _ => "inline",
+    }
+}
+
+fn default_font_size_for_tag(tag_name: &str) -> &'static str {
+    match tag_name {
+        "h1" => "2em",
+        "h2" => "1.5em",
+        "h3" => "1.17em",
+        "h4" => "1em",
+        "h5" => "0.83em",
+        "h6" => "0.67em",
+        _ => "16px",
+    }
+}
+
+fn default_font_weight_for_tag(tag_name: &str) -> &'static str {
+    match tag_name {
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "strong" | "b" | "th" => "700",
+        _ => "400",
+    }
+}
+
+fn default_background_color_for_tag(tag_name: &str) -> &'static str {
+    match tag_name {
+        "html" | "body" => "rgb(255, 255, 255)",
+        _ => "rgba(0, 0, 0, 0)",
+    }
+}
+
+fn box_shorthand_value(top: &str, right: &str, bottom: &str, left: &str) -> String {
+    if top == right && right == bottom && bottom == left {
+        top.to_string()
+    } else if top == bottom && right == left {
+        format!("{top} {right}")
+    } else if right == left {
+        format!("{top} {right} {bottom}")
+    } else {
+        format!("{top} {right} {bottom} {left}")
+    }
+}
+
+fn computed_style_parent_value(
+    context: &mut Context,
+    node_id: usize,
+    property_name: &str,
+) -> Option<String> {
+    let parent_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .node(node_id)
+            .and_then(|node| node.parent)
+    })?;
+    Some(computed_style_property_value(
+        context,
+        parent_id,
+        property_name,
+    ))
+}
+
+fn computed_style_property_value(
+    context: &mut Context,
+    node_id: usize,
+    property_name: &str,
+) -> String {
+    let normalized = normalize_css_property_name(property_name);
+    let inline = inline_style_property_value(context, node_id, &normalized);
+    if !inline.is_empty() {
+        if inline.eq_ignore_ascii_case("inherit") {
+            return computed_style_parent_value(context, node_id, &normalized).unwrap_or_default();
+        }
+        return inline;
+    }
+
+    let tag_name = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .element(node_id)
+                .map(|element| element.tag_name.clone())
+        })
+        .unwrap_or_default();
+
+    match normalized.as_str() {
+        "display" => {
+            if context
+                .get_data::<JavaScriptHostData>()
+                .map(|host| host.state.borrow().dom.has_attribute(node_id, "hidden"))
+                .unwrap_or(false)
+            {
+                "none".to_string()
+            } else {
+                default_display_for_tag(&tag_name).to_string()
+            }
+        }
+        "position" => "static".to_string(),
+        "visibility" => computed_style_parent_value(context, node_id, "visibility")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "visible".to_string()),
+        "color" => computed_style_parent_value(context, node_id, "color")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "rgb(0, 0, 0)".to_string()),
+        "background-color" => default_background_color_for_tag(&tag_name).to_string(),
+        "font-size" => match tag_name.as_str() {
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                default_font_size_for_tag(&tag_name).to_string()
+            }
+            _ => computed_style_parent_value(context, node_id, "font-size")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "16px".to_string()),
+        },
+        "font-weight" => match tag_name.as_str() {
+            "strong" | "b" | "th" => default_font_weight_for_tag(&tag_name).to_string(),
+            _ => computed_style_parent_value(context, node_id, "font-weight")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "400".to_string()),
+        },
+        "font-family" => computed_style_parent_value(context, node_id, "font-family")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "sans-serif".to_string()),
+        "font-style" => "normal".to_string(),
+        "line-height" => computed_style_parent_value(context, node_id, "line-height")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "normal".to_string()),
+        "text-align" => computed_style_parent_value(context, node_id, "text-align")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "left".to_string()),
+        "white-space" => computed_style_parent_value(context, node_id, "white-space")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "normal".to_string()),
+        "text-decoration" => "none".to_string(),
+        "text-transform" => "none".to_string(),
+        "text-indent" => "0px".to_string(),
+        "letter-spacing" => "normal".to_string(),
+        "pointer-events" => "auto".to_string(),
+        "opacity" => "1".to_string(),
+        "overflow" => "visible".to_string(),
+        "width" | "height" => "auto".to_string(),
+        "max-width" | "min-width" | "max-height" | "min-height" => "none".to_string(),
+        "margin-top" | "margin-right" | "margin-bottom" | "margin-left" | "padding-top"
+        | "padding-right" | "padding-bottom" | "padding-left" => "0px".to_string(),
+        "margin" => box_shorthand_value(
+            &computed_style_property_value(context, node_id, "margin-top"),
+            &computed_style_property_value(context, node_id, "margin-right"),
+            &computed_style_property_value(context, node_id, "margin-bottom"),
+            &computed_style_property_value(context, node_id, "margin-left"),
+        ),
+        "padding" => box_shorthand_value(
+            &computed_style_property_value(context, node_id, "padding-top"),
+            &computed_style_property_value(context, node_id, "padding-right"),
+            &computed_style_property_value(context, node_id, "padding-bottom"),
+            &computed_style_property_value(context, node_id, "padding-left"),
+        ),
+        "border-top-width" | "border-right-width" | "border-bottom-width" | "border-left-width" => {
+            "0px".to_string()
+        }
+        "border-width" => box_shorthand_value(
+            &computed_style_property_value(context, node_id, "border-top-width"),
+            &computed_style_property_value(context, node_id, "border-right-width"),
+            &computed_style_property_value(context, node_id, "border-bottom-width"),
+            &computed_style_property_value(context, node_id, "border-left-width"),
+        ),
+        "border-top-style" | "border-right-style" | "border-bottom-style" | "border-left-style" => {
+            "none".to_string()
+        }
+        "border-style" => box_shorthand_value(
+            &computed_style_property_value(context, node_id, "border-top-style"),
+            &computed_style_property_value(context, node_id, "border-right-style"),
+            &computed_style_property_value(context, node_id, "border-bottom-style"),
+            &computed_style_property_value(context, node_id, "border-left-style"),
+        ),
+        "border-top-color" | "border-right-color" | "border-bottom-color" | "border-left-color" => {
+            "currentcolor".to_string()
+        }
+        "border-color" => box_shorthand_value(
+            &computed_style_property_value(context, node_id, "border-top-color"),
+            &computed_style_property_value(context, node_id, "border-right-color"),
+            &computed_style_property_value(context, node_id, "border-bottom-color"),
+            &computed_style_property_value(context, node_id, "border-left-color"),
+        ),
+        "vertical-align" => "baseline".to_string(),
+        "cursor" => "auto".to_string(),
+        _ => String::new(),
+    }
+}
+
+fn set_inline_style_property(
+    context: &mut Context,
+    node_id: usize,
+    property_name: &str,
+    value: &str,
+) {
+    let target = normalize_css_property_name(property_name);
+    if target.is_empty() {
+        return;
+    }
+
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let current = state
+            .dom
+            .get_attribute(node_id, "style")
+            .unwrap_or_default();
+        let mut entries = parse_inline_style_entries(&current);
+        entries.retain(|(property, _)| *property != target);
+
+        let value = value.trim();
+        if !value.is_empty() {
+            entries.push((target, value.to_string()));
+        }
+
+        if entries.is_empty() {
+            state.dom.remove_attribute(node_id, "style");
+        } else {
+            state
+                .dom
+                .set_attribute(node_id, "style", &serialize_inline_style_entries(&entries));
+        }
+    }
+}
+
+fn remove_inline_style_property(
+    context: &mut Context,
+    node_id: usize,
+    property_name: &str,
+) -> String {
+    let target = normalize_css_property_name(property_name);
+    if target.is_empty() {
+        return String::new();
+    }
+
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return String::new();
+    };
+    let mut state = host.state.borrow_mut();
+    let current = state
+        .dom
+        .get_attribute(node_id, "style")
+        .unwrap_or_default();
+    let mut entries = parse_inline_style_entries(&current);
+    let mut removed = String::new();
+    entries.retain(|(property, value)| {
+        if *property == target {
+            removed = value.clone();
+            false
+        } else {
+            true
+        }
+    });
+
+    if entries.is_empty() {
+        state.dom.remove_attribute(node_id, "style");
+    } else {
+        state
+            .dom
+            .set_attribute(node_id, "style", &serialize_inline_style_entries(&entries));
+    }
+
+    removed
+}
+
+macro_rules! define_style_accessors {
+    ($(($getter:ident, $setter:ident, $css_name:literal)),+ $(,)?) => {
+        $(
+            fn $getter(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+                let value = style_node_id_from_this(this)
+                    .map(|node_id| inline_style_property_value(context, node_id, $css_name))
+                    .unwrap_or_default();
+                Ok(JsValue::from(js_string!(value)))
+            }
+
+            fn $setter(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+                let value = args
+                    .first()
+                    .map(|value| js_value_to_string(value, context))
+                    .transpose()?
+                    .unwrap_or_default();
+                if let Some(node_id) = style_node_id_from_this(this) {
+                    set_inline_style_property(context, node_id, $css_name, &value);
+                }
+                Ok(JsValue::undefined())
+            }
+        )+
+    };
+}
+
+define_style_accessors!(
+    (
+        js_dom_style_get_display,
+        js_dom_style_set_display,
+        "display"
+    ),
+    (js_dom_style_get_color, js_dom_style_set_color, "color"),
+    (
+        js_dom_style_get_font_style,
+        js_dom_style_set_font_style,
+        "font-style"
+    ),
+    (
+        js_dom_style_get_text_decoration,
+        js_dom_style_set_text_decoration,
+        "text-decoration"
+    ),
+    (
+        js_dom_style_get_text_transform,
+        js_dom_style_set_text_transform,
+        "text-transform"
+    ),
+    (
+        js_dom_style_get_text_indent,
+        js_dom_style_set_text_indent,
+        "text-indent"
+    ),
+    (
+        js_dom_style_get_letter_spacing,
+        js_dom_style_set_letter_spacing,
+        "letter-spacing"
+    ),
+    (
+        js_dom_style_get_background_color,
+        js_dom_style_set_background_color,
+        "background-color"
+    ),
+    (js_dom_style_get_width, js_dom_style_set_width, "width"),
+    (js_dom_style_get_height, js_dom_style_set_height, "height"),
+    (
+        js_dom_style_get_max_width,
+        js_dom_style_set_max_width,
+        "max-width"
+    ),
+    (
+        js_dom_style_get_min_width,
+        js_dom_style_set_min_width,
+        "min-width"
+    ),
+    (
+        js_dom_style_get_max_height,
+        js_dom_style_set_max_height,
+        "max-height"
+    ),
+    (
+        js_dom_style_get_min_height,
+        js_dom_style_set_min_height,
+        "min-height"
+    ),
+    (
+        js_dom_style_get_font_size,
+        js_dom_style_set_font_size,
+        "font-size"
+    ),
+    (
+        js_dom_style_get_font_weight,
+        js_dom_style_set_font_weight,
+        "font-weight"
+    ),
+    (
+        js_dom_style_get_font_family,
+        js_dom_style_set_font_family,
+        "font-family"
+    ),
+    (
+        js_dom_style_get_text_align,
+        js_dom_style_set_text_align,
+        "text-align"
+    ),
+    (
+        js_dom_style_get_vertical_align,
+        js_dom_style_set_vertical_align,
+        "vertical-align"
+    ),
+    (js_dom_style_get_margin, js_dom_style_set_margin, "margin"),
+    (
+        js_dom_style_get_padding,
+        js_dom_style_set_padding,
+        "padding"
+    ),
+    (
+        js_dom_style_get_border_width,
+        js_dom_style_set_border_width,
+        "border-width"
+    ),
+    (
+        js_dom_style_get_border_color,
+        js_dom_style_set_border_color,
+        "border-color"
+    ),
+    (
+        js_dom_style_get_border_style,
+        js_dom_style_set_border_style,
+        "border-style"
+    ),
+    (
+        js_dom_style_get_opacity,
+        js_dom_style_set_opacity,
+        "opacity"
+    ),
+    (
+        js_dom_style_get_line_height,
+        js_dom_style_set_line_height,
+        "line-height"
+    ),
+    (
+        js_dom_style_get_white_space,
+        js_dom_style_set_white_space,
+        "white-space"
+    ),
+    (js_dom_style_get_cursor, js_dom_style_set_cursor, "cursor"),
+    (
+        js_dom_style_get_overflow,
+        js_dom_style_set_overflow,
+        "overflow"
+    ),
+    (
+        js_dom_style_get_position,
+        js_dom_style_set_position,
+        "position"
+    ),
+);
+
+fn js_dom_style_get_css_text(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = style_node_id_from_this(this)
+        .map(|node_id| inline_style_text(context, node_id))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(text)))
+}
+
+fn js_dom_style_set_css_text(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(node_id) = style_node_id_from_this(this) {
+        set_inline_style_text(context, node_id, &text);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_style_get_property_value(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    let value = style_node_id_from_this(this)
+        .map(|node_id| inline_style_property_value(context, node_id, &name))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(value)))
+}
+
+fn js_dom_style_set_property(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    let value = args
+        .get(1)
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(node_id) = style_node_id_from_this(this) {
+        set_inline_style_property(context, node_id, &name, &value);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_style_remove_property(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    let removed = style_node_id_from_this(this)
+        .map(|node_id| remove_inline_style_property(context, node_id, &name))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(removed)))
+}
+
+fn js_computed_style_get_property_value(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    let value = computed_style_node_id_from_this(this)
+        .map(|node_id| computed_style_property_value(context, node_id, &name))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(value)))
+}
+
+fn js_computed_style_get_property_priority(
+    _this: &JsValue,
+    _: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    Ok(JsValue::from(js_string!("")))
+}
+
+fn js_computed_style_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if computed_style_node_id_from_this(this).is_none() {
+        return Ok(JsValue::undefined());
+    }
+    let index = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(usize::MAX);
+    if index == usize::MAX || index >= COMPUTED_STYLE_PROPERTIES.len() {
+        return Ok(JsValue::undefined());
+    }
+    let (_, css_name) = COMPUTED_STYLE_PROPERTIES[index];
+    Ok(JsValue::from(js_string!(css_name)))
+}
+
 fn js_dom_class_list_add(
     this: &JsValue,
     args: &[JsValue],
@@ -4531,18 +7979,148 @@ fn js_dom_class_list_toggle(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let class_name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let has_force = args.get(1).is_some();
+    let force = args.get(1).map(JsValue::to_boolean);
     let toggled = if let Some(object) = this.as_object()
+        && let Some(handle) = object.downcast_ref::<DomClassListHandle>()
+        && let Some(host) = context.get_data::<JavaScriptHostData>()
+    {
+        let mut state = host.state.borrow_mut();
+        if has_force {
+            if force.unwrap_or(false) {
+                state.dom.add_class(handle.node_id, &class_name);
+                true
+            } else {
+                state.dom.remove_class(handle.node_id, &class_name);
+                false
+            }
+        } else {
+            state.dom.toggle_class(handle.node_id, &class_name)
+        }
+    } else {
+        false
+    };
+    Ok(JsValue::new(toggled))
+}
+
+fn js_dom_class_list_replace(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let old_class = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let new_class = js_value_to_string(args.get(1).unwrap_or(&JsValue::undefined()), context)?;
+    let replaced = if let Some(object) = this.as_object()
         && let Some(handle) = object.downcast_ref::<DomClassListHandle>()
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
         host.state
             .borrow_mut()
             .dom
-            .toggle_class(handle.node_id, &class_name)
+            .replace_class(handle.node_id, &old_class, &new_class)
     } else {
         false
     };
-    Ok(JsValue::new(toggled))
+    Ok(JsValue::new(replaced))
+}
+
+fn class_list_node_id_from_this(this: &JsValue) -> Option<usize> {
+    this.as_object()?
+        .downcast_ref::<DomClassListHandle>()
+        .map(|handle| handle.node_id)
+}
+
+fn class_list_value(context: &mut Context, node_id: usize) -> String {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.get_attribute(node_id, "class"))
+        .unwrap_or_default()
+}
+
+fn set_class_list_value(context: &mut Context, node_id: usize, value: &str) {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let value = value.trim();
+        if value.is_empty() {
+            state.dom.remove_attribute(node_id, "class");
+        } else {
+            state.dom.set_attribute(node_id, "class", value);
+        }
+    }
+}
+
+fn js_dom_class_list_get_value(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = class_list_node_id_from_this(this) else {
+        return Ok(JsValue::from(js_string!("")));
+    };
+    Ok(JsValue::from(js_string!(class_list_value(
+        context, node_id
+    ))))
+}
+
+fn js_dom_class_list_set_value(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let value = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    if let Some(node_id) = class_list_node_id_from_this(this) {
+        set_class_list_value(context, node_id, &value);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_class_list_get_length(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = class_list_node_id_from_this(this) else {
+        return Ok(JsValue::new(0));
+    };
+    let length = class_list_value(context, node_id)
+        .split_ascii_whitespace()
+        .filter(|class_name| !class_name.is_empty())
+        .count();
+    Ok(JsValue::new(length as i32))
+}
+
+fn js_dom_class_list_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let index = args
+        .first()
+        .and_then(JsValue::as_number)
+        .map(|value| value as usize)
+        .unwrap_or(usize::MAX);
+    let Some(node_id) = class_list_node_id_from_this(this) else {
+        return Ok(JsValue::null());
+    };
+    let token = class_list_value(context, node_id)
+        .split_ascii_whitespace()
+        .filter(|class_name| !class_name.is_empty())
+        .nth(index)
+        .map(|class_name| JsValue::from(js_string!(class_name)));
+    Ok(token.unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_class_list_to_string(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = class_list_node_id_from_this(this) else {
+        return Ok(JsValue::from(js_string!("")));
+    };
+    Ok(JsValue::from(js_string!(class_list_value(
+        context, node_id
+    ))))
 }
 
 fn js_dom_node_list_for_each(
@@ -4618,8 +8196,144 @@ fn js_return_undefined(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<
     Ok(JsValue::undefined())
 }
 
+fn js_document_get_cookie(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let cookie = current_document_url(context)
+        .map(|url| site_state::document_cookie_get(&url))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(cookie)))
+}
+
+fn js_document_set_cookie(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(value) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let cookie_line = js_value_to_string(value, context)?;
+    if let Some(url) = current_document_url(context) {
+        site_state::document_cookie_set(&url, &cookie_line);
+    }
+    Ok(JsValue::undefined())
+}
+
 fn js_noop(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::undefined())
+}
+
+fn storage_kind_from_this(this: &JsValue) -> Option<StorageKind> {
+    let object = this.as_object()?;
+    let handle = object.downcast_ref::<StorageHandle>()?;
+    Some(handle.kind)
+}
+
+fn js_storage_get_length(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(kind) = storage_kind_from_this(this) else {
+        return Ok(JsValue::new(0));
+    };
+    let Some(url) = current_document_url(context) else {
+        return Ok(JsValue::new(0));
+    };
+    Ok(JsValue::new(site_state::storage_length(kind, &url) as i32))
+}
+
+fn js_storage_get_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(kind) = storage_kind_from_this(this) else {
+        return Ok(JsValue::null());
+    };
+    let Some(url) = current_document_url(context) else {
+        return Ok(JsValue::null());
+    };
+    let key = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(site_state::storage_get_item(kind, &url, &key)
+        .map(|value| JsValue::from(js_string!(value)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_storage_set_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(kind) = storage_kind_from_this(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(url) = current_document_url(context) else {
+        return Ok(JsValue::undefined());
+    };
+    let key = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    let value = args
+        .get(1)
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    site_state::storage_set_item(kind, &url, key, value);
+    Ok(JsValue::undefined())
+}
+
+fn js_storage_remove_item(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(kind) = storage_kind_from_this(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(url) = current_document_url(context) else {
+        return Ok(JsValue::undefined());
+    };
+    let key = args
+        .first()
+        .map(|value| js_value_to_string(value, context))
+        .transpose()?
+        .unwrap_or_default();
+    site_state::storage_remove_item(kind, &url, &key);
+    Ok(JsValue::undefined())
+}
+
+fn js_storage_clear(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(kind) = storage_kind_from_this(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(url) = current_document_url(context) else {
+        return Ok(JsValue::undefined());
+    };
+    site_state::storage_clear(kind, &url);
+    Ok(JsValue::undefined())
+}
+
+fn js_storage_key(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(kind) = storage_kind_from_this(this) else {
+        return Ok(JsValue::null());
+    };
+    let Some(url) = current_document_url(context) else {
+        return Ok(JsValue::null());
+    };
+    let index = args
+        .first()
+        .and_then(JsValue::as_number)
+        .map(|value| value as usize)
+        .unwrap_or(0);
+    Ok(site_state::storage_key(kind, &url, index)
+        .map(|value| JsValue::from(js_string!(value)))
+        .unwrap_or_else(JsValue::null))
 }
 
 fn js_crypto_get_random_values(
@@ -4785,6 +8499,16 @@ fn dispatch_dom_event_on_target(
     request: &DomEventRequest,
     context: &mut Context,
 ) -> JsResult<bool> {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        if request.event_type.eq_ignore_ascii_case("focus") {
+            state.active_element_node_id = Some(request.target_node_id);
+        } else if request.event_type.eq_ignore_ascii_case("blur")
+            && state.active_element_node_id == Some(request.target_node_id)
+        {
+            state.active_element_node_id = None;
+        }
+    }
     let event = build_dom_event_object(context, request, &target);
     let listener_event_type = request.event_type.to_ascii_lowercase();
     if let Some(target_node_id) = target
@@ -4904,8 +8628,11 @@ mod tests {
     use boa_engine::{Context, JsValue, Source, js_string};
 
     use super::{
-        DomEventRequest, JavaScriptRuntime, current_location_url, ensure_same_origin_script_url,
-        fetch_for_script, process_document_scripts, resolve_requested_url, set_location_href,
+        DomEventRequest, HttpResponse, JavaScriptRuntime, XmlHttpRequestHandle,
+        build_fetch_response_object, build_xml_http_request_object, current_location_url,
+        ensure_same_origin_script_url, fetch_for_script, js_value_to_string,
+        process_document_scripts, resolve_requested_url, set_location_href,
+        start_document_script_session,
     };
     use crate::url::Url;
 
@@ -5020,6 +8747,19 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_hashchange_for_location_hash_updates() {
+        let processed = process_document_scripts(
+            "<script>window.addEventListener('hashchange', function () { document.title = location.href + '|' + location.hash; }); location.hash = '#frag';</script>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("https://example.com/start#frag|#frag")
+        );
+    }
+
+    #[test]
     fn push_state_updates_location_without_reload() {
         let processed = process_document_scripts(
             "<script>history.pushState({ page: 1 }, '', '/next?from=test#frag'); document.title = location.href + '|' + location.hash;</script>",
@@ -5038,6 +8778,23 @@ mod tests {
     }
 
     #[test]
+    fn history_state_tracks_push_state_and_popstate() {
+        let processed = process_document_scripts(
+            "<script>window.addEventListener('popstate', function () { document.title = location.href + '|' + String(history.state.page); }); history.pushState({ page: 1 }, '', '/one'); history.pushState({ page: 2 }, '', '/two'); history.back();</script>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.soft_navigation_target.as_deref(),
+            Some("https://example.com/one")
+        );
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("https://example.com/one|1")
+        );
+    }
+
+    #[test]
     fn history_back_and_forward_follow_soft_navigation_stack() {
         let processed = process_document_scripts(
             "<script>history.pushState({}, '', '/one'); history.pushState({}, '', '/two'); history.back(); history.forward(); document.title = location.href + '|' + location.hash + '|' + String(history.length);</script>",
@@ -5052,6 +8809,21 @@ mod tests {
         assert_eq!(
             processed.title_override.as_deref(),
             Some("https://example.com/two||3")
+        );
+    }
+
+    #[test]
+    fn history_back_and_forward_restore_scroll_positions() {
+        let processed = process_document_scripts(
+            "<script>window.scrollTo(0, 120); history.pushState({}, '', '/one'); window.scrollTo(0, 240); history.pushState({}, '', '/two'); history.back(); var firstBack = location.href + '|' + String(window.scrollY); history.back(); var secondBack = location.href + '|' + String(window.scrollY); history.forward(); var forward = location.href + '|' + String(window.scrollY); document.title = firstBack + '||' + secondBack + '||' + forward;</script>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some(
+                "https://example.com/one|240||https://example.com/start|120||https://example.com/one|240"
+            )
         );
     }
 
@@ -5185,6 +8957,63 @@ mod tests {
         );
 
         assert!(processed.html.contains("<p>Ready</p>"));
+    }
+
+    #[test]
+    fn updates_viewport_accessors_and_resize_events() {
+        let (processed, session) = start_document_script_session(
+            "<html><body><script>document.title = [window.innerWidth, window.innerHeight].join('x'); window.addEventListener('resize', function () { document.title = [window.innerWidth, window.innerHeight].join('x'); });</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(processed.title_override.as_deref(), Some("1280x720"));
+
+        let session = session.expect("session should exist");
+        assert!(session.set_viewport_size(800, 600));
+        let result = session
+            .dispatch_global_event("resize", false, false)
+            .expect("resize dispatch should succeed");
+
+        assert_eq!(result.snapshot.title_override.as_deref(), Some("800x600"));
+    }
+
+    #[test]
+    fn tracks_document_active_element_for_focus_and_blur() {
+        let processed = process_document_scripts(
+            "<html><body><button id=\"btn\">Go</button><script>var btn = document.getElementById('btn'); btn.focus(); document.title = document.activeElement.tagName; btn.blur(); document.title += '|' + document.activeElement.tagName;</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(processed.title_override.as_deref(), Some("BUTTON|BODY"));
+    }
+
+    #[test]
+    fn updates_scroll_accessors_and_scroll_events() {
+        let (processed, session) = start_document_script_session(
+            "<html><body><script>document.title = String(window.scrollY); window.addEventListener('scroll', function () { document.title = String(window.scrollY); });</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(processed.title_override.as_deref(), Some("0"));
+
+        let session = session.expect("session should exist");
+        assert!(session.set_scroll_position(120));
+        let result = session
+            .dispatch_global_event("scroll", false, false)
+            .expect("scroll dispatch should succeed");
+
+        assert_eq!(result.snapshot.title_override.as_deref(), Some("120"));
+    }
+
+    #[test]
+    fn supports_scroll_to_scroll_by_and_scroll_top_setter() {
+        let processed = process_document_scripts(
+            "<html><body><script>window.scrollTo({ top: 120 }); window.scrollBy({ top: 30 }); document.documentElement.scrollTop = 55; document.title = [String(window.scrollY), String(window.pageYOffset), String(document.documentElement.scrollTop)].join('|');</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(processed.title_override.as_deref(), Some("55|55|55"));
+        assert_eq!(processed.scroll_y, 55);
     }
 
     #[test]
@@ -5384,6 +9213,74 @@ mod tests {
     }
 
     #[test]
+    fn supports_dynamic_document_body_head_and_document_element_getters() {
+        let processed = process_document_scripts(
+            "<html><script>var root = document.documentElement; var initialBody = document.body; var initialHead = document.head; var head = document.createElement('head'); var body = document.createElement('body'); root.appendChild(head); root.appendChild(body); document.body.setAttribute('data-live', [initialBody === null, initialHead === null, document.documentElement === root, document.body === body, document.head === head].join('|'));</script></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-live=\"true|true|true|true|true\"")
+        );
+    }
+
+    #[test]
+    fn supports_inline_style_mutations() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"app\" style=\"color: #ff0000\"></div><script>var app = document.getElementById('app'); app.style.display = 'none'; app.style.backgroundColor = '#123456'; app.style.setProperty('margin-top', '8px'); app.style.fontStyle = 'italic'; app.style.textDecoration = 'underline'; app.style.textTransform = 'uppercase'; app.style.textIndent = '10px'; app.style.letterSpacing = '2px'; app.style.maxWidth = '120px'; app.style.minHeight = '24px'; app.style.borderWidth = '2px'; app.style.borderColor = '#abcdef'; app.style.borderStyle = 'solid'; app.style.removeProperty('display');</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("background-color: #123456"));
+        assert!(processed.html.contains("margin-top: 8px"));
+        assert!(processed.html.contains("font-style: italic"));
+        assert!(processed.html.contains("text-decoration: underline"));
+        assert!(processed.html.contains("text-transform: uppercase"));
+        assert!(processed.html.contains("text-indent: 10px"));
+        assert!(processed.html.contains("letter-spacing: 2px"));
+        assert!(processed.html.contains("max-width: 120px"));
+        assert!(processed.html.contains("min-height: 24px"));
+        assert!(processed.html.contains("border-width: 2px"));
+        assert!(processed.html.contains("border-color: #abcdef"));
+        assert!(processed.html.contains("border-style: solid"));
+        assert!(!processed.html.contains("display: none"));
+    }
+
+    #[test]
+    fn supports_extended_inline_style_accessors() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"app\"></div><script>var app = document.getElementById('app'); app.style.maxWidth = '320px'; app.style.minWidth = '120px'; app.style.maxHeight = '480px'; app.style.minHeight = '64px'; app.style.borderWidth = '3px'; app.style.borderColor = '#112233'; app.style.borderStyle = 'dashed';</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("max-width: 320px"));
+        assert!(processed.html.contains("min-width: 120px"));
+        assert!(processed.html.contains("max-height: 480px"));
+        assert!(processed.html.contains("min-height: 64px"));
+        assert!(processed.html.contains("border-width: 3px"));
+        assert!(processed.html.contains("border-color: #112233"));
+        assert!(processed.html.contains("border-style: dashed"));
+    }
+
+    #[test]
+    fn supports_get_computed_style_snapshot_and_inheritance() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"outer\" style=\"color: rgb(1, 2, 3); font-size: 24px; text-align: center; white-space: pre;\"><span id=\"inner\">Hello</span><strong id=\"bold\">Bold</strong></div><script>var outer = document.getElementById('outer'); var inner = document.getElementById('inner'); var bold = document.getElementById('bold'); var outerStyle = getComputedStyle(outer); var innerStyle = getComputedStyle(inner); var boldStyle = getComputedStyle(bold); document.body.setAttribute('data-computed', [outerStyle.display, innerStyle.display, innerStyle.fontSize, innerStyle.color, innerStyle.getPropertyValue('font-size'), innerStyle.getPropertyValue('color'), boldStyle.fontWeight, boldStyle.getPropertyValue('font-weight')].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed.html.contains(
+                "data-computed=\"block|inline|24px|rgb(1, 2, 3)|24px|rgb(1, 2, 3)|700|700\""
+            ),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
     fn supports_create_text_node_and_property_reflection() {
         let processed = process_document_scripts(
             "<html><body><div id=\"app\"></div><script>var app = document.getElementById('app'); var span = document.createElement('span'); span.className = 'chip'; var text = document.createTextNode('Hello'); span.appendChild(text); var img = document.createElement('img'); img.src = '/avatar.png'; app.appendChild(span); app.appendChild(img);</script></body></html>",
@@ -5395,10 +9292,193 @@ mod tests {
     }
 
     #[test]
+    fn supports_outer_html_and_insert_adjacent_html() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"app\"><p id=\"a\">A</p></div><script>var app = document.getElementById('app'); var p = document.getElementById('a'); var before = p.outerHTML; p.outerHTML = '<span id=\"b\">B</span>'; app.insertAdjacentHTML('afterbegin', '<em id=\"c\">C</em>'); app.insertAdjacentHTML('beforeend', '<strong id=\"d\">D</strong>'); document.body.setAttribute('data-html', [before, app.innerHTML].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("data-html="), "{}", processed.html);
+        assert!(
+            processed
+                .html
+                .contains("<em id=\"c\">C</em><span id=\"b\">B</span><strong id=\"d\">D</strong>"),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_dom_matches_closest_contains_and_element_siblings() {
+        let processed = process_document_scripts(
+            "<html><body><section id=\"outer\"><div id=\"wrap\" class=\"wrap\"><button id=\"btn\">Go</button><span id=\"tail\">Later</span></div></section><script>var btn = document.getElementById('btn'); var wrap = btn.closest('#wrap'); var outer = btn.closest('section'); var tail = btn.nextElementSibling; outer.setAttribute('data-dom', [btn.matches('button#btn'), !btn.matches('.wrap'), wrap === document.getElementById('wrap'), outer === document.getElementById('outer'), outer.contains(btn), btn.contains(btn), outer.firstElementChild === wrap, outer.lastElementChild === wrap, wrap.firstElementChild === btn, wrap.lastElementChild === tail, btn.previousElementSibling === null, tail && tail.id === 'tail', tail.previousElementSibling === btn, wrap.nextElementSibling === null].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains(
+            "data-dom=\"true|true|true|true|true|true|true|true|true|true|true|true|true|true\""
+        ));
+    }
+
+    #[test]
+    fn supports_attribute_introspection_helpers() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\" data-a=\"1\" title=\"x\"></div><script>var box = document.getElementById('box'); box.setAttribute('aria-label', 'demo'); box.setAttribute('data-b', '2'); box.setAttribute('data-c', '3'); box.setAttribute('role', 'button'); box.removeAttribute('title'); document.body.setAttribute('data-attrs', [box.hasAttribute('title'), box.hasAttribute('data-b'), box.getAttributeNames().join('|')].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-attrs=\"false|true|aria-label|data-a|data-b|data-c|id|role\"")
+        );
+    }
+
+    #[test]
+    fn supports_attribute_collection_accessors_and_iteration() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\" data-foo-bar=\"one\" title=\"x\"></div><script>var box = document.getElementById('box'); var attrs = box.attributes; var named = attrs.getNamedItem('data-foo-bar'); var from = Array.from(attrs).map(function(attr) { return attr.name + '=' + attr.value; }).join('|'); document.body.setAttribute('data-attrs', [attrs.length, attrs.item(0).name, named.value, attrs['title'].value, from].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-attrs=\"3|data-foo-bar|one|x|data-foo-bar=one|id=box|title=x\""),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_toggle_attribute_and_class_list_replace() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\" class=\"one two\" data-a=\"1\"></div><script>var box = document.getElementById('box'); var toggledOn = box.toggleAttribute('hidden'); var toggledOff = box.toggleAttribute('hidden', false); var replaced = box.classList.replace('one', 'uno'); var forced = box.classList.toggle('two', false); var value = box.classList.value; var length = box.classList.length; var first = box.classList.item(0); var asString = box.classList.toString(); document.body.setAttribute('data-toggle', [toggledOn, toggledOff, box.hasAttributes(), replaced, value, length, first, asString, box.getAttribute('class'), box.classList.contains('uno'), box.classList.contains('two'), box.toggleAttribute('data-swap', true), box.toggleAttribute('data-swap')].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed.html.contains(
+                "data-toggle=\"true|false|true|true|uno|1|uno|uno|uno|true|false|true|false\""
+            ),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_dataset_live_reflection_and_updates() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\" data-foo-bar=\"one\"></div><script>var box = document.getElementById('box'); var before = box.dataset.fooBar; var builtin = box.dataset.toString === Object.prototype.toString; box.dataset.fooBar = 'updated'; var after = box.getAttribute('data-foo-bar'); var live = box.dataset.fooBar; document.body.setAttribute('data-before', before); document.body.setAttribute('data-after', after); document.body.setAttribute('data-live', live); document.body.setAttribute('data-builtin', builtin);</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed.html.contains("data-before=\"one\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-after=\"updated\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-live=\"updated\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-builtin=\"true\""),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
     fn response_clone_errors_on_invalid_receiver() {
         let mut context = Context::default();
         let result = super::js_fetch_response_clone(&JsValue::undefined(), &[], &mut context);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn supports_response_headers_iteration_and_xhr_header_access() {
+        let mut runtime = JavaScriptRuntime::new(
+            &Url::parse("https://example.com").unwrap(),
+            "<html><body></body></html>",
+        );
+        let response = HttpResponse {
+            final_url: Url::parse("https://example.com/data").unwrap(),
+            status_code: 200,
+            reason_phrase: "OK".to_string(),
+            headers: std::collections::HashMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("x-demo".to_string(), "one".to_string()),
+            ]),
+            set_cookie_headers: Vec::new(),
+            body: br#"{"ok":true}"#.to_vec(),
+        };
+        let response_object = build_fetch_response_object(&mut runtime.context, response);
+        runtime
+            .context
+            .global_object()
+            .set(
+                js_string!("resp"),
+                JsValue::from(response_object),
+                true,
+                &mut runtime.context,
+            )
+            .unwrap();
+
+        let fetch_summary = runtime
+            .context
+            .eval(Source::from_bytes(
+                "(()=>{var h=resp.headers; var seen=[]; h.forEach(function(value, name, source){ seen.push(name+'='+value+'='+(source===h)); }); return [h.get('content-type'), h.has('x-demo'), h.keys().join('|'), h.values().join('|'), h.entries().map(function(pair){ return pair[0]+'='+pair[1]; }).join('|'), h.toString(), seen.join('|')].join('||'); })()",
+            ))
+            .unwrap();
+        let fetch_summary = js_value_to_string(&fetch_summary, &mut runtime.context).unwrap();
+        assert!(fetch_summary.contains(
+            "application/json||true||content-type|x-demo||application/json|one||content-type=application/json|x-demo=one||content-type: application/json"
+        ));
+
+        let xhr_object = build_xml_http_request_object(&mut runtime.context);
+        {
+            let handle = xhr_object
+                .downcast_ref::<XmlHttpRequestHandle>()
+                .expect("xhr handle");
+            let mut state = handle.state.borrow_mut();
+            state.ready_state = 4;
+            state.status = 200;
+            state.status_text = "OK".to_string();
+            state.response_text = "payload".to_string();
+            state.response_url = "https://example.com/data".to_string();
+            state.response_headers = std::collections::HashMap::from([
+                ("content-type".to_string(), "text/plain".to_string()),
+                ("x-demo".to_string(), "two".to_string()),
+            ])
+            .into_iter()
+            .collect();
+        }
+        runtime
+            .context
+            .global_object()
+            .set(
+                js_string!("xhr"),
+                JsValue::from(xhr_object),
+                true,
+                &mut runtime.context,
+            )
+            .unwrap();
+
+        let xhr_summary = runtime
+            .context
+            .eval(Source::from_bytes(
+                "(()=>[xhr.getResponseHeader('content-type'), xhr.getResponseHeader('x-demo'), xhr.getAllResponseHeaders()].join('|'))()",
+            ))
+            .unwrap();
+        let xhr_summary = js_value_to_string(&xhr_summary, &mut runtime.context).unwrap();
+        assert!(xhr_summary.contains("text/plain|two|content-type: text/plain"));
     }
 }
