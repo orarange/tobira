@@ -3492,6 +3492,8 @@ fn render_commands(
                 }
                 if let Some(page) = page {
                     if let Some(decoded) = page.images.get(&image.src) {
+                        // min_y = offset_y prevents images from bleeding into the chrome UI
+                        let min_y = offset_y as i32;
                         if image.tile {
                             // Tiled background: draw at natural size, repeated across element
                             let sx = offset_x as i32 + image.x as i32;
@@ -3501,6 +3503,7 @@ fn render_commands(
                                 sx, sy,
                                 image.width, image.height,
                                 decoded,
+                                min_y,
                             );
                         } else {
                             let sx = offset_x as i32 + image.x as i32;
@@ -3513,6 +3516,7 @@ fn render_commands(
                                 image.object_fit,
                                 image.object_position_x,
                                 image.object_position_y,
+                                min_y,
                             );
                         }
                     }
@@ -4115,6 +4119,8 @@ fn draw_rect_outline(
 /// Draw an image tiled at its natural pixel size to fill the region
 /// [x, x+draw_width) × [y, y+draw_height) in the buffer.
 /// x and y are signed so callers can pass scroll-adjusted coords that may be negative.
+/// min_y is the minimum buffer y that may be written (pass offset_y to prevent drawing
+/// into the chrome / UI area above the content viewport).
 fn draw_tiled_image(
     buffer: &mut [u32],
     buf_width: u32,
@@ -4124,6 +4130,7 @@ fn draw_tiled_image(
     draw_width: u32,
     draw_height: u32,
     image: &DecodedImage,
+    min_y: i32,
 ) {
     let tile_w = image.width as i32;
     let tile_h = image.height as i32;
@@ -4132,7 +4139,7 @@ fn draw_tiled_image(
     }
 
     let start_x = x.max(0) as u32;
-    let start_y = y.max(0) as u32;
+    let start_y = y.max(min_y) as u32;
     let end_x = (x + draw_width as i32).max(0).min(buf_width as i32) as u32;
     let end_y = (y + draw_height as i32).max(0).min(buf_height as i32) as u32;
 
@@ -4178,6 +4185,7 @@ fn draw_scaled_image(
     object_fit: ObjectFit,
     object_position_x: u32,
     object_position_y: u32,
+    min_y: i32,
 ) {
     if draw_width == 0 || draw_height == 0 || image.width == 0 || image.height == 0 {
         return;
@@ -4279,14 +4287,14 @@ fn draw_scaled_image(
         .min(y + draw_height as i32)
         .min(height as i32);
 
-    // Actual buffer start (clamped to 0)
+    // Actual buffer start (clamped to min_y / 0 to avoid writing into the chrome area)
     let dest_start_x = dest_start_x_signed.max(0) as u32;
-    let dest_start_y = dest_start_y_signed.max(0) as u32;
+    let dest_start_y = dest_start_y_signed.max(min_y) as u32;
     let max_dx = dest_end_x_signed.max(0) as u32;
     let max_dy = dest_end_y_signed.max(0) as u32;
 
-    // How many dest rows/cols were skipped due to negative start (used to advance source)
-    let y_skip = (-dest_start_y_signed).max(0) as u32;
+    // How many dest rows/cols were skipped due to start being above min_y (used to advance source)
+    let y_skip = (min_y - dest_start_y_signed).max(0) as u32;
     let x_skip = (-dest_start_x_signed).max(0) as u32;
 
     if max_dx <= dest_start_x || max_dy <= dest_start_y {
