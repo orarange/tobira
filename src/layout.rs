@@ -3494,12 +3494,24 @@ fn measure_node_preferred_width(
                     });
             }
 
-            let child_width = element
-                .children
-                .iter()
-                .map(|child| measure_node_preferred_width(child, images, fonts))
-                .max()
-                .unwrap_or(1);
+            // Inline elements place children side-by-side on the same line, so the preferred
+            // width is the SUM of children (e.g. "「link」" = 「+link+」 widths combined).
+            // Block elements place children on separate lines, so we take the MAX.
+            let child_width = if element.style.display == Display::Inline {
+                element
+                    .children
+                    .iter()
+                    .map(|child| measure_node_preferred_width(child, images, fonts))
+                    .sum::<u32>()
+                    .max(1)
+            } else {
+                element
+                    .children
+                    .iter()
+                    .map(|child| measure_node_preferred_width(child, images, fonts))
+                    .max()
+                    .unwrap_or(1)
+            };
 
             child_width
                 .saturating_add(element.style.padding.left + element.style.padding.right)
