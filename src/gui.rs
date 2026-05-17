@@ -289,7 +289,7 @@ impl BrowserApp {
         let size = window.inner_size();
         let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
         let body_top = chrome.height + FRAME_PADDING;
-        let content_width = size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let Some(control) = layout
             .controls
@@ -312,7 +312,7 @@ impl BrowserApp {
         let text_y = body_top
             .saturating_add(control.y.saturating_sub(self.scroll_y))
             .saturating_add(control.height.saturating_sub(line_height) / 2);
-        let caret_x = FRAME_PADDING
+        let caret_x = (FRAME_PADDING / 2)
             .saturating_add(control.x)
             .saturating_add(CONTROL_PADDING_X)
             .saturating_add(view.caret_x);
@@ -345,7 +345,7 @@ impl BrowserApp {
 
         let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
         let body_top = chrome.height + FRAME_PADDING;
-        let content_width = size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
         let viewport_height = size.height.saturating_sub(body_top + FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let max_scroll_y = max_scroll(viewport_height, layout.content_height);
@@ -391,7 +391,7 @@ impl BrowserApp {
             &mut buffer,
             size.width,
             size.height,
-            FRAME_PADDING,
+            FRAME_PADDING / 2,
             body_top,
             viewport_height,
             self.scroll_y,
@@ -409,7 +409,7 @@ impl BrowserApp {
     fn content_metrics(&mut self, window_size: PhysicalSize<u32>) -> (u32, u32) {
         let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
         let body_top = chrome.height + FRAME_PADDING;
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         let viewport_height = window_size
             .height
             .saturating_sub(body_top + FRAME_PADDING)
@@ -433,12 +433,12 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
-        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
         for link in &layout.links {
             if content_x >= link.x
                 && content_x < link.x.saturating_add(link.width)
@@ -459,12 +459,12 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
-        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
         for control in &layout.controls {
             if content_x >= control.x
                 && content_x < control.x.saturating_add(control.width)
@@ -499,7 +499,7 @@ impl BrowserApp {
         if element_changed {
             self.hovered_element_node_id = hovered_element;
             // Trigger a CSS relayout with the new interactive state
-            let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+            let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
             let interactive = InteractiveState {
                 hovered_node_id: hovered_element,
                 ..Default::default()
@@ -555,12 +555,12 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return CursorKind::Auto;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
-        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
         layout.element_hitboxes.iter().rev()
             .find(|h| {
                 content_x >= h.x && content_x < h.x + h.width
@@ -578,12 +578,12 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
-        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
         // Find the deepest (last) hitbox that contains the cursor
         layout.element_hitboxes.iter().rev()
             .find(|h| {
@@ -1209,7 +1209,7 @@ impl BrowserApp {
             .as_ref()
             .map(|window| window.inner_size())
             .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         self.document.layout(content_width, &mut self.fonts)
     }
 
@@ -1393,8 +1393,8 @@ impl BrowserApp {
                     let local_x = self
                         .cursor_position
                         .x
-                        .max((FRAME_PADDING + control.x + CONTROL_PADDING_X) as f64)
-                        - (FRAME_PADDING + control.x + CONTROL_PADDING_X) as f64;
+                        .max((FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64)
+                        - (FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64;
                     let mut editor = AddressBarState::new(self.control_current_value(&control));
                     editor.focus_at(editor.char_len());
                     let char_index = cursor_index_for_text_x(
@@ -1551,7 +1551,7 @@ impl ApplicationHandler for BrowserApp {
                 self.hovered_link_node_id = None;
                 if self.hovered_element_node_id.is_some() {
                     self.hovered_element_node_id = None;
-                    let content_width = window.inner_size().width.saturating_sub(FRAME_PADDING * 2).max(1);
+                    let content_width = window.inner_size().width.saturating_sub(FRAME_PADDING).max(1);
                     if let DocumentContent::Loaded(page) = &mut self.document.content {
                         page.relayout(content_width, &InteractiveState::default());
                     }
