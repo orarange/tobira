@@ -111,6 +111,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Recent Commit Landmarks
 
+- `7af71f3` dom traversal api implementation complete
 - `6981cea` dedicated codex worktree setup documentation complete
 - `c64f16a` event listener capture groundwork complete
 - `d864ed6` codex branch switch handoff update complete
