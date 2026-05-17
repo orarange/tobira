@@ -1191,6 +1191,109 @@ impl DomState {
             .unwrap_or(false)
     }
 
+    fn tree_root(&self, node_id: usize) -> usize {
+        let mut current = node_id;
+        while let Some(parent_id) = self.node(current).and_then(|node| node.parent) {
+            current = parent_id;
+        }
+        current
+    }
+
+    fn contains_node(&self, ancestor_id: usize, node_id: usize) -> bool {
+        if ancestor_id == node_id {
+            return self.node(ancestor_id).is_some();
+        }
+        let mut cursor = self.node(node_id).and_then(|node| node.parent);
+        while let Some(parent_id) = cursor {
+            if parent_id == ancestor_id {
+                return true;
+            }
+            cursor = self.node(parent_id).and_then(|node| node.parent);
+        }
+        false
+    }
+
+    fn element_children(&self, node_id: usize) -> Vec<usize> {
+        self.node(node_id)
+            .map(|node| {
+                node.children
+                    .iter()
+                    .copied()
+                    .filter(|child_id| self.element(*child_id).is_some())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn first_element_child(&self, node_id: usize) -> Option<usize> {
+        self.node(node_id).and_then(|node| {
+            node.children
+                .iter()
+                .copied()
+                .find(|child_id| self.element(*child_id).is_some())
+        })
+    }
+
+    fn last_element_child(&self, node_id: usize) -> Option<usize> {
+        self.node(node_id).and_then(|node| {
+            node.children
+                .iter()
+                .rev()
+                .copied()
+                .find(|child_id| self.element(*child_id).is_some())
+        })
+    }
+
+    fn previous_element_sibling(&self, node_id: usize) -> Option<usize> {
+        let parent_id = self.node(node_id)?.parent?;
+        let parent = self.node(parent_id)?;
+        let index = parent
+            .children
+            .iter()
+            .position(|child_id| *child_id == node_id)?;
+        parent.children[..index]
+            .iter()
+            .rev()
+            .copied()
+            .find(|sibling_id| self.element(*sibling_id).is_some())
+    }
+
+    fn next_element_sibling(&self, node_id: usize) -> Option<usize> {
+        let parent_id = self.node(node_id)?.parent?;
+        let parent = self.node(parent_id)?;
+        let index = parent
+            .children
+            .iter()
+            .position(|child_id| *child_id == node_id)?;
+        parent.children[index + 1..]
+            .iter()
+            .copied()
+            .find(|sibling_id| self.element(*sibling_id).is_some())
+    }
+
+    fn matches_selector(&self, node_id: usize, selector: &str) -> bool {
+        let Some(selector) = ParsedSelector::parse(selector) else {
+            return false;
+        };
+        let scope_id = self.tree_root(node_id);
+        self.matches_selector_in_scope(node_id, scope_id, &selector)
+    }
+
+    fn closest_selector(&self, node_id: usize, selector: &str) -> Option<usize> {
+        let selector = ParsedSelector::parse(selector)?;
+        let scope_id = self.tree_root(node_id);
+        let mut current = Some(node_id);
+        while let Some(candidate_id) = current {
+            if self.element(candidate_id).is_some()
+                && self.matches_selector_in_scope(candidate_id, scope_id, &selector)
+            {
+                return Some(candidate_id);
+            }
+            current = self.node(candidate_id).and_then(|node| node.parent);
+        }
+        None
+    }
+
     fn add_class(&mut self, node_id: usize, class_name: &str) {
         let mut classes = self
             .get_attribute(node_id, "class")
@@ -2886,6 +2989,15 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_children).to_js_function(context.realm());
     let get_child_nodes =
         NativeFunction::from_fn_ptr(js_dom_get_child_nodes).to_js_function(context.realm());
+    let get_first_element_child =
+        NativeFunction::from_fn_ptr(js_dom_get_first_element_child).to_js_function(context.realm());
+    let get_last_element_child =
+        NativeFunction::from_fn_ptr(js_dom_get_last_element_child).to_js_function(context.realm());
+    let get_previous_element_sibling =
+        NativeFunction::from_fn_ptr(js_dom_get_previous_element_sibling)
+            .to_js_function(context.realm());
+    let get_next_element_sibling = NativeFunction::from_fn_ptr(js_dom_get_next_element_sibling)
+        .to_js_function(context.realm());
     let get_text_content =
         NativeFunction::from_fn_ptr(js_dom_get_text_content).to_js_function(context.realm());
     let set_text_content =
@@ -2946,6 +3058,21 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .function(
             NativeFunction::from_fn_ptr(js_dom_query_selector_all),
             js_string!("querySelectorAll"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_matches),
+            js_string!("matches"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_closest),
+            js_string!("closest"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_contains),
+            js_string!("contains"),
             1,
         )
         .function(
@@ -3028,6 +3155,30 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .accessor(
             js_string!("childNodes"),
             Some(get_child_nodes),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("firstElementChild"),
+            Some(get_first_element_child),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("lastElementChild"),
+            Some(get_last_element_child),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("previousElementSibling"),
+            Some(get_previous_element_sibling),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("nextElementSibling"),
+            Some(get_next_element_sibling),
             None,
             Attribute::all(),
         )
@@ -4937,6 +5088,45 @@ fn js_document_get_element_by_id(
         .unwrap_or_else(JsValue::null))
 }
 
+fn js_dom_matches(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let selector = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::new(false));
+    };
+    let matches = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.matches_selector(node_id, &selector))
+        .unwrap_or(false);
+    Ok(JsValue::new(matches))
+}
+
+fn js_dom_closest(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let selector = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    let closest = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.closest_selector(node_id, &selector));
+    Ok(closest
+        .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_contains(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::new(false));
+    };
+    let Some(target_id) = node_id_argument(args.first()) else {
+        return Ok(JsValue::new(false));
+    };
+    let contains = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.contains_node(node_id, target_id))
+        .unwrap_or(false);
+    Ok(JsValue::new(contains))
+}
+
 fn js_document_create_element(
     _: &JsValue,
     args: &[JsValue],
@@ -5120,20 +5310,7 @@ fn js_dom_get_children(this: &JsValue, _: &[JsValue], context: &mut Context) -> 
     let node_id = this_node_id(this).unwrap_or(0);
     let node_ids = context
         .get_data::<JavaScriptHostData>()
-        .map(|host| {
-            let state = host.state.borrow();
-            state
-                .dom
-                .node(node_id)
-                .map(|node| {
-                    node.children
-                        .iter()
-                        .copied()
-                        .filter(|child_id| state.dom.element(*child_id).is_some())
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
+        .map(|host| host.state.borrow().dom.element_children(node_id))
         .unwrap_or_default();
     Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
 }
@@ -5155,6 +5332,62 @@ fn js_dom_get_child_nodes(
         })
         .unwrap_or_default();
     Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
+}
+
+fn js_dom_get_first_element_child(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let child_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.first_element_child(node_id));
+    Ok(child_id
+        .map(|child_id| JsValue::from(build_dom_node_object(context, child_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_get_last_element_child(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let child_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.last_element_child(node_id));
+    Ok(child_id
+        .map(|child_id| JsValue::from(build_dom_node_object(context, child_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_get_previous_element_sibling(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let sibling_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.previous_element_sibling(node_id));
+    Ok(sibling_id
+        .map(|sibling_id| JsValue::from(build_dom_node_object(context, sibling_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_get_next_element_sibling(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let sibling_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.next_element_sibling(node_id));
+    Ok(sibling_id
+        .map(|sibling_id| JsValue::from(build_dom_node_object(context, sibling_id)))
+        .unwrap_or_else(JsValue::null))
 }
 
 fn js_dom_get_text_content(
@@ -6933,6 +7166,18 @@ mod tests {
 
         assert!(processed.html.contains("<span class=\"chip\">Hello</span>"));
         assert!(processed.html.contains("<img src=\"/avatar.png\">"));
+    }
+
+    #[test]
+    fn supports_dom_matches_closest_contains_and_element_siblings() {
+        let processed = process_document_scripts(
+            "<html><body><section id=\"outer\"><div id=\"wrap\" class=\"wrap\"><button id=\"btn\">Go</button><span id=\"tail\">Later</span></div></section><script>var btn = document.getElementById('btn'); var wrap = btn.closest('#wrap'); var outer = btn.closest('section'); var tail = btn.nextElementSibling; outer.setAttribute('data-dom', [btn.matches('button#btn'), !btn.matches('.wrap'), wrap === document.getElementById('wrap'), outer === document.getElementById('outer'), outer.contains(btn), btn.contains(btn), outer.firstElementChild === wrap, outer.lastElementChild === wrap, wrap.firstElementChild === btn, wrap.lastElementChild === tail, btn.previousElementSibling === null, tail && tail.id === 'tail', tail.previousElementSibling === btn, wrap.nextElementSibling === null].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains(
+            "data-dom=\"true|true|true|true|true|true|true|true|true|true|true|true|true|true\""
+        ));
     }
 
     #[test]

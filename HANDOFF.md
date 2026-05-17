@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `121` passing tests on `2026-05-17`
+  - `cargo test`: `122` passing tests on `2026-05-17`
   - `cargo build`: success on `2026-05-17`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -64,6 +64,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `querySelector(...)`, `querySelectorAll(...)`, `getElementById(...)`
     - `createElement(...)`, `createTextNode(...)`
     - `appendChild(...)`, `insertBefore(...)`, `remove()`
+    - `matches(...)`, `closest(...)`, `contains(...)`
+    - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
     - `innerHTML`, `textContent`, `classList`, `id`, `className`
     - reflected `value`, `src`, `href`, `rel`, `type`, `name`, `content`
     - recursive `document.write(...)`
@@ -128,6 +130,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - JS support is still far from a full browser DOM / framework runtime.
 - GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics are in place, and `location.hash` plus `history.pushState(...)` / `replaceState(...)` now support soft navigation without a reload, while the rest of the option matrix and back/forward stack still need depth.
 - Native page input typing now syncs `value` into the JS DOM.
+- DOM traversal APIs now include `matches(...)`, `closest(...)`, `contains(...)`, and element sibling / child accessors for event delegation and framework-style code paths.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward replay and scroll restoration still need depth.
 - Script-driven scrolling now has basic window / DOM setter support, but full scroll restoration across history still needs depth.
@@ -286,6 +289,18 @@ git worktree list
 - Added browser-level history tracking for full document loads.
 - Added back/forward chrome buttons and `Alt+Left` / `Alt+Right` shortcuts.
 - Kept same-document soft navigation in sync with the browser history entry for the current page.
+
+### 2026-05-17 - Codex (DOM traversal APIs)
+
+- Added `matches(...)`, `closest(...)`, and `contains(...)` to the DOM bridge so selector-driven event delegation code can walk the tree without special cases.
+- Added `firstElementChild`, `lastElementChild`, `previousElementSibling`, and `nextElementSibling` accessors for framework-style traversal.
+- Added a regression test that exercises selector matching, ancestor lookup, containment, and sibling traversal together on a nested DOM tree.
+
+### 2026-05-17 - Codex (DOM traversal APIs)
+
+- Added `matches(...)`, `closest(...)`, and `contains(...)` to the lightweight DOM bridge so event delegation code can inspect and climb the tree without special cases.
+- Added `firstElementChild`, `lastElementChild`, `previousElementSibling`, and `nextElementSibling` accessors so framework-style traversal paths can read the surrounding element structure.
+- Added a regression test that exercises selector matching, ancestor lookup, containment, and sibling traversal together on a small nested DOM tree.
 
 ### 2026-05-17 - Codex (script-driven scroll APIs)
 

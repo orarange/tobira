@@ -81,6 +81,7 @@ Goal: support the DOM shape that frameworks and interactive sites rely on.
 Tasks:
 
 - expand node/element APIs that are commonly used
+- DOM traversal helpers like `matches(...)`, `closest(...)`, `contains(...)`, and element sibling accessors are now in place
 - improve `classList`, `dataset`, `attributes`, and property reflection
 - add `querySelector(...)` coverage for more selectors if needed
 - support `document.body`, `document.head`, `document.documentElement` consistently

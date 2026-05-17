@@ -59,6 +59,8 @@ Current capabilities:
   - `document.getElementById(...)`
   - `document.createElement(...)`
   - `appendChild(...)`, `insertBefore(...)`, `remove()`
+  - `matches(...)`, `closest(...)`, `contains(...)`
+  - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
   - `innerHTML`, `textContent`, `classList`, `id`, `className`
   - recursive `document.write(...)`
   - inline `element.style` updates through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
@@ -198,6 +200,8 @@ Current JS support is intentionally small:
 - `document.getElementById(...)`
 - `document.createElement(...)`
 - `appendChild(...)` / `insertBefore(...)` / `remove()`
+- `matches(...)`, `closest(...)`, `contains(...)`
+- `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
 - `innerHTML`, `textContent`, `classList`, `id`, `className`
 - `document.addEventListener(...)` / capture + bubbling for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`
 - `focus` / `blur` are currently target-only
