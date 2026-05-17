@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use boa_engine::object::{
     JsObject, ObjectInitializer,
-    builtins::{JsFunction, JsPromise},
+    builtins::{JsArray, JsFunction, JsPromise},
 };
 use boa_engine::property::{Attribute, PropertyDescriptor};
 use boa_engine::{
@@ -1161,6 +1161,16 @@ impl DomState {
         self.element(node_id)
             .and_then(|element| element.attributes.get(name))
             .cloned()
+    }
+
+    fn has_attribute(&self, node_id: usize, name: &str) -> bool {
+        self.get_attribute(node_id, name).is_some()
+    }
+
+    fn attribute_names(&self, node_id: usize) -> Vec<String> {
+        self.element(node_id)
+            .map(|element| element.attributes.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     fn is_disabled(&self, node_id: usize) -> bool {
@@ -3094,6 +3104,16 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             NativeFunction::from_fn_ptr(js_remove_event_listener),
             js_string!("removeEventListener"),
             2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_has_attribute),
+            js_string!("hasAttribute"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_get_attribute_names),
+            js_string!("getAttributeNames"),
+            0,
         )
         .function(
             NativeFunction::from_fn_ptr(js_dom_get_attribute),
@@ -5238,6 +5258,43 @@ fn js_dom_get_property_attribute(
     Ok(JsValue::from(js_string!(value)))
 }
 
+fn js_dom_has_attribute(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::new(false));
+    };
+    let has_attribute = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.has_attribute(node_id, &name))
+        .unwrap_or(false);
+    Ok(JsValue::new(has_attribute))
+}
+
+fn js_dom_get_attribute_names(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let names = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.attribute_names(node_id))
+        .unwrap_or_default();
+    let array = JsArray::from_iter(
+        names
+            .into_iter()
+            .map(|name| JsValue::from(js_string!(name))),
+        context,
+    );
+    Ok(JsValue::from(array))
+}
+
 fn js_dom_set_attribute(
     this: &JsValue,
     args: &[JsValue],
@@ -7178,6 +7235,20 @@ mod tests {
         assert!(processed.html.contains(
             "data-dom=\"true|true|true|true|true|true|true|true|true|true|true|true|true|true\""
         ));
+    }
+
+    #[test]
+    fn supports_attribute_introspection_helpers() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\" data-a=\"1\" title=\"x\"></div><script>var box = document.getElementById('box'); box.setAttribute('aria-label', 'demo'); box.setAttribute('data-b', '2'); box.setAttribute('data-c', '3'); box.setAttribute('role', 'button'); box.removeAttribute('title'); document.body.setAttribute('data-attrs', [box.hasAttribute('title'), box.hasAttribute('data-b'), box.getAttributeNames().join('|')].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-attrs=\"false|true|aria-label|data-a|data-b|data-c|id|role\"")
+        );
     }
 
     #[test]

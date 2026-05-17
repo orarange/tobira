@@ -59,6 +59,7 @@ Current capabilities:
   - `document.getElementById(...)`
   - `document.createElement(...)`
   - `appendChild(...)`, `insertBefore(...)`, `remove()`
+  - `hasAttribute(...)`, `getAttributeNames(...)`
   - `matches(...)`, `closest(...)`, `contains(...)`
   - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
   - `innerHTML`, `textContent`, `classList`, `id`, `className`
@@ -200,6 +201,7 @@ Current JS support is intentionally small:
 - `document.getElementById(...)`
 - `document.createElement(...)`
 - `appendChild(...)` / `insertBefore(...)` / `remove()`
+- `hasAttribute(...)` / `getAttributeNames(...)`
 - `matches(...)`, `closest(...)`, `contains(...)`
 - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
 - `innerHTML`, `textContent`, `classList`, `id`, `className`

@@ -10,6 +10,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Codex must stay on the active Codex branch listed below unless the user explicitly changes that rule.
 - Codex should use a dedicated worktree for the active Codex branch instead of sharing the user's main checkout.
 - Keep Codex changes isolated to the active Codex branch; Claude may work on its own branch and merge reconciliation happens later through GitHub Copilot or the user's preferred flow.
+- CSS boundary:
+  - treat the Claude `claude/phase5-css` branch as the owner of the CSS parser/layout baseline
+  - do not edit CSS-engine files or other Claude-owned CSS work by default
+  - if a JS task genuinely needs CSS-facing integration, keep the change minimal and non-destructive, open/update a PR, request Copilot review before broadening the diff, and log the exact touched files plus the reason in `change.md`
+  - read-only inspection of CSS files is fine; destructive or broad CSS edits are not
 - Update the `Current Snapshot` section whenever the high-level state changes.
 - Append a short entry to `Session Log` whenever meaningful work is handed off or resumed.
 - Do not stage unrelated local helper artifacts unless the user explicitly asks for them.
@@ -25,7 +30,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `122` passing tests on `2026-05-17`
+  - `cargo test`: `123` passing tests on `2026-05-17`
   - `cargo build`: success on `2026-05-17`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -64,6 +69,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `querySelector(...)`, `querySelectorAll(...)`, `getElementById(...)`
     - `createElement(...)`, `createTextNode(...)`
     - `appendChild(...)`, `insertBefore(...)`, `remove()`
+    - `hasAttribute(...)`, `getAttributeNames(...)`
     - `matches(...)`, `closest(...)`, `contains(...)`
     - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
     - `innerHTML`, `textContent`, `classList`, `id`, `className`
@@ -132,6 +138,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics are in place, and `location.hash` plus `history.pushState(...)` / `replaceState(...)` now support soft navigation without a reload, while the rest of the option matrix and back/forward stack still need depth.
 - Native page input typing now syncs `value` into the JS DOM.
 - DOM traversal APIs now include `matches(...)`, `closest(...)`, `contains(...)`, and element sibling / child accessors for event delegation and framework-style code paths.
+- The richer `attributes` / `dataset` surface still needs deeper parity.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward replay and scroll restoration still need depth.
 - Script-driven scrolling now has basic window / DOM setter support, but full scroll restoration across history still needs depth.
@@ -297,6 +304,12 @@ git worktree list
 - Added `firstElementChild`, `lastElementChild`, `previousElementSibling`, and `nextElementSibling` accessors for framework-style traversal.
 - Added a regression test that exercises selector matching, ancestor lookup, containment, and sibling traversal together on a nested DOM tree.
 
+### 2026-05-17 - Codex (attribute introspection)
+
+- Added `hasAttribute(...)` and `getAttributeNames(...)` to the DOM bridge so scripts can inspect element attributes without special casing.
+- Kept the new work CSS-neutral and stayed on the `codex/js-event-capture` branch.
+- Updated the JS roadmap to put attribute/introspection helpers before harder browser gaps like history replay and reflow invalidation.
+
 ### 2026-05-17 - Codex (DOM traversal APIs)
 
 - Added `matches(...)`, `closest(...)`, and `contains(...)` to the lightweight DOM bridge so event delegation code can inspect and climb the tree without special cases.
@@ -313,6 +326,12 @@ git worktree list
 
 - Added `demo/scroll-demo.html` so the new scroll APIs can be exercised manually without digging through source code.
 - The demo uses a tall DOM tree plus buttons for `scrollTo`, `scrollBy`, and `scrollTop` setter checks.
+
+### 2026-05-17 - Codex (CSS boundary policy)
+
+- Defined a clearer boundary for CSS work: treat the Claude `claude/phase5-css` branch as the CSS parser/layout owner and avoid broad or destructive CSS edits from Codex.
+- Documented the exception workflow for JS tasks that genuinely need CSS-facing integration: keep the diff minimal, request Copilot review, and log touched files in `change.md`.
+- Kept the current update CSS-neutral; this change only tightened coordination rules and documentation.
 
 ### 2026-05-16 - Codex (browser history back/forward)
 

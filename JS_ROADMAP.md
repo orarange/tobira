@@ -39,6 +39,7 @@ CSS baseline note:
 
 - the broad CSS parser / selector / cascade / computed-style foundation is treated as complete on the Claude `claude/phase5-css` branch
 - Codex's Phase 5 work is therefore about JS-driven reflow and rendering feedback on top of that baseline, not reimplementing the CSS engine
+- if a JS task genuinely needs CSS-facing integration, keep the diff minimal, request Copilot review, and log the touched files in `change.md`
 
 Still missing or shallow:
 
@@ -48,6 +49,22 @@ Still missing or shallow:
 - rendering invalidation and layout reflow after DOM mutation still need deeper incremental invalidation
 - the style bridge still needs the rest of the CSS property matrix and computed-style parity
 - remaining CSS work is mostly Phase 6 visual effects / advanced rendering, not the core parser/layout baseline
+
+## Execution Order (Simple -> Hard)
+
+If we want to keep momentum and avoid getting stuck on the biggest browser gaps too early, the practical implementation order is:
+
+1. attribute / DOM introspection helpers like `hasAttribute(...)`, `getAttributeNames(...)`, and broader property reflection
+2. event-delegation helpers like `matches(...)`, `closest(...)`, `contains(...)`, and element traversal accessors
+3. basic listener-option edge cases and default-action sequencing
+4. `document.body` / `document.head` / `document.documentElement` consistency and `innerHTML` edge cases
+5. mutation notifications plus incremental reflow invalidation for DOM and style changes
+6. same-document and full-document history replay polish, including scroll restoration
+7. fetch / XHR semantics and safer cross-origin handling
+8. Google / YouTube / app-shell compatibility smoke tests
+9. media and advanced APIs
+
+The roadmap below still keeps the big browser areas grouped by phase, but the list above is the preferred order when we need the next easiest high-impact task.
 
 ## Phase 1: Real Event Plumbing
 
