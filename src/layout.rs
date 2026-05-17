@@ -1,11 +1,28 @@
 use crate::css::{
-    AlignItems, AlignSelf, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
-    FlexDirection, FontFamilyKind, GridTrackSize, JustifyContent, LengthValue, ObjectFit, Overflow,
-    Position, StyledElement, StyledNode, TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode,
-    apply_text_transform,
+    AlignItems, AlignSelf, BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind,
+    DEFAULT_BACKGROUND_COLOR, Display, FlexDirection, FontFamilyKind, GridTrackSize,
+    JustifyContent, LengthValue, ObjectFit, Overflow, Position, StyledElement, StyledNode,
+    TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode, apply_text_transform,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GradientStop {
+    pub color: u32,
+    pub position: u32, // 0-1000 (thousandths)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GradientCommand {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub border_radius: u32,
+    pub angle_deg_x1000: i32,
+    pub stops: Vec<GradientStop>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DrawCommand {
@@ -13,6 +30,7 @@ pub enum DrawCommand {
     Text(TextCommand),
     Image(ImageCommand),
     Layer(LayerCommand),
+    Gradient(GradientCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +40,8 @@ pub struct LayerCommand {
     pub width: u32,
     pub height: u32,
     pub opacity: u8,
+    pub blur_px: u32,    // CSS filter: blur() radius; 0 = no blur
+    pub brightness: u32, // CSS filter: brightness() in 1/10000; 10000 = no change
     pub commands: Vec<DrawCommand>,
 }
 
@@ -91,6 +111,10 @@ fn shift_command(cmd: &mut DrawCommand, dx: u32, dy: u32) {
             l.x = l.x.saturating_add(dx);
             l.y = l.y.saturating_add(dy);
         }
+        DrawCommand::Gradient(g) => {
+            g.x = g.x.saturating_add(dx);
+            g.y = g.y.saturating_add(dy);
+        }
     }
 }
 
@@ -111,6 +135,10 @@ fn shift_command_signed(cmd: &mut DrawCommand, dx: i32, dy: i32) {
         DrawCommand::Layer(l) => {
             l.x = (l.x as i64 + dx as i64).max(0) as u32;
             l.y = (l.y as i64 + dy as i64).max(0) as u32;
+        }
+        DrawCommand::Gradient(g) => {
+            g.x = (g.x as i64 + dx as i64).max(0) as u32;
+            g.y = (g.y as i64 + dy as i64).max(0) as u32;
         }
     }
 }
@@ -205,8 +233,10 @@ pub struct TextCommand {
     pub font_family: FontFamilyKind,
     pub color: Color,
     pub underline: bool,
+    pub line_through: bool,
     pub bold: bool,
     pub italic: bool,
+    pub text_shadow: Option<crate::css::TextShadow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +249,7 @@ pub struct ImageCommand {
     pub object_fit: ObjectFit,
     pub object_position_x: u32,
     pub object_position_y: u32,
+    pub tile: bool, // true = background-repeat tile at natural size
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -959,8 +990,11 @@ fn layout_block_element(
     }
 
     if element.tag_name == "table" {
-        if element.style.opacity < 255 {
-            // Table with opacity: render into sub-context and wrap in a LayerCommand
+        if element.style.opacity < 255
+            || element.style.filter_blur_px > 0
+            || element.style.filter_brightness != 10000
+        {
+            // Table with opacity/filter: render into sub-context and wrap in a LayerCommand
             let mut sub_context = LayoutContext {
                 background_color: context.background_color,
                 ..LayoutContext::default()
@@ -987,6 +1021,8 @@ fn layout_block_element(
                 width: width.max(1),
                 height: table_height,
                 opacity: element.style.opacity,
+                blur_px: element.style.filter_blur_px,
+                brightness: element.style.filter_brightness,
                 commands: sub_context.commands,
             }));
             context.links.extend(sub_context.links);
@@ -1015,17 +1051,68 @@ fn layout_block_element(
 
     *cursor_y = cursor_y.saturating_add(element.style.margin.top);
 
-    let outer_x = x.saturating_add(element.style.margin.left);
-    let raw_outer_width =
-        width.saturating_sub(element.style.margin.left + element.style.margin.right);
-    // Apply min/max-width
-    let outer_width = raw_outer_width
-        .min(element.style.max_width.unwrap_or(u32::MAX))
-        .max(element.style.min_width);
+    // Resolve explicit width from style.width (LengthValue → px)
+    let explicit_width: Option<u32> = element.style.width.map(|w| match w {
+        LengthValue::Pixels(px) => px,
+        LengthValue::Percent(pct) => (width as u64 * pct as u64 / 100).min(width as u64) as u32,
+        LengthValue::MinContent => 0,
+        LengthValue::MaxContent => width,
+        LengthValue::FitContent(max_px) => width.min(max_px),
+    });
+
+    // Container-derived width (what the element would be without explicit width)
+    let container_derived_width = {
+        let ml = if element.style.margin_left_auto {
+            0
+        } else {
+            element.style.margin.left
+        };
+        let mr = if element.style.margin_right_auto {
+            0
+        } else {
+            element.style.margin.right
+        };
+        width
+            .saturating_sub(ml + mr)
+            .min(element.style.max_width.unwrap_or(u32::MAX))
+            .max(element.style.min_width)
+    };
+
+    // Compute outer_width: only use explicit width when it actually constrains (is narrower).
+    // This prevents HTML width="" attributes from incorrectly shrinking table-allocated cells.
+    let (outer_width, width_is_constrained) = if let Some(ew) = explicit_width {
+        let clamped = ew
+            .min(element.style.max_width.unwrap_or(u32::MAX))
+            .max(element.style.min_width);
+        if clamped < container_derived_width {
+            (clamped, true)
+        } else {
+            (container_derived_width, false)
+        }
+    } else {
+        (container_derived_width, false)
+    };
+
+    // Compute outer_x: center when both margins are auto AND width is actually constrained.
+    let outer_x = if element.style.margin_left_auto
+        && element.style.margin_right_auto
+        && width_is_constrained
+    {
+        let total_margin = width.saturating_sub(outer_width);
+        x.saturating_add(total_margin / 2)
+    } else if element.style.margin_right_auto && !element.style.margin_left_auto {
+        x.saturating_add(element.style.margin.left)
+    } else {
+        x.saturating_add(element.style.margin.left)
+    };
+
     let background_top = *cursor_y;
 
-    // Detect stacking context: element has opacity < 255
-    if element.style.opacity < 255 {
+    // Detect stacking context: element has opacity < 255 or a filter effect
+    if element.style.opacity < 255
+        || element.style.filter_blur_px > 0
+        || element.style.filter_brightness != 10000
+    {
         layout_block_element_as_layer(
             element,
             outer_x,
@@ -1087,6 +1174,36 @@ fn layout_block_element(
     } else {
         None
     };
+
+    // Insert background image placeholder BEFORE children so it renders behind them.
+    let bg_img_tile = matches!(
+        element.style.background_repeat,
+        BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY
+    );
+    let bg_img_object_fit = if bg_img_tile {
+        ObjectFit::None
+    } else {
+        match element.style.background_size {
+            BackgroundSize::Cover => ObjectFit::Cover,
+            BackgroundSize::Contain => ObjectFit::Contain,
+            BackgroundSize::Auto => ObjectFit::Fill,
+        }
+    };
+    let bg_image_cmd_idx: Option<usize> = element.style.background_image_url.as_ref().map(|url| {
+        let idx = context.commands.len();
+        context.commands.push(DrawCommand::Image(ImageCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1, // placeholder; updated after children
+            src: url.clone(),
+            object_fit: bg_img_object_fit,
+            object_position_x: element.style.background_position_x,
+            object_position_y: element.style.background_position_y,
+            tile: bg_img_tile,
+        }));
+        idx
+    });
 
     // Capture clip start BEFORE children are laid out, so overflow:hidden can correctly
     // filter commands added by children (even when there is no background rect).
@@ -1181,6 +1298,34 @@ fn layout_block_element(
         if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(background_cmd_index) {
             rect.height = background_height;
         }
+    }
+    if let Some(idx) = bg_image_cmd_idx {
+        if let DrawCommand::Image(ref mut img) = context.commands[idx] {
+            img.height = background_height;
+        }
+    }
+
+    // Emit gradient overlay if background_gradient is set
+    if let Some(ref gradient) = element.style.background_gradient {
+        let stops: Vec<GradientStop> = gradient
+            .stops
+            .iter()
+            .map(|(c, p)| GradientStop {
+                color: *c,
+                position: *p,
+            })
+            .collect();
+        context
+            .commands
+            .push(DrawCommand::Gradient(GradientCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: background_height,
+                border_radius: element.style.border_radius,
+                angle_deg_x1000: gradient.angle_deg_x1000,
+                stops,
+            }));
     }
 
     // Restore parent background color after children are rendered
@@ -1363,6 +1508,22 @@ fn clip_commands_to_box(
                         Some(DrawCommand::Text(t))
                     }
                 }
+                DrawCommand::Gradient(mut g) => {
+                    let gx2 = g.x.saturating_add(g.width);
+                    let gy2 = g.y.saturating_add(g.height);
+                    if g.x >= clip_x2 || g.y >= clip_y2 || gx2 <= clip_x || gy2 <= clip_y {
+                        return None;
+                    }
+                    let new_x = g.x.max(clip_x);
+                    let new_y = g.y.max(clip_y);
+                    let new_x2 = gx2.min(clip_x2);
+                    let new_y2 = gy2.min(clip_y2);
+                    g.x = new_x;
+                    g.y = new_y;
+                    g.width = new_x2.saturating_sub(new_x).max(1);
+                    g.height = new_y2.saturating_sub(new_y).max(1);
+                    Some(DrawCommand::Gradient(g))
+                }
             }
         })
         .collect();
@@ -1388,6 +1549,10 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
                 l.x = l.x.saturating_sub(origin_x);
                 l.y = l.y.saturating_sub(origin_y);
                 // Do NOT recurse into l.commands — they're already layer-relative
+            }
+            DrawCommand::Gradient(g) => {
+                g.x = g.x.saturating_sub(origin_x);
+                g.y = g.y.saturating_sub(origin_y);
             }
         }
     }
@@ -1544,6 +1709,57 @@ fn layout_block_element_as_layer(
         }
     }
 
+    // Emit gradient overlay if background_gradient is set
+    if let Some(ref gradient) = element.style.background_gradient {
+        let stops: Vec<GradientStop> = gradient
+            .stops
+            .iter()
+            .map(|(c, p)| GradientStop {
+                color: *c,
+                position: *p,
+            })
+            .collect();
+        sub_context
+            .commands
+            .push(DrawCommand::Gradient(GradientCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: final_height,
+                border_radius: element.style.border_radius,
+                angle_deg_x1000: gradient.angle_deg_x1000,
+                stops,
+            }));
+    }
+
+    // Emit background image if background_image_url is set
+    if let Some(ref url) = element.style.background_image_url {
+        let tile = matches!(
+            element.style.background_repeat,
+            BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY
+        );
+        let object_fit = if tile {
+            ObjectFit::None
+        } else {
+            match element.style.background_size {
+                BackgroundSize::Cover => ObjectFit::Cover,
+                BackgroundSize::Contain => ObjectFit::Contain,
+                BackgroundSize::Auto => ObjectFit::Fill,
+            }
+        };
+        sub_context.commands.push(DrawCommand::Image(ImageCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: final_height,
+            src: url.clone(),
+            object_fit,
+            object_position_x: element.style.background_position_x,
+            object_position_y: element.style.background_position_y,
+            tile,
+        }));
+    }
+
     // Draw borders into the sub-context (they are part of the composited layer)
     if !element.style.border_style_none {
         // Borders use raw border_color since they're inside the layer
@@ -1630,6 +1846,8 @@ fn layout_block_element_as_layer(
         width: outer_width.max(1),
         height: final_height,
         opacity: element.style.opacity,
+        blur_px: element.style.filter_blur_px,
+        brightness: element.style.filter_brightness,
         commands: sub_context.commands,
     }));
 
@@ -1672,8 +1890,11 @@ fn layout_image_element(
         TextAlign::Left => x,
     };
 
-    if element.style.opacity < 255 {
-        // Wrap the image in a LayerCommand so opacity is applied correctly
+    if element.style.opacity < 255
+        || element.style.filter_blur_px > 0
+        || element.style.filter_brightness != 10000
+    {
+        // Wrap the image in a LayerCommand so opacity/filters are applied correctly
         let img_cmd = DrawCommand::Image(ImageCommand {
             x: 0,
             y: 0,
@@ -1683,6 +1904,7 @@ fn layout_image_element(
             object_fit: element.style.object_fit,
             object_position_x: element.style.object_position_x,
             object_position_y: element.style.object_position_y,
+            tile: false,
         });
         context.commands.push(DrawCommand::Layer(LayerCommand {
             x: draw_x,
@@ -1690,6 +1912,8 @@ fn layout_image_element(
             width: draw_width,
             height: draw_height,
             opacity: element.style.opacity,
+            blur_px: element.style.filter_blur_px,
+            brightness: element.style.filter_brightness,
             commands: vec![img_cmd],
         }));
     } else {
@@ -1702,6 +1926,7 @@ fn layout_image_element(
             object_fit: element.style.object_fit,
             object_position_x: element.style.object_position_x,
             object_position_y: element.style.object_position_y,
+            tile: false,
         }));
     }
 
@@ -1955,6 +2180,34 @@ fn layout_table_element(
                     border_radius: 0,
                 }));
             }
+            if let Some(ref url) = placement.cell.style.background_image_url {
+                let tile = matches!(
+                    placement.cell.style.background_repeat,
+                    BackgroundRepeat::Repeat
+                        | BackgroundRepeat::RepeatX
+                        | BackgroundRepeat::RepeatY
+                );
+                let object_fit = if tile {
+                    ObjectFit::None
+                } else {
+                    match placement.cell.style.background_size {
+                        BackgroundSize::Cover => ObjectFit::Cover,
+                        BackgroundSize::Contain => ObjectFit::Contain,
+                        BackgroundSize::Auto => ObjectFit::Fill,
+                    }
+                };
+                layer_commands.push(DrawCommand::Image(ImageCommand {
+                    x: 0,
+                    y: 0,
+                    width: layer_w,
+                    height: layer_h,
+                    src: url.clone(),
+                    object_fit,
+                    object_position_x: placement.cell.style.background_position_x,
+                    object_position_y: placement.cell.style.background_position_y,
+                    tile,
+                }));
+            }
             // Content commands are (0,0)-relative within the cell; offset by padding/valign
             let pad_x = padding;
             let pad_y = padding.saturating_add(vertical_offset);
@@ -1969,6 +2222,8 @@ fn layout_table_element(
                 width: layer_w,
                 height: layer_h,
                 opacity: placement.cell.style.opacity,
+                blur_px: placement.cell.style.filter_blur_px,
+                brightness: placement.cell.style.filter_brightness,
                 commands: layer_commands,
             }));
             // Links are content-relative; shift by cell position + padding/valign
@@ -2047,6 +2302,34 @@ fn layout_table_element(
                     height: cell_height.max(1),
                     color: blended,
                     border_radius: 0,
+                }));
+            }
+            if let Some(ref url) = placement.cell.style.background_image_url {
+                let tile = matches!(
+                    placement.cell.style.background_repeat,
+                    BackgroundRepeat::Repeat
+                        | BackgroundRepeat::RepeatX
+                        | BackgroundRepeat::RepeatY
+                );
+                let object_fit = if tile {
+                    ObjectFit::None
+                } else {
+                    match placement.cell.style.background_size {
+                        BackgroundSize::Cover => ObjectFit::Cover,
+                        BackgroundSize::Contain => ObjectFit::Contain,
+                        BackgroundSize::Auto => ObjectFit::Fill,
+                    }
+                };
+                context.commands.push(DrawCommand::Image(ImageCommand {
+                    x: cell_x,
+                    y: cell_y,
+                    width: cell_width.max(1),
+                    height: cell_height.max(1),
+                    src: url.clone(),
+                    object_fit,
+                    object_position_x: placement.cell.style.background_position_x,
+                    object_position_y: placement.cell.style.background_position_y,
+                    tile,
                 }));
             }
             merge_fragment(context, layout, content_x, content_y);
@@ -2355,8 +2638,10 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             font_family: text.font_family,
             color: text.color,
             underline: text.underline,
+            line_through: text.line_through,
             bold: text.bold,
             italic: text.italic,
+            text_shadow: text.text_shadow.clone(),
         }),
         DrawCommand::Image(image) => DrawCommand::Image(ImageCommand {
             x: image.x.saturating_add(offset_x),
@@ -2367,6 +2652,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             object_fit: image.object_fit,
             object_position_x: image.object_position_x,
             object_position_y: image.object_position_y,
+            tile: image.tile,
         }),
         DrawCommand::Layer(layer) => DrawCommand::Layer(LayerCommand {
             x: layer.x.saturating_add(offset_x),
@@ -2374,7 +2660,18 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             width: layer.width,
             height: layer.height,
             opacity: layer.opacity,
+            blur_px: layer.blur_px,
+            brightness: layer.brightness,
             commands: layer.commands.clone(),
+        }),
+        DrawCommand::Gradient(g) => DrawCommand::Gradient(GradientCommand {
+            x: g.x.saturating_add(offset_x),
+            y: g.y.saturating_add(offset_y),
+            width: g.width,
+            height: g.height,
+            border_radius: g.border_radius,
+            angle_deg_x1000: g.angle_deg_x1000,
+            stops: g.stops.clone(),
         }),
     }
 }
@@ -2604,6 +2901,16 @@ fn layout_inline_fragments(
             context,
             fonts,
         );
+    } else if container_style.white_space == WhiteSpaceMode::NoWrap {
+        layout_nowrap_fragments(
+            fragments,
+            container_style,
+            x,
+            width,
+            cursor_y,
+            context,
+            fonts,
+        );
     } else {
         layout_normal_fragments(
             fragments,
@@ -2617,7 +2924,7 @@ fn layout_inline_fragments(
     }
 }
 
-fn layout_normal_fragments(
+fn layout_nowrap_fragments(
     fragments: &[InlineFragment],
     container_style: &ComputedStyle,
     x: u32,
@@ -2627,25 +2934,95 @@ fn layout_normal_fragments(
     fonts: &mut FontContext,
 ) {
     let mut line = LineBuilder::default();
-    let mut pending_space = false;
     let text_indent = container_style.text_indent;
     let mut first_line = true;
+    let mut pending_space = false;
 
     for fragment in fragments {
         match fragment {
             InlineFragment::LineBreak => {
-                emit_line_with_indent(
-                    &mut line,
-                    container_style,
-                    x,
-                    width,
-                    cursor_y,
-                    context,
-                    fonts,
-                    if first_line { text_indent } else { 0 },
-                );
-                first_line = false;
-                pending_space = false;
+                // nowrap: ignore line breaks
+            }
+            InlineFragment::Control(control) => {
+                if pending_space && !line.is_empty() {
+                    line.push_span(" ", &control.style, fonts, None, None);
+                }
+                line.push_control(control, fonts);
+                pending_space = true;
+            }
+            InlineFragment::Text {
+                text,
+                style,
+                link_href,
+                link_node_id,
+            } => {
+                let had_whitespace = text.chars().any(char::is_whitespace);
+                for word in text.split_whitespace() {
+                    if pending_space && !line.is_empty() {
+                        line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
+                    }
+                    line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
+                    pending_space = true;
+                }
+                if had_whitespace {
+                    pending_space = true;
+                }
+            }
+        }
+    }
+
+    emit_line_with_indent(
+        &mut line,
+        container_style,
+        x,
+        width,
+        cursor_y,
+        context,
+        fonts,
+        if first_line { text_indent } else { 0 },
+    );
+    let _ = first_line; // suppress unused warning
+}
+
+fn layout_normal_fragments(
+    fragments: &[InlineFragment],
+    container_style: &ComputedStyle,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    fonts: &mut FontContext,
+) {
+    let ellipsis_mode =
+        container_style.text_overflow_ellipsis && container_style.overflow == Overflow::Hidden;
+    let mut line = LineBuilder::default();
+    let mut pending_space = false;
+    let text_indent = container_style.text_indent;
+    let mut first_line = true;
+    let mut ellipsis_done = false; // in ellipsis mode, once we clip, we're done
+
+    'outer: for fragment in fragments {
+        if ellipsis_mode && ellipsis_done {
+            break;
+        }
+        match fragment {
+            InlineFragment::LineBreak => {
+                if ellipsis_mode {
+                    // In ellipsis mode, ignore line breaks
+                } else {
+                    emit_line_with_indent(
+                        &mut line,
+                        container_style,
+                        x,
+                        width,
+                        cursor_y,
+                        context,
+                        fonts,
+                        if first_line { text_indent } else { 0 },
+                    );
+                    first_line = false;
+                    pending_space = false;
+                }
             }
             InlineFragment::Control(control) => {
                 let (control_width, _) = measure_form_control(control, fonts);
@@ -2659,6 +3036,17 @@ fn layout_normal_fragments(
                 if pending_space_before_control {
                     let space_width = char_width(&control.style, ' ', fonts);
                     if line.width.saturating_add(space_width) > effective_width {
+                        if ellipsis_mode {
+                            // Apply ellipsis and stop
+                            apply_ellipsis_to_line(
+                                &mut line,
+                                effective_width,
+                                container_style,
+                                fonts,
+                            );
+                            ellipsis_done = true;
+                            break 'outer;
+                        }
                         emit_line_with_indent(
                             &mut line,
                             container_style,
@@ -2681,6 +3069,11 @@ fn layout_normal_fragments(
                     width
                 };
                 if !line.is_empty() && line.width.saturating_add(control_width) > effective_width {
+                    if ellipsis_mode {
+                        apply_ellipsis_to_line(&mut line, effective_width, container_style, fonts);
+                        ellipsis_done = true;
+                        break 'outer;
+                    }
                     emit_line_with_indent(
                         &mut line,
                         container_style,
@@ -2705,6 +3098,9 @@ fn layout_normal_fragments(
                 let had_whitespace = text.chars().any(char::is_whitespace);
 
                 for word in text.split_whitespace() {
+                    if ellipsis_mode && ellipsis_done {
+                        break;
+                    }
                     let effective_width = if first_line && line.is_empty() {
                         width.saturating_sub(text_indent)
                     } else {
@@ -2714,6 +3110,16 @@ fn layout_normal_fragments(
                     if pending_space && !line.is_empty() {
                         let space_width = char_width(style, ' ', fonts);
                         if line.width.saturating_add(space_width) > effective_width {
+                            if ellipsis_mode {
+                                apply_ellipsis_to_line(
+                                    &mut line,
+                                    effective_width,
+                                    container_style,
+                                    fonts,
+                                );
+                                ellipsis_done = true;
+                                break;
+                            }
                             emit_line_with_indent(
                                 &mut line,
                                 container_style,
@@ -2730,26 +3136,59 @@ fn layout_normal_fragments(
                         }
                     }
 
+                    if ellipsis_done {
+                        break;
+                    }
+
                     let effective_width2 = if first_line && line.is_empty() {
                         width.saturating_sub(text_indent)
                     } else {
                         width
                     };
 
-                    push_wrapped_word(
-                        word,
-                        style,
-                        link_href.as_deref(),
-                        *link_node_id,
-                        container_style,
-                        x,
-                        effective_width2,
-                        cursor_y,
-                        context,
-                        &mut line,
-                        fonts,
-                    );
-                    pending_space = true;
+                    if ellipsis_mode {
+                        // Check if word fits; if not, apply ellipsis
+                        let word_width = text_width(style, word, fonts);
+                        let ellipsis_width = text_width(style, "...", fonts);
+                        if line.width.saturating_add(word_width) > effective_width2 {
+                            // Word doesn't fit - apply ellipsis to current line
+                            apply_ellipsis_to_line(
+                                &mut line,
+                                effective_width2,
+                                container_style,
+                                fonts,
+                            );
+                            ellipsis_done = true;
+                            break;
+                        } else if line
+                            .width
+                            .saturating_add(word_width)
+                            .saturating_add(ellipsis_width)
+                            > effective_width2
+                        {
+                            // Word fits but we can't guarantee another word will fit - add it
+                            line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
+                            pending_space = true;
+                        } else {
+                            line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
+                            pending_space = true;
+                        }
+                    } else {
+                        push_wrapped_word(
+                            word,
+                            style,
+                            link_href.as_deref(),
+                            *link_node_id,
+                            container_style,
+                            x,
+                            effective_width2,
+                            cursor_y,
+                            context,
+                            &mut line,
+                            fonts,
+                        );
+                        pending_space = true;
+                    }
                 }
 
                 if had_whitespace {
@@ -2757,6 +3196,11 @@ fn layout_normal_fragments(
                 }
             }
         }
+    }
+
+    if ellipsis_mode && !ellipsis_done && !line.is_empty() {
+        let eff_width = width.saturating_sub(text_indent);
+        apply_ellipsis_to_line(&mut line, eff_width, container_style, fonts);
     }
 
     emit_line_with_indent(
@@ -2769,6 +3213,73 @@ fn layout_normal_fragments(
         fonts,
         if first_line { text_indent } else { 0 },
     );
+}
+
+/// Truncate the last span in `line` so total width fits within `max_width`, then append "...".
+fn apply_ellipsis_to_line(
+    line: &mut LineBuilder,
+    max_width: u32,
+    container_style: &ComputedStyle,
+    fonts: &mut FontContext,
+) {
+    let ellipsis = "...";
+    // Find a style to use for ellipsis (last span or container style)
+    let ellipsis_style = line
+        .spans
+        .last()
+        .map(|s| s.style.clone())
+        .unwrap_or_else(|| container_style.clone());
+    let ellipsis_width = text_width(&ellipsis_style, ellipsis, fonts);
+    let target = max_width.saturating_sub(ellipsis_width);
+
+    // Trim spans to fit within `target` width
+    let mut used = 0u32;
+    let mut truncated = false;
+    for span in &mut line.spans {
+        if used >= target {
+            span.text.clear();
+            span.width = 0;
+            truncated = true;
+        } else {
+            let available = target.saturating_sub(used);
+            if span.width <= available {
+                used = used.saturating_add(span.width);
+            } else {
+                // Truncate this span
+                let mut truncated_text = String::new();
+                let mut tw = 0u32;
+                for ch in span.text.chars() {
+                    let cw =
+                        fonts.glyph_advance_px(ch, span.style.font_size_px, span.style.font_family);
+                    if tw.saturating_add(cw) > available {
+                        break;
+                    }
+                    tw += cw;
+                    truncated_text.push(ch);
+                }
+                span.text = truncated_text;
+                span.width = tw;
+                used = used.saturating_add(tw);
+                truncated = true;
+            }
+        }
+    }
+    // Remove empty trailing spans
+    line.spans
+        .retain(|s| !s.text.is_empty() || s.control.is_some());
+    // Append ellipsis as a new span
+    let mut ellipsis_span = LineSpan {
+        text: ellipsis.to_string(),
+        width: ellipsis_width,
+        height: text_line_height(&ellipsis_style, fonts),
+        style: ellipsis_style,
+        link_href: None,
+        link_node_id: None,
+        control: None,
+    };
+    line.spans.push(ellipsis_span);
+    // Recompute line width
+    line.width = line.spans.iter().map(|s| s.width).sum();
 }
 
 fn layout_preformatted_fragments(
@@ -3077,8 +3588,10 @@ fn emit_line_impl(
             font_family: span.style.font_family,
             color: apply_opacity(span.style.color, context.background_color, span_opacity),
             underline: span.style.underline,
+            line_through: span.style.line_through,
             bold: span.style.font_weight,
             italic: span.style.font_style_italic,
+            text_shadow: span.style.text_shadow.clone(),
         }));
 
         if let Some(href) = &span.link_href {
@@ -3236,12 +3749,24 @@ fn measure_node_preferred_width(
                     });
             }
 
-            let child_width = element
-                .children
-                .iter()
-                .map(|child| measure_node_preferred_width(child, images, fonts))
-                .max()
-                .unwrap_or(1);
+            // Inline elements place children side-by-side on the same line, so the preferred
+            // width is the SUM of children (e.g. "「link」" = 「+link+」 widths combined).
+            // Block elements place children on separate lines, so we take the MAX.
+            let child_width = if element.style.display == Display::Inline {
+                element
+                    .children
+                    .iter()
+                    .map(|child| measure_node_preferred_width(child, images, fonts))
+                    .sum::<u32>()
+                    .max(1)
+            } else {
+                element
+                    .children
+                    .iter()
+                    .map(|child| measure_node_preferred_width(child, images, fonts))
+                    .max()
+                    .unwrap_or(1)
+            };
 
             child_width
                 .saturating_add(element.style.padding.left + element.style.padding.right)
@@ -4687,5 +5212,135 @@ mod tests {
         // They should be at different x positions
         assert!(b.x > a.x, "B should be to the right of A");
         assert!(c.x > b.x, "C should be to the right of B");
+    }
+
+    #[test]
+    fn filter_blur_emits_layer_command_with_blur_px() {
+        use super::LayerCommand;
+
+        let document = parse_document(r#"<div style="filter: blur(4px);">Hello</div>"#);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 320, &mut fonts);
+
+        // Find all LayerCommands recursively
+        fn find_layers(cmds: &[DrawCommand]) -> Vec<&LayerCommand> {
+            let mut result = Vec::new();
+            for cmd in cmds {
+                if let DrawCommand::Layer(layer) = cmd {
+                    result.push(layer);
+                    result.extend(find_layers(&layer.commands));
+                }
+            }
+            result
+        }
+
+        let layers = find_layers(&layout.commands);
+        assert!(
+            !layers.is_empty(),
+            "Expected at least one LayerCommand for filter: blur()"
+        );
+        assert!(
+            layers.iter().any(|l| l.blur_px > 0),
+            "Expected a LayerCommand with blur_px > 0, got: {:?}",
+            layers.iter().map(|l| l.blur_px).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn filter_brightness_emits_layer_command_with_brightness() {
+        use super::LayerCommand;
+
+        let document = parse_document(r#"<div style="filter: brightness(0.5);">Hello</div>"#);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 320, &mut fonts);
+
+        fn find_layers(cmds: &[DrawCommand]) -> Vec<&LayerCommand> {
+            let mut result = Vec::new();
+            for cmd in cmds {
+                if let DrawCommand::Layer(layer) = cmd {
+                    result.push(layer);
+                    result.extend(find_layers(&layer.commands));
+                }
+            }
+            result
+        }
+
+        let layers = find_layers(&layout.commands);
+        assert!(
+            !layers.is_empty(),
+            "Expected at least one LayerCommand for filter: brightness()"
+        );
+        assert!(
+            layers.iter().any(|l| l.brightness != 10000),
+            "Expected a LayerCommand with brightness != 10000, got: {:?}",
+            layers.iter().map(|l| l.brightness).collect::<Vec<_>>()
+        );
+        // brightness(0.5) => 5000
+        assert!(
+            layers.iter().any(|l| l.brightness == 5000),
+            "Expected brightness = 5000 (50%), got: {:?}",
+            layers.iter().map(|l| l.brightness).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn block_with_explicit_width_is_constrained() {
+        let document = parse_document(r#"<div style="width:200px;background:red;">x</div>"#);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
+
+        let rects = layout.rects();
+        let bg = rects
+            .iter()
+            .find(|r| r.color == 0xFF0000)
+            .expect("red background rect should exist");
+        assert_eq!(bg.width, 200, "div should be 200px wide, got {}", bg.width);
+    }
+
+    #[test]
+    fn margin_auto_centers_block_element() {
+        let document =
+            parse_document(r#"<div style="width:200px;margin:0 auto;background:red;">x</div>"#);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
+
+        let rects = layout.rects();
+        let bg = rects
+            .iter()
+            .find(|r| r.color == 0xFF0000)
+            .expect("red background rect should exist");
+        // (800 - 200) / 2 = 300
+        assert_eq!(bg.x, 300, "div should be centered at x=300, got {}", bg.x);
+        assert_eq!(bg.width, 200, "div width should be 200px");
     }
 }

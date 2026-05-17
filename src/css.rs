@@ -239,12 +239,67 @@ pub enum VerticalAlign {
 pub enum WhiteSpaceMode {
     Normal,
     Pre,
+    NoWrap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontFamilyKind {
     Sans,
+    Serif,
     Monospace,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TextShadow
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextShadow {
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub blur: u32,
+    pub color: u32,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LinearGradient
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearGradient {
+    pub angle_deg_x1000: i32,
+    pub stops: Vec<(u32, u32)>, // (color, position 0-1000)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BackgroundSize / BackgroundRepeat
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackgroundSize {
+    Auto,
+    Cover,
+    Contain,
+}
+
+impl Default for BackgroundSize {
+    fn default() -> Self {
+        BackgroundSize::Auto
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundRepeat {
+    Repeat,
+    NoRepeat,
+    RepeatX,
+    RepeatY,
+}
+
+impl Default for BackgroundRepeat {
+    fn default() -> Self {
+        BackgroundRepeat::Repeat
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -493,6 +548,8 @@ pub struct ComputedStyle {
     pub color: Color,
     pub background_color: Option<Color>,
     pub margin: EdgeSizes,
+    pub margin_left_auto: bool,
+    pub margin_right_auto: bool,
     pub padding: EdgeSizes,
     pub width: Option<LengthValue>,
     pub height: Option<LengthValue>,
@@ -502,7 +559,16 @@ pub struct ComputedStyle {
     pub vertical_align: VerticalAlign,
     pub font_weight: bool,
     pub underline: bool,
+    pub line_through: bool,
     pub white_space: WhiteSpaceMode,
+    pub text_overflow_ellipsis: bool,
+    pub text_shadow: Option<TextShadow>,
+    pub background_gradient: Option<LinearGradient>,
+    pub background_image_url: Option<String>,
+    pub background_size: BackgroundSize,
+    pub background_repeat: BackgroundRepeat,
+    pub background_position_x: u32,
+    pub background_position_y: u32,
     // ── new fields ──
     pub border: EdgeSizes,
     pub border_color: Color,
@@ -580,6 +646,8 @@ impl ComputedStyle {
             color: parent.map(|s| s.color).unwrap_or(DEFAULT_TEXT_COLOR),
             background_color: None,
             margin: default_margin(tag_name),
+            margin_left_auto: false,
+            margin_right_auto: false,
             padding: EdgeSizes::default(),
             width: None,
             height: None,
@@ -591,9 +659,18 @@ impl ComputedStyle {
             vertical_align: VerticalAlign::Top,
             font_weight: parent.map(|s| s.font_weight).unwrap_or(false),
             underline: parent.map(|s| s.underline).unwrap_or(false),
+            line_through: parent.map(|s| s.line_through).unwrap_or(false),
             white_space: parent
                 .map(|s| s.white_space)
                 .unwrap_or(WhiteSpaceMode::Normal),
+            text_overflow_ellipsis: false,
+            text_shadow: None,
+            background_gradient: None,
+            background_image_url: None,
+            background_size: BackgroundSize::Auto,
+            background_repeat: BackgroundRepeat::Repeat,
+            background_position_x: 50,
+            background_position_y: 50,
             // new fields – most not inherited
             border: EdgeSizes::default(),
             border_color: parent.map(|s| s.color).unwrap_or(DEFAULT_TEXT_COLOR),
@@ -1545,8 +1622,75 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.color = color;
             }
         }
-        "background" | "background-color" => {
+        "background" => {
+            let v = value.trim();
+            if v.to_ascii_lowercase().contains("linear-gradient(") {
+                style.background_gradient = parse_linear_gradient(v);
+            } else if v.to_ascii_lowercase().starts_with("url(") {
+                style.background_image_url = extract_url(v);
+            } else {
+                style.background_color = parse_color(v);
+            }
+        }
+        "background-color" => {
             style.background_color = parse_color(value);
+        }
+        "background-image" => {
+            let v = value.trim();
+            let vl = v.to_ascii_lowercase();
+            if vl == "none" {
+                style.background_gradient = None;
+                style.background_image_url = None;
+            } else if vl.contains("linear-gradient(") {
+                style.background_gradient = parse_linear_gradient(v);
+            } else if vl.starts_with("url(") {
+                style.background_image_url = extract_url(v);
+            }
+        }
+        "background-size" => {
+            let v = value.trim().to_ascii_lowercase();
+            style.background_size = match v.as_str() {
+                "cover" => BackgroundSize::Cover,
+                "contain" => BackgroundSize::Contain,
+                _ => BackgroundSize::Auto,
+            };
+        }
+        "background-repeat" => {
+            let v = value.trim().to_ascii_lowercase();
+            style.background_repeat = match v.as_str() {
+                "no-repeat" => BackgroundRepeat::NoRepeat,
+                "repeat-x" => BackgroundRepeat::RepeatX,
+                "repeat-y" => BackgroundRepeat::RepeatY,
+                _ => BackgroundRepeat::Repeat,
+            };
+        }
+        "background-position" => {
+            let parse_pct = |s: &str| -> u32 {
+                match s.trim() {
+                    "left" | "top" => 0,
+                    "center" => 50,
+                    "right" | "bottom" => 100,
+                    other => other
+                        .trim_end_matches('%')
+                        .parse::<f32>()
+                        .ok()
+                        .map(|f| f.clamp(0.0, 100.0).round() as u32)
+                        .unwrap_or(50),
+                }
+            };
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            match parts.as_slice() {
+                [x, y, ..] => {
+                    style.background_position_x = parse_pct(x);
+                    style.background_position_y = parse_pct(y);
+                }
+                [single] => {
+                    let v = parse_pct(single);
+                    style.background_position_x = v;
+                    style.background_position_y = v;
+                }
+                _ => {}
+            }
         }
         "display" => {
             if let Some(display) = parse_display(value) {
@@ -1630,10 +1774,15 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             let v = value.trim().to_ascii_lowercase();
             if v.contains("none") {
                 style.underline = false;
-            } else if v.contains("underline") {
-                style.underline = true;
+                style.line_through = false;
+            } else {
+                if v.contains("underline") {
+                    style.underline = true;
+                }
+                if v.contains("line-through") {
+                    style.line_through = true;
+                }
             }
-            // line-through etc → no change to underline (don't set it)
         }
         "text-decoration-color" => {
             style.text_decoration_color = parse_color(value);
@@ -1658,9 +1807,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "margin" => {
-            if let Some(edges) = parse_box_shorthand(value, parent_font_size) {
-                style.margin = edges;
-            }
+            parse_margin_shorthand(style, value, parent_font_size);
         }
         "padding" => {
             if let Some(edges) = parse_box_shorthand(value, parent_font_size) {
@@ -1673,7 +1820,12 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "margin-right" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            let v = value.trim().to_ascii_lowercase();
+            if v == "auto" {
+                style.margin_right_auto = true;
+                style.margin.right = 0;
+            } else if let Some(v) = parse_length(value, parent_font_size) {
+                style.margin_right_auto = false;
                 style.margin.right = v;
             }
         }
@@ -1683,7 +1835,12 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "margin-left" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            let v = value.trim().to_ascii_lowercase();
+            if v == "auto" {
+                style.margin_left_auto = true;
+                style.margin.left = 0;
+            } else if let Some(v) = parse_length(value, parent_font_size) {
+                style.margin_left_auto = false;
                 style.margin.left = v;
             }
         }
@@ -2081,6 +2238,18 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         "filter" | "-webkit-filter" => {
             parse_filter_value(value, style);
         }
+        "text-overflow" => {
+            let v = value.trim().to_ascii_lowercase();
+            style.text_overflow_ellipsis = v.contains("ellipsis");
+        }
+        "text-shadow" => {
+            let v = value.trim();
+            if v.to_ascii_lowercase() == "none" {
+                style.text_shadow = None;
+            } else {
+                style.text_shadow = parse_text_shadow(v, parent_font_size);
+            }
+        }
         // No-op properties — parsed to prevent warnings, not yet implemented
         "scroll-behavior"
         | "overscroll-behavior"
@@ -2214,6 +2383,13 @@ fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_
 
     if let Some(color) = element.attribute("text").and_then(parse_color) {
         style.color = color;
+    }
+
+    // <body background="..."> — annotate_resource_urls pre-resolves this to an absolute URL
+    // stored in data-scratch-background; wire it up as background_image_url so it gets
+    // fetched and drawn just like CSS background-image: url(...).
+    if let Some(bg_url) = element.attribute("data-scratch-background") {
+        style.background_image_url = Some(bg_url.to_string());
     }
 
     if element.tag_name == "font" {
@@ -3086,6 +3262,7 @@ fn parse_white_space(input: &str) -> Option<WhiteSpaceMode> {
     match input.trim().to_ascii_lowercase().as_str() {
         "normal" => Some(WhiteSpaceMode::Normal),
         "pre" | "pre-wrap" | "pre-line" => Some(WhiteSpaceMode::Pre),
+        "nowrap" => Some(WhiteSpaceMode::NoWrap),
         _ => None,
     }
 }
@@ -3349,6 +3526,72 @@ fn parse_font_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size
     }
 }
 
+fn parse_margin_shorthand(style: &mut ComputedStyle, input: &str, parent_font_size: u32) {
+    // Reset auto flags
+    style.margin_left_auto = false;
+    style.margin_right_auto = false;
+
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    // Parse each token as length or auto (None means auto)
+    let parsed: Vec<Option<u32>> = tokens
+        .iter()
+        .map(|t| {
+            if t.to_ascii_lowercase() == "auto" {
+                None // auto
+            } else {
+                parse_length(t, parent_font_size)
+            }
+        })
+        .collect();
+
+    // Apply CSS box shorthand rules (1/2/3/4 values)
+    // None means "auto" (0px, flag set separately)
+    let resolve = |v: Option<u32>| v.unwrap_or(0);
+    match parsed.as_slice() {
+        [all] => {
+            let v = resolve(*all);
+            style.margin = EdgeSizes::all(v);
+            if all.is_none() {
+                style.margin_left_auto = true;
+                style.margin_right_auto = true;
+            }
+        }
+        [vertical, horizontal] => {
+            style.margin.top = resolve(*vertical);
+            style.margin.bottom = resolve(*vertical);
+            style.margin.left = resolve(*horizontal);
+            style.margin.right = resolve(*horizontal);
+            if horizontal.is_none() {
+                style.margin_left_auto = true;
+                style.margin_right_auto = true;
+            }
+        }
+        [top, horizontal, bottom] => {
+            style.margin.top = resolve(*top);
+            style.margin.bottom = resolve(*bottom);
+            style.margin.left = resolve(*horizontal);
+            style.margin.right = resolve(*horizontal);
+            if horizontal.is_none() {
+                style.margin_left_auto = true;
+                style.margin_right_auto = true;
+            }
+        }
+        [top, right, bottom, left] => {
+            style.margin.top = resolve(*top);
+            style.margin.right = resolve(*right);
+            style.margin.bottom = resolve(*bottom);
+            style.margin.left = resolve(*left);
+            if left.is_none() {
+                style.margin_left_auto = true;
+            }
+            if right.is_none() {
+                style.margin_right_auto = true;
+            }
+        }
+        _ => {} // invalid, leave unchanged
+    }
+}
+
 fn parse_box_shorthand(input: &str, parent_font_size: u32) -> Option<EdgeSizes> {
     let values = input
         .split_whitespace()
@@ -3417,6 +3660,8 @@ fn parse_font_family(input: &str) -> Option<FontFamilyKind> {
     let value = input.trim().to_ascii_lowercase();
     if value.contains("mono") || value.contains("code") || value.contains("console") {
         Some(FontFamilyKind::Monospace)
+    } else if value.contains("georgia") || value.contains("times") || value == "serif" {
+        Some(FontFamilyKind::Serif)
     } else if !value.is_empty() {
         Some(FontFamilyKind::Sans)
     } else {
@@ -4044,6 +4289,237 @@ pub fn apply_text_transform(text: &str, transform: TextTransform) -> String {
             result
         }
     }
+}
+
+/// Extract a URL from a CSS `url(...)` token.
+fn extract_url(value: &str) -> Option<String> {
+    let v = value.trim();
+    let inner = v.strip_prefix("url(")?.strip_suffix(')')?;
+    let inner = inner.trim();
+    // Strip optional surrounding quotes
+    let url = if (inner.starts_with('"') && inner.ends_with('"'))
+        || (inner.starts_with('\'') && inner.ends_with('\''))
+    {
+        &inner[1..inner.len() - 1]
+    } else {
+        inner
+    };
+    if url.is_empty() {
+        None
+    } else {
+        Some(url.to_string())
+    }
+}
+
+/// Parse a `text-shadow` value. Format: offset-x offset-y [blur] color.
+fn parse_text_shadow(value: &str, parent_font_size: u32) -> Option<TextShadow> {
+    // Take only the first shadow (before any comma outside parens)
+    let first_shadow = split_at_top_level(value, ',').into_iter().next()?;
+    let tokens: Vec<String> = split_at_top_level(first_shadow.trim(), ' ')
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut lengths: Vec<i32> = Vec::new();
+    let mut color: u32 = 0x000000;
+    let mut found_color = false;
+
+    for token in &tokens {
+        if let Some(c) = parse_color(token) {
+            color = c;
+            found_color = true;
+        } else if let Some(px) = parse_signed_length(token, parent_font_size) {
+            lengths.push(px);
+        }
+    }
+
+    if !found_color {
+        // default shadow color is black
+        color = 0x000000;
+    }
+
+    match lengths.as_slice() {
+        [ox, oy] => Some(TextShadow {
+            offset_x: *ox,
+            offset_y: *oy,
+            blur: 0,
+            color,
+        }),
+        [ox, oy, blur, ..] => Some(TextShadow {
+            offset_x: *ox,
+            offset_y: *oy,
+            blur: (*blur).max(0) as u32,
+            color,
+        }),
+        _ => None,
+    }
+}
+
+/// Parse a `linear-gradient(...)` value.
+fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
+    // Find the linear-gradient(...) part
+    let lower = value.to_ascii_lowercase();
+    let start = lower.find("linear-gradient(")?;
+    let after = &value[start + "linear-gradient(".len()..];
+    // Find matching closing paren
+    let mut depth = 1u32;
+    let mut end = 0;
+    for (i, ch) in after.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let inner = &after[..end];
+
+    // Split by top-level commas
+    let args: Vec<String> = split_at_top_level(inner, ',');
+
+    if args.is_empty() {
+        return None;
+    }
+
+    let mut arg_iter = args.iter().peekable();
+
+    // Determine angle from first arg
+    let first_arg = arg_iter.peek()?.trim().to_ascii_lowercase();
+    let angle_deg_x1000: i32;
+
+    if first_arg.starts_with("to ") {
+        let dir = first_arg[3..].trim();
+        angle_deg_x1000 = match dir {
+            "right" => 90_000,
+            "left" => 270_000,
+            "bottom" => 180_000,
+            "top" => 0,
+            "bottom right" | "right bottom" => 135_000,
+            "bottom left" | "left bottom" => 225_000,
+            "top right" | "right top" => 45_000,
+            "top left" | "left top" => 315_000,
+            _ => 180_000,
+        };
+        arg_iter.next(); // consume the direction arg
+    } else if let Some(deg_str) = first_arg.strip_suffix("deg") {
+        let deg: f64 = deg_str.trim().parse().unwrap_or(180.0);
+        angle_deg_x1000 = (deg * 1000.0).round() as i32;
+        arg_iter.next();
+    } else if first_arg.starts_with("to")
+        || first_arg.ends_with("deg")
+        || first_arg.ends_with("turn")
+        || first_arg.ends_with("rad")
+        || first_arg.ends_with("grad")
+    {
+        // Other angle formats — skip and use 180
+        angle_deg_x1000 = 180_000;
+        arg_iter.next();
+    } else {
+        // No explicit angle, default to bottom (180deg)
+        angle_deg_x1000 = 180_000;
+    }
+
+    // Parse color stops
+    let mut raw_stops: Vec<(u32, Option<u32>)> = Vec::new();
+    for arg in arg_iter {
+        let arg_trimmed = arg.trim();
+        // A color stop is "color [position%]"
+        // Split by whitespace but be careful with rgb()/rgba()
+        let parts: Vec<String> = split_at_top_level(arg_trimmed, ' ')
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if parts.is_empty() {
+            continue;
+        }
+
+        // Try to find which part is the color
+        // Color could be a keyword, #hex, rgb(...), etc.
+        // It's usually the first token but could be combined with a function
+        // Reassemble function calls that were split
+        let mut color_str = String::new();
+        let mut pos_str: Option<String> = None;
+
+        // Attempt: first join parts that belong to a function (rgb/rgba/hsl)
+        let joined = parts.join(" ");
+        // Try the whole joined string as color first, or look for position at end
+        // Position is a numeric token ending with % or px
+        let last = parts.last().unwrap();
+        let second_last = if parts.len() >= 2 {
+            Some(&parts[parts.len() - 2])
+        } else {
+            None
+        };
+
+        let last_is_position =
+            last.ends_with('%') || (last.ends_with("px") && parse_length(last, 16).is_some());
+        let second_last_is_position = second_last
+            .map(|s| s.ends_with('%') || s.ends_with("px"))
+            .unwrap_or(false);
+
+        if last_is_position && parts.len() >= 2 {
+            pos_str = Some(last.clone());
+            color_str = parts[..parts.len() - 1].join(" ");
+        } else if second_last_is_position && parts.len() >= 3 {
+            pos_str = Some(second_last.unwrap().clone());
+            color_str = parts[..parts.len() - 2].join(" ");
+        } else {
+            color_str = joined.clone();
+        }
+
+        if let Some(c) = parse_color(color_str.trim()) {
+            let pos = pos_str.and_then(|p| {
+                let p = p.trim();
+                if p.ends_with('%') {
+                    p[..p.len() - 1]
+                        .parse::<f64>()
+                        .ok()
+                        .map(|v| (v * 10.0).round() as u32)
+                } else {
+                    parse_length(p, 16).map(|v| (v as f64 / 10.0).round() as u32) // rough conversion
+                }
+            });
+            raw_stops.push((c, pos));
+        }
+    }
+
+    if raw_stops.is_empty() {
+        return None;
+    }
+
+    // Fill in missing positions by distributing evenly
+    let count = raw_stops.len();
+    let stops: Vec<(u32, u32)> = raw_stops
+        .into_iter()
+        .enumerate()
+        .map(|(i, (c, p))| {
+            let pos = p.unwrap_or_else(|| {
+                if count == 1 {
+                    0
+                } else {
+                    (1000 * i / (count - 1)) as u32
+                }
+            });
+            (c, pos)
+        })
+        .collect();
+
+    Some(LinearGradient {
+        angle_deg_x1000,
+        stops,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5168,5 +5644,26 @@ mod tests {
         let div = find_first_element(&styled, "div").unwrap();
         // Just check it doesn't panic and the element is accessible
         assert_eq!(div.tag_name, "div");
+    }
+    #[test]
+    fn margin_auto_sets_auto_flags() {
+        // 5em at 16px = 80px; "auto" for horizontal means both auto flags set
+        let html = r#"<div style="margin: 5em auto;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.margin.top, 80, "5em at 16px base = 80px");
+        assert_eq!(div.style.margin.bottom, 80, "5em at 16px base = 80px");
+        assert_eq!(
+            div.style.margin.left, 0,
+            "auto resolves to 0 in parsed value"
+        );
+        assert_eq!(
+            div.style.margin.right, 0,
+            "auto resolves to 0 in parsed value"
+        );
+        assert!(div.style.margin_left_auto, "margin-left should be auto");
+        assert!(div.style.margin_right_auto, "margin-right should be auto");
     }
 }

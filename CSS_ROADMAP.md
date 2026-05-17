@@ -119,7 +119,32 @@ Branch: `claude/phase5-css` (PR #49)
 | `backdrop-filter` / `clip-path` | 🔧 | Parsed as no-op |
 | `scroll-behavior` / `resize` / `writing-mode` / `user-select` / `appearance` / `contain` | 🔧 | Parsed as no-op (no crash on real-world CSS) |
 
-## Phase 6 — Future Work ❌
+## Phase 6 — Partially Implemented 🔧
+
+### Phase 6 Batch 1 ✅ (Branch: `claude/phase5-css`)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `filter: blur()` rendering | ✅ | Separable box blur in `gui.rs`; `LayerCommand.blur_px` field |
+| `filter: brightness()` rendering | ✅ | Per-channel scale in `gui.rs`; `LayerCommand.brightness` field |
+
+### Phase 6 Batch 2 ✅ (Branch: `claude/phase5-css`)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `white-space: nowrap` | ✅ | `WhiteSpaceMode::NoWrap` variant; `layout_nowrap_fragments()` skips line-breaking |
+| `text-decoration: line-through` | ✅ | `line_through: bool` on `ComputedStyle` + `TextCommand`; strikethrough rendered in `gui.rs` |
+| `font-weight` numeric (100–900) | ✅ | 600–900 → bold, 100–500 → normal |
+| `font-family: serif` | ✅ | `FontFamilyKind::Serif`; maps Georgia/Times to serif system font |
+| `text-overflow: ellipsis` | ✅ | `text_overflow_ellipsis: bool`; clips inline content with "…" when `overflow: hidden` |
+| `text-shadow` | ✅ | `TextShadow` struct (offset-x/y, blur, color); shadow rendered before main text in `gui.rs` |
+| `background-image: linear-gradient()` | ✅ | `GradientCommand` draw command; pixel-level angle+stop interpolation in `gui.rs` |
+| `background-image: url()` | ✅ | `background_image_url` field; emits `DrawCommand::Image` at element background position |
+| `background-size` | ✅ | `Cover`, `Contain`, `Auto` variants |
+| `background-repeat` | ✅ | `Repeat`, `NoRepeat`, `RepeatX`, `RepeatY` (single-tile for now) |
+| `background-position` | ✅ | x/y as 0–100 percent |
+
+### Phase 6 Remaining ❌
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
@@ -127,7 +152,6 @@ Branch: `claude/phase5-css` (PR #49)
 | CSS `animation` / `@keyframes` | Low | Requires animation runtime and repaint loop |
 | `transition` interpolation | Low | Requires repaint loop and state diffing |
 | `position: sticky` scroll tracking | Medium | Requires scroll-offset propagation into layout |
-| `filter: blur()` rendering | Medium | Box blur implementation in `gui.rs` (field is parsed) |
 | `grid-template-areas` | Low | Named area placement |
 | `grid-auto-flow` | Low | Dense packing auto-placement |
 | `counter()` / `counters()` | Low | CSS counters for lists |
@@ -137,6 +161,8 @@ Branch: `claude/phase5-css` (PR #49)
 | `scroll-behavior: smooth` | Low | Smooth scrolling |
 | `::selection` styling | Low | Highlight selected text with custom color |
 | `::placeholder` GUI wiring | Low | Apply `::placeholder` style to input placeholder text |
+| `background-repeat` tiling | Low | Full tiling (repeat-x/y across element) |
+| `text-shadow` with blur | Low | Blur pass for text shadow (offset-only works now) |
 
 ---
 

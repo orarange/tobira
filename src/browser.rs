@@ -287,10 +287,11 @@ fn rebuild_page_from_document(
         .unwrap_or_else(|| "Tobira".to_string());
 
     let stylesheet = collect_stylesheet(&document, url);
-    let images = collect_image_resources(&document);
+    let mut images = collect_image_resources(&document);
     let rendered = include_rendered_output.then(|| render_document(&document));
     let styled_document =
         build_styled_tree(&document, &stylesheet, 1280, &InteractiveState::default());
+    collect_styled_background_images(&styled_document, url, &mut images);
 
     BrowserPage {
         url: url.clone(),
@@ -514,7 +515,9 @@ fn expand_frameset(
         .attribute("rows")
         .map(|value| parse_frame_tracks(value, frames.len()));
 
-    let mut frame_nodes = Vec::new();
+    // Collect (children, body_style_attrs) tuples so bgcolor/background from each
+    // frame's <body> element can be transferred to the synthetic wrapper <td>.
+    let mut frame_nodes: Vec<(Vec<Node>, BTreeMap<String, String>)> = Vec::new();
     for frame in frames {
         let Some(src) = frame.attribute("src") else {
             continue;
@@ -525,7 +528,9 @@ fn expand_frameset(
         let Ok(frame_document) = load_document_source(&frame_url, frame_depth) else {
             continue;
         };
-        frame_nodes.push(extract_body_children(&frame_document.document));
+        let children = extract_body_children(&frame_document.document);
+        let body_attrs = extract_body_style_attrs(&frame_document.document);
+        frame_nodes.push((children, body_attrs));
     }
 
     if frame_nodes.is_empty() {
@@ -553,7 +558,7 @@ fn expand_frameset(
     }
 
     let mut body_children = Vec::new();
-    for children in frame_nodes {
+    for (children, _) in frame_nodes {
         body_children.extend(children);
         body_children.push(hr_node());
     }
@@ -681,15 +686,23 @@ fn synthetic_document(title: &str, body_children: Vec<Node>) -> Node {
 fn synthetic_frameset_columns_document(
     title: &str,
     tracks: &[FrameTrack],
-    frame_nodes: Vec<Vec<Node>>,
+    frame_nodes: Vec<(Vec<Node>, BTreeMap<String, String>)>,
 ) -> Node {
     let cells = frame_nodes
         .into_iter()
         .zip(tracks.iter())
-        .map(|(children, track)| {
+        .map(|((children, body_attrs), track)| {
+            let mut attrs = table_cell_attributes(track);
+            // Carry bgcolor / text / data-scratch-background from the frame's <body>
+            // so the synthetic <td> inherits the frame's background color.
+            for key in &["bgcolor", "text", "data-scratch-background"] {
+                if let Some(val) = body_attrs.get(*key) {
+                    attrs.insert(key.to_string(), val.clone());
+                }
+            }
             Node::Element(Element {
                 tag_name: "td".to_string(),
-                attributes: table_cell_attributes(track),
+                attributes: attrs,
                 children,
             })
         })
@@ -712,18 +725,24 @@ fn synthetic_frameset_columns_document(
 fn synthetic_frameset_rows_document(
     title: &str,
     tracks: &[FrameTrack],
-    frame_nodes: Vec<Vec<Node>>,
+    frame_nodes: Vec<(Vec<Node>, BTreeMap<String, String>)>,
 ) -> Node {
     let rows = frame_nodes
         .into_iter()
         .zip(tracks.iter())
-        .map(|(children, track)| {
+        .map(|((children, body_attrs), track)| {
+            let mut td_attrs = BTreeMap::new();
+            for key in &["bgcolor", "text", "data-scratch-background"] {
+                if let Some(val) = body_attrs.get(*key) {
+                    td_attrs.insert(key.to_string(), val.clone());
+                }
+            }
             Node::Element(Element {
                 tag_name: "tr".to_string(),
                 attributes: row_attributes(track),
                 children: vec![Node::Element(Element {
                     tag_name: "td".to_string(),
-                    attributes: BTreeMap::new(),
+                    attributes: td_attrs,
                     children,
                 })],
             })
@@ -789,6 +808,33 @@ fn extract_body_children(node: &Node) -> Vec<Node> {
             }
 
             Vec::new()
+        }
+    }
+}
+
+/// Extract style-relevant attributes from the `<body>` element so they can be
+/// transferred to the synthetic `<td>` wrapper when merging frameset frames.
+/// Preserves `bgcolor`, `text` (body text color), and `data-scratch-background`.
+fn extract_body_style_attrs(node: &Node) -> BTreeMap<String, String> {
+    match node {
+        Node::Text(_) => BTreeMap::new(),
+        Node::Element(element) => {
+            if element.tag_name == "body" {
+                let mut attrs = BTreeMap::new();
+                for key in &["bgcolor", "text", "data-scratch-background"] {
+                    if let Some(val) = element.attributes.get(*key) {
+                        attrs.insert(key.to_string(), val.clone());
+                    }
+                }
+                return attrs;
+            }
+            for child in &element.children {
+                let attrs = extract_body_style_attrs(child);
+                if !attrs.is_empty() {
+                    return attrs;
+                }
+            }
+            BTreeMap::new()
         }
     }
 }
@@ -899,6 +945,34 @@ fn collect_image_resources(document: &Node) -> ImageStore {
     }
 
     images
+}
+
+fn collect_styled_background_images(styled: &StyledNode, base_url: &Url, images: &mut ImageStore) {
+    match styled {
+        StyledNode::Text(_) => {}
+        StyledNode::Element(element) => {
+            if let Some(ref url_str) = element.style.background_image_url {
+                if images.get(url_str).is_none() {
+                    let resolved =
+                        if url_str.starts_with("http://") || url_str.starts_with("https://") {
+                            Url::parse(url_str).ok()
+                        } else {
+                            base_url.resolve(url_str).ok()
+                        };
+                    if let Some(resolved_url) = resolved {
+                        if let Ok(response) = fetch(&resolved_url) {
+                            if let Ok(image) = decode_image(&response.body) {
+                                images.insert(url_str.clone(), image);
+                            }
+                        }
+                    }
+                }
+            }
+            for child in &element.children {
+                collect_styled_background_images(child, base_url, images);
+            }
+        }
+    }
 }
 
 fn collect_image_sources_into(node: &Node, output: &mut Vec<String>) {
@@ -2967,6 +3041,8 @@ mod tests {
                     color: crate::css::DEFAULT_TEXT_COLOR,
                     background_color: None,
                     margin: crate::css::EdgeSizes::default(),
+                    margin_left_auto: false,
+                    margin_right_auto: false,
                     padding: crate::css::EdgeSizes::default(),
                     width: None,
                     height: None,
@@ -3033,6 +3109,15 @@ mod tests {
                     filter_blur_px: 0,
                     filter_brightness: 10000,
                     filter_opacity: 255,
+                    line_through: false,
+                    text_overflow_ellipsis: false,
+                    text_shadow: None,
+                    background_gradient: None,
+                    background_image_url: None,
+                    background_size: crate::css::BackgroundSize::Auto,
+                    background_repeat: crate::css::BackgroundRepeat::Repeat,
+                    background_position_x: 50,
+                    background_position_y: 50,
                 },
             }),
             raw_document: Node::Text(String::new()),
@@ -3113,6 +3198,8 @@ mod tests {
                     color: crate::css::DEFAULT_TEXT_COLOR,
                     background_color: None,
                     margin: crate::css::EdgeSizes::default(),
+                    margin_left_auto: false,
+                    margin_right_auto: false,
                     padding: crate::css::EdgeSizes::default(),
                     width: None,
                     height: None,
@@ -3122,7 +3209,16 @@ mod tests {
                     vertical_align: crate::css::VerticalAlign::Top,
                     font_weight: false,
                     underline: false,
+                    line_through: false,
                     white_space: crate::css::WhiteSpaceMode::Normal,
+                    text_overflow_ellipsis: false,
+                    text_shadow: None,
+                    background_gradient: None,
+                    background_image_url: None,
+                    background_size: crate::css::BackgroundSize::default(),
+                    background_repeat: crate::css::BackgroundRepeat::default(),
+                    background_position_x: 0,
+                    background_position_y: 0,
                     border: crate::css::EdgeSizes::default(),
                     border_color: 0,
                     border_style_none: false,
@@ -3466,6 +3562,8 @@ mod tests {
                 color: crate::css::DEFAULT_TEXT_COLOR,
                 background_color: None,
                 margin: crate::css::EdgeSizes::default(),
+                margin_left_auto: false,
+                margin_right_auto: false,
                 padding: crate::css::EdgeSizes::default(),
                 width: None,
                 height: None,
@@ -3532,6 +3630,15 @@ mod tests {
                 filter_blur_px: 0,
                 filter_brightness: 10000,
                 filter_opacity: 255,
+                line_through: false,
+                text_overflow_ellipsis: false,
+                text_shadow: None,
+                background_gradient: None,
+                background_image_url: None,
+                background_size: crate::css::BackgroundSize::Auto,
+                background_repeat: crate::css::BackgroundRepeat::Repeat,
+                background_position_x: 50,
+                background_position_y: 50,
             },
         })
     }
