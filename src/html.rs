@@ -58,6 +58,12 @@ pub fn parse_document(input: &str) -> Node {
                 attributes,
                 self_closing,
             } => {
+                // HTML5 optional-end-tag: implicitly close certain elements before
+                // opening a new one (e.g. <td> closes an open <td>, <li> closes open <li>).
+                if !self_closing {
+                    maybe_auto_close(&mut stack, &name);
+                }
+
                 let element = Element {
                     tag_name: name,
                     attributes,
@@ -103,6 +109,71 @@ fn close_element(stack: &mut Vec<Element>, target: &str) {
             break;
         }
     }
+}
+
+/// HTML5 optional-end-tag / implicit-close rules.
+/// When certain start tags are encountered, currently open elements of the
+/// same category must be implicitly closed first (e.g. a new <td> closes any
+/// already-open <td> that is within the same <tr>).
+fn maybe_auto_close(stack: &mut Vec<Element>, new_tag: &str) {
+    match new_tag {
+        // Table cell: close any open td/th within the current tr context
+        "td" | "th" => {
+            auto_close_before(stack, &["td", "th"], &["tr", "table", "tbody", "thead", "tfoot"]);
+        }
+        // Table row: close any open tr within the current table body/head/foot
+        "tr" => {
+            auto_close_before(stack, &["tr"], &["table", "tbody", "thead", "tfoot"]);
+        }
+        // List item: close any open li within the current list
+        "li" => {
+            auto_close_before(stack, &["li"], &["ul", "ol"]);
+        }
+        // Definition list items
+        "dt" | "dd" => {
+            auto_close_before(stack, &["dt", "dd"], &["dl"]);
+        }
+        // A new <p> closes an open <p> (and many block elements do too)
+        tag if is_block_like(tag) => {
+            auto_close_before(stack, &["p"], &["td", "th", "li", "dd", "dt", "body", "html", "document"]);
+        }
+        _ => {}
+    }
+}
+
+/// Walk up the stack looking for an element whose tag is in `targets`.
+/// Stop (and do nothing) if we hit a `boundary` element first.
+/// If found, call close_element to pop up to and including that element.
+fn auto_close_before(stack: &mut Vec<Element>, targets: &[&str], boundaries: &[&str]) {
+    let close_tag = stack
+        .iter()
+        .rev()
+        .find_map(|el| {
+            let name = el.tag_name.as_str();
+            if targets.contains(&name) {
+                Some(name.to_string())
+            } else if boundaries.contains(&name) {
+                Some(String::new()) // boundary hit — signal "stop, nothing to close"
+            } else {
+                None
+            }
+        });
+    if let Some(tag) = close_tag {
+        if !tag.is_empty() {
+            close_element(stack, &tag);
+        }
+    }
+}
+
+/// Elements that trigger implicit closure of an open <p>.
+fn is_block_like(tag: &str) -> bool {
+    matches!(tag,
+        "address" | "article" | "aside" | "blockquote" | "details" | "dialog" |
+        "div" | "dl" | "fieldset" | "figcaption" | "figure" | "footer" | "form" |
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "header" | "hgroup" |
+        "hr" | "main" | "menu" | "nav" | "ol" | "p" | "pre" | "section" |
+        "summary" | "table" | "ul"
+    )
 }
 
 fn tokenize(input: &str) -> Vec<Token> {

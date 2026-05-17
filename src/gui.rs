@@ -392,7 +392,7 @@ impl BrowserApp {
         let size = window.inner_size();
         let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
         let body_top = chrome.height + FRAME_PADDING;
-        let content_width = size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let Some(control) = layout
             .controls
@@ -415,7 +415,7 @@ impl BrowserApp {
         let text_y = body_top
             .saturating_add(control.y.saturating_sub(self.scroll_y))
             .saturating_add(control.height.saturating_sub(line_height) / 2);
-        let caret_x = FRAME_PADDING
+        let caret_x = (FRAME_PADDING / 2)
             .saturating_add(control.x)
             .saturating_add(CONTROL_PADDING_X)
             .saturating_add(view.caret_x);
@@ -472,7 +472,7 @@ impl BrowserApp {
         let can_go_back = self.can_go_back();
         let can_go_forward = self.can_go_forward();
         let body_top = chrome.height + FRAME_PADDING;
-        let content_width = size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
         let viewport_height = size.height.saturating_sub(body_top + FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let max_scroll_y = max_scroll(viewport_height, layout.content_height);
@@ -525,7 +525,7 @@ impl BrowserApp {
             &mut buffer,
             size.width,
             size.height,
-            FRAME_PADDING,
+            FRAME_PADDING / 2,
             body_top,
             viewport_height,
             self.scroll_y,
@@ -543,7 +543,7 @@ impl BrowserApp {
     fn content_metrics(&mut self, window_size: PhysicalSize<u32>) -> (u32, u32) {
         let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
         let body_top = chrome.height + FRAME_PADDING;
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         let viewport_height = window_size
             .height
             .saturating_sub(body_top + FRAME_PADDING)
@@ -567,12 +567,12 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
-        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
         for link in &layout.links {
             if content_x >= link.x
                 && content_x < link.x.saturating_add(link.width)
@@ -593,12 +593,12 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
-        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
         for control in &layout.controls {
             if content_x >= control.x
                 && content_x < control.x.saturating_add(control.width)
@@ -633,7 +633,7 @@ impl BrowserApp {
         if element_changed {
             self.hovered_element_node_id = hovered_element;
             // Trigger a CSS relayout with the new interactive state
-            let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+            let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
             let interactive = InteractiveState {
                 hovered_node_id: hovered_element,
                 ..Default::default()
@@ -689,12 +689,12 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return CursorKind::Auto;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
-        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
         layout.element_hitboxes.iter().rev()
             .find(|h| {
                 content_x >= h.x && content_x < h.x + h.width
@@ -712,12 +712,12 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         let layout = self.document.layout(content_width, &mut self.fonts);
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
-        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING);
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
         // Find the deepest (last) hitbox that contains the cursor
         layout.element_hitboxes.iter().rev()
             .find(|h| {
@@ -1406,7 +1406,7 @@ impl BrowserApp {
             .as_ref()
             .map(|window| window.inner_size())
             .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING * 2).max(1);
+        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         self.document.layout(content_width, &mut self.fonts)
     }
 
@@ -1590,8 +1590,8 @@ impl BrowserApp {
                     let local_x = self
                         .cursor_position
                         .x
-                        .max((FRAME_PADDING + control.x + CONTROL_PADDING_X) as f64)
-                        - (FRAME_PADDING + control.x + CONTROL_PADDING_X) as f64;
+                        .max((FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64)
+                        - (FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64;
                     let mut editor = AddressBarState::new(self.control_current_value(&control));
                     editor.focus_at(editor.char_len());
                     let char_index = cursor_index_for_text_x(
@@ -1753,7 +1753,7 @@ impl ApplicationHandler for BrowserApp {
                 self.hovered_link_node_id = None;
                 if self.hovered_element_node_id.is_some() {
                     self.hovered_element_node_id = None;
-                    let content_width = window.inner_size().width.saturating_sub(FRAME_PADDING * 2).max(1);
+                    let content_width = window.inner_size().width.saturating_sub(FRAME_PADDING).max(1);
                     if let DocumentContent::Loaded(page) = &mut self.document.content {
                         page.relayout(content_width, &InteractiveState::default());
                     }
@@ -2072,8 +2072,10 @@ fn layout_error_document(
             font_family: FontFamilyKind::Sans,
             color,
             underline: false,
+            line_through: false,
             bold: scale >= 3,
             italic: false,
+            text_shadow: None,
         }));
 
         cursor_y = cursor_y.saturating_add(height);
@@ -3032,6 +3034,7 @@ fn paint_chrome(
         COLOR_HEADER_TEXT,
         true,
         false,
+        false,
         FontFamilyKind::Sans,
     );
 
@@ -3068,6 +3071,7 @@ fn paint_chrome(
             &page_title,
             TITLE_FONT_SIZE,
             COLOR_HEADER_MUTED,
+            false,
             false,
             false,
             FontFamilyKind::Sans,
@@ -3203,6 +3207,7 @@ fn paint_chrome(
         COLOR_ADDRESS_BAR_TEXT,
         false,
         false,
+        false,
         FontFamilyKind::Sans,
     );
     if address_bar.focused {
@@ -3234,6 +3239,7 @@ fn paint_chrome(
                 &address_view.text,
                 ADDRESS_BAR_FONT_SIZE,
                 COLOR_ADDRESS_BAR_TEXT,
+                false,
                 false,
                 false,
                 FontFamilyKind::Sans,
@@ -3278,6 +3284,7 @@ fn paint_chrome(
         COLOR_HEADER_MUTED,
         false,
         false,
+        false,
         FontFamilyKind::Sans,
     );
 
@@ -3303,6 +3310,7 @@ fn paint_chrome(
         } else {
             COLOR_HEADER_TEXT
         },
+        false,
         false,
         false,
         FontFamilyKind::Sans,
@@ -3419,6 +3427,7 @@ fn paint_button(
         },
         true,
         false,
+        false,
         FontFamilyKind::Sans,
     );
 }
@@ -3524,6 +3533,7 @@ fn paint_page_control(
                     COLOR_CONTROL_PLACEHOLDER,
                     false,
                     false,
+                    false,
                     control.font_family,
                 );
             } else {
@@ -3578,6 +3588,7 @@ fn paint_page_control(
                     control.text_color,
                     false,
                     false,
+                    false,
                     control.font_family,
                 );
                 if focused.is_some() {
@@ -3629,6 +3640,7 @@ fn paint_page_control(
                 control.font_size_px,
                 control.text_color,
                 true,
+                false,
                 false,
                 control.font_family,
             );
@@ -3771,17 +3783,39 @@ fn render_commands(
                 if text_bottom < scroll_y || text.y > viewport_bottom {
                     continue;
                 }
+                let text_draw_x = offset_x.saturating_add(text.x);
+                let text_draw_y = offset_y.saturating_add(text.y.saturating_sub(scroll_y));
+                // Draw text shadow first (behind main text)
+                if let Some(ref shadow) = text.text_shadow {
+                    let shadow_x = (text_draw_x as i64 + shadow.offset_x as i64).max(0) as u32;
+                    let shadow_y = (text_draw_y as i64 + shadow.offset_y as i64).max(0) as u32;
+                    fonts.draw_text(
+                        buffer,
+                        width,
+                        height,
+                        shadow_x,
+                        shadow_y,
+                        &text.text,
+                        text.font_size_px,
+                        shadow.color,
+                        false,
+                        false,
+                        false,
+                        text.font_family,
+                    );
+                }
                 fonts.draw_text(
                     buffer,
                     width,
                     height,
-                    offset_x.saturating_add(text.x),
-                    offset_y.saturating_add(text.y.saturating_sub(scroll_y)),
+                    text_draw_x,
+                    text_draw_y,
                     &text.text,
                     text.font_size_px,
                     text.color,
                     text.bold,
                     text.underline,
+                    text.line_through,
                     text.font_family,
                 );
             }
@@ -3792,19 +3826,33 @@ fn render_commands(
                 }
                 if let Some(page) = page {
                     if let Some(decoded) = page.images.get(&image.src) {
-                        draw_scaled_image(
-                            buffer,
-                            width,
-                            height,
-                            offset_x.saturating_add(image.x),
-                            offset_y.saturating_add(image.y.saturating_sub(scroll_y)),
-                            image.width,
-                            image.height,
-                            decoded,
-                            image.object_fit,
-                            image.object_position_x,
-                            image.object_position_y,
-                        );
+                        // min_y = offset_y prevents images from bleeding into the chrome UI
+                        let min_y = offset_y as i32;
+                        if image.tile {
+                            // Tiled background: draw at natural size, repeated across element
+                            let sx = offset_x as i32 + image.x as i32;
+                            let sy = offset_y as i32 + image.y as i32 - scroll_y as i32;
+                            draw_tiled_image(
+                                buffer, width, height,
+                                sx, sy,
+                                image.width, image.height,
+                                decoded,
+                                min_y,
+                            );
+                        } else {
+                            let sx = offset_x as i32 + image.x as i32;
+                            let sy = offset_y as i32 + image.y as i32 - scroll_y as i32;
+                            draw_scaled_image(
+                                buffer, width, height,
+                                sx, sy,
+                                image.width, image.height,
+                                decoded,
+                                image.object_fit,
+                                image.object_position_x,
+                                image.object_position_y,
+                                min_y,
+                            );
+                        }
                     }
                 }
             }
@@ -3814,7 +3862,233 @@ fn render_commands(
                     page, fonts, scratch, depth,
                 );
             }
+            DrawCommand::Gradient(g) => {
+                let grad_bottom = g.y.saturating_add(g.height);
+                if grad_bottom < scroll_y || g.y > viewport_bottom {
+                    continue;
+                }
+                // Convert angle (stored as degrees * 1000) to radians using f64
+                let angle_rad = (g.angle_deg_x1000 as f64 / 1000.0_f64).to_radians();
+                let dx = angle_rad.sin();
+                let dy = angle_rad.cos();
+                let gw = g.width as f64;
+                let gh = g.height as f64;
+                // Project length: length of the gradient vector across the box
+                let proj_len = (dx * gw).abs() + (dy * gh).abs();
+                let proj_len = if proj_len < 0.001 { 1.0 } else { proj_len };
+
+                // border_radius corner check setup
+                let r = g.border_radius.min(g.width / 2).min(g.height / 2) as i64;
+                let r_sq = r * r;
+                let cx_left = g.x as i64 + r;
+                let cx_right = (g.x + g.width) as i64 - r;
+                let cy_top = g.y as i64 + r;
+                let cy_bottom = (g.y + g.height) as i64 - r;
+
+                let gx = g.x;
+                let gy = g.y;
+                let gw_u = g.width;
+                let gh_u = g.height;
+
+                let py_start = g.y.max(scroll_y);
+                let py_end = grad_bottom.min(viewport_bottom);
+
+                for py in py_start..py_end {
+                    for px in gx..(gx + gw_u) {
+                        // border_radius: skip corner pixels
+                        if r > 0 {
+                            let ipx = px as i64;
+                            let ipy = py as i64;
+                            let in_top_strip = ipy < cy_top;
+                            let in_bot_strip = ipy >= cy_bottom;
+                            let in_left_strip = ipx < cx_left;
+                            let in_right_strip = ipx >= cx_right;
+                            if in_top_strip && in_left_strip {
+                                let ddx = cx_left - ipx;
+                                let ddy = cy_top - ipy;
+                                if ddx * ddx + ddy * ddy > r_sq { continue; }
+                            } else if in_top_strip && in_right_strip {
+                                let ddx = ipx - cx_right + 1;
+                                let ddy = cy_top - ipy;
+                                if ddx * ddx + ddy * ddy > r_sq { continue; }
+                            } else if in_bot_strip && in_left_strip {
+                                let ddx = cx_left - ipx;
+                                let ddy = ipy - cy_bottom + 1;
+                                if ddx * ddx + ddy * ddy > r_sq { continue; }
+                            } else if in_bot_strip && in_right_strip {
+                                let ddx = ipx - cx_right + 1;
+                                let ddy = ipy - cy_bottom + 1;
+                                if ddx * ddx + ddy * ddy > r_sq { continue; }
+                            }
+                        }
+
+                        // Compute gradient t in [0,1]
+                        let rel_x = px as f64 - gx as f64;
+                        let rel_y = py as f64 - gy as f64;
+                        // Project pixel position onto gradient direction
+                        // t = (dx*(rel_x - cx) + dy*(rel_y - cy) + proj_len/2) / proj_len
+                        // Simpler: use dot product with direction vector, offset so that center of box = 0.5
+                        let dot = dx * rel_x + dy * rel_y;
+                        // Range of dot across box: from 0 to proj_len (approximately)
+                        let t_raw = dot / proj_len;
+                        let t = t_raw.clamp(0.0, 1.0);
+
+                        // Interpolate color between stops
+                        let stops = &g.stops;
+                        let color = if stops.is_empty() {
+                            0u32
+                        } else if stops.len() == 1 {
+                            stops[0].color
+                        } else {
+                            // find which two stops t falls between
+                            let t_pos = (t * 1000.0) as u32;
+                            let mut color = stops[0].color;
+                            for i in 0..stops.len().saturating_sub(1) {
+                                let s0 = &stops[i];
+                                let s1 = &stops[i + 1];
+                                if t_pos <= s0.position {
+                                    color = s0.color;
+                                    break;
+                                }
+                                if t_pos <= s1.position {
+                                    // lerp between s0 and s1
+                                    let range = s1.position.saturating_sub(s0.position);
+                                    if range == 0 {
+                                        color = s1.color;
+                                    } else {
+                                        let frac = (t_pos - s0.position) as u64 * 1000 / range as u64;
+                                        let r0 = (s0.color >> 16) & 0xFF;
+                                        let g0 = (s0.color >> 8) & 0xFF;
+                                        let b0 = s0.color & 0xFF;
+                                        let r1 = (s1.color >> 16) & 0xFF;
+                                        let g1 = (s1.color >> 8) & 0xFF;
+                                        let b1 = s1.color & 0xFF;
+                                        let ri = (r0 as u64 * (1000 - frac) + r1 as u64 * frac) / 1000;
+                                        let gi = (g0 as u64 * (1000 - frac) + g1 as u64 * frac) / 1000;
+                                        let bi = (b0 as u64 * (1000 - frac) + b1 as u64 * frac) / 1000;
+                                        color = ((ri as u32) << 16) | ((gi as u32) << 8) | (bi as u32);
+                                    }
+                                    break;
+                                }
+                                if i + 1 == stops.len() - 1 {
+                                    color = s1.color;
+                                }
+                            }
+                            color
+                        };
+
+                        let draw_px = offset_x.saturating_add(px);
+                        let draw_py = offset_y.saturating_add(py.saturating_sub(scroll_y));
+                        if draw_px < width && draw_py < height {
+                            let idx = draw_py as usize * width as usize + draw_px as usize;
+                            if idx < buffer.len() {
+                                buffer[idx] = color;
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+}
+
+/// Apply a separable box blur to an ARGB pixel buffer in-place.
+/// radius = 0 is a no-op.
+fn apply_box_blur(pixels: &mut Vec<u32>, width: u32, height: u32, radius: u32) {
+    if radius == 0 || width == 0 || height == 0 { return; }
+    let w = width as usize;
+    let h = height as usize;
+    let r = radius as usize;
+    let mut tmp = vec![0u32; w * h];
+
+    // Horizontal pass: pixels → tmp
+    for row in 0..h {
+        let base = row * w;
+        let mut sr: u32 = 0;
+        let mut sg: u32 = 0;
+        let mut sb: u32 = 0;
+        let mut cnt: u32 = 0;
+        // Seed window with pixels[0..=min(r, w-1)]
+        let init_end = r.min(w.saturating_sub(1));
+        for k in 0..=init_end {
+            let px = pixels[base + k];
+            sr += (px >> 16) & 0xFF;
+            sg += (px >> 8) & 0xFF;
+            sb += px & 0xFF;
+            cnt += 1;
+        }
+        for x in 0..w {
+            if cnt > 0 {
+                tmp[base + x] = ((sr / cnt) << 16) | ((sg / cnt) << 8) | (sb / cnt);
+            }
+            // Advance: add right edge
+            let add = x + r + 1;
+            if add < w {
+                let px = pixels[base + add];
+                sr += (px >> 16) & 0xFF;
+                sg += (px >> 8) & 0xFF;
+                sb += px & 0xFF;
+                cnt += 1;
+            }
+            // Remove left edge
+            if x >= r {
+                let rem = x - r;
+                let px = pixels[base + rem];
+                sr = sr.saturating_sub((px >> 16) & 0xFF);
+                sg = sg.saturating_sub((px >> 8) & 0xFF);
+                sb = sb.saturating_sub(px & 0xFF);
+                cnt = cnt.saturating_sub(1);
+            }
+        }
+    }
+
+    // Vertical pass: tmp → pixels
+    for col in 0..w {
+        let mut sr: u32 = 0;
+        let mut sg: u32 = 0;
+        let mut sb: u32 = 0;
+        let mut cnt: u32 = 0;
+        let init_end = r.min(h.saturating_sub(1));
+        for k in 0..=init_end {
+            let px = tmp[k * w + col];
+            sr += (px >> 16) & 0xFF;
+            sg += (px >> 8) & 0xFF;
+            sb += px & 0xFF;
+            cnt += 1;
+        }
+        for y in 0..h {
+            if cnt > 0 {
+                pixels[y * w + col] = ((sr / cnt) << 16) | ((sg / cnt) << 8) | (sb / cnt);
+            }
+            let add = y + r + 1;
+            if add < h {
+                let px = tmp[add * w + col];
+                sr += (px >> 16) & 0xFF;
+                sg += (px >> 8) & 0xFF;
+                sb += px & 0xFF;
+                cnt += 1;
+            }
+            if y >= r {
+                let rem = y - r;
+                let px = tmp[rem * w + col];
+                sr = sr.saturating_sub((px >> 16) & 0xFF);
+                sg = sg.saturating_sub((px >> 8) & 0xFF);
+                sb = sb.saturating_sub(px & 0xFF);
+                cnt = cnt.saturating_sub(1);
+            }
+        }
+    }
+}
+
+/// Apply brightness adjustment to an ARGB pixel buffer in-place.
+/// brightness = 10000 is a no-op (100% brightness).
+fn apply_brightness(pixels: &mut [u32], brightness: u32) {
+    if brightness == 10000 { return; }
+    for px in pixels.iter_mut() {
+        let r = ((((*px >> 16) & 0xFF) * brightness / 10000).min(255)) as u32;
+        let g = ((((*px >> 8) & 0xFF) * brightness / 10000).min(255)) as u32;
+        let b = (((*px & 0xFF) * brightness / 10000).min(255)) as u32;
+        *px = (r << 16) | (g << 8) | b;
     }
 }
 
@@ -3953,6 +4227,16 @@ fn render_layer(
         scratch,
         depth + 1, // nested layers use the next depth slot
     );
+
+    // Apply CSS filter effects to the offscreen buffer.
+    // Blur: applied first (uses neighboring pixel values before brightness skews them)
+    if layer.blur_px > 0 {
+        apply_box_blur(&mut offscreen, ow, oh, layer.blur_px);
+    }
+    // Brightness: applied after blur
+    if layer.brightness != 10000 {
+        apply_brightness(&mut offscreen, layer.brightness);
+    }
 
     // Blend the visible rows of the offscreen back onto the main buffer with opacity.
     // Visible row r: offscreen row (src_y_start + r) → buffer row (dst_y + r).
@@ -4166,18 +4450,76 @@ fn draw_rect_outline(
     );
 }
 
+/// Draw an image tiled at its natural pixel size to fill the region
+/// [x, x+draw_width) × [y, y+draw_height) in the buffer.
+/// x and y are signed so callers can pass scroll-adjusted coords that may be negative.
+/// min_y is the minimum buffer y that may be written (pass offset_y to prevent drawing
+/// into the chrome / UI area above the content viewport).
+fn draw_tiled_image(
+    buffer: &mut [u32],
+    buf_width: u32,
+    buf_height: u32,
+    x: i32,
+    y: i32,
+    draw_width: u32,
+    draw_height: u32,
+    image: &DecodedImage,
+    min_y: i32,
+) {
+    let tile_w = image.width as i32;
+    let tile_h = image.height as i32;
+    if tile_w == 0 || tile_h == 0 || draw_width == 0 || draw_height == 0 {
+        return;
+    }
+
+    let start_x = x.max(0) as u32;
+    let start_y = y.max(min_y) as u32;
+    let end_x = (x + draw_width as i32).max(0).min(buf_width as i32) as u32;
+    let end_y = (y + draw_height as i32).max(0).min(buf_height as i32) as u32;
+
+    for sy in start_y..end_y {
+        for sx in start_x..end_x {
+            // Compute offset within this tile using rem_euclid to handle negative x/y
+            let px = ((sx as i32 - x).rem_euclid(tile_w)) as u32;
+            let py = ((sy as i32 - y).rem_euclid(tile_h)) as u32;
+            let src_idx = (py * image.width + px) as usize * 4;
+            if src_idx + 3 >= image.rgba.len() {
+                continue;
+            }
+            let r = image.rgba[src_idx] as u32;
+            let g = image.rgba[src_idx + 1] as u32;
+            let b = image.rgba[src_idx + 2] as u32;
+            let a = image.rgba[src_idx + 3] as u32;
+            let dst_idx = (sy * buf_width + sx) as usize;
+            if a == 255 {
+                buffer[dst_idx] = (r << 16) | (g << 8) | b;
+            } else if a > 0 {
+                let bg = buffer[dst_idx];
+                let bg_r = (bg >> 16) & 0xFF;
+                let bg_g = (bg >> 8) & 0xFF;
+                let bg_b = bg & 0xFF;
+                let out_r = (r * a + bg_r * (255 - a)) / 255;
+                let out_g = (g * a + bg_g * (255 - a)) / 255;
+                let out_b = (b * a + bg_b * (255 - a)) / 255;
+                buffer[dst_idx] = (out_r << 16) | (out_g << 8) | out_b;
+            }
+        }
+    }
+}
+
 fn draw_scaled_image(
     buffer: &mut [u32],
     width: u32,
     height: u32,
-    x: u32,
-    y: u32,
+    x: i32,
+    y: i32,
     draw_width: u32,
     draw_height: u32,
     image: &DecodedImage,
     object_fit: ObjectFit,
     object_position_x: u32,
     object_position_y: u32,
+    min_y: i32,
 ) {
     if draw_width == 0 || draw_height == 0 || image.width == 0 || image.height == 0 {
         return;
@@ -4267,20 +4609,41 @@ fn draw_scaled_image(
         return;
     }
 
-    let dest_start_x = x.saturating_add(render_x);
-    let dest_start_y = y.saturating_add(render_y);
-    let max_dx = dest_start_x.saturating_add(render_w).min(x.saturating_add(draw_width)).min(width);
-    let max_dy = dest_start_y.saturating_add(render_h).min(y.saturating_add(draw_height)).min(height);
+    // dest_start in global buffer coordinates (signed)
+    let dest_start_x_signed = x + render_x as i32;
+    let dest_start_y_signed = y + render_y as i32;
+
+    // Clip to buffer and draw-box bounds
+    let dest_end_x_signed = (dest_start_x_signed + render_w as i32)
+        .min(x + draw_width as i32)
+        .min(width as i32);
+    let dest_end_y_signed = (dest_start_y_signed + render_h as i32)
+        .min(y + draw_height as i32)
+        .min(height as i32);
+
+    // Actual buffer start (clamped to min_y / 0 to avoid writing into the chrome area)
+    let dest_start_x = dest_start_x_signed.max(0) as u32;
+    let dest_start_y = dest_start_y_signed.max(min_y) as u32;
+    let max_dx = dest_end_x_signed.max(0) as u32;
+    let max_dy = dest_end_y_signed.max(0) as u32;
+
+    // How many dest rows/cols were skipped due to start being above min_y (used to advance source)
+    let y_skip = (min_y - dest_start_y_signed).max(0) as u32;
+    let x_skip = (-dest_start_x_signed).max(0) as u32;
+
+    if max_dx <= dest_start_x || max_dy <= dest_start_y {
+        return;
+    }
 
     for dest_y in dest_start_y..max_dy {
-        let local_y = dest_y - dest_start_y;
+        let local_y = (dest_y - dest_start_y) + y_skip; // includes skipped rows
         let source_y = (src_y_off as u64
             + local_y as u64 * src_h as u64 / render_h as u64) as u32;
         let source_y = source_y.min(image.height.saturating_sub(1));
         let row_offset = dest_y as usize * width as usize;
 
         for dest_x in dest_start_x..max_dx {
-            let local_x = dest_x - dest_start_x;
+            let local_x = (dest_x - dest_start_x) + x_skip; // includes skipped cols
             let source_x = (src_x_off as u64
                 + local_x as u64 * src_w as u64 / render_w as u64) as u32;
             let source_x = source_x.min(image.width.saturating_sub(1));
