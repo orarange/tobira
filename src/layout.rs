@@ -1998,6 +1998,23 @@ fn layout_table_element(
                     border_radius: 0,
                 }));
             }
+            if let Some(ref url) = placement.cell.style.background_image_url {
+                let object_fit = match placement.cell.style.background_size {
+                    BackgroundSize::Cover => ObjectFit::Cover,
+                    BackgroundSize::Contain => ObjectFit::Contain,
+                    BackgroundSize::Auto => ObjectFit::Fill,
+                };
+                layer_commands.push(DrawCommand::Image(ImageCommand {
+                    x: 0,
+                    y: 0,
+                    width: layer_w,
+                    height: layer_h,
+                    src: url.clone(),
+                    object_fit,
+                    object_position_x: placement.cell.style.background_position_x,
+                    object_position_y: placement.cell.style.background_position_y,
+                }));
+            }
             // Content commands are (0,0)-relative within the cell; offset by padding/valign
             let pad_x = padding;
             let pad_y = padding.saturating_add(vertical_offset);
@@ -2073,6 +2090,23 @@ fn layout_table_element(
                     height: cell_height.max(1),
                     color: blended,
                     border_radius: 0,
+                }));
+            }
+            if let Some(ref url) = placement.cell.style.background_image_url {
+                let object_fit = match placement.cell.style.background_size {
+                    BackgroundSize::Cover => ObjectFit::Cover,
+                    BackgroundSize::Contain => ObjectFit::Contain,
+                    BackgroundSize::Auto => ObjectFit::Fill,
+                };
+                context.commands.push(DrawCommand::Image(ImageCommand {
+                    x: cell_x,
+                    y: cell_y,
+                    width: cell_width.max(1),
+                    height: cell_height.max(1),
+                    src: url.clone(),
+                    object_fit,
+                    object_position_x: placement.cell.style.background_position_x,
+                    object_position_y: placement.cell.style.background_position_y,
                 }));
             }
             merge_fragment(context, layout, content_x, content_y);
