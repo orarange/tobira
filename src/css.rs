@@ -515,6 +515,21 @@ pub struct ComputedStyle {
     pub filter_blur_px: u32,       // blur() value in pixels, 0 = no blur
     pub filter_brightness: u32,    // brightness() in percent * 100 (10000 = 100% = no change)
     pub filter_opacity: u8,        // opacity() as 0-255, 255 = no change
+    // CSS transform (all integer to keep ComputedStyle: Eq)
+    /// translate X in pixels (0 = no translate)
+    pub transform_translate_x: i32,
+    /// translate Y in pixels (0 = no translate)
+    pub transform_translate_y: i32,
+    /// scaleX * 1000 (1000 = 1.0, no scale). 0 is treated as "not set" → 1000
+    pub transform_scale_x: u32,
+    /// scaleY * 1000 (1000 = 1.0, no scale). 0 is treated as "not set" → 1000
+    pub transform_scale_y: u32,
+    /// rotation in millidegrees clockwise (0 = no rotation)
+    pub transform_rotate_millideg: i32,
+    /// transform-origin X in permille of element width (500 = 50% = center)
+    pub transform_origin_x: u32,
+    /// transform-origin Y in permille of element height (500 = 50% = center)
+    pub transform_origin_y: u32,
 }
 
 impl ComputedStyle {
@@ -602,6 +617,14 @@ impl ComputedStyle {
             filter_blur_px: 0,
             filter_brightness: 10000,
             filter_opacity: 255,
+            // CSS transform
+            transform_translate_x: 0,
+            transform_translate_y: 0,
+            transform_scale_x: 0,  // 0 = "not set" → treated as 1000 at render time
+            transform_scale_y: 0,
+            transform_rotate_millideg: 0,
+            transform_origin_x: 500,  // 50% center
+            transform_origin_y: 500,
         };
 
         match tag_name {
@@ -1450,6 +1473,149 @@ fn parse_filter_value(input: &str, style: &mut ComputedStyle) {
     }
 }
 
+/// Parse a CSS transform: value and accumulate into a ComputedStyle's transform fields.
+/// Handles: none, translate(x,y), translateX(x), translateY(y),
+///          scale(s) / scale(sx,sy), scaleX(sx), scaleY(sy),
+///          rotate(Ndeg) / rotate(Nrad), skewX / skewY (ignored for now).
+fn parse_transform_into(value: &str, style: &mut ComputedStyle) {
+    let v = value.trim();
+    if v.eq_ignore_ascii_case("none") {
+        style.transform_translate_x = 0;
+        style.transform_translate_y = 0;
+        style.transform_scale_x = 0;
+        style.transform_scale_y = 0;
+        style.transform_rotate_millideg = 0;
+        return;
+    }
+
+    // Tokenise: split on ')' so each token is like "translateX(30px"
+    for token in v.split(')') {
+        let token = token.trim();
+        if token.is_empty() { continue; }
+        let (fname, args_str) = if let Some(p) = token.find('(') {
+            (&token[..p], &token[p + 1..])
+        } else {
+            continue;
+        };
+        let fname = fname.trim().to_ascii_lowercase();
+        // Parse comma- or space-separated arguments as f32
+        let args: Vec<f32> = args_str
+            .split(|c: char| c == ',' || c == ' ')
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| parse_transform_length(s.trim()))
+            .collect();
+
+        match fname.as_str() {
+            "translate" => {
+                style.transform_translate_x += args.first().copied().unwrap_or(0.0).round() as i32;
+                style.transform_translate_y += args.get(1).copied().unwrap_or(0.0).round() as i32;
+            }
+            "translatex" => {
+                style.transform_translate_x += args.first().copied().unwrap_or(0.0).round() as i32;
+            }
+            "translatey" => {
+                style.transform_translate_y += args.first().copied().unwrap_or(0.0).round() as i32;
+            }
+            "translate3d" => {
+                style.transform_translate_x += args.first().copied().unwrap_or(0.0).round() as i32;
+                style.transform_translate_y += args.get(1).copied().unwrap_or(0.0).round() as i32;
+                // Z ignored
+            }
+            "scale" => {
+                let sx = args.first().copied().unwrap_or(1.0);
+                let sy = args.get(1).copied().unwrap_or(sx);
+                // Accumulate by multiplying (convert millis → float → multiply → back)
+                let prev_sx = if style.transform_scale_x == 0 { 1.0 } else { style.transform_scale_x as f32 / 1000.0 };
+                let prev_sy = if style.transform_scale_y == 0 { 1.0 } else { style.transform_scale_y as f32 / 1000.0 };
+                style.transform_scale_x = ((prev_sx * sx) * 1000.0).round() as u32;
+                style.transform_scale_y = ((prev_sy * sy) * 1000.0).round() as u32;
+            }
+            "scalex" => {
+                let sx = args.first().copied().unwrap_or(1.0);
+                let prev = if style.transform_scale_x == 0 { 1.0 } else { style.transform_scale_x as f32 / 1000.0 };
+                style.transform_scale_x = ((prev * sx) * 1000.0).round() as u32;
+            }
+            "scaley" => {
+                let sy = args.first().copied().unwrap_or(1.0);
+                let prev = if style.transform_scale_y == 0 { 1.0 } else { style.transform_scale_y as f32 / 1000.0 };
+                style.transform_scale_y = ((prev * sy) * 1000.0).round() as u32;
+            }
+            "rotate" | "rotatez" => {
+                style.transform_rotate_millideg += parse_transform_angle(args_str.trim());
+            }
+            // skew: ignore for now
+            _ => {}
+        }
+    }
+}
+
+/// Parse a CSS length value to f32 pixels for transform arguments.
+/// Handles: 42px, 3.5em (approximate as * 16px), 50% (returns 0 — % needs element size context).
+fn parse_transform_length(s: &str) -> Option<f32> {
+    if s.ends_with("px") {
+        s[..s.len() - 2].trim().parse::<f32>().ok()
+    } else if s.ends_with("rem") {
+        s[..s.len() - 3].trim().parse::<f32>().ok().map(|v| v * 16.0)
+    } else if s.ends_with("em") {
+        s[..s.len() - 2].trim().parse::<f32>().ok().map(|v| v * 16.0)
+    } else if s.ends_with('%') {
+        // Can't resolve % without element size — return 0 (ignored)
+        Some(0.0)
+    } else {
+        // Unitless (rare, typically for scale values like "1.5")
+        s.parse::<f32>().ok()
+    }
+}
+
+/// Parse a CSS angle string (from inside rotate(...)) to millidegrees.
+/// Handles: 45deg, 3.14rad, 0.5turn, unitless (treated as deg).
+fn parse_transform_angle(s: &str) -> i32 {
+    if s.ends_with("deg") {
+        s[..s.len() - 3].trim().parse::<f32>().ok()
+            .map(|d| (d * 1000.0).round() as i32)
+            .unwrap_or(0)
+    } else if s.ends_with("grad") {
+        s[..s.len() - 4].trim().parse::<f32>().ok()
+            .map(|g| (g * 0.9 * 1000.0).round() as i32)
+            .unwrap_or(0)
+    } else if s.ends_with("rad") {
+        s[..s.len() - 3].trim().parse::<f32>().ok()
+            .map(|r| (r.to_degrees() * 1000.0).round() as i32)
+            .unwrap_or(0)
+    } else if s.ends_with("turn") {
+        s[..s.len() - 4].trim().parse::<f32>().ok()
+            .map(|t| (t * 360_000.0).round() as i32)
+            .unwrap_or(0)
+    } else {
+        // unitless: treat as degrees
+        s.parse::<f32>().ok()
+            .map(|d| (d * 1000.0).round() as i32)
+            .unwrap_or(0)
+    }
+}
+
+/// Parse a `transform-origin` single component (e.g. "50%", "center", "left", "0px").
+/// Returns permille (500 = 50% = center).
+fn parse_transform_origin_pct(s: &str) -> u32 {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "center" => 500,
+        "left" | "top" => 0,
+        "right" | "bottom" => 1000,
+        other => {
+            if other.ends_with('%') {
+                other[..other.len() - 1].parse::<f32>().ok()
+                    .map(|v| (v * 10.0).round() as u32)
+                    .unwrap_or(500)
+            } else if other.ends_with("px") {
+                // pixel value — can't resolve without element size context, default to 0
+                0
+            } else {
+                500 // fallback center
+            }
+        }
+    }
+}
+
 fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, parent_font_size: u32) {
     let value = &declaration.value;
     match declaration.property.as_str() {
@@ -1982,6 +2148,14 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         }
         "filter" | "-webkit-filter" => {
             parse_filter_value(value, style);
+        }
+        "transform" => {
+            parse_transform_into(value, style);
+        }
+        "transform-origin" => {
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            style.transform_origin_x = parse_transform_origin_pct(parts.first().copied().unwrap_or("50%"));
+            style.transform_origin_y = parse_transform_origin_pct(parts.get(1).copied().unwrap_or("50%"));
         }
         // No-op properties — parsed to prevent warnings, not yet implemented
         "scroll-behavior" | "overscroll-behavior" | "overscroll-behavior-x" | "overscroll-behavior-y"
@@ -4808,5 +4982,37 @@ mod tests {
         let div = find_first_element(&styled, "div").unwrap();
         // Just check it doesn't panic and the element is accessible
         assert_eq!(div.tag_name, "div");
+    }
+
+    #[test]
+    fn transform_translate_parsed() {
+        let html = r#"<div style="transform: translateX(30px) translateY(-10px);"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.transform_translate_x, 30);
+        assert_eq!(div.style.transform_translate_y, -10);
+    }
+
+    #[test]
+    fn transform_scale_parsed() {
+        let html = r#"<div style="transform: scale(1.5);"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.transform_scale_x, 1500);
+        assert_eq!(div.style.transform_scale_y, 1500);
+    }
+
+    #[test]
+    fn transform_rotate_parsed() {
+        let html = r#"<div style="transform: rotate(45deg);"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.transform_rotate_millideg, 45000);
     }
 }
