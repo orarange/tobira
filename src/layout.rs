@@ -13,6 +13,7 @@ pub enum DrawCommand {
     Text(TextCommand),
     Image(ImageCommand),
     Layer(LayerCommand),
+    Sticky(StickyCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +25,23 @@ pub struct LayerCommand {
     pub opacity: u8,
     pub blur_px: u32,  // 0 = no blur
     pub commands: Vec<DrawCommand>,
+}
+
+/// A sticky-positioned element. It lays out in normal flow (at `normal_y`) but is rendered
+/// at `max(normal_y, min(scroll_y + sticky_top, container_bottom - layer.height))` so it
+/// pins near the viewport top when scrolled past.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StickyCommand {
+    /// Element's y-coordinate in normal flow (content space).
+    pub normal_y: u32,
+    /// CSS `top` value in pixels — distance from viewport content-top when sticking.
+    pub sticky_top: u32,
+    /// Bottom boundary of the containing block in content space. Use `u32::MAX` when unknown
+    /// (element sticks indefinitely until the end of the page).
+    pub container_bottom: u32,
+    /// The element's rendering data. `layer.y` equals `normal_y`; commands are element-relative
+    /// (rebased to origin (0,0) relative to layer.x / layer.y).
+    pub layer: LayerCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +110,11 @@ fn shift_command(cmd: &mut DrawCommand, dx: u32, dy: u32) {
             l.x = l.x.saturating_add(dx);
             l.y = l.y.saturating_add(dy);
         }
+        DrawCommand::Sticky(s) => {
+            s.layer.x = s.layer.x.saturating_add(dx);
+            s.layer.y = s.layer.y.saturating_add(dy);
+            s.normal_y = s.normal_y.saturating_add(dy);
+        }
     }
 }
 
@@ -113,6 +136,11 @@ fn shift_command_signed(cmd: &mut DrawCommand, dx: i32, dy: i32) {
             l.x = (l.x as i64 + dx as i64).max(0) as u32;
             l.y = (l.y as i64 + dy as i64).max(0) as u32;
         }
+        DrawCommand::Sticky(s) => {
+            s.layer.x = (s.layer.x as i64 + dx as i64).max(0) as u32;
+            s.layer.y = (s.layer.y as i64 + dy as i64).max(0) as u32;
+            s.normal_y = (s.normal_y as i64 + dy as i64).max(0) as u32;
+        }
     }
 }
 
@@ -128,6 +156,9 @@ fn collect_texts(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec<
             }
             DrawCommand::Layer(l) => {
                 out.extend(collect_texts(&l.commands, offset_x.saturating_add(l.x), offset_y.saturating_add(l.y)));
+            }
+            DrawCommand::Sticky(s) => {
+                out.extend(collect_texts(&s.layer.commands, offset_x.saturating_add(s.layer.x), offset_y.saturating_add(s.layer.y)));
             }
             _ => {}
         }
@@ -148,6 +179,9 @@ fn collect_rects(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec<
             DrawCommand::Layer(l) => {
                 out.extend(collect_rects(&l.commands, offset_x.saturating_add(l.x), offset_y.saturating_add(l.y)));
             }
+            DrawCommand::Sticky(s) => {
+                out.extend(collect_rects(&s.layer.commands, offset_x.saturating_add(s.layer.x), offset_y.saturating_add(s.layer.y)));
+            }
             _ => {}
         }
     }
@@ -166,6 +200,9 @@ fn collect_images(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec
             }
             DrawCommand::Layer(l) => {
                 out.extend(collect_images(&l.commands, offset_x.saturating_add(l.x), offset_y.saturating_add(l.y)));
+            }
+            DrawCommand::Sticky(s) => {
+                out.extend(collect_images(&s.layer.commands, offset_x.saturating_add(s.layer.x), offset_y.saturating_add(s.layer.y)));
             }
             _ => {}
         }
@@ -1171,17 +1208,39 @@ fn layout_block_element(
         }
     }
 
-    // position: relative / sticky — apply visual offset without affecting flow
-    // sticky: lay out in normal flow then apply top/bottom as minimum offsets (same as relative
-    // for now; true scroll-based stickiness requires scroll state propagation).
-    if element.style.position == Position::Relative || element.style.position == Position::Sticky {
-        let dx = element.style.left.unwrap_or(0) - element.style.right.unwrap_or(0);
-        let dy = element.style.top.unwrap_or(0) - element.style.bottom.unwrap_or(0);
+    // position: relative — apply visual offset without affecting flow
+    if element.style.position == Position::Relative {
+        let dx = element.style.left.unwrap_or(0) as i32 - element.style.right.unwrap_or(0) as i32;
+        let dy = element.style.top.unwrap_or(0) as i32 - element.style.bottom.unwrap_or(0) as i32;
         if dx != 0 || dy != 0 {
             for cmd in &mut context.commands[block_cmd_start..] {
                 shift_command_signed(cmd, dx, dy);
             }
         }
+    }
+
+    // position: sticky — wrap commands in a StickyCommand for scroll-aware rendering
+    if element.style.position == Position::Sticky {
+        if let Some(top_px) = element.style.top {
+            let height = cursor_y.saturating_sub(background_top).max(1);
+            let mut sticky_cmds: Vec<DrawCommand> = context.commands.drain(block_cmd_start..).collect();
+            rebase_commands(&mut sticky_cmds, outer_x, background_top);
+            context.commands.push(DrawCommand::Sticky(StickyCommand {
+                normal_y: background_top,
+                sticky_top: top_px.max(0) as u32,
+                container_bottom: u32::MAX,
+                layer: LayerCommand {
+                    x: outer_x,
+                    y: background_top,
+                    width: outer_width.max(1),
+                    height,
+                    opacity: 255,
+                    blur_px: 0,
+                    commands: sticky_cmds,
+                },
+            }));
+        }
+        // If no `top` is set, sticky behaves like static — leave commands as-is.
     }
 
     *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
@@ -1264,6 +1323,17 @@ fn clip_commands_to_box(
                     Some(DrawCommand::Text(t))
                 }
             }
+            DrawCommand::Sticky(mut s) => {
+                let lx2 = s.layer.x.saturating_add(s.layer.width);
+                let ly2 = s.layer.y.saturating_add(s.layer.height);
+                if s.layer.x >= clip_x2 || s.layer.y >= clip_y2 || lx2 <= clip_x || ly2 <= clip_y {
+                    return None;
+                }
+                // Clamp width/height only — same as Layer arm
+                s.layer.width = lx2.min(clip_x2).saturating_sub(s.layer.x).max(1);
+                s.layer.height = ly2.min(clip_y2).saturating_sub(s.layer.y).max(1);
+                Some(DrawCommand::Sticky(s))
+            }
         }
     }).collect();
     commands.extend(clamped);
@@ -1288,6 +1358,12 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
                 l.x = l.x.saturating_sub(origin_x);
                 l.y = l.y.saturating_sub(origin_y);
                 // Do NOT recurse into l.commands — they're already layer-relative
+            }
+            DrawCommand::Sticky(s) => {
+                s.layer.x = s.layer.x.saturating_sub(origin_x);
+                s.layer.y = s.layer.y.saturating_sub(origin_y);
+                s.normal_y = s.normal_y.saturating_sub(origin_y);
+                // Do NOT recurse into s.layer.commands — they're already layer-relative
             }
         }
     }
@@ -2242,6 +2318,20 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             opacity: layer.opacity,
             blur_px: layer.blur_px,
             commands: layer.commands.clone(),
+        }),
+        DrawCommand::Sticky(sticky) => DrawCommand::Sticky(StickyCommand {
+            normal_y: sticky.normal_y.saturating_add(offset_y),
+            sticky_top: sticky.sticky_top,
+            container_bottom: sticky.container_bottom,
+            layer: LayerCommand {
+                x: sticky.layer.x.saturating_add(offset_x),
+                y: sticky.layer.y.saturating_add(offset_y),
+                width: sticky.layer.width,
+                height: sticky.layer.height,
+                opacity: sticky.layer.opacity,
+                blur_px: sticky.layer.blur_px,
+                commands: sticky.layer.commands.clone(),
+            },
         }),
     }
 }

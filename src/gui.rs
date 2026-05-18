@@ -17,7 +17,8 @@ use crate::font::FontContext;
 use crate::image::DecodedImage;
 use crate::js::{DomEventDispatchResult, DomEventRequest};
 use crate::layout::{
-    DrawCommand, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument, TextCommand, layout_styled_document,
+    DrawCommand, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument,
+    TextCommand, layout_styled_document,
 };
 use crate::url::Url;
 
@@ -3811,6 +3812,26 @@ fn render_commands(
             DrawCommand::Layer(layer) => {
                 render_layer(
                     buffer, width, height, offset_x, offset_y, scroll_y, layer,
+                    None,
+                    page, fonts, scratch, depth,
+                );
+            }
+            DrawCommand::Sticky(sticky) => {
+                // Compute scroll-adjusted y in content space
+                let container_max_y = if sticky.container_bottom == u32::MAX {
+                    u32::MAX
+                } else {
+                    sticky.container_bottom.saturating_sub(sticky.layer.height)
+                };
+                let effective_y = scroll_y
+                    .saturating_add(sticky.sticky_top)
+                    .max(sticky.normal_y)
+                    .min(container_max_y);
+
+                render_layer(
+                    buffer, width, height, offset_x, offset_y, scroll_y,
+                    &sticky.layer,
+                    Some(effective_y),
                     page, fonts, scratch, depth,
                 );
             }
@@ -3826,13 +3847,15 @@ fn render_layer(
     offset_y: u32,
     scroll_y: u32,
     layer: &LayerCommand,
+    y_override: Option<u32>,
     page: Option<&crate::browser::BrowserPage>,
     fonts: &mut FontContext,
     scratch: &mut Vec<Vec<u32>>,
     depth: usize,
 ) {
     // Compute screen-space position using signed arithmetic to handle layers above viewport
-    let layer_screen_y = layer.y as i64 + offset_y as i64 - scroll_y as i64;
+    let layer_y = y_override.unwrap_or(layer.y);
+    let layer_screen_y = layer_y as i64 + offset_y as i64 - scroll_y as i64;
     let layer_screen_x = layer.x as i64 + offset_x as i64;
 
     // Content viewport top/left: the chrome (address bar, etc.) occupies [0, offset_y) rows
