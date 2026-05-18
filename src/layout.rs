@@ -1181,6 +1181,15 @@ fn layout_block_element(
         }
     }
 
+    // CSS transform: translate — shift all commands for this element by (tx, ty)
+    let tx = element.style.transform_translate_x;
+    let ty = element.style.transform_translate_y;
+    if tx != 0 || ty != 0 {
+        for cmd in &mut context.commands[block_cmd_start..] {
+            shift_command_signed(cmd, tx, ty);
+        }
+    }
+
     *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
 }
 
