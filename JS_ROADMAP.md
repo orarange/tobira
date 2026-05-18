@@ -20,6 +20,8 @@ Already working:
 - recursive `document.write(...)`
 - lightweight DOM mutation helpers
 - live `element.attributes` collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
+- browser-grade Node accessors and mutation helpers such as `nodeType`, `nodeName`, `nodeValue`, sibling traversal, `cloneNode(...)`, `replaceChild(...)`, `removeChild(...)`, `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, `replaceChildren(...)`
+- `document.createDocumentFragment(...)` with fragment flattening during insertion
 - native GUI typing stays in sync with live DOM `input.value`
 - basic DOM event plumbing for capture + bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`
 - `Promise` job flushing
@@ -108,6 +110,7 @@ Tasks:
 
 - expand node/element APIs that are commonly used
 - DOM traversal helpers like `matches(...)`, `closest(...)`, `contains(...)`, and element sibling accessors are now in place
+- Node introspection and mutation helpers now cover the common insertion / replacement paths, plus `document.createDocumentFragment(...)`
 - improve `classList`, `dataset`, `attributes`, and property reflection beyond the current helper surface; live `element.attributes` is now in place, but deeper parity is still open
 - add `querySelector(...)` coverage for more selectors if needed
 - support `document.body`, `document.head`, `document.documentElement` consistently

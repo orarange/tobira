@@ -237,6 +237,7 @@ struct DomNode {
 enum DomNodeKind {
     Element(DomElementData),
     Text(String),
+    Fragment,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -873,6 +874,20 @@ impl DomState {
         node_id
     }
 
+    fn create_document_fragment(&mut self) -> usize {
+        let node_id = self.nodes.len();
+        self.nodes.push(DomNode {
+            parent: None,
+            children: Vec::new(),
+            kind: DomNodeKind::Fragment,
+        });
+        node_id
+    }
+
+    fn is_document_node(&self, node_id: usize) -> bool {
+        node_id == self.document_id && self.node(node_id).is_some()
+    }
+
     fn node(&self, node_id: usize) -> Option<&DomNode> {
         self.nodes.get(node_id)
     }
@@ -884,15 +899,90 @@ impl DomState {
     fn element(&self, node_id: usize) -> Option<&DomElementData> {
         match &self.node(node_id)?.kind {
             DomNodeKind::Element(element) => Some(element),
-            DomNodeKind::Text(_) => None,
+            DomNodeKind::Text(_) | DomNodeKind::Fragment => None,
         }
     }
 
     fn element_mut(&mut self, node_id: usize) -> Option<&mut DomElementData> {
         match &mut self.node_mut(node_id)?.kind {
             DomNodeKind::Element(element) => Some(element),
-            DomNodeKind::Text(_) => None,
+            DomNodeKind::Text(_) | DomNodeKind::Fragment => None,
         }
+    }
+
+    fn node_type(&self, node_id: usize) -> u16 {
+        if !self.nodes.get(node_id).is_some() {
+            return 0;
+        }
+        if self.is_document_node(node_id) {
+            return 9;
+        }
+        match self.node(node_id).map(|node| &node.kind) {
+            Some(DomNodeKind::Element(_)) => 1,
+            Some(DomNodeKind::Text(_)) => 3,
+            Some(DomNodeKind::Fragment) => 11,
+            None => 0,
+        }
+    }
+
+    fn node_name(&self, node_id: usize) -> Option<String> {
+        if self.is_document_node(node_id) {
+            return Some("#document".to_string());
+        }
+        match self.node(node_id).map(|node| &node.kind) {
+            Some(DomNodeKind::Element(element)) => Some(element.tag_name.to_ascii_uppercase()),
+            Some(DomNodeKind::Text(_)) => Some("#text".to_string()),
+            Some(DomNodeKind::Fragment) => Some("#document-fragment".to_string()),
+            None => None,
+        }
+    }
+
+    fn node_value(&self, node_id: usize) -> Option<String> {
+        match self.node(node_id).map(|node| &node.kind) {
+            Some(DomNodeKind::Text(text)) => Some(text.clone()),
+            Some(DomNodeKind::Element(_)) | Some(DomNodeKind::Fragment) => None,
+            None => None,
+        }
+    }
+
+    fn set_node_value(&mut self, node_id: usize, value: &str) {
+        if let Some(DomNodeKind::Text(text)) = self.node_mut(node_id).map(|node| &mut node.kind) {
+            *text = value.to_string();
+        }
+    }
+
+    fn first_child(&self, node_id: usize) -> Option<usize> {
+        self.node(node_id)?.children.first().copied()
+    }
+
+    fn last_child(&self, node_id: usize) -> Option<usize> {
+        self.node(node_id)?.children.last().copied()
+    }
+
+    fn previous_sibling(&self, node_id: usize) -> Option<usize> {
+        let parent_id = self.node(node_id)?.parent?;
+        let parent = self.node(parent_id)?;
+        let index = parent
+            .children
+            .iter()
+            .position(|child_id| *child_id == node_id)?;
+        index
+            .checked_sub(1)
+            .and_then(|previous_index| parent.children.get(previous_index).copied())
+    }
+
+    fn next_sibling(&self, node_id: usize) -> Option<usize> {
+        let parent_id = self.node(node_id)?.parent?;
+        let parent = self.node(parent_id)?;
+        let index = parent
+            .children
+            .iter()
+            .position(|child_id| *child_id == node_id)?;
+        parent.children.get(index + 1).copied()
+    }
+
+    fn is_connected(&self, node_id: usize) -> bool {
+        self.contains_node(self.document_id, node_id)
     }
 
     fn find_first_tag(&self, start_id: usize, tag_name: &str) -> Option<usize> {
@@ -989,7 +1079,22 @@ impl DomState {
     }
 
     fn append_child(&mut self, parent_id: usize, child_id: usize) {
+        let fragment_children = matches!(
+            self.node(child_id).map(|node| &node.kind),
+            Some(DomNodeKind::Fragment)
+        )
+        .then(|| {
+            self.node(child_id)
+                .map(|node| node.children.clone())
+                .unwrap_or_default()
+        });
         self.detach_node(child_id);
+        if let Some(fragment_children) = fragment_children {
+            for fragment_child in fragment_children {
+                self.append_child(parent_id, fragment_child);
+            }
+            return;
+        }
         if let Some(parent) = self.node_mut(parent_id) {
             parent.children.push(child_id);
         }
@@ -998,8 +1103,101 @@ impl DomState {
         }
     }
 
+    fn clone_node(&mut self, node_id: usize, deep: bool) -> Option<usize> {
+        let node = self.node(node_id)?.clone();
+        let cloned_id = match node.kind {
+            DomNodeKind::Text(text) => self.create_text_node(&text),
+            DomNodeKind::Element(element) => {
+                let cloned_id = self.nodes.len();
+                self.nodes.push(DomNode {
+                    parent: None,
+                    children: Vec::new(),
+                    kind: DomNodeKind::Element(element),
+                });
+                cloned_id
+            }
+            DomNodeKind::Fragment => self.create_document_fragment(),
+        };
+        if deep {
+            for child_id in node.children {
+                let cloned_child = self.clone_node(child_id, true)?;
+                self.append_child(cloned_id, cloned_child);
+            }
+        }
+        Some(cloned_id)
+    }
+
+    fn replace_child(
+        &mut self,
+        parent_id: usize,
+        new_child_id: usize,
+        old_child_id: usize,
+    ) -> Option<usize> {
+        if new_child_id == old_child_id {
+            return Some(old_child_id);
+        }
+
+        let new_child_is_fragment = matches!(
+            self.node(new_child_id).map(|node| &node.kind),
+            Some(DomNodeKind::Fragment)
+        );
+        if new_child_is_fragment {
+            let fragment_children = self
+                .node(new_child_id)
+                .map(|node| node.children.clone())
+                .unwrap_or_default();
+            self.detach_node(new_child_id);
+            for child_id in fragment_children {
+                self.insert_before(parent_id, child_id, Some(old_child_id));
+            }
+            self.detach_node(old_child_id);
+            return Some(old_child_id);
+        }
+
+        self.detach_node(new_child_id);
+        let current_index = self
+            .node(parent_id)?
+            .children
+            .iter()
+            .position(|child_id| *child_id == old_child_id)?;
+        if let Some(parent) = self.node_mut(parent_id) {
+            parent.children[current_index] = new_child_id;
+        }
+        if let Some(child) = self.node_mut(new_child_id) {
+            child.parent = Some(parent_id);
+        }
+        if let Some(old_child) = self.node_mut(old_child_id) {
+            old_child.parent = None;
+        }
+        Some(old_child_id)
+    }
+
+    fn remove_child(&mut self, parent_id: usize, child_id: usize) -> Option<usize> {
+        let parent = self.node(parent_id)?;
+        if parent.children.iter().any(|node_id| *node_id == child_id) {
+            self.detach_node(child_id);
+            return Some(child_id);
+        }
+        None
+    }
+
     fn insert_before(&mut self, parent_id: usize, child_id: usize, before_id: Option<usize>) {
+        let fragment_children = matches!(
+            self.node(child_id).map(|node| &node.kind),
+            Some(DomNodeKind::Fragment)
+        )
+        .then(|| {
+            self.node(child_id)
+                .map(|node| node.children.clone())
+                .unwrap_or_default()
+        });
         self.detach_node(child_id);
+        if let Some(fragment_children) = fragment_children {
+            for fragment_child in fragment_children {
+                self.insert_before(parent_id, fragment_child, before_id);
+            }
+            return;
+        }
         let insert_index = before_id
             .and_then(|before_id| {
                 self.node(parent_id)
@@ -1118,7 +1316,7 @@ impl DomState {
         };
         match &node.kind {
             DomNodeKind::Text(text) => text.clone(),
-            DomNodeKind::Element(_) => node
+            DomNodeKind::Element(_) | DomNodeKind::Fragment => node
                 .children
                 .iter()
                 .map(|child_id| self.text_content(*child_id))
@@ -1203,6 +1401,11 @@ impl DomState {
                 html.push('>');
                 html
             }
+            DomNodeKind::Fragment => node
+                .children
+                .iter()
+                .map(|child_id| self.serialize_node(*child_id))
+                .collect(),
         }
     }
 
@@ -1817,6 +2020,30 @@ fn install_browser_globals(context: &mut Context) {
     let document_fonts = ObjectInitializer::new(context)
         .function(NativeFunction::from_fn_ptr(js_noop), js_string!("load"), 2)
         .build();
+    let get_node_name =
+        NativeFunction::from_fn_ptr(js_dom_get_node_name).to_js_function(context.realm());
+    let get_node_type =
+        NativeFunction::from_fn_ptr(js_dom_get_node_type).to_js_function(context.realm());
+    let get_node_value =
+        NativeFunction::from_fn_ptr(js_dom_get_node_value).to_js_function(context.realm());
+    let set_node_value =
+        NativeFunction::from_fn_ptr(js_dom_set_node_value).to_js_function(context.realm());
+    let get_first_child =
+        NativeFunction::from_fn_ptr(js_dom_get_first_child).to_js_function(context.realm());
+    let get_last_child =
+        NativeFunction::from_fn_ptr(js_dom_get_last_child).to_js_function(context.realm());
+    let get_previous_sibling =
+        NativeFunction::from_fn_ptr(js_dom_get_previous_sibling).to_js_function(context.realm());
+    let get_next_sibling =
+        NativeFunction::from_fn_ptr(js_dom_get_next_sibling).to_js_function(context.realm());
+    let get_is_connected =
+        NativeFunction::from_fn_ptr(js_dom_get_is_connected).to_js_function(context.realm());
+    let get_parent_node =
+        NativeFunction::from_fn_ptr(js_dom_get_parent_node).to_js_function(context.realm());
+    let get_parent_element =
+        NativeFunction::from_fn_ptr(js_dom_get_parent_element).to_js_function(context.realm());
+    let get_owner_document =
+        NativeFunction::from_fn_ptr(js_dom_get_owner_document).to_js_function(context.realm());
     let cookie_getter =
         NativeFunction::from_fn_ptr(js_document_get_cookie).to_js_function(context.realm());
     let cookie_setter =
@@ -1879,6 +2106,11 @@ fn install_browser_globals(context: &mut Context) {
         1,
     )
     .function(
+        NativeFunction::from_fn_ptr(js_document_create_document_fragment),
+        js_string!("createDocumentFragment"),
+        0,
+    )
+    .function(
         NativeFunction::from_fn_ptr(js_document_has_focus),
         js_string!("hasFocus"),
         0,
@@ -1892,6 +2124,72 @@ fn install_browser_globals(context: &mut Context) {
         NativeFunction::from_fn_ptr(js_remove_event_listener),
         js_string!("removeEventListener"),
         2,
+    )
+    .accessor(
+        js_string!("nodeName"),
+        Some(get_node_name.clone()),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("nodeType"),
+        Some(get_node_type.clone()),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("nodeValue"),
+        Some(get_node_value.clone()),
+        Some(set_node_value.clone()),
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("firstChild"),
+        Some(get_first_child.clone()),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("lastChild"),
+        Some(get_last_child.clone()),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("previousSibling"),
+        Some(get_previous_sibling.clone()),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("nextSibling"),
+        Some(get_next_sibling.clone()),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("isConnected"),
+        Some(get_is_connected.clone()),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("parentNode"),
+        Some(get_parent_node.clone()),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("parentElement"),
+        Some(get_parent_element.clone()),
+        None,
+        Attribute::all(),
+    )
+    .accessor(
+        js_string!("ownerDocument"),
+        Some(get_owner_document.clone()),
+        None,
+        Attribute::all(),
     )
     .property(js_string!("location"), location.clone(), Attribute::all())
     .accessor(
@@ -3524,6 +3822,24 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_owner_document).to_js_function(context.realm());
     let get_tag_name =
         NativeFunction::from_fn_ptr(js_dom_get_tag_name).to_js_function(context.realm());
+    let get_node_name =
+        NativeFunction::from_fn_ptr(js_dom_get_node_name).to_js_function(context.realm());
+    let get_node_type =
+        NativeFunction::from_fn_ptr(js_dom_get_node_type).to_js_function(context.realm());
+    let get_node_value =
+        NativeFunction::from_fn_ptr(js_dom_get_node_value).to_js_function(context.realm());
+    let set_node_value =
+        NativeFunction::from_fn_ptr(js_dom_set_node_value).to_js_function(context.realm());
+    let get_first_child =
+        NativeFunction::from_fn_ptr(js_dom_get_first_child).to_js_function(context.realm());
+    let get_last_child =
+        NativeFunction::from_fn_ptr(js_dom_get_last_child).to_js_function(context.realm());
+    let get_previous_sibling =
+        NativeFunction::from_fn_ptr(js_dom_get_previous_sibling).to_js_function(context.realm());
+    let get_next_sibling =
+        NativeFunction::from_fn_ptr(js_dom_get_next_sibling).to_js_function(context.realm());
+    let get_is_connected =
+        NativeFunction::from_fn_ptr(js_dom_get_is_connected).to_js_function(context.realm());
     let get_parent_node =
         NativeFunction::from_fn_ptr(js_dom_get_parent_node).to_js_function(context.realm());
     let get_client_width =
@@ -3574,6 +3890,51 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             NativeFunction::from_fn_ptr(js_dom_insert_before),
             js_string!("insertBefore"),
             2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_replace_child),
+            js_string!("replaceChild"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_remove_child),
+            js_string!("removeChild"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_append),
+            js_string!("append"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_prepend),
+            js_string!("prepend"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_before),
+            js_string!("before"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_after),
+            js_string!("after"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_replace_with),
+            js_string!("replaceWith"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_replace_children),
+            js_string!("replaceChildren"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_clone_node),
+            js_string!("cloneNode"),
+            1,
         )
         .function(
             NativeFunction::from_fn_ptr(js_add_event_listener),
@@ -3789,7 +4150,49 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         )
         .accessor(
             js_string!("nodeName"),
-            Some(get_tag_name),
+            Some(get_node_name),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("nodeType"),
+            Some(get_node_type),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("nodeValue"),
+            Some(get_node_value),
+            Some(set_node_value),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("firstChild"),
+            Some(get_first_child),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("lastChild"),
+            Some(get_last_child),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("previousSibling"),
+            Some(get_previous_sibling),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("nextSibling"),
+            Some(get_next_sibling),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("isConnected"),
+            Some(get_is_connected),
             None,
             Attribute::all(),
         )
@@ -5970,6 +6373,328 @@ fn node_id_argument(arg: Option<&JsValue>) -> Option<usize> {
     })
 }
 
+fn js_value_to_dom_node_id(value: &JsValue, context: &mut Context) -> JsResult<usize> {
+    if let Some(node_id) = node_id_argument(Some(value)) {
+        return Ok(node_id);
+    }
+
+    let text = js_value_to_string(value, context)?;
+    let node_id = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow_mut().dom.create_text_node(&text))
+        .unwrap_or(0);
+    Ok(node_id)
+}
+
+fn js_values_to_dom_node_ids(args: &[JsValue], context: &mut Context) -> JsResult<Vec<usize>> {
+    args.iter()
+        .map(|value| js_value_to_dom_node_id(value, context))
+        .collect()
+}
+
+fn js_dom_get_node_name(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let node_name = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.node_name(node_id))
+        .unwrap_or_default();
+    Ok(JsValue::from(js_string!(node_name)))
+}
+
+fn js_dom_get_node_type(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let node_type = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.node_type(node_id))
+        .unwrap_or(0);
+    Ok(JsValue::new(node_type as i32))
+}
+
+fn js_dom_get_node_value(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let value = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.node_value(node_id));
+    Ok(value
+        .map(|value| JsValue::from(js_string!(value)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_set_node_value(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let value = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state.borrow_mut().dom.set_node_value(node_id, &value);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_get_first_child(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let child_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.first_child(node_id));
+    Ok(child_id
+        .map(|child_id| JsValue::from(build_dom_node_object(context, child_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_get_last_child(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let child_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.last_child(node_id));
+    Ok(child_id
+        .map(|child_id| JsValue::from(build_dom_node_object(context, child_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_get_previous_sibling(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let sibling_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.previous_sibling(node_id));
+    Ok(sibling_id
+        .map(|sibling_id| JsValue::from(build_dom_node_object(context, sibling_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_get_next_sibling(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let sibling_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.next_sibling(node_id));
+    Ok(sibling_id
+        .map(|sibling_id| JsValue::from(build_dom_node_object(context, sibling_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_get_is_connected(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(usize::MAX);
+    let is_connected = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.is_connected(node_id))
+        .unwrap_or(false);
+    Ok(JsValue::new(is_connected))
+}
+
+fn js_dom_clone_node(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let deep = args.first().map(JsValue::to_boolean).unwrap_or(false);
+    let cloned = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow_mut().dom.clone_node(node_id, deep));
+    Ok(cloned
+        .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
+        .unwrap_or_else(JsValue::undefined))
+}
+
+fn js_dom_replace_child(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(parent_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(new_child_id) = node_id_argument(args.first()) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(old_child_id) = node_id_argument(args.get(1)) else {
+        return Ok(JsValue::undefined());
+    };
+    let replaced = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow_mut()
+            .dom
+            .replace_child(parent_id, new_child_id, old_child_id)
+    });
+    Ok(replaced
+        .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
+        .unwrap_or_else(JsValue::undefined))
+}
+
+fn js_dom_remove_child(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(parent_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(child_id) = node_id_argument(args.first()) else {
+        return Ok(JsValue::undefined());
+    };
+    let removed = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow_mut()
+            .dom
+            .remove_child(parent_id, child_id)
+    });
+    Ok(removed
+        .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
+        .unwrap_or_else(JsValue::undefined))
+}
+
+fn js_dom_append(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(parent_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let node_ids = js_values_to_dom_node_ids(args, context)?;
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        for node_id in node_ids {
+            state.dom.append_child(parent_id, node_id);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_prepend(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(parent_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let mut node_ids = js_values_to_dom_node_ids(args, context)?;
+    node_ids.reverse();
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let mut before_id = state.dom.first_child(parent_id);
+        for node_id in node_ids {
+            state.dom.insert_before(parent_id, node_id, before_id);
+            before_id = Some(node_id);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_before(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(target_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(parent_id) = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .node(target_id)
+            .and_then(|node| node.parent)
+    }) else {
+        return Ok(JsValue::undefined());
+    };
+    let mut node_ids = js_values_to_dom_node_ids(args, context)?;
+    node_ids.reverse();
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let mut before_id = Some(target_id);
+        for node_id in node_ids {
+            state.dom.insert_before(parent_id, node_id, before_id);
+            before_id = Some(node_id);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_after(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(target_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(parent_id) = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .node(target_id)
+            .and_then(|node| node.parent)
+    }) else {
+        return Ok(JsValue::undefined());
+    };
+    let next_sibling = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.next_sibling(target_id));
+    let node_ids = js_values_to_dom_node_ids(args, context)?;
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        for node_id in node_ids {
+            state.dom.insert_before(parent_id, node_id, next_sibling);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_replace_with(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(target_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(parent_id) = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .node(target_id)
+            .and_then(|node| node.parent)
+    }) else {
+        return Ok(JsValue::undefined());
+    };
+    let node_ids = js_values_to_dom_node_ids(args, context)?;
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        for node_id in node_ids {
+            state.dom.insert_before(parent_id, node_id, Some(target_id));
+        }
+        state.dom.detach_node(target_id);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_replace_children(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let node_ids = js_values_to_dom_node_ids(args, context)?;
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state
+            .borrow_mut()
+            .dom
+            .replace_children(node_id, node_ids);
+    }
+    Ok(JsValue::undefined())
+}
+
 fn js_dom_query_selector(
     this: &JsValue,
     args: &[JsValue],
@@ -6095,6 +6820,18 @@ fn js_document_create_text_node(
     let node_id = context
         .get_data::<JavaScriptHostData>()
         .map(|host| host.state.borrow_mut().dom.create_text_node(&text))
+        .unwrap_or(0);
+    Ok(JsValue::from(build_dom_node_object(context, node_id)))
+}
+
+fn js_document_create_document_fragment(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow_mut().dom.create_document_fragment())
         .unwrap_or(0);
     Ok(JsValue::from(build_dom_node_object(context, node_id)))
 }
@@ -6644,8 +7381,11 @@ fn js_dom_get_tag_name(this: &JsValue, _: &[JsValue], context: &mut Context) -> 
     let tag_name = context
         .get_data::<JavaScriptHostData>()
         .and_then(|host| {
-            host.state
-                .borrow()
+            let state = host.state.borrow();
+            if state.dom.is_document_node(node_id) {
+                return None;
+            }
+            state
                 .dom
                 .element(node_id)
                 .map(|element| element.tag_name.to_ascii_uppercase())
@@ -6692,10 +7432,20 @@ fn js_dom_get_parent_element(
 }
 
 fn js_dom_get_owner_document(
-    _: &JsValue,
+    this: &JsValue,
     _: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    let is_document = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.is_document_node(node_id))
+        .unwrap_or(false);
+    if is_document {
+        return Ok(JsValue::null());
+    }
     let document_id = context
         .get_data::<JavaScriptHostData>()
         .map(|host| host.state.borrow().dom.document_id)
@@ -9290,6 +10040,59 @@ mod tests {
 
         assert!(processed.html.contains("<span class=\"chip\">Hello</span>"));
         assert!(processed.html.contains("<img src=\"/avatar.png\">"));
+    }
+
+    #[test]
+    fn supports_node_introspection_and_sibling_accessors() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\"></div><script>var box = document.getElementById('box'); var first = document.createTextNode('one'); var second = document.createTextNode('two'); box.append(first); box.append(second); document.body.setAttribute('data-node', [document.nodeType, document.nodeName, document.ownerDocument === null, box.nodeType, box.nodeName, first.nodeType, first.nodeName, first.nodeValue, first.isConnected, first.previousSibling === null, first.nextSibling === second, second.previousSibling === first, second.nextSibling === null, box.firstChild === first, box.lastChild === second, box.isConnected].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-node=\"9|#document|true|1|DIV|3|#text|one|true|true|true|true|true|true|true|true\""),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_document_fragment_flattening_and_clone_node() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\"></div><script>var box = document.getElementById('box'); var frag = document.createDocumentFragment(); var span = document.createElement('span'); span.textContent = 'B'; frag.append('A', span); var template = document.createElement('section'); template.append('X', document.createElement('strong')); template.lastChild.textContent = 'Y'; var copy = template.cloneNode(true); copy.id = 'copy'; box.append(frag); box.append(copy); document.body.setAttribute('data-frag', [frag.nodeType, frag.nodeName, frag.childNodes.length].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-frag=\"11|#document-fragment|0\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed
+                .html
+                .contains("<div id=\"box\">A<span>B</span><section id=\"copy\">X<strong>Y</strong></section></div>"),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_replace_child_remove_child_and_replace_children() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\"></div><script>var box = document.getElementById('box'); var first = document.createElement('i'); first.textContent = '1'; var second = document.createElement('b'); second.textContent = '2'; box.append(first); box.append(second); var fresh = document.createElement('u'); fresh.textContent = '3'; box.replaceChild(fresh, first); box.removeChild(fresh); box.replaceChildren('N', document.createElement('em'), 'M');</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed.html.contains("<div id=\"box\">N<em></em>M</div>"),
+            "{}",
+            processed.html
+        );
     }
 
     #[test]

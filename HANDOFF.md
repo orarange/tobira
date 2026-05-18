@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-17`
+- Date: `2026-05-18`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
 - Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
@@ -33,8 +33,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `157` passing tests on `2026-05-17`
-  - `cargo build`: success on `2026-05-17`
+  - `cargo test`: `188` passing tests on `2026-05-18`
+  - `cargo build`: success on `2026-05-18`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -66,6 +66,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `window.scrollY` / `window.pageYOffset`
     - `document.activeElement`
     - `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
+  - Node introspection and mutation helpers are now much closer to browser DOM behavior:
+    - `nodeType`, `nodeName`, `nodeValue`, `firstChild`, `lastChild`, `previousSibling`, `nextSibling`, `isConnected`
+    - `cloneNode(...)`, `replaceChild(...)`, `removeChild(...)`
+    - `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, `replaceChildren(...)`
+    - `document.createDocumentFragment(...)` with fragment flattening on insertion
   - page event listeners now support capture + bubbling, plus `once` listeners and capture-sensitive `removeEventListener(...)`
   - guarded JavaScript execution through `boa_engine`
   - lightweight mutable DOM bridge with:
@@ -189,6 +194,13 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-18 - Codex (Node / fragment DOM APIs)
+
+- Added browser-grade Node accessors to the JS DOM bridge, including `nodeType`, `nodeName`, `nodeValue`, sibling accessors, and `isConnected` on document and element nodes.
+- Added structural mutation helpers: `cloneNode(...)`, `replaceChild(...)`, `removeChild(...)`, `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, and `replaceChildren(...)`.
+- Added `document.createDocumentFragment(...)` and fragment flattening during insertion so DOM batches behave more like a real browser.
+- Verified the updated state with `cargo test` (`188` passing tests) and `cargo build`.
 
 ### 2026-05-14 - Codex
 

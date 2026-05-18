@@ -72,8 +72,11 @@ Current capabilities:
   - `document.getElementById(...)`
   - `document.createElement(...)`
   - `document.createTextNode(...)`
+  - `document.createDocumentFragment(...)`
   - `appendChild(...)`, `insertBefore(...)`, `remove()`
+  - `replaceChild(...)`, `removeChild(...)`, `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, `replaceChildren(...)`
   - dynamic `document.body`, `document.head`, and `document.documentElement`
+  - Node introspection helpers: `nodeType`, `nodeName`, `nodeValue`, `firstChild`, `lastChild`, `previousSibling`, `nextSibling`, `isConnected`
   - `hasAttribute(...)`, `getAttributeNames(...)`
   - `toggleAttribute(...)`
   - `element.attributes` as a live NamedNodeMap-style collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
