@@ -163,6 +163,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Native page input typing now syncs `value` into the JS DOM.
 - DOM traversal APIs now include `matches(...)`, `closest(...)`, `contains(...)`, and element sibling / child accessors for event delegation and framework-style code paths.
 - The richer `attributes` / `dataset` surface still needs deeper parity, even though `element.attributes` is now a live collection and `hasAttributes(...)` / `toggleAttribute(...)` now exist.
+- `MutationObserver` now fires for `attributes` and `childList`, and the JS layer also exposes browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) plus `AbortController` / `AbortSignal`.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward replay still needs depth beyond the current scroll restoration work.
 - Script-driven scrolling now has basic window / DOM setter support, and full-document / same-document history scroll restoration is in place.

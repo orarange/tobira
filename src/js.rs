@@ -50,6 +50,14 @@ pub struct DomEventRequest {
     pub cancelable: bool,
     pub key: Option<String>,
     pub code: Option<String>,
+    pub detail: Option<String>,
+    pub data: Option<String>,
+    pub input_type: Option<String>,
+    pub client_x: Option<i32>,
+    pub client_y: Option<i32>,
+    pub button: Option<i32>,
+    pub buttons: Option<i32>,
+    pub is_composing: bool,
     pub repeat: bool,
     pub alt_key: bool,
     pub ctrl_key: bool,
@@ -535,6 +543,7 @@ impl JavaScriptRuntime {
     }
 
     fn snapshot(&mut self) -> ProcessedScriptHtml {
+        flush_mutation_observers(&mut self.context);
         ProcessedScriptHtml {
             html: self.serialize_html(),
             title_override: self.title_override(),
@@ -568,17 +577,21 @@ impl JavaScriptRuntime {
 
     fn set_dom_attribute(&mut self, node_id: usize, name: &str, value: &str) {
         if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+            let old_value = host.state.borrow().dom.get_attribute(node_id, name);
             host.state
                 .borrow_mut()
                 .dom
                 .set_attribute(node_id, name, value);
+            record_dom_attribute_mutation(&mut self.context, node_id, name, old_value);
         }
+        flush_mutation_observers(&mut self.context);
     }
 
     fn dispatch_dom_event(&mut self, request: DomEventRequest) -> DomEventDispatchResult {
         let default_prevented = self.dispatch_dom_event_request(request).unwrap_or(false);
         self.flush_pending_document_writes();
         self.process_loaded_document();
+        flush_mutation_observers(&mut self.context);
         DomEventDispatchResult {
             snapshot: self.snapshot(),
             default_prevented,
@@ -601,6 +614,7 @@ impl JavaScriptRuntime {
             .unwrap_or(false);
         self.flush_pending_document_writes();
         self.process_loaded_document();
+        flush_mutation_observers(&mut self.context);
         DomEventDispatchResult {
             snapshot: self.snapshot(),
             default_prevented,
@@ -635,6 +649,7 @@ impl JavaScriptRuntime {
                 if let Err(error) = self.context.run_jobs() {
                     self.push_log(format!("js job error: {error}"));
                 }
+                flush_mutation_observers(&mut self.context);
             }
             Err(error) => self.push_log(format!("js error: {error}")),
         }
@@ -2683,6 +2698,296 @@ fn install_browser_globals(context: &mut Context) {
             "globalThis.XMLHttpRequest = function XMLHttpRequest(){ return __tobiraCreateXMLHttpRequest(); };",
         ))
         .expect("XMLHttpRequest bootstrap should evaluate");
+    context
+        .register_global_builtin_callable(
+            js_string!("__tobiraGetNodeById"),
+            1,
+            NativeFunction::from_fn_ptr(js_get_node_by_id),
+        )
+        .expect("__tobiraGetNodeById should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("__tobiraCreateMutationObserver"),
+            1,
+            NativeFunction::from_fn_ptr(js_create_mutation_observer),
+        )
+        .expect("__tobiraCreateMutationObserver should be installable");
+    context
+        .eval(Source::from_bytes(
+            r#"
+globalThis.__tobiraMutationObservers = [];
+globalThis.MutationObserver = function MutationObserver(callback) {
+  var observer = __tobiraCreateMutationObserver(callback);
+  observer.observe = function (target, options) {
+    if (!target || typeof target !== 'object') {
+      return;
+    }
+    var normalized = options && typeof options === 'object' ? options : {};
+    this.observations.push({
+      target: target,
+      childList: !!normalized.childList,
+      attributes: !!normalized.attributes,
+      characterData: !!normalized.characterData,
+      subtree: !!normalized.subtree,
+      attributeOldValue: !!normalized.attributeOldValue,
+      characterDataOldValue: !!normalized.characterDataOldValue,
+      attributeFilter: Array.isArray(normalized.attributeFilter)
+        ? normalized.attributeFilter.map(String)
+        : null,
+    });
+  };
+  observer.disconnect = function () {
+    this.observations.length = 0;
+    this.records.length = 0;
+  };
+  observer.takeRecords = function () {
+    var records = this.records.slice();
+    this.records.length = 0;
+    return records;
+  };
+  observer.matchesMutation = function (mutationType, target, attributeName) {
+    return this.observations.some(function (observation) {
+      if (!observation) {
+        return false;
+      }
+      if (mutationType === 'attributes' && !observation.attributes) {
+        return false;
+      }
+      if (mutationType === 'childList' && !observation.childList) {
+        return false;
+      }
+      if (mutationType === 'characterData' && !observation.characterData) {
+        return false;
+      }
+      if (observation.target !== target && !(observation.subtree && observation.target.contains(target))) {
+        return false;
+      }
+      if (mutationType === 'attributes' && observation.attributeFilter && !observation.attributeFilter.includes(attributeName)) {
+        return false;
+      }
+      return true;
+    });
+  };
+  __tobiraMutationObservers.push(observer);
+  return observer;
+};
+globalThis.__tobiraRecordMutation = function (mutationType, targetId, attributeName, oldValue, addedNodeIds, removedNodeIds) {
+  if (!globalThis.__tobiraMutationObservers || !globalThis.__tobiraMutationObservers.length) {
+    return;
+  }
+  var target = __tobiraGetNodeById(targetId);
+  if (!target) {
+    return;
+  }
+  var addedNodes = Array.isArray(addedNodeIds)
+    ? addedNodeIds.map(__tobiraGetNodeById).filter(Boolean)
+    : [];
+  var removedNodes = Array.isArray(removedNodeIds)
+    ? removedNodeIds.map(__tobiraGetNodeById).filter(Boolean)
+    : [];
+  var record = {
+    type: mutationType,
+    target: target,
+    attributeName: attributeName == null ? null : String(attributeName),
+    oldValue: oldValue == null ? null : String(oldValue),
+    addedNodes: addedNodes,
+    removedNodes: removedNodes,
+  };
+  for (var i = 0; i < __tobiraMutationObservers.length; i += 1) {
+    var observer = __tobiraMutationObservers[i];
+    if (observer && observer.matchesMutation(mutationType, target, record.attributeName)) {
+      observer.records.push(record);
+    }
+  }
+};
+globalThis.__tobiraFlushMutationObservers = function () {
+  if (!globalThis.__tobiraMutationObservers || !globalThis.__tobiraMutationObservers.length) {
+    return false;
+  }
+  var delivered = false;
+  for (var i = 0; i < __tobiraMutationObservers.length; i += 1) {
+    var observer = __tobiraMutationObservers[i];
+    if (observer && observer.records.length) {
+      delivered = true;
+      var records = observer.takeRecords();
+      observer.callback.call(observer, records, observer);
+    }
+  }
+  return delivered;
+};
+if (typeof globalThis.Event !== 'function') {
+  globalThis.__tobiraCreateEventObject = function (ctor, type, init, extra) {
+    var event = Object.create(ctor.prototype);
+    init = init && typeof init === 'object' ? init : {};
+    event.type = String(type == null ? '' : type);
+    event.bubbles = !!init.bubbles;
+    event.cancelable = !!init.cancelable;
+    event.composed = !!init.composed;
+    event.defaultPrevented = false;
+    event.eventPhase = 0;
+    event.target = null;
+    event.currentTarget = null;
+    event.cancelBubble = false;
+    event.propagationStopped = false;
+    event.immediatePropagationStopped = false;
+    if (typeof extra === 'function') {
+      extra(event, init);
+    }
+    return event;
+  };
+  globalThis.Event = function Event(type, init) {
+    if (!(this instanceof Event)) {
+      return new Event(type, init);
+    }
+    return __tobiraCreateEventObject(Event, type, init);
+  };
+  Event.prototype.preventDefault = function () {
+    if (!this.cancelable || this.__tobiraPassiveListener) {
+      return;
+    }
+    this.defaultPrevented = true;
+  };
+  Event.prototype.stopPropagation = function () {
+    this.propagationStopped = true;
+    this.cancelBubble = true;
+  };
+  Event.prototype.stopImmediatePropagation = function () {
+    this.immediatePropagationStopped = true;
+    this.propagationStopped = true;
+    this.cancelBubble = true;
+  };
+  globalThis.CustomEvent = function CustomEvent(type, init) {
+    if (!(this instanceof CustomEvent)) {
+      return new CustomEvent(type, init);
+    }
+    return __tobiraCreateEventObject(CustomEvent, type, init, function (event, initValue) {
+      event.detail = initValue.detail == null ? null : String(initValue.detail);
+    });
+  };
+  CustomEvent.prototype = Object.create(Event.prototype);
+  CustomEvent.prototype.constructor = CustomEvent;
+  globalThis.KeyboardEvent = function KeyboardEvent(type, init) {
+    if (!(this instanceof KeyboardEvent)) {
+      return new KeyboardEvent(type, init);
+    }
+    return __tobiraCreateEventObject(KeyboardEvent, type, init, function (event, initValue) {
+      event.key = initValue.key == null ? '' : String(initValue.key);
+      event.code = initValue.code == null ? '' : String(initValue.code);
+      event.repeat = !!initValue.repeat;
+      event.altKey = !!initValue.altKey;
+      event.ctrlKey = !!initValue.ctrlKey;
+      event.shiftKey = !!initValue.shiftKey;
+      event.metaKey = !!initValue.metaKey;
+    });
+  };
+  KeyboardEvent.prototype = Object.create(Event.prototype);
+  KeyboardEvent.prototype.constructor = KeyboardEvent;
+  globalThis.InputEvent = function InputEvent(type, init) {
+    if (!(this instanceof InputEvent)) {
+      return new InputEvent(type, init);
+    }
+    return __tobiraCreateEventObject(InputEvent, type, init, function (event, initValue) {
+      event.data = initValue.data == null ? null : String(initValue.data);
+      event.inputType = initValue.inputType == null ? '' : String(initValue.inputType);
+      event.isComposing = !!initValue.isComposing;
+      event.altKey = !!initValue.altKey;
+      event.ctrlKey = !!initValue.ctrlKey;
+      event.shiftKey = !!initValue.shiftKey;
+      event.metaKey = !!initValue.metaKey;
+    });
+  };
+  InputEvent.prototype = Object.create(Event.prototype);
+  InputEvent.prototype.constructor = InputEvent;
+  globalThis.MouseEvent = function MouseEvent(type, init) {
+    if (!(this instanceof MouseEvent)) {
+      return new MouseEvent(type, init);
+    }
+    return __tobiraCreateEventObject(MouseEvent, type, init, function (event, initValue) {
+      event.clientX = Number(initValue.clientX || 0);
+      event.clientY = Number(initValue.clientY || 0);
+      event.button = Number(initValue.button || 0);
+      event.buttons = Number(initValue.buttons || 0);
+      event.altKey = !!initValue.altKey;
+      event.ctrlKey = !!initValue.ctrlKey;
+      event.shiftKey = !!initValue.shiftKey;
+      event.metaKey = !!initValue.metaKey;
+    });
+  };
+  MouseEvent.prototype = Object.create(Event.prototype);
+  MouseEvent.prototype.constructor = MouseEvent;
+  globalThis.FocusEvent = function FocusEvent(type, init) {
+    if (!(this instanceof FocusEvent)) {
+      return new FocusEvent(type, init);
+    }
+    return __tobiraCreateEventObject(FocusEvent, type, init, function (event, initValue) {
+      event.relatedTarget = initValue.relatedTarget == null ? null : initValue.relatedTarget;
+    });
+  };
+  FocusEvent.prototype = Object.create(Event.prototype);
+  FocusEvent.prototype.constructor = FocusEvent;
+  globalThis.SubmitEvent = function SubmitEvent(type, init) {
+    if (!(this instanceof SubmitEvent)) {
+      return new SubmitEvent(type, init);
+    }
+    return __tobiraCreateEventObject(SubmitEvent, type, init, function (event, initValue) {
+      event.submitter = initValue.submitter == null ? null : initValue.submitter;
+    });
+  };
+  SubmitEvent.prototype = Object.create(Event.prototype);
+  SubmitEvent.prototype.constructor = SubmitEvent;
+  globalThis.AbortSignal = function AbortSignal() {
+    if (!(this instanceof AbortSignal)) {
+      return new AbortSignal();
+    }
+    this.aborted = false;
+    this.reason = null;
+    this.__tobiraAbortListeners = [];
+  };
+  AbortSignal.prototype.addEventListener = function (type, callback) {
+    if (String(type).toLowerCase() !== 'abort' || typeof callback !== 'function') {
+      return;
+    }
+    this.__tobiraAbortListeners.push(callback);
+  };
+  AbortSignal.prototype.removeEventListener = function (type, callback) {
+    if (String(type).toLowerCase() !== 'abort' || typeof callback !== 'function') {
+      return;
+    }
+    this.__tobiraAbortListeners = this.__tobiraAbortListeners.filter(function (listener) {
+      return listener !== callback;
+    });
+  };
+  AbortSignal.prototype.dispatchEvent = function (event) {
+    if (!event || event.type !== 'abort') {
+      return true;
+    }
+    var listeners = this.__tobiraAbortListeners.slice();
+    for (var i = 0; i < listeners.length; i += 1) {
+      try {
+        listeners[i].call(this, event);
+      } catch (error) {
+      }
+    }
+    return true;
+  };
+  globalThis.AbortController = function AbortController() {
+    if (!(this instanceof AbortController)) {
+      return new AbortController();
+    }
+    this.signal = new AbortSignal();
+  };
+  AbortController.prototype.abort = function (reason) {
+    if (this.signal.aborted) {
+      return;
+    }
+    this.signal.aborted = true;
+    this.signal.reason = reason == null ? null : reason;
+    this.signal.dispatchEvent(new Event('abort', { bubbles: false, cancelable: false }));
+  };
+}
+"#,
+        ))
+        .expect("MutationObserver bootstrap should evaluate");
 }
 
 fn build_simple_node_list_stub(context: &mut Context) -> boa_engine::object::JsObject {
@@ -3404,6 +3709,38 @@ fn build_dom_event_object(
     if let Some(code) = &request.code {
         let _ = event.set(js_string!("code"), js_string!(code.as_str()), true, context);
     }
+    if let Some(detail) = &request.detail {
+        let _ = event.set(js_string!("detail"), js_string!(detail.as_str()), true, context);
+    }
+    if let Some(data) = &request.data {
+        let _ = event.set(js_string!("data"), js_string!(data.as_str()), true, context);
+    }
+    if let Some(input_type) = &request.input_type {
+        let _ = event.set(
+            js_string!("inputType"),
+            js_string!(input_type.as_str()),
+            true,
+            context,
+        );
+    }
+    if let Some(client_x) = request.client_x {
+        let _ = event.set(js_string!("clientX"), JsValue::new(client_x), true, context);
+    }
+    if let Some(client_y) = request.client_y {
+        let _ = event.set(js_string!("clientY"), JsValue::new(client_y), true, context);
+    }
+    if let Some(button) = request.button {
+        let _ = event.set(js_string!("button"), JsValue::new(button), true, context);
+    }
+    if let Some(buttons) = request.buttons {
+        let _ = event.set(js_string!("buttons"), JsValue::new(buttons), true, context);
+    }
+    let _ = event.set(
+        js_string!("isComposing"),
+        JsValue::new(request.is_composing),
+        true,
+        context,
+    );
     let _ = event.set(
         js_string!("repeat"),
         JsValue::new(request.repeat),
@@ -5651,6 +5988,20 @@ fn fetch_for_script(url: &Url, context: &mut Context) -> JsResult<HttpResponse> 
 
 fn js_fetch(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let request = args.first().cloned().unwrap_or_else(JsValue::undefined);
+    let options = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
+    if let Some(options_object) = options.as_object()
+        && let Ok(signal_value) = options_object.get(js_string!("signal"), context)
+        && let Some(signal_object) = signal_value.as_object()
+    {
+        if let Ok(aborted_value) = signal_object.get(js_string!("aborted"), context)
+            && aborted_value.to_boolean()
+        {
+            return Ok(JsValue::from(JsPromise::reject(
+                JsNativeError::error().with_message("fetch aborted"),
+                context,
+            )));
+        }
+    }
     let url = resolve_requested_url(&request, context);
     let promise = match url {
         Ok(url) => JsPromise::from_result(
@@ -6207,16 +6558,69 @@ fn js_dom_dispatch_event(
         return Ok(JsValue::new(true));
     };
     let event_arg = args.first().cloned().unwrap_or_else(JsValue::undefined);
-    let (event_type, bubbles, cancelable) = if let Some(object) = event_arg.as_object() {
+    let (event_type, bubbles, cancelable, key, code, detail, data, input_type, client_x, client_y, button, buttons, is_composing, repeat, alt_key, ctrl_key, shift_key, meta_key) = if let Some(object) = event_arg.as_object() {
         let event_type = js_value_to_string(&object.get(js_string!("type"), context)?, context)?;
         let bubbles = object.get(js_string!("bubbles"), context)?.to_boolean();
         let cancelable = object.get(js_string!("cancelable"), context)?.to_boolean();
-        (event_type, bubbles, cancelable)
+        let key = js_optional_string_property(&object, "key", context)?;
+        let code = js_optional_string_property(&object, "code", context)?;
+        let detail = js_optional_string_property(&object, "detail", context)?;
+        let data = js_optional_string_property(&object, "data", context)?;
+        let input_type = js_optional_string_property(&object, "inputType", context)?;
+        let client_x = js_optional_i32_property(&object, "clientX", context)?;
+        let client_y = js_optional_i32_property(&object, "clientY", context)?;
+        let button = js_optional_i32_property(&object, "button", context)?;
+        let buttons = js_optional_i32_property(&object, "buttons", context)?;
+        let is_composing = js_optional_bool_property(&object, "isComposing", context)?;
+        let repeat = js_optional_bool_property(&object, "repeat", context)?;
+        let alt_key = js_optional_bool_property(&object, "altKey", context)?;
+        let ctrl_key = js_optional_bool_property(&object, "ctrlKey", context)?;
+        let shift_key = js_optional_bool_property(&object, "shiftKey", context)?;
+        let meta_key = js_optional_bool_property(&object, "metaKey", context)?;
+        (
+            event_type,
+            bubbles,
+            cancelable,
+            key,
+            code,
+            detail,
+            data,
+            input_type,
+            client_x,
+            client_y,
+            button,
+            buttons,
+            is_composing,
+            repeat,
+            alt_key,
+            ctrl_key,
+            shift_key,
+            meta_key,
+        )
     } else {
         let event_type = js_value_to_string(&event_arg, context)?;
         let bubbles = default_event_bubbles(&event_type);
         let cancelable = default_event_cancelable(&event_type);
-        (event_type, bubbles, cancelable)
+        (
+            event_type,
+            bubbles,
+            cancelable,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
     };
     let request = DomEventRequest {
         target_node_id: target
@@ -6226,6 +6630,21 @@ fn js_dom_dispatch_event(
         event_type,
         bubbles,
         cancelable,
+        key,
+        code,
+        detail,
+        data,
+        input_type,
+        client_x,
+        client_y,
+        button,
+        buttons,
+        is_composing,
+        repeat,
+        alt_key,
+        ctrl_key,
+        shift_key,
+        meta_key,
         ..Default::default()
     };
     let prevented = dispatch_dom_event_on_target(target.clone(), &request, context)?;
@@ -6533,12 +6952,16 @@ fn js_dom_replace_child(
     let Some(old_child_id) = node_id_argument(args.get(1)) else {
         return Ok(JsValue::undefined());
     };
+    let old_children = snapshot_dom_children(context, parent_id);
     let replaced = context.get_data::<JavaScriptHostData>().and_then(|host| {
         host.state
             .borrow_mut()
             .dom
             .replace_child(parent_id, new_child_id, old_child_id)
     });
+    let new_children = snapshot_dom_children(context, parent_id);
+    record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(replaced
         .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
         .unwrap_or_else(JsValue::undefined))
@@ -6555,12 +6978,16 @@ fn js_dom_remove_child(
     let Some(child_id) = node_id_argument(args.first()) else {
         return Ok(JsValue::undefined());
     };
+    let old_children = snapshot_dom_children(context, parent_id);
     let removed = context.get_data::<JavaScriptHostData>().and_then(|host| {
         host.state
             .borrow_mut()
             .dom
             .remove_child(parent_id, child_id)
     });
+    let new_children = snapshot_dom_children(context, parent_id);
+    record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(removed
         .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
         .unwrap_or_else(JsValue::undefined))
@@ -6571,12 +6998,17 @@ fn js_dom_append(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
         return Ok(JsValue::undefined());
     };
     let node_ids = js_values_to_dom_node_ids(args, context)?;
+    let old_children = snapshot_dom_children(context, parent_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
         for node_id in node_ids {
             state.dom.append_child(parent_id, node_id);
         }
+        drop(state);
     }
+    let new_children = snapshot_dom_children(context, parent_id);
+    record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
 
@@ -6586,6 +7018,7 @@ fn js_dom_prepend(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     };
     let mut node_ids = js_values_to_dom_node_ids(args, context)?;
     node_ids.reverse();
+    let old_children = snapshot_dom_children(context, parent_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
         let mut before_id = state.dom.first_child(parent_id);
@@ -6593,7 +7026,11 @@ fn js_dom_prepend(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
             state.dom.insert_before(parent_id, node_id, before_id);
             before_id = Some(node_id);
         }
+        drop(state);
     }
+    let new_children = snapshot_dom_children(context, parent_id);
+    record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
 
@@ -6612,6 +7049,7 @@ fn js_dom_before(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     };
     let mut node_ids = js_values_to_dom_node_ids(args, context)?;
     node_ids.reverse();
+    let old_children = snapshot_dom_children(context, parent_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
         let mut before_id = Some(target_id);
@@ -6619,7 +7057,11 @@ fn js_dom_before(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
             state.dom.insert_before(parent_id, node_id, before_id);
             before_id = Some(node_id);
         }
+        drop(state);
     }
+    let new_children = snapshot_dom_children(context, parent_id);
+    record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
 
@@ -6640,12 +7082,17 @@ fn js_dom_after(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
         .get_data::<JavaScriptHostData>()
         .and_then(|host| host.state.borrow().dom.next_sibling(target_id));
     let node_ids = js_values_to_dom_node_ids(args, context)?;
+    let old_children = snapshot_dom_children(context, parent_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
         for node_id in node_ids {
             state.dom.insert_before(parent_id, node_id, next_sibling);
         }
+        drop(state);
     }
+    let new_children = snapshot_dom_children(context, parent_id);
+    record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
 
@@ -6667,13 +7114,18 @@ fn js_dom_replace_with(
         return Ok(JsValue::undefined());
     };
     let node_ids = js_values_to_dom_node_ids(args, context)?;
+    let old_children = snapshot_dom_children(context, parent_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
         for node_id in node_ids {
             state.dom.insert_before(parent_id, node_id, Some(target_id));
         }
         state.dom.detach_node(target_id);
+        drop(state);
     }
+    let new_children = snapshot_dom_children(context, parent_id);
+    record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
 
@@ -6686,12 +7138,16 @@ fn js_dom_replace_children(
         return Ok(JsValue::undefined());
     };
     let node_ids = js_values_to_dom_node_ids(args, context)?;
+    let old_children = snapshot_dom_children(context, node_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         host.state
             .borrow_mut()
             .dom
             .replace_children(node_id, node_ids);
     }
+    let new_children = snapshot_dom_children(context, node_id);
+    record_dom_child_list_mutation(context, node_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
 
@@ -6836,6 +7292,51 @@ fn js_document_create_document_fragment(
     Ok(JsValue::from(build_dom_node_object(context, node_id)))
 }
 
+fn js_get_node_by_id(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return Ok(JsValue::null());
+    };
+    if host.state.borrow().dom.node(node_id).is_none() {
+        return Ok(JsValue::null());
+    }
+    Ok(JsValue::from(build_dom_node_object(context, node_id)))
+}
+
+fn js_create_mutation_observer(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(callback) = args.first().cloned() else {
+        return Err(JsNativeError::typ()
+            .with_message("MutationObserver callback is required")
+            .into());
+    };
+    let Some(callback_object) = callback.as_object() else {
+        return Err(JsNativeError::typ()
+            .with_message("MutationObserver callback must be callable")
+            .into());
+    };
+    if JsFunction::from_object(callback_object.clone()).is_none() {
+        return Err(JsNativeError::typ()
+            .with_message("MutationObserver callback must be callable")
+            .into());
+    }
+
+    let records = JsArray::new(context);
+    let observations = JsArray::new(context);
+    let observer = ObjectInitializer::new(context)
+        .property(js_string!("callback"), callback, Attribute::all())
+        .property(js_string!("records"), records, Attribute::all())
+        .property(js_string!("observations"), observations, Attribute::all())
+        .build();
+    Ok(JsValue::from(observer))
+}
+
 fn js_document_create_stub_object(
     _: &JsValue,
     _: &[JsValue],
@@ -6859,12 +7360,16 @@ fn js_dom_append_child(
     let Some(child_id) = node_id_argument(args.first()) else {
         return Ok(JsValue::undefined());
     };
+    let old_children = snapshot_dom_children(context, parent_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         host.state
             .borrow_mut()
             .dom
             .append_child(parent_id, child_id);
     }
+    let new_children = snapshot_dom_children(context, parent_id);
+    record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(args.first().cloned().unwrap_or_else(JsValue::undefined))
 }
 
@@ -6880,12 +7385,16 @@ fn js_dom_insert_before(
         return Ok(JsValue::undefined());
     };
     let before_id = node_id_argument(args.get(1));
+    let old_children = snapshot_dom_children(context, parent_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         host.state
             .borrow_mut()
             .dom
             .insert_before(parent_id, child_id, before_id);
     }
+    let new_children = snapshot_dom_children(context, parent_id);
+    record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(args.first().cloned().unwrap_or_else(JsValue::undefined))
 }
 
@@ -6992,10 +7501,13 @@ fn js_dom_set_attribute(
     if let Some(node_id) = this_node_id(this)
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
+        let old_value = host.state.borrow().dom.get_attribute(node_id, &name);
         host.state
             .borrow_mut()
             .dom
             .set_attribute(node_id, &name, &value);
+        record_dom_attribute_mutation(context, node_id, &name, old_value);
+        flush_mutation_observers(context);
     }
     Ok(JsValue::undefined())
 }
@@ -7011,8 +7523,9 @@ fn js_dom_toggle_attribute(
         return Ok(JsValue::new(false));
     };
     let toggled = if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let old_value = host.state.borrow().dom.get_attribute(node_id, &name);
         let mut state = host.state.borrow_mut();
-        if let Some(force) = force {
+        let toggled = if let Some(force) = force {
             if force {
                 state.dom.set_attribute(node_id, &name, "");
                 true
@@ -7026,7 +7539,11 @@ fn js_dom_toggle_attribute(
         } else {
             state.dom.set_attribute(node_id, &name, "");
             true
-        }
+        };
+        drop(state);
+        record_dom_attribute_mutation(context, node_id, &name, old_value);
+        flush_mutation_observers(context);
+        toggled
     } else {
         false
     };
@@ -7043,10 +7560,13 @@ fn js_dom_set_property_attribute(
     if let Some(node_id) = this_node_id(this)
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
+        let old_value = host.state.borrow().dom.get_attribute(node_id, name);
         host.state
             .borrow_mut()
             .dom
             .set_attribute(node_id, name, &value);
+        record_dom_attribute_mutation(context, node_id, name, old_value);
+        flush_mutation_observers(context);
     }
     Ok(JsValue::undefined())
 }
@@ -7060,16 +7580,30 @@ fn js_dom_remove_attribute(
     if let Some(node_id) = this_node_id(this)
         && let Some(host) = context.get_data::<JavaScriptHostData>()
     {
+        let old_value = host.state.borrow().dom.get_attribute(node_id, &name);
         host.state.borrow_mut().dom.remove_attribute(node_id, &name);
+        record_dom_attribute_mutation(context, node_id, &name, old_value);
+        flush_mutation_observers(context);
     }
     Ok(JsValue::undefined())
 }
 
 fn js_dom_remove(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    if let Some(node_id) = this_node_id(this)
-        && let Some(host) = context.get_data::<JavaScriptHostData>()
-    {
-        host.state.borrow_mut().dom.detach_node(node_id);
+    if let Some(node_id) = this_node_id(this) {
+        let parent_id = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.node(node_id).and_then(|node| node.parent));
+        if let Some(parent_id) = parent_id {
+            let old_children = snapshot_dom_children(context, parent_id);
+            if let Some(host) = context.get_data::<JavaScriptHostData>() {
+                host.state.borrow_mut().dom.detach_node(node_id);
+            }
+            let new_children = snapshot_dom_children(context, parent_id);
+            record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+            flush_mutation_observers(context);
+        } else if let Some(host) = context.get_data::<JavaScriptHostData>() {
+            host.state.borrow_mut().dom.detach_node(node_id);
+        }
     }
     Ok(JsValue::undefined())
 }
@@ -7085,6 +7619,15 @@ fn js_dom_insert_adjacent_html(
     let Some(node_id) = this_node_id(this) else {
         return Ok(JsValue::undefined());
     };
+    let target_id = if matches!(position.as_str(), "beforebegin" | "afterend") {
+        context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.node(node_id).and_then(|node| node.parent))
+            .unwrap_or(node_id)
+    } else {
+        node_id
+    };
+    let old_children = snapshot_dom_children(context, target_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
         match position.as_str() {
@@ -7094,7 +7637,11 @@ fn js_dom_insert_adjacent_html(
             "afterend" => state.dom.insert_fragment_after(node_id, &html),
             _ => {}
         }
+        drop(state);
     }
+    let new_children = snapshot_dom_children(context, target_id);
+    record_dom_child_list_mutation(context, target_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
 
@@ -7211,9 +7758,13 @@ fn js_dom_set_text_content(
 ) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let text = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let old_children = snapshot_dom_children(context, node_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         host.state.borrow_mut().dom.set_text_content(node_id, &text);
     }
+    let new_children = snapshot_dom_children(context, node_id);
+    record_dom_child_list_mutation(context, node_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
 
@@ -7237,12 +7788,16 @@ fn js_dom_set_inner_html(
 ) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let html = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let old_children = snapshot_dom_children(context, node_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         host.state
             .borrow_mut()
             .dom
             .replace_children_with_fragment(node_id, &html);
     }
+    let new_children = snapshot_dom_children(context, node_id);
+    record_dom_child_list_mutation(context, node_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
 
@@ -7266,20 +7821,24 @@ fn js_dom_set_outer_html(
 ) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let html = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let parent_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.node(node_id).and_then(|node| node.parent));
+    let target_id = parent_id.unwrap_or(node_id);
+    let old_children = snapshot_dom_children(context, target_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
-        if state
-            .dom
-            .node(node_id)
-            .and_then(|node| node.parent)
-            .is_some()
-        {
+        if parent_id.is_some() {
             state.dom.insert_fragment_before(node_id, &html);
             state.dom.detach_node(node_id);
         } else {
             state.dom.replace_children_with_fragment(node_id, &html);
         }
+        drop(state);
     }
+    let new_children = snapshot_dom_children(context, target_id);
+    record_dom_child_list_mutation(context, target_id, &old_children, &new_children);
+    flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
 
@@ -8947,6 +9506,168 @@ fn js_return_undefined(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<
     Ok(JsValue::undefined())
 }
 
+fn js_string_literal(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn js_usize_array_literal(values: &[usize]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn record_dom_mutation(
+    context: &mut Context,
+    mutation_type: &str,
+    target_node_id: usize,
+    attribute_name: Option<&str>,
+    old_value: Option<&str>,
+    added_node_ids: &[usize],
+    removed_node_ids: &[usize],
+) {
+    let script = format!(
+        "if (typeof __tobiraRecordMutation === 'function') {{ __tobiraRecordMutation({}, {}, {}, {}, {}, {}); }}",
+        js_string_literal(mutation_type),
+        target_node_id,
+        attribute_name
+            .map(js_string_literal)
+            .unwrap_or_else(|| "null".to_string()),
+        old_value
+            .map(js_string_literal)
+            .unwrap_or_else(|| "null".to_string()),
+        js_usize_array_literal(added_node_ids),
+        js_usize_array_literal(removed_node_ids),
+    );
+    let _ = context.eval(Source::from_bytes(script.as_str()));
+}
+
+fn snapshot_dom_children(context: &mut Context, node_id: usize) -> Vec<usize> {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .node(node_id)
+                .map(|node| node.children.clone())
+        })
+        .unwrap_or_default()
+}
+
+fn js_optional_string_property(
+    object: &boa_engine::object::JsObject,
+    name: &str,
+    context: &mut Context,
+) -> JsResult<Option<String>> {
+    let value = object.get(js_string!(name), context)?;
+    if value.is_null() || value.is_undefined() {
+        return Ok(None);
+    }
+    Ok(Some(js_value_to_string(&value, context)?))
+}
+
+fn js_optional_i32_property(
+    object: &boa_engine::object::JsObject,
+    name: &str,
+    context: &mut Context,
+) -> JsResult<Option<i32>> {
+    let value = object.get(js_string!(name), context)?;
+    if value.is_null() || value.is_undefined() {
+        return Ok(None);
+    }
+    let number = value.to_number(context)?;
+    if !number.is_finite() {
+        return Ok(None);
+    }
+    Ok(Some(number.round() as i32))
+}
+
+fn js_optional_bool_property(
+    object: &boa_engine::object::JsObject,
+    name: &str,
+    context: &mut Context,
+) -> JsResult<bool> {
+    Ok(object.get(js_string!(name), context)?.to_boolean())
+}
+
+fn record_dom_child_list_mutation(
+    context: &mut Context,
+    target_node_id: usize,
+    old_children: &[usize],
+    new_children: &[usize],
+) {
+    if old_children == new_children {
+        return;
+    }
+    let reorder_only = old_children.len() == new_children.len()
+        && old_children.iter().all(|child_id| new_children.contains(child_id))
+        && new_children.iter().all(|child_id| old_children.contains(child_id));
+    let (added, removed) = if reorder_only {
+        (new_children.to_vec(), old_children.to_vec())
+    } else {
+        let added: Vec<usize> = new_children
+            .iter()
+            .copied()
+            .filter(|child_id| !old_children.contains(child_id))
+            .collect();
+        let removed: Vec<usize> = old_children
+            .iter()
+            .copied()
+            .filter(|child_id| !new_children.contains(child_id))
+            .collect();
+        (added, removed)
+    };
+    if added.is_empty() && removed.is_empty() {
+        return;
+    }
+    record_dom_mutation(
+        context,
+        "childList",
+        target_node_id,
+        None,
+        None,
+        &added,
+        &removed,
+    );
+}
+
+fn record_dom_attribute_mutation(
+    context: &mut Context,
+    target_node_id: usize,
+    attribute_name: &str,
+    old_value: Option<String>,
+) {
+    record_dom_mutation(
+        context,
+        "attributes",
+        target_node_id,
+        Some(attribute_name),
+        old_value.as_deref(),
+        &[],
+        &[],
+    );
+}
+
+fn flush_mutation_observers(context: &mut Context) {
+    for _ in 0..8 {
+        let delivered = context
+            .eval(Source::from_bytes(
+                "typeof __tobiraFlushMutationObservers === 'function' && __tobiraFlushMutationObservers()",
+            ))
+            .ok()
+            .map(|value| value.to_boolean())
+            .unwrap_or(false);
+        if !delivered {
+            break;
+        }
+    }
+}
+
 fn js_document_get_cookie(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let cookie = current_document_url(context)
         .map(|url| site_state::document_cookie_get(&url))
@@ -9788,6 +10509,7 @@ mod tests {
             ctrl_key: false,
             shift_key: false,
             meta_key: false,
+            ..Default::default()
         });
 
         assert!(!result.default_prevented);
@@ -10165,6 +10887,62 @@ mod tests {
             processed.html.contains(
                 "data-toggle=\"true|false|true|true|uno|1|uno|uno|uno|true|false|true|false\""
             ),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_mutation_observer_callbacks_for_attributes_and_child_list() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\"></div><script>var box = document.getElementById('box'); var log = []; var observer = new MutationObserver(function(records) { log.push(records.map(function(record) { return record.type + ':' + record.target.id + ':' + record.addedNodes.length + ':' + record.removedNodes.length; }).join(',')); document.body.setAttribute('data-log', log.join(';')); }); observer.observe(box, { attributes: true, childList: true }); box.setAttribute('data-x', '1'); var child = document.createElement('span'); child.textContent = 'hello'; box.appendChild(child);</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-log=\"attributes:box:0:0;childList:box:1:0\""),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_event_constructors_and_dispatch_event_payloads() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\"></div><script>var box = document.getElementById('box'); box.addEventListener('keydown', function(event) { document.body.setAttribute('data-key', [event.type, event.key, event.code, String(event.ctrlKey), String(event.repeat)].join('|')); }); box.addEventListener('custom', function(event) { document.body.setAttribute('data-detail', event.detail); }); box.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', code: 'KeyA', ctrlKey: true, repeat: true, bubbles: true, cancelable: true })); box.dispatchEvent(new CustomEvent('custom', { detail: 'hello', bubbles: true }));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-key=\"keydown|a|KeyA|true|true\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-detail=\"hello\""),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_abort_controller_and_fetch_signal_abort() {
+        let processed = process_document_scripts(
+            "<html><body><script>var controller = new AbortController(); controller.signal.addEventListener('abort', function () { document.body.setAttribute('data-signal', String(controller.signal.aborted)); }); controller.abort('stop'); fetch('https://example.com/', { signal: controller.signal }).then(function () { document.body.setAttribute('data-fetch', 'ok'); }).catch(function () { document.body.setAttribute('data-fetch', 'aborted'); });</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed.html.contains("data-signal=\"true\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-fetch=\"aborted\""),
             "{}",
             processed.html
         );

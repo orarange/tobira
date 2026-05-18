@@ -66,6 +66,7 @@ Current capabilities:
   - Scroll restoration for both same-document and full-document history entries
   - Clickable page links plus basic GUI form controls for `GET` submissions
   - Basic DOM event plumbing (bubbles `click`, `input`, `change`, `submit`; target-only `focus`, `blur`)
+  - `MutationObserver` callbacks for `attributes` and `childList`, plus browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) and `AbortController` / `AbortSignal`
   - Layout reflow cache keyed by viewport width and page revision
 - Lightweight mutable DOM support for:
   - `document.querySelector(...)` / `querySelectorAll(...)`
