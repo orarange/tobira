@@ -3982,6 +3982,14 @@ fn render_layer(
         box_blur(&mut offscreen, ow, oh, layer.blur_px);
     }
 
+    // Apply CSS transform: scale / rotate if set
+    let has_scale = (layer.scale_x != 0 && layer.scale_x != 1000)
+        || (layer.scale_y != 0 && layer.scale_y != 1000);
+    let has_rotate = layer.rotate_millideg != 0;
+    if has_scale || has_rotate {
+        apply_affine_transform(&mut offscreen, ow, oh, layer);
+    }
+
     // Blend the visible rows of the offscreen back onto the main buffer with opacity.
     // Visible row r: offscreen row (src_y_start + r) → buffer row (dst_y + r).
     // Read from src_x_start in the offscreen (horizontal clip offset).
@@ -4013,6 +4021,57 @@ fn render_layer(
         offscreen.shrink_to(needed * 2);
     }
     scratch[depth] = offscreen;
+}
+
+/// Apply scale and/or rotate transform to `buf` (width × height) in-place.
+/// Uses inverse mapping (for each output pixel, compute the source pixel).
+/// transform-origin is at (origin_x/1000 * w, origin_y/1000 * h).
+fn apply_affine_transform(buf: &mut [u32], width: u32, height: u32, layer: &LayerCommand) {
+    let w = width as usize;
+    let h = height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    let sx = if layer.scale_x == 0 { 1.0f32 } else { layer.scale_x as f32 / 1000.0 };
+    let sy = if layer.scale_y == 0 { 1.0f32 } else { layer.scale_y as f32 / 1000.0 };
+    let angle_deg = layer.rotate_millideg as f32 / 1000.0;
+    let angle_rad = angle_deg.to_radians();
+    let cos_a = angle_rad.cos();
+    let sin_a = angle_rad.sin();
+
+    // Transform origin in pixels
+    let ox = layer.origin_x as f32 / 1000.0 * width as f32;
+    let oy = layer.origin_y as f32 / 1000.0 * height as f32;
+
+    // Build a scratch buffer for the result
+    let mut result = vec![0u32; w * h];
+
+    for dy in 0..h {
+        for dx in 0..w {
+            // Output pixel offset from origin
+            let fx = dx as f32 - ox;
+            let fy = dy as f32 - oy;
+
+            // Inverse rotate (negate angle)
+            let rx = fx * cos_a + fy * sin_a;
+            let ry = -fx * sin_a + fy * cos_a;
+
+            // Inverse scale
+            let src_x = rx / sx + ox;
+            let src_y = ry / sy + oy;
+
+            // Nearest-neighbor sampling with bounds check
+            let ix = src_x.round() as i32;
+            let iy = src_y.round() as i32;
+            if ix >= 0 && iy >= 0 && (ix as usize) < w && (iy as usize) < h {
+                result[dy * w + dx] = buf[iy as usize * w + ix as usize];
+            }
+            // Out-of-bounds → transparent (0) — already set by vec init
+        }
+    }
+
+    buf.copy_from_slice(&result);
 }
 
 /// Apply a separable box blur of radius `r` pixels to `buf` (width x height).

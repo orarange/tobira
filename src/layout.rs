@@ -24,6 +24,12 @@ pub struct LayerCommand {
     pub height: u32,
     pub opacity: u8,
     pub blur_px: u32,  // 0 = no blur
+    // CSS transform (applied during composite)
+    pub scale_x: u32,          // millis: 1000 = 1.0. 0 = no scale (treated as 1000)
+    pub scale_y: u32,          // millis: 1000 = 1.0. 0 = no scale (treated as 1000)
+    pub rotate_millideg: i32,  // rotation in millidegrees. 0 = no rotation
+    pub origin_x: u32,         // transform-origin X as permille of width (500 = 50% = center)
+    pub origin_y: u32,         // transform-origin Y as permille of height (500 = 50% = center)
     pub commands: Vec<DrawCommand>,
 }
 
@@ -955,6 +961,11 @@ fn layout_block_element(
                 height: table_height,
                 opacity: element.style.opacity,
                 blur_px: element.style.filter_blur_px,
+                scale_x: 0,
+                scale_y: 0,
+                rotate_millideg: 0,
+                origin_x: 500,
+                origin_y: 500,
                 commands: sub_context.commands,
             }));
             context.links.extend(sub_context.links);
@@ -981,8 +992,12 @@ fn layout_block_element(
         .max(element.style.min_width);
     let background_top = *cursor_y;
 
-    // Detect stacking context: element has opacity < 255 or filter: blur()
-    let needs_layer = element.style.opacity < 255 || element.style.filter_blur_px > 0;
+    // Detect stacking context: element has opacity < 255, filter: blur(), or CSS transform scale/rotate
+    let needs_layer = element.style.opacity < 255
+        || element.style.filter_blur_px > 0
+        || element.style.transform_scale_x != 0
+        || element.style.transform_scale_y != 0
+        || element.style.transform_rotate_millideg != 0;
     if needs_layer {
         layout_block_element_as_layer(
             element, outer_x, outer_width, background_top, cursor_y, context, images, fonts, current_form,
@@ -1236,6 +1251,11 @@ fn layout_block_element(
                     height,
                     opacity: 255,
                     blur_px: 0,
+                    scale_x: 0,
+                    scale_y: 0,
+                    rotate_millideg: 0,
+                    origin_x: 500,
+                    origin_y: 500,
                     commands: sticky_cmds,
                 },
             }));
@@ -1607,6 +1627,11 @@ fn layout_block_element_as_layer(
         height: final_height,
         opacity: element.style.opacity,
         blur_px: element.style.filter_blur_px,
+        scale_x: element.style.transform_scale_x,
+        scale_y: element.style.transform_scale_y,
+        rotate_millideg: element.style.transform_rotate_millideg,
+        origin_x: element.style.transform_origin_x,
+        origin_y: element.style.transform_origin_y,
         commands: sub_context.commands,
     }));
 
@@ -1666,6 +1691,11 @@ fn layout_image_element(
             height: draw_height,
             opacity: element.style.opacity,
             blur_px: 0,
+            scale_x: 0,
+            scale_y: 0,
+            rotate_millideg: 0,
+            origin_x: 500,
+            origin_y: 500,
             commands: vec![img_cmd],
         }));
     } else {
@@ -1941,6 +1971,11 @@ fn layout_table_element(
                 height: layer_h,
                 opacity: placement.cell.style.opacity,
                 blur_px: 0,
+                scale_x: 0,
+                scale_y: 0,
+                rotate_millideg: 0,
+                origin_x: 500,
+                origin_y: 500,
                 commands: layer_commands,
             }));
             // Links are content-relative; shift by cell position + padding/valign
@@ -2326,6 +2361,11 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             height: layer.height,
             opacity: layer.opacity,
             blur_px: layer.blur_px,
+            scale_x: layer.scale_x,
+            scale_y: layer.scale_y,
+            rotate_millideg: layer.rotate_millideg,
+            origin_x: layer.origin_x,
+            origin_y: layer.origin_y,
             commands: layer.commands.clone(),
         }),
         DrawCommand::Sticky(sticky) => DrawCommand::Sticky(StickyCommand {
@@ -2339,6 +2379,11 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
                 height: sticky.layer.height,
                 opacity: sticky.layer.opacity,
                 blur_px: sticky.layer.blur_px,
+                scale_x: 0,
+                scale_y: 0,
+                rotate_millideg: 0,
+                origin_x: 500,
+                origin_y: 500,
                 commands: sticky.layer.commands.clone(),
             },
         }),
