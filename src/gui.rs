@@ -3695,6 +3695,92 @@ fn paint_layout(
     }
 }
 
+fn lerp_channel(a: u32, b: u32, t: f32) -> u32 {
+    (a as f32 + (b as f32 - a as f32) * t).round() as u32
+}
+
+/// Interpolate between gradient color stops at position t ∈ [0,1].
+fn interpolate_gradient_color(stops: &[crate::css::ColorStop], t: f32) -> u32 {
+    if stops.is_empty() { return 0; }
+    if stops.len() == 1 { return stops[0].color; }
+
+    let t_permille = (t * 1000.0) as u32;
+
+    // Find the last stop whose position <= t_permille (lo) and
+    // the first stop whose position >= t_permille (hi).
+    let mut lo = 0usize;
+    for (i, stop) in stops.iter().enumerate() {
+        if stop.position <= t_permille {
+            lo = i;
+        }
+    }
+    // Find hi: first stop at or after t_permille
+    let hi = stops.iter().enumerate()
+        .skip(lo)
+        .find(|(_, stop)| stop.position >= t_permille)
+        .map(|(i, _)| i)
+        .unwrap_or(lo);
+
+    if lo == hi { return stops[lo].color; }
+
+    let p0 = stops[lo].position as f32;
+    let p1 = stops[hi].position as f32;
+    let frac = if p1 > p0 { (t_permille as f32 - p0) / (p1 - p0) } else { 0.0 };
+    let frac = frac.clamp(0.0, 1.0);
+
+    let c0 = stops[lo].color;
+    let c1 = stops[hi].color;
+    let r = lerp_channel((c0 >> 16) & 0xFF, (c1 >> 16) & 0xFF, frac);
+    let g = lerp_channel((c0 >> 8) & 0xFF, (c1 >> 8) & 0xFF, frac);
+    let b = lerp_channel(c0 & 0xFF, c1 & 0xFF, frac);
+    (r << 16) | (g << 8) | b
+}
+
+/// Draw a linear gradient into the buffer at the given rect.
+fn draw_linear_gradient(
+    buffer: &mut [u32],
+    buf_width: u32,
+    buf_height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    gradient: &crate::css::LinearGradient,
+) {
+    if width == 0 || height == 0 { return; }
+
+    // CSS gradient angles: 0deg = to top, 90deg = to right, 180deg = to bottom
+    let angle_deg = gradient.angle_millideg as f32 / 1000.0;
+    let angle_rad = angle_deg.to_radians();
+    // Direction vector pointing toward the gradient's "end"
+    let dir_x = angle_rad.sin();
+    let dir_y = -angle_rad.cos(); // y-axis is flipped in screen space
+
+    let half_w = width as f32 * 0.5;
+    let half_h = height as f32 * 0.5;
+    // Gradient extent = max projection of any corner onto dir
+    let extent = dir_x.abs() * half_w + dir_y.abs() * half_h;
+    let extent = extent.max(1.0);
+
+    for row in 0..height {
+        let py = row as f32 - half_h;
+        for col in 0..width {
+            let px = col as f32 - half_w;
+            // Project (px, py) onto gradient direction, normalized to [0, 1]
+            let t = ((px * dir_x + py * dir_y) / extent) * 0.5 + 0.5;
+            let t = t.clamp(0.0, 1.0);
+
+            let color = interpolate_gradient_color(&gradient.stops, t);
+
+            let sx = x.saturating_add(col);
+            let sy = y.saturating_add(row);
+            if sx < buf_width && sy < buf_height {
+                buffer[(sy * buf_width + sx) as usize] = color;
+            }
+        }
+    }
+}
+
 fn render_commands(
     buffer: &mut [u32],
     width: u32,
@@ -3812,6 +3898,26 @@ fn render_commands(
                 render_layer(
                     buffer, width, height, offset_x, offset_y, scroll_y, layer,
                     page, fonts, scratch, depth,
+                );
+            }
+            DrawCommand::Gradient(grad) => {
+                let grad_bottom = grad.y.saturating_add(grad.height);
+                if grad_bottom < scroll_y || grad.y > viewport_bottom { continue; }
+                let draw_y = offset_y.saturating_add(grad.y.saturating_sub(scroll_y));
+                let draw_x = offset_x.saturating_add(grad.x);
+                // Clip height to visible viewport portion
+                let visible_height = if grad.y < scroll_y {
+                    grad.height.saturating_sub(scroll_y.saturating_sub(grad.y))
+                } else {
+                    grad.height.min(grad_bottom.saturating_sub(scroll_y))
+                };
+                draw_linear_gradient(
+                    buffer, width, height,
+                    draw_x,
+                    draw_y,
+                    grad.width,
+                    visible_height,
+                    &grad.gradient,
                 );
             }
         }

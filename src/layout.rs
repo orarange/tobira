@@ -13,6 +13,16 @@ pub enum DrawCommand {
     Text(TextCommand),
     Image(ImageCommand),
     Layer(LayerCommand),
+    Gradient(GradientCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GradientCommand {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub gradient: crate::css::LinearGradient,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +101,10 @@ fn shift_command(cmd: &mut DrawCommand, dx: u32, dy: u32) {
             l.x = l.x.saturating_add(dx);
             l.y = l.y.saturating_add(dy);
         }
+        DrawCommand::Gradient(g) => {
+            g.x = g.x.saturating_add(dx);
+            g.y = g.y.saturating_add(dy);
+        }
     }
 }
 
@@ -111,6 +125,10 @@ fn shift_command_signed(cmd: &mut DrawCommand, dx: i32, dy: i32) {
         DrawCommand::Layer(l) => {
             l.x = (l.x as i64 + dx as i64).max(0) as u32;
             l.y = (l.y as i64 + dy as i64).max(0) as u32;
+        }
+        DrawCommand::Gradient(g) => {
+            g.x = (g.x as i64 + dx as i64).max(0) as u32;
+            g.y = (g.y as i64 + dy as i64).max(0) as u32;
         }
     }
 }
@@ -998,6 +1016,20 @@ fn layout_block_element(
         None
     };
 
+    // Emit a gradient command if background-gradient is set (height will be fixed up later)
+    let gradient_cmd_index = if let Some(ref gradient) = element.style.background_gradient {
+        context.commands.push(DrawCommand::Gradient(GradientCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1,
+            gradient: gradient.clone(),
+        }));
+        Some(context.commands.len() - 1)
+    } else {
+        None
+    };
+
     // Capture clip start BEFORE children are laid out, so overflow:hidden can correctly
     // filter commands added by children (even when there is no background rect).
     let clip_start_idx = context.commands.len();
@@ -1085,6 +1117,11 @@ fn layout_block_element(
     if let Some(background_cmd_index) = background_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(background_cmd_index) {
             rect.height = background_height;
+        }
+    }
+    if let Some(gradient_cmd_index) = gradient_cmd_index {
+        if let Some(DrawCommand::Gradient(g)) = context.commands.get_mut(gradient_cmd_index) {
+            g.height = background_height;
         }
     }
 
@@ -1261,6 +1298,21 @@ fn clip_commands_to_box(
                     Some(DrawCommand::Text(t))
                 }
             }
+            DrawCommand::Gradient(mut g) => {
+                let gx2 = g.x.saturating_add(g.width);
+                let gy2 = g.y.saturating_add(g.height);
+                if g.x >= clip_x2 || g.y >= clip_y2 || gx2 <= clip_x || gy2 <= clip_y {
+                    return None;
+                }
+                let new_x = g.x.max(clip_x);
+                let new_y = g.y.max(clip_y);
+                let new_x2 = gx2.min(clip_x2);
+                let new_y2 = gy2.min(clip_y2);
+                g.x = new_x; g.y = new_y;
+                g.width = new_x2.saturating_sub(new_x).max(1);
+                g.height = new_y2.saturating_sub(new_y).max(1);
+                Some(DrawCommand::Gradient(g))
+            }
         }
     }).collect();
     commands.extend(clamped);
@@ -1285,6 +1337,10 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
                 l.x = l.x.saturating_sub(origin_x);
                 l.y = l.y.saturating_sub(origin_y);
                 // Do NOT recurse into l.commands — they're already layer-relative
+            }
+            DrawCommand::Gradient(g) => {
+                g.x = g.x.saturating_sub(origin_x);
+                g.y = g.y.saturating_sub(origin_y);
             }
         }
     }
@@ -1362,6 +1418,20 @@ fn layout_block_element_as_layer(
         None
     };
 
+    // Emit a gradient command if background-gradient is set (height will be fixed up later)
+    let gradient_cmd_index = if let Some(ref gradient) = element.style.background_gradient {
+        sub_context.commands.push(DrawCommand::Gradient(GradientCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1,
+            gradient: gradient.clone(),
+        }));
+        Some(sub_context.commands.len() - 1)
+    } else {
+        None
+    };
+
     // Capture clip index BEFORE children so overflow:hidden can clip child commands
     let clip_start_idx = sub_context.commands.len();
 
@@ -1434,6 +1504,11 @@ fn layout_block_element_as_layer(
     if let Some(background_cmd_index) = background_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(background_cmd_index) {
             rect.height = final_height;
+        }
+    }
+    if let Some(gradient_cmd_index) = gradient_cmd_index {
+        if let Some(DrawCommand::Gradient(g)) = sub_context.commands.get_mut(gradient_cmd_index) {
+            g.height = final_height;
         }
     }
 
@@ -2235,6 +2310,13 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             height: layer.height,
             opacity: layer.opacity,
             commands: layer.commands.clone(),
+        }),
+        DrawCommand::Gradient(g) => DrawCommand::Gradient(GradientCommand {
+            x: g.x.saturating_add(offset_x),
+            y: g.y.saturating_add(offset_y),
+            width: g.width,
+            height: g.height,
+            gradient: g.gradient.clone(),
         }),
     }
 }
@@ -3417,6 +3499,20 @@ fn layout_grid_container(
         None
     };
 
+    // Gradient placeholder (grid layout path)
+    let grad_cmd_index = if let Some(ref gradient) = element.style.background_gradient {
+        context.commands.push(DrawCommand::Gradient(GradientCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1,
+            gradient: gradient.clone(),
+        }));
+        Some(context.commands.len() - 1)
+    } else {
+        None
+    };
+
     let content_top = background_top
         .saturating_add(if !element.style.border_style_none { element.style.border.top } else { 0 })
         .saturating_add(element.style.padding.top);
@@ -3460,6 +3556,12 @@ fn layout_grid_container(
     if let Some(idx) = bg_cmd_index {
         if let DrawCommand::Rect(r) = &mut context.commands[idx] {
             r.height = (background_bottom - background_top).max(1);
+        }
+    }
+    // Fix gradient height
+    if let Some(idx) = grad_cmd_index {
+        if let DrawCommand::Gradient(g) = &mut context.commands[idx] {
+            g.height = (background_bottom - background_top).max(1);
         }
     }
 
@@ -3633,6 +3735,20 @@ fn layout_flex_container(
         None
     };
 
+    // Gradient placeholder (flex layout path)
+    let flex_grad_cmd_index = if let Some(ref gradient) = element.style.background_gradient {
+        context.commands.push(DrawCommand::Gradient(GradientCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1,
+            gradient: gradient.clone(),
+        }));
+        Some(context.commands.len() - 1)
+    } else {
+        None
+    };
+
     let saved_bg = context.background_color;
     if let Some(bg) = element.style.background_color {
         if element.style.effective_opacity == 255 {
@@ -3737,6 +3853,11 @@ fn layout_flex_container(
     if let Some(idx) = bg_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(idx) {
             rect.height = background_height;
+        }
+    }
+    if let Some(idx) = flex_grad_cmd_index {
+        if let Some(DrawCommand::Gradient(g)) = context.commands.get_mut(idx) {
+            g.height = background_height;
         }
     }
 

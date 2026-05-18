@@ -429,6 +429,28 @@ impl Default for GridPlacement {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Gradient types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single color stop in a CSS gradient.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColorStop {
+    pub color: Color,    // u32 = 0xRRGGBB
+    /// permille (0–1000); u32::MAX = "not set" (auto-distribute)
+    pub position: u32,
+}
+
+/// A parsed CSS linear-gradient.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearGradient {
+    /// Angle in millidegrees clockwise from "to top" (CSS convention).
+    /// CSS `to bottom` = 180deg = stored as 180_000.
+    /// CSS `to right`  = 90deg  = stored as  90_000.
+    pub angle_millideg: u32,
+    pub stops: Vec<ColorStop>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ComputedStyle
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -437,6 +459,7 @@ pub struct ComputedStyle {
     pub display: Display,
     pub color: Color,
     pub background_color: Option<Color>,
+    pub background_gradient: Option<LinearGradient>,
     pub margin: EdgeSizes,
     pub padding: EdgeSizes,
     pub width: Option<LengthValue>,
@@ -524,6 +547,7 @@ impl ComputedStyle {
             display: default_display(tag_name),
             color: parent.map(|s| s.color).unwrap_or(DEFAULT_TEXT_COLOR),
             background_color: None,
+            background_gradient: None,
             margin: default_margin(tag_name),
             padding: EdgeSizes::default(),
             width: None,
@@ -1458,7 +1482,18 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.color = color;
             }
         }
-        "background" | "background-color" => {
+        "background" | "background-image" => {
+            let v = value.trim();
+            if v.starts_with("linear-gradient(") || v.starts_with("linear-gradient (") {
+                style.background_gradient = parse_linear_gradient(v);
+            } else {
+                // Treat as a color for the "background" shorthand
+                if let Some(c) = parse_color(v) {
+                    style.background_color = Some(c);
+                }
+            }
+        }
+        "background-color" => {
             style.background_color = parse_color(value);
         }
         "display" => {
@@ -3854,6 +3889,176 @@ fn parse_named_color(name: &str) -> Option<Color> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Linear gradient parsing
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Parse a `linear-gradient(...)` CSS value.
+/// Returns None if unparseable.
+fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
+    // Strip outer function call: "linear-gradient(" prefix and ")" suffix
+    let inner = value.trim()
+        .strip_prefix("linear-gradient(")?
+        .strip_suffix(')')?;
+
+    let parts = split_gradient_args(inner);
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut angle_millideg: u32 = 180_000; // default: to bottom = 180deg
+    let mut stop_start = 0;
+
+    // Check if first arg is an angle or direction
+    let first = parts[0].trim();
+    if let Some(angle) = parse_gradient_angle(first) {
+        angle_millideg = angle;
+        stop_start = 1;
+    } else if first.starts_with("to ") {
+        angle_millideg = parse_gradient_direction(first);
+        stop_start = 1;
+    }
+
+    // Parse color stops
+    let mut stops: Vec<ColorStop> = Vec::new();
+    for part in &parts[stop_start..] {
+        let part = part.trim();
+        if let Some(stop) = parse_color_stop(part) {
+            stops.push(stop);
+        }
+    }
+
+    if stops.len() < 2 {
+        return None;
+    }
+
+    // Auto-distribute stops that have position = u32::MAX
+    distribute_stops(&mut stops);
+
+    Some(LinearGradient { angle_millideg, stops })
+}
+
+/// Split gradient arguments respecting nested parens (for rgba/hsl stops).
+fn split_gradient_args(s: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for c in s.chars() {
+        match c {
+            '(' => { depth += 1; current.push(c); }
+            ')' => { if depth > 0 { depth -= 1; } current.push(c); }
+            ',' if depth == 0 => {
+                result.push(current.trim().to_string());
+                current = String::new();
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.trim().is_empty() {
+        result.push(current.trim().to_string());
+    }
+    result
+}
+
+/// Parse an angle token like "45deg", "0.5turn", "1rad", "100grad".
+fn parse_gradient_angle(s: &str) -> Option<u32> {
+    let s = s.trim();
+    if s.ends_with("deg") {
+        let deg: f32 = s[..s.len() - 3].trim().parse().ok()?;
+        Some((deg.rem_euclid(360.0) * 1000.0).round() as u32)
+    } else if s.ends_with("turn") {
+        let t: f32 = s[..s.len() - 4].trim().parse().ok()?;
+        Some((t.rem_euclid(1.0) * 360_000.0).round() as u32)
+    } else if s.ends_with("rad") {
+        let r: f32 = s[..s.len() - 3].trim().parse().ok()?;
+        Some((r.to_degrees().rem_euclid(360.0) * 1000.0).round() as u32)
+    } else if s.ends_with("grad") {
+        let g: f32 = s[..s.len() - 4].trim().parse().ok()?;
+        Some(((g * 0.9_f32).rem_euclid(360.0) * 1000.0).round() as u32)
+    } else {
+        None
+    }
+}
+
+/// Map CSS direction keywords to millidegrees.
+fn parse_gradient_direction(s: &str) -> u32 {
+    match s.trim() {
+        "to top"                              => 0,
+        "to top right" | "to right top"      => 45_000,
+        "to right"                            => 90_000,
+        "to bottom right" | "to right bottom" => 135_000,
+        "to bottom"                           => 180_000,
+        "to bottom left" | "to left bottom"   => 225_000,
+        "to left"                             => 270_000,
+        "to top left" | "to left top"         => 315_000,
+        _                                     => 180_000,
+    }
+}
+
+/// Parse a color stop: "red", "#fff 50%", "rgba(0,0,0,0.5) 100%"
+fn parse_color_stop(s: &str) -> Option<ColorStop> {
+    let s = s.trim();
+    // Try to find a percentage position at the end
+    let (color_str, pos) = if let Some(pct_pos) = s.rfind('%') {
+        let before_pct = s[..pct_pos].trim();
+        // Find the space that separates color from position number
+        if let Some(sp) = before_pct.rfind(|c: char| c.is_ascii_whitespace()) {
+            let color_part = before_pct[..sp].trim();
+            let pos_part = before_pct[sp..].trim();
+            let pct: f32 = pos_part.parse().ok()?;
+            (color_part, (pct * 10.0).round() as u32)
+        } else {
+            // No space before %, so the whole string might be just a percentage with no color
+            return None;
+        }
+    } else {
+        // No position — auto-distribute
+        (s, u32::MAX)
+    };
+
+    let color = parse_color(color_str)?;
+    Some(ColorStop { color, position: pos })
+}
+
+/// Auto-distribute stops with position = u32::MAX evenly between their neighbours.
+fn distribute_stops(stops: &mut Vec<ColorStop>) {
+    let n = stops.len();
+    if n == 0 {
+        return;
+    }
+    // First stop defaults to 0, last to 1000
+    if stops[0].position == u32::MAX {
+        stops[0].position = 0;
+    }
+    if stops[n - 1].position == u32::MAX {
+        stops[n - 1].position = 1000;
+    }
+
+    // Fill in any unset stops between set stops
+    let mut i = 1;
+    while i < n {
+        if stops[i].position == u32::MAX {
+            // Find next stop that has a set position
+            let start_i = i - 1;
+            let mut end_i = i + 1;
+            while end_i < n && stops[end_i].position == u32::MAX {
+                end_i += 1;
+            }
+            let end_i = end_i.min(n - 1);
+            let start_pos = stops[start_i].position;
+            let end_pos = stops[end_i].position;
+            let count = (end_i - start_i) as u32;
+            for j in (start_i + 1)..end_i {
+                let frac = (j - start_i) as u32;
+                stops[j].position = start_pos + (end_pos - start_pos) * frac / count;
+            }
+            i = end_i + 1;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Comment stripping
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -4808,5 +5013,28 @@ mod tests {
         let div = find_first_element(&styled, "div").unwrap();
         // Just check it doesn't panic and the element is accessible
         assert_eq!(div.tag_name, "div");
+    }
+
+    #[test]
+    fn linear_gradient_to_right_parsed() {
+        let html = r#"<div style="background: linear-gradient(to right, red, blue);"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        let g = div.style.background_gradient.as_ref().unwrap();
+        assert_eq!(g.angle_millideg, 90_000); // to right = 90deg
+        assert_eq!(g.stops.len(), 2);
+    }
+
+    #[test]
+    fn linear_gradient_angle_parsed() {
+        let html = r#"<div style="background: linear-gradient(45deg, #000, #fff);"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        let g = div.style.background_gradient.as_ref().unwrap();
+        assert_eq!(g.angle_millideg, 45_000);
     }
 }
