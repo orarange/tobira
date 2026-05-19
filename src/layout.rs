@@ -1,6 +1,6 @@
 use crate::css::{
     BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
-    FontFamilyKind, GridTrackSize, LengthValue, ObjectFit, Overflow, Position, FlexDirection,
+    FontFamilyKind, GradientKind, GridTrackSize, LengthValue, ObjectFit, Overflow, Position, FlexDirection,
     AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
     VerticalAlign, WhiteSpaceMode, apply_text_transform,
 };
@@ -20,7 +20,7 @@ pub struct GradientCommand {
     pub width: u32,
     pub height: u32,
     pub border_radius: u32,
-    pub angle_deg_x1000: i32,
+    pub kind: GradientKind,
     pub stops: Vec<GradientStop>,
 }
 
@@ -31,6 +31,7 @@ pub enum DrawCommand {
     Image(ImageCommand),
     Layer(LayerCommand),
     Gradient(GradientCommand),
+    Sticky(StickyCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +43,26 @@ pub struct LayerCommand {
     pub opacity: u8,
     pub blur_px: u32,       // CSS filter: blur() radius; 0 = no blur
     pub brightness: u32,    // CSS filter: brightness() in 1/10000; 10000 = no change
+    // CSS transform fields (applied during composite in gui.rs)
+    pub scale_x: u32,          // millis: 1000=1.0, 0=no scale (treated as 1000)
+    pub scale_y: u32,
+    pub rotate_millideg: i32,  // rotation in millidegrees
+    pub origin_x: u32,         // transform-origin X as permille (500=50%)
+    pub origin_y: u32,         // transform-origin Y as permille (500=50%)
     pub commands: Vec<DrawCommand>,
+}
+
+/// A position:sticky element wrapped in a Layer with scroll-tracking metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StickyCommand {
+    /// Y coordinate of the element in normal flow (content space).
+    pub normal_y: u32,
+    /// The `top: N` value — the element sticks when scrolled past this screen offset.
+    pub sticky_top: u32,
+    /// Bottom of the containing block (for "unstick" boundary). u32::MAX = unbounded.
+    pub container_bottom: u32,
+    /// The layer to render (contains the element's commands, rebased to element-relative coords).
+    pub layer: LayerCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +135,11 @@ fn shift_command(cmd: &mut DrawCommand, dx: u32, dy: u32) {
             g.x = g.x.saturating_add(dx);
             g.y = g.y.saturating_add(dy);
         }
+        DrawCommand::Sticky(s) => {
+            s.layer.x = s.layer.x.saturating_add(dx);
+            s.layer.y = s.layer.y.saturating_add(dy);
+            s.normal_y = s.normal_y.saturating_add(dy);
+        }
     }
 }
 
@@ -139,6 +164,11 @@ fn shift_command_signed(cmd: &mut DrawCommand, dx: i32, dy: i32) {
         DrawCommand::Gradient(g) => {
             g.x = (g.x as i64 + dx as i64).max(0) as u32;
             g.y = (g.y as i64 + dy as i64).max(0) as u32;
+        }
+        DrawCommand::Sticky(s) => {
+            s.layer.x = (s.layer.x as i64 + dx as i64).max(0) as u32;
+            s.layer.y = (s.layer.y as i64 + dy as i64).max(0) as u32;
+            s.normal_y = (s.normal_y as i64 + dy as i64).max(0) as u32;
         }
     }
 }
@@ -949,6 +979,11 @@ fn layout_block_element(
                 opacity: element.style.opacity,
                 blur_px: element.style.filter_blur_px,
                 brightness: element.style.filter_brightness,
+                scale_x: 0,
+                scale_y: 0,
+                rotate_millideg: 0,
+                origin_x: 500,
+                origin_y: 500,
                 commands: sub_context.commands,
             }));
             context.links.extend(sub_context.links);
@@ -1199,7 +1234,7 @@ fn layout_block_element(
             width: outer_width.max(1),
             height: background_height,
             border_radius: element.style.border_radius,
-            angle_deg_x1000: gradient.angle_deg_x1000,
+            kind: gradient.kind.clone(),
             stops,
         }));
     }
@@ -1392,6 +1427,7 @@ fn clip_commands_to_box(
                 g.height = new_y2.saturating_sub(new_y).max(1);
                 Some(DrawCommand::Gradient(g))
             }
+            DrawCommand::Sticky(s) => Some(DrawCommand::Sticky(s)),
         }
     }).collect();
     commands.extend(clamped);
@@ -1420,6 +1456,11 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
             DrawCommand::Gradient(g) => {
                 g.x = g.x.saturating_sub(origin_x);
                 g.y = g.y.saturating_sub(origin_y);
+            }
+            DrawCommand::Sticky(s) => {
+                s.layer.x = s.layer.x.saturating_sub(origin_x);
+                s.layer.y = s.layer.y.saturating_sub(origin_y);
+                s.normal_y = s.normal_y.saturating_sub(origin_y);
             }
         }
     }
@@ -1584,7 +1625,7 @@ fn layout_block_element_as_layer(
             width: outer_width.max(1),
             height: final_height,
             border_radius: element.style.border_radius,
-            angle_deg_x1000: gradient.angle_deg_x1000,
+            kind: gradient.kind.clone(),
             stops,
         }));
     }
@@ -1697,6 +1738,11 @@ fn layout_block_element_as_layer(
         opacity: element.style.opacity,
         blur_px: element.style.filter_blur_px,
         brightness: element.style.filter_brightness,
+        scale_x: element.style.transform_scale_x,
+        scale_y: element.style.transform_scale_y,
+        rotate_millideg: element.style.transform_rotate_millideg,
+        origin_x: element.style.transform_origin_x,
+        origin_y: element.style.transform_origin_y,
         commands: sub_context.commands,
     }));
 
@@ -1758,6 +1804,11 @@ fn layout_image_element(
             opacity: element.style.opacity,
             blur_px: element.style.filter_blur_px,
             brightness: element.style.filter_brightness,
+            scale_x: 0,
+            scale_y: 0,
+            rotate_millideg: 0,
+            origin_x: 500,
+            origin_y: 500,
             commands: vec![img_cmd],
         }));
     } else {
@@ -2058,6 +2109,11 @@ fn layout_table_element(
                 opacity: placement.cell.style.opacity,
                 blur_px: placement.cell.style.filter_blur_px,
                 brightness: placement.cell.style.filter_brightness,
+                scale_x: 0,
+                scale_y: 0,
+                rotate_millideg: 0,
+                origin_x: 500,
+                origin_y: 500,
                 commands: layer_commands,
             }));
             // Links are content-relative; shift by cell position + padding/valign
@@ -2470,6 +2526,11 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             opacity: layer.opacity,
             blur_px: layer.blur_px,
             brightness: layer.brightness,
+            scale_x: layer.scale_x,
+            scale_y: layer.scale_y,
+            rotate_millideg: layer.rotate_millideg,
+            origin_x: layer.origin_x,
+            origin_y: layer.origin_y,
             commands: layer.commands.clone(),
         }),
         DrawCommand::Gradient(g) => DrawCommand::Gradient(GradientCommand {
@@ -2478,9 +2539,16 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             width: g.width,
             height: g.height,
             border_radius: g.border_radius,
-            angle_deg_x1000: g.angle_deg_x1000,
+            kind: g.kind.clone(),
             stops: g.stops.clone(),
         }),
+        DrawCommand::Sticky(s) => {
+            let mut ns = s.clone();
+            ns.layer.x = ns.layer.x.saturating_add(offset_x);
+            ns.layer.y = ns.layer.y.saturating_add(offset_y);
+            ns.normal_y = ns.normal_y.saturating_add(offset_y);
+            DrawCommand::Sticky(ns)
+        }
     }
 }
 

@@ -262,14 +262,27 @@ pub struct TextShadow {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LinearGradient
+// GradientKind / CssGradient (shared by linear + radial)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Distinguishes gradient types in the CSS parse layer and draw-command layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinearGradient {
-    pub angle_deg_x1000: i32,
+pub enum GradientKind {
+    /// angle_deg_x1000: degrees × 1000 (e.g. 180_000 = 180°, top-to-bottom).
+    Linear { angle_deg_x1000: i32 },
+    /// center_x / center_y in permille of element dimensions (500 = 50 %).
+    Radial { center_x: u32, center_y: u32 },
+}
+
+/// A gradient value parsed from CSS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CssGradient {
+    pub kind: GradientKind,
     pub stops: Vec<(u32, u32)>, // (color, position 0-1000)
 }
+
+// Keep old name as a type alias for backward compatibility.
+pub type LinearGradient = CssGradient;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BackgroundSize / BackgroundRepeat
@@ -581,6 +594,14 @@ pub struct ComputedStyle {
     pub filter_blur_px: u32,       // blur() value in pixels, 0 = no blur
     pub filter_brightness: u32,    // brightness() in percent * 100 (10000 = 100% = no change)
     pub filter_opacity: u8,        // opacity() as 0-255, 255 = no change
+    // CSS transform (integer fixed-point to keep Eq/Hash)
+    pub transform_translate_x: i32,  // pixels (signed)
+    pub transform_translate_y: i32,
+    pub transform_scale_x: u32,      // millis: 1000=1.0, 0=identity
+    pub transform_scale_y: u32,
+    pub transform_rotate_millideg: i32,
+    pub transform_origin_x: u32,     // permille: 500=50%
+    pub transform_origin_y: u32,
 }
 
 impl ComputedStyle {
@@ -679,6 +700,14 @@ impl ComputedStyle {
             filter_blur_px: 0,
             filter_brightness: 10000,
             filter_opacity: 255,
+            // CSS transform
+            transform_translate_x: 0,
+            transform_translate_y: 0,
+            transform_scale_x: 0,
+            transform_scale_y: 0,
+            transform_rotate_millideg: 0,
+            transform_origin_x: 500,
+            transform_origin_y: 500,
         };
 
         match tag_name {
@@ -1537,9 +1566,12 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         }
         "background" => {
             let v = value.trim();
-            if v.to_ascii_lowercase().contains("linear-gradient(") {
+            let vl = v.to_ascii_lowercase();
+            if vl.contains("radial-gradient(") {
+                style.background_gradient = parse_radial_gradient(v);
+            } else if vl.contains("linear-gradient(") {
                 style.background_gradient = parse_linear_gradient(v);
-            } else if v.to_ascii_lowercase().starts_with("url(") {
+            } else if vl.starts_with("url(") {
                 style.background_image_url = extract_url(v);
             } else {
                 style.background_color = parse_color(v);
@@ -1554,6 +1586,8 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if vl == "none" {
                 style.background_gradient = None;
                 style.background_image_url = None;
+            } else if vl.contains("radial-gradient(") {
+                style.background_gradient = parse_radial_gradient(v);
             } else if vl.contains("linear-gradient(") {
                 style.background_gradient = parse_linear_gradient(v);
             } else if vl.starts_with("url(") {
@@ -2188,6 +2222,18 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                     style.object_position_y = v;
                 }
                 _ => {}
+            }
+        }
+        "transform" => {
+            parse_transform_into(value, style);
+        }
+        "transform-origin" => {
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            if let Some(x) = parts.first() {
+                style.transform_origin_x = parse_pct_permille(x, 500);
+            }
+            if let Some(y) = parts.get(1) {
+                style.transform_origin_y = parse_pct_permille(y, 500);
             }
         }
         _ => {}
@@ -4214,7 +4260,7 @@ fn parse_text_shadow(value: &str, parent_font_size: u32) -> Option<TextShadow> {
 }
 
 /// Parse a `linear-gradient(...)` value.
-fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
+fn parse_linear_gradient(value: &str) -> Option<CssGradient> {
     // Find the linear-gradient(...) part
     let lower = value.to_ascii_lowercase();
     let start = lower.find("linear-gradient(")?;
@@ -4350,7 +4396,193 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
         (c, pos)
     }).collect();
 
-    Some(LinearGradient { angle_deg_x1000, stops })
+    Some(CssGradient { kind: GradientKind::Linear { angle_deg_x1000 }, stops })
+}
+
+/// Parse a `radial-gradient(...)` value → CssGradient with GradientKind::Radial.
+fn parse_radial_gradient(value: &str) -> Option<CssGradient> {
+    let lower = value.to_ascii_lowercase();
+    let start = lower.find("radial-gradient(")?;
+    let after = &value[start + "radial-gradient(".len()..];
+    let mut depth = 1u32;
+    let mut end = 0;
+    for (i, ch) in after.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => { depth -= 1; if depth == 0 { end = i; break; } }
+            _ => {}
+        }
+    }
+    let inner = &after[..end];
+
+    // Split args respecting parens
+    let args: Vec<String> = split_at_top_level(inner, ',');
+
+    // Parse optional shape/center ("circle at 30% 70%", "ellipse at center")
+    let mut stop_start = 0usize;
+    let mut center_x = 500u32;
+    let mut center_y = 500u32;
+
+    if let Some(first) = args.first() {
+        let fl = first.to_ascii_lowercase();
+        if fl.contains("circle") || fl.contains("ellipse") || fl.contains(" at ") || fl.trim().starts_with("at ") {
+            stop_start = 1;
+            if let Some(at_pos) = fl.find(" at ") {
+                let pos_str = &first[at_pos + 4..];
+                let parts: Vec<&str> = pos_str.split_whitespace().collect();
+                if let Some(x) = parts.first() { center_x = parse_pct_permille(x, 500); }
+                if let Some(y) = parts.get(1) { center_y = parse_pct_permille(y, 500); }
+            }
+        } else {
+            // Heuristic: if it doesn't look like a color stop, treat as shape spec
+            let trimmed = fl.trim();
+            if !trimmed.starts_with('#') && !trimmed.starts_with("rgb") && trimmed.parse::<f32>().is_err() {
+                // Check if it's a known color keyword
+                let looks_like_color = parse_color(trimmed).is_some();
+                if !looks_like_color {
+                    stop_start = 1;
+                }
+            }
+        }
+    }
+
+    // Parse color stops
+    let stop_args = &args[stop_start..];
+    if stop_args.is_empty() { return None; }
+
+    let mut raw_stops: Vec<(u32, Option<u32>)> = Vec::new();
+    for arg in stop_args {
+        let arg_trimmed = arg.trim();
+        let parts: Vec<String> = split_at_top_level(arg_trimmed, ' ')
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.is_empty() { continue; }
+
+        let last = parts.last().unwrap();
+        let last_is_position = last.ends_with('%') || last.ends_with("px");
+        let (color_str, pos_str) = if last_is_position && parts.len() >= 2 {
+            let c = parts[..parts.len() - 1].join(" ");
+            (c, Some(last.clone()))
+        } else {
+            (parts.join(" "), None)
+        };
+
+        if let Some(c) = parse_color(color_str.trim()) {
+            let pos = pos_str.and_then(|p| {
+                let p = p.trim();
+                if p.ends_with('%') {
+                    p[..p.len()-1].parse::<f64>().ok().map(|v| (v * 10.0).round() as u32)
+                } else {
+                    None
+                }
+            });
+            raw_stops.push((c, pos));
+        }
+    }
+
+    if raw_stops.is_empty() { return None; }
+
+    let count = raw_stops.len();
+    let stops: Vec<(u32, u32)> = raw_stops.into_iter().enumerate().map(|(i, (c, p))| {
+        let pos = p.unwrap_or_else(|| {
+            if count == 1 { 0 } else { (1000 * i / (count - 1)) as u32 }
+        });
+        (c, pos)
+    }).collect();
+
+    Some(CssGradient { kind: GradientKind::Radial { center_x, center_y }, stops })
+}
+
+/// Accumulate CSS transform functions into ComputedStyle fields.
+fn parse_transform_into(value: &str, style: &mut ComputedStyle) {
+    let v = value.trim();
+    if v.eq_ignore_ascii_case("none") { return; }
+    let mut rest = v;
+    while let Some(paren) = rest.find('(') {
+        let func = rest[..paren].trim().to_ascii_lowercase();
+        let after = &rest[paren + 1..];
+        let close = after.find(')').unwrap_or(after.len());
+        let args = &after[..close];
+        rest = if close + 1 < after.len() { &after[close + 1..] } else { "" };
+
+        match func.as_str() {
+            "translate" => {
+                let parts: Vec<&str> = args.split(',').collect();
+                style.transform_translate_x = parse_transform_length(parts.first().unwrap_or(&"0"));
+                style.transform_translate_y = parse_transform_length(parts.get(1).unwrap_or(&"0"));
+            }
+            "translatex" => {
+                style.transform_translate_x = parse_transform_length(args);
+            }
+            "translatey" => {
+                style.transform_translate_y = parse_transform_length(args);
+            }
+            "scale" => {
+                let parts: Vec<&str> = args.split(',').collect();
+                let sx = parse_transform_scale(parts.first().unwrap_or(&"1"));
+                let sy = parts.get(1).map(|s| parse_transform_scale(s)).unwrap_or(sx);
+                style.transform_scale_x = sx;
+                style.transform_scale_y = sy;
+            }
+            "scalex" => { style.transform_scale_x = parse_transform_scale(args); }
+            "scaley" => { style.transform_scale_y = parse_transform_scale(args); }
+            "rotate" => {
+                style.transform_rotate_millideg = parse_transform_angle_millideg(args);
+            }
+            _ => {} // skew, matrix, etc. — no-op
+        }
+    }
+}
+
+fn parse_transform_length(s: &str) -> i32 {
+    let s = s.trim();
+    if s.ends_with("px") {
+        s[..s.len() - 2].trim().parse::<f32>().unwrap_or(0.0) as i32
+    } else if s.ends_with('%') {
+        0 // percent translate not supported in fixed-pixel layout
+    } else {
+        s.parse::<f32>().unwrap_or(0.0) as i32
+    }
+}
+
+fn parse_transform_scale(s: &str) -> u32 {
+    let v = s.trim().parse::<f32>().unwrap_or(1.0);
+    (v * 1000.0).round() as u32
+}
+
+fn parse_transform_angle_millideg(s: &str) -> i32 {
+    let s = s.trim();
+    if s.ends_with("deg") {
+        let v = s[..s.len() - 3].trim().parse::<f32>().unwrap_or(0.0);
+        (v * 1000.0).round() as i32
+    } else if s.ends_with("rad") {
+        let v = s[..s.len() - 3].trim().parse::<f32>().unwrap_or(0.0);
+        (v.to_degrees() * 1000.0).round() as i32
+    } else if s.ends_with("turn") {
+        let v = s[..s.len() - 4].trim().parse::<f32>().unwrap_or(0.0);
+        (v * 360.0 * 1000.0).round() as i32
+    } else {
+        s.parse::<f32>().unwrap_or(0.0) as i32
+    }
+}
+
+fn parse_pct_permille(s: &str, default: u32) -> u32 {
+    let s = s.trim();
+    match s {
+        "center" => 500,
+        "left" | "top" => 0,
+        "right" | "bottom" => 1000,
+        _ => {
+            if s.ends_with('%') {
+                let v = s[..s.len() - 1].trim().parse::<f32>().unwrap_or(50.0);
+                (v * 10.0).round() as u32
+            } else {
+                default
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
