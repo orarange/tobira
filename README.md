@@ -48,7 +48,7 @@ Current capabilities:
   - `window.crypto` stubs (`getRandomValues`, `randomUUID`)
   - `URLSearchParams` stub
   - `console.log()` / `warn()` / `error()`
-  - immediate `setTimeout(...)` fallback
+  - queued `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)` callbacks
   - JS-visible viewport / focus / scroll state:
     - `window.innerWidth` / `window.innerHeight`
     - `window.scrollY` / `window.pageYOffset`
@@ -232,7 +232,7 @@ Current JS support is intentionally small:
 - `location.href`
 - lightweight response header iteration plus XHR `getResponseHeader(...)` / `getAllResponseHeaders()`
 - `console.log()` / `warn()` / `error()`
-- immediate `setTimeout(...)` fallback
+- queued `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)` callbacks
 - YouTube generic home pages now take a synthetic fast path before the heavy JS session, which keeps the app responsive on startup
 
 It still does not implement a full browser DOM, async networking, or framework-level browser APIs.

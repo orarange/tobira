@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-18`
+- Date: `2026-05-19`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
 - Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
@@ -33,8 +33,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `188` passing tests on `2026-05-18`
-  - `cargo build`: success on `2026-05-18`
+- `cargo test`: `192` passing tests on `2026-05-19`
+- `cargo build`: success on `2026-05-19`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -89,6 +89,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - reflected `value`, `src`, `href`, `rel`, `type`, `name`, `content`
   - JS execution / runtime support for:
     - dedicated larger-stack worker thread
+    - queued host-task plumbing for `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)`
     - Promise job flushing (drained after top-level script eval via `context.run_jobs()`)
     - lightweight `fetch(...)` with response headers iteration
     - lightweight `XMLHttpRequest` with `getResponseHeader(...)` / `getAllResponseHeaders()`
@@ -202,6 +203,14 @@ git log --oneline -n 20
 - Added structural mutation helpers: `cloneNode(...)`, `replaceChild(...)`, `removeChild(...)`, `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, and `replaceChildren(...)`.
 - Added `document.createDocumentFragment(...)` and fragment flattening during insertion so DOM batches behave more like a real browser.
 - Verified the updated state with `cargo test` (`188` passing tests) and `cargo build`.
+
+### 2026-05-19 - Codex (event loop / timer queue)
+
+- Replaced the immediate timer / animation / microtask fallback path with queued host-task plumbing so callbacks do not reenter the current JS turn immediately.
+- Added queued support for `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)`, plus `clearTimeout(...)`, `clearInterval(...)`, and `cancelAnimationFrame(...)` handle cleanup.
+- Added a regression test that confirms nested timeouts defer to the next turn instead of recursively firing in the same turn.
+- Updated the README and JS roadmap so the documented JS runtime status matches the queued task behavior.
+- Verified the updated state with `cargo test` (`192` passing tests) and `cargo build`.
 
 ### 2026-05-14 - Codex
 

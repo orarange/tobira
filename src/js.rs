@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::mem;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
@@ -209,6 +209,8 @@ struct JavaScriptState {
     viewport_height: u32,
     scroll_y: u32,
     active_element_node_id: Option<usize>,
+    pending_tasks: VecDeque<PendingTask>,
+    next_task_handle: usize,
     dom: DomState,
 }
 
@@ -217,6 +219,29 @@ struct HistoryEntry {
     href: String,
     scroll_y: u32,
     state: JsValue,
+}
+
+#[derive(Debug, Clone)]
+struct PendingTask {
+    handle: usize,
+    kind: PendingTaskKind,
+    action: PendingTaskAction,
+}
+
+#[derive(Debug, Clone)]
+enum PendingTaskKind {
+    Microtask,
+    AnimationFrame,
+    Timeout { repeat: bool },
+}
+
+#[derive(Debug, Clone)]
+enum PendingTaskAction {
+    Callback {
+        callback: JsValue,
+        args: Vec<JsValue>,
+    },
+    Script(String),
 }
 
 #[derive(Debug, Trace, Finalize, JsData)]
@@ -499,6 +524,8 @@ impl JavaScriptRuntime {
                 viewport_height: DEFAULT_VIEWPORT_HEIGHT,
                 scroll_y: 0,
                 active_element_node_id: None,
+                pending_tasks: VecDeque::new(),
+                next_task_handle: 1,
                 dom,
             }),
         });
@@ -532,6 +559,99 @@ impl JavaScriptRuntime {
         }
     }
 
+    fn settle_pending_state(&mut self) {
+        self.flush_pending_document_writes();
+        self.process_loaded_document();
+        self.flush_pending_tasks();
+        self.flush_pending_document_writes();
+        self.process_loaded_document();
+    }
+
+    fn queue_pending_task(&self, kind: PendingTaskKind, action: PendingTaskAction) -> usize {
+        let Some(host) = self.context.get_data::<JavaScriptHostData>() else {
+            return 0;
+        };
+        let mut state = host.state.borrow_mut();
+        let handle = state.next_task_handle;
+        state.next_task_handle = state.next_task_handle.checked_add(1).unwrap_or(1);
+        state.pending_tasks.push_back(PendingTask {
+            handle,
+            kind,
+            action,
+        });
+        handle
+    }
+
+    fn take_pending_tasks(&self) -> Vec<PendingTask> {
+        let Some(host) = self.context.get_data::<JavaScriptHostData>() else {
+            return Vec::new();
+        };
+        let mut state = host.state.borrow_mut();
+        mem::take(&mut state.pending_tasks).into_iter().collect()
+    }
+
+    fn flush_pending_tasks(&mut self) {
+        let pending_tasks = self.take_pending_tasks();
+        if pending_tasks.is_empty() {
+            return;
+        }
+
+        let mut microtasks = Vec::new();
+        let mut animation_frames = Vec::new();
+        let mut timeouts = Vec::new();
+
+        for task in pending_tasks {
+            match task.kind {
+                PendingTaskKind::Microtask => microtasks.push(task),
+                PendingTaskKind::AnimationFrame => animation_frames.push(task),
+                PendingTaskKind::Timeout { .. } => timeouts.push(task),
+            }
+        }
+
+        for task in microtasks {
+            self.run_pending_task(task);
+        }
+        for task in animation_frames {
+            self.run_pending_task(task);
+        }
+        for task in timeouts {
+            let repeat = matches!(&task.kind, PendingTaskKind::Timeout { repeat: true });
+            self.run_pending_task(task.clone());
+            if repeat {
+                self.queue_pending_task(task.kind.clone(), task.action.clone());
+            }
+        }
+    }
+
+    fn run_pending_task(&mut self, task: PendingTask) {
+        let result = match task.action {
+            PendingTaskAction::Callback { callback, mut args } => {
+                if matches!(task.kind, PendingTaskKind::AnimationFrame) {
+                    args.insert(0, JsValue::new(performance_now_ms()));
+                }
+                let this_value = if matches!(task.kind, PendingTaskKind::Microtask) {
+                    JsValue::undefined()
+                } else {
+                    JsValue::from(self.context.global_object().clone())
+                };
+                call_js_callback_with_this(&callback, &this_value, &args, &mut self.context)
+                    .map(|_| ())
+            }
+            PendingTaskAction::Script(source) => self
+                .context
+                .eval(Source::from_bytes(source.as_str()))
+                .map(|_| ()),
+        };
+
+        if let Err(error) = result {
+            self.push_log(format!("js task error: {error}"));
+        }
+        if let Err(error) = self.context.run_jobs() {
+            self.push_log(format!("js job error: {error}"));
+        }
+        flush_mutation_observers(&mut self.context);
+    }
+
     fn dispatch_initial_load_events(&mut self) {
         let document_id = self.document_id();
         let _ = self.dispatch_dom_event_to_node(document_id, "readystatechange", false, false);
@@ -543,6 +663,7 @@ impl JavaScriptRuntime {
     }
 
     fn snapshot(&mut self) -> ProcessedScriptHtml {
+        self.settle_pending_state();
         flush_mutation_observers(&mut self.context);
         ProcessedScriptHtml {
             html: self.serialize_html(),
@@ -589,9 +710,6 @@ impl JavaScriptRuntime {
 
     fn dispatch_dom_event(&mut self, request: DomEventRequest) -> DomEventDispatchResult {
         let default_prevented = self.dispatch_dom_event_request(request).unwrap_or(false);
-        self.flush_pending_document_writes();
-        self.process_loaded_document();
-        flush_mutation_observers(&mut self.context);
         DomEventDispatchResult {
             snapshot: self.snapshot(),
             default_prevented,
@@ -612,9 +730,6 @@ impl JavaScriptRuntime {
         let default_prevented = self
             .dispatch_global_event(event_type, bubbles, cancelable)
             .unwrap_or(false);
-        self.flush_pending_document_writes();
-        self.process_loaded_document();
-        flush_mutation_observers(&mut self.context);
         DomEventDispatchResult {
             snapshot: self.snapshot(),
             default_prevented,
@@ -2437,7 +2552,7 @@ fn install_browser_globals(context: &mut Context) {
         .register_global_builtin_callable(
             js_string!("setInterval"),
             2,
-            NativeFunction::from_fn_ptr(js_set_timeout),
+            NativeFunction::from_fn_ptr(js_set_interval),
         )
         .expect("setInterval should be installable");
     context
@@ -2465,7 +2580,7 @@ fn install_browser_globals(context: &mut Context) {
         .register_global_builtin_callable(
             js_string!("cancelAnimationFrame"),
             1,
-            NativeFunction::from_fn_ptr(js_clear_timeout),
+            NativeFunction::from_fn_ptr(js_clear_animation_frame),
         )
         .expect("cancelAnimationFrame should be installable");
     context
@@ -3710,7 +3825,12 @@ fn build_dom_event_object(
         let _ = event.set(js_string!("code"), js_string!(code.as_str()), true, context);
     }
     if let Some(detail) = &request.detail {
-        let _ = event.set(js_string!("detail"), js_string!(detail.as_str()), true, context);
+        let _ = event.set(
+            js_string!("detail"),
+            js_string!(detail.as_str()),
+            true,
+            context,
+        );
     }
     if let Some(data) = &request.data {
         let _ = event.set(js_string!("data"), js_string!(data.as_str()), true, context);
@@ -6466,39 +6586,133 @@ fn js_console_log(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     Ok(JsValue::undefined())
 }
 
+fn queue_pending_task(
+    context: &mut Context,
+    kind: PendingTaskKind,
+    action: PendingTaskAction,
+) -> usize {
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return 0;
+    };
+    let mut state = host.state.borrow_mut();
+    let handle = state.next_task_handle;
+    state.next_task_handle = state.next_task_handle.checked_add(1).unwrap_or(1);
+    state.pending_tasks.push_back(PendingTask {
+        handle,
+        kind,
+        action,
+    });
+    handle
+}
+
+fn clear_pending_task(context: &mut Context, handle: usize) {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state
+            .borrow_mut()
+            .pending_tasks
+            .retain(|task| task.handle != handle);
+    }
+}
+
+fn pending_task_handle_from_value(
+    value: Option<&JsValue>,
+    context: &mut Context,
+) -> JsResult<Option<usize>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let number = value.to_number(context)?;
+    if !number.is_finite() || number < 0.0 {
+        return Ok(None);
+    }
+    Ok(Some(number.round() as usize))
+}
+
 fn js_request_animation_frame(
     _: &JsValue,
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    if let Some(callback) = args.first() {
-        call_js_callback(callback, &[JsValue::new(performance_now_ms())], context)?;
+    let Some(callback) = args.first().cloned() else {
+        return Ok(JsValue::new(0));
+    };
+    if callback.as_object().is_none() {
+        return Ok(JsValue::new(0));
     }
-    Ok(JsValue::new(1))
+    let handle = queue_pending_task(
+        context,
+        PendingTaskKind::AnimationFrame,
+        PendingTaskAction::Callback {
+            callback,
+            args: Vec::new(),
+        },
+    );
+    Ok(JsValue::new(handle as i32))
 }
 
 fn js_queue_microtask(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    if let Some(callback) = args.first() {
-        call_js_callback(callback, &[], context)?;
+    let Some(callback) = args.first().cloned() else {
+        return Ok(JsValue::undefined());
+    };
+    if callback.as_object().is_none() {
+        return Ok(JsValue::undefined());
     }
+    let _ = queue_pending_task(
+        context,
+        PendingTaskKind::Microtask,
+        PendingTaskAction::Callback {
+            callback,
+            args: Vec::new(),
+        },
+    );
     Ok(JsValue::undefined())
 }
 
 fn js_set_timeout(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    if let Some(callback) = args.first() {
-        if callback.as_object().is_some() {
-            call_js_callback(callback, &[], context)?;
-        } else if callback.is_string() {
-            let script = js_value_to_string(callback, context)?;
-            let _ = context.eval(Source::from_bytes(script.as_str()));
-        }
-    }
-
-    Ok(JsValue::new(0))
+    schedule_timer(false, args, context)
 }
 
-fn js_clear_timeout(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+fn js_set_interval(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    schedule_timer(true, args, context)
+}
+
+fn schedule_timer(repeat: bool, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(callback) = args.first().cloned() else {
+        return Ok(JsValue::new(0));
+    };
+    let action = if callback.as_object().is_some() {
+        let callback_args = if args.len() > 2 {
+            args[2..].to_vec()
+        } else {
+            Vec::new()
+        };
+        PendingTaskAction::Callback {
+            callback,
+            args: callback_args,
+        }
+    } else if callback.is_string() {
+        PendingTaskAction::Script(js_value_to_string(&callback, context)?)
+    } else {
+        return Ok(JsValue::new(0));
+    };
+    let handle = queue_pending_task(context, PendingTaskKind::Timeout { repeat }, action);
+
+    Ok(JsValue::new(handle as i32))
+}
+
+fn js_clear_timeout(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if let Some(handle) = pending_task_handle_from_value(args.first(), context)? {
+        clear_pending_task(context, handle);
+    }
     Ok(JsValue::undefined())
+}
+
+fn js_clear_animation_frame(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    js_clear_timeout(this, args, context)
 }
 
 fn js_add_event_listener(
@@ -6558,7 +6772,26 @@ fn js_dom_dispatch_event(
         return Ok(JsValue::new(true));
     };
     let event_arg = args.first().cloned().unwrap_or_else(JsValue::undefined);
-    let (event_type, bubbles, cancelable, key, code, detail, data, input_type, client_x, client_y, button, buttons, is_composing, repeat, alt_key, ctrl_key, shift_key, meta_key) = if let Some(object) = event_arg.as_object() {
+    let (
+        event_type,
+        bubbles,
+        cancelable,
+        key,
+        code,
+        detail,
+        data,
+        input_type,
+        client_x,
+        client_y,
+        button,
+        buttons,
+        is_composing,
+        repeat,
+        alt_key,
+        ctrl_key,
+        shift_key,
+        meta_key,
+    ) = if let Some(object) = event_arg.as_object() {
         let event_type = js_value_to_string(&object.get(js_string!("type"), context)?, context)?;
         let bubbles = object.get(js_string!("bubbles"), context)?.to_boolean();
         let cancelable = object.get(js_string!("cancelable"), context)?.to_boolean();
@@ -6602,24 +6835,8 @@ fn js_dom_dispatch_event(
         let bubbles = default_event_bubbles(&event_type);
         let cancelable = default_event_cancelable(&event_type);
         (
-            event_type,
-            bubbles,
-            cancelable,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
+            event_type, bubbles, cancelable, None, None, None, None, None, None, None, None, None,
+            false, false, false, false, false, false,
         )
     };
     let request = DomEventRequest {
@@ -7590,9 +7807,13 @@ fn js_dom_remove_attribute(
 
 fn js_dom_remove(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(node_id) = this_node_id(this) {
-        let parent_id = context
-            .get_data::<JavaScriptHostData>()
-            .and_then(|host| host.state.borrow().dom.node(node_id).and_then(|node| node.parent));
+        let parent_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .node(node_id)
+                .and_then(|node| node.parent)
+        });
         if let Some(parent_id) = parent_id {
             let old_children = snapshot_dom_children(context, parent_id);
             if let Some(host) = context.get_data::<JavaScriptHostData>() {
@@ -7622,7 +7843,13 @@ fn js_dom_insert_adjacent_html(
     let target_id = if matches!(position.as_str(), "beforebegin" | "afterend") {
         context
             .get_data::<JavaScriptHostData>()
-            .and_then(|host| host.state.borrow().dom.node(node_id).and_then(|node| node.parent))
+            .and_then(|host| {
+                host.state
+                    .borrow()
+                    .dom
+                    .node(node_id)
+                    .and_then(|node| node.parent)
+            })
             .unwrap_or(node_id)
     } else {
         node_id
@@ -7821,9 +8048,13 @@ fn js_dom_set_outer_html(
 ) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let html = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
-    let parent_id = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| host.state.borrow().dom.node(node_id).and_then(|node| node.parent));
+    let parent_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .node(node_id)
+            .and_then(|node| node.parent)
+    });
     let target_id = parent_id.unwrap_or(node_id);
     let old_children = snapshot_dom_children(context, target_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
@@ -9605,8 +9836,12 @@ fn record_dom_child_list_mutation(
         return;
     }
     let reorder_only = old_children.len() == new_children.len()
-        && old_children.iter().all(|child_id| new_children.contains(child_id))
-        && new_children.iter().all(|child_id| old_children.contains(child_id));
+        && old_children
+            .iter()
+            .all(|child_id| new_children.contains(child_id))
+        && new_children
+            .iter()
+            .all(|child_id| old_children.contains(child_id));
     let (added, removed) = if reorder_only {
         (new_children.to_vec(), old_children.to_vec())
     } else {
@@ -10160,13 +10395,23 @@ mod tests {
     }
 
     #[test]
-    fn runs_set_timeout_callbacks_immediately() {
+    fn runs_set_timeout_callbacks_after_script_turn() {
         let processed = process_document_scripts(
             "<script>setTimeout(function () { document.write('<p>Later</p>'); }, 1);</script>",
             &Url::parse("https://example.com").unwrap(),
         );
 
         assert!(processed.html.contains("<p>Later</p>"));
+    }
+
+    #[test]
+    fn defers_nested_timeouts_until_the_next_turn() {
+        let processed = process_document_scripts(
+            "<script>setTimeout(function () { document.title = 'first'; setTimeout(function () { document.title = 'second'; }, 1); }, 1);</script>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(processed.title_override.as_deref(), Some("first"));
     }
 
     #[test]

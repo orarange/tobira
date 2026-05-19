@@ -100,6 +100,7 @@ Tasks:
 - `addEventListener(...)` and basic listener registration are in place
 - basic capture + bubbling exists for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`; `focus` and `blur` are target-only
 - page controls now dispatch DOM events before default actions
+- queued host-task plumbing now defers `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)` callbacks instead of running them synchronously
 - submit and link clicks can be canceled with `preventDefault()`
 - browser chrome back/forward navigation is now in place
 
@@ -361,7 +362,7 @@ Exit: all five targets are browsable in their core flows without falling back to
 - `<canvas>` 2D context (minimal: `fillRect`, `drawImage`, `fillText`)
 - `ResizeObserver` / `IntersectionObserver` stubs
 - `navigator.userAgent`, `navigator.language`, feature-detection shims
-- `requestAnimationFrame` loop (currently synchronous / absent)
+- `requestAnimationFrame` loop (queued, but still not a full browser frame clock)
 
 Exit: video-centric pages stop crashing on feature detection; canvas-based UI elements render.
 
