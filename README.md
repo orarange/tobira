@@ -66,7 +66,7 @@ Current capabilities:
   - Scroll restoration for both same-document and full-document history entries
   - Clickable page links plus basic GUI form controls for `GET` submissions
   - Basic DOM event plumbing (bubbles `click`, `input`, `change`, `submit`; target-only `focus`, `blur`)
-  - `MutationObserver` callbacks for `attributes` and `childList`, plus browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) and `AbortController` / `AbortSignal`
+  - `MutationObserver` callbacks for `attributes`, `childList`, and `characterData`, plus browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) and `AbortController` / `AbortSignal`
   - Layout reflow cache keyed by viewport width and page revision
 - Lightweight mutable DOM support for:
   - `document.querySelector(...)` / `querySelectorAll(...)`
@@ -78,6 +78,7 @@ Current capabilities:
   - `replaceChild(...)`, `removeChild(...)`, `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, `replaceChildren(...)`
   - dynamic `document.body`, `document.head`, and `document.documentElement`
   - Node introspection helpers: `nodeType`, `nodeName`, `nodeValue`, `firstChild`, `lastChild`, `previousSibling`, `nextSibling`, `isConnected`
+  - text node `CharacterData` support: `data`, `length`, `nodeValue`, `textContent`, and `splitText(...)`
   - `hasAttribute(...)`, `getAttributeNames(...)`
   - `toggleAttribute(...)`
   - `element.attributes` as a live NamedNodeMap-style collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration

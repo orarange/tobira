@@ -129,7 +129,7 @@ Tasks:
 - improve `classList`, `dataset`, `attributes`, and property reflection beyond the current helper surface; live `element.attributes` is now in place, but deeper parity is still open
 - add `querySelector(...)` coverage for more selectors if needed
 - support `document.body`, `document.head`, `document.documentElement` consistently
-- add mutation notifications for DOM changes when they affect layout or event targets; `MutationObserver` now fires for `attributes` and `childList`, and browser-style event constructors plus `AbortController` / `AbortSignal` are now available, but deeper parity and more mutation types are still open
+- add mutation notifications for DOM changes when they affect layout or event targets; `MutationObserver` now fires for `attributes`, `childList`, and `characterData`, browser-style event constructors plus `AbortController` / `AbortSignal` are available, and text nodes now expose `splitText(...)`, but deeper parity and more mutation types are still open
 - improve `innerHTML` parsing and serialization edge cases
 
 Exit criteria:

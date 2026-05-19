@@ -1075,10 +1075,33 @@ impl DomState {
         }
     }
 
-    fn set_node_value(&mut self, node_id: usize, value: &str) {
+    fn set_node_value(&mut self, node_id: usize, value: &str) -> Option<String> {
         if let Some(DomNodeKind::Text(text)) = self.node_mut(node_id).map(|node| &mut node.kind) {
-            *text = value.to_string();
+            return Some(std::mem::replace(text, value.to_string()));
         }
+        None
+    }
+
+    fn text_length(&self, node_id: usize) -> Option<usize> {
+        self.node_value(node_id).map(|value| value.chars().count())
+    }
+
+    fn split_text(&mut self, node_id: usize, offset: usize) -> Option<usize> {
+        let current = self.node_value(node_id)?;
+        let current_length = current.chars().count();
+        if offset > current_length {
+            return None;
+        }
+
+        let (left, right) = split_text_at_char_offset(&current, offset);
+        let _ = self.set_node_value(node_id, &left)?;
+        let new_node_id = self.create_text_node(&right);
+        let parent_id = self.node(node_id).and_then(|node| node.parent);
+        if let Some(parent_id) = parent_id {
+            let next_sibling = self.next_sibling(node_id);
+            self.insert_before(parent_id, new_node_id, next_sibling);
+        }
+        Some(new_node_id)
     }
 
     fn first_child(&self, node_id: usize) -> Option<usize> {
@@ -1455,6 +1478,10 @@ impl DomState {
     }
 
     fn set_text_content(&mut self, node_id: usize, text: &str) {
+        if self.node_type(node_id) == 3 {
+            let _ = self.set_node_value(node_id, text);
+            return;
+        }
         let text_id = self.create_text_node(text);
         self.replace_children(node_id, vec![text_id]);
     }
@@ -3987,6 +4014,25 @@ fn scroll_offset_from_args(args: &[JsValue], context: &mut Context) -> JsResult<
     Ok(0)
 }
 
+fn character_data_offset_from_value(value: &JsValue, context: &mut Context) -> JsResult<usize> {
+    let number = value.to_number(context)?;
+    if !number.is_finite() {
+        return Ok(0);
+    }
+    if number < 0.0 {
+        return Err(JsNativeError::range()
+            .with_message("character data offset must be non-negative")
+            .into());
+    }
+    Ok(number.trunc() as usize)
+}
+
+fn split_text_at_char_offset(text: &str, offset: usize) -> (String, String) {
+    let left: String = text.chars().take(offset).collect();
+    let right: String = text.chars().skip(offset).collect();
+    (left, right)
+}
+
 fn js_window_scroll_to(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let target = scroll_offset_from_args(args, context)?.max(0) as u32;
     let changed = if let Some(host) = context.get_data::<JavaScriptHostData>() {
@@ -4287,6 +4333,9 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_node_value).to_js_function(context.realm());
     let set_node_value =
         NativeFunction::from_fn_ptr(js_dom_set_node_value).to_js_function(context.realm());
+    let get_text_length =
+        NativeFunction::from_fn_ptr(js_dom_get_text_length).to_js_function(context.realm());
+    let split_text = NativeFunction::from_fn_ptr(js_dom_split_text);
     let get_first_child =
         NativeFunction::from_fn_ptr(js_dom_get_first_child).to_js_function(context.realm());
     let get_last_child =
@@ -4311,8 +4360,13 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_scroll_top).to_js_function(context.realm());
     let set_scroll_top =
         NativeFunction::from_fn_ptr(js_dom_set_scroll_top).to_js_function(context.realm());
+    let is_text_node = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.node_type(node_id) == 3)
+        .unwrap_or(false);
     let style = build_dom_style_object(context, node_id);
-    let object = ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context)
+    let mut object = ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context);
+    let mut object = object
         .function(
             NativeFunction::from_fn_ptr(js_dom_query_selector),
             js_string!("querySelector"),
@@ -4619,8 +4673,8 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         )
         .accessor(
             js_string!("nodeValue"),
-            Some(get_node_value),
-            Some(set_node_value),
+            Some(get_node_value.clone()),
+            Some(set_node_value.clone()),
             Attribute::all(),
         )
         .accessor(
@@ -4703,8 +4757,24 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             Some(get_scroll_height),
             None,
             Attribute::all(),
-        )
-        .build();
+        );
+    if is_text_node {
+        object = object
+            .accessor(
+                js_string!("data"),
+                Some(get_node_value.clone()),
+                Some(set_node_value.clone()),
+                Attribute::all(),
+            )
+            .accessor(
+                js_string!("length"),
+                Some(get_text_length.clone()),
+                None,
+                Attribute::all(),
+            )
+            .function(split_text, js_string!("splitText"), 1);
+    }
+    let object = object.build();
     store_dom_node_object(context, node_id, &object);
     object
 }
@@ -7067,10 +7137,93 @@ fn js_dom_set_node_value(
 ) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let value = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let old_value = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.node_value(node_id));
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
-        host.state.borrow_mut().dom.set_node_value(node_id, &value);
+        let _ = host.state.borrow_mut().dom.set_node_value(node_id, &value);
+    }
+    if old_value.as_deref() != Some(value.as_str()) {
+        record_dom_character_data_mutation(context, node_id, old_value);
+        flush_mutation_observers(context);
     }
     Ok(JsValue::undefined())
+}
+
+fn js_dom_get_text_length(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let length = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.text_length(node_id))
+        .unwrap_or(0);
+    Ok(JsValue::new(length as i32))
+}
+
+fn js_dom_split_text(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let offset =
+        character_data_offset_from_value(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let old_value = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.node_value(node_id));
+    let Some(current_value) = old_value.clone() else {
+        return Err(JsNativeError::typ()
+            .with_message("Text.splitText called on non-text node")
+            .into());
+    };
+    let current_length = current_value.chars().count();
+    if offset > current_length {
+        return Err(JsNativeError::range()
+            .with_message("Text.splitText offset is out of range")
+            .into());
+    }
+    let (left_value, _) = split_text_at_char_offset(&current_value, offset);
+
+    let parent_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .node(node_id)
+            .and_then(|node| node.parent)
+    });
+    let old_parent_children = if let Some(parent_id) = parent_id {
+        snapshot_dom_children(context, parent_id)
+    } else {
+        Vec::new()
+    };
+    let new_node_id = {
+        let Some(host) = context.get_data::<JavaScriptHostData>() else {
+            return Ok(JsValue::undefined());
+        };
+        let mut state = host.state.borrow_mut();
+        state.dom.split_text(node_id, offset).ok_or_else(|| {
+            JsNativeError::range().with_message("Text.splitText offset is out of range")
+        })?
+    };
+    let new_parent_children = if let Some(parent_id) = parent_id {
+        snapshot_dom_children(context, parent_id)
+    } else {
+        Vec::new()
+    };
+    if left_value != current_value {
+        record_dom_character_data_mutation(context, node_id, old_value);
+    }
+    if old_parent_children != new_parent_children
+        && let Some(parent_id) = parent_id
+    {
+        record_dom_child_list_mutation(
+            context,
+            parent_id,
+            &old_parent_children,
+            &new_parent_children,
+        );
+    }
+    flush_mutation_observers(context);
+    Ok(JsValue::from(build_dom_node_object(context, new_node_id)))
 }
 
 fn js_dom_get_first_child(
@@ -7985,6 +8138,23 @@ fn js_dom_set_text_content(
 ) -> JsResult<JsValue> {
     let node_id = this_node_id(this).unwrap_or(0);
     let text = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let node_type = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.node_type(node_id))
+        .unwrap_or(0);
+    if node_type == 3 {
+        let old_value = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.node_value(node_id));
+        if let Some(host) = context.get_data::<JavaScriptHostData>() {
+            host.state.borrow_mut().dom.set_text_content(node_id, &text);
+        }
+        if old_value.as_deref() != Some(text.as_str()) {
+            record_dom_character_data_mutation(context, node_id, old_value);
+            flush_mutation_observers(context);
+        }
+        return Ok(JsValue::undefined());
+    }
     let old_children = snapshot_dom_children(context, node_id);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         host.state.borrow_mut().dom.set_text_content(node_id, &text);
@@ -9888,6 +10058,22 @@ fn record_dom_attribute_mutation(
     );
 }
 
+fn record_dom_character_data_mutation(
+    context: &mut Context,
+    target_node_id: usize,
+    old_value: Option<String>,
+) {
+    record_dom_mutation(
+        context,
+        "characterData",
+        target_node_id,
+        None,
+        old_value.as_deref(),
+        &[],
+        &[],
+    );
+}
+
 fn flush_mutation_observers(context: &mut Context) {
     for _ in 0..8 {
         let delivered = context
@@ -11020,6 +11206,22 @@ mod tests {
             processed
                 .html
                 .contains("data-node=\"9|#document|true|1|DIV|3|#text|one|true|true|true|true|true|true|true|true\""),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_character_data_mutation_observers_and_split_text() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"box\"></div><script>var box = document.getElementById('box'); var text = document.createTextNode('abc'); box.appendChild(text); var log = []; var observer = new MutationObserver(function(records) { log.push(records.map(function(record) { return record.type + ':' + record.oldValue; }).join(',')); }); observer.observe(text, { characterData: true, characterDataOldValue: true }); text.nodeValue = 'xyz'; var tail = text.splitText(1); document.body.setAttribute('data-char', [text.data, text.length, tail.data, tail.length, text.nextSibling === tail, tail.previousSibling === text, log.join(';')].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-char=\"x|1|yz|2|true|true|characterData:abc;characterData:xyz\""),
             "{}",
             processed.html
         );
