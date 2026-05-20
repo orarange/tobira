@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-17`
+- Date: `2026-05-19`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
 - Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
@@ -33,8 +33,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
 - Verification status:
-  - `cargo test`: `157` passing tests on `2026-05-17`
-  - `cargo build`: success on `2026-05-17`
+- `cargo test`: `193` passing tests on `2026-05-19`
+- `cargo build`: success on `2026-05-19`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -66,6 +66,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `window.scrollY` / `window.pageYOffset`
     - `document.activeElement`
     - `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
+  - Node introspection and mutation helpers are now much closer to browser DOM behavior:
+    - `nodeType`, `nodeName`, `nodeValue`, `firstChild`, `lastChild`, `previousSibling`, `nextSibling`, `isConnected`
+    - `cloneNode(...)`, `replaceChild(...)`, `removeChild(...)`
+    - `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, `replaceChildren(...)`
+    - `document.createDocumentFragment(...)` with fragment flattening on insertion
   - page event listeners now support capture + bubbling, plus `once` listeners and capture-sensitive `removeEventListener(...)`
   - guarded JavaScript execution through `boa_engine`
   - lightweight mutable DOM bridge with:
@@ -84,6 +89,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - reflected `value`, `src`, `href`, `rel`, `type`, `name`, `content`
   - JS execution / runtime support for:
     - dedicated larger-stack worker thread
+    - queued host-task plumbing for `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)`
     - Promise job flushing (drained after top-level script eval via `context.run_jobs()`)
     - lightweight `fetch(...)` with response headers iteration
     - lightweight `XMLHttpRequest` with `getResponseHeader(...)` / `getAllResponseHeaders()`
@@ -106,6 +112,9 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - YouTube home shell / cards / nudge UI
     - lightweight Google shell
     - legacy frame/table-heavy pages such as the Abe Hiroshi site
+  - generic YouTube home / non-watch pages now take a synthetic fast path before the heavy JS session so the app does not spin on the full app shell
+  - generic `google.com` and `youtube.com` now try the real JS/HTML path before synthetic fallback
+  - living JS roadmap tracked in `JS_ROADMAP.md`
 
 ## Important Modules
 
@@ -155,6 +164,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Native page input typing now syncs `value` into the JS DOM.
 - DOM traversal APIs now include `matches(...)`, `closest(...)`, `contains(...)`, and element sibling / child accessors for event delegation and framework-style code paths.
 - The richer `attributes` / `dataset` surface still needs deeper parity, even though `element.attributes` is now a live collection and `hasAttributes(...)` / `toggleAttribute(...)` now exist.
+- `MutationObserver` now fires for `attributes`, `childList`, and `characterData`, and the JS layer also exposes browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) plus `AbortController` / `AbortSignal`.
+- text nodes now expose browser-like `CharacterData` helpers including `data`, `length`, `nodeValue`, and `splitText(...)`.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward replay still needs depth beyond the current scroll restoration work.
 - Script-driven scrolling now has basic window / DOM setter support, and full-document / same-document history scroll restoration is in place.
@@ -167,6 +178,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - CSS Phase 5 is on PR #49 (`claude/phase5-css`); once merged, all Phase 5 features land in master.
 - CSS Phase 6 items remain: `transform: scale/rotate` rendering, `animation`/`@keyframes`, `transition`, `filter: blur()` rendering, `grid-template-areas`, RTL text.
 - JS support still needs storage/cookies, richer history/back-forward, and more DOM depth for app-shell sites.
+- text node `characterData` mutation notifications and `splitText(...)` are now in place for common DOM edit flows.
 
 ## Useful Commands
 
@@ -186,6 +198,29 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-18 - Codex (Node / fragment DOM APIs)
+
+- Added browser-grade Node accessors to the JS DOM bridge, including `nodeType`, `nodeName`, `nodeValue`, sibling accessors, and `isConnected` on document and element nodes.
+- Added structural mutation helpers: `cloneNode(...)`, `replaceChild(...)`, `removeChild(...)`, `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, and `replaceChildren(...)`.
+- Added `document.createDocumentFragment(...)` and fragment flattening during insertion so DOM batches behave more like a real browser.
+- Verified the updated state with `cargo test` (`188` passing tests) and `cargo build`.
+
+### 2026-05-19 - Codex (event loop / timer queue)
+
+- Replaced the immediate timer / animation / microtask fallback path with queued host-task plumbing so callbacks do not reenter the current JS turn immediately.
+- Added queued support for `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)`, plus `clearTimeout(...)`, `clearInterval(...)`, and `cancelAnimationFrame(...)` handle cleanup.
+- Added a regression test that confirms nested timeouts defer to the next turn instead of recursively firing in the same turn.
+- Updated the README and JS roadmap so the documented JS runtime status matches the queued task behavior.
+- Verified the updated state with `cargo test` (`193` passing tests) and `cargo build`.
+
+### 2026-05-19 - Codex (characterData / splitText)
+
+- Added browser-like `CharacterData` support for text nodes, including `data`, `length`, `nodeValue`, and `splitText(...)`.
+- Updated `textContent` / `nodeValue` setters so text-node edits now emit `characterData` mutation records instead of only child-list churn.
+- Added a regression test that confirms `MutationObserver` receives `characterData` changes and that `splitText(...)` preserves text-node sibling relationships.
+- Updated the README and roadmap notes to reflect the deeper text-node DOM surface.
+- Verified the updated state with `cargo test` (`193` passing tests) and `cargo build`.
 
 ### 2026-05-14 - Codex
 
@@ -397,8 +432,84 @@ Implemented all Phase 5 CSS roadmap items across 6 batches on `claude/phase5-css
 
 ### 2026-05-17 - Codex (computed style, header and state APIs)
 
-- Added `getComputedStyle(...)` snapshots exposing layout-sensitive color / font / box spacing.
-- Added response header iteration to fetch response and XHR `getResponseHeader(...)` / `getAllResponseHeaders()`.
-- Added `history.state` support and dispatched `popstate` on history transitions and `hashchange` on same-document fragments.
-- Made GUI-driven DOM attribute updates refresh the live snapshot to trigger immediate reflow invalidation.
-- Defined a clearer CSS boundary coordination policy to treat the Claude branch as the layout/parser owner.
+- Added `matches(...)`, `closest(...)`, and `contains(...)` to the lightweight DOM bridge so event delegation code can inspect and climb the tree without special cases.
+- Added `firstElementChild`, `lastElementChild`, `previousElementSibling`, and `nextElementSibling` accessors so framework-style traversal paths can read the surrounding element structure.
+- Added a regression test that exercises selector matching, ancestor lookup, containment, and sibling traversal together on a small nested DOM tree.
+
+### 2026-05-17 - Codex (script-driven scroll APIs)
+
+- Added `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setter support so scripts can move the viewport directly.
+- Wired JS scroll changes back into the GUI scroll state so the rendered page and `window.scrollY` stay aligned.
+- Added regression coverage for scroll-position getters, setters, and scroll-driven event handling.
+
+### 2026-05-17 - Codex (scroll demo page)
+
+- Added `demo/scroll-demo.html` so the new scroll APIs can be exercised manually without digging through source code.
+- The demo uses a tall DOM tree plus buttons for `scrollTo`, `scrollBy`, and `scrollTop` setter checks.
+
+### 2026-05-17 - Codex (CSS boundary policy)
+
+- Defined a clearer boundary for CSS work: treat the Claude `claude/phase5-css` branch as the CSS parser/layout owner and avoid broad or destructive CSS edits from Codex.
+- Documented the exception workflow for JS tasks that genuinely need CSS-facing integration: keep the diff minimal, request Copilot review, and log touched files in `change.md`.
+- Kept the current update CSS-neutral; this change only tightened coordination rules and documentation.
+
+### 2026-05-17 - Codex (dynamic document root getters)
+
+- Converted `document.body`, `document.head`, and `document.documentElement` to dynamic getters so they stay consistent if the DOM is extended after load.
+- Added a regression test that creates body/head nodes after startup and verifies the getters track the live tree.
+- Updated the roadmap and README to reflect the current DOM consistency surface.
+
+### 2026-05-17 - Codex (mutation snapshot refresh)
+
+- Made GUI-driven DOM attribute writes refresh the live page snapshot so mutation notifications can bump layout revision and invalidate cached reflow immediately.
+- Added a regression test that mutates the root element, then verifies the refreshed page snapshot and layout revision update together.
+- Recorded the new snapshot-refresh behavior in the README and roadmap notes.
+
+### 2026-05-17 - Codex (same-document history scroll restore)
+
+- Extended same-document history entries to store scroll positions, and restored them on `history.back()` / `history.forward()`.
+- Added a regression test that walks a same-document history stack and verifies the stored scroll position comes back with each entry.
+- Updated the README and roadmap notes to mention same-document scroll restoration.
+
+### 2026-05-17 - Codex (full-document history scroll restore)
+
+- Extended browser-level history entries to store scroll positions, and restored them when navigating back and forward across document loads.
+- Updated the browser history load path so scroll state is reapplied after a full document load when history demands it.
+- Recorded the browser-level scroll restoration behavior in the README and roadmap notes.
+
+### 2026-05-17 - Codex (computed style and DOM token list helpers)
+
+- Added `getComputedStyle(...)` snapshots for common layout-sensitive values, including inherited color / font / spacing properties and shorthand box values.
+- Extended `classList` with `value`, `length`, `item(...)`, `toString()`, `replace(...)`, and force-aware `toggle(...)`.
+- Added `hasAttributes(...)` and `toggleAttribute(...)` on elements so scripts can introspect and flip attributes without manual DOM plumbing.
+- Updated the README and roadmap notes to reflect the broader DOM / computed-style surface.
+
+### 2026-05-17 - Codex (attribute collection live bridge)
+
+- Added a live `element.attributes` collection with `length`, `item(...)`, `getNamedItem(...)`, named lookup, and array-like iteration support.
+- Added regression coverage for attributes collection indexing, named lookup, and iteration order.
+- Updated the README and roadmap notes to reflect that live attribute collection support is now available.
+
+### 2026-05-17 - Codex (fetch/XHR response headers)
+
+- Added response header iteration helpers to the lightweight fetch response surface.
+- Added XHR `getResponseHeader(...)` and `getAllResponseHeaders()` support backed by the stored response header map.
+- Added regression coverage for response header iteration plus XHR header access.
+
+### 2026-05-17 - Codex (history state and hashchange/popstate)
+
+- Added `history.state` support for same-document session history entries.
+- Dispatched `popstate` on history back/forward and `hashchange` on same-document fragment changes.
+- Added regression coverage for `hashchange` and `popstate` dispatch behavior.
+
+### 2026-05-17 - Codex (YouTube synthetic fast path)
+
+- Short-circuited generic YouTube home / non-watch loads to a synthetic shell before starting the heavy JS session.
+- Kept the watch-page summary path intact while avoiding the runaway memory growth seen on the full YouTube app shell.
+- Verified the new path with a process-memory smoke test that stabilized instead of growing without bound.
+
+### 2026-05-16 - Codex (browser history back/forward)
+
+- Added browser-level history tracking for full document loads.
+- Added back/forward chrome buttons and `Alt+Left` / `Alt+Right` shortcuts.
+- Kept same-document soft navigation in sync with the browser history entry for the current page.

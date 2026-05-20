@@ -119,7 +119,11 @@ fn maybe_auto_close(stack: &mut Vec<Element>, new_tag: &str) {
     match new_tag {
         // Table cell: close any open td/th within the current tr context
         "td" | "th" => {
-            auto_close_before(stack, &["td", "th"], &["tr", "table", "tbody", "thead", "tfoot"]);
+            auto_close_before(
+                stack,
+                &["td", "th"],
+                &["tr", "table", "tbody", "thead", "tfoot"],
+            );
         }
         // Table row: close any open tr within the current table body/head/foot
         "tr" => {
@@ -135,7 +139,11 @@ fn maybe_auto_close(stack: &mut Vec<Element>, new_tag: &str) {
         }
         // A new <p> closes an open <p> (and many block elements do too)
         tag if is_block_like(tag) => {
-            auto_close_before(stack, &["p"], &["td", "th", "li", "dd", "dt", "body", "html", "document"]);
+            auto_close_before(
+                stack,
+                &["p"],
+                &["td", "th", "li", "dd", "dt", "body", "html", "document"],
+            );
         }
         _ => {}
     }
@@ -145,19 +153,16 @@ fn maybe_auto_close(stack: &mut Vec<Element>, new_tag: &str) {
 /// Stop (and do nothing) if we hit a `boundary` element first.
 /// If found, call close_element to pop up to and including that element.
 fn auto_close_before(stack: &mut Vec<Element>, targets: &[&str], boundaries: &[&str]) {
-    let close_tag = stack
-        .iter()
-        .rev()
-        .find_map(|el| {
-            let name = el.tag_name.as_str();
-            if targets.contains(&name) {
-                Some(name.to_string())
-            } else if boundaries.contains(&name) {
-                Some(String::new()) // boundary hit — signal "stop, nothing to close"
-            } else {
-                None
-            }
-        });
+    let close_tag = stack.iter().rev().find_map(|el| {
+        let name = el.tag_name.as_str();
+        if targets.contains(&name) {
+            Some(name.to_string())
+        } else if boundaries.contains(&name) {
+            Some(String::new()) // boundary hit — signal "stop, nothing to close"
+        } else {
+            None
+        }
+    });
     if let Some(tag) = close_tag {
         if !tag.is_empty() {
             close_element(stack, &tag);
@@ -167,12 +172,40 @@ fn auto_close_before(stack: &mut Vec<Element>, targets: &[&str], boundaries: &[&
 
 /// Elements that trigger implicit closure of an open <p>.
 fn is_block_like(tag: &str) -> bool {
-    matches!(tag,
-        "address" | "article" | "aside" | "blockquote" | "details" | "dialog" |
-        "div" | "dl" | "fieldset" | "figcaption" | "figure" | "footer" | "form" |
-        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "header" | "hgroup" |
-        "hr" | "main" | "menu" | "nav" | "ol" | "p" | "pre" | "section" |
-        "summary" | "table" | "ul"
+    matches!(
+        tag,
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "details"
+            | "dialog"
+            | "div"
+            | "dl"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "hgroup"
+            | "hr"
+            | "main"
+            | "menu"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "summary"
+            | "table"
+            | "ul"
     )
 }
 

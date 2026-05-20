@@ -20,6 +20,8 @@ Already working:
 - recursive `document.write(...)`
 - lightweight DOM mutation helpers
 - live `element.attributes` collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
+- browser-grade Node accessors and mutation helpers such as `nodeType`, `nodeName`, `nodeValue`, sibling traversal, `cloneNode(...)`, `replaceChild(...)`, `removeChild(...)`, `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, `replaceChildren(...)`
+- `document.createDocumentFragment(...)` with fragment flattening during insertion
 - native GUI typing stays in sync with live DOM `input.value`
 - basic DOM event plumbing for capture + bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`
 - `Promise` job flushing
@@ -34,6 +36,7 @@ Already working:
 - same-document history back/forward now restores stored scroll positions
 - browser-level back/forward navigation across document loads
 - browser-level history entries now also remember scroll positions across document loads
+- generic YouTube home / non-watch pages use a synthetic fast path instead of running the heavy app shell through the JS worker
 - layout cache invalidation keyed by viewport width and page revision
 - JS-visible viewport and focus state are wired up through `window.innerWidth` / `window.innerHeight`, `window.scrollY` / `window.pageYOffset`, and `document.activeElement`
 - basic script-driven scrolling APIs now exist through `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
@@ -74,6 +77,20 @@ If we want to keep momentum and avoid getting stuck on the biggest browser gaps 
 
 The roadmap below still keeps the big browser areas grouped by phase, but the list above is the preferred order when we need the next easiest high-impact task.
 
+## Risk Matrix
+
+If we are choosing what is most likely to block "modern browser-like JS" first, this is the practical risk order:
+
+| Rank | Bottleneck | Why it is risky | Typical symptom | Preferred countermeasure |
+| --- | --- | --- | --- | --- |
+| 1 | Event loop / reentrancy | Promise jobs, timers, DOM events, and callbacks can recurse into each other in surprising ways | Pages freeze, handlers run out of order, or one callback starves the rest | Keep the microtask / task / event sequencing explicit and small enough to reason about |
+| 2 | DOM mutation -> reflow / repaint / hit-test sync | DOM changes only matter if layout, focus, and clicks are recomputed afterward | The page looks updated but clicks land in the wrong place, or the UI visually drifts | Make invalidation cheap and deterministic, and reflow only the affected subtree or page revision slice |
+| 3 | Network semantics | `fetch` / `XHR` behavior is very site-dependent and easy to get subtly wrong | App shells stop loading, retry loops appear, or requests are silently rejected | Keep same-origin / redirect / abort / header handling explicit and add smoke tests for real sites |
+| 4 | Input / form / selection details | Modern sites lean on precise typing, selection, and submission behavior | Search boxes accept text but do not submit correctly, or caret / selection jumps oddly | Treat `value`, selection, and default actions as a single pipeline |
+| 5 | Framework-facing DOM parity | React / YouTube / Google-like code expects browser quirks, not just a basic DOM | The site renders but the client app never becomes usable | Add the smallest browser-facing DOM gaps first, then test against real app-shell paths |
+| 6 | Performance / memory growth | More caching and observer machinery can accidentally make the browser heavy | Memory climbs until the process stalls or recovers in bursts | Measure frequently and keep caches / snapshots bounded |
+| 7 | Cross-branch integration risk | CSS baseline is owned by Claude, so accidental overlap can create merge churn | Repeated conflicts or duplicated engine work | Avoid CSS engine files unless integration is truly needed, and use PR + Copilot review when it is |
+
 ## Phase 1: Real Event Plumbing
 
 Goal: make page interaction feel like a browser, not a custom app.
@@ -83,6 +100,7 @@ Tasks:
 - `addEventListener(...)` and basic listener registration are in place
 - basic capture + bubbling exists for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`; `focus` and `blur` are target-only
 - page controls now dispatch DOM events before default actions
+- queued host-task plumbing now defers `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)` callbacks instead of running them synchronously
 - submit and link clicks can be canceled with `preventDefault()`
 - browser chrome back/forward navigation is now in place
 
@@ -107,10 +125,11 @@ Tasks:
 
 - expand node/element APIs that are commonly used
 - DOM traversal helpers like `matches(...)`, `closest(...)`, `contains(...)`, and element sibling accessors are now in place
+- Node introspection and mutation helpers now cover the common insertion / replacement paths, plus `document.createDocumentFragment(...)`
 - improve `classList`, `dataset`, `attributes`, and property reflection beyond the current helper surface; live `element.attributes` is now in place, but deeper parity is still open
 - add `querySelector(...)` coverage for more selectors if needed
 - support `document.body`, `document.head`, `document.documentElement` consistently
-- add mutation notifications for DOM changes when they affect layout or event targets
+- add mutation notifications for DOM changes when they affect layout or event targets; `MutationObserver` now fires for `attributes`, `childList`, and `characterData`, browser-style event constructors plus `AbortController` / `AbortSignal` are available, and text nodes now expose `splitText(...)`, but deeper parity and more mutation types are still open
 - improve `innerHTML` parsing and serialization edge cases
 
 Exit criteria:
@@ -343,7 +362,7 @@ Exit: all five targets are browsable in their core flows without falling back to
 - `<canvas>` 2D context (minimal: `fillRect`, `drawImage`, `fillText`)
 - `ResizeObserver` / `IntersectionObserver` stubs
 - `navigator.userAgent`, `navigator.language`, feature-detection shims
-- `requestAnimationFrame` loop (currently synchronous / absent)
+- `requestAnimationFrame` loop (queued, but still not a full browser frame clock)
 
 Exit: video-centric pages stop crashing on feature detection; canvas-based UI elements render.
 
