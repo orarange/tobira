@@ -371,7 +371,9 @@ pub struct BoxShadow {
     pub offset_x: i32,
     pub offset_y: i32,
     pub blur: u32,
+    pub spread: i32,
     pub color: Option<u32>,
+    pub inset: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -554,7 +556,7 @@ pub struct ComputedStyle {
     pub cursor_kind: CursorKind,
     pub pointer_events_none: bool,
     pub text_decoration_color: Option<Color>,
-    pub box_shadow: Option<BoxShadow>,
+    pub box_shadows: Vec<BoxShadow>,
     pub content: Option<String>,
     // Position
     pub position: Position,
@@ -587,9 +589,12 @@ pub struct ComputedStyle {
     pub grid_template_rows: Vec<GridTrackSize>,
     pub grid_auto_rows: GridTrackSize,
     pub grid_auto_columns: GridTrackSize,
+    // Grid container areas
+    pub grid_template_areas: Vec<Vec<String>>,
     // Grid item fields
     pub grid_column: GridPlacement,
     pub grid_row: GridPlacement,
+    pub grid_area_name: Option<String>,
     // Filter effects
     pub filter_blur_px: u32,       // blur() value in pixels, 0 = no blur
     pub filter_brightness: u32,    // brightness() in percent * 100 (10000 = 100% = no change)
@@ -664,7 +669,7 @@ impl ComputedStyle {
             cursor_kind: CursorKind::Auto,
             pointer_events_none: false,
             text_decoration_color: None,
-            box_shadow: None,
+            box_shadows: Vec::new(),
             content: None,
             // Position fields
             position: Position::Static,
@@ -694,8 +699,10 @@ impl ComputedStyle {
             grid_template_rows: Vec::new(),
             grid_auto_rows: GridTrackSize::Auto,
             grid_auto_columns: GridTrackSize::Auto,
+            grid_template_areas: Vec::new(),
             grid_column: GridPlacement::default(),
             grid_row: GridPlacement::default(),
+            grid_area_name: None,
             // Filter effects
             filter_blur_px: 0,
             filter_brightness: 10000,
@@ -1930,12 +1937,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "box-shadow" => {
-            let v = value.trim().to_ascii_lowercase();
-            if v == "none" {
-                style.box_shadow = None;
-            } else {
-                style.box_shadow = parse_box_shadow(value);
-            }
+            style.box_shadows = parse_box_shadows(value);
         }
         "cursor" => {
             style.cursor_kind = match value.trim().to_ascii_lowercase().as_str() {
@@ -2137,6 +2139,13 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                     style.grid_row.start = Some(end);
                 }
             }
+        }
+        "grid-template-areas" => {
+            style.grid_template_areas = parse_grid_template_areas(value);
+        }
+        "grid-area" => {
+            let v = value.trim();
+            if !v.contains('/') { style.grid_area_name = Some(v.to_string()); }
         }
         "grid-template" | "grid" => {
             // Simplified: skip complex shorthand
@@ -3152,6 +3161,29 @@ fn parse_grid_line(s: &str) -> Option<i32> {
     s.parse::<i32>().ok()
 }
 
+
+/// Parse a grid-template-areas value like "header header" "sidebar main".
+/// Returns a Vec of rows, each row being a Vec of column area names.
+/// Both single-quoted and double-quoted strings are supported.
+fn parse_grid_template_areas(value: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' || c == '\'' {
+            let quote = c;
+            let mut row_str = String::new();
+            for ch in chars.by_ref() {
+                if ch == quote { break; }
+                row_str.push(ch);
+            }
+            let cells: Vec<String> = row_str.split_whitespace().map(|s| s.to_string()).collect();
+            if !cells.is_empty() { rows.push(cells); }
+        }
+    }
+    rows
+}
+
+
 fn parse_font_weight(input: &str) -> Option<bool> {
     let value = input.trim().to_ascii_lowercase();
     match value.as_str() {
@@ -3226,11 +3258,23 @@ fn parse_list_style_type(input: &str) -> ListStyleType {
     ListStyleType::Disc
 }
 
-fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
+fn parse_box_shadows(value: &str) -> Vec<BoxShadow> {
+    if value.trim().to_ascii_lowercase() == "none" {
+        return Vec::new();
+    }
+    // Split on commas at the top level (avoiding rgba(r,g,b,a) inner commas).
+    split_at_top_level(value, ',')
+        .into_iter()
+        .filter_map(|s| parse_single_box_shadow(s.trim()))
+        .collect()
+}
+
+fn parse_single_box_shadow(value: &str) -> Option<BoxShadow> {
     let v = value.trim();
-    if v.to_ascii_lowercase() == "none" {
+    if v.is_empty() || v.to_ascii_lowercase() == "none" {
         return None;
     }
+
     // Split tokens at spaces (top-level only, respecting parentheses for rgb()/rgba() colors).
     // Note: only ASCII space is used as separator; tabs and other whitespace between
     // tokens are not treated as delimiters. This is an approximation that covers
@@ -3242,13 +3286,15 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Inset shadows are not yet supported; return None so they are silently skipped
-    // rather than being incorrectly drawn as outer shadows.
-    if tokens.iter().any(|t| t.to_ascii_lowercase() == "inset") {
-        return None;
-    }
+    // Check for 'inset' keyword anywhere in the token list.
+    let inset = tokens.iter().any(|t| t.to_ascii_lowercase() == "inset");
 
-    let tokens: Vec<&str> = tokens.iter().map(|s| s.as_str()).collect();
+    // Filter out the 'inset' keyword, leaving only lengths and color tokens.
+    let tokens: Vec<&str> = tokens
+        .iter()
+        .filter(|t| t.to_ascii_lowercase() != "inset")
+        .map(|s| s.as_str())
+        .collect();
 
     if tokens.len() < 2 {
         return None;
@@ -3257,6 +3303,7 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
     let mut offset_x: i32 = 0;
     let mut offset_y: i32 = 0;
     let mut blur: u32 = 0;
+    let mut spread: i32 = 0;
     let mut color: Option<u32> = None;
     let mut length_count = 0;
 
@@ -3269,6 +3316,7 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
                 0 => offset_x = val,
                 1 => offset_y = val,
                 2 => blur = val.max(0) as u32,
+                3 => spread = val,
                 _ => {}
             }
             length_count += 1;
@@ -3285,7 +3333,9 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
         offset_x,
         offset_y,
         blur,
+        spread,
         color,
+        inset,
     })
 }
 
@@ -5500,5 +5550,28 @@ mod tests {
         assert_eq!(div.style.margin.right, 0, "auto resolves to 0 in parsed value");
         assert!(div.style.margin_left_auto, "margin-left should be auto");
         assert!(div.style.margin_right_auto, "margin-right should be auto");
+    }
+
+    #[test]
+    fn grid_template_areas_parsed() {
+        let html = "<div style=\"display:grid;grid-template-areas:'header header' 'sidebar main' 'footer footer';\"></div>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.grid_template_areas.len(), 3);
+        assert_eq!(div.style.grid_template_areas[0], vec!["header", "header"]);
+        assert_eq!(div.style.grid_template_areas[1], vec!["sidebar", "main"]);
+        assert_eq!(div.style.grid_template_areas[2], vec!["footer", "footer"]);
+    }
+
+    #[test]
+    fn grid_area_name_parsed() {
+        let html = "<div style=\"grid-area: sidebar;\"></div>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.grid_area_name, Some("sidebar".to_string()));
     }
 }

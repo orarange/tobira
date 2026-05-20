@@ -1056,25 +1056,37 @@ fn layout_block_element(
 
     let saved_bg = context.background_color;
 
-    // box-shadow: push shadow rect before background (so it renders behind it)
-    let shadow_cmd_index = if let Some(ref shadow) = element.style.box_shadow {
-        let blur = shadow.blur;
-        // Expand shadow rect by blur amount in all directions for approximate blur spread
-        let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64).max(0) as u32;
-        let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64).max(0) as u32;
-        let sw = outer_width.saturating_add(blur.saturating_mul(2)).max(1);
-        context.commands.push(DrawCommand::Rect(RectCommand {
-            x: sx,
-            y: sy,
-            width: sw,
-            height: 1,
-            color: shadow.color.unwrap_or(element.style.color),
-            border_radius: element.style.border_radius.saturating_add(blur),
-        }));
-        Some(context.commands.len() - 1)
-    } else {
-        None
-    };
+    // box-shadow: push outer shadow rects before background (so they render behind it).
+    // We collect (cmd_index, blur, spread) for each outer shadow so heights can be
+    // patched after layout completes.
+    let outer_shadow_indices_inline: Vec<(usize, u32, i32)> = element
+        .style
+        .box_shadows
+        .iter()
+        .filter(|s| !s.inset)
+        .map(|shadow| {
+            let blur = shadow.blur;
+            let spread = shadow.spread;
+            let spread_expand = (spread * 2).max(0) as u32;
+            let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64 - spread as i64)
+                .max(0) as u32;
+            let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64 - spread as i64)
+                .max(0) as u32;
+            let sw = outer_width
+                .saturating_add(blur.saturating_mul(2))
+                .saturating_add(spread_expand)
+                .max(1);
+            context.commands.push(DrawCommand::Rect(RectCommand {
+                x: sx,
+                y: sy,
+                width: sw,
+                height: 1,
+                color: shadow.color.unwrap_or(element.style.color),
+                border_radius: element.style.border_radius.saturating_add(blur),
+            }));
+            (context.commands.len() - 1, blur, spread)
+        })
+        .collect();
 
     let background_cmd_index = if let Some(background_color) = element.style.background_color {
         // Use effective_opacity for the actual drawn rect color (correct visual result)
@@ -1205,12 +1217,15 @@ fn layout_block_element(
         }
     }
 
-    if let Some(shadow_idx) = shadow_cmd_index {
-        if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(shadow_idx) {
-            let blur = element.style.box_shadow.as_ref().map(|s| s.blur).unwrap_or(0);
-            rect.height = background_height.saturating_add(blur.saturating_mul(2));
+    for (shadow_idx, blur, spread) in &outer_shadow_indices_inline {
+        if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(*shadow_idx) {
+            let spread_expand = (*spread * 2).max(0) as u32;
+            rect.height = background_height
+                .saturating_add(blur.saturating_mul(2))
+                .saturating_add(spread_expand);
         }
     }
+    // Inset shadows are rendered on top of the background (TODO: render as clip-masked overlay).
     if let Some(background_cmd_index) = background_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(background_cmd_index) {
             rect.height = background_height;
@@ -1493,32 +1508,43 @@ fn layout_block_element_as_layer(
         ..LayoutContext::default()
     };
 
-    // box-shadow: push shadow rect before background (so it renders behind it)
-    let shadow_cmd_index = if let Some(ref shadow) = element.style.box_shadow {
-        let blur = shadow.blur;
-        // Clamp shadow origin to the element's own top-left corner.
-        // Without clamping, a shadow with a negative offset or large blur can produce
-        // sx < outer_x or sy < background_top. The subsequent rebase_commands call uses
-        // saturating_sub(outer_x, background_top), which clamps negative offsets to 0 and
-        // corrupts the shadow position. By clamping to the element box we lose shadow that
-        // extends above/left of the element, but avoid rebase corruption.
-        let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64)
-            .max(outer_x as i64) as u32; // don't go left of element
-        let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64)
-            .max(background_top as i64) as u32; // don't go above element
-        let sw = outer_width.saturating_add(blur.saturating_mul(2)).max(1);
-        sub_context.commands.push(DrawCommand::Rect(RectCommand {
-            x: sx,
-            y: sy,
-            width: sw,
-            height: 1,
-            color: shadow.color.unwrap_or(element.style.color),
-            border_radius: element.style.border_radius.saturating_add(blur),
-        }));
-        Some(sub_context.commands.len() - 1)
-    } else {
-        None
-    };
+    // box-shadow: push outer shadow rects before background (so they render behind it).
+    // We collect (cmd_index, blur, spread) for each outer shadow so heights can be
+    // patched after layout completes.
+    // Clamp shadow origin to the element's own top-left corner.
+    // Without clamping, a shadow with a negative offset or large blur can produce
+    // sx < outer_x or sy < background_top. The subsequent rebase_commands call uses
+    // saturating_sub(outer_x, background_top), which clamps negative offsets to 0 and
+    // corrupts the shadow position. By clamping to the element box we lose shadow that
+    // extends above/left of the element, but avoid rebase corruption.
+    let outer_shadow_indices: Vec<(usize, u32, i32)> = element
+        .style
+        .box_shadows
+        .iter()
+        .filter(|s| !s.inset)
+        .map(|shadow| {
+            let blur = shadow.blur;
+            let spread = shadow.spread;
+            let spread_expand = (spread * 2).max(0) as u32;
+            let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64 - spread as i64)
+                .max(outer_x as i64) as u32; // don't go left of element
+            let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64 - spread as i64)
+                .max(background_top as i64) as u32; // don't go above element
+            let sw = outer_width
+                .saturating_add(blur.saturating_mul(2))
+                .saturating_add(spread_expand)
+                .max(1);
+            sub_context.commands.push(DrawCommand::Rect(RectCommand {
+                x: sx,
+                y: sy,
+                width: sw,
+                height: 1,
+                color: shadow.color.unwrap_or(element.style.color),
+                border_radius: element.style.border_radius.saturating_add(blur),
+            }));
+            (sub_context.commands.len() - 1, blur, spread)
+        })
+        .collect();
 
     // The element's own background rect goes into the sub-context (raw color, no opacity blend)
     let background_cmd_index = if let Some(background_color) = element.style.background_color {
@@ -1601,12 +1627,15 @@ fn layout_block_element_as_layer(
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     let final_height = cursor_y.saturating_sub(background_top).max(1);
 
-    if let Some(shadow_idx) = shadow_cmd_index {
-        if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(shadow_idx) {
-            let blur = element.style.box_shadow.as_ref().map(|s| s.blur).unwrap_or(0);
-            rect.height = final_height.saturating_add(blur.saturating_mul(2));
+    for (shadow_idx, blur, spread) in &outer_shadow_indices {
+        if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(*shadow_idx) {
+            let spread_expand = (*spread * 2).max(0) as u32;
+            rect.height = final_height
+                .saturating_add(blur.saturating_mul(2))
+                .saturating_add(spread_expand);
         }
     }
+    // Inset shadows are rendered on top of the background (TODO: render as clip-masked overlay).
     if let Some(background_cmd_index) = background_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(background_cmd_index) {
             rect.height = final_height;
