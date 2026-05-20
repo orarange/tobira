@@ -17,7 +17,8 @@ use crate::font::FontContext;
 use crate::image::DecodedImage;
 use crate::js::{DomEventDispatchResult, DomEventRequest};
 use crate::layout::{
-    DrawCommand, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument, TextCommand, layout_styled_document,
+    DrawCommand, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument,
+    TextCommand, layout_styled_document,
 };
 use crate::url::Url;
 
@@ -3859,6 +3860,26 @@ fn render_commands(
             DrawCommand::Layer(layer) => {
                 render_layer(
                     buffer, width, height, offset_x, offset_y, scroll_y, layer,
+                    None,
+                    page, fonts, scratch, depth,
+                );
+            }
+            DrawCommand::Sticky(sticky) => {
+                // Compute scroll-adjusted y in content space
+                let container_max_y = if sticky.container_bottom == u32::MAX {
+                    u32::MAX
+                } else {
+                    sticky.container_bottom.saturating_sub(sticky.layer.height)
+                };
+                let effective_y = scroll_y
+                    .saturating_add(sticky.sticky_top)
+                    .max(sticky.normal_y)
+                    .min(container_max_y);
+
+                render_layer(
+                    buffer, width, height, offset_x, offset_y, scroll_y,
+                    &sticky.layer,
+                    Some(effective_y),
                     page, fonts, scratch, depth,
                 );
             }
@@ -4100,13 +4121,15 @@ fn render_layer(
     offset_y: u32,
     scroll_y: u32,
     layer: &LayerCommand,
+    y_override: Option<u32>,
     page: Option<&crate::browser::BrowserPage>,
     fonts: &mut FontContext,
     scratch: &mut Vec<Vec<u32>>,
     depth: usize,
 ) {
     // Compute screen-space position using signed arithmetic to handle layers above viewport
-    let layer_screen_y = layer.y as i64 + offset_y as i64 - scroll_y as i64;
+    let layer_y = y_override.unwrap_or(layer.y);
+    let layer_screen_y = layer_y as i64 + offset_y as i64 - scroll_y as i64;
     let layer_screen_x = layer.x as i64 + offset_x as i64;
 
     // Content viewport top/left: the chrome (address bar, etc.) occupies [0, offset_y) rows
@@ -4238,6 +4261,14 @@ fn render_layer(
         apply_brightness(&mut offscreen, layer.brightness);
     }
 
+    // Apply CSS transform: scale / rotate if set.
+    let has_scale = (layer.scale_x != 0 && layer.scale_x != 1000)
+        || (layer.scale_y != 0 && layer.scale_y != 1000);
+    let has_rotate = layer.rotate_millideg != 0;
+    if has_scale || has_rotate {
+        apply_affine_transform(&mut offscreen, ow, oh, layer);
+    }
+
     // Blend the visible rows of the offscreen back onto the main buffer with opacity.
     // Visible row r: offscreen row (src_y_start + r) → buffer row (dst_y + r).
     // Read from src_x_start in the offscreen (horizontal clip offset).
@@ -4269,6 +4300,107 @@ fn render_layer(
         offscreen.shrink_to(needed * 2);
     }
     scratch[depth] = offscreen;
+}
+
+/// Apply scale and/or rotate transform to `buf` (width × height) in-place.
+/// Uses inverse mapping (for each output pixel, compute the source pixel).
+/// transform-origin is at (origin_x/1000 * w, origin_y/1000 * h).
+fn apply_affine_transform(buf: &mut [u32], width: u32, height: u32, layer: &LayerCommand) {
+    let w = width as usize;
+    let h = height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    let sx = if layer.scale_x == 0 { 1.0f32 } else { layer.scale_x as f32 / 1000.0 };
+    let sy = if layer.scale_y == 0 { 1.0f32 } else { layer.scale_y as f32 / 1000.0 };
+    let angle_deg = layer.rotate_millideg as f32 / 1000.0;
+    let angle_rad = angle_deg.to_radians();
+    let cos_a = angle_rad.cos();
+    let sin_a = angle_rad.sin();
+
+    // Transform origin in pixels
+    let ox = layer.origin_x as f32 / 1000.0 * width as f32;
+    let oy = layer.origin_y as f32 / 1000.0 * height as f32;
+
+    // Build a scratch buffer for the result
+    let mut result = vec![0u32; w * h];
+
+    for dy in 0..h {
+        for dx in 0..w {
+            // Output pixel offset from origin
+            let fx = dx as f32 - ox;
+            let fy = dy as f32 - oy;
+
+            // Inverse rotate (negate angle)
+            let rx = fx * cos_a + fy * sin_a;
+            let ry = -fx * sin_a + fy * cos_a;
+
+            // Inverse scale
+            let src_x = rx / sx + ox;
+            let src_y = ry / sy + oy;
+
+            // Nearest-neighbor sampling with bounds check
+            let ix = src_x.round() as i32;
+            let iy = src_y.round() as i32;
+            if ix >= 0 && iy >= 0 && (ix as usize) < w && (iy as usize) < h {
+                result[dy * w + dx] = buf[iy as usize * w + ix as usize];
+            }
+            // Out-of-bounds → transparent (0) — already set by vec init
+        }
+    }
+
+    buf.copy_from_slice(&result);
+}
+
+/// Apply a separable box blur of radius `r` pixels to `buf` (width x height).
+/// Uses a simple per-pixel averaging approach for correctness.
+fn box_blur(buf: &mut [u32], width: u32, height: u32, r: u32) {
+    if r == 0 || width == 0 || height == 0 {
+        return;
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let radius = r as usize;
+    let mut tmp = vec![0u32; buf.len()];
+
+    // Horizontal pass: buf -> tmp
+    for y in 0..h {
+        for x in 0..w {
+            let x_start = x.saturating_sub(radius);
+            let x_end = (x + radius + 1).min(w);
+            let count = (x_end - x_start) as u32;
+            let mut r_sum = 0u32;
+            let mut g_sum = 0u32;
+            let mut b_sum = 0u32;
+            for kx in x_start..x_end {
+                let p = buf[y * w + kx];
+                r_sum += (p >> 16) & 0xFF;
+                g_sum += (p >> 8) & 0xFF;
+                b_sum += p & 0xFF;
+            }
+            tmp[y * w + x] = ((r_sum / count) << 16) | ((g_sum / count) << 8) | (b_sum / count);
+        }
+    }
+
+    // Vertical pass: tmp -> buf
+    for y in 0..h {
+        for x in 0..w {
+            let y_start = y.saturating_sub(radius);
+            let y_end = (y + radius + 1).min(h);
+            let count = (y_end - y_start) as u32;
+            let mut r_sum = 0u32;
+            let mut g_sum = 0u32;
+            let mut b_sum = 0u32;
+            for ky in y_start..y_end {
+                let p = tmp[ky * w + x];
+                r_sum += (p >> 16) & 0xFF;
+                g_sum += (p >> 8) & 0xFF;
+                b_sum += p & 0xFF;
+            }
+            buf[y * w + x] = ((r_sum / count) << 16) | ((g_sum / count) << 8) | (b_sum / count);
+        }
+    }
 }
 
 fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {
