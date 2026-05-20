@@ -2782,6 +2782,7 @@ fn keyboard_dom_event_request(
         ctrl_key: modifiers.control_key(),
         shift_key: modifiers.shift_key(),
         meta_key: modifiers.super_key(),
+        ..Default::default()
     }
 }
 
