@@ -2074,6 +2074,7 @@ fn layout_error_document(
             color,
             underline: false,
             line_through: false,
+            text_decoration_color: None,
             bold: scale >= 3,
             italic: false,
             text_shadow: None,

@@ -10,6 +10,97 @@ pub const DEFAULT_BACKGROUND_COLOR: Color = 0xFFFDF8;
 pub const DEFAULT_LINK_COLOR: Color = 0x2A5DB0;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Animation / Transition / Keyframe types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single keyframe position with its CSS declarations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyframeStop {
+    /// Position 0–1000 (permille). 0 = "from"/0%, 1000 = "to"/100%
+    pub position: u32,
+    /// The CSS declarations at this keyframe position (property → value pairs)
+    pub declarations: Vec<(String, String)>,
+}
+
+/// A parsed `@keyframes` rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyframeRule {
+    pub name: String,
+    pub stops: Vec<KeyframeStop>,
+}
+
+/// Easing function for both animation and transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimingFunction {
+    Linear,
+    Ease,       // default
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    StepStart,
+    StepEnd,
+}
+
+impl Default for TimingFunction {
+    fn default() -> Self {
+        TimingFunction::Ease
+    }
+}
+
+/// CSS `animation-fill-mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimFillMode {
+    None,
+    Forwards,
+    Backwards,
+    Both,
+}
+
+impl Default for AnimFillMode {
+    fn default() -> Self {
+        AnimFillMode::None
+    }
+}
+
+/// CSS `animation-direction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimDirection {
+    Normal,
+    Reverse,
+    Alternate,
+    AlternateReverse,
+}
+
+impl Default for AnimDirection {
+    fn default() -> Self {
+        AnimDirection::Normal
+    }
+}
+
+/// A fully parsed `animation` layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnimationSpec {
+    pub name: String,
+    pub duration_ms: u32,
+    pub delay_ms: i32,
+    /// 0 = infinite (stored as u32::MAX), default 1
+    pub iteration_count: u32,
+    pub fill_mode: AnimFillMode,
+    pub timing_function: TimingFunction,
+    pub direction: AnimDirection,
+}
+
+/// A fully parsed `transition` layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionSpec {
+    /// CSS property name, or "all"
+    pub property: String,
+    pub duration_ms: u32,
+    pub delay_ms: i32,
+    pub timing_function: TimingFunction,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Stylesheet / Rule types
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -23,6 +114,8 @@ pub struct Stylesheet {
     /// Each entry is `(condition, vars)` and is only applied when the condition matches
     /// the current viewport width at style-computation time.
     pub media_root_vars: Vec<(MediaCondition, BTreeMap<String, String>)>,
+    /// All `@keyframes` rules found in this stylesheet.
+    pub keyframes: Vec<KeyframeRule>,
 }
 
 impl Stylesheet {
@@ -34,6 +127,8 @@ impl Stylesheet {
         self.root_vars = Rc::new(merged);
         // Merge media-conditional root vars
         self.media_root_vars.extend(other.media_root_vars);
+        // Merge keyframes
+        self.keyframes.extend(other.keyframes);
     }
 }
 
@@ -547,6 +642,10 @@ pub struct ComputedStyle {
     pub border_radius: u32,
     pub outline_width: u32,
     pub outline_color: Option<Color>,
+    /// Space between element border and outline (can be negative)
+    pub outline_offset: i32,
+    /// Whether the outline style is visible (false = none/hidden)
+    pub outline_visible: bool,
     /// line-height in thousandths of em; 0 = "normal"
     pub line_height: u32,
     /// opacity 0–255; 255 = opaque
@@ -624,6 +723,9 @@ pub struct ComputedStyle {
     // CSS counters
     pub counter_reset: Vec<(String, i32)>,      // counter-reset: name value
     pub counter_increment: Vec<(String, i32)>,  // counter-increment: name value
+    // Animations and transitions (structured, for future repaint loop use)
+    pub animations: Vec<AnimationSpec>,
+    pub transitions: Vec<TransitionSpec>,
 }
 
 impl ComputedStyle {
@@ -666,6 +768,8 @@ impl ComputedStyle {
             border_radius: 0,
             outline_width: 0,
             outline_color: None,
+            outline_offset: 0,
+            outline_visible: true,
             line_height: parent.map(|s| s.line_height).unwrap_or(0),
             opacity: 255,
             effective_opacity: 255,
@@ -737,6 +841,9 @@ impl ComputedStyle {
             // CSS counters
             counter_reset: vec![],
             counter_increment: vec![],
+            // Animations / transitions
+            animations: vec![],
+            transitions: vec![],
         };
 
         match tag_name {
@@ -905,6 +1012,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut root_vars = BTreeMap::new();
     let mut media_root_vars: Vec<(MediaCondition, BTreeMap<String, String>)> = Vec::new();
+    let mut keyframes: Vec<KeyframeRule> = Vec::new();
     let source = strip_comments(input);
     let mut cursor = 0;
 
@@ -956,6 +1064,15 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                     rule.media = Some(media_cond.clone());
                     rules.push(rule);
                 }
+            } else if at_lower.starts_with("@keyframes") {
+                // Extract animation name — everything after "@keyframes " before the block
+                let name_part = selector_text["@keyframes".len()..].trim();
+                // Strip vendor prefix if present (e.g. @-webkit-keyframes)
+                let anim_name = name_part.trim_matches(|c: char| c == '"' || c == '\'').to_string();
+                if !anim_name.is_empty() {
+                    let stops = parse_keyframe_stops(block_text);
+                    keyframes.push(KeyframeRule { name: anim_name, stops });
+                }
             } else if at_lower.starts_with("@supports") || at_lower.starts_with("@layer") {
                 // @supports: treat condition as always-true (optimistic: assume all features supported)
                 // @layer: ignore layer name, parse rules as regular rules (no cascade layering)
@@ -971,6 +1088,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                     media_root_vars.push((inner_cond, inner_map));
                 }
                 rules.extend(inner_stylesheet.rules);
+                keyframes.extend(inner_stylesheet.keyframes);
             }
             // other at-rules are skipped
             continue;
@@ -1015,7 +1133,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         }
     }
 
-    Stylesheet { rules, root_vars: Rc::new(root_vars), media_root_vars }
+    Stylesheet { rules, root_vars: Rc::new(root_vars), media_root_vars, keyframes }
 }
 
 fn parse_media_condition(query: &str) -> MediaCondition {
@@ -1747,6 +1865,8 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "text-decoration" => {
+            // Shorthand: may contain line keywords, color, style.
+            // e.g. "underline", "underline line-through", "underline red", "none"
             let v = value.trim().to_ascii_lowercase();
             if v.contains("none") {
                 style.underline = false;
@@ -1758,10 +1878,37 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 if v.contains("line-through") {
                     style.line_through = true;
                 }
+                // Extract color token (any non-keyword token that parses as color)
+                for token in v.split_whitespace() {
+                    if !matches!(token, "underline" | "overline" | "line-through" | "blink"
+                        | "solid" | "dashed" | "dotted" | "double" | "wavy" | "none") {
+                        if let Some(c) = parse_color(token) {
+                            style.text_decoration_color = Some(c);
+                        }
+                    }
+                }
+            }
+        }
+        "text-decoration-line" => {
+            let v = value.trim().to_ascii_lowercase();
+            if v.contains("none") {
+                style.underline = false;
+                style.line_through = false;
+            } else {
+                for token in v.split_whitespace() {
+                    match token {
+                        "underline" => style.underline = true,
+                        "line-through" => style.line_through = true,
+                        _ => {}
+                    }
+                }
             }
         }
         "text-decoration-color" => {
             style.text_decoration_color = parse_color(value);
+        }
+        "text-decoration-thickness" | "text-underline-offset" => {
+            // Parsed but not yet applied; stored as no-op for future use
         }
         "text-transform" => {
             style.text_transform = parse_text_transform(value);
@@ -1921,6 +2068,15 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         }
         "outline-color" => {
             style.outline_color = parse_color(value);
+        }
+        "outline-offset" => {
+            if let Some(px) = parse_signed_length(value, parent_font_size) {
+                style.outline_offset = px;
+            }
+        }
+        "outline-style" => {
+            let v = value.trim().to_ascii_lowercase();
+            style.outline_visible = !matches!(v.as_str(), "none" | "hidden");
         }
         "line-height" => {
             style.line_height = parse_line_height(value, parent_font_size);
@@ -3534,18 +3690,26 @@ fn parse_outline_shorthand(style: &mut ComputedStyle, value: &str, parent_font_s
     let v = value.trim().to_ascii_lowercase();
     if v == "none" {
         style.outline_width = 0;
+        style.outline_visible = false;
         return;
     }
     for token in v.split_whitespace() {
-        if matches!(token, "solid" | "dashed" | "dotted" | "none") {
-            continue;
-        }
-        if let Some(px) = parse_length(token, parent_font_size) {
-            style.outline_width = px;
-            continue;
-        }
-        if let Some(color) = parse_color(token) {
-            style.outline_color = Some(color);
+        match token {
+            "none" | "hidden" => {
+                style.outline_width = 0;
+                style.outline_visible = false;
+            }
+            "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset" | "auto" => {
+                // style keyword — outline is visible
+                style.outline_visible = true;
+            }
+            _ => {
+                if let Some(px) = parse_length(token, parent_font_size) {
+                    style.outline_width = px;
+                } else if let Some(color) = parse_color(token) {
+                    style.outline_color = Some(color);
+                }
+            }
         }
     }
 }
@@ -4400,6 +4564,54 @@ fn parse_text_shadow(value: &str, parent_font_size: u32) -> Option<TextShadow> {
         }),
         _ => None,
     }
+}
+
+/// Parse the interior of a `@keyframes` block into a list of `KeyframeStop`s.
+fn parse_keyframe_stops(block: &str) -> Vec<KeyframeStop> {
+    let mut stops = Vec::new();
+    // Find each "selector { declarations }" pair inside the block
+    let mut rest = block.trim();
+    while !rest.is_empty() {
+        // Find the selector part (everything before '{')
+        let brace = match rest.find('{') {
+            Some(i) => i,
+            None => break,
+        };
+        let sel = rest[..brace].trim();
+        rest = &rest[brace + 1..];
+        // Find matching closing brace
+        let close = match rest.find('}') {
+            Some(i) => i,
+            None => break,
+        };
+        let decls_str = rest[..close].trim();
+        rest = rest[close + 1..].trim();
+
+        // Parse position(s): "from", "to", "0%", "50%", "0%, 100%"
+        let positions: Vec<u32> = sel.split(',').filter_map(|s| {
+            let s = s.trim();
+            if s == "from" || s == "0%" { Some(0) }
+            else if s == "to" || s == "100%" { Some(1000) }
+            else if let Some(pct) = s.strip_suffix('%') {
+                pct.trim().parse::<f32>().ok().map(|v| (v * 10.0) as u32)
+            } else { None }
+        }).collect();
+
+        // Parse declarations as raw (property, value) pairs
+        let declarations: Vec<(String, String)> = decls_str.split(';')
+            .filter_map(|d| {
+                let d = d.trim();
+                if d.is_empty() { return None; }
+                let colon = d.find(':')?;
+                Some((d[..colon].trim().to_string(), d[colon+1..].trim().to_string()))
+            })
+            .collect();
+
+        for pos in positions {
+            stops.push(KeyframeStop { position: pos, declarations: declarations.clone() });
+        }
+    }
+    stops
 }
 
 /// Parse a `linear-gradient(...)` value.
@@ -5666,5 +5878,86 @@ mod tests {
         let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         let div = find_first_element(&styled, "div").unwrap();
         assert_eq!(div.style.grid_area_name, Some("sidebar".to_string()));
+    }
+
+    // ─── CSS counter tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn counter_reset_parsed_with_value() {
+        let css = "ol { counter-reset: item 0; }";
+        let html = "<ol><li>test</li></ol>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let ol = find_first_element(&styled, "ol").unwrap();
+        assert_eq!(ol.style.counter_reset, vec![("item".to_string(), 0)]);
+    }
+
+    #[test]
+    fn counter_reset_parsed_no_value() {
+        // When no integer follows the name, default is 0
+        let css = "ol { counter-reset: section; }";
+        let html = "<ol></ol>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let ol = find_first_element(&styled, "ol").unwrap();
+        assert_eq!(ol.style.counter_reset, vec![("section".to_string(), 0)]);
+    }
+
+    #[test]
+    fn counter_increment_parsed_default_step() {
+        // counter-increment default step is 1
+        let css = "li { counter-increment: item; }";
+        let html = "<li>test</li>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let li = find_first_element(&styled, "li").unwrap();
+        assert_eq!(li.style.counter_increment, vec![("item".to_string(), 1)]);
+    }
+
+    #[test]
+    fn counter_increment_parsed_with_step() {
+        let css = "li { counter-increment: chapter 2; }";
+        let html = "<li>test</li>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let li = find_first_element(&styled, "li").unwrap();
+        assert_eq!(li.style.counter_increment, vec![("chapter".to_string(), 2)]);
+    }
+
+    #[test]
+    fn counter_reset_none_gives_empty_vec() {
+        let css = "ol { counter-reset: none; }";
+        let html = "<ol></ol>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let ol = find_first_element(&styled, "ol").unwrap();
+        assert_eq!(ol.style.counter_reset, vec![]);
+    }
+
+    #[test]
+    fn resolve_content_counters_replaces_counter_ref() {
+        let mut counters = std::collections::HashMap::new();
+        counters.insert("item".to_string(), 3);
+        let result = super::resolve_content_counters("counter(item). ", &counters);
+        assert_eq!(result, "3. ");
+    }
+
+    #[test]
+    fn resolve_content_counters_unknown_counter_gives_zero() {
+        let counters = std::collections::HashMap::new();
+        let result = super::resolve_content_counters("counter(missing)", &counters);
+        assert_eq!(result, "0");
+    }
+
+    #[test]
+    fn resolve_content_counters_no_counter_unchanged() {
+        let counters = std::collections::HashMap::new();
+        let result = super::resolve_content_counters("plain text", &counters);
+        assert_eq!(result, "plain text");
     }
 }

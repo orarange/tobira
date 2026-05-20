@@ -2,7 +2,7 @@ use crate::css::{
     BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
     FontFamilyKind, GradientKind, GridTrackSize, LengthValue, ObjectFit, Overflow, Position, FlexDirection,
     AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
-    VerticalAlign, WhiteSpaceMode, WordBreak, apply_text_transform,
+    VerticalAlign, WhiteSpaceMode, WordBreak, apply_text_transform, resolve_content_counters,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
@@ -252,6 +252,7 @@ pub struct TextCommand {
     pub color: Color,
     pub underline: bool,
     pub line_through: bool,
+    pub text_decoration_color: Option<crate::css::Color>,
     pub bold: bool,
     pub italic: bool,
     pub text_shadow: Option<crate::css::TextShadow>,
@@ -833,8 +834,14 @@ fn layout_node(
 ) {
     match node {
         StyledNode::Text(text) => {
+            // Resolve counter() references injected via ::before/::after content.
+            let resolved_text = if text.text.contains("counter(") {
+                resolve_content_counters(&text.text, &context.counters)
+            } else {
+                text.text.clone()
+            };
             let fragments = [InlineFragment::Text {
-                text: text.text.clone(),
+                text: resolved_text,
                 style: text.style.clone(),
                 link_href: None,
                 link_node_id: None,
@@ -851,6 +858,15 @@ fn layout_node(
             if element.style.position == Position::Absolute || element.style.position == Position::Fixed {
                 layout_positioned_element(element, x, width, cursor_y, context, images, fonts, current_form.clone());
                 return;
+            }
+
+            // Apply counter-reset and counter-increment before children are processed.
+            for (name, initial) in &element.style.counter_reset {
+                context.counters.insert(name.clone(), *initial);
+            }
+            for (name, delta) in &element.style.counter_increment {
+                let entry = context.counters.entry(name.clone()).or_insert(0);
+                *entry += delta;
             }
 
             match element.style.display {
@@ -2535,6 +2551,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             color: text.color,
             underline: text.underline,
             line_through: text.line_through,
+            text_decoration_color: text.text_decoration_color,
             bold: text.bold,
             italic: text.italic,
             text_shadow: text.text_shadow.clone(),
@@ -2699,8 +2716,14 @@ fn collect_inline_fragments(
 ) {
     match node {
         StyledNode::Text(text) => {
+            // Resolve counter() references (e.g. injected via ::before/::after pseudo-elements).
+            let resolved = if text.text.contains("counter(") {
+                resolve_content_counters(&text.text, &context.counters)
+            } else {
+                text.text.clone()
+            };
             output.push(InlineFragment::Text {
-                text: text.text.clone(),
+                text: resolved,
                 style: text.style.clone(),
                 link_href: link_href.map(str::to_string),
                 link_node_id,
@@ -3521,6 +3544,7 @@ fn emit_line_impl(
             color: apply_opacity(span.style.color, context.background_color, span_opacity),
             underline: span.style.underline,
             line_through: span.style.line_through,
+            text_decoration_color: span.style.text_decoration_color,
             bold: span.style.font_weight,
             italic: span.style.font_style_italic,
             text_shadow: span.style.text_shadow.clone(),
@@ -4959,5 +4983,38 @@ mod tests {
         // (800 - 200) / 2 = 300
         assert_eq!(bg.x, 300, "div should be centered at x=300, got {}", bg.x);
         assert_eq!(bg.width, 200, "div width should be 200px");
+    }
+
+    #[test]
+    fn css_counter_increments_and_renders_in_pseudo_content() {
+        // ol resets "item" to 0; each li increments by 1; ::before shows counter value.
+        let css = r#"
+            ol { counter-reset: item; }
+            li { counter-increment: item; }
+            li::before { content: counter(item); }
+        "#;
+        let html = "<ol><li>First</li><li>Second</li><li>Third</li></ol>";
+        let document = parse_document(html);
+        let stylesheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
+
+        let texts = layout.texts();
+        let rendered: Vec<&str> = texts.iter().map(|t| t.text.as_str()).collect();
+        // The counter values 1, 2, 3 should appear somewhere in the rendered output.
+        let all_text = rendered.join(" ");
+        assert!(
+            all_text.contains('1'),
+            "Expected '1' in rendered text, got: {:?}", rendered
+        );
+        assert!(
+            all_text.contains('2'),
+            "Expected '2' in rendered text, got: {:?}", rendered
+        );
+        assert!(
+            all_text.contains('3'),
+            "Expected '3' in rendered text, got: {:?}", rendered
+        );
     }
 }
