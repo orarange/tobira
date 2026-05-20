@@ -242,6 +242,17 @@ pub enum WhiteSpaceMode {
     NoWrap,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordBreak {
+    Normal,
+    BreakAll,
+    KeepAll,
+}
+
+impl Default for WordBreak {
+    fn default() -> Self { WordBreak::Normal }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontFamilyKind {
     Sans,
@@ -607,6 +618,12 @@ pub struct ComputedStyle {
     pub transform_rotate_millideg: i32,
     pub transform_origin_x: u32,     // permille: 500=50%
     pub transform_origin_y: u32,
+    // Text breaking
+    pub word_break: WordBreak,
+    pub overflow_wrap_break_word: bool,
+    // CSS counters
+    pub counter_reset: Vec<(String, i32)>,      // counter-reset: name value
+    pub counter_increment: Vec<(String, i32)>,  // counter-increment: name value
 }
 
 impl ComputedStyle {
@@ -715,6 +732,11 @@ impl ComputedStyle {
             transform_rotate_millideg: 0,
             transform_origin_x: 500,
             transform_origin_y: 500,
+            word_break: WordBreak::Normal,
+            overflow_wrap_break_word: false,
+            // CSS counters
+            counter_reset: vec![],
+            counter_increment: vec![],
         };
 
         match tag_name {
@@ -1760,6 +1782,16 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.white_space = ws;
             }
         }
+        "word-break" => {
+            match value.trim() {
+                "break-all" => style.word_break = WordBreak::BreakAll,
+                "keep-all"  => style.word_break = WordBreak::KeepAll,
+                _           => style.word_break = WordBreak::Normal,
+            }
+        }
+        "overflow-wrap" | "word-wrap" => {
+            style.overflow_wrap_break_word = value.trim() == "break-word";
+        }
         "margin" => {
             parse_margin_shorthand(style, value, parent_font_size);
         }
@@ -2245,8 +2277,69 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.transform_origin_y = parse_pct_permille(y, 500);
             }
         }
+        "counter-reset" => {
+            style.counter_reset = parse_counter_list(value, 0);
+        }
+        "counter-increment" => {
+            style.counter_increment = parse_counter_list(value, 1);
+        }
         _ => {}
     }
+}
+
+/// Parse a CSS counter list value (for `counter-reset` or `counter-increment`).
+/// Format: `<name> [<integer>]` pairs, e.g. `item 1` or `section 0 chapter`.
+/// `default_val` is used when no integer follows the name (0 for reset, 1 for increment).
+fn parse_counter_list(value: &str, default_val: i32) -> Vec<(String, i32)> {
+    if value.trim().eq_ignore_ascii_case("none") {
+        return vec![];
+    }
+    let mut result = Vec::new();
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    let mut i = 0;
+    while i < tokens.len() {
+        let name = tokens[i].to_string();
+        i += 1;
+        let val = if i < tokens.len() {
+            if let Ok(n) = tokens[i].parse::<i32>() {
+                i += 1;
+                n
+            } else {
+                default_val
+            }
+        } else {
+            default_val
+        };
+        if !name.is_empty() {
+            result.push((name, val));
+        }
+    }
+    result
+}
+
+/// Resolve `counter(name)` and `counter(name, style)` references in a content string.
+/// Replaces each `counter(...)` call with the current integer value from `counters`.
+pub fn resolve_content_counters(content: &str, counters: &std::collections::HashMap<String, i32>) -> String {
+    let mut result = String::new();
+    let mut s = content;
+    while let Some(pos) = s.find("counter(") {
+        result.push_str(&s[..pos]);
+        let after = &s[pos + "counter(".len()..];
+        if let Some(end) = after.find(')') {
+            let args = &after[..end];
+            // Take the first arg (counter name), ignore optional style arg
+            let name = args.split(',').next().unwrap_or("").trim();
+            let val = counters.get(name).copied().unwrap_or(0);
+            result.push_str(&val.to_string());
+            s = &after[end + 1..];
+        } else {
+            // Unbalanced paren — emit literally and stop
+            result.push_str("counter(");
+            s = after;
+        }
+    }
+    result.push_str(s);
+    result
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

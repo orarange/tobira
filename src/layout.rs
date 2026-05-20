@@ -2,7 +2,7 @@ use crate::css::{
     BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
     FontFamilyKind, GradientKind, GridTrackSize, LengthValue, ObjectFit, Overflow, Position, FlexDirection,
     AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
-    VerticalAlign, WhiteSpaceMode, apply_text_transform,
+    VerticalAlign, WhiteSpaceMode, WordBreak, apply_text_transform,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
@@ -406,6 +406,8 @@ struct LayoutContext {
     containing_block_origin: (u32, u32),
     scroll_y_for_fixed: u32,
     positioned_commands: Vec<(i32, Vec<DrawCommand>)>,
+    /// CSS counter values, updated as elements are laid out in document order.
+    counters: std::collections::HashMap<String, i32>,
 }
 
 impl Default for LayoutContext {
@@ -421,6 +423,7 @@ impl Default for LayoutContext {
             containing_block_origin: (0, 0),
             scroll_y_for_fixed: 0,
             positioned_commands: Vec::new(),
+            counters: std::collections::HashMap::new(),
         }
     }
 }
@@ -3050,6 +3053,36 @@ fn layout_normal_fragments(
                             line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
                             pending_space = true;
                         }
+                    } else if container_style.word_break == WordBreak::BreakAll {
+                        push_break_all_word(
+                            word,
+                            style,
+                            link_href.as_deref(),
+                            *link_node_id,
+                            container_style,
+                            x,
+                            effective_width2,
+                            cursor_y,
+                            context,
+                            &mut line,
+                            fonts,
+                        );
+                        pending_space = true;
+                    } else if container_style.overflow_wrap_break_word {
+                        push_overflow_wrap_word(
+                            word,
+                            style,
+                            link_href.as_deref(),
+                            *link_node_id,
+                            container_style,
+                            x,
+                            effective_width2,
+                            cursor_y,
+                            context,
+                            &mut line,
+                            fonts,
+                        );
+                        pending_space = true;
                     } else {
                         push_wrapped_word(
                             word,
@@ -3286,6 +3319,63 @@ fn push_wrapped_word(
             emit_line(line, container_style, x, width, cursor_y, context, fonts);
         }
         line.push_span(&chunk, style, fonts, link_href, link_node_id);
+    }
+}
+
+/// Push `word` character-by-character, breaking the line whenever a character
+/// would overflow the available width (implements `word-break: break-all`).
+fn push_break_all_word(
+    word: &str,
+    style: &ComputedStyle,
+    link_href: Option<&str>,
+    link_node_id: Option<usize>,
+    container_style: &ComputedStyle,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    line: &mut LineBuilder,
+    fonts: &mut FontContext,
+) {
+    for ch in word.chars() {
+        let cw = fonts.glyph_advance_px(ch, style.font_size_px, style.font_family);
+        if !line.is_empty() && line.width.saturating_add(cw) > width {
+            emit_line(line, container_style, x, width, cursor_y, context, fonts);
+        }
+        let ch_str = ch.to_string();
+        line.push_span(&ch_str, style, fonts, link_href, link_node_id);
+    }
+}
+
+/// Push `word` with `overflow-wrap: break-word` semantics: if the whole word
+/// fits on a fresh line, start a new line then add it whole; otherwise break
+/// the word character-by-character.
+fn push_overflow_wrap_word(
+    word: &str,
+    style: &ComputedStyle,
+    link_href: Option<&str>,
+    link_node_id: Option<usize>,
+    container_style: &ComputedStyle,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    line: &mut LineBuilder,
+    fonts: &mut FontContext,
+) {
+    let word_width = text_width(style, word, fonts);
+    if word_width <= width {
+        // The word fits on a fresh line — wrap normally (start new line if needed)
+        if !line.is_empty() && line.width.saturating_add(word_width) > width {
+            emit_line(line, container_style, x, width, cursor_y, context, fonts);
+        }
+        line.push_span(word, style, fonts, link_href, link_node_id);
+    } else {
+        // Word is wider than container — break character by character
+        push_break_all_word(
+            word, style, link_href, link_node_id,
+            container_style, x, width, cursor_y, context, line, fonts,
+        );
     }
 }
 
@@ -3719,6 +3809,35 @@ fn layout_positioned_element(
 // Grid layout
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Resolve a grid-area name to (col_start, row_start, col_span, row_span).
+/// Returns None if the name is not found in template_areas.
+fn resolve_grid_area_name(
+    name: &str,
+    template_areas: &[Vec<String>],
+) -> Option<(usize, usize, usize, usize)> {
+    let mut min_row = usize::MAX;
+    let mut max_row = 0usize;
+    let mut min_col = usize::MAX;
+    let mut max_col = 0usize;
+    let mut found = false;
+    for (ri, row) in template_areas.iter().enumerate() {
+        for (ci, cell) in row.iter().enumerate() {
+            if cell == name {
+                if ri < min_row { min_row = ri; }
+                if ri > max_row { max_row = ri; }
+                if ci < min_col { min_col = ci; }
+                if ci > max_col { max_col = ci; }
+                found = true;
+            }
+        }
+    }
+    if found && min_row != usize::MAX {
+        Some((min_col, min_row, max_col - min_col + 1, max_row - min_row + 1))
+    } else {
+        None
+    }
+}
+
 fn layout_grid_container(
     element: &StyledElement,
     x: u32,
@@ -3787,13 +3906,21 @@ fn layout_grid_container(
     let mut placed: Vec<PlacedItem> = Vec::new();
 
     for child in &children {
-        let (col_start, col_span) = {
+        // Check for grid-area name resolution from parent's grid-template-areas
+        let area_override = child.style.grid_area_name.as_deref()
+            .and_then(|name| resolve_grid_area_name(name, &element.style.grid_template_areas));
+
+        let (col_start, col_span) = if let Some((ac, _ar, acsz, _arsz)) = area_override {
+            (Some(ac), acsz)
+        } else {
             let p = &child.style.grid_column;
             let span = p.span.unwrap_or(1) as usize;
             let start = p.start.map(|s| (s - 1).max(0) as usize);
             (start, span)
         };
-        let (row_start, row_span) = {
+        let (row_start, row_span) = if let Some((_ac, ar, _acsz, arsz)) = area_override {
+            (Some(ar), arsz)
+        } else {
             let p = &child.style.grid_row;
             let span = p.span.unwrap_or(1) as usize;
             let start = p.start.map(|s| (s - 1).max(0) as usize);
