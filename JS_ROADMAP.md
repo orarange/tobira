@@ -48,9 +48,9 @@ Already working:
 
 CSS baseline note:
 
-- the broad CSS parser / selector / cascade / computed-style foundation is treated as complete on the Claude `claude/phase5-css` branch
-- Codex's Phase 5 work is therefore about JS-driven reflow and rendering feedback on top of that baseline, not reimplementing the CSS engine
-- if a JS task genuinely needs CSS-facing integration, keep the diff minimal, request Copilot review, and log the touched files in `change.md`
+- the broad CSS parser / selector / cascade / computed-style foundation is treated as complete on the Claude `claude/phase5-css` branch and has already been merged into master
+- Codex may now touch CSS when it helps the current goal, but should keep any overlap with active Claude work small, use the `claude` command when a targeted follow-up is useful, and log meaningful overlap in `change.md`
+- the remaining CSS work is mostly Phase 6 visual effects / advanced rendering rather than parser/layout duplication
 
 Still missing or shallow:
 

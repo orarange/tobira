@@ -10,11 +10,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Codex must stay on the active Codex branch listed below unless the user explicitly changes that rule.
 - Codex should use a dedicated worktree for the active Codex branch instead of sharing the user's main checkout.
 - Keep Codex changes isolated to the active Codex branch; Claude may work on its own branch and merge reconciliation happens later through GitHub Copilot or the user's preferred flow.
-- CSS boundary:
-  - treat the Claude `claude/phase5-css` branch as the owner of the CSS parser/layout baseline
-  - do not edit CSS-engine files or other Claude-owned CSS work by default
-  - if a JS task genuinely needs CSS-facing integration, keep the change minimal and non-destructive, open/update a PR, request Copilot review before broadening the diff, and log the exact touched files plus the reason in `change.md`
-  - read-only inspection of CSS files is fine; destructive or broad CSS edits are not
+- CSS / JS coordination:
+  - Codex may now work directly on both CSS and JS on the active Codex branch when that is the shortest path to the goal
+  - keep overlap with Claude-side CSS work as small as practical, and use the `claude` command when a targeted Claude-side follow-up or second opinion is useful
+  - if a CSS-facing change is substantial or overlaps with active Claude work, keep the diff narrow, open/update a PR, request Copilot review before broadening it, and log the touched files plus the reason in `change.md`
+  - read-only inspection of CSS files is always fine; broad or destructive churn still deserves a coordination pass
 - Update the `Current Snapshot` section whenever the high-level state changes.
 - Append a short entry to `Session Log` whenever meaningful work is handed off or resumed.
 - Do not stage unrelated local helper artifacts unless the user explicitly asks for them.
@@ -32,6 +32,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Workflow:
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
+  - Codex is the primary implementation owner for this worktree and may touch both CSS and JS when needed
 - Verification status:
 - `cargo test`: `193` passing tests on `2026-05-19`
 - `cargo build`: success on `2026-05-19`
@@ -45,7 +46,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `@media` handling
     - `calc(...)`
     - `rgba(...)` blending
-  - CSS Phase 5 baseline is treated as complete on the Claude `claude/phase5-css` branch; Codex should not duplicate the parser/layout engine and should treat Phase 6 as the remaining CSS surface.
+  - CSS Phase 5 baseline is treated as complete on the Claude `claude/phase5-css` branch; Codex can extend CSS when needed and should coordinate overlap rather than duplicating the parser/layout engine.
   - software-rendered GUI with custom title bar and address bar
   - blank startup page and direct URL entry
   - address bar editing shortcuts including `Ctrl+A`, `Ctrl+C`, `Ctrl+X`, and `Ctrl+V`
@@ -198,6 +199,12 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-21 - Codex (CSS / JS ownership update)
+
+- Updated the operating rules so Codex is now the primary implementation owner for both CSS and JS on the active Codex branch.
+- Noted that Claude help can be requested via the `claude` command when a targeted follow-up or second opinion is useful.
+- Kept the change documentation focused on coordination rather than reintroducing a hard CSS boundary.
 
 ### 2026-05-18 - Codex (Node / fragment DOM APIs)
 
