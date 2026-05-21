@@ -90,6 +90,10 @@ enum JavaScriptSessionCommand {
         cancelable: bool,
         response_tx: Sender<DomEventDispatchResult>,
     },
+    HasGlobalEventListener {
+        event_type: String,
+        response_tx: Sender<bool>,
+    },
     SetScrollPosition {
         y: u32,
     },
@@ -184,6 +188,22 @@ impl JavaScriptSession {
         }
 
         response_rx.recv().ok()
+    }
+
+    pub(crate) fn has_global_event_listener(&self, event_type: &str) -> bool {
+        let (response_tx, response_rx) = mpsc::channel();
+        if self
+            .command_tx
+            .send(JavaScriptSessionCommand::HasGlobalEventListener {
+                event_type: event_type.to_string(),
+                response_tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+
+        response_rx.recv().unwrap_or(false)
     }
 }
 
@@ -427,6 +447,13 @@ pub fn start_document_script_session(
                                 bubbles,
                                 cancelable,
                             );
+                            let _ = response_tx.send(result);
+                        }
+                        JavaScriptSessionCommand::HasGlobalEventListener {
+                            event_type,
+                            response_tx,
+                        } => {
+                            let result = runtime.has_global_event_listener(&event_type);
                             let _ = response_tx.send(result);
                         }
                         JavaScriptSessionCommand::SetScrollPosition { y } => {
@@ -934,6 +961,12 @@ impl JavaScriptRuntime {
         let target = self.context.global_object();
         let event = build_dom_event_object(&mut self.context, &request, &target);
         dispatch_global_event_object(&mut self.context, event_type, bubbles, cancelable, &event)
+    }
+
+    fn has_global_event_listener(&mut self, event_type: &str) -> bool {
+        let target = self.context.global_object().clone();
+        has_event_listener(&target, &event_type.to_ascii_lowercase(), &mut self.context)
+            .unwrap_or(false)
     }
 
     fn serialize_html(&self) -> String {
@@ -3799,6 +3832,24 @@ fn event_listener_entries(
     Ok(entries)
 }
 
+fn has_event_listener(
+    target: &boa_engine::object::JsObject,
+    event_name: &str,
+    context: &mut Context,
+) -> JsResult<bool> {
+    let store = hidden_event_listener_store(target, context)?;
+    let key = js_string!(event_name);
+    let existing = store.get(key, context)?;
+    let Some(list) = existing.as_object() else {
+        return Ok(false);
+    };
+
+    let length = list
+        .get(js_string!("length"), context)?
+        .to_length(context)? as usize;
+    Ok(length > 0)
+}
+
 fn build_dom_event_object(
     context: &mut Context,
     request: &DomEventRequest,
@@ -4112,6 +4163,10 @@ fn runtime_scroll_event(context: &mut Context) -> JsResult<()> {
         .get_data::<JavaScriptHostData>()
         .map(|host| host.state.borrow().dom.document_id)
         .unwrap_or(0);
+    let target = context.global_object().clone();
+    if !has_event_listener(&target, "scroll", context)? {
+        return Ok(());
+    }
     let request = DomEventRequest {
         target_node_id,
         event_type: "scroll".to_string(),
@@ -4119,7 +4174,6 @@ fn runtime_scroll_event(context: &mut Context) -> JsResult<()> {
         cancelable: false,
         ..Default::default()
     };
-    let target = context.global_object().clone();
     let _ = dispatch_dom_event_on_target(target, &request, context)?;
     Ok(())
 }

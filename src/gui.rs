@@ -444,10 +444,12 @@ impl BrowserApp {
     }
 
     fn sync_scroll_position(&mut self) {
-        if self.document.set_scroll_position(self.scroll_y) {
+        if self.document.set_scroll_position(self.scroll_y)
+            && self.document.has_global_event_listener("scroll")
+        {
             let _ = self.document.dispatch_scroll_event();
-            self.scroll_y = self.document.scroll_position();
         }
+        self.scroll_y = self.document.scroll_position();
         self.sync_current_history_scroll();
     }
 
@@ -1402,7 +1404,12 @@ impl BrowserApp {
         }
 
         if self.scroll_y != previous_scroll_y {
-            self.sync_scroll_position();
+            if self.document.has_global_event_listener("scroll") {
+                self.sync_scroll_position();
+            } else {
+                let _ = self.document.set_scroll_position(self.scroll_y);
+                self.sync_current_history_scroll();
+            }
         }
         self.request_redraw();
     }
@@ -1949,6 +1956,9 @@ impl DocumentView {
     }
 
     fn dispatch_window_resize(&mut self) -> bool {
+        if !self.has_global_event_listener("resize") {
+            return false;
+        }
         let resized = match &mut self.content {
             DocumentContent::Loaded(page) => page.dispatch_window_resize().is_some(),
             _ => false,
@@ -1969,6 +1979,13 @@ impl DocumentView {
             self.sync_from_loaded_page();
         }
         scrolled
+    }
+
+    fn has_global_event_listener(&mut self, event_type: &str) -> bool {
+        match &mut self.content {
+            DocumentContent::Loaded(page) => page.has_global_event_listener(event_type),
+            _ => false,
+        }
     }
 
     fn sync_from_loaded_page(&mut self) {

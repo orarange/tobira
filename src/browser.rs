@@ -135,12 +135,19 @@ impl BrowserPage {
 
     pub fn set_scroll_position(&mut self, y: u32) -> bool {
         if let Some(session) = &self.javascript_session {
-            return session.set_scroll_position(y);
+            let changed = session.set_scroll_position(y);
+            if changed {
+                self.scroll_y = y;
+            }
+            return changed;
         }
         false
     }
 
     pub fn dispatch_window_resize(&mut self) -> Option<DomEventDispatchResult> {
+        if !self.has_global_event_listener("resize") {
+            return None;
+        }
         let result = self
             .javascript_session
             .as_ref()
@@ -150,12 +157,22 @@ impl BrowserPage {
     }
 
     pub fn dispatch_scroll_event(&mut self) -> Option<DomEventDispatchResult> {
+        if !self.has_global_event_listener("scroll") {
+            return None;
+        }
         let result = self
             .javascript_session
             .as_ref()
             .and_then(|session| session.dispatch_global_event("scroll", false, false))?;
         self.apply_script_snapshot(result.snapshot.clone());
         Some(result)
+    }
+
+    pub fn has_global_event_listener(&mut self, event_type: &str) -> bool {
+        self.javascript_session
+            .as_mut()
+            .map(|session| session.has_global_event_listener(event_type))
+            .unwrap_or(false)
     }
 
     pub fn body_text(&self) -> &str {
@@ -3356,9 +3373,7 @@ mod tests {
         let initial_html = page.html_source.clone();
         assert!(page.set_scroll_position(120));
 
-        let _ = page
-            .dispatch_scroll_event()
-            .expect("scroll dispatch should succeed");
+        assert!(page.dispatch_scroll_event().is_none());
 
         assert_eq!(page.layout_revision(), initial_revision);
         assert_eq!(page.html_source, initial_html);
