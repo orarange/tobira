@@ -39,6 +39,7 @@ Already working:
 - browser-level history entries now also remember scroll positions across document loads
 - generic YouTube home / non-watch pages use a synthetic fast path instead of running the heavy app shell through the JS worker
 - layout cache invalidation keyed by viewport width and page revision
+- scroll events that do not change the DOM now keep the current layout cache instead of forcing a rebuild
 - JS-visible viewport and focus state are wired up through `window.innerWidth` / `window.innerHeight`, `window.scrollY` / `window.pageYOffset`, and `document.activeElement`
 - basic script-driven scrolling APIs now exist through `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
 - inline style mutations now reflect back into the DOM snapshot
@@ -186,6 +187,7 @@ Tasks:
 - viewport-width and page-revision based layout cache invalidation is in place
 - a native `element.style` bridge now reflects inline CSS changes back into the DOM tree
 - the bridge covers more text, size, and border-related properties that the current layout engine already understands
+- scroll event handling now avoids rebuilding unchanged documents, so pure scrolling stays responsive
 - GUI scroll changes now sync back into the JS runtime so scroll listeners can react to the current offset
 - script-driven scroll APIs now feed back into the GUI viewport state as well
 - DOM mutation notifications now refresh the live snapshot after GUI-driven attribute changes; deeper incremental invalidation for other mutation paths is still to do

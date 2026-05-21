@@ -44,6 +44,17 @@ impl BrowserPage {
     }
 
     pub fn apply_script_snapshot(&mut self, snapshot: ProcessedScriptHtml) {
+        let html_unchanged = snapshot.html == self.html_source;
+        let has_navigation_target = snapshot.navigation_target.is_some();
+        let has_soft_navigation_target = snapshot.soft_navigation_target.is_some();
+        if html_unchanged && !has_navigation_target && !has_soft_navigation_target {
+            if let Some(title) = snapshot.title_override.clone() {
+                self.title = title;
+            }
+            self.scroll_y = snapshot.scroll_y;
+            return;
+        }
+
         let include_rendered_output = self.rendered.is_some();
         let javascript_session = self.javascript_session.take();
         let layout_revision = self
@@ -3322,6 +3333,36 @@ mod tests {
         assert_eq!(page.layout_revision(), 1);
         assert_ne!(page.html_source, initial_html);
         assert!(page.html_source.contains("data-test=\"updated\""));
+    }
+
+    #[test]
+    fn scroll_events_do_not_rebuild_unchanged_documents() {
+        let html = "<html><body><script>window.foo = 1;</script><div style=\"height: 2000px\"></div></body></html>";
+        let url = Url::parse("https://example.com").unwrap();
+        let (processed, session) = start_document_script_session(html, &url);
+        let mut page = rebuild_page_from_html(
+            &url,
+            200,
+            "OK".to_string(),
+            Some("text/html".to_string()),
+            &processed.html,
+            processed.title_override.clone(),
+            true,
+            0,
+            session,
+        );
+
+        let initial_revision = page.layout_revision();
+        let initial_html = page.html_source.clone();
+        assert!(page.set_scroll_position(120));
+
+        let _ = page
+            .dispatch_scroll_event()
+            .expect("scroll dispatch should succeed");
+
+        assert_eq!(page.layout_revision(), initial_revision);
+        assert_eq!(page.html_source, initial_html);
+        assert_eq!(page.scroll_y(), 120);
     }
 
     #[test]

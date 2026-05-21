@@ -10656,12 +10656,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        DomEventRequest, HttpResponse, JavaScriptRuntime, XmlHttpRequestHandle,
-        build_fetch_response_object, build_xml_http_request_object, current_location_url,
-        ensure_same_origin_script_url, fetch_for_script, finalize_script_request,
-        js_value_to_string, process_document_scripts, resolve_requested_url,
-        script_request_options_from_js, set_location_href, start_document_script_session,
-        ScriptRequestOptions,
+        DomEventRequest, HttpResponse, JavaScriptRuntime, ScriptRequestOptions,
+        XmlHttpRequestHandle, build_fetch_response_object, build_xml_http_request_object,
+        current_location_url, ensure_same_origin_script_url, fetch_for_script,
+        finalize_script_request, js_value_to_string, process_document_scripts,
+        resolve_requested_url, script_request_options_from_js, set_location_href,
+        start_document_script_session,
     };
     use crate::url::Url;
 

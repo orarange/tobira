@@ -1967,7 +1967,6 @@ impl DocumentView {
         };
         if scrolled {
             self.sync_from_loaded_page();
-            self.layout_cache = None;
         }
         scrolled
     }

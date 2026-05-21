@@ -103,6 +103,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - browser-level history entries now remember scroll positions and restore them on back/forward
   - same-document history entries now expose `history.state` and dispatch `popstate` / `hashchange`
   - same-document history back/forward now restores the stored scroll position for each entry
+  - scroll events that do not mutate the DOM keep the current layout cache alive instead of forcing a rebuild
   - layout cache invalidates on viewport width or page revision changes
   - GUI-driven DOM attribute updates now push a fresh runtime snapshot back into the page, so mutation notifications can invalidate reflow immediately
   - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, keyboard event logging, storage/cookies, and scroll control
@@ -212,6 +213,12 @@ git log --oneline -n 20
 - Extended the JS-driven network layer so `fetch(...)` and `XMLHttpRequest` now accept same-origin request method/body settings plus plain-object request headers.
 - Kept redirect handling, same-origin checks, and response decoding on the shared HTTP path so the new request options still go through the same safety boundaries.
 - Added regression tests for fetch request option parsing and POST request construction.
+
+### 2026-05-21 - Codex (scroll reflow stopgap)
+
+- Changed scroll event handling so unchanged documents no longer rebuild their page snapshot or invalidate the layout cache.
+- Added a regression test that scrolls a document without mutating the DOM and verifies the layout revision stays stable.
+- This should make long-page scrolling feel more responsive while the deeper reflow work remains on the roadmap.
 
 ### 2026-05-18 - Codex (Node / fragment DOM APIs)
 
