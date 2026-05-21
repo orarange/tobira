@@ -57,9 +57,10 @@ Current capabilities:
   - Lightweight storage and cookie support:
     - origin-scoped `localStorage` and `sessionStorage`
     - `document.cookie` read/write and HTTP cookie propagation
-  - Network APIs:
-    - Promise-backed `fetch(...)` with response headers iteration
-    - minimal `XMLHttpRequest` supporting `getResponseHeader(...)` / `getAllResponseHeaders()`
+- Network APIs:
+  - Promise-backed `fetch(...)` with response headers iteration
+  - same-origin request method/body support plus plain-object request headers for `fetch(...)` and `XMLHttpRequest`
+  - minimal `XMLHttpRequest` supporting `getResponseHeader(...)` / `getAllResponseHeaders()`
 - Advanced Chrome & Browser GUI features:
   - Custom title bar and address bar
   - Browser back/forward buttons and `Alt+Left` / `Alt+Right` history navigation
@@ -100,6 +101,7 @@ Still missing:
 - session-history replay polish across full document loads (basic scroll restoration is now in place)
 - deeper scroll restoration beyond the current full-document / same-document history support
 - inline style mutations still need broader coverage across the full CSS property matrix and computed-style parity
+- richer networking semantics, especially `Headers` / `Request` / `Response` parity and more request-body shapes
 - POST forms, complex widgets, and modern app-shell browser APIs
 
 ## Run

@@ -9,14 +9,16 @@ use boa_engine::object::{
     JsObject, ObjectInitializer,
     builtins::{JsArray, JsFunction, JsPromise},
 };
-use boa_engine::property::{Attribute, PropertyDescriptor};
+use boa_engine::property::{Attribute, PropertyDescriptor, PropertyKey};
 use boa_engine::{
     Context, Finalize, JsData, JsNativeError, JsResult, JsValue, NativeFunction, Source, Trace,
     js_string,
 };
 
 use crate::html::{Node, parse_document};
-use crate::http::{HttpResponse, fetch, fetch_with_limits_same_origin};
+use crate::http::{
+    HttpRequestOptions, HttpResponse, fetch, fetch_with_request_with_limits_same_origin,
+};
 use crate::site_state::{self, StorageKind};
 use crate::text::decode_text_response;
 use crate::url::Url;
@@ -6100,6 +6102,126 @@ fn resolve_requested_url(request: &JsValue, context: &mut Context) -> JsResult<U
         .into())
 }
 
+#[derive(Debug, Clone, Default)]
+struct ScriptRequestOptions {
+    method: String,
+    headers: BTreeMap<String, String>,
+    body: Option<Vec<u8>>,
+}
+
+fn script_request_options_from_js(
+    request: &JsValue,
+    init: &JsValue,
+    context: &mut Context,
+) -> JsResult<ScriptRequestOptions> {
+    let mut options = ScriptRequestOptions::default();
+    if let Some(object) = request.as_object() {
+        apply_request_options_from_object(&mut options, &object, context)?;
+    }
+    if let Some(object) = init.as_object() {
+        apply_request_options_from_object(&mut options, &object, context)?;
+    }
+
+    finalize_script_request(options, true)
+}
+
+fn apply_request_options_from_object(
+    options: &mut ScriptRequestOptions,
+    object: &JsObject,
+    context: &mut Context,
+) -> JsResult<()> {
+    let method_value = object.get(js_string!("method"), context)?;
+    if !method_value.is_undefined() && !method_value.is_null() {
+        options.method = js_value_to_string(&method_value, context)?;
+    }
+
+    let headers_value = object.get(js_string!("headers"), context)?;
+    if let Some(headers_object) = headers_value.as_object() {
+        for (name, value) in js_plain_object_to_header_map(&headers_object, context)? {
+            options.headers.insert(name, value);
+        }
+    }
+
+    let body_value = object.get(js_string!("body"), context)?;
+    options.body = js_request_body_bytes(Some(&body_value), context)?;
+
+    Ok(())
+}
+
+fn js_plain_object_to_header_map(
+    object: &JsObject,
+    context: &mut Context,
+) -> JsResult<BTreeMap<String, String>> {
+    let mut headers = BTreeMap::new();
+    for key in object.own_property_keys(context)? {
+        let PropertyKey::String(name) = key else {
+            continue;
+        };
+        let property_name = name.to_std_string_escaped();
+        let value = object.get(js_string!(property_name.as_str()), context)?;
+        if value.is_null() || value.is_undefined() {
+            continue;
+        }
+        headers.insert(
+            property_name.to_ascii_lowercase(),
+            js_value_to_string(&value, context)?,
+        );
+    }
+    Ok(headers)
+}
+
+fn js_request_body_bytes(
+    value: Option<&JsValue>,
+    context: &mut Context,
+) -> JsResult<Option<Vec<u8>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_undefined() || value.is_null() {
+        return Ok(None);
+    }
+    let text = js_value_to_string(value, context)?;
+    Ok(Some(text.into_bytes()))
+}
+
+fn finalize_script_request(
+    mut request: ScriptRequestOptions,
+    default_method_for_body: bool,
+) -> JsResult<ScriptRequestOptions> {
+    let method = request.method.trim().to_ascii_uppercase();
+    request.method = if method.is_empty() {
+        if request.body.is_some() && default_method_for_body {
+            "POST".to_string()
+        } else {
+            "GET".to_string()
+        }
+    } else {
+        method
+    };
+
+    if matches!(request.method.as_str(), "GET" | "HEAD")
+        && request.body.as_ref().is_some_and(|body| !body.is_empty())
+    {
+        return Err(JsNativeError::error()
+            .with_message(format!(
+                "{} requests do not support a request body",
+                request.method
+            ))
+            .into());
+    }
+
+    if request.body.as_ref().is_some_and(|body| !body.is_empty())
+        && !request.headers.contains_key("content-type")
+    {
+        request.headers.insert(
+            "content-type".to_string(),
+            "text/plain;charset=UTF-8".to_string(),
+        );
+    }
+
+    Ok(request)
+}
+
 fn reserve_js_network_budget(context: &mut Context) -> JsResult<usize> {
     let Some(host) = context.get_data::<JavaScriptHostData>() else {
         return Err(JsNativeError::error()
@@ -6138,21 +6260,6 @@ fn record_js_network_response_bytes(response_len: usize, context: &mut Context) 
     }
 }
 
-fn xhr_body_is_supported(body: Option<&JsValue>, context: &mut Context) -> JsResult<bool> {
-    let Some(body) = body else {
-        return Ok(true);
-    };
-    if body.is_undefined() || body.is_null() {
-        return Ok(true);
-    }
-
-    if body.is_string() {
-        return Ok(js_value_to_string(body, context)?.is_empty());
-    }
-
-    Ok(false)
-}
-
 fn ensure_same_origin_script_url(current: &Url, target: &Url, reason: &str) -> JsResult<()> {
     if current.shares_origin(target) {
         return Ok(());
@@ -6164,38 +6271,65 @@ fn ensure_same_origin_script_url(current: &Url, target: &Url, reason: &str) -> J
 }
 
 fn fetch_for_script(url: &Url, context: &mut Context) -> JsResult<HttpResponse> {
+    fetch_for_script_with_request(url, &ScriptRequestOptions::default(), context)
+}
+
+fn fetch_for_script_with_request(
+    url: &Url,
+    request: &ScriptRequestOptions,
+    context: &mut Context,
+) -> JsResult<HttpResponse> {
     let current = current_document_url(context).ok_or_else(|| {
         JsNativeError::error().with_message("missing current page origin for JS request")
     })?;
     ensure_same_origin_script_url(&current, url, "cross-origin JS requests are blocked")?;
 
     let max_response_bytes = reserve_js_network_budget(context)?;
-    let response = fetch_with_limits_same_origin(url, max_response_bytes, &current)
-        .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
+    let http_request = HttpRequestOptions {
+        method: request.method.clone(),
+        headers: request.headers.clone(),
+        body: request.body.clone(),
+    };
+    let response = fetch_with_request_with_limits_same_origin(
+        url,
+        max_response_bytes,
+        &current,
+        &http_request,
+    )
+    .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
     record_js_network_response_bytes(response.body.len(), context);
     Ok(response)
+}
+
+fn fetch_signal_is_aborted(value: &JsValue, context: &mut Context) -> JsResult<bool> {
+    let Some(object) = value.as_object() else {
+        return Ok(false);
+    };
+    let signal_value = object.get(js_string!("signal"), context)?;
+    let Some(signal_object) = signal_value.as_object() else {
+        return Ok(false);
+    };
+    let aborted_value = signal_object.get(js_string!("aborted"), context)?;
+    Ok(aborted_value.to_boolean())
 }
 
 fn js_fetch(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let request = args.first().cloned().unwrap_or_else(JsValue::undefined);
     let options = args.get(1).cloned().unwrap_or_else(JsValue::undefined);
-    if let Some(options_object) = options.as_object()
-        && let Ok(signal_value) = options_object.get(js_string!("signal"), context)
-        && let Some(signal_object) = signal_value.as_object()
-    {
-        if let Ok(aborted_value) = signal_object.get(js_string!("aborted"), context)
-            && aborted_value.to_boolean()
-        {
-            return Ok(JsValue::from(JsPromise::reject(
-                JsNativeError::error().with_message("fetch aborted"),
-                context,
-            )));
-        }
+    if fetch_signal_is_aborted(&request, context)? || fetch_signal_is_aborted(&options, context)? {
+        return Ok(JsValue::from(JsPromise::reject(
+            JsNativeError::error().with_message("fetch aborted"),
+            context,
+        )));
     }
     let url = resolve_requested_url(&request, context);
+    let request_options = script_request_options_from_js(&request, &options, context);
     let promise = match url {
         Ok(url) => JsPromise::from_result(
-            fetch_for_script(&url, context)
+            request_options
+                .and_then(|request_options| {
+                    fetch_for_script_with_request(&url, &request_options, context)
+                })
                 .map(|response| JsValue::from(build_fetch_response_object(context, response)))
                 .map_err(|error| JsNativeError::error().with_message(error.to_string())),
             context,
@@ -6492,17 +6626,17 @@ fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
         )
     };
 
-    let result = if !xhr_body_is_supported(args.first(), context)? {
-        Err(JsNativeError::error()
-            .with_message("XMLHttpRequest send(body) is not supported yet")
-            .into())
-    } else if method.is_empty() || method == "GET" {
-        resolve_requested_url(&JsValue::from(js_string!(target_url)), context)
-            .and_then(|url| fetch_for_script(&url, context))
-    } else {
-        Err(JsNativeError::error()
-            .with_message(format!("unsupported XMLHttpRequest method: {method}"))
-            .into())
+    let body = js_request_body_bytes(args.first(), context)?;
+    let request = ScriptRequestOptions {
+        method,
+        headers: handle.state.borrow().request_headers.clone(),
+        body,
+    };
+
+    let result = match finalize_script_request(request, false) {
+        Ok(request) => resolve_requested_url(&JsValue::from(js_string!(target_url)), context)
+            .and_then(|url| fetch_for_script_with_request(&url, &request, context)),
+        Err(error) => Err(error),
     };
 
     match result {
@@ -10519,13 +10653,15 @@ fn js_value_to_string(value: &JsValue, context: &mut Context) -> JsResult<String
 #[cfg(test)]
 mod tests {
     use boa_engine::{Context, JsValue, Source, js_string};
+    use std::collections::BTreeMap;
 
     use super::{
         DomEventRequest, HttpResponse, JavaScriptRuntime, XmlHttpRequestHandle,
         build_fetch_response_object, build_xml_http_request_object, current_location_url,
-        ensure_same_origin_script_url, fetch_for_script, js_value_to_string,
-        process_document_scripts, resolve_requested_url, set_location_href,
-        start_document_script_session,
+        ensure_same_origin_script_url, fetch_for_script, finalize_script_request,
+        js_value_to_string, process_document_scripts, resolve_requested_url,
+        script_request_options_from_js, set_location_href, start_document_script_session,
+        ScriptRequestOptions,
     };
     use crate::url::Url;
 
@@ -11393,6 +11529,50 @@ mod tests {
             "{}",
             processed.html
         );
+    }
+
+    #[test]
+    fn parses_fetch_request_options_from_request_and_init_objects() {
+        let base_url = Url::parse("https://example.com/start").unwrap();
+        let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
+        let request = runtime
+            .context
+            .eval(Source::from_bytes(
+                "({ url: '/api', headers: { 'X-First': 'one' } })",
+            ))
+            .unwrap();
+        let init = runtime
+            .context
+            .eval(Source::from_bytes(
+                "({ method: 'post', headers: { 'X-Second': 'two' }, body: 'payload' })",
+            ))
+            .unwrap();
+
+        let options = script_request_options_from_js(&request, &init, &mut runtime.context)
+            .expect("request options should parse");
+
+        assert_eq!(options.method, "POST");
+        assert_eq!(options.headers.get("x-first"), Some(&"one".to_string()));
+        assert_eq!(options.headers.get("x-second"), Some(&"two".to_string()));
+        assert_eq!(
+            options.headers.get("content-type"),
+            Some(&"text/plain;charset=UTF-8".to_string())
+        );
+        assert_eq!(options.body.as_deref(), Some(b"payload".as_ref()));
+    }
+
+    #[test]
+    fn normalizes_script_request_bodies_for_post_methods() {
+        let request = ScriptRequestOptions {
+            method: "post".to_string(),
+            headers: BTreeMap::new(),
+            body: Some(b"payload".to_vec()),
+        };
+
+        let finalized = finalize_script_request(request, false).expect("request should normalize");
+
+        assert_eq!(finalized.method, "POST");
+        assert_eq!(finalized.body.as_deref(), Some(b"payload".as_ref()));
     }
 
     #[test]

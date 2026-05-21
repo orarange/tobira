@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -35,12 +35,25 @@ impl HttpResponse {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct HttpRequestOptions {
+    pub method: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: Option<Vec<u8>>,
+}
+
 pub fn fetch(url: &Url) -> Result<HttpResponse> {
-    fetch_inner(url, 0, None, None)
+    fetch_inner(url, 0, None, None, HttpRequestOptions::default())
 }
 
 pub fn fetch_with_limits(url: &Url, max_body_bytes: usize) -> Result<HttpResponse> {
-    fetch_inner(url, 0, Some(max_body_bytes), None)
+    fetch_inner(
+        url,
+        0,
+        Some(max_body_bytes),
+        None,
+        HttpRequestOptions::default(),
+    )
 }
 
 pub fn fetch_with_limits_same_origin(
@@ -48,7 +61,22 @@ pub fn fetch_with_limits_same_origin(
     max_body_bytes: usize,
     origin: &Url,
 ) -> Result<HttpResponse> {
-    fetch_inner(url, 0, Some(max_body_bytes), Some(origin))
+    fetch_inner(
+        url,
+        0,
+        Some(max_body_bytes),
+        Some(origin),
+        HttpRequestOptions::default(),
+    )
+}
+
+pub fn fetch_with_request_with_limits_same_origin(
+    url: &Url,
+    max_body_bytes: usize,
+    origin: &Url,
+    request: &HttpRequestOptions,
+) -> Result<HttpResponse> {
+    fetch_inner(url, 0, Some(max_body_bytes), Some(origin), request.clone())
 }
 
 fn fetch_inner(
@@ -56,6 +84,7 @@ fn fetch_inner(
     redirect_count: usize,
     max_body_bytes: Option<usize>,
     same_origin: Option<&Url>,
+    request: HttpRequestOptions,
 ) -> Result<HttpResponse> {
     if redirect_count > MAX_REDIRECTS {
         return Err(BrowserError::message("too many redirects"));
@@ -66,18 +95,8 @@ fn fetch_inner(
     tcp_stream.set_read_timeout(Some(Duration::from_secs(20)))?;
     tcp_stream.set_write_timeout(Some(Duration::from_secs(20)))?;
     let mut stream = open_stream(url, tcp_stream)?;
-    let cookie_header = site_state::cookie_header_for_url(url)
-        .map(|value| format!("Cookie: {value}\r\n"))
-        .unwrap_or_default();
-
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8\r\nAccept-Language: ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: gzip, deflate, br\r\nCache-Control: no-cache\r\nPragma: no-cache\r\nConnection: close\r\nUpgrade-Insecure-Requests: 1\r\nSec-CH-UA: \"Chromium\";v=\"136\", \"Google Chrome\";v=\"136\", \"Not/A)Brand\";v=\"99\"\r\nSec-CH-UA-Mobile: ?0\r\nSec-CH-UA-Platform: \"Windows\"\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\n{cookie_header}\r\n",
-        url.path,
-        url.host_header(),
-        USER_AGENT
-    );
-
-    stream.write_all(request.as_bytes())?;
+    let request_bytes = build_request_bytes(url, &request);
+    stream.write_all(&request_bytes)?;
 
     let response_bytes = read_response_bytes(
         &mut stream,
@@ -97,7 +116,14 @@ fn fetch_inner(
                     "cross-origin redirect target is blocked",
                 ));
             }
-            return fetch_inner(&next_url, redirect_count + 1, max_body_bytes, same_origin);
+            let next_request = redirect_followup_request(&request, response.status_code);
+            return fetch_inner(
+                &next_url,
+                redirect_count + 1,
+                max_body_bytes,
+                same_origin,
+                next_request,
+            );
         }
     }
 
@@ -177,6 +203,67 @@ fn parse_response_with_limits(
 
 fn is_redirect(status_code: u16) -> bool {
     matches!(status_code, 301 | 302 | 303 | 307 | 308)
+}
+
+fn redirect_followup_request(request: &HttpRequestOptions, status_code: u16) -> HttpRequestOptions {
+    let mut next = request.clone();
+    let method = next.method.trim().to_ascii_uppercase();
+    if should_switch_to_get_after_redirect(status_code, &method) {
+        next.method = "GET".to_string();
+        next.body = None;
+    }
+    next
+}
+
+fn should_switch_to_get_after_redirect(status_code: u16, method: &str) -> bool {
+    matches!(status_code, 303)
+        || matches!(status_code, 301 | 302) && !matches!(method, "GET" | "HEAD")
+}
+
+fn build_request_bytes(url: &Url, request: &HttpRequestOptions) -> Vec<u8> {
+    let method = normalized_request_method(&request.method);
+    let cookie_header = site_state::cookie_header_for_url(url)
+        .map(|value| format!("Cookie: {value}\r\n"))
+        .unwrap_or_default();
+    let mut header_lines = String::new();
+    for (name, value) in &request.headers {
+        if name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        header_lines.push_str(&format!("{name}: {value}\r\n"));
+    }
+
+    let body = request.body.as_deref().unwrap_or(&[]);
+    let body_length = body.len();
+    let content_length = if matches!(method.as_str(), "GET" | "HEAD") && body_length == 0 {
+        None
+    } else {
+        Some(body_length)
+    };
+    let content_length_line = content_length
+        .map(|len| format!("Content-Length: {len}\r\n"))
+        .unwrap_or_default();
+
+    let request_text = format!(
+        "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8\r\nAccept-Language: ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: gzip, deflate, br\r\nCache-Control: no-cache\r\nPragma: no-cache\r\nConnection: close\r\nUpgrade-Insecure-Requests: 1\r\nSec-CH-UA: \"Chromium\";v=\"136\", \"Google Chrome\";v=\"136\", \"Not/A)Brand\";v=\"99\"\r\nSec-CH-UA-Mobile: ?0\r\nSec-CH-UA-Platform: \"Windows\"\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\n{header_lines}{content_length_line}{cookie_header}\r\n",
+        url.path,
+        url.host_header(),
+        USER_AGENT
+    );
+    let mut request_bytes = request_text.into_bytes();
+    if !body.is_empty() {
+        request_bytes.extend_from_slice(body);
+    }
+    request_bytes
+}
+
+fn normalized_request_method(method: &str) -> String {
+    let trimmed = method.trim();
+    if trimmed.is_empty() {
+        "GET".to_string()
+    } else {
+        trimmed.to_ascii_uppercase()
+    }
 }
 
 fn open_stream(url: &Url, tcp_stream: TcpStream) -> Result<Box<dyn ReadWrite>> {
@@ -349,12 +436,16 @@ impl<T> ReadWrite for T where T: Read + Write {}
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::Write;
 
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
-    use super::{decode_chunked, parse_response, parse_response_with_limits};
+    use super::{
+        HttpRequestOptions, build_request_bytes, decode_chunked, parse_response,
+        parse_response_with_limits,
+    };
     use crate::url::Url;
 
     #[test]
@@ -406,5 +497,39 @@ mod tests {
         );
 
         assert!(response.is_err());
+    }
+
+    #[test]
+    fn builds_post_request_with_headers_and_body() {
+        let url = Url::parse("https://example.com/api").unwrap();
+        let request = HttpRequestOptions {
+            method: "post".to_string(),
+            headers: BTreeMap::from([
+                ("x-demo".to_string(), "one".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+            ]),
+            body: Some(br#"{"ok":true}"#.to_vec()),
+        };
+
+        let request_bytes = build_request_bytes(&url, &request);
+        let request_text = String::from_utf8(request_bytes).unwrap();
+
+        assert!(
+            request_text.starts_with("POST /api HTTP/1.1\r\n"),
+            "{request_text}"
+        );
+        assert!(request_text.contains("x-demo: one") || request_text.contains("X-Demo: one"));
+        assert!(
+            request_text.contains("content-type: application/json"),
+            "{request_text}"
+        );
+        assert!(
+            request_text.contains("Content-Length: 11"),
+            "{request_text}"
+        );
+        assert!(
+            request_text.ends_with("\r\n\r\n{\"ok\":true}"),
+            "{request_text}"
+        );
     }
 }

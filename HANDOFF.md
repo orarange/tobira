@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-19`
+- Date: `2026-05-21`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
 - Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
@@ -34,8 +34,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - run Codex implementation from a separate `codex/js-event-capture` worktree
   - Codex is the primary implementation owner for this worktree and may touch both CSS and JS when needed
 - Verification status:
-- `cargo test`: `193` passing tests on `2026-05-19`
-- `cargo build`: success on `2026-05-19`
+- `cargo test`: `196` passing tests on `2026-05-21`
+- `cargo build`: success on `2026-05-21`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -94,6 +94,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - Promise job flushing (drained after top-level script eval via `context.run_jobs()`)
     - lightweight `fetch(...)` with response headers iteration
     - lightweight `XMLHttpRequest` with `getResponseHeader(...)` / `getAllResponseHeaders()`
+    - same-origin request bodies plus plain-object request headers for `fetch(...)` and `XMLHttpRequest`
     - loop-iteration runtime budget for runaway scripts
     - same-origin request and redirect guards
     - script-driven `location.href` follow-up navigation
@@ -205,6 +206,12 @@ git log --oneline -n 20
 - Updated the operating rules so Codex is now the primary implementation owner for both CSS and JS on the active Codex branch.
 - Noted that Claude help can be requested via the `claude` command when a targeted follow-up or second opinion is useful.
 - Kept the change documentation focused on coordination rather than reintroducing a hard CSS boundary.
+
+### 2026-05-21 - Codex (network request semantics)
+
+- Extended the JS-driven network layer so `fetch(...)` and `XMLHttpRequest` now accept same-origin request method/body settings plus plain-object request headers.
+- Kept redirect handling, same-origin checks, and response decoding on the shared HTTP path so the new request options still go through the same safety boundaries.
+- Added regression tests for fetch request option parsing and POST request construction.
 
 ### 2026-05-18 - Codex (Node / fragment DOM APIs)
 

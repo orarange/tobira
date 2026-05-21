@@ -26,6 +26,7 @@ Already working:
 - basic DOM event plumbing for capture + bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`
 - `Promise` job flushing
 - guarded `fetch(...)` and `XMLHttpRequest`
+- same-origin request method/body support plus plain-object request headers for `fetch(...)` and `XMLHttpRequest`
 - response header iteration plus XHR `getResponseHeader(...)` / `getAllResponseHeaders()`
 - same-origin navigation checks
 - loop-iteration runtime budget for runaway scripts
@@ -54,7 +55,7 @@ CSS baseline note:
 
 Still missing or shallow:
 
-- richer networking semantics
+- richer networking semantics, especially `Headers` / `Request` / `Response` parity and more request-body shapes
 - session-history replay polish across full document loads
 - async browser APIs that modern frameworks expect
 - rendering invalidation and layout reflow after DOM mutation still need deeper incremental invalidation
@@ -71,7 +72,7 @@ If we want to keep momentum and avoid getting stuck on the biggest browser gaps 
 4. `document.body` / `document.head` / `document.documentElement` consistency and `innerHTML` edge cases
 5. mutation notifications plus incremental reflow invalidation for DOM and style changes
 6. same-document and full-document history replay polish, including scroll restoration
-7. fetch / XHR semantics and safer cross-origin handling
+7. fetch / XHR semantics and safer cross-origin handling, including method / body / header handling
 8. Google / YouTube / app-shell compatibility smoke tests
 9. media and advanced APIs
 
@@ -165,6 +166,7 @@ Tasks:
 
 - improve `fetch(...)` request/response coverage
 - add request headers and response headers that app shells expect
+- request method/body support is now in place for the common same-origin cases; keep expanding toward `Headers` / `Request` parity
 - support abort signals and request cancellation
 - improve `XMLHttpRequest` beyond the current lightweight shim
 - decide a safer cross-origin policy for controlled use cases
