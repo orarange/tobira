@@ -4416,6 +4416,16 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_scroll_top).to_js_function(context.realm());
     let set_scroll_top =
         NativeFunction::from_fn_ptr(js_dom_set_scroll_top).to_js_function(context.realm());
+    let is_form_node = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .element(node_id)
+                .map(|element| element.tag_name == "form")
+        })
+        .unwrap_or(false);
     let is_text_node = context
         .get_data::<JavaScriptHostData>()
         .map(|host| host.state.borrow().dom.node_type(node_id) == 3)
@@ -4829,6 +4839,19 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
                 Attribute::all(),
             )
             .function(split_text, js_string!("splitText"), 1);
+    }
+    if is_form_node {
+        object = object
+            .function(
+                NativeFunction::from_fn_ptr(js_dom_form_submit),
+                js_string!("submit"),
+                0,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_dom_form_request_submit),
+                js_string!("requestSubmit"),
+                1,
+            );
     }
     let object = object.build();
     store_dom_node_object(context, node_id, &object);
@@ -5983,6 +6006,89 @@ fn set_soft_navigation_href(href: &str, context: &mut Context) {
     record_soft_navigation_href(&resolved, false, None, true, context);
 }
 
+fn resolve_content_href(href: &str, base: Option<&Url>) -> String {
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return href.to_string();
+    }
+    if let Some(base) = base
+        && let Ok(resolved) = base.resolve(href)
+    {
+        return resolved.to_string();
+    }
+    href.to_string()
+}
+
+fn percent_encode_form_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            b' ' => encoded.push('+'),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn build_get_form_submission_url(
+    action_url: &str,
+    fields: &[(String, String)],
+    replace_existing_query: bool,
+) -> Option<String> {
+    if action_url.trim().is_empty() {
+        return None;
+    }
+
+    let (without_fragment, fragment_suffix) = if replace_existing_query {
+        (
+            action_url
+                .split_once('#')
+                .map(|(head, _)| head)
+                .unwrap_or(action_url),
+            String::new(),
+        )
+    } else {
+        action_url
+            .split_once('#')
+            .map(|(head, fragment)| (head, format!("#{fragment}")))
+            .unwrap_or((action_url, String::new()))
+    };
+
+    let (base, existing_query) = without_fragment
+        .split_once('?')
+        .map(|(head, query)| (head, Some(query)))
+        .unwrap_or((without_fragment, None));
+
+    let mut query = if replace_existing_query {
+        String::new()
+    } else {
+        existing_query.unwrap_or_default().to_string()
+    };
+    let mut needs_separator = !query.is_empty();
+    for (name, value) in fields {
+        if name.is_empty() {
+            continue;
+        }
+        if needs_separator {
+            query.push('&');
+        }
+        query.push_str(&percent_encode_form_component(name));
+        query.push('=');
+        query.push_str(&percent_encode_form_component(value));
+        needs_separator = true;
+    }
+
+    let mut final_url = base.to_string();
+    if !query.is_empty() {
+        final_url.push('?');
+        final_url.push_str(&query);
+    }
+    final_url.push_str(&fragment_suffix);
+    Some(final_url)
+}
+
 fn apply_soft_navigation_href_resolved(resolved: &str, context: &mut Context) {
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
@@ -6004,6 +6110,197 @@ fn apply_soft_navigation_entry(entry: &HistoryEntry, context: &mut Context) {
         }
         state.soft_navigation_target = Some(entry.href.clone());
     }
+}
+
+fn value_node_id(value: &JsValue) -> Option<usize> {
+    value
+        .as_object()
+        .and_then(|object| object.downcast_ref::<DomNodeHandle>().map(|handle| handle.node_id))
+}
+
+fn is_form_submit_control(dom: &DomState, node_id: usize) -> bool {
+    let Some(element) = dom.element(node_id) else {
+        return false;
+    };
+    match element.tag_name.as_str() {
+        "button" => {
+            let input_type = dom
+                .get_attribute(node_id, "type")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "submit".to_string());
+            !matches!(input_type.as_str(), "reset" | "button")
+        }
+        "input" => {
+            let input_type = dom
+                .get_attribute(node_id, "type")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "text".to_string());
+            matches!(input_type.as_str(), "submit" | "image")
+        }
+        _ => false,
+    }
+}
+
+fn first_form_submitter(dom: &DomState, form_id: usize) -> Option<usize> {
+    dom.descendant_nodes(form_id, false)
+        .into_iter()
+        .find(|node_id| !dom.is_disabled(*node_id) && is_form_submit_control(dom, *node_id))
+}
+
+fn collect_form_fields(
+    dom: &DomState,
+    form_id: usize,
+    submitter_node_id: Option<usize>,
+) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
+    for node_id in dom.descendant_nodes(form_id, false) {
+        if dom.is_disabled(node_id) {
+            continue;
+        }
+        let Some(element) = dom.element(node_id) else {
+            continue;
+        };
+        match element.tag_name.as_str() {
+            "input" => {
+                let input_type = dom
+                    .get_attribute(node_id, "type")
+                    .map(|value| value.trim().to_ascii_lowercase())
+                    .unwrap_or_else(|| "text".to_string());
+                let is_submitter = submitter_node_id == Some(node_id);
+                if matches!(
+                    input_type.as_str(),
+                    "submit" | "image" | "button" | "reset" | "checkbox" | "radio" | "file"
+                ) && !is_submitter
+                {
+                    continue;
+                }
+                if let Some(name) = dom.get_attribute(node_id, "name")
+                    && !name.is_empty()
+                {
+                    fields.push((name, dom.get_attribute(node_id, "value").unwrap_or_default()));
+                }
+            }
+            "textarea" => {
+                if let Some(name) = dom.get_attribute(node_id, "name")
+                    && !name.is_empty()
+                {
+                    fields.push((name, dom.text_content(node_id)));
+                }
+            }
+            "button" => {
+                if submitter_node_id != Some(node_id) {
+                    continue;
+                }
+                if let Some(name) = dom.get_attribute(node_id, "name")
+                    && !name.is_empty()
+                {
+                    fields.push((name, dom.get_attribute(node_id, "value").unwrap_or_default()));
+                }
+            }
+            _ => {}
+        }
+    }
+    fields
+}
+
+fn form_submission_target(
+    context: &mut Context,
+    form_node_id: usize,
+    submitter_node_id: Option<usize>,
+) -> Option<String> {
+    let base = current_location_url(context)?;
+    let host = context.get_data::<JavaScriptHostData>()?;
+    let state = host.state.borrow();
+    let form = state.dom.element(form_node_id)?;
+    if form.tag_name != "form" {
+        return None;
+    }
+
+    let action = state
+        .dom
+        .get_attribute(form_node_id, "action")
+        .unwrap_or_default();
+    let method = state
+        .dom
+        .get_attribute(form_node_id, "method")
+        .unwrap_or_else(|| "get".to_string());
+    if !method.eq_ignore_ascii_case("get") {
+        return None;
+    }
+
+    let submitter_node_id = submitter_node_id.filter(|node_id| {
+        *node_id == form_node_id || state.dom.contains_node(form_node_id, *node_id)
+    });
+    let submitter_node_id = submitter_node_id.or_else(|| first_form_submitter(&state.dom, form_node_id));
+    let fields = collect_form_fields(&state.dom, form_node_id, submitter_node_id);
+    let resolved_action = if action.is_empty() {
+        base.to_string()
+    } else {
+        resolve_content_href(&action, Some(&base))
+    };
+    build_get_form_submission_url(&resolved_action, &fields, action.is_empty())
+}
+
+fn set_form_submission_target(context: &mut Context, target: String) {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let current_document_url = state.document_url.to_string();
+        state.location_href = target.clone();
+        state.soft_navigation_target = (target == current_document_url).then_some(target);
+    }
+}
+
+fn js_dom_form_submit(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(form_node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if let Some(target) = form_submission_target(context, form_node_id, None) {
+        set_form_submission_target(context, target);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_form_request_submit(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(form_node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let is_form_node = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .element(form_node_id)
+                .map(|element| element.tag_name == "form")
+        })
+        .unwrap_or(false);
+    if !is_form_node {
+        return Ok(JsValue::undefined());
+    }
+    let submitter_node_id = args.first().and_then(value_node_id);
+    let target = form_submission_target(context, form_node_id, submitter_node_id);
+    let request = DomEventRequest {
+        target_node_id: form_node_id,
+        event_type: "submit".to_string(),
+        bubbles: true,
+        cancelable: true,
+        ..Default::default()
+    };
+    let prevented = dispatch_dom_event_on_target(
+        build_dom_node_object(context, form_node_id),
+        &request,
+        context,
+    )?;
+    if !prevented
+        && let Some(target) = target
+    {
+        set_form_submission_target(context, target);
+    }
+    Ok(JsValue::undefined())
 }
 
 fn dispatch_global_event_object(
@@ -10818,6 +11115,19 @@ mod tests {
         assert_eq!(
             processed.navigation_target.as_deref(),
             Some("https://example.com/next?from=test")
+        );
+    }
+
+    #[test]
+    fn request_submit_builds_get_form_navigation_target() {
+        let processed = process_document_scripts(
+            "<html><body><form id=\"search\" action=\"/search\"><input name=\"q\" value=\"red fox\"><button name=\"source\" value=\"ui\">Search</button></form><script>document.getElementById('search').requestSubmit();</script></body></html>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.navigation_target.as_deref(),
+            Some("https://example.com/search?q=red+fox&source=ui")
         );
     }
 

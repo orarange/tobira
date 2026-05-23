@@ -34,7 +34,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - run Codex implementation from a separate `codex/js-event-capture` worktree
   - Codex is the primary implementation owner for this worktree and may touch both CSS and JS when needed
 - Verification status:
-- `cargo test`: `197` passing tests on `2026-05-23`
+- `cargo test`: `198` passing tests on `2026-05-23`
 - `cargo build`: success on `2026-05-23`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -68,6 +68,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `document.activeElement`
     - `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
   - scroll changes on pages without scroll listeners now paint immediately instead of waiting for a later redraw
+  - JS-side form submission helpers now support `HTMLFormElement.submit()` / `requestSubmit()` for `GET` forms, including event dispatch and encoded query construction
   - Node introspection and mutation helpers are now much closer to browser DOM behavior:
     - `nodeType`, `nodeName`, `nodeValue`, `firstChild`, `lastChild`, `previousSibling`, `nextSibling`, `isConnected`
     - `cloneNode(...)`, `replaceChild(...)`, `removeChild(...)`
@@ -226,6 +227,12 @@ git log --oneline -n 20
 - Made static-page scroll handling paint immediately after the viewport changes so wheel-driven scrolling no longer waits for a delayed redraw.
 - Kept the no-listener path from rebuilding the page snapshot or invalidating the layout cache, so we get responsiveness without reintroducing the old scroll churn.
 - Verified the updated state with `cargo test` (`197` passing tests) and `cargo build`.
+
+### 2026-05-23 - Codex (form submit JS bridge)
+
+- Added `HTMLFormElement.submit()` and `requestSubmit()` for `GET` forms so JS-driven forms can navigate through the same encoded query path as GUI submits.
+- `requestSubmit()` dispatches the form `submit` event before navigating, and the first submit-capable control is used as the implicit submitter when one is not provided.
+- Updated the README and handoff snapshot to reflect the new JS-side form submission path.
 
 ### 2026-05-18 - Codex (Node / fragment DOM APIs)
 
