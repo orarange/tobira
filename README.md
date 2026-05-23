@@ -93,7 +93,7 @@ Current capabilities:
   - recursive `document.write(...)`
   - GUI-driven DOM attribute changes now refresh the live page snapshot, so reflow follows mutation notifications instead of waiting for a reload
   - inline `element.style` updates through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
-- Site-specific rendering paths for YouTube and Google
+- Generic HTML/JS rendering path for YouTube, Google, and other app-shell sites
 
 Still missing:
 
@@ -190,7 +190,7 @@ cargo run -- http://127.0.0.1:8765/demo/storage-demo.html
 - `src/css.rs` — CSS parsing, selector matching, cascade, computed styles, `@media`, `calc()`, color parsing
 - `src/layout.rs` — Styled text layout, block rendering, tables, image placement, background/border drawing, link hitboxes
 - `src/font.rs` — System font loading, glyph rasterization, and text measurement helpers
-- `src/browser.rs` — Page loading pipeline, stylesheet collection, site-specific rewrites, YouTube/Google synthetic documents
+- `src/browser.rs` — Page loading pipeline, stylesheet collection, frame expansion, and generic HTML/JS handling
 - `src/gui.rs` — `winit` event loop, address bar, input handling, software rendering
 - `src/js.rs` — Sandboxed JS execution, block-list filter, mutable DOM bridge, browser-ish stubs
 - `src/render.rs` — Plain text fallback renderer for CLI mode
@@ -204,7 +204,7 @@ Short version:
 
 1. Finish richer history/back-forward behavior and document-load replay
 2. Improve networking semantics and incremental reflow after DOM mutation
-3. Validate against Google, YouTube, and other app-shell sites
+3. Validate against Google, YouTube, and other app-shell sites through the generic path
 
 ## JavaScript Scope
 
@@ -238,6 +238,6 @@ Current JS support is intentionally small:
 - lightweight response header iteration plus XHR `getResponseHeader(...)` / `getAllResponseHeaders()`
 - `console.log()` / `warn()` / `error()`
 - queued `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)` callbacks
-- YouTube generic home pages now take a synthetic fast path before the heavy JS session, which keeps the app responsive on startup
+- YouTube and Google pages now stay on the generic HTML/JS path instead of a synthetic shortcut, so startup behavior matches the rest of the web stack
 
 It still does not implement a full browser DOM, async networking, or framework-level browser APIs.

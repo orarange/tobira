@@ -113,19 +113,14 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
   - inline `element.style` mutations now reflect through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
   - `getComputedStyle(...)` snapshots now expose common layout-sensitive values for DOM-driven callers
-  - site-specific rendering paths for:
-    - YouTube watch pages
-    - YouTube home shell / cards / nudge UI
-    - lightweight Google shell
-    - legacy frame/table-heavy pages such as the Abe Hiroshi site
-  - generic YouTube home / non-watch pages now take a synthetic fast path before the heavy JS session so the app does not spin on the full app shell
-  - generic `google.com` and `youtube.com` now try the real JS/HTML path before synthetic fallback
+  - generic HTML/JS rendering path now handles YouTube, Google, and other app-shell sites without site-specific synthetic rewrites
+  - legacy frame/table-heavy pages such as the Abe Hiroshi site still get their own parser/layout handling
   - living JS roadmap tracked in `JS_ROADMAP.md`
 
 ## Important Modules
 
 - `src/browser.rs`
-  Main page-loading pipeline, site-specific rewrites, legacy page handling, YouTube/Google synthetic documents.
+  Main page-loading pipeline, legacy page handling, frame expansion, and generic HTML/JS rendering.
 - `src/css.rs`
   CSS parser, selector matching, computed styles, `@media`, `calc(...)`, color parsing.
 - `src/layout.rs`
@@ -549,10 +544,10 @@ Implemented all Phase 5 CSS roadmap items across 6 batches on `claude/phase5-css
 - Dispatched `popstate` on history back/forward and `hashchange` on same-document fragment changes.
 - Added regression coverage for `hashchange` and `popstate` dispatch behavior.
 
-### 2026-05-17 - Codex (YouTube synthetic fast path)
+### 2026-05-17 - Codex (YouTube/Google generic path)
 
-- Short-circuited generic YouTube home / non-watch loads to a synthetic shell before starting the heavy JS session.
-- Kept the watch-page summary path intact while avoiding the runaway memory growth seen on the full YouTube app shell.
+- Removed the YouTube/Google synthetic-document shortcut so those sites now stay on the generic HTML/JS path.
+- Kept the heavy app-shell handling on the shared pipeline instead of a site-specific rewrite path.
 - Verified the new path with a process-memory smoke test that stabilized instead of growing without bound.
 
 ### 2026-05-16 - Codex (browser history back/forward)
