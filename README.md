@@ -67,6 +67,7 @@ Current capabilities:
   - Scroll restoration for both same-document and full-document history entries
   - Clickable page links plus basic GUI form controls for `GET` submissions
   - JS-driven `HTMLFormElement.submit()` / `requestSubmit()` for `GET` forms with event dispatch and query encoding
+  - `getBoundingClientRect()` reads the current layout snapshot when hitboxes are available
   - Basic DOM event plumbing (bubbles `click`, `input`, `change`, `submit`; target-only `focus`, `blur`)
   - `MutationObserver` callbacks for `attributes`, `childList`, and `characterData`, plus browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) and `AbortController` / `AbortSignal`
   - Layout reflow cache keyed by viewport width and page revision
