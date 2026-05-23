@@ -19,6 +19,7 @@ use crate::html::{Node, parse_document};
 use crate::http::{
     HttpRequestOptions, HttpResponse, fetch, fetch_with_request_with_limits_same_origin,
 };
+use crate::layout::ElementHitbox;
 use crate::site_state::{self, StorageKind};
 use crate::text::decode_text_response;
 use crate::url::Url;
@@ -106,6 +107,9 @@ enum JavaScriptSessionCommand {
         name: String,
         value: String,
     },
+    SetLayoutHitboxes {
+        hitboxes: Vec<ElementHitbox>,
+    },
     Snapshot {
         response_tx: Sender<ProcessedScriptHtml>,
     },
@@ -152,6 +156,12 @@ impl JavaScriptSession {
                 name: name.to_string(),
                 value: value.to_string(),
             })
+            .is_ok()
+    }
+
+    pub(crate) fn set_layout_hitboxes(&self, hitboxes: Vec<ElementHitbox>) -> bool {
+        self.command_tx
+            .send(JavaScriptSessionCommand::SetLayoutHitboxes { hitboxes })
             .is_ok()
     }
 
@@ -231,6 +241,7 @@ struct JavaScriptState {
     viewport_height: u32,
     scroll_y: u32,
     active_element_node_id: Option<usize>,
+    layout_hitboxes: Vec<ElementHitbox>,
     pending_tasks: VecDeque<PendingTask>,
     next_task_handle: usize,
     dom: DomState,
@@ -469,6 +480,9 @@ pub fn start_document_script_session(
                         } => {
                             runtime.set_dom_attribute(node_id, &name, &value);
                         }
+                        JavaScriptSessionCommand::SetLayoutHitboxes { hitboxes } => {
+                            runtime.set_layout_hitboxes(hitboxes);
+                        }
                         JavaScriptSessionCommand::Snapshot { response_tx } => {
                             let _ = response_tx.send(runtime.snapshot());
                         }
@@ -553,6 +567,7 @@ impl JavaScriptRuntime {
                 viewport_height: DEFAULT_VIEWPORT_HEIGHT,
                 scroll_y: 0,
                 active_element_node_id: None,
+                layout_hitboxes: Vec::new(),
                 pending_tasks: VecDeque::new(),
                 next_task_handle: 1,
                 dom,
@@ -709,6 +724,12 @@ impl JavaScriptRuntime {
             let mut state = host.state.borrow_mut();
             state.viewport_width = width;
             state.viewport_height = height;
+        }
+    }
+
+    fn set_layout_hitboxes(&mut self, hitboxes: Vec<ElementHitbox>) {
+        if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+            host.state.borrow_mut().layout_hitboxes = hitboxes;
         }
     }
 
@@ -4191,48 +4212,6 @@ fn js_dom_get_scroll_top(
     Ok(JsValue::new(value))
 }
 
-fn js_dom_get_client_width(
-    this: &JsValue,
-    _: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let width = if this_node_id(this).is_some() {
-        viewport_width(context)
-    } else {
-        DEFAULT_VIEWPORT_WIDTH
-    };
-    Ok(JsValue::new(width))
-}
-
-fn js_dom_get_client_height(
-    this: &JsValue,
-    _: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let height = if this_node_id(this).is_some() {
-        viewport_height(context)
-    } else {
-        DEFAULT_VIEWPORT_HEIGHT
-    };
-    Ok(JsValue::new(height))
-}
-
-fn js_dom_get_scroll_width(
-    this: &JsValue,
-    _: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    js_dom_get_client_width(this, &[], context)
-}
-
-fn js_dom_get_scroll_height(
-    this: &JsValue,
-    _: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    js_dom_get_client_height(this, &[], context)
-}
-
 fn active_element_node_id(context: &mut Context) -> Option<usize> {
     let host = context.get_data::<JavaScriptHostData>()?;
     let state = host.state.borrow();
@@ -4408,14 +4387,29 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_client_width).to_js_function(context.realm());
     let get_client_height =
         NativeFunction::from_fn_ptr(js_dom_get_client_height).to_js_function(context.realm());
+    let get_client_top =
+        NativeFunction::from_fn_ptr(js_dom_get_client_top).to_js_function(context.realm());
+    let get_client_left =
+        NativeFunction::from_fn_ptr(js_dom_get_client_left).to_js_function(context.realm());
     let get_scroll_width =
         NativeFunction::from_fn_ptr(js_dom_get_scroll_width).to_js_function(context.realm());
     let get_scroll_height =
         NativeFunction::from_fn_ptr(js_dom_get_scroll_height).to_js_function(context.realm());
+    let get_offset_width =
+        NativeFunction::from_fn_ptr(js_dom_get_offset_width).to_js_function(context.realm());
+    let get_offset_height =
+        NativeFunction::from_fn_ptr(js_dom_get_offset_height).to_js_function(context.realm());
+    let get_offset_top =
+        NativeFunction::from_fn_ptr(js_dom_get_offset_top).to_js_function(context.realm());
+    let get_offset_left =
+        NativeFunction::from_fn_ptr(js_dom_get_offset_left).to_js_function(context.realm());
+    let get_offset_parent =
+        NativeFunction::from_fn_ptr(js_dom_get_offset_parent).to_js_function(context.realm());
     let get_scroll_top =
         NativeFunction::from_fn_ptr(js_dom_get_scroll_top).to_js_function(context.realm());
     let set_scroll_top =
         NativeFunction::from_fn_ptr(js_dom_set_scroll_top).to_js_function(context.realm());
+    let get_client_rects = NativeFunction::from_fn_ptr(js_dom_get_client_rects);
     let is_form_node = context
         .get_data::<JavaScriptHostData>()
         .and_then(|host| {
@@ -4584,9 +4578,15 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             2,
         )
         .function(
-            NativeFunction::from_fn_ptr(js_return_dom_rect_stub),
+            NativeFunction::from_fn_ptr(js_dom_get_bounding_client_rect),
             js_string!("getBoundingClientRect"),
             0,
+        )
+        .function(get_client_rects, js_string!("getClientRects"), 0)
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_scroll_into_view),
+            js_string!("scrollIntoView"),
+            1,
         )
         .function(
             NativeFunction::from_fn_ptr(js_get_video_aspect_ratio),
@@ -4803,6 +4803,48 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .accessor(
             js_string!("clientHeight"),
             Some(get_client_height),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("clientTop"),
+            Some(get_client_top),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("clientLeft"),
+            Some(get_client_left),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("offsetWidth"),
+            Some(get_offset_width),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("offsetHeight"),
+            Some(get_offset_height),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("offsetTop"),
+            Some(get_offset_top),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("offsetLeft"),
+            Some(get_offset_left),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("offsetParent"),
+            Some(get_offset_parent),
             None,
             Attribute::all(),
         )
@@ -5554,17 +5596,372 @@ fn build_match_media_stub(context: &mut Context, media: String) -> boa_engine::o
         .build()
 }
 
-fn build_dom_rect_stub(context: &mut Context) -> boa_engine::object::JsObject {
+fn build_dom_rect_object(
+    context: &mut Context,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> boa_engine::object::JsObject {
     ObjectInitializer::new(context)
-        .property(js_string!("x"), 0, Attribute::all())
-        .property(js_string!("y"), 0, Attribute::all())
-        .property(js_string!("top"), 0, Attribute::all())
-        .property(js_string!("left"), 0, Attribute::all())
-        .property(js_string!("right"), 1280, Attribute::all())
-        .property(js_string!("bottom"), 720, Attribute::all())
-        .property(js_string!("width"), 1280, Attribute::all())
-        .property(js_string!("height"), 720, Attribute::all())
+        .property(js_string!("x"), x, Attribute::all())
+        .property(js_string!("y"), y, Attribute::all())
+        .property(js_string!("top"), y, Attribute::all())
+        .property(js_string!("left"), x, Attribute::all())
+        .property(
+            js_string!("right"),
+            x.saturating_add(width as i32),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("bottom"),
+            y.saturating_add(height as i32),
+            Attribute::all(),
+        )
+        .property(js_string!("width"), width as i32, Attribute::all())
+        .property(js_string!("height"), height as i32, Attribute::all())
         .build()
+}
+
+fn layout_hitbox_rects_for_node(
+    context: &mut Context,
+    node_id: usize,
+) -> Vec<(i32, i32, u32, u32)> {
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return Vec::new();
+    };
+    let state = host.state.borrow();
+    state
+        .layout_hitboxes
+        .iter()
+        .filter(|hitbox| hitbox.node_id == node_id)
+        .map(|hitbox| {
+            (
+                hitbox.x as i32,
+                hitbox.y as i32 - state.scroll_y as i32,
+                hitbox.width,
+                hitbox.height,
+            )
+        })
+        .collect()
+}
+
+fn layout_hitbox_union_for_node(
+    context: &mut Context,
+    node_id: usize,
+) -> Option<(i32, i32, u32, u32)> {
+    let rects = layout_hitbox_rects_for_node(context, node_id);
+    let mut left = i32::MAX;
+    let mut top = i32::MAX;
+    let mut right = i32::MIN;
+    let mut bottom = i32::MIN;
+    let mut found = false;
+    for (x, y, width, height) in rects {
+        found = true;
+        let width = width as i32;
+        let height = height as i32;
+        left = left.min(x);
+        top = top.min(y);
+        right = right.max(x.saturating_add(width));
+        bottom = bottom.max(y.saturating_add(height));
+    }
+    found.then_some((
+        left,
+        top,
+        right.saturating_sub(left).max(0) as u32,
+        bottom.saturating_sub(top).max(0) as u32,
+    ))
+}
+
+fn layout_document_extent(context: &mut Context) -> Option<(u32, u32)> {
+    let host = context.get_data::<JavaScriptHostData>()?;
+    let state = host.state.borrow();
+    let mut max_right = 0u32;
+    let mut max_bottom = 0u32;
+    let mut found = false;
+    for hitbox in &state.layout_hitboxes {
+        found = true;
+        max_right = max_right.max(hitbox.x.saturating_add(hitbox.width));
+        max_bottom = max_bottom.max(hitbox.y.saturating_add(hitbox.height));
+    }
+    found.then_some((max_right, max_bottom))
+}
+
+fn is_layout_root_node(context: &mut Context, node_id: usize) -> bool {
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return false;
+    };
+    let state = host.state.borrow();
+    node_id == state.dom.document_id
+        || state.dom.html_id == Some(node_id)
+        || state.dom.body_id == Some(node_id)
+}
+
+fn js_dom_get_bounding_client_rect(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(build_dom_rect_object(context, 0, 0, 0, 0)));
+    };
+    let (x, y, width, height) =
+        layout_hitbox_union_for_node(context, node_id).unwrap_or((0, 0, 0, 0));
+    Ok(JsValue::from(build_dom_rect_object(
+        context, x, y, width, height,
+    )))
+}
+
+fn js_dom_get_client_rects(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let rects = layout_hitbox_rects_for_node(context, node_id);
+    let rect_values = rects
+        .into_iter()
+        .map(|(x, y, width, height)| {
+            JsValue::from(build_dom_rect_object(context, x, y, width, height))
+        })
+        .collect::<Vec<_>>();
+    let array = JsArray::from_iter(rect_values, context);
+    Ok(JsValue::from(array))
+}
+
+fn js_dom_get_client_width(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let width = if let Some(node_id) = this_node_id(this) {
+        if is_layout_root_node(context, node_id) {
+            viewport_width(context)
+        } else {
+            layout_hitbox_union_for_node(context, node_id)
+                .map(|(_, _, width, _)| width)
+                .unwrap_or_else(|| viewport_width(context))
+        }
+    } else {
+        DEFAULT_VIEWPORT_WIDTH
+    };
+    Ok(JsValue::new(width))
+}
+
+fn js_dom_get_client_height(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let height = if let Some(node_id) = this_node_id(this) {
+        if is_layout_root_node(context, node_id) {
+            viewport_height(context)
+        } else {
+            layout_hitbox_union_for_node(context, node_id)
+                .map(|(_, _, _, height)| height)
+                .unwrap_or_else(|| viewport_height(context))
+        }
+    } else {
+        DEFAULT_VIEWPORT_HEIGHT
+    };
+    Ok(JsValue::new(height))
+}
+
+fn js_dom_get_scroll_width(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let width = if let Some(node_id) = this_node_id(this) {
+        if is_layout_root_node(context, node_id) {
+            layout_document_extent(context)
+                .map(|(width, _)| width)
+                .unwrap_or_else(|| viewport_width(context))
+        } else {
+            layout_hitbox_union_for_node(context, node_id)
+                .map(|(_, _, width, _)| width)
+                .unwrap_or_else(|| viewport_width(context))
+        }
+    } else {
+        DEFAULT_VIEWPORT_WIDTH
+    };
+    Ok(JsValue::new(width))
+}
+
+fn js_dom_get_scroll_height(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let height = if let Some(node_id) = this_node_id(this) {
+        if is_layout_root_node(context, node_id) {
+            layout_document_extent(context)
+                .map(|(_, height)| height)
+                .unwrap_or_else(|| viewport_height(context))
+        } else {
+            layout_hitbox_union_for_node(context, node_id)
+                .map(|(_, _, _, height)| height)
+                .unwrap_or_else(|| viewport_height(context))
+        }
+    } else {
+        DEFAULT_VIEWPORT_HEIGHT
+    };
+    Ok(JsValue::new(height))
+}
+
+fn js_dom_get_offset_width(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let width = if let Some(node_id) = this_node_id(this) {
+        if is_layout_root_node(context, node_id) {
+            viewport_width(context)
+        } else {
+            layout_hitbox_union_for_node(context, node_id)
+                .map(|(_, _, width, _)| width)
+                .unwrap_or_else(|| viewport_width(context))
+        }
+    } else {
+        0
+    };
+    Ok(JsValue::new(width))
+}
+
+fn js_dom_get_offset_height(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let height = if let Some(node_id) = this_node_id(this) {
+        if is_layout_root_node(context, node_id) {
+            viewport_height(context)
+        } else {
+            layout_hitbox_union_for_node(context, node_id)
+                .map(|(_, _, _, height)| height)
+                .unwrap_or_else(|| viewport_height(context))
+        }
+    } else {
+        0
+    };
+    Ok(JsValue::new(height))
+}
+
+fn js_dom_get_offset_top(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let top = if let Some(node_id) = this_node_id(this) {
+        layout_hitbox_union_for_node(context, node_id)
+            .map(|(_, top, _, _)| {
+                let scroll_y = scroll_position(context).min(i32::MAX as u32) as i32;
+                top.saturating_add(scroll_y)
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    Ok(JsValue::new(top))
+}
+
+fn js_dom_get_offset_left(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let left = if let Some(node_id) = this_node_id(this) {
+        layout_hitbox_union_for_node(context, node_id)
+            .map(|(left, _, _, _)| left)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    Ok(JsValue::new(left))
+}
+
+fn js_dom_get_client_top(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if this_node_id(this).is_some() {
+        let _ = context;
+        return Ok(JsValue::new(0));
+    }
+    Ok(JsValue::new(0))
+}
+
+fn js_dom_get_client_left(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if this_node_id(this).is_some() {
+        let _ = context;
+        return Ok(JsValue::new(0));
+    }
+    Ok(JsValue::new(0))
+}
+
+fn js_dom_get_offset_parent(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = this_node_id(this).unwrap_or(0);
+    let parent_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        let state = host.state.borrow();
+        state
+            .dom
+            .node(node_id)
+            .and_then(|node| node.parent)
+            .filter(|parent_id| state.dom.element(*parent_id).is_some())
+    });
+    Ok(parent_id
+        .map(|parent_id| JsValue::from(build_dom_node_object(context, parent_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_scroll_into_view(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some((_, top, _, height)) = layout_hitbox_union_for_node(context, node_id) else {
+        return Ok(JsValue::undefined());
+    };
+    let changed = if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let current = state.scroll_y as i32;
+        let viewport_height = state.viewport_height as i32;
+        let bottom = top.saturating_add(height as i32);
+        let target = if top < current {
+            top
+        } else if bottom > current.saturating_add(viewport_height) {
+            bottom.saturating_sub(viewport_height)
+        } else {
+            current
+        };
+        let target = target.max(0) as u32;
+        let changed = state.scroll_y != target;
+        state.scroll_y = target;
+        if changed {
+            sync_current_history_entry_scroll(&mut state);
+        }
+        changed
+    } else {
+        false
+    };
+    if changed {
+        let _ = runtime_scroll_event(context);
+    }
+    Ok(JsValue::undefined())
 }
 
 fn load_script_source(
@@ -6113,9 +6510,11 @@ fn apply_soft_navigation_entry(entry: &HistoryEntry, context: &mut Context) {
 }
 
 fn value_node_id(value: &JsValue) -> Option<usize> {
-    value
-        .as_object()
-        .and_then(|object| object.downcast_ref::<DomNodeHandle>().map(|handle| handle.node_id))
+    value.as_object().and_then(|object| {
+        object
+            .downcast_ref::<DomNodeHandle>()
+            .map(|handle| handle.node_id)
+    })
 }
 
 fn is_form_submit_control(dom: &DomState, node_id: usize) -> bool {
@@ -6177,7 +6576,10 @@ fn collect_form_fields(
                 if let Some(name) = dom.get_attribute(node_id, "name")
                     && !name.is_empty()
                 {
-                    fields.push((name, dom.get_attribute(node_id, "value").unwrap_or_default()));
+                    fields.push((
+                        name,
+                        dom.get_attribute(node_id, "value").unwrap_or_default(),
+                    ));
                 }
             }
             "textarea" => {
@@ -6194,7 +6596,10 @@ fn collect_form_fields(
                 if let Some(name) = dom.get_attribute(node_id, "name")
                     && !name.is_empty()
                 {
-                    fields.push((name, dom.get_attribute(node_id, "value").unwrap_or_default()));
+                    fields.push((
+                        name,
+                        dom.get_attribute(node_id, "value").unwrap_or_default(),
+                    ));
                 }
             }
             _ => {}
@@ -6231,7 +6636,8 @@ fn form_submission_target(
     let submitter_node_id = submitter_node_id.filter(|node_id| {
         *node_id == form_node_id || state.dom.contains_node(form_node_id, *node_id)
     });
-    let submitter_node_id = submitter_node_id.or_else(|| first_form_submitter(&state.dom, form_node_id));
+    let submitter_node_id =
+        submitter_node_id.or_else(|| first_form_submitter(&state.dom, form_node_id));
     let fields = collect_form_fields(&state.dom, form_node_id, submitter_node_id);
     let resolved_action = if action.is_empty() {
         base.to_string()
@@ -6282,7 +6688,6 @@ fn js_dom_form_request_submit(
         return Ok(JsValue::undefined());
     }
     let submitter_node_id = args.first().and_then(value_node_id);
-    let target = form_submission_target(context, form_node_id, submitter_node_id);
     let request = DomEventRequest {
         target_node_id: form_node_id,
         event_type: "submit".to_string(),
@@ -6296,7 +6701,7 @@ fn js_dom_form_request_submit(
         context,
     )?;
     if !prevented
-        && let Some(target) = target
+        && let Some(target) = form_submission_target(context, form_node_id, submitter_node_id)
     {
         set_form_submission_target(context, target);
     }
@@ -10372,10 +10777,6 @@ fn js_performance_now(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<J
     Ok(JsValue::new(performance_now_ms()))
 }
 
-fn js_return_dom_rect_stub(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    Ok(JsValue::from(build_dom_rect_stub(context)))
-}
-
 fn js_get_video_aspect_ratio(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::new(16.0 / 9.0))
 }
@@ -11791,6 +12192,40 @@ mod tests {
         assert!(processed.html.contains(
             "data-dom=\"true|true|true|true|true|true|true|true|true|true|true|true|true|true\""
         ));
+    }
+
+    #[test]
+    fn supports_geometry_accessors_from_layout_hitboxes() {
+        let mut runtime = JavaScriptRuntime::new(
+            &Url::parse("https://example.com").unwrap(),
+            "<html><body><div id=\"box\">Hi</div></body></html>",
+        );
+        let box_value = runtime
+            .context
+            .eval(Source::from_bytes("document.getElementById('box')"))
+            .unwrap();
+        let node_id = super::this_node_id(&box_value).unwrap();
+        runtime.set_layout_hitboxes(vec![crate::layout::ElementHitbox {
+            node_id,
+            x: 40,
+            y: 200,
+            width: 120,
+            height: 30,
+            cursor_kind: crate::css::CursorKind::Auto,
+        }]);
+
+        let summary = runtime
+            .context
+            .eval(Source::from_bytes(
+                "(()=>{var box=document.getElementById('box'); var rect=box.getBoundingClientRect(); var rects=box.getClientRects(); var root=document.documentElement; return [rect.x,rect.y,rect.width,rect.height,rects.length,rects[0].left,rects[0].top,box.clientWidth,box.clientHeight,box.clientTop,box.clientLeft,box.offsetWidth,box.offsetHeight,box.offsetLeft,box.offsetTop,box.offsetParent === document.body,root.scrollWidth,root.scrollHeight].join('|');})()",
+            ))
+            .unwrap();
+        let summary = js_value_to_string(&summary, &mut runtime.context).unwrap();
+
+        assert_eq!(
+            summary,
+            "40|200|120|30|1|40|200|120|30|0|0|120|30|40|200|true|160|230"
+        );
     }
 
     #[test]

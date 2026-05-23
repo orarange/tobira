@@ -34,7 +34,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - run Codex implementation from a separate `codex/js-event-capture` worktree
   - Codex is the primary implementation owner for this worktree and may touch both CSS and JS when needed
 - Verification status:
-- `cargo test`: `198` passing tests on `2026-05-23`
+- `cargo test`: `199` passing tests on `2026-05-23`
 - `cargo build`: success on `2026-05-23`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -69,7 +69,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
   - scroll changes on pages without scroll listeners now paint immediately instead of waiting for a later redraw
   - JS-side form submission helpers now support `HTMLFormElement.submit()` / `requestSubmit()` for `GET` forms, including event dispatch and encoded query construction
-  - `getBoundingClientRect()` now reads the latest layout hitboxes that the GUI syncs back into the JS session after reflow
+  - geometry reads now include `getBoundingClientRect()`, `getClientRects()`, and `offset*` / `client*` / `scroll*` box metrics from the latest layout hitboxes that the GUI syncs back into the JS session after reflow
   - Node introspection and mutation helpers are now much closer to browser DOM behavior:
     - `nodeType`, `nodeName`, `nodeValue`, `firstChild`, `lastChild`, `previousSibling`, `nextSibling`, `isConnected`
     - `cloneNode(...)`, `replaceChild(...)`, `removeChild(...)`
@@ -239,6 +239,12 @@ git log --oneline -n 20
 
 - Synchronized layout hitboxes from the GUI reflow path back into the JS session so `getBoundingClientRect()` can read current layout geometry when it is available.
 - Kept the fallback behavior safe for nodes that do not yet have hitboxes, so existing DOM scripts still degrade cleanly.
+
+### 2026-05-23 - Codex (geometry box metrics)
+
+- Extended the layout geometry bridge so `getClientRects()` plus `offset*` / `client*` / `scroll*` box metrics read from the latest GUI-synced hitboxes as well.
+- Added a regression test that injects a synthetic hitbox and checks `getBoundingClientRect()`, `getClientRects()`, `offsetParent`, and the root scroll extents.
+- Verified the updated state with `cargo test` (`199` passing tests) and `cargo build`.
 
 ### 2026-05-18 - Codex (Node / fragment DOM APIs)
 

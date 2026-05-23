@@ -191,6 +191,7 @@ Tasks:
 - GUI scroll changes now sync back into the JS runtime so scroll listeners can react to the current offset
 - script-driven scroll APIs now feed back into the GUI viewport state as well
 - DOM mutation notifications now refresh the live snapshot after GUI-driven attribute changes; deeper incremental invalidation for other mutation paths is still to do
+- layout hitboxes now feed browser geometry reads like `getBoundingClientRect()`, `getClientRects()`, and `offset*` / `client*` / `scroll*`
 - invalidate cached layout when width or content changes
 - support more CSS properties that interactive pages depend on
 - add better inline/block mixing and table/layout stability

@@ -2060,6 +2060,10 @@ impl DocumentView {
             DocumentContent::Error(error) => layout_error_document(error, width, fonts),
         };
 
+        if let DocumentContent::Loaded(page) = &self.content {
+            let _ = page.set_layout_hitboxes(layout.element_hitboxes.clone());
+        }
+
         self.layout_cache = Some(CachedLayout {
             width,
             revision,

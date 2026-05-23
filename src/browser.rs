@@ -11,6 +11,7 @@ use crate::js::{
     DomEventDispatchResult, DomEventRequest, JavaScriptSession, ProcessedScriptHtml,
     start_document_script_session,
 };
+use crate::layout::ElementHitbox;
 use crate::render::render_document;
 use crate::text::decode_text_response;
 use crate::url::Url;
@@ -142,6 +143,13 @@ impl BrowserPage {
             return changed;
         }
         false
+    }
+
+    pub fn set_layout_hitboxes(&self, hitboxes: Vec<ElementHitbox>) -> bool {
+        self.javascript_session
+            .as_ref()
+            .map(|session| session.set_layout_hitboxes(hitboxes))
+            .unwrap_or(false)
     }
 
     pub fn dispatch_window_resize(&mut self) -> Option<DomEventDispatchResult> {
