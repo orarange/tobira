@@ -451,6 +451,7 @@ impl BrowserApp {
         }
         self.scroll_y = self.document.scroll_position();
         self.sync_current_history_scroll();
+        let _ = self.draw();
     }
 
     fn scroll_by(&mut self, delta: i32, viewport_height: u32, content_height: u32) {
@@ -1409,7 +1410,9 @@ impl BrowserApp {
             } else {
                 let _ = self.document.set_scroll_position(self.scroll_y);
                 self.sync_current_history_scroll();
+                let _ = self.draw();
             }
+            return;
         }
         self.request_redraw();
     }

@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-21`
+- Date: `2026-05-23`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
 - Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
@@ -34,8 +34,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - run Codex implementation from a separate `codex/js-event-capture` worktree
   - Codex is the primary implementation owner for this worktree and may touch both CSS and JS when needed
 - Verification status:
-- `cargo test`: `196` passing tests on `2026-05-21`
-- `cargo build`: success on `2026-05-21`
+- `cargo test`: `197` passing tests on `2026-05-23`
+- `cargo build`: success on `2026-05-23`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -67,6 +67,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `window.scrollY` / `window.pageYOffset`
     - `document.activeElement`
     - `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
+  - scroll changes on pages without scroll listeners now paint immediately instead of waiting for a later redraw
   - Node introspection and mutation helpers are now much closer to browser DOM behavior:
     - `nodeType`, `nodeName`, `nodeValue`, `firstChild`, `lastChild`, `previousSibling`, `nextSibling`, `isConnected`
     - `cloneNode(...)`, `replaceChild(...)`, `removeChild(...)`
@@ -219,6 +220,12 @@ git log --oneline -n 20
 - Changed scroll event handling so unchanged documents no longer rebuild their page snapshot or invalidate the layout cache.
 - Added a regression test that scrolls a document without mutating the DOM and verifies the layout revision stays stable.
 - This should make long-page scrolling feel more responsive while the deeper reflow work remains on the roadmap.
+
+### 2026-05-23 - Codex (scroll immediate paint)
+
+- Made static-page scroll handling paint immediately after the viewport changes so wheel-driven scrolling no longer waits for a delayed redraw.
+- Kept the no-listener path from rebuilding the page snapshot or invalidating the layout cache, so we get responsiveness without reintroducing the old scroll churn.
+- Verified the updated state with `cargo test` (`197` passing tests) and `cargo build`.
 
 ### 2026-05-18 - Codex (Node / fragment DOM APIs)
 
