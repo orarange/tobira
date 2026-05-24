@@ -223,7 +223,7 @@ impl BrowserPage {
 }
 
 #[derive(Debug, Clone)]
-struct LoadedDocumentSource {
+pub(crate) struct LoadedDocumentSource {
     final_url: Url,
     status_code: u16,
     reason_phrase: String,
@@ -248,7 +248,18 @@ pub fn load_page_for_cli(url: &Url) -> Result<BrowserPage> {
 }
 
 fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<BrowserPage> {
-    let source = load_document_source(url, 0)?;
+    let source = load_page_source(url)?;
+    Ok(build_page_from_source(source, include_rendered_output))
+}
+
+pub(crate) fn load_page_source(url: &Url) -> Result<LoadedDocumentSource> {
+    load_document_source(url, 0)
+}
+
+pub(crate) fn build_page_from_source(
+    source: LoadedDocumentSource,
+    include_rendered_output: bool,
+) -> BrowserPage {
     let mut page = rebuild_page_from_document(
         &source.final_url,
         source.status_code,
@@ -270,7 +281,7 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
     {
         page.url = soft_target;
     }
-    Ok(page)
+    page
 }
 
 fn rebuild_page_from_html(

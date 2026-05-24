@@ -1,16 +1,19 @@
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::thread;
 
 use arboard::Clipboard;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
+use winit::event_loop::{
+    ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle,
+};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, ResizeDirection, Window};
 
-use crate::browser::{BrowserPage, load_page};
+use crate::browser::{BrowserPage, LoadedDocumentSource, build_page_from_source, load_page_source};
 use crate::css::{
     Color, CursorKind, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind,
     InteractiveState, ObjectFit,
@@ -73,12 +76,15 @@ type WindowHandle = Rc<Window>;
 type SurfaceHandle = Surface<OwnedDisplayHandle, WindowHandle>;
 
 pub fn run(initial_url: Option<Url>) -> Result<()> {
-    let event_loop = EventLoop::new().map_err(|error| BrowserError::message(error.to_string()))?;
+    let event_loop = EventLoop::<BrowserUserEvent>::with_user_event()
+        .build()
+        .map_err(|error| BrowserError::message(error.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let context = Context::new(event_loop.owned_display_handle())
         .map_err(|error| BrowserError::message(error.to_string()))?;
-    let mut app = BrowserApp::new(initial_url, context);
+    let event_proxy = event_loop.create_proxy();
+    let mut app = BrowserApp::new(initial_url, context, event_proxy);
 
     event_loop
         .run_app(&mut app)
@@ -92,6 +98,7 @@ struct BrowserApp {
     document: DocumentView,
     fonts: FontContext,
     context: Context<OwnedDisplayHandle>,
+    event_proxy: EventLoopProxy<BrowserUserEvent>,
     window: Option<WindowHandle>,
     surface: Option<SurfaceHandle>,
     scroll_y: u32,
@@ -104,10 +111,32 @@ struct BrowserApp {
     hovered_link_node_id: Option<usize>,
     hovered_element_node_id: Option<usize>,
     ime_composing: bool,
+    pending_navigation: Option<PendingNavigation>,
+    next_navigation_id: u64,
     /// Depth-indexed offscreen buffer pool for layer compositing.
     /// scratch[depth] holds the pixel buffer used by the layer at that nesting depth.
     /// Buffers are reused across frames; no per-frame allocation after the first paint.
     scratch: Vec<Vec<u32>>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingNavigation {
+    id: u64,
+    restore_scroll: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+enum BrowserUserEvent {
+    NavigationFinished {
+        navigation_id: u64,
+        result: std::result::Result<LoadedDocumentSource, String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NavigationHistoryUpdate {
+    Push,
+    None,
 }
 
 #[derive(Debug, Clone)]
@@ -117,37 +146,41 @@ struct HistoryEntry {
 }
 
 impl BrowserApp {
-    fn new(initial_url: Option<Url>, context: Context<OwnedDisplayHandle>) -> Self {
+    fn new(
+        initial_url: Option<Url>,
+        context: Context<OwnedDisplayHandle>,
+        event_proxy: EventLoopProxy<BrowserUserEvent>,
+    ) -> Self {
+        let initial_load_url = initial_url.clone();
         let (current_url, history, history_index, document, address_bar) = match initial_url {
-            Some(url) => {
-                let document = DocumentView::load(url.clone());
-                let address_bar = AddressBarState::new(url.to_string());
-                (
-                    Some(url.clone()),
-                    vec![HistoryEntry { url, scroll_y: 0 }],
-                    Some(0),
-                    document,
-                    address_bar,
-                )
-            }
+            Some(url) => (
+                Some(url.clone()),
+                vec![HistoryEntry {
+                    url: url.clone(),
+                    scroll_y: 0,
+                }],
+                Some(0),
+                DocumentView::loading(url.to_string()),
+                AddressBarState::new(url.to_string()),
+            ),
             None => {
                 let mut address_bar = AddressBarState::new(String::new());
                 address_bar.focus_at(0);
                 (None, Vec::new(), None, DocumentView::blank(), address_bar)
             }
         };
-        let scroll_y = document.scroll_position();
 
-        Self {
+        let mut app = Self {
             current_url,
             history,
             history_index,
             document,
             fonts: FontContext::load(),
             context,
+            event_proxy,
             window: None,
             surface: None,
-            scroll_y,
+            scroll_y: 0,
             modifiers: ModifiersState::default(),
             cursor_position: PhysicalPosition::new(0.0, 0.0),
             address_bar,
@@ -157,13 +190,20 @@ impl BrowserApp {
             hovered_link_node_id: None,
             hovered_element_node_id: None,
             ime_composing: false,
+            pending_navigation: None,
+            next_navigation_id: 1,
             scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
+        };
+
+        if let Some(url) = initial_load_url {
+            app.begin_navigation(url, None, NavigationHistoryUpdate::None);
         }
+
+        app
     }
 
     fn load_url(&mut self, url: Url) {
-        self.record_history_visit(url.clone());
-        self.load_document(url, None);
+        self.begin_navigation(url, None, NavigationHistoryUpdate::Push);
     }
 
     fn reload(&mut self) {
@@ -176,7 +216,11 @@ impl BrowserApp {
             return;
         };
 
-        self.load_document(url, self.current_history_scroll());
+        self.begin_navigation(
+            url,
+            self.current_history_scroll(),
+            NavigationHistoryUpdate::None,
+        );
     }
 
     fn navigate_to_address(&mut self) {
@@ -275,7 +319,11 @@ impl BrowserApp {
         let next_index = next as usize;
         let entry = self.history[next_index].clone();
         self.history_index = Some(next_index);
-        self.load_document(entry.url, Some(entry.scroll_y));
+        self.begin_navigation(
+            entry.url,
+            Some(entry.scroll_y),
+            NavigationHistoryUpdate::None,
+        );
     }
 
     fn sync_current_history_scroll(&mut self) {
@@ -292,23 +340,88 @@ impl BrowserApp {
         self.history.get(index).map(|entry| entry.scroll_y)
     }
 
-    fn load_document(&mut self, url: Url, restore_scroll: Option<u32>) {
-        self.document = DocumentView::load(url.clone());
+    fn begin_navigation(
+        &mut self,
+        url: Url,
+        restore_scroll: Option<u32>,
+        history_update: NavigationHistoryUpdate,
+    ) {
+        match history_update {
+            NavigationHistoryUpdate::Push => self.record_history_visit(url.clone()),
+            NavigationHistoryUpdate::None => {}
+        }
+
+        let navigation_id = self.next_navigation_id;
+        self.next_navigation_id = self.next_navigation_id.saturating_add(1);
+        self.pending_navigation = Some(PendingNavigation {
+            id: navigation_id,
+            restore_scroll,
+        });
+
         self.current_url = Some(url.clone());
         self.address_bar.set_text(url.to_string());
         self.address_bar.blur();
         self.clear_page_control_state();
-        self.scroll_y = restore_scroll.unwrap_or_else(|| self.document.scroll_position());
-        if restore_scroll.is_some() {
-            let _ = self.document.set_scroll_position(self.scroll_y);
-        }
-        // Clear scratch pool on navigation/reload to avoid wasting memory.
+        self.document = DocumentView::loading(url.to_string());
+        self.scroll_y = 0;
         self.scratch.clear();
-        self.sync_current_history_scroll();
-        self.sync_viewport_size();
         self.sync_window_title();
         self.sync_input_method();
         self.request_redraw();
+
+        let proxy = self.event_proxy.clone();
+        thread::spawn(move || {
+            let result = load_page_source(&url).map_err(|error| error.to_string());
+            let _ = proxy.send_event(BrowserUserEvent::NavigationFinished {
+                navigation_id,
+                result,
+            });
+        });
+    }
+
+    fn finish_navigation(
+        &mut self,
+        navigation_id: u64,
+        result: std::result::Result<LoadedDocumentSource, String>,
+    ) {
+        if self
+            .pending_navigation
+            .as_ref()
+            .is_none_or(|pending| pending.id != navigation_id)
+        {
+            return;
+        }
+
+        let pending = self.pending_navigation.take().unwrap();
+        match result {
+            Ok(source) => {
+                let restore_scroll = pending.restore_scroll;
+                let page = build_page_from_source(source, false);
+                let final_url = page.url.clone();
+                self.document = DocumentView::from_page(page);
+                self.current_url = Some(final_url.clone());
+                self.address_bar.set_text(final_url.to_string());
+                self.replace_current_history_entry(final_url);
+                self.clear_page_control_state();
+                self.scroll_y = restore_scroll.unwrap_or_else(|| self.document.scroll_position());
+                if restore_scroll.is_some() {
+                    let _ = self.document.set_scroll_position(self.scroll_y);
+                }
+                self.sync_current_history_scroll();
+                self.sync_viewport_size();
+                self.sync_window_title();
+                self.sync_input_method();
+                self.request_redraw();
+            }
+            Err(error) => {
+                self.document = DocumentView::error(error);
+                self.scroll_y = 0;
+                self.clear_page_control_state();
+                self.sync_window_title();
+                self.sync_input_method();
+                self.request_redraw();
+            }
+        }
     }
 
     fn focus_address_bar(&mut self, char_index: usize) {
@@ -1704,7 +1817,7 @@ impl BrowserApp {
     }
 }
 
-impl ApplicationHandler for BrowserApp {
+impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Wait);
 
@@ -1733,6 +1846,17 @@ impl ApplicationHandler for BrowserApp {
         self.sync_window_title();
         self.sync_input_method();
         self.request_redraw();
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: BrowserUserEvent) {
+        match event {
+            BrowserUserEvent::NavigationFinished {
+                navigation_id,
+                result,
+            } => {
+                self.finish_navigation(navigation_id, result);
+            }
+        }
     }
 
     fn window_event(
@@ -1875,6 +1999,7 @@ struct DocumentView {
 #[derive(Debug, Clone)]
 enum DocumentContent {
     Blank,
+    Loading(LoadingDocument),
     Loaded(BrowserPage),
     Error(ErrorDocument),
 }
@@ -1891,6 +2016,11 @@ struct ErrorDocument {
     lines: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct LoadingDocument {
+    lines: Vec<String>,
+}
+
 impl DocumentView {
     fn blank() -> Self {
         Self {
@@ -1902,10 +2032,19 @@ impl DocumentView {
         }
     }
 
-    fn load(url: Url) -> Self {
-        match load_page(&url) {
-            Ok(page) => Self::from_page(page),
-            Err(error) => Self::error(error.to_string()),
+    fn loading(message: impl Into<String>) -> Self {
+        Self {
+            title: "Loading...".to_string(),
+            status_line: "Status: loading".to_string(),
+            subtitle: message.into(),
+            content: DocumentContent::Loading(LoadingDocument {
+                lines: vec![
+                    "# Loading...".to_string(),
+                    String::new(),
+                    "Please wait while Tobira finishes the page load.".to_string(),
+                ],
+            }),
+            layout_cache: None,
         }
     }
 
@@ -2054,6 +2193,7 @@ impl DocumentView {
                 controls: Vec::new(),
                 element_hitboxes: Vec::new(),
             },
+            DocumentContent::Loading(loading) => layout_loading_document(loading, width, fonts),
             DocumentContent::Loaded(page) => {
                 layout_styled_document(&page.styled_document, &page.images, width, fonts)
             }
@@ -2078,6 +2218,20 @@ impl DocumentView {
             _ => 0,
         }
     }
+}
+
+fn layout_loading_document(
+    document: &LoadingDocument,
+    width: u32,
+    fonts: &mut FontContext,
+) -> LayoutDocument {
+    layout_error_document(
+        &ErrorDocument {
+            lines: document.lines.clone(),
+        },
+        width,
+        fonts,
+    )
 }
 
 fn layout_error_document(

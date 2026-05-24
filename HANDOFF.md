@@ -106,6 +106,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `TOBIRA_TRACE_JS=1` for per-script / JS runtime timing
     - `TOBIRA_TRACE_LOAD=1` for page-load / frame-expansion timing
   - cross-origin frames are skipped during recursive expansion so heavy sign-in / embed frames do not synchronously freeze generic pages
+  - page navigation now runs through a background loader thread and returns completions to the UI event loop via winit user events, so window chrome stays responsive while heavy pages load
   - browser chrome history controls for back/forward navigation across full document loads
   - browser-level history entries now remember scroll positions and restore them on back/forward
   - same-document history entries now expose `history.state` and dispatch `popstate` / `hashchange`
@@ -203,6 +204,13 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-24 - Codex (async navigation handoff)
+
+- Split page loading off the UI thread so navigation work now runs in a background loader thread and reports completion back to the winit event loop through user events.
+- Kept the window chrome responsive during load by showing a lightweight loading document while the background worker is busy.
+- Retained the cross-origin frame skip and debug trace knobs from the freeze investigation so the same stall can be diagnosed again if it ever comes back.
+- Verified the updated state with `cargo fmt --all`, `cargo test` (`197` passing tests), and `cargo build`.
 
 ### 2026-05-24 - Codex (YouTube freeze debug / cross-origin frame skip)
 
