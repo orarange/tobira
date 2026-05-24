@@ -39,6 +39,7 @@ Current capabilities:
 - Lightweight GUI window with `winit`
 - Software rendering with `softbuffer`
 - System font rendering with TrueType / OpenType fonts via `fontdue`
+- Background page loading and content rendering workers keep the title bar and address bar responsive while navigation is in flight
 - Plain text CLI renderer with `--cli`
 - JavaScript execution via `boa_engine` & sandboxed DOM/API support:
   - inline `<script>` and external `<script src>`
@@ -64,6 +65,7 @@ Current capabilities:
   - Custom title bar and address bar
   - Browser back/forward buttons and `Alt+Left` / `Alt+Right` history navigation
   - Scroll restoration for both same-document and full-document history entries
+  - Page navigation and content rendering complete asynchronously without showing a loading-screen UI
   - Clickable page links plus basic GUI form controls for `GET` submissions
   - Basic DOM event plumbing (bubbles `click`, `input`, `change`, `submit`; target-only `focus`, `blur`)
   - `MutationObserver` callbacks for `attributes`, `childList`, and `characterData`, plus browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) and `AbortController` / `AbortSignal`
@@ -129,6 +131,14 @@ Local JavaScript demo:
 ```bash
 python -m http.server 8765
 cargo run -- http://127.0.0.1:8765/demo/js-demo.html
+```
+
+Debug tracing:
+
+```powershell
+$env:TOBIRA_TRACE_JS=1
+$env:TOBIRA_TRACE_LOAD=1
+cargo run -- https://www.youtube.com/
 ```
 
 Local DOM demo:

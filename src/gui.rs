@@ -1,24 +1,31 @@
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::mpsc::{self, Sender};
+use std::thread;
 
 use arboard::Clipboard;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
+use winit::event_loop::{
+    ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle,
+};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, ResizeDirection, Window};
 
 use crate::browser::{BrowserPage, load_page};
-use crate::css::{Color, CursorKind, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind, InteractiveState, ObjectFit};
+use crate::css::{
+    Color, CursorKind, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind,
+    InteractiveState, ObjectFit, StyledNode,
+};
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
-use crate::image::DecodedImage;
+use crate::image::{DecodedImage, ImageStore};
 use crate::js::{DomEventDispatchResult, DomEventRequest};
 use crate::layout::{
-    DrawCommand, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument,
-    TextCommand, layout_styled_document,
+    DrawCommand, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument, TextCommand,
+    layout_styled_document,
 };
 use crate::url::Url;
 
@@ -70,12 +77,15 @@ type WindowHandle = Rc<Window>;
 type SurfaceHandle = Surface<OwnedDisplayHandle, WindowHandle>;
 
 pub fn run(initial_url: Option<Url>) -> Result<()> {
-    let event_loop = EventLoop::new().map_err(|error| BrowserError::message(error.to_string()))?;
+    let event_loop = EventLoop::<BrowserUserEvent>::with_user_event()
+        .build()
+        .map_err(|error| BrowserError::message(error.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let context = Context::new(event_loop.owned_display_handle())
         .map_err(|error| BrowserError::message(error.to_string()))?;
-    let mut app = BrowserApp::new(initial_url, context);
+    let proxy = event_loop.create_proxy();
+    let mut app = BrowserApp::new(initial_url, context, proxy);
 
     event_loop
         .run_app(&mut app)
@@ -89,6 +99,13 @@ struct BrowserApp {
     document: DocumentView,
     fonts: FontContext,
     context: Context<OwnedDisplayHandle>,
+    load_request_tx: Sender<NavigationRequest>,
+    render_request_tx: Sender<RenderRequest>,
+    latest_render_frame: Option<RenderedContentFrame>,
+    pending_navigation_id: Option<u64>,
+    pending_render_id: Option<u64>,
+    next_navigation_id: u64,
+    next_render_id: u64,
     window: Option<WindowHandle>,
     surface: Option<SurfaceHandle>,
     scroll_y: u32,
@@ -113,17 +130,74 @@ struct HistoryEntry {
     scroll_y: u32,
 }
 
+#[derive(Debug, Clone)]
+enum BrowserUserEvent {
+    NavigationFinished {
+        navigation_id: u64,
+        restore_scroll: Option<u32>,
+        result: std::result::Result<BrowserPage, String>,
+    },
+    RenderFinished {
+        render_id: u64,
+        result: std::result::Result<RenderedContentFrame, String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct NavigationRequest {
+    id: u64,
+    url: Url,
+    restore_scroll: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct RenderRequest {
+    id: u64,
+    content_width: u32,
+    viewport_height: u32,
+    scroll_y: u32,
+    page: RenderPageSnapshot,
+    focused_page_input: Option<FocusedPageInput>,
+    hovered_target: HitTarget,
+}
+
+#[derive(Debug, Clone)]
+struct RenderPageSnapshot {
+    styled_document: StyledNode,
+    images: ImageStore,
+}
+
+#[derive(Debug, Clone)]
+struct RenderedContentFrame {
+    content_width: u32,
+    viewport_height: u32,
+    scroll_y: u32,
+    content_height: u32,
+    layout: LayoutDocument,
+    pixels: Vec<u32>,
+}
+
 impl BrowserApp {
-    fn new(initial_url: Option<Url>, context: Context<OwnedDisplayHandle>) -> Self {
+    fn new(
+        initial_url: Option<Url>,
+        context: Context<OwnedDisplayHandle>,
+        event_proxy: EventLoopProxy<BrowserUserEvent>,
+    ) -> Self {
+        let (load_request_tx, load_request_rx) = mpsc::channel::<NavigationRequest>();
+        let (render_request_tx, render_request_rx) = mpsc::channel::<RenderRequest>();
+        start_load_worker(load_request_rx, event_proxy.clone());
+        start_render_worker(render_request_rx, event_proxy.clone());
+
+        let initial_navigation = initial_url.clone();
         let (current_url, history, history_index, document, address_bar) = match initial_url {
             Some(url) => {
-                let document = DocumentView::load(url.clone());
-                let address_bar = AddressBarState::new(url.to_string());
+                let mut address_bar = AddressBarState::new(url.to_string());
+                address_bar.focused = false;
                 (
                     Some(url.clone()),
                     vec![HistoryEntry { url, scroll_y: 0 }],
                     Some(0),
-                    document,
+                    DocumentView::blank(),
                     address_bar,
                 )
             }
@@ -135,13 +209,20 @@ impl BrowserApp {
         };
         let scroll_y = document.scroll_position();
 
-        Self {
+        let mut app = Self {
             current_url,
             history,
             history_index,
             document,
             fonts: FontContext::load(),
             context,
+            load_request_tx,
+            render_request_tx,
+            latest_render_frame: None,
+            pending_navigation_id: None,
+            pending_render_id: None,
+            next_navigation_id: 1,
+            next_render_id: 1,
             window: None,
             surface: None,
             scroll_y,
@@ -155,17 +236,24 @@ impl BrowserApp {
             hovered_element_node_id: None,
             ime_composing: false,
             scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
+        };
+
+        if let Some(url) = initial_navigation {
+            app.begin_navigation(url, None);
         }
+
+        app
     }
 
     fn load_url(&mut self, url: Url) {
         self.record_history_visit(url.clone());
-        self.load_document(url, None);
+        self.begin_navigation(url, None);
     }
 
     fn reload(&mut self) {
         let Some(url) = self.current_url.clone() else {
             self.document = DocumentView::blank();
+            self.latest_render_frame = None;
             self.scroll_y = 0;
             self.scratch.clear();
             self.sync_window_title();
@@ -173,7 +261,7 @@ impl BrowserApp {
             return;
         };
 
-        self.load_document(url, self.current_history_scroll());
+        self.begin_navigation(url, self.current_history_scroll());
     }
 
     fn navigate_to_address(&mut self) {
@@ -272,7 +360,7 @@ impl BrowserApp {
         let next_index = next as usize;
         let entry = self.history[next_index].clone();
         self.history_index = Some(next_index);
-        self.load_document(entry.url, Some(entry.scroll_y));
+        self.begin_navigation(entry.url, Some(entry.scroll_y));
     }
 
     fn sync_current_history_scroll(&mut self) {
@@ -289,23 +377,125 @@ impl BrowserApp {
         self.history.get(index).map(|entry| entry.scroll_y)
     }
 
-    fn load_document(&mut self, url: Url, restore_scroll: Option<u32>) {
-        self.document = DocumentView::load(url.clone());
+    fn begin_navigation(&mut self, url: Url, restore_scroll: Option<u32>) {
+        let navigation_id = self.next_navigation_id;
+        self.next_navigation_id = self.next_navigation_id.saturating_add(1);
+        self.pending_navigation_id = Some(navigation_id);
         self.current_url = Some(url.clone());
         self.address_bar.set_text(url.to_string());
         self.address_bar.blur();
+        self.document = DocumentView::blank();
+        self.document.layout_cache = None;
+        self.latest_render_frame = None;
         self.clear_page_control_state();
-        self.scroll_y = restore_scroll.unwrap_or_else(|| self.document.scroll_position());
-        if restore_scroll.is_some() {
-            let _ = self.document.set_scroll_position(self.scroll_y);
-        }
-        // Clear scratch pool on navigation/reload to avoid wasting memory.
+        self.scroll_y = 0;
         self.scratch.clear();
-        self.sync_current_history_scroll();
-        self.sync_viewport_size();
         self.sync_window_title();
         self.sync_input_method();
         self.request_redraw();
+
+        let _ = self.load_request_tx.send(NavigationRequest {
+            id: navigation_id,
+            url,
+            restore_scroll,
+        });
+    }
+
+    fn finish_navigation(
+        &mut self,
+        navigation_id: u64,
+        restore_scroll: Option<u32>,
+        result: std::result::Result<BrowserPage, String>,
+    ) {
+        if self.pending_navigation_id != Some(navigation_id) {
+            return;
+        }
+        self.pending_navigation_id = None;
+
+        match result {
+            Ok(mut page) => {
+                if let Some(scroll_y) = restore_scroll {
+                    let _ = page.set_scroll_position(scroll_y);
+                }
+                self.scroll_y = restore_scroll.unwrap_or_else(|| page.scroll_y());
+                self.document = DocumentView::from_page(page);
+                self.latest_render_frame = None;
+                self.document.layout_cache = None;
+                self.sync_viewport_size();
+                self.sync_window_title();
+                self.sync_input_method();
+                self.request_redraw();
+            }
+            Err(error) => {
+                self.document = DocumentView::error(error.to_string());
+                self.latest_render_frame = None;
+                self.clear_page_control_state();
+                self.scroll_y = 0;
+                self.sync_window_title();
+                self.sync_input_method();
+                self.request_redraw();
+            }
+        }
+    }
+
+    fn request_content_render(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let Some(page) = self.document.render_snapshot() else {
+            return;
+        };
+
+        let size = window.inner_size();
+        let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
+        let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
+        let viewport_height = size
+            .height
+            .saturating_sub(chrome.height + FRAME_PADDING)
+            .max(1);
+        let render_id = self.next_render_id;
+        self.next_render_id = self.next_render_id.saturating_add(1);
+        self.pending_render_id = Some(render_id);
+        let request = RenderRequest {
+            id: render_id,
+            content_width,
+            viewport_height,
+            scroll_y: self.scroll_y,
+            page,
+            focused_page_input: self.focused_page_input.clone(),
+            hovered_target: self.hovered_target,
+        };
+        let _ = self.render_request_tx.send(request);
+    }
+
+    fn finish_render(
+        &mut self,
+        render_id: u64,
+        result: std::result::Result<RenderedContentFrame, String>,
+    ) {
+        if self.pending_render_id != Some(render_id) {
+            return;
+        }
+        self.pending_render_id = None;
+
+        match result {
+            Ok(frame) => {
+                self.document.layout_cache = Some(CachedLayout {
+                    width: frame.content_width,
+                    revision: self.document.layout_revision(),
+                    layout: frame.layout.clone(),
+                });
+                self.latest_render_frame = Some(frame);
+                self.sync_current_history_scroll();
+                self.sync_window_title();
+                self.sync_input_method();
+                self.request_redraw();
+            }
+            Err(error) => {
+                self.document.status_line = format!("Status: render failed ({error})");
+                self.request_redraw();
+            }
+        }
     }
 
     fn focus_address_bar(&mut self, char_index: usize) {
@@ -348,7 +538,7 @@ impl BrowserApp {
     }
 
     fn sync_input_method(&mut self) {
-        let Some(window) = &self.window else {
+        let Some(window) = self.window.as_ref().cloned() else {
             return;
         };
 
@@ -389,22 +579,23 @@ impl BrowserApp {
         let Some(focused) = self.focused_page_input.as_ref() else {
             return;
         };
+        let focused_control_id = focused.control_id;
+        let focused_editor = focused.editor.clone();
 
         let size = window.inner_size();
         let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
         let body_top = chrome.height + FRAME_PADDING;
-        let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
+        let layout = self.current_layout();
         let Some(control) = layout
             .controls
             .iter()
-            .find(|control| control.id == focused.control_id)
+            .find(|control| control.id == focused_control_id)
         else {
             return;
         };
 
         let view = text_editor_view(
-            &focused.editor,
+            &focused_editor,
             &mut self.fonts,
             control.width.saturating_sub(CONTROL_PADDING_X * 2),
             control.font_size_px,
@@ -437,15 +628,22 @@ impl BrowserApp {
             let _ = self.document.dispatch_window_resize();
             self.scroll_y = self.document.scroll_position();
             self.sync_current_history_scroll();
+            self.latest_render_frame = None;
+            self.request_content_render();
         }
     }
 
     fn sync_scroll_position(&mut self) {
+        let previous_scroll_y = self.scroll_y;
         if self.document.set_scroll_position(self.scroll_y) {
             let _ = self.document.dispatch_scroll_event();
             self.scroll_y = self.document.scroll_position();
         }
         self.sync_current_history_scroll();
+        if self.scroll_y != previous_scroll_y {
+            self.latest_render_frame = None;
+            self.request_content_render();
+        }
     }
 
     fn scroll_by(&mut self, delta: i32, viewport_height: u32, content_height: u32) {
@@ -475,8 +673,16 @@ impl BrowserApp {
         let body_top = chrome.height + FRAME_PADDING;
         let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
         let viewport_height = size.height.saturating_sub(body_top + FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
-        let max_scroll_y = max_scroll(viewport_height, layout.content_height);
+        let layout = self.current_layout();
+        let frame_matches = self.latest_render_frame.as_ref().is_some_and(|frame| {
+            frame.content_width == content_width && frame.scroll_y == self.scroll_y
+        });
+        let content_height = self
+            .latest_render_frame
+            .as_ref()
+            .map(|frame| frame.content_height)
+            .unwrap_or(layout.content_height);
+        let max_scroll_y = max_scroll(viewport_height, content_height);
         let previous_scroll_y = self.scroll_y;
         self.scroll_y = self.scroll_y.min(max_scroll_y);
         if self.scroll_y != previous_scroll_y {
@@ -520,21 +726,34 @@ impl BrowserApp {
             self.scroll_y,
             max_scroll_y,
         );
-        paint_layout(
-            &self.document,
-            &mut self.fonts,
-            &mut buffer,
-            size.width,
-            size.height,
-            FRAME_PADDING / 2,
-            body_top,
-            viewport_height,
-            self.scroll_y,
-            &layout,
-            self.focused_page_input.as_ref(),
-            self.hovered_target,
-            &mut self.scratch,
-        );
+        if frame_matches {
+            if let Some(frame) = &self.latest_render_frame {
+                blit_rendered_content_frame(
+                    &mut buffer,
+                    size.width,
+                    size.height,
+                    FRAME_PADDING / 2,
+                    body_top,
+                    frame,
+                );
+            }
+        } else if !matches!(self.document.content, DocumentContent::Loaded(_)) {
+            paint_layout(
+                None,
+                &mut self.fonts,
+                &mut buffer,
+                size.width,
+                size.height,
+                FRAME_PADDING / 2,
+                body_top,
+                viewport_height,
+                self.scroll_y,
+                &layout,
+                self.focused_page_input.as_ref(),
+                self.hovered_target,
+                &mut self.scratch,
+            );
+        }
 
         buffer
             .present()
@@ -544,15 +763,16 @@ impl BrowserApp {
     fn content_metrics(&mut self, window_size: PhysicalSize<u32>) -> (u32, u32) {
         let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
         let body_top = chrome.height + FRAME_PADDING;
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         let viewport_height = window_size
             .height
             .saturating_sub(body_top + FRAME_PADDING)
             .max(1);
+        let layout = self.current_layout();
         let content_height = self
-            .document
-            .layout(content_width, &mut self.fonts)
-            .content_height;
+            .latest_render_frame
+            .as_ref()
+            .map(|frame| frame.content_height)
+            .unwrap_or(layout.content_height);
 
         (viewport_height, content_height)
     }
@@ -568,8 +788,7 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
+        let layout = self.current_layout();
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
@@ -594,8 +813,7 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
+        let layout = self.current_layout();
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
@@ -652,6 +870,7 @@ impl BrowserApp {
         self.hovered_link_url = link_url;
         self.hovered_link_node_id = link_node_id;
         if changed {
+            self.request_content_render();
             self.request_redraw();
         }
         // Determine cursor icon before borrowing self.window
@@ -690,16 +909,20 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return CursorKind::Auto;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
+        let layout = self.current_layout();
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
         let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
-        layout.element_hitboxes.iter().rev()
+        layout
+            .element_hitboxes
+            .iter()
+            .rev()
             .find(|h| {
-                content_x >= h.x && content_x < h.x + h.width
-                    && content_y >= h.y && content_y < h.y + h.height
+                content_x >= h.x
+                    && content_x < h.x + h.width
+                    && content_y >= h.y
+                    && content_y < h.y + h.height
             })
             .map(|h| h.cursor_kind)
             .unwrap_or(CursorKind::Auto)
@@ -713,17 +936,21 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
+        let layout = self.current_layout();
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
         let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
         // Find the deepest (last) hitbox that contains the cursor
-        layout.element_hitboxes.iter().rev()
+        layout
+            .element_hitboxes
+            .iter()
+            .rev()
             .find(|h| {
-                content_x >= h.x && content_x < h.x + h.width
-                    && content_y >= h.y && content_y < h.y + h.height
+                content_x >= h.x
+                    && content_x < h.x + h.width
+                    && content_y >= h.y
+                    && content_y < h.y + h.height
             })
             .map(|h| h.node_id)
     }
@@ -1188,6 +1415,7 @@ impl BrowserApp {
         self.focused_page_input = None;
         self.ime_composing = false;
         self.sync_input_method();
+        self.request_content_render();
         self.request_redraw();
     }
 
@@ -1218,6 +1446,7 @@ impl BrowserApp {
         self.dispatch_page_dom_event(control.node_id, "focus", false, false);
         self.refresh_focused_page_input_from_document();
         self.sync_input_method();
+        self.request_content_render();
         self.request_redraw();
     }
 
@@ -1303,6 +1532,7 @@ impl BrowserApp {
         self.sync_window_title();
         self.refresh_focused_page_input_from_document();
         self.sync_input_method();
+        self.request_content_render();
         self.request_redraw();
         Some(result)
     }
@@ -1402,6 +1632,13 @@ impl BrowserApp {
     }
 
     fn current_layout(&mut self) -> LayoutDocument {
+        if let DocumentContent::Loaded(_) = &self.document.content {
+            if let Some(cache) = &self.document.layout_cache {
+                return cache.layout.clone();
+            }
+            return empty_layout_document();
+        }
+
         let window_size = self
             .window
             .as_ref()
@@ -1681,7 +1918,7 @@ impl BrowserApp {
     }
 }
 
-impl ApplicationHandler for BrowserApp {
+impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Wait);
 
@@ -1710,6 +1947,19 @@ impl ApplicationHandler for BrowserApp {
         self.sync_window_title();
         self.sync_input_method();
         self.request_redraw();
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: BrowserUserEvent) {
+        match event {
+            BrowserUserEvent::NavigationFinished {
+                navigation_id,
+                restore_scroll,
+                result,
+            } => self.finish_navigation(navigation_id, restore_scroll, result),
+            BrowserUserEvent::RenderFinished { render_id, result } => {
+                self.finish_render(render_id, result)
+            }
+        }
     }
 
     fn window_event(
@@ -1754,10 +2004,15 @@ impl ApplicationHandler for BrowserApp {
                 self.hovered_link_node_id = None;
                 if self.hovered_element_node_id.is_some() {
                     self.hovered_element_node_id = None;
-                    let content_width = window.inner_size().width.saturating_sub(FRAME_PADDING).max(1);
+                    let content_width = window
+                        .inner_size()
+                        .width
+                        .saturating_sub(FRAME_PADDING)
+                        .max(1);
                     if let DocumentContent::Loaded(page) = &mut self.document.content {
                         page.relayout(content_width, &InteractiveState::default());
                     }
+                    self.request_content_render();
                 }
                 window.set_cursor(CursorIcon::Default);
                 self.request_redraw();
@@ -1904,6 +2159,17 @@ impl DocumentView {
         }
     }
 
+    fn render_snapshot(&self) -> Option<RenderPageSnapshot> {
+        let DocumentContent::Loaded(page) = &self.content else {
+            return None;
+        };
+
+        Some(RenderPageSnapshot {
+            styled_document: page.styled_document.clone(),
+            images: page.images.clone(),
+        })
+    }
+
     fn dispatch_dom_event(&mut self, request: DomEventRequest) -> Option<DomEventDispatchResult> {
         match &mut self.content {
             DocumentContent::Loaded(page) => page.dispatch_dom_event(request),
@@ -2037,6 +2303,17 @@ impl DocumentView {
             DocumentContent::Loaded(page) => page.layout_revision(),
             _ => 0,
         }
+    }
+}
+
+fn empty_layout_document() -> LayoutDocument {
+    LayoutDocument {
+        background_color: DEFAULT_BACKGROUND_COLOR,
+        content_height: 0,
+        commands: Vec::new(),
+        links: Vec::new(),
+        controls: Vec::new(),
+        element_hitboxes: Vec::new(),
     }
 }
 
@@ -2970,6 +3247,30 @@ fn paint_background(
     draw_rect_outline(buffer, width, height, 0, 0, width, height, COLOR_HEADER);
 }
 
+fn blit_rendered_content_frame(
+    buffer: &mut [u32],
+    window_width: u32,
+    window_height: u32,
+    offset_x: u32,
+    offset_y: u32,
+    frame: &RenderedContentFrame,
+) {
+    let copy_width = frame
+        .content_width
+        .min(window_width.saturating_sub(offset_x));
+    let copy_height = frame
+        .viewport_height
+        .min(window_height.saturating_sub(offset_y));
+    for row in 0..copy_height {
+        let src_row = row as usize * frame.content_width as usize;
+        let dst_row = (offset_y + row) as usize * window_width as usize + offset_x as usize;
+        let len = copy_width as usize;
+        if src_row + len <= frame.pixels.len() && dst_row + len <= buffer.len() {
+            buffer[dst_row..dst_row + len].copy_from_slice(&frame.pixels[src_row..src_row + len]);
+        }
+    }
+}
+
 fn paint_chrome(
     fonts: &mut FontContext,
     buffer: &mut [u32],
@@ -3652,7 +3953,7 @@ fn paint_page_control(
 }
 
 fn paint_layout(
-    document: &DocumentView,
+    page_images: Option<&ImageStore>,
     fonts: &mut FontContext,
     buffer: &mut [u32],
     width: u32,
@@ -3666,12 +3967,6 @@ fn paint_layout(
     hovered_target: HitTarget,
     scratch: &mut Vec<Vec<u32>>,
 ) {
-    let page = if let DocumentContent::Loaded(page) = &document.content {
-        Some(page)
-    } else {
-        None
-    };
-
     render_commands(
         buffer,
         width,
@@ -3681,7 +3976,7 @@ fn paint_layout(
         viewport_height,
         scroll_y,
         &layout.commands,
-        page,
+        page_images,
         fonts,
         scratch,
         0,
@@ -3718,7 +4013,7 @@ fn render_commands(
     viewport_height: u32,
     scroll_y: u32,
     commands: &[DrawCommand],
-    page: Option<&crate::browser::BrowserPage>,
+    page_images: Option<&ImageStore>,
     fonts: &mut FontContext,
     scratch: &mut Vec<Vec<u32>>,
     depth: usize,
@@ -3826,8 +4121,8 @@ fn render_commands(
                 if image_bottom < scroll_y || image.y > viewport_bottom {
                     continue;
                 }
-                if let Some(page) = page {
-                    if let Some(decoded) = page.images.get(&image.src) {
+                if let Some(images) = page_images {
+                    if let Some(decoded) = images.get(&image.src) {
                         // min_y = offset_y prevents images from bleeding into the chrome UI
                         let min_y = offset_y as i32;
                         if image.tile {
@@ -3835,9 +4130,13 @@ fn render_commands(
                             let sx = offset_x as i32 + image.x as i32;
                             let sy = offset_y as i32 + image.y as i32 - scroll_y as i32;
                             draw_tiled_image(
-                                buffer, width, height,
-                                sx, sy,
-                                image.width, image.height,
+                                buffer,
+                                width,
+                                height,
+                                sx,
+                                sy,
+                                image.width,
+                                image.height,
                                 decoded,
                                 min_y,
                             );
@@ -3845,9 +4144,13 @@ fn render_commands(
                             let sx = offset_x as i32 + image.x as i32;
                             let sy = offset_y as i32 + image.y as i32 - scroll_y as i32;
                             draw_scaled_image(
-                                buffer, width, height,
-                                sx, sy,
-                                image.width, image.height,
+                                buffer,
+                                width,
+                                height,
+                                sx,
+                                sy,
+                                image.width,
+                                image.height,
                                 decoded,
                                 image.object_fit,
                                 image.object_position_x,
@@ -3860,9 +4163,18 @@ fn render_commands(
             }
             DrawCommand::Layer(layer) => {
                 render_layer(
-                    buffer, width, height, offset_x, offset_y, scroll_y, layer,
+                    buffer,
+                    width,
+                    height,
+                    offset_x,
+                    offset_y,
+                    scroll_y,
+                    layer,
                     None,
-                    page, fonts, scratch, depth,
+                    page_images,
+                    fonts,
+                    scratch,
+                    depth,
                 );
             }
             DrawCommand::Sticky(sticky) => {
@@ -3878,10 +4190,18 @@ fn render_commands(
                     .min(container_max_y);
 
                 render_layer(
-                    buffer, width, height, offset_x, offset_y, scroll_y,
+                    buffer,
+                    width,
+                    height,
+                    offset_x,
+                    offset_y,
+                    scroll_y,
                     &sticky.layer,
                     Some(effective_y),
-                    page, fonts, scratch, depth,
+                    page_images,
+                    fonts,
+                    scratch,
+                    depth,
                 );
             }
             DrawCommand::Gradient(g) => {
@@ -3928,19 +4248,27 @@ fn render_commands(
                             if in_top_strip && in_left_strip {
                                 let ddx = cx_left - ipx;
                                 let ddy = cy_top - ipy;
-                                if ddx * ddx + ddy * ddy > r_sq { continue; }
+                                if ddx * ddx + ddy * ddy > r_sq {
+                                    continue;
+                                }
                             } else if in_top_strip && in_right_strip {
                                 let ddx = ipx - cx_right + 1;
                                 let ddy = cy_top - ipy;
-                                if ddx * ddx + ddy * ddy > r_sq { continue; }
+                                if ddx * ddx + ddy * ddy > r_sq {
+                                    continue;
+                                }
                             } else if in_bot_strip && in_left_strip {
                                 let ddx = cx_left - ipx;
                                 let ddy = ipy - cy_bottom + 1;
-                                if ddx * ddx + ddy * ddy > r_sq { continue; }
+                                if ddx * ddx + ddy * ddy > r_sq {
+                                    continue;
+                                }
                             } else if in_bot_strip && in_right_strip {
                                 let ddx = ipx - cx_right + 1;
                                 let ddy = ipy - cy_bottom + 1;
-                                if ddx * ddx + ddy * ddy > r_sq { continue; }
+                                if ddx * ddx + ddy * ddy > r_sq {
+                                    continue;
+                                }
                             }
                         }
 
@@ -3978,17 +4306,22 @@ fn render_commands(
                                     if range == 0 {
                                         color = s1.color;
                                     } else {
-                                        let frac = (t_pos - s0.position) as u64 * 1000 / range as u64;
+                                        let frac =
+                                            (t_pos - s0.position) as u64 * 1000 / range as u64;
                                         let r0 = (s0.color >> 16) & 0xFF;
                                         let g0 = (s0.color >> 8) & 0xFF;
                                         let b0 = s0.color & 0xFF;
                                         let r1 = (s1.color >> 16) & 0xFF;
                                         let g1 = (s1.color >> 8) & 0xFF;
                                         let b1 = s1.color & 0xFF;
-                                        let ri = (r0 as u64 * (1000 - frac) + r1 as u64 * frac) / 1000;
-                                        let gi = (g0 as u64 * (1000 - frac) + g1 as u64 * frac) / 1000;
-                                        let bi = (b0 as u64 * (1000 - frac) + b1 as u64 * frac) / 1000;
-                                        color = ((ri as u32) << 16) | ((gi as u32) << 8) | (bi as u32);
+                                        let ri =
+                                            (r0 as u64 * (1000 - frac) + r1 as u64 * frac) / 1000;
+                                        let gi =
+                                            (g0 as u64 * (1000 - frac) + g1 as u64 * frac) / 1000;
+                                        let bi =
+                                            (b0 as u64 * (1000 - frac) + b1 as u64 * frac) / 1000;
+                                        color =
+                                            ((ri as u32) << 16) | ((gi as u32) << 8) | (bi as u32);
                                     }
                                     break;
                                 }
@@ -4017,7 +4350,9 @@ fn render_commands(
 /// Apply a separable box blur to an ARGB pixel buffer in-place.
 /// radius = 0 is a no-op.
 fn apply_box_blur(pixels: &mut Vec<u32>, width: u32, height: u32, radius: u32) {
-    if radius == 0 || width == 0 || height == 0 { return; }
+    if radius == 0 || width == 0 || height == 0 {
+        return;
+    }
     let w = width as usize;
     let h = height as usize;
     let r = radius as usize;
@@ -4105,7 +4440,9 @@ fn apply_box_blur(pixels: &mut Vec<u32>, width: u32, height: u32, radius: u32) {
 /// Apply brightness adjustment to an ARGB pixel buffer in-place.
 /// brightness = 10000 is a no-op (100% brightness).
 fn apply_brightness(pixels: &mut [u32], brightness: u32) {
-    if brightness == 10000 { return; }
+    if brightness == 10000 {
+        return;
+    }
     for px in pixels.iter_mut() {
         let r = ((((*px >> 16) & 0xFF) * brightness / 10000).min(255)) as u32;
         let g = ((((*px >> 8) & 0xFF) * brightness / 10000).min(255)) as u32;
@@ -4123,7 +4460,7 @@ fn render_layer(
     scroll_y: u32,
     layer: &LayerCommand,
     y_override: Option<u32>,
-    page: Option<&crate::browser::BrowserPage>,
+    page_images: Option<&ImageStore>,
     fonts: &mut FontContext,
     scratch: &mut Vec<Vec<u32>>,
     depth: usize,
@@ -4139,11 +4476,19 @@ fn render_layer(
     let content_left = offset_x as i64;
 
     // Skip layers fully below or to the right of viewport/buffer
-    if layer_screen_y >= buf_height as i64 { return; }
-    if layer_screen_x >= buf_width as i64 { return; }
+    if layer_screen_y >= buf_height as i64 {
+        return;
+    }
+    if layer_screen_x >= buf_width as i64 {
+        return;
+    }
     // Skip layers fully within the chrome (no part reaches the content area)
-    if layer_screen_y + layer.height as i64 <= content_top { return; }
-    if layer_screen_x + layer.width as i64 <= content_left { return; }
+    if layer_screen_y + layer.height as i64 <= content_top {
+        return;
+    }
+    if layer_screen_x + layer.width as i64 <= content_left {
+        return;
+    }
 
     // Clip: how many rows/cols of the layer are above/left of the content viewport
     let src_y_start = (content_top - layer_screen_y).max(0) as u32;
@@ -4153,9 +4498,17 @@ fn render_layer(
     let dst_x = layer_screen_x.max(content_left) as u32;
 
     // Visible size: clipped by layer bounds and buffer bounds
-    let visible_h = layer.height.saturating_sub(src_y_start).min(buf_height.saturating_sub(dst_y));
-    let visible_w = layer.width.saturating_sub(src_x_start).min(buf_width.saturating_sub(dst_x));
-    if visible_h == 0 || visible_w == 0 { return; }
+    let visible_h = layer
+        .height
+        .saturating_sub(src_y_start)
+        .min(buf_height.saturating_sub(dst_y));
+    let visible_w = layer
+        .width
+        .saturating_sub(src_x_start)
+        .min(buf_width.saturating_sub(dst_x));
+    if visible_h == 0 || visible_w == 0 {
+        return;
+    }
 
     // Offscreen buffer uses the full layer dimensions (layer.width × layer.height) so that
     // sub-commands are rendered at their natural layer-relative coordinates with scroll_y=0.
@@ -4164,12 +4517,14 @@ fn render_layer(
     // the wrong portion of its content to appear in the visible slice.
     // We copy the backdrop into the visible rows only, render all commands (scroll_y=0),
     // then blend only the visible rows back to the main buffer.
-    let ow = layer.width;  // full layer width
+    let ow = layer.width; // full layer width
     let oh = layer.height; // full layer height — natural coordinate space
 
     // Use checked_mul so pathological dimensions (which would overflow usize in release
     // or panic in debug) are caught safely before any allocation attempt.
-    let Some(needed) = (ow as usize).checked_mul(oh as usize) else { return; };
+    let Some(needed) = (ow as usize).checked_mul(oh as usize) else {
+        return;
+    };
     // Note: we allocate the full layer.width × layer.height even when only visible_w × visible_h
     // pixels are actually blended back to the screen. This is a deliberate trade-off: allocating
     // only the visible slice and translating sub-command coordinates by -src_y_start would be
@@ -4194,13 +4549,18 @@ fn render_layer(
         // layout time). Pass scroll_y=0 so commands render at their natural layer-relative
         // coordinates. Account for page scroll by adjusting offset_y by layer.y - scroll_y.
         render_commands(
-            buffer, buf_width, buf_height,
+            buffer,
+            buf_width,
+            buf_height,
             offset_x.saturating_add(layer.x),
             offset_y.saturating_add(layer.y).saturating_sub(scroll_y),
             layer.height, // viewport for layer is its own height
             0,            // layer-relative scroll = 0
             &layer.commands,
-            page, fonts, scratch, depth + 1,
+            page_images,
+            fonts,
+            scratch,
+            depth + 1,
         );
         return;
     }
@@ -4246,7 +4606,7 @@ fn render_layer(
         oh, // viewport height = full layer height (all commands visible)
         0,  // scroll_y = 0: render at natural layer-relative coordinates
         &layer.commands,
-        page,
+        page_images,
         fonts,
         scratch,
         depth + 1, // nested layers use the next depth slot
@@ -4279,14 +4639,18 @@ fn render_layer(
     for row in 0..visible_h {
         let buf_row_start = (dst_y + row) as usize * buf_width as usize + dst_x as usize;
         let off_row_start = (src_y_start + row) as usize * ow as usize + src_x_start as usize;
-        if buf_row_start + visible_w as usize > buf_end || off_row_start + visible_w as usize > off_end {
+        if buf_row_start + visible_w as usize > buf_end
+            || off_row_start + visible_w as usize > off_end
+        {
             continue;
         }
         for col in 0..visible_w as usize {
             let src = offscreen[off_row_start + col];
             let dst_px = buffer[buf_row_start + col];
-            let r = ((src >> 16 & 0xFF) * opacity + (dst_px >> 16 & 0xFF) * (255 - opacity) + 127) / 255;
-            let g = ((src >> 8 & 0xFF) * opacity + (dst_px >> 8 & 0xFF) * (255 - opacity) + 127) / 255;
+            let r = ((src >> 16 & 0xFF) * opacity + (dst_px >> 16 & 0xFF) * (255 - opacity) + 127)
+                / 255;
+            let g =
+                ((src >> 8 & 0xFF) * opacity + (dst_px >> 8 & 0xFF) * (255 - opacity) + 127) / 255;
             let b = ((src & 0xFF) * opacity + (dst_px & 0xFF) * (255 - opacity) + 127) / 255;
             buffer[buf_row_start + col] = (r << 16) | (g << 8) | b;
         }
@@ -4303,6 +4667,85 @@ fn render_layer(
     scratch[depth] = offscreen;
 }
 
+fn start_load_worker(
+    request_rx: mpsc::Receiver<NavigationRequest>,
+    event_proxy: EventLoopProxy<BrowserUserEvent>,
+) {
+    thread::Builder::new()
+        .name("tobira-load".to_string())
+        .spawn(move || {
+            for request in request_rx {
+                let result = load_page(&request.url).map_err(|error| error.to_string());
+                let _ = event_proxy.send_event(BrowserUserEvent::NavigationFinished {
+                    navigation_id: request.id,
+                    restore_scroll: request.restore_scroll,
+                    result,
+                });
+            }
+        })
+        .expect("load worker should spawn");
+}
+
+fn start_render_worker(
+    request_rx: mpsc::Receiver<RenderRequest>,
+    event_proxy: EventLoopProxy<BrowserUserEvent>,
+) {
+    thread::Builder::new()
+        .name("tobira-render".to_string())
+        .spawn(move || {
+            let mut fonts = FontContext::load();
+            for request in request_rx {
+                let render_id = request.id;
+                let result =
+                    render_content_frame(request, &mut fonts).map_err(|error| error.to_string());
+                let _ =
+                    event_proxy.send_event(BrowserUserEvent::RenderFinished { render_id, result });
+            }
+        })
+        .expect("render worker should spawn");
+}
+
+fn render_content_frame(
+    request: RenderRequest,
+    fonts: &mut FontContext,
+) -> Result<RenderedContentFrame> {
+    let layout = layout_styled_document(
+        &request.page.styled_document,
+        &request.page.images,
+        request.content_width,
+        fonts,
+    );
+    let mut pixels = vec![
+        layout.background_color;
+        request.content_width as usize * request.viewport_height as usize
+    ];
+    let mut scratch = Vec::new();
+    paint_layout(
+        Some(&request.page.images),
+        fonts,
+        &mut pixels,
+        request.content_width,
+        request.viewport_height,
+        0,
+        0,
+        request.viewport_height,
+        request.scroll_y,
+        &layout,
+        request.focused_page_input.as_ref(),
+        request.hovered_target,
+        &mut scratch,
+    );
+
+    Ok(RenderedContentFrame {
+        content_width: request.content_width,
+        viewport_height: request.viewport_height,
+        scroll_y: request.scroll_y,
+        content_height: layout.content_height,
+        layout,
+        pixels,
+    })
+}
+
 /// Apply scale and/or rotate transform to `buf` (width × height) in-place.
 /// Uses inverse mapping (for each output pixel, compute the source pixel).
 /// transform-origin is at (origin_x/1000 * w, origin_y/1000 * h).
@@ -4313,8 +4756,16 @@ fn apply_affine_transform(buf: &mut [u32], width: u32, height: u32, layer: &Laye
         return;
     }
 
-    let sx = if layer.scale_x == 0 { 1.0f32 } else { layer.scale_x as f32 / 1000.0 };
-    let sy = if layer.scale_y == 0 { 1.0f32 } else { layer.scale_y as f32 / 1000.0 };
+    let sx = if layer.scale_x == 0 {
+        1.0f32
+    } else {
+        layer.scale_x as f32 / 1000.0
+    };
+    let sy = if layer.scale_y == 0 {
+        1.0f32
+    } else {
+        layer.scale_y as f32 / 1000.0
+    };
     let angle_deg = layer.rotate_millideg as f32 / 1000.0;
     let angle_rad = angle_deg.to_radians();
     let cos_a = angle_rad.cos();
@@ -4480,7 +4931,16 @@ fn draw_rounded_rect(
 
     // Middle strip: full-width rows — no corner checks needed
     if cy_top < cy_bottom {
-        draw_rect(buffer, buf_w, buf_h, x, cy_top, w, cy_bottom - cy_top, color);
+        draw_rect(
+            buffer,
+            buf_w,
+            buf_h,
+            x,
+            cy_top,
+            w,
+            cy_bottom - cy_top,
+            color,
+        );
     }
 
     // Top corner strip: rows y..cy_top
@@ -4494,12 +4954,23 @@ fn draw_rounded_rect(
             let dy = cy_top.saturating_sub(pv32) as i64;
             if dx * dx + dy * dy <= r_sq {
                 let idx = py * buf_w as usize + px;
-                if idx < buffer.len() { buffer[idx] = color; }
+                if idx < buffer.len() {
+                    buffer[idx] = color;
+                }
             }
         }
         // Middle of row: cx_left..cx_right (always inside)
         if cx_left < cx_right {
-            draw_rect(buffer, buf_w, buf_h, cx_left, pv32, cx_right - cx_left, 1, color);
+            draw_rect(
+                buffer,
+                buf_w,
+                buf_h,
+                cx_left,
+                pv32,
+                cx_right - cx_left,
+                1,
+                color,
+            );
         }
         // Right corner: cx_right..x2
         for px in (cx_right.min(buf_w) as usize)..(x2.min(buf_w) as usize) {
@@ -4508,7 +4979,9 @@ fn draw_rounded_rect(
             let dy = cy_top.saturating_sub(pv32) as i64;
             if dx * dx + dy * dy <= r_sq {
                 let idx = py * buf_w as usize + px;
-                if idx < buffer.len() { buffer[idx] = color; }
+                if idx < buffer.len() {
+                    buffer[idx] = color;
+                }
             }
         }
     }
@@ -4525,12 +4998,23 @@ fn draw_rounded_rect(
             let dy = pv32.saturating_sub(cy_bottom) as i64;
             if dx * dx + dy * dy <= r_sq {
                 let idx = py * buf_w as usize + px;
-                if idx < buffer.len() { buffer[idx] = color; }
+                if idx < buffer.len() {
+                    buffer[idx] = color;
+                }
             }
         }
         // Middle of row
         if cx_left < cx_right {
-            draw_rect(buffer, buf_w, buf_h, cx_left, pv32, cx_right - cx_left, 1, color);
+            draw_rect(
+                buffer,
+                buf_w,
+                buf_h,
+                cx_left,
+                pv32,
+                cx_right - cx_left,
+                1,
+                color,
+            );
         }
         // Right corner
         for px in (cx_right.min(buf_w) as usize)..(x2.min(buf_w) as usize) {
@@ -4539,7 +5023,9 @@ fn draw_rounded_rect(
             let dy = pv32.saturating_sub(cy_bottom) as i64;
             if dx * dx + dy * dy <= r_sq {
                 let idx = py * buf_w as usize + px;
-                if idx < buffer.len() { buffer[idx] = color; }
+                if idx < buffer.len() {
+                    buffer[idx] = color;
+                }
             }
         }
     }
@@ -4665,7 +5151,16 @@ fn draw_scaled_image(
         match object_fit {
             ObjectFit::Fill => {
                 // Stretch to fill: use full source, full dest
-                (0u32, 0u32, image.width, image.height, 0u32, 0u32, draw_width, draw_height)
+                (
+                    0u32,
+                    0u32,
+                    image.width,
+                    image.height,
+                    0u32,
+                    0u32,
+                    draw_width,
+                    draw_height,
+                )
             }
             ObjectFit::None => {
                 // No scaling: use natural size, positioned by object-position
@@ -4673,18 +5168,30 @@ fn draw_scaled_image(
                 let natural_h = image.height.min(draw_height);
                 // If image is smaller than box, place at object-position
                 let rx = if draw_width > image.width {
-                    ((draw_width - image.width) as f32 * object_position_x as f32 / 100.0).round() as u32
-                } else { 0 };
+                    ((draw_width - image.width) as f32 * object_position_x as f32 / 100.0).round()
+                        as u32
+                } else {
+                    0
+                };
                 let ry = if draw_height > image.height {
-                    ((draw_height - image.height) as f32 * object_position_y as f32 / 100.0).round() as u32
-                } else { 0 };
+                    ((draw_height - image.height) as f32 * object_position_y as f32 / 100.0).round()
+                        as u32
+                } else {
+                    0
+                };
                 // source crop when image is larger than box
                 let sx = if image.width > draw_width {
-                    ((image.width - draw_width) as f32 * object_position_x as f32 / 100.0).round() as u32
-                } else { 0 };
+                    ((image.width - draw_width) as f32 * object_position_x as f32 / 100.0).round()
+                        as u32
+                } else {
+                    0
+                };
                 let sy = if image.height > draw_height {
-                    ((image.height - draw_height) as f32 * object_position_y as f32 / 100.0).round() as u32
-                } else { 0 };
+                    ((image.height - draw_height) as f32 * object_position_y as f32 / 100.0).round()
+                        as u32
+                } else {
+                    0
+                };
                 (sx, sy, natural_w, natural_h, rx, ry, natural_w, natural_h)
             }
             ObjectFit::Contain => {
@@ -4694,8 +5201,12 @@ fn draw_scaled_image(
                 let scale = scale_x.min(scale_y);
                 let scaled_w = (image.width as f32 * scale).round().max(1.0) as u32;
                 let scaled_h = (image.height as f32 * scale).round().max(1.0) as u32;
-                let rx = ((draw_width.saturating_sub(scaled_w)) as f32 * object_position_x as f32 / 100.0).round() as u32;
-                let ry = ((draw_height.saturating_sub(scaled_h)) as f32 * object_position_y as f32 / 100.0).round() as u32;
+                let rx = ((draw_width.saturating_sub(scaled_w)) as f32 * object_position_x as f32
+                    / 100.0)
+                    .round() as u32;
+                let ry = ((draw_height.saturating_sub(scaled_h)) as f32 * object_position_y as f32
+                    / 100.0)
+                    .round() as u32;
                 (0, 0, image.width, image.height, rx, ry, scaled_w, scaled_h)
             }
             ObjectFit::Cover => {
@@ -4713,17 +5224,42 @@ fn draw_scaled_image(
                 // convert back to source coords
                 let sx = (sx_px as f32 / scale).round() as u32;
                 let sy = (sy_px as f32 / scale).round() as u32;
-                let src_w_used = ((draw_width as f32 / scale).round() as u32).min(image.width.saturating_sub(sx)).max(1);
-                let src_h_used = ((draw_height as f32 / scale).round() as u32).min(image.height.saturating_sub(sy)).max(1);
-                (sx, sy, src_w_used, src_h_used, 0, 0, draw_width, draw_height)
+                let src_w_used = ((draw_width as f32 / scale).round() as u32)
+                    .min(image.width.saturating_sub(sx))
+                    .max(1);
+                let src_h_used = ((draw_height as f32 / scale).round() as u32)
+                    .min(image.height.saturating_sub(sy))
+                    .max(1);
+                (
+                    sx,
+                    sy,
+                    src_w_used,
+                    src_h_used,
+                    0,
+                    0,
+                    draw_width,
+                    draw_height,
+                )
             }
             ObjectFit::ScaleDown => {
                 // min(none, contain): use natural size if smaller, else contain
                 if image.width <= draw_width && image.height <= draw_height {
                     // same as none (image fits naturally)
-                    let rx = ((draw_width - image.width) as f32 * object_position_x as f32 / 100.0).round() as u32;
-                    let ry = ((draw_height - image.height) as f32 * object_position_y as f32 / 100.0).round() as u32;
-                    (0, 0, image.width, image.height, rx, ry, image.width, image.height)
+                    let rx = ((draw_width - image.width) as f32 * object_position_x as f32 / 100.0)
+                        .round() as u32;
+                    let ry = ((draw_height - image.height) as f32 * object_position_y as f32
+                        / 100.0)
+                        .round() as u32;
+                    (
+                        0,
+                        0,
+                        image.width,
+                        image.height,
+                        rx,
+                        ry,
+                        image.width,
+                        image.height,
+                    )
                 } else {
                     // same as contain
                     let scale_x = draw_width as f32 / image.width as f32;
@@ -4731,8 +5267,14 @@ fn draw_scaled_image(
                     let scale = scale_x.min(scale_y);
                     let scaled_w = (image.width as f32 * scale).round().max(1.0) as u32;
                     let scaled_h = (image.height as f32 * scale).round().max(1.0) as u32;
-                    let rx = ((draw_width.saturating_sub(scaled_w)) as f32 * object_position_x as f32 / 100.0).round() as u32;
-                    let ry = ((draw_height.saturating_sub(scaled_h)) as f32 * object_position_y as f32 / 100.0).round() as u32;
+                    let rx = ((draw_width.saturating_sub(scaled_w)) as f32
+                        * object_position_x as f32
+                        / 100.0)
+                        .round() as u32;
+                    let ry = ((draw_height.saturating_sub(scaled_h)) as f32
+                        * object_position_y as f32
+                        / 100.0)
+                        .round() as u32;
                     (0, 0, image.width, image.height, rx, ry, scaled_w, scaled_h)
                 }
             }
@@ -4770,15 +5312,14 @@ fn draw_scaled_image(
 
     for dest_y in dest_start_y..max_dy {
         let local_y = (dest_y - dest_start_y) + y_skip; // includes skipped rows
-        let source_y = (src_y_off as u64
-            + local_y as u64 * src_h as u64 / render_h as u64) as u32;
+        let source_y = (src_y_off as u64 + local_y as u64 * src_h as u64 / render_h as u64) as u32;
         let source_y = source_y.min(image.height.saturating_sub(1));
         let row_offset = dest_y as usize * width as usize;
 
         for dest_x in dest_start_x..max_dx {
             let local_x = (dest_x - dest_start_x) + x_skip; // includes skipped cols
-            let source_x = (src_x_off as u64
-                + local_x as u64 * src_w as u64 / render_w as u64) as u32;
+            let source_x =
+                (src_x_off as u64 + local_x as u64 * src_w as u64 / render_w as u64) as u32;
             let source_x = source_x.min(image.width.saturating_sub(1));
             let source_index = ((source_y * image.width + source_x) * 4) as usize;
             let source = &image.rgba[source_index..source_index + 4];

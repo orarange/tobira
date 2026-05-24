@@ -36,6 +36,11 @@ pub struct BrowserPage {
     scroll_y: u32,
 }
 
+// BrowserPage is moved between threads only through owned message passing:
+// the load worker constructs it, then hands ownership to the UI thread, which
+// owns the page afterwards. We avoid sharing the same instance concurrently.
+unsafe impl Send for BrowserPage {}
+
 impl BrowserPage {
     pub fn status_text(&self) -> String {
         format!("{} {}", self.status_code, self.reason_phrase)
@@ -289,7 +294,8 @@ fn rebuild_page_from_document(
     let stylesheet = collect_stylesheet(&document, url);
     let mut images = collect_image_resources(&document);
     let rendered = include_rendered_output.then(|| render_document(&document));
-    let styled_document = build_styled_tree(&document, &stylesheet, 1280, &InteractiveState::default());
+    let styled_document =
+        build_styled_tree(&document, &stylesheet, 1280, &InteractiveState::default());
     collect_styled_background_images(&styled_document, url, &mut images);
 
     BrowserPage {
@@ -925,11 +931,12 @@ fn collect_styled_background_images(styled: &StyledNode, base_url: &Url, images:
         StyledNode::Element(element) => {
             if let Some(ref url_str) = element.style.background_image_url {
                 if images.get(url_str).is_none() {
-                    let resolved = if url_str.starts_with("http://") || url_str.starts_with("https://") {
-                        Url::parse(url_str).ok()
-                    } else {
-                        base_url.resolve(url_str).ok()
-                    };
+                    let resolved =
+                        if url_str.starts_with("http://") || url_str.starts_with("https://") {
+                            Url::parse(url_str).ok()
+                        } else {
+                            base_url.resolve(url_str).ok()
+                        };
                     if let Some(resolved_url) = resolved {
                         if let Ok(response) = fetch(&resolved_url) {
                             if let Ok(image) = decode_image(&response.body) {

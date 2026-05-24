@@ -7,14 +7,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 - Read this file, `git status --short`, and the latest `git log --oneline -n 20` before making assumptions.
 - Confirm the current branch with `git branch --show-current` before starting work.
-- Codex must stay on the active Codex branch listed below unless the user explicitly changes that rule.
-- Codex should use a dedicated worktree for the active Codex branch instead of sharing the user's main checkout.
-- Keep Codex changes isolated to the active Codex branch; Claude may work on its own branch and merge reconciliation happens later through GitHub Copilot or the user's preferred flow.
-- CSS boundary:
-  - treat the Claude `claude/phase5-css` branch as the owner of the CSS parser/layout baseline
-  - do not edit CSS-engine files or other Claude-owned CSS work by default
-  - if a JS task genuinely needs CSS-facing integration, keep the change minimal and non-destructive, open/update a PR, request Copilot review before broadening the diff, and log the exact touched files plus the reason in `change.md`
-  - read-only inspection of CSS files is fine; destructive or broad CSS edits are not
+- Work in the branch / checkout the user has currently designated; do not assume a separate Claude/Codex split unless the user explicitly asks for one.
+- CSS files may be edited when the current task genuinely needs it. Keep the change minimal, call out any non-trivial CSS touch in `change.md`, and prefer review before broadening a CSS-heavy diff.
 - Update the `Current Snapshot` section whenever the high-level state changes.
 - Append a short entry to `Session Log` whenever meaningful work is handed off or resumed.
 - Do not stage unrelated local helper artifacts unless the user explicitly asks for them.
@@ -25,16 +19,15 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-19`
+- Date: `2026-05-24`
 - Repo / package name: `tobira`
-- Active Codex branch: `codex/js-event-capture`
-- Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
+- Working branch: `master`
 - Workflow:
-  - keep the shared root checkout free for the user / Claude side
-  - run Codex implementation from a separate `codex/js-event-capture` worktree
+  - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
+  - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `193` passing tests on `2026-05-19`
-- `cargo build`: success on `2026-05-19`
+- `cargo test`: `196` passing tests on `2026-05-24`
+- `cargo build`: success on `2026-05-24`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -47,6 +40,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `rgba(...)` blending
   - CSS Phase 5 baseline is treated as complete on the Claude `claude/phase5-css` branch; Codex should not duplicate the parser/layout engine and should treat Phase 6 as the remaining CSS surface.
   - software-rendered GUI with custom title bar and address bar
+  - page loading now runs on a dedicated background worker and content rendering runs on a separate worker, so the window chrome stays responsive while pages load
+  - no loading-screen UI; the chrome remains interactive and the content area updates when the background work finishes
   - blank startup page and direct URL entry
   - address bar editing shortcuts including `Ctrl+A`, `Ctrl+C`, `Ctrl+X`, and `Ctrl+V`
   - clickable links in the rendered page
@@ -101,6 +96,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - browser-level history entries now remember scroll positions and restore them on back/forward
   - same-document history entries now expose `history.state` and dispatch `popstate` / `hashchange`
   - same-document history back/forward now restores the stored scroll position for each entry
+  - browser chrome no longer blocks on page loading; navigation and rendering completion are delivered back to the UI thread through user events
   - layout cache invalidates on viewport width or page revision changes
   - GUI-driven DOM attribute updates now push a fresh runtime snapshot back into the page, so mutation notifications can invalidate reflow immediately
   - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, keyboard event logging, storage/cookies, and scroll control
@@ -171,11 +167,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Script-driven scrolling now has basic window / DOM setter support, and full-document / same-document history scroll restoration is in place.
 - Modern app-shell sites still need more DOM APIs, richer history replay, and CSS Phase 6 visual effects / advanced rendering.
 - Incremental reflow still needs deeper invalidation for more DOM/style mutations.
-- The inline style bridge still needs broader CSS property coverage and more computed-style parity to be browser-grade, but the core CSS parser/layout baseline is already considered done on the Claude branch.
+- The inline style bridge still needs broader CSS property coverage and more computed-style parity to be browser-grade, but the core CSS parser/layout baseline is already part of the shared codebase.
 - Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
-- CSS Phase 5 is on PR #49 (`claude/phase5-css`); once merged, all Phase 5 features land in master.
+- CSS Phase 5 baseline is already part of the shared codebase; remaining CSS work is mostly the Phase 6 visual-effects / advanced-rendering surface.
 - CSS Phase 6 items remain: `transform: scale/rotate` rendering, `animation`/`@keyframes`, `transition`, `filter: blur()` rendering, `grid-template-areas`, RTL text.
 - JS support still needs storage/cookies, richer history/back-forward, and more DOM depth for app-shell sites.
 - text node `characterData` mutation notifications and `splitText(...)` are now in place for common DOM edit flows.
@@ -221,6 +217,18 @@ git log --oneline -n 20
 - Added a regression test that confirms `MutationObserver` receives `characterData` changes and that `splitText(...)` preserves text-node sibling relationships.
 - Updated the README and roadmap notes to reflect the deeper text-node DOM surface.
 - Verified the updated state with `cargo test` (`193` passing tests) and `cargo build`.
+
+### 2026-05-24 - Codex (async UI / background render)
+
+- Moved page navigation into a background worker so the title bar and address bar remain responsive while page loading is in flight.
+- Added a separate background render worker that produces content frames off the UI thread, then hands completed frames back through user events.
+- Removed any loading-screen style UI; the chrome stays interactive and the content area updates when the async work completes.
+- Verified the updated state with `cargo test` (`196` passing tests) and `cargo build`.
+
+### 2026-05-24 - Codex (policy update)
+
+- Relaxed the CSS-editing guardrail because the user explicitly said CSS may be touched when needed.
+- Dropped the Claude/Codex branch-split assumption from the shared handoff rules so future work can follow the current shared branch/worktree the user designates.
 
 ### 2026-05-14 - Codex
 
