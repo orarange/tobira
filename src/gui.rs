@@ -1,5 +1,6 @@
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 use arboard::Clipboard;
@@ -15,12 +16,12 @@ use winit::window::{CursorIcon, ResizeDirection, Window};
 
 use crate::browser::{BrowserPage, LoadedDocumentSource, build_page_from_source, load_page_source};
 use crate::css::{
-    Color, CursorKind, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind,
-    InteractiveState, ObjectFit,
+    Color, CursorKind, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind, ObjectFit,
+    StyledNode,
 };
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
-use crate::image::DecodedImage;
+use crate::image::{DecodedImage, ImageStore};
 use crate::js::{DomEventDispatchResult, DomEventRequest};
 use crate::layout::{
     DrawCommand, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument, TextCommand,
@@ -105,6 +106,8 @@ struct BrowserApp {
     modifiers: ModifiersState,
     cursor_position: PhysicalPosition<f64>,
     address_bar: AddressBarState,
+    render_request_tx: Sender<RenderRequest>,
+    latest_render_frame: Option<RenderedContentFrame>,
     focused_page_input: Option<FocusedPageInput>,
     hovered_target: HitTarget,
     hovered_link_url: Option<String>,
@@ -112,7 +115,9 @@ struct BrowserApp {
     hovered_element_node_id: Option<usize>,
     ime_composing: bool,
     pending_navigation: Option<PendingNavigation>,
+    pending_render_id: Option<u64>,
     next_navigation_id: u64,
+    next_render_id: u64,
     /// Depth-indexed offscreen buffer pool for layer compositing.
     /// scratch[depth] holds the pixel buffer used by the layer at that nesting depth.
     /// Buffers are reused across frames; no per-frame allocation after the first paint.
@@ -131,6 +136,34 @@ enum BrowserUserEvent {
         navigation_id: u64,
         result: std::result::Result<LoadedDocumentSource, String>,
     },
+    RenderFinished {
+        render_id: u64,
+        result: std::result::Result<RenderedContentFrame, String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct RenderRequest {
+    id: u64,
+    viewport_width: u32,
+    page: RenderPageSnapshot,
+    focused_page_input: Option<FocusedPageInput>,
+    hovered_target: HitTarget,
+}
+
+#[derive(Debug, Clone)]
+struct RenderPageSnapshot {
+    styled_document: StyledNode,
+    images: ImageStore,
+}
+
+#[derive(Debug, Clone)]
+struct RenderedContentFrame {
+    id: u64,
+    content_width: u32,
+    content_height: u32,
+    layout: LayoutDocument,
+    pixels: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -145,12 +178,96 @@ struct HistoryEntry {
     scroll_y: u32,
 }
 
+fn empty_layout_document() -> LayoutDocument {
+    LayoutDocument {
+        background_color: DEFAULT_BACKGROUND_COLOR,
+        content_height: 0,
+        commands: Vec::new(),
+        links: Vec::new(),
+        controls: Vec::new(),
+        element_hitboxes: Vec::new(),
+    }
+}
+
+fn start_render_worker(event_proxy: EventLoopProxy<BrowserUserEvent>) -> Sender<RenderRequest> {
+    let (request_tx, request_rx) = mpsc::channel::<RenderRequest>();
+    thread::Builder::new()
+        .name("tobira-render".to_string())
+        .spawn(move || {
+            let mut fonts = FontContext::load();
+            while let Ok(request) = request_rx.recv() {
+                let render_id = request.id;
+                let result =
+                    render_content_frame(request, &mut fonts).map_err(|error| error.to_string());
+                let _ =
+                    event_proxy.send_event(BrowserUserEvent::RenderFinished { render_id, result });
+            }
+        })
+        .expect("render worker should start");
+
+    request_tx
+}
+
+fn render_content_frame(
+    request: RenderRequest,
+    fonts: &mut FontContext,
+) -> Result<RenderedContentFrame> {
+    let content_width = request.viewport_width.saturating_sub(FRAME_PADDING).max(1);
+    let layout = layout_styled_document(
+        &request.page.styled_document,
+        &request.page.images,
+        content_width,
+        fonts,
+    );
+    let content_height = layout.content_height;
+    let mut buffer = if content_width == 0 || content_height == 0 {
+        Vec::new()
+    } else {
+        vec![layout.background_color; content_width as usize * content_height as usize]
+    };
+
+    if !buffer.is_empty() {
+        paint_background(
+            &mut buffer,
+            content_width,
+            content_height,
+            0,
+            layout.background_color,
+        );
+        let mut scratch = Vec::new();
+        paint_layout(
+            Some(&request.page.images),
+            fonts,
+            &mut buffer,
+            content_width,
+            content_height,
+            FRAME_PADDING / 2,
+            0,
+            content_height,
+            0,
+            &layout,
+            request.focused_page_input.as_ref(),
+            request.hovered_target,
+            &mut scratch,
+        );
+    }
+
+    Ok(RenderedContentFrame {
+        id: request.id,
+        content_width,
+        content_height,
+        layout,
+        pixels: buffer,
+    })
+}
+
 impl BrowserApp {
     fn new(
         initial_url: Option<Url>,
         context: Context<OwnedDisplayHandle>,
         event_proxy: EventLoopProxy<BrowserUserEvent>,
     ) -> Self {
+        let render_request_tx = start_render_worker(event_proxy.clone());
         let initial_load_url = initial_url.clone();
         let (current_url, history, history_index, document, address_bar) = match initial_url {
             Some(url) => (
@@ -160,7 +277,7 @@ impl BrowserApp {
                     scroll_y: 0,
                 }],
                 Some(0),
-                DocumentView::loading(url.to_string()),
+                DocumentView::blank(),
                 AddressBarState::new(url.to_string()),
             ),
             None => {
@@ -178,6 +295,8 @@ impl BrowserApp {
             fonts: FontContext::load(),
             context,
             event_proxy,
+            render_request_tx,
+            latest_render_frame: None,
             window: None,
             surface: None,
             scroll_y: 0,
@@ -191,7 +310,9 @@ impl BrowserApp {
             hovered_element_node_id: None,
             ime_composing: false,
             pending_navigation: None,
+            pending_render_id: None,
             next_navigation_id: 1,
+            next_render_id: 1,
             scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
         };
 
@@ -340,6 +461,90 @@ impl BrowserApp {
         self.history.get(index).map(|entry| entry.scroll_y)
     }
 
+    fn current_layout(&mut self) -> LayoutDocument {
+        match &self.document.content {
+            DocumentContent::Loaded(_) => self
+                .document
+                .layout_cache
+                .clone()
+                .map(|cache| cache.layout)
+                .unwrap_or_else(empty_layout_document),
+            _ => {
+                let window_size = self
+                    .window
+                    .as_ref()
+                    .map(|window| window.inner_size())
+                    .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+                let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
+                let mut fonts = FontContext::load();
+                self.document.layout(content_width, &mut fonts)
+            }
+        }
+    }
+
+    fn current_page_control(&mut self, id: usize) -> Option<FormControlCommand> {
+        self.current_layout()
+            .controls
+            .into_iter()
+            .find(|control| control.id == id)
+    }
+
+    fn request_content_render(&mut self) {
+        let Some(page) = self.document.render_snapshot() else {
+            return;
+        };
+
+        let window_size = self
+            .window
+            .as_ref()
+            .map(|window| window.inner_size())
+            .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+        let request_id = self.next_render_id;
+        self.next_render_id = self.next_render_id.saturating_add(1);
+        self.pending_render_id = Some(request_id);
+        let _ = self.render_request_tx.send(RenderRequest {
+            id: request_id,
+            viewport_width: window_size.width,
+            page,
+            focused_page_input: self.focused_page_input.clone(),
+            hovered_target: self.hovered_target,
+        });
+    }
+
+    fn finish_render(
+        &mut self,
+        render_id: u64,
+        result: std::result::Result<RenderedContentFrame, String>,
+    ) {
+        if self
+            .pending_render_id
+            .is_none_or(|pending| pending != render_id)
+        {
+            return;
+        }
+        self.pending_render_id = None;
+
+        match result {
+            Ok(frame) => {
+                self.document.layout_cache = Some(CachedLayout {
+                    width: frame.content_width,
+                    revision: self.document.layout_revision(),
+                    layout: frame.layout.clone(),
+                });
+                self.latest_render_frame = Some(frame);
+                let _ = self.document.set_scroll_position(self.scroll_y);
+                self.scroll_y = self.document.scroll_position();
+                self.sync_current_history_scroll();
+                self.sync_window_title();
+                self.request_redraw();
+            }
+            Err(error) => {
+                self.document.status_line = format!("Status: render failed ({error})");
+                self.request_redraw();
+            }
+        }
+    }
+
     fn begin_navigation(
         &mut self,
         url: Url,
@@ -362,7 +567,10 @@ impl BrowserApp {
         self.address_bar.set_text(url.to_string());
         self.address_bar.blur();
         self.clear_page_control_state();
-        self.document = DocumentView::loading(url.to_string());
+        self.document = DocumentView::blank();
+        self.latest_render_frame = None;
+        self.document.layout_cache = None;
+        self.pending_render_id = None;
         self.scroll_y = 0;
         self.scratch.clear();
         self.sync_window_title();
@@ -408,9 +616,14 @@ impl BrowserApp {
                     let _ = self.document.set_scroll_position(self.scroll_y);
                 }
                 self.sync_current_history_scroll();
+                self.latest_render_frame = None;
+                self.document.layout_cache = None;
                 self.sync_viewport_size();
                 self.sync_window_title();
                 self.sync_input_method();
+                if self.window.is_none() {
+                    self.request_content_render();
+                }
                 self.request_redraw();
             }
             Err(error) => {
@@ -464,7 +677,7 @@ impl BrowserApp {
     }
 
     fn sync_input_method(&mut self) {
-        let Some(window) = &self.window else {
+        let Some(window) = self.window.as_ref().cloned() else {
             return;
         };
 
@@ -505,22 +718,23 @@ impl BrowserApp {
         let Some(focused) = self.focused_page_input.as_ref() else {
             return;
         };
+        let focused_control_id = focused.control_id;
+        let focused_editor = focused.editor.clone();
 
         let size = window.inner_size();
         let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
         let body_top = chrome.height + FRAME_PADDING;
-        let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
+        let layout = self.current_layout();
         let Some(control) = layout
             .controls
             .iter()
-            .find(|control| control.id == focused.control_id)
+            .find(|control| control.id == focused_control_id)
         else {
             return;
         };
 
         let view = text_editor_view(
-            &focused.editor,
+            &focused_editor,
             &mut self.fonts,
             control.width.saturating_sub(CONTROL_PADDING_X * 2),
             control.font_size_px,
@@ -550,13 +764,16 @@ impl BrowserApp {
 
         let size = window.inner_size();
         if self.document.set_viewport_size(size.width, size.height) {
+            self.latest_render_frame = None;
             let _ = self.document.dispatch_window_resize();
             self.scroll_y = self.document.scroll_position();
             self.sync_current_history_scroll();
+            self.request_content_render();
         }
     }
 
     fn sync_scroll_position(&mut self) {
+        let previous_revision = self.document.layout_revision();
         if self.document.set_scroll_position(self.scroll_y)
             && self.document.has_global_event_listener("scroll")
         {
@@ -564,6 +781,9 @@ impl BrowserApp {
         }
         self.scroll_y = self.document.scroll_position();
         self.sync_current_history_scroll();
+        if self.document.layout_revision() != previous_revision {
+            self.request_content_render();
+        }
         let _ = self.draw();
     }
 
@@ -594,7 +814,10 @@ impl BrowserApp {
         let body_top = chrome.height + FRAME_PADDING;
         let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
         let viewport_height = size.height.saturating_sub(body_top + FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
+        let layout = match &self.document.content {
+            DocumentContent::Loaded(_) => self.current_layout(),
+            _ => self.document.layout(content_width, &mut self.fonts),
+        };
         let max_scroll_y = max_scroll(viewport_height, layout.content_height);
         let previous_scroll_y = self.scroll_y;
         self.scroll_y = self.scroll_y.min(max_scroll_y);
@@ -639,21 +862,38 @@ impl BrowserApp {
             self.scroll_y,
             max_scroll_y,
         );
-        paint_layout(
-            &self.document,
-            &mut self.fonts,
-            &mut buffer,
-            size.width,
-            size.height,
-            FRAME_PADDING / 2,
-            body_top,
-            viewport_height,
-            self.scroll_y,
-            &layout,
-            self.focused_page_input.as_ref(),
-            self.hovered_target,
-            &mut self.scratch,
-        );
+        if let Some(frame) = self
+            .latest_render_frame
+            .as_ref()
+            .filter(|frame| frame.content_width == content_width)
+        {
+            blit_rendered_content_frame(
+                &mut buffer,
+                size.width,
+                size.height,
+                FRAME_PADDING / 2,
+                body_top,
+                viewport_height,
+                self.scroll_y,
+                frame,
+            );
+        } else if !matches!(self.document.content, DocumentContent::Loaded(_)) {
+            paint_layout(
+                None,
+                &mut self.fonts,
+                &mut buffer,
+                size.width,
+                size.height,
+                FRAME_PADDING / 2,
+                body_top,
+                viewport_height,
+                self.scroll_y,
+                &layout,
+                self.focused_page_input.as_ref(),
+                self.hovered_target,
+                &mut self.scratch,
+            );
+        }
 
         buffer
             .present()
@@ -663,15 +903,12 @@ impl BrowserApp {
     fn content_metrics(&mut self, window_size: PhysicalSize<u32>) -> (u32, u32) {
         let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
         let body_top = chrome.height + FRAME_PADDING;
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
+        let _content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
         let viewport_height = window_size
             .height
             .saturating_sub(body_top + FRAME_PADDING)
             .max(1);
-        let content_height = self
-            .document
-            .layout(content_width, &mut self.fonts)
-            .content_height;
+        let content_height = self.current_layout().content_height;
 
         (viewport_height, content_height)
     }
@@ -687,8 +924,8 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
+        let _content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
+        let layout = self.current_layout();
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
@@ -713,8 +950,8 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
+        let _content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
+        let layout = self.current_layout();
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
@@ -752,15 +989,7 @@ impl BrowserApp {
         // Only relayout when hovered element changes
         if element_changed {
             self.hovered_element_node_id = hovered_element;
-            // Trigger a CSS relayout with the new interactive state
-            let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-            let interactive = InteractiveState {
-                hovered_node_id: hovered_element,
-                ..Default::default()
-            };
-            if let DocumentContent::Loaded(page) = &mut self.document.content {
-                page.relayout(content_width, &interactive);
-            }
+            self.request_content_render();
         }
 
         let changed = next != self.hovered_target
@@ -809,8 +1038,8 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return CursorKind::Auto;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
+        let _content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
+        let layout = self.current_layout();
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
@@ -837,8 +1066,8 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-        let layout = self.document.layout(content_width, &mut self.fonts);
+        let _content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
+        let layout = self.current_layout();
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
@@ -1317,6 +1546,7 @@ impl BrowserApp {
         self.focused_page_input = None;
         self.ime_composing = false;
         self.sync_input_method();
+        self.request_content_render();
         self.request_redraw();
     }
 
@@ -1347,6 +1577,7 @@ impl BrowserApp {
         self.dispatch_page_dom_event(control.node_id, "focus", false, false);
         self.refresh_focused_page_input_from_document();
         self.sync_input_method();
+        self.request_content_render();
         self.request_redraw();
     }
 
@@ -1432,6 +1663,7 @@ impl BrowserApp {
         self.sync_window_title();
         self.refresh_focused_page_input_from_document();
         self.sync_input_method();
+        self.request_content_render();
         self.request_redraw();
         Some(result)
     }
@@ -1535,23 +1767,6 @@ impl BrowserApp {
             DocumentContent::Loaded(page) => Some(&page.url),
             _ => self.current_url.as_ref(),
         }
-    }
-
-    fn current_layout(&mut self) -> LayoutDocument {
-        let window_size = self
-            .window
-            .as_ref()
-            .map(|window| window.inner_size())
-            .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-        self.document.layout(content_width, &mut self.fonts)
-    }
-
-    fn current_page_control(&mut self, id: usize) -> Option<FormControlCommand> {
-        self.current_layout()
-            .controls
-            .into_iter()
-            .find(|control| control.id == id)
     }
 
     fn copy_page_input_selection(&self) -> bool {
@@ -1856,6 +2071,9 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
             } => {
                 self.finish_navigation(navigation_id, result);
             }
+            BrowserUserEvent::RenderFinished { render_id, result } => {
+                self.finish_render(render_id, result);
+            }
         }
     }
 
@@ -1899,17 +2117,8 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
                 self.hovered_target = HitTarget::None;
                 self.hovered_link_url = None;
                 self.hovered_link_node_id = None;
-                if self.hovered_element_node_id.is_some() {
-                    self.hovered_element_node_id = None;
-                    let content_width = window
-                        .inner_size()
-                        .width
-                        .saturating_sub(FRAME_PADDING)
-                        .max(1);
-                    if let DocumentContent::Loaded(page) = &mut self.document.content {
-                        page.relayout(content_width, &InteractiveState::default());
-                    }
-                }
+                self.hovered_element_node_id = None;
+                self.request_content_render();
                 window.set_cursor(CursorIcon::Default);
                 self.request_redraw();
             }
@@ -2060,6 +2269,16 @@ impl DocumentView {
             subtitle: format!("{} | {}", page.url, content_type),
             content: DocumentContent::Loaded(page),
             layout_cache: None,
+        }
+    }
+
+    fn render_snapshot(&self) -> Option<RenderPageSnapshot> {
+        match &self.content {
+            DocumentContent::Loaded(page) => Some(RenderPageSnapshot {
+                styled_document: page.styled_document.clone(),
+                images: page.images.clone(),
+            }),
+            _ => None,
         }
     }
 
@@ -3846,7 +4065,7 @@ fn paint_page_control(
 }
 
 fn paint_layout(
-    document: &DocumentView,
+    page_images: Option<&ImageStore>,
     fonts: &mut FontContext,
     buffer: &mut [u32],
     width: u32,
@@ -3860,12 +4079,6 @@ fn paint_layout(
     hovered_target: HitTarget,
     scratch: &mut Vec<Vec<u32>>,
 ) {
-    let page = if let DocumentContent::Loaded(page) = &document.content {
-        Some(page)
-    } else {
-        None
-    };
-
     render_commands(
         buffer,
         width,
@@ -3875,7 +4088,7 @@ fn paint_layout(
         viewport_height,
         scroll_y,
         &layout.commands,
-        page,
+        page_images,
         fonts,
         scratch,
         0,
@@ -3903,6 +4116,43 @@ fn paint_layout(
     }
 }
 
+fn blit_rendered_content_frame(
+    buffer: &mut [u32],
+    width: u32,
+    _height: u32,
+    offset_x: u32,
+    offset_y: u32,
+    viewport_height: u32,
+    scroll_y: u32,
+    frame: &RenderedContentFrame,
+) {
+    if frame.content_width == 0 || frame.content_height == 0 {
+        return;
+    }
+
+    let start_row = scroll_y.min(frame.content_height);
+    let visible_height = frame
+        .content_height
+        .saturating_sub(start_row)
+        .min(viewport_height);
+    let row_len = frame.content_width as usize;
+    let src_stride = frame.content_width as usize;
+    let dst_stride = width as usize;
+
+    for row in 0..visible_height {
+        let src_y = start_row.saturating_add(row);
+        let src_start = (src_y as usize).saturating_mul(src_stride);
+        let dst_y = offset_y.saturating_add(row);
+        let dst_start = (dst_y as usize)
+            .saturating_mul(dst_stride)
+            .saturating_add(offset_x as usize);
+        if src_start + row_len <= frame.pixels.len() && dst_start + row_len <= buffer.len() {
+            buffer[dst_start..dst_start + row_len]
+                .copy_from_slice(&frame.pixels[src_start..src_start + row_len]);
+        }
+    }
+}
+
 fn render_commands(
     buffer: &mut [u32],
     width: u32,
@@ -3912,7 +4162,7 @@ fn render_commands(
     viewport_height: u32,
     scroll_y: u32,
     commands: &[DrawCommand],
-    page: Option<&crate::browser::BrowserPage>,
+    page_images: Option<&ImageStore>,
     fonts: &mut FontContext,
     scratch: &mut Vec<Vec<u32>>,
     depth: usize,
@@ -4020,50 +4270,59 @@ fn render_commands(
                 if image_bottom < scroll_y || image.y > viewport_bottom {
                     continue;
                 }
-                if let Some(page) = page {
-                    if let Some(decoded) = page.images.get(&image.src) {
-                        // min_y = offset_y prevents images from bleeding into the chrome UI
-                        let min_y = offset_y as i32;
-                        if image.tile {
-                            // Tiled background: draw at natural size, repeated across element
-                            let sx = offset_x as i32 + image.x as i32;
-                            let sy = offset_y as i32 + image.y as i32 - scroll_y as i32;
-                            draw_tiled_image(
-                                buffer,
-                                width,
-                                height,
-                                sx,
-                                sy,
-                                image.width,
-                                image.height,
-                                decoded,
-                                min_y,
-                            );
-                        } else {
-                            let sx = offset_x as i32 + image.x as i32;
-                            let sy = offset_y as i32 + image.y as i32 - scroll_y as i32;
-                            draw_scaled_image(
-                                buffer,
-                                width,
-                                height,
-                                sx,
-                                sy,
-                                image.width,
-                                image.height,
-                                decoded,
-                                image.object_fit,
-                                image.object_position_x,
-                                image.object_position_y,
-                                min_y,
-                            );
-                        }
+                if let Some(images) = page_images
+                    && let Some(decoded) = images.get(&image.src)
+                {
+                    // min_y = offset_y prevents images from bleeding into the chrome UI
+                    let min_y = offset_y as i32;
+                    if image.tile {
+                        // Tiled background: draw at natural size, repeated across element
+                        let sx = offset_x as i32 + image.x as i32;
+                        let sy = offset_y as i32 + image.y as i32 - scroll_y as i32;
+                        draw_tiled_image(
+                            buffer,
+                            width,
+                            height,
+                            sx,
+                            sy,
+                            image.width,
+                            image.height,
+                            decoded,
+                            min_y,
+                        );
+                    } else {
+                        let sx = offset_x as i32 + image.x as i32;
+                        let sy = offset_y as i32 + image.y as i32 - scroll_y as i32;
+                        draw_scaled_image(
+                            buffer,
+                            width,
+                            height,
+                            sx,
+                            sy,
+                            image.width,
+                            image.height,
+                            decoded,
+                            image.object_fit,
+                            image.object_position_x,
+                            image.object_position_y,
+                            min_y,
+                        );
                     }
                 }
             }
             DrawCommand::Layer(layer) => {
                 render_layer(
-                    buffer, width, height, offset_x, offset_y, scroll_y, layer, page, fonts,
-                    scratch, depth,
+                    buffer,
+                    width,
+                    height,
+                    offset_x,
+                    offset_y,
+                    scroll_y,
+                    layer,
+                    page_images,
+                    fonts,
+                    scratch,
+                    depth,
                 );
             }
             DrawCommand::Gradient(g) => {
@@ -4321,7 +4580,7 @@ fn render_layer(
     offset_y: u32,
     scroll_y: u32,
     layer: &LayerCommand,
-    page: Option<&crate::browser::BrowserPage>,
+    page_images: Option<&ImageStore>,
     fonts: &mut FontContext,
     scratch: &mut Vec<Vec<u32>>,
     depth: usize,
@@ -4417,7 +4676,7 @@ fn render_layer(
             layer.height, // viewport for layer is its own height
             0,            // layer-relative scroll = 0
             &layer.commands,
-            page,
+            page_images,
             fonts,
             scratch,
             depth + 1,
@@ -4466,7 +4725,7 @@ fn render_layer(
         oh, // viewport height = full layer height (all commands visible)
         0,  // scroll_y = 0: render at natural layer-relative coordinates
         &layer.commands,
-        page,
+        page_images,
         fonts,
         scratch,
         depth + 1, // nested layers use the next depth slot
