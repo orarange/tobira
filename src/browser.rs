@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -18,6 +19,16 @@ use crate::url::Url;
 
 const MAX_FRAME_DEPTH: usize = 3;
 const MAX_SCRIPT_NAVIGATION_DEPTH: usize = 3;
+
+fn load_trace_enabled() -> bool {
+    std::env::var_os("TOBIRA_TRACE_LOAD").is_some()
+}
+
+fn load_trace(message: impl AsRef<str>) {
+    if load_trace_enabled() {
+        eprintln!("[tobira-load] {}", message.as_ref());
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct BrowserPage {
@@ -346,10 +357,36 @@ fn load_document_source_with_script_navigation(
     frame_depth: usize,
     script_navigation_depth: usize,
 ) -> Result<LoadedDocumentSource> {
+    let load_started = Instant::now();
+    load_trace(format!(
+        "load start url={} frame_depth={} script_nav_depth={}",
+        url, frame_depth, script_navigation_depth
+    ));
     let response = fetch(url)?;
     let content_type = response.header("content-type").map(str::to_string);
+    load_trace(format!(
+        "fetch done url={} final_url={} status={} bytes={} elapsed={:?}",
+        url,
+        response.final_url,
+        response.status_code,
+        response.body.len(),
+        load_started.elapsed()
+    ));
     let text = decode_text_response(&response.body, response.header("content-type"));
+    load_trace(format!(
+        "decode done final_url={} chars={} elapsed={:?}",
+        response.final_url,
+        text.len(),
+        load_started.elapsed()
+    ));
+    let script_started = Instant::now();
     let (scripted, javascript_session) = start_document_script_session(&text, &response.final_url);
+    load_trace(format!(
+        "script session done final_url={} logs={} elapsed={:?}",
+        response.final_url,
+        scripted.console_logs.len(),
+        script_started.elapsed()
+    ));
     if let Some(target) = scripted.navigation_target.as_deref()
         && target != response.final_url.to_string()
         && script_navigation_depth < MAX_SCRIPT_NAVIGATION_DEPTH
@@ -371,6 +408,11 @@ fn load_document_source_with_script_navigation(
     } else {
         parsed_document
     };
+    load_trace(format!(
+        "load complete final_url={} elapsed={:?}",
+        response.final_url,
+        load_started.elapsed()
+    ));
     Ok(LoadedDocumentSource {
         final_url: response.final_url,
         status_code: response.status_code,
@@ -423,6 +465,14 @@ fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<
             continue;
         };
 
+        if !should_expand_frame(base_url, &frame_url) {
+            load_trace(format!(
+                "skip cross-origin frame base={} frame={} src={}",
+                base_url, frame_url, frame.src
+            ));
+            continue;
+        }
+
         let Ok(frame_document) = load_document_source(&frame_url, frame_depth) else {
             continue;
         };
@@ -454,6 +504,10 @@ fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<
 
     let title = document_title(document).unwrap_or_else(|| "Tobira".to_string());
     Ok(Some(synthetic_document(&title, body_children)))
+}
+
+fn should_expand_frame(base_url: &Url, frame_url: &Url) -> bool {
+    base_url.shares_origin(frame_url)
 }
 
 fn first_frameset(node: &Node) -> Option<&Element> {
@@ -511,6 +565,13 @@ fn expand_frameset(
         let Ok(frame_url) = base_url.resolve(src) else {
             continue;
         };
+        if !should_expand_frame(base_url, &frame_url) {
+            load_trace(format!(
+                "skip cross-origin frame base={} frame={} src={}",
+                base_url, frame_url, src
+            ));
+            continue;
+        }
         let Ok(frame_document) = load_document_source(&frame_url, frame_depth) else {
             continue;
         };
@@ -2997,7 +3058,7 @@ fn collect_raw_text_into(node: &Node, output: &mut String) {
 mod tests {
     use super::{
         BrowserPage, collect_frame_specs, collect_stylesheet, document_has_meaningful_body,
-        document_title, extract_body_children, rebuild_page_from_html,
+        document_title, extract_body_children, rebuild_page_from_html, should_expand_frame,
         should_follow_script_navigation, synthetic_document,
     };
     use crate::css::StyledNode;
@@ -3160,6 +3221,16 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].src, "menu.htm");
         assert_eq!(frames[1].title.as_deref(), Some("right"));
+    }
+
+    #[test]
+    fn expands_only_same_origin_frames() {
+        let base = Url::parse("https://www.youtube.com/").unwrap();
+        let same_origin = Url::parse("https://www.youtube.com/embed/demo").unwrap();
+        let cross_origin = Url::parse("https://accounts.google.com/signin").unwrap();
+
+        assert!(should_expand_frame(&base, &same_origin));
+        assert!(!should_expand_frame(&base, &cross_origin));
     }
 
     #[test]

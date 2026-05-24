@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::mem;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use boa_engine::object::{
     JsObject, ObjectInitializer,
@@ -32,8 +32,19 @@ const JS_LOOP_ITERATION_LIMIT: u64 = 100_000;
 const JS_MAX_NETWORK_REQUESTS: usize = 8;
 const JS_MAX_NETWORK_RESPONSE_BYTES: usize = 256 * 1024;
 const JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES: usize = 512 * 1024;
+const JS_INITIAL_SCRIPT_PROCESSING_BUDGET: Duration = Duration::from_millis(2_000);
 const DEFAULT_VIEWPORT_WIDTH: u32 = 1280;
 const DEFAULT_VIEWPORT_HEIGHT: u32 = 720;
+
+fn js_trace_enabled() -> bool {
+    std::env::var_os("TOBIRA_TRACE_JS").is_some()
+}
+
+fn js_trace(message: impl AsRef<str>) {
+    if js_trace_enabled() {
+        eprintln!("[tobira-js] {}", message.as_ref());
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessedScriptHtml {
@@ -421,6 +432,12 @@ pub fn start_document_script_session(
     html: &str,
     base_url: &Url,
 ) -> (ProcessedScriptHtml, Option<JavaScriptSession>) {
+    let session_started = Instant::now();
+    js_trace(format!(
+        "session start url={} html_bytes={}",
+        base_url,
+        html.len()
+    ));
     let html_owned = html.to_string();
     let base_url_owned = base_url.clone();
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -432,10 +449,21 @@ pub fn start_document_script_session(
             let html = html_owned.clone();
             let base_url = base_url_owned.clone();
             move || {
+                js_trace(format!(
+                    "worker start url={} html_bytes={}",
+                    base_url,
+                    html.len()
+                ));
                 let mut runtime = JavaScriptRuntime::new(&base_url, &html);
                 runtime.process_loaded_document();
                 runtime.dispatch_initial_load_events();
                 let processed = runtime.snapshot();
+                js_trace(format!(
+                    "worker snapshot ready url={} logs={} elapsed={:?}",
+                    base_url,
+                    processed.console_logs.len(),
+                    session_started.elapsed()
+                ));
                 let _ = ready_tx.send(processed);
 
                 while let Ok(command) = command_rx.recv() {
@@ -494,7 +522,14 @@ pub fn start_document_script_session(
 
     match worker {
         Ok(_) => match ready_rx.recv() {
-            Ok(processed) => (processed, Some(JavaScriptSession { command_tx })),
+            Ok(processed) => {
+                js_trace(format!(
+                    "session ready url={} elapsed={:?}",
+                    base_url_owned,
+                    session_started.elapsed()
+                ));
+                (processed, Some(JavaScriptSession { command_tx }))
+            }
             Err(_) => (
                 process_document_scripts_error(
                     html_owned,
@@ -584,23 +619,72 @@ impl JavaScriptRuntime {
     }
 
     fn process_loaded_document(&mut self) {
+        let started = Instant::now();
         let mut iterations = 0;
+        let mut executed_scripts = 0;
+        js_trace(format!(
+            "process_loaded_document start url={}",
+            self.document_url()
+        ));
 
         while let Some((script_id, attributes, inline_source)) = self.next_script() {
             iterations += 1;
             if iterations > MAX_SCRIPT_ITERATIONS {
                 self.push_log("js skip: script iteration limit reached".to_string());
+                js_trace(format!(
+                    "process_loaded_document stop: iteration budget reached after {} scripts elapsed={:?}",
+                    executed_scripts,
+                    started.elapsed()
+                ));
+                break;
+            }
+            if started.elapsed() > JS_INITIAL_SCRIPT_PROCESSING_BUDGET {
+                self.push_log("js skip: initial script processing budget exceeded".to_string());
+                js_trace(format!(
+                    "process_loaded_document stop: time budget exceeded after {} scripts elapsed={:?}",
+                    executed_scripts,
+                    started.elapsed()
+                ));
                 break;
             }
             let document_url = self.document_url();
             if let Some(source) = load_script_source(&inline_source, &attributes, &document_url) {
+                let script_started = Instant::now();
+                executed_scripts += 1;
+                if js_trace_enabled() {
+                    let script_kind = attributes
+                        .get("src")
+                        .map(|value| format!("external:{value}"))
+                        .unwrap_or_else(|| "inline".to_string());
+                    js_trace(format!(
+                        "script {} start id={} kind={} bytes={}",
+                        executed_scripts,
+                        script_id,
+                        script_kind,
+                        source.len()
+                    ));
+                }
                 self.set_current_script(script_id);
                 self.execute(&source);
                 self.flush_document_writes(script_id);
                 self.clear_current_script();
+                js_trace(format!(
+                    "script {} done id={} elapsed={:?} total_elapsed={:?}",
+                    executed_scripts,
+                    script_id,
+                    script_started.elapsed(),
+                    started.elapsed()
+                ));
             }
             self.remove_script_node(script_id);
         }
+
+        js_trace(format!(
+            "process_loaded_document done url={} scripts={} elapsed={:?}",
+            self.document_url(),
+            executed_scripts,
+            started.elapsed()
+        ));
     }
 
     fn settle_pending_state(&mut self) {
@@ -808,6 +892,7 @@ impl JavaScriptRuntime {
         }
 
         self.executed_bytes = self.executed_bytes.saturating_add(source.len());
+        let executed_started = Instant::now();
 
         match self.context.eval(Source::from_bytes(source)) {
             Ok(_) => {
@@ -815,8 +900,20 @@ impl JavaScriptRuntime {
                     self.push_log(format!("js job error: {error}"));
                 }
                 flush_mutation_observers(&mut self.context);
+                js_trace(format!(
+                    "script eval ok bytes={} elapsed={:?}",
+                    source.len(),
+                    executed_started.elapsed()
+                ));
             }
-            Err(error) => self.push_log(format!("js error: {error}")),
+            Err(error) => {
+                self.push_log(format!("js error: {error}"));
+                js_trace(format!(
+                    "script eval err bytes={} elapsed={:?} error={error}",
+                    source.len(),
+                    executed_started.elapsed()
+                ));
+            }
         }
     }
 

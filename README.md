@@ -135,6 +135,14 @@ python -m http.server 8765
 cargo run -- http://127.0.0.1:8765/demo/js-demo.html
 ```
 
+Debug tracing:
+
+```powershell
+$env:TOBIRA_TRACE_JS=1
+$env:TOBIRA_TRACE_LOAD=1
+cargo run -- https://www.youtube.com/
+```
+
 Local DOM demo:
 
 ```bash

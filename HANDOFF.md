@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-23`
+- Date: `2026-05-24`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
 - Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
@@ -34,8 +34,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - run Codex implementation from a separate `codex/js-event-capture` worktree
   - Codex is the primary implementation owner for this worktree and may touch both CSS and JS when needed
 - Verification status:
-- `cargo test`: `199` passing tests on `2026-05-23`
-- `cargo build`: success on `2026-05-23`
+- `cargo test`: `197` passing tests on `2026-05-24`
+- `cargo build`: success on `2026-05-24`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -102,6 +102,10 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - same-origin request and redirect guards
     - script-driven `location.href` follow-up navigation
     - origin-scoped `localStorage`, `sessionStorage`, and `document.cookie`
+  - debug trace knobs:
+    - `TOBIRA_TRACE_JS=1` for per-script / JS runtime timing
+    - `TOBIRA_TRACE_LOAD=1` for page-load / frame-expansion timing
+  - cross-origin frames are skipped during recursive expansion so heavy sign-in / embed frames do not synchronously freeze generic pages
   - browser chrome history controls for back/forward navigation across full document loads
   - browser-level history entries now remember scroll positions and restore them on back/forward
   - same-document history entries now expose `history.state` and dispatch `popstate` / `hashchange`
@@ -200,6 +204,12 @@ git log --oneline -n 20
 
 ## Session Log
 
+### 2026-05-24 - Codex (YouTube freeze debug / cross-origin frame skip)
+
+- Traced the YouTube freeze with `TOBIRA_TRACE_JS=1` and `TOBIRA_TRACE_LOAD=1`, which showed the top-level page was being followed by a heavy cross-origin `accounts.google.com` sign-in frame.
+- Added a generic frame-expansion guard so recursive frame loading now skips cross-origin frames and only expands same-origin frames.
+- Added per-load and per-script timing logs to make similar stalls easier to diagnose next time.
+- Verified the updated state with `cargo fmt --all`, `cargo test` (`197` passing tests), and `cargo build`.
 ### 2026-05-21 - Codex (CSS / JS ownership update)
 
 - Updated the operating rules so Codex is now the primary implementation owner for both CSS and JS on the active Codex branch.
