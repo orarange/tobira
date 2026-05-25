@@ -66,10 +66,10 @@ Current capabilities:
 - Network APIs:
     - Promise-backed `fetch(...)` with response headers iteration
     - minimal `XMLHttpRequest` supporting `getResponseHeader(...)` / `getAllResponseHeaders()`
-  - WebComponents support:
-    - `customElements.define(...)` / `get(...)` / `whenDefined(...)` / `upgrade(...)`
-    - `attachShadow(...)` with open / closed roots, `slot.assignedNodes()`, `slot.assignedElements()`
-    - `Event.composedPath()` plus shadow-boundary retargeting for capture / bubble dispatch
+- WebComponents support:
+  - `customElements.define(...)` / `get(...)` / `whenDefined(...)` / `upgrade(...)`
+  - `attachShadow(...)` with open / closed roots, `slot.assignedNodes()` / `slot.assignedElements()` with `flatten`
+  - `assignedSlot`, `slotchange`, and `Event.composedPath()` plus shadow-boundary retargeting for capture / bubble dispatch
 - Advanced Chrome & Browser GUI features:
   - Custom title bar and address bar
   - Browser back/forward buttons and `Alt+Left` / `Alt+Right` history navigation

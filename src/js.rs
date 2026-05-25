@@ -213,7 +213,8 @@ struct JavaScriptState {
     pending_tasks: VecDeque<PendingTask>,
     next_task_handle: usize,
     custom_elements: BTreeMap<String, CustomElementDefinition>,
-    pending_custom_element_waiters: BTreeMap<String, Vec<boa_engine::builtins::promise::ResolvingFunctions>>,
+    pending_custom_element_waiters:
+        BTreeMap<String, Vec<boa_engine::builtins::promise::ResolvingFunctions>>,
     dom: DomState,
 }
 
@@ -262,6 +263,7 @@ struct DomState {
     body_id: Option<usize>,
     shadow_roots: BTreeMap<usize, ShadowRootMeta>,
     shadow_root_by_host: BTreeMap<usize, usize>,
+    slot_assignment_snapshots: BTreeMap<usize, Vec<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1060,18 +1062,10 @@ impl DomState {
         self.nodes.push(DomNode {
             parent: None,
             children: Vec::new(),
-            kind: DomNodeKind::ShadowRoot(ShadowRootMeta {
-                host_node_id,
-                mode,
-            }),
+            kind: DomNodeKind::ShadowRoot(ShadowRootMeta { host_node_id, mode }),
         });
-        self.shadow_roots.insert(
-            node_id,
-            ShadowRootMeta {
-                host_node_id,
-                mode,
-            },
-        );
+        self.shadow_roots
+            .insert(node_id, ShadowRootMeta { host_node_id, mode });
         self.shadow_root_by_host.insert(host_node_id, node_id);
         if let Some(element) = self.element_mut(host_node_id) {
             element.shadow_root_id = Some(node_id);
@@ -1114,7 +1108,10 @@ impl DomState {
     }
 
     fn is_shadow_root(&self, node_id: usize) -> bool {
-        matches!(self.node(node_id).map(|node| &node.kind), Some(DomNodeKind::ShadowRoot(_)))
+        matches!(
+            self.node(node_id).map(|node| &node.kind),
+            Some(DomNodeKind::ShadowRoot(_))
+        )
     }
 
     fn shadow_root_host(&self, node_id: usize) -> Option<usize> {
@@ -1186,11 +1183,88 @@ impl DomState {
             .unwrap_or_default()
     }
 
+    fn slot_assigned_nodes_flattened(&self, slot_node_id: usize) -> Vec<usize> {
+        fn collect(
+            dom: &DomState,
+            slot_node_id: usize,
+            visited: &mut Vec<usize>,
+            output: &mut Vec<usize>,
+        ) {
+            if visited.contains(&slot_node_id) {
+                return;
+            }
+            visited.push(slot_node_id);
+            for node_id in dom.slot_assigned_nodes(slot_node_id) {
+                if dom
+                    .element(node_id)
+                    .map(|element| element.tag_name == "slot")
+                    .unwrap_or(false)
+                {
+                    let before_len = output.len();
+                    collect(dom, node_id, visited, output);
+                    if output.len() > before_len {
+                        continue;
+                    }
+                }
+                output.push(node_id);
+            }
+            visited.pop();
+        }
+
+        let mut visited = Vec::new();
+        let mut output = Vec::new();
+        collect(self, slot_node_id, &mut visited, &mut output);
+        output
+    }
+
     fn slot_assigned_elements(&self, slot_node_id: usize) -> Vec<usize> {
         self.slot_assigned_nodes(slot_node_id)
             .into_iter()
             .filter(|node_id| self.element(*node_id).is_some())
             .collect()
+    }
+
+    fn slot_assigned_elements_flattened(&self, slot_node_id: usize) -> Vec<usize> {
+        self.slot_assigned_nodes_flattened(slot_node_id)
+            .into_iter()
+            .filter(|node_id| self.element(*node_id).is_some())
+            .collect()
+    }
+
+    fn slot_nodes_in_shadow_root(&self, shadow_root_id: usize) -> Vec<usize> {
+        self.descendant_nodes(shadow_root_id, false)
+            .into_iter()
+            .filter(|node_id| {
+                self.element(*node_id)
+                    .map(|element| element.tag_name == "slot")
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    fn assigned_slot_for_node(&self, node_id: usize) -> Option<usize> {
+        let parent_id = self.node(node_id)?.parent?;
+        let shadow_root_id = self.element(parent_id)?.shadow_root_id?;
+        let slot_name = self.get_attribute(node_id, "slot").unwrap_or_default();
+        self.slot_nodes_in_shadow_root(shadow_root_id)
+            .into_iter()
+            .find(|slot_id| {
+                let slot_name_on_node = self.get_attribute(*slot_id, "name").unwrap_or_default();
+                if slot_name_on_node.is_empty() {
+                    slot_name.is_empty()
+                } else {
+                    slot_name_on_node == slot_name
+                }
+            })
+    }
+
+    fn slot_assignment_snapshot(&self, slot_node_id: usize) -> Option<&Vec<usize>> {
+        self.slot_assignment_snapshots.get(&slot_node_id)
+    }
+
+    fn set_slot_assignment_snapshot(&mut self, slot_node_id: usize, assigned_nodes: Vec<usize>) {
+        self.slot_assignment_snapshots
+            .insert(slot_node_id, assigned_nodes);
     }
 
     fn node_type(&self, node_id: usize) -> u16 {
@@ -3651,22 +3725,16 @@ fn custom_element_definition_for_node(
     context: &mut Context,
     node_id: usize,
 ) -> Option<CustomElementDefinition> {
-    let tag_name = context
-        .get_data::<JavaScriptHostData>()
-        .and_then(|host| {
-            host.state
-                .borrow()
-                .dom
-                .element(node_id)
-                .map(|element| element.tag_name.clone())
-        })?;
-    context.get_data::<JavaScriptHostData>().and_then(|host| {
+    let tag_name = context.get_data::<JavaScriptHostData>().and_then(|host| {
         host.state
             .borrow()
-            .custom_elements
-            .get(&tag_name)
-            .cloned()
-    })
+            .dom
+            .element(node_id)
+            .map(|element| element.tag_name.clone())
+    })?;
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().custom_elements.get(&tag_name).cloned())
 }
 
 fn apply_custom_element_prototype(
@@ -3712,7 +3780,9 @@ fn custom_element_observed_attributes(
     let Some(object) = observed.as_object() else {
         return Ok(Vec::new());
     };
-    let length = object.get(js_string!("length"), context)?.to_length(context)?;
+    let length = object
+        .get(js_string!("length"), context)?
+        .to_length(context)?;
     let mut names = Vec::new();
     for index in 0..length {
         let value = object.get(js_string!(index.to_string()), context)?;
@@ -3738,7 +3808,10 @@ fn custom_element_upgrade_node(context: &mut Context, node_id: usize) -> bool {
     let object = build_dom_node_object(context, node_id);
     let _ = object.set_prototype(Some(definition.prototype.clone()));
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
-        host.state.borrow_mut().dom.mark_custom_element_upgraded(node_id);
+        host.state
+            .borrow_mut()
+            .dom
+            .mark_custom_element_upgraded(node_id);
     }
     true
 }
@@ -3832,7 +3905,11 @@ fn custom_element_try_attribute_changed_callback(
         Ok(method) => method,
         Err(_) => return,
     };
-    if method.as_object().and_then(JsFunction::from_object).is_none() {
+    if method
+        .as_object()
+        .and_then(JsFunction::from_object)
+        .is_none()
+    {
         return;
     }
     let args = [
@@ -3860,20 +3937,24 @@ fn custom_element_upgrade_subtree(context: &mut Context, root_id: usize) {
         }
         let children = context
             .get_data::<JavaScriptHostData>()
-            .and_then(|host| host.state.borrow().dom.node(node_id).map(|node| node.children.clone()))
-            .unwrap_or_default();
-        for child_id in children.into_iter().rev() {
-            stack.push(child_id);
-        }
-        let shadow_root_id = context
-            .get_data::<JavaScriptHostData>()
             .and_then(|host| {
                 host.state
                     .borrow()
                     .dom
-                    .element(node_id)
-                    .and_then(|element| element.shadow_root_id)
-            });
+                    .node(node_id)
+                    .map(|node| node.children.clone())
+            })
+            .unwrap_or_default();
+        for child_id in children.into_iter().rev() {
+            stack.push(child_id);
+        }
+        let shadow_root_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .element(node_id)
+                .and_then(|element| element.shadow_root_id)
+        });
         if let Some(shadow_root_id) = shadow_root_id {
             stack.push(shadow_root_id);
         }
@@ -3892,20 +3973,24 @@ fn custom_element_disconnect_subtree(context: &mut Context, root_id: usize) {
         }
         let children = context
             .get_data::<JavaScriptHostData>()
-            .and_then(|host| host.state.borrow().dom.node(node_id).map(|node| node.children.clone()))
-            .unwrap_or_default();
-        for child_id in children.into_iter().rev() {
-            stack.push(child_id);
-        }
-        let shadow_root_id = context
-            .get_data::<JavaScriptHostData>()
             .and_then(|host| {
                 host.state
                     .borrow()
                     .dom
-                    .element(node_id)
-                    .and_then(|element| element.shadow_root_id)
-            });
+                    .node(node_id)
+                    .map(|node| node.children.clone())
+            })
+            .unwrap_or_default();
+        for child_id in children.into_iter().rev() {
+            stack.push(child_id);
+        }
+        let shadow_root_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .element(node_id)
+                .and_then(|element| element.shadow_root_id)
+        });
         if let Some(shadow_root_id) = shadow_root_id {
             stack.push(shadow_root_id);
         }
@@ -5011,6 +5096,8 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_owner_document).to_js_function(context.realm());
     let get_shadow_root =
         NativeFunction::from_fn_ptr(js_dom_get_shadow_root).to_js_function(context.realm());
+    let get_assigned_slot =
+        NativeFunction::from_fn_ptr(js_dom_get_assigned_slot).to_js_function(context.realm());
     let get_tag_name =
         NativeFunction::from_fn_ptr(js_dom_get_tag_name).to_js_function(context.realm());
     let get_node_name =
@@ -5444,6 +5531,12 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .accessor(
             js_string!("shadowRoot"),
             Some(get_shadow_root.clone()),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("assignedSlot"),
+            Some(get_assigned_slot.clone()),
             None,
             Attribute::all(),
         )
@@ -8834,11 +8927,7 @@ fn js_dom_set_attribute(
         let new_value = host.state.borrow().dom.get_attribute(node_id, &name);
         record_dom_attribute_mutation(context, node_id, &name, old_value.clone());
         custom_element_try_attribute_changed_callback(
-            context,
-            node_id,
-            &name,
-            old_value,
-            new_value,
+            context, node_id, &name, old_value, new_value,
         );
         flush_mutation_observers(context);
     }
@@ -8877,11 +8966,7 @@ fn js_dom_toggle_attribute(
         drop(state);
         record_dom_attribute_mutation(context, node_id, &name, old_value.clone());
         custom_element_try_attribute_changed_callback(
-            context,
-            node_id,
-            &name,
-            old_value,
-            new_value,
+            context, node_id, &name, old_value, new_value,
         );
         flush_mutation_observers(context);
         toggled
@@ -8908,13 +8993,7 @@ fn js_dom_set_property_attribute(
             .set_attribute(node_id, name, &value);
         let new_value = host.state.borrow().dom.get_attribute(node_id, name);
         record_dom_attribute_mutation(context, node_id, name, old_value.clone());
-        custom_element_try_attribute_changed_callback(
-            context,
-            node_id,
-            name,
-            old_value,
-            new_value,
-        );
+        custom_element_try_attribute_changed_callback(context, node_id, name, old_value, new_value);
         flush_mutation_observers(context);
     }
     Ok(JsValue::undefined())
@@ -8932,13 +9011,7 @@ fn js_dom_remove_attribute(
         let old_value = host.state.borrow().dom.get_attribute(node_id, &name);
         host.state.borrow_mut().dom.remove_attribute(node_id, &name);
         record_dom_attribute_mutation(context, node_id, &name, old_value.clone());
-        custom_element_try_attribute_changed_callback(
-            context,
-            node_id,
-            &name,
-            old_value,
-            None,
-        );
+        custom_element_try_attribute_changed_callback(context, node_id, &name, old_value, None);
         flush_mutation_observers(context);
     }
     Ok(JsValue::undefined())
@@ -9456,6 +9529,22 @@ fn js_dom_get_shadow_root(
         .unwrap_or_else(JsValue::null))
 }
 
+fn js_dom_get_assigned_slot(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    let assigned_slot_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.assigned_slot_for_node(node_id));
+    Ok(assigned_slot_id
+        .map(|slot_id| JsValue::from(build_dom_node_object(context, slot_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
 fn js_dom_attach_shadow(
     this: &JsValue,
     args: &[JsValue],
@@ -9478,7 +9567,7 @@ fn js_dom_attach_shadow(
         _ => {
             return Err(JsNativeError::typ()
                 .with_message("shadow root mode must be 'open' or 'closed'")
-                .into())
+                .into());
         }
     };
     let Some(host) = context.get_data::<JavaScriptHostData>() else {
@@ -9499,7 +9588,10 @@ fn js_dom_attach_shadow(
         state.dom.create_shadow_root(host_node_id, mode)
     };
     custom_element_upgrade_subtree(context, shadow_root_id);
-    Ok(JsValue::from(build_dom_node_object(context, shadow_root_id)))
+    Ok(JsValue::from(build_dom_node_object(
+        context,
+        shadow_root_id,
+    )))
 }
 
 fn js_dom_get_root_node(
@@ -9565,30 +9657,66 @@ fn js_dom_shadow_root_get_mode(
 
 fn js_dom_slot_assigned_nodes(
     this: &JsValue,
-    _: &[JsValue],
+    args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let Some(node_id) = this_node_id(this) else {
-        return Ok(JsValue::from(build_dom_node_list_object(context, Vec::new())));
+        return Ok(JsValue::from(build_dom_node_list_object(
+            context,
+            Vec::new(),
+        )));
     };
+    let flatten = args
+        .first()
+        .and_then(JsValue::as_object)
+        .and_then(|options| options.get(js_string!("flatten"), context).ok())
+        .map(|value| value.to_boolean())
+        .unwrap_or(false);
     let node_ids = context
         .get_data::<JavaScriptHostData>()
-        .map(|host| host.state.borrow().dom.slot_assigned_nodes(node_id))
+        .map(|host| {
+            if flatten {
+                host.state
+                    .borrow()
+                    .dom
+                    .slot_assigned_nodes_flattened(node_id)
+            } else {
+                host.state.borrow().dom.slot_assigned_nodes(node_id)
+            }
+        })
         .unwrap_or_default();
     Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
 }
 
 fn js_dom_slot_assigned_elements(
     this: &JsValue,
-    _: &[JsValue],
+    args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let Some(node_id) = this_node_id(this) else {
-        return Ok(JsValue::from(build_dom_node_list_object(context, Vec::new())));
+        return Ok(JsValue::from(build_dom_node_list_object(
+            context,
+            Vec::new(),
+        )));
     };
+    let flatten = args
+        .first()
+        .and_then(JsValue::as_object)
+        .and_then(|options| options.get(js_string!("flatten"), context).ok())
+        .map(|value| value.to_boolean())
+        .unwrap_or(false);
     let node_ids = context
         .get_data::<JavaScriptHostData>()
-        .map(|host| host.state.borrow().dom.slot_assigned_elements(node_id))
+        .map(|host| {
+            if flatten {
+                host.state
+                    .borrow()
+                    .dom
+                    .slot_assigned_elements_flattened(node_id)
+            } else {
+                host.state.borrow().dom.slot_assigned_elements(node_id)
+            }
+        })
         .unwrap_or_default();
     Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
 }
@@ -10942,11 +11070,7 @@ fn set_class_list_value(context: &mut Context, node_id: usize, value: &str) {
         drop(state);
         record_dom_attribute_mutation(context, node_id, "class", old_value.clone());
         custom_element_try_attribute_changed_callback(
-            context,
-            node_id,
-            "class",
-            old_value,
-            new_value,
+            context, node_id, "class", old_value, new_value,
         );
     }
 }
@@ -11138,6 +11262,26 @@ fn record_dom_mutation(
     let _ = context.eval(Source::from_bytes(script.as_str()));
 }
 
+fn dispatch_dom_event_on_node(
+    context: &mut Context,
+    node_id: usize,
+    event_type: &str,
+    bubbles: bool,
+    cancelable: bool,
+    composed: bool,
+) -> JsResult<bool> {
+    let request = DomEventRequest {
+        target_node_id: node_id,
+        event_type: event_type.to_string(),
+        bubbles,
+        cancelable,
+        composed,
+        ..Default::default()
+    };
+    let target = build_dom_node_object(context, node_id);
+    dispatch_dom_event_on_target(target, &request, context)
+}
+
 fn snapshot_dom_children(context: &mut Context, node_id: usize) -> Vec<usize> {
     context
         .get_data::<JavaScriptHostData>()
@@ -11230,6 +11374,7 @@ fn record_dom_child_list_mutation(
         &added,
         &removed,
     );
+    flush_slotchange_events(context);
 }
 
 fn record_dom_attribute_mutation(
@@ -11247,6 +11392,7 @@ fn record_dom_attribute_mutation(
         &[],
         &[],
     );
+    flush_slotchange_events(context);
 }
 
 fn record_dom_character_data_mutation(
@@ -11276,6 +11422,47 @@ fn flush_mutation_observers(context: &mut Context) {
             .unwrap_or(false);
         if !delivered {
             break;
+        }
+    }
+}
+
+fn flush_slotchange_events(context: &mut Context) {
+    for _ in 0..8 {
+        let pending = {
+            let Some(host) = context.get_data::<JavaScriptHostData>() else {
+                return;
+            };
+            let state = host.state.borrow();
+            let shadow_root_ids: Vec<usize> = state.dom.shadow_roots.keys().copied().collect();
+            let mut pending = Vec::new();
+            for shadow_root_id in shadow_root_ids {
+                for slot_node_id in state.dom.slot_nodes_in_shadow_root(shadow_root_id) {
+                    let assigned_nodes = state.dom.slot_assigned_nodes(slot_node_id);
+                    let changed = match state.dom.slot_assignment_snapshot(slot_node_id) {
+                        Some(previous) => previous != &assigned_nodes,
+                        None => !assigned_nodes.is_empty(),
+                    };
+                    if changed {
+                        pending.push((slot_node_id, assigned_nodes));
+                    }
+                }
+            }
+            pending
+        };
+
+        if pending.is_empty() {
+            break;
+        }
+
+        for (slot_node_id, assigned_nodes) in pending {
+            if let Some(host) = context.get_data::<JavaScriptHostData>() {
+                host.state
+                    .borrow_mut()
+                    .dom
+                    .set_slot_assignment_snapshot(slot_node_id, assigned_nodes);
+            }
+            let _ =
+                dispatch_dom_event_on_node(context, slot_node_id, "slotchange", true, false, false);
         }
     }
 }
@@ -11658,8 +11845,7 @@ fn dispatch_dom_event_on_target(
 
         for ancestor_id in ancestors.iter().copied() {
             let current_target = build_dom_node_object(context, ancestor_id);
-            let retargeted_target =
-                retarget_dom_event_target(target_node_id, ancestor_id, context);
+            let retargeted_target = retarget_dom_event_target(target_node_id, ancestor_id, context);
             let retargeted_target = build_dom_node_object(context, retargeted_target);
             set_event_target(&event, &retargeted_target, context)?;
             set_event_current_target(&event, &current_target, context)?;
@@ -12782,7 +12968,10 @@ mod tests {
             &Url::parse("https://example.com").unwrap(),
         );
 
-        assert_eq!(processed.title_override.as_deref(), Some("data-state|null|live"));
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("data-state|null|live")
+        );
     }
 
     #[test]
@@ -12795,6 +12984,25 @@ mod tests {
         assert_eq!(
             processed.title_override.as_deref(),
             Some("true|true|true|true|1|1")
+        );
+    }
+
+    #[test]
+    fn supports_assigned_slot_and_slotchange_events() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"host\"></div><script>var host = document.getElementById('host'); var shadow = host.attachShadow({ mode: 'open' }); shadow.innerHTML = '<slot name=\"lead\"></slot>'; var slot = shadow.querySelector('slot'); var light = document.createElement('span'); light.id = 'light'; light.setAttribute('slot', 'lead'); light.textContent = 'Light'; slot.addEventListener('slotchange', function () { document.body.setAttribute('data-slotchange', [String(slot.assignedNodes().length), String(slot.assignedElements().length), String(light.assignedSlot === slot)].join('|')); }); host.appendChild(light); document.body.setAttribute('data-assigned', String(light.assignedSlot === slot));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed.html.contains("data-slotchange=\"1|1|true\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-assigned=\"true\""),
+            "{}",
+            processed.html
         );
     }
 

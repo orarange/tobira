@@ -70,7 +70,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, `replaceChildren(...)`
     - `document.createDocumentFragment(...)` with fragment flattening on insertion
   - page event listeners now support capture + bubbling, plus `once` listeners and capture-sensitive `removeEventListener(...)`
-  - shadow DOM / WebComponents now have `customElements`, `attachShadow(...)`, `slot.assignedNodes(...)`, `slot.assignedElements(...)`, and shadow-boundary event retargeting with `Event.composedPath()`
+  - shadow DOM / WebComponents now have `customElements`, `attachShadow(...)`, `slot.assignedNodes(...)` / `slot.assignedElements(...)` with `flatten`, `assignedSlot`, `slotchange`, and shadow-boundary event retargeting with `Event.composedPath()`
   - guarded JavaScript execution through `boa_engine`
   - lightweight mutable DOM bridge with:
     - `querySelector(...)`, `querySelectorAll(...)`, `getElementById(...)`
@@ -437,6 +437,16 @@ Implemented all Phase 5 CSS roadmap items across 6 batches on `claude/phase5-css
 
 - Locked the north star in the roadmap and handoff notes: Chrome-level practicality so Google / YouTube / other complex sites can be browsed and operated without synthetic fallback pages.
 - Reaffirmed the working order as WebComponents / shadow DOM details, DOM mutation to reflow / hit-test synchronization, fetch / XHR / history / storage browser-grade behavior, and real-site stability checks.
+
+### 2026-05-25 - Codex (slotchange and assignedSlot)
+
+- Added `assignedSlot` on nodes and synchronous `slotchange` dispatch when slot distribution changes.
+- Kept the implementation local to the existing shadow DOM bridge so it stays aligned with the current WebComponents work.
+
+### 2026-05-25 - Codex (flattened slot assignment helpers)
+
+- Extended `slot.assignedNodes(...)` and `slot.assignedElements(...)` with a `flatten` option so nested slot trees can be traversed more like a real browser.
+- Updated the roadmap and README to reflect the broader WebComponents surface.
 
 ### 2026-05-17 - Codex (DOM traversal & manipulation APIs)
 
