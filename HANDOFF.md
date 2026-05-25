@@ -97,6 +97,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - script-driven `location.href` follow-up navigation
     - origin-scoped `localStorage`, `sessionStorage`, and `document.cookie`
   - browser chrome history controls for back/forward navigation across full document loads
+  - `location.reload()` and `history.go(0)` now request a reload of the current effective URL
+  - `history.scrollRestoration` supports `auto` and `manual` to control back/forward scroll replay
   - browser-level history entries now remember scroll positions and restore them on back/forward
   - same-document history entries now expose `history.state` and dispatch `popstate` / `hashchange`
   - same-document history back/forward now restores the stored scroll position for each entry
@@ -160,7 +162,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 - README capability list is partially stale; prefer this file for the latest snapshot.
 - JS support is still far from a full browser DOM / framework runtime.
-- GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics are in place, and `location.hash` plus `history.pushState(...)` / `replaceState(...)` now support soft navigation without a reload, while the rest of the option matrix and back/forward stack still need depth.
+  - GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics and `{ signal }` cancellation are in place, and `location.hash` plus `history.pushState(...)` / `replaceState(...)` now support soft navigation without a reload, while the rest of the option matrix and back/forward stack still need depth.
 - Native page input typing now syncs `value` into the JS DOM.
 - DOM traversal APIs now include `matches(...)`, `closest(...)`, `contains(...)`, and element sibling / child accessors for event delegation and framework-style code paths.
 - The richer `attributes` / `dataset` surface still needs deeper parity, even though `element.attributes` is now a live collection and `hasAttributes(...)` / `toggleAttribute(...)` now exist.

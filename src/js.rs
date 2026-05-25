@@ -201,8 +201,10 @@ struct JavaScriptState {
     document_url: Url,
     location_href: String,
     soft_navigation_target: Option<String>,
+    reload_requested: bool,
     history_entries: Vec<HistoryEntry>,
     history_index: usize,
+    scroll_restoration: ScrollRestorationMode,
     current_script: Option<usize>,
     network_request_count: usize,
     network_response_bytes: usize,
@@ -216,6 +218,12 @@ struct JavaScriptState {
     pending_custom_element_waiters:
         BTreeMap<String, Vec<boa_engine::builtins::promise::ResolvingFunctions>>,
     dom: DomState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollRestorationMode {
+    Auto,
+    Manual,
 }
 
 #[derive(Debug, Clone)]
@@ -393,6 +401,7 @@ struct EventListenerOptions {
     capture: bool,
     once: bool,
     passive: bool,
+    signal: Option<JsValue>,
 }
 
 #[derive(Debug, Clone)]
@@ -541,12 +550,14 @@ impl JavaScriptRuntime {
                 document_url: base_url.clone(),
                 location_href: base_url.to_string(),
                 soft_navigation_target: None,
+                reload_requested: false,
                 history_entries: vec![HistoryEntry {
                     href: base_url.to_string(),
                     scroll_y: 0,
                     state: JsValue::null(),
                 }],
                 history_index: 0,
+                scroll_restoration: ScrollRestorationMode::Auto,
                 current_script: None,
                 network_request_count: 0,
                 network_response_bytes: 0,
@@ -835,12 +846,16 @@ impl JavaScriptRuntime {
 
     fn navigation_target(&self) -> Option<String> {
         let host = self.context.get_data::<JavaScriptHostData>()?;
-        let state = host.state.borrow();
+        let mut state = host.state.borrow_mut();
+        if state.reload_requested {
+            state.reload_requested = false;
+            return Some(state.location_href.clone());
+        }
         if state.soft_navigation_target.is_some() {
             return None;
         }
         let href = state.location_href.clone();
-        let document_url = self.document_url().to_string();
+        let document_url = state.document_url.to_string();
         (href != document_url).then_some(href)
     }
 
@@ -2580,6 +2595,11 @@ fn install_browser_globals(context: &mut Context) {
             js_string!("replace"),
             1,
         )
+        .function(
+            NativeFunction::from_fn_ptr(js_location_reload),
+            js_string!("reload"),
+            0,
+        )
         .build();
     let document_id = context
         .get_data::<JavaScriptHostData>()
@@ -2877,6 +2897,12 @@ fn install_browser_globals(context: &mut Context) {
         NativeFunction::from_fn_ptr(js_history_length).to_js_function(context.realm());
     let history_state_getter =
         NativeFunction::from_fn_ptr(js_history_state).to_js_function(context.realm());
+    let history_scroll_restoration_getter =
+        NativeFunction::from_fn_ptr(js_history_get_scroll_restoration)
+            .to_js_function(context.realm());
+    let history_scroll_restoration_setter =
+        NativeFunction::from_fn_ptr(js_history_set_scroll_restoration)
+            .to_js_function(context.realm());
     let history = ObjectInitializer::new(context)
         .function(
             NativeFunction::from_fn_ptr(js_history_push_state),
@@ -2898,6 +2924,11 @@ fn install_browser_globals(context: &mut Context) {
             js_string!("forward"),
             0,
         )
+        .function(
+            NativeFunction::from_fn_ptr(js_history_go),
+            js_string!("go"),
+            1,
+        )
         .accessor(
             js_string!("length"),
             Some(history_length_getter),
@@ -2908,6 +2939,12 @@ fn install_browser_globals(context: &mut Context) {
             js_string!("state"),
             Some(history_state_getter),
             None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("scrollRestoration"),
+            Some(history_scroll_restoration_getter),
+            Some(history_scroll_restoration_setter),
             Attribute::all(),
         )
         .build();
@@ -3634,12 +3671,16 @@ fn build_event_listener_record(
     callback: JsValue,
     options: &EventListenerOptions,
 ) -> boa_engine::object::JsObject {
-    ObjectInitializer::new(context)
+    let mut binding = ObjectInitializer::new(context);
+    let mut object = binding
         .property(js_string!("callback"), callback, Attribute::all())
         .property(js_string!("capture"), options.capture, Attribute::all())
         .property(js_string!("once"), options.once, Attribute::all())
-        .property(js_string!("passive"), options.passive, Attribute::all())
-        .build()
+        .property(js_string!("passive"), options.passive, Attribute::all());
+    if let Some(signal) = &options.signal {
+        object = object.property(js_string!("signal"), signal.clone(), Attribute::all());
+    }
+    object.build()
 }
 
 fn dom_node_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObject> {
@@ -4395,10 +4436,15 @@ fn event_listener_options_from_value(
         let capture = object.get(js_string!("capture"), context)?.to_boolean();
         let once = object.get(js_string!("once"), context)?.to_boolean();
         let passive = object.get(js_string!("passive"), context)?.to_boolean();
+        let signal = object
+            .get(js_string!("signal"), context)
+            .ok()
+            .filter(|value| !value.is_undefined() && !value.is_null());
         return Ok(EventListenerOptions {
             capture,
             once,
             passive,
+            signal,
         });
     }
 
@@ -4406,6 +4452,7 @@ fn event_listener_options_from_value(
         capture: value.to_boolean(),
         once: false,
         passive: false,
+        signal: None,
     })
 }
 
@@ -4542,10 +4589,31 @@ fn event_listener_entries(
                 .get(js_string!("passive"), context)
                 .unwrap_or_else(|_| JsValue::undefined())
                 .to_boolean(),
+            signal: record
+                .get(js_string!("signal"), context)
+                .ok()
+                .filter(|value| !value.is_undefined() && !value.is_null()),
         };
+        if event_listener_signal_aborted(&options.signal, context) {
+            continue;
+        }
         entries.push(EventListenerEntry { callback, options });
     }
     Ok(entries)
+}
+
+fn event_listener_signal_aborted(signal: &Option<JsValue>, context: &mut Context) -> bool {
+    let Some(signal) = signal else {
+        return false;
+    };
+    let Some(object) = signal.as_object() else {
+        return false;
+    };
+    object
+        .get(js_string!("aborted"), context)
+        .ok()
+        .map(|value| value.to_boolean())
+        .unwrap_or(false)
 }
 
 fn build_dom_event_object(
@@ -4757,6 +4825,14 @@ fn scroll_offset_from_value(value: &JsValue, context: &mut Context) -> JsResult<
         return Ok(0);
     }
     Ok(number.round() as i64)
+}
+
+fn history_delta_from_value(value: &JsValue, context: &mut Context) -> JsResult<isize> {
+    let number = value.to_number(context)?;
+    if !number.is_finite() {
+        return Ok(0);
+    }
+    Ok(number.trunc() as isize)
 }
 
 fn scroll_offset_from_args(args: &[JsValue], context: &mut Context) -> JsResult<i64> {
@@ -6613,6 +6689,13 @@ fn js_location_replace(_: &JsValue, args: &[JsValue], context: &mut Context) -> 
     Ok(JsValue::undefined())
 }
 
+fn js_location_reload(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state.borrow_mut().reload_requested = true;
+    }
+    Ok(JsValue::undefined())
+}
+
 fn js_history_push_state(
     _: &JsValue,
     args: &[JsValue],
@@ -6669,6 +6752,28 @@ fn js_history_forward(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsRe
     Ok(JsValue::undefined())
 }
 
+fn js_history_go(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let delta = args
+        .first()
+        .map(|value| history_delta_from_value(value, context))
+        .transpose()?
+        .unwrap_or(0);
+    if delta == 0 {
+        if let Some(host) = context.get_data::<JavaScriptHostData>() {
+            host.state.borrow_mut().reload_requested = true;
+        }
+        return Ok(JsValue::undefined());
+    }
+
+    let previous_href = current_location_url(context).map(|url| url.to_string());
+    if let Some(target) = navigate_history(context, delta) {
+        apply_soft_navigation_entry(&target, context);
+        dispatch_history_popstate_event(context, target.state.clone());
+        dispatch_hashchange_if_needed(previous_href.as_deref(), &target.href, context);
+    }
+    Ok(JsValue::undefined())
+}
+
 fn js_history_length(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let length = context
         .get_data::<JavaScriptHostData>()
@@ -6681,6 +6786,41 @@ fn js_history_state(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResu
     Ok(current_history_entry_state(context).unwrap_or_else(JsValue::null))
 }
 
+fn js_history_get_scroll_restoration(
+    _: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let value = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| match host.state.borrow().scroll_restoration {
+            ScrollRestorationMode::Auto => "auto",
+            ScrollRestorationMode::Manual => "manual",
+        })
+        .unwrap_or("auto");
+    Ok(js_string!(value).into())
+}
+
+fn js_history_set_scroll_restoration(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let value = args.first().cloned().unwrap_or_else(JsValue::undefined);
+    let mode = match js_value_to_string(&value, context)?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "manual" => ScrollRestorationMode::Manual,
+        _ => ScrollRestorationMode::Auto,
+    };
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state.borrow_mut().scroll_restoration = mode;
+    }
+    Ok(JsValue::undefined())
+}
+
 fn record_soft_navigation_href(
     href: &str,
     replace_current: bool,
@@ -6691,6 +6831,7 @@ fn record_soft_navigation_href(
     let previous_href = current_location_url(context).map(|url| url.to_string());
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
+        state.reload_requested = false;
         let current_scroll_y = state.scroll_y;
         let entry_state = state_override.unwrap_or_else(|| {
             state
@@ -6779,6 +6920,7 @@ fn navigate_location_href(href: &str, replace_current: bool, context: &mut Conte
         let mut state = host.state.borrow_mut();
         state.location_href = resolved;
         state.soft_navigation_target = None;
+        state.reload_requested = false;
     }
 }
 
@@ -6799,6 +6941,7 @@ fn apply_soft_navigation_href_resolved(resolved: &str, context: &mut Context) {
             state.document_url = url;
         }
         state.soft_navigation_target = Some(resolved.to_string());
+        state.reload_requested = false;
     }
 }
 
@@ -6806,11 +6949,14 @@ fn apply_soft_navigation_entry(entry: &HistoryEntry, context: &mut Context) {
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         let mut state = host.state.borrow_mut();
         state.location_href = entry.href.clone();
-        state.scroll_y = entry.scroll_y;
+        if state.scroll_restoration == ScrollRestorationMode::Auto {
+            state.scroll_y = entry.scroll_y;
+        }
         if let Ok(url) = Url::parse(&entry.href) {
             state.document_url = url;
         }
         state.soft_navigation_target = Some(entry.href.clone());
+        state.reload_requested = false;
     }
 }
 
@@ -12171,6 +12317,53 @@ mod tests {
     }
 
     #[test]
+    fn history_go_zero_requests_reload_of_current_page() {
+        let processed = process_document_scripts(
+            "<script>history.pushState({}, '', '/one'); history.go(0); document.title = location.href + '|' + String(history.scrollRestoration);</script>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.navigation_target.as_deref(),
+            Some("https://example.com/one")
+        );
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("https://example.com/one|auto")
+        );
+    }
+
+    #[test]
+    fn location_reload_requests_navigation_to_current_location() {
+        let processed = process_document_scripts(
+            "<script>history.pushState({}, '', '/one'); location.reload(); document.title = location.href;</script>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.navigation_target.as_deref(),
+            Some("https://example.com/one")
+        );
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("https://example.com/one")
+        );
+    }
+
+    #[test]
+    fn history_scroll_restoration_manual_preserves_current_scroll_on_back() {
+        let processed = process_document_scripts(
+            "<script>history.scrollRestoration = 'manual'; window.scrollTo(0, 120); history.pushState({}, '', '/one'); window.scrollTo(0, 240); history.back(); document.title = location.href + '|' + String(window.scrollY) + '|' + history.scrollRestoration;</script>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("https://example.com/start|240|manual")
+        );
+    }
+
+    #[test]
     fn resolves_script_requests_against_document_url_after_location_changes() {
         let base_url = Url::parse("https://example.com/start").unwrap();
         let mut runtime = JavaScriptRuntime::new(&base_url, "<html><body></body></html>");
@@ -12833,6 +13026,16 @@ mod tests {
             "{}",
             processed.html
         );
+    }
+
+    #[test]
+    fn supports_event_listener_abort_signals() {
+        let processed = process_document_scripts(
+            "<html><body><button id=\"btn\">Go</button><script>var controller = new AbortController(); var btn = document.getElementById('btn'); var count = 0; btn.addEventListener('click', function () { count += 1; document.title = String(count); }, { signal: controller.signal }); controller.abort(); btn.dispatchEvent(new MouseEvent('click', { bubbles: true })); document.title = String(count);</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(processed.title_override.as_deref(), Some("0"));
     }
 
     #[test]

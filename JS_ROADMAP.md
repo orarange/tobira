@@ -40,6 +40,8 @@ Already working:
 - `location.hash`, `history.pushState(...)`, `replaceState(...)`, `back()`, and `forward()` for same-document navigation
 - `history.state`, `popstate`, and `hashchange` for same-document session history changes
 - same-document history back/forward now restores stored scroll positions
+- `history.go(0)` and `location.reload()` now trigger a reload of the current effective URL
+- `history.scrollRestoration` supports `auto` and `manual`
 - browser-level back/forward navigation across document loads
 - browser-level history entries now also remember scroll positions across document loads
 - generic YouTube home / non-watch pages use a synthetic fast path instead of running the heavy app shell through the JS worker
@@ -109,6 +111,7 @@ Tasks:
 - queued host-task plumbing now defers `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)` callbacks instead of running them synchronously
 - submit and link clicks can be canceled with `preventDefault()`
 - browser chrome back/forward navigation is now in place
+- listener options now cover capture / once / passive plus `{ signal }` cancellation for common modern patterns
 
 Still to finish in this phase:
 
@@ -154,6 +157,7 @@ Tasks:
 - `localStorage` and `sessionStorage` are now in place
 - browser history stack and back/forward UI are now in place for full document loads
 - same-document scroll restoration is now in place, and browser-level history now restores scroll too; finish replay polish for richer history syncing
+- `history.go(0)` / `location.reload()` are wired, but replay polish still needs to match full browser behavior for reload timing and scroll replay
 - keep `location` updates and history state in sync
 - extend the current soft-navigation handling so it cooperates with browser history instead of only updating the current URL
 - support hash navigation and same-document scroll targets
@@ -317,6 +321,7 @@ Exit: DOM-heavy single-page init scripts can build their UI tree without crashin
 - cookie read/write with basic `Set-Cookie` header support
 - `document.cookie` read and write
 - history state kept on full page loads (not just soft navigation)
+- reload requests through `history.go(0)` / `location.reload()` are part of the session-history contract
 
 Exit: login-ish flows and session-dependent pages retain state across navigations.
 
