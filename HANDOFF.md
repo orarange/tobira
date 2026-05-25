@@ -28,6 +28,9 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Verification status:
 - `cargo test`: `200` passing tests on `2026-05-25`
 - `cargo build`: success on `2026-05-25`
+- North star / current goal:
+  - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
+  - priority order: WebComponents / shadow DOM details -> DOM mutation to reflow / hit-test sync -> fetch/XHR / history / storage browser-grade behavior -> real-site stability checks
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -429,6 +432,11 @@ Implemented all Phase 5 CSS roadmap items across 6 batches on `claude/phase5-css
 - Added browser-level history tracking for full document loads.
 - Added back/forward chrome buttons and `Alt+Left` / `Alt+Right` shortcuts.
 - Kept same-document soft navigation in sync with the browser history entry for the current page.
+
+### 2026-05-25 - Codex (goal lock)
+
+- Locked the north star in the roadmap and handoff notes: Chrome-level practicality so Google / YouTube / other complex sites can be browsed and operated without synthetic fallback pages.
+- Reaffirmed the working order as WebComponents / shadow DOM details, DOM mutation to reflow / hit-test synchronization, fetch / XHR / history / storage browser-grade behavior, and real-site stability checks.
 
 ### 2026-05-17 - Codex (DOM traversal & manipulation APIs)
 

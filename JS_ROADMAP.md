@@ -2,6 +2,11 @@
 
 This document is the living roadmap for making Tobira's JavaScript support "browser-grade" instead of "lightweight and useful".
 
+## North Star
+
+Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする。
+優先順位は WebComponents/shadow DOM の細部、DOM mutation→reflow/hit-test の同期、fetch/XHR/history/storage の browser-grade 化、実サイトでの安定性確認。
+
 ## What "Perfect" Means Here
 
 For this project, "perfect JS" does not mean implementing every single Web Platform API.

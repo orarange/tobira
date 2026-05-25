@@ -5,6 +5,11 @@ Tobira is a from-scratch browser experiment built without Chromium, WebView, or 
 For the most current implementation snapshot and handoff notes, see [HANDOFF.md](HANDOFF.md).
 When work switches between Codex, Claude, Gemini, Copilot, or a fresh session, update `HANDOFF.md` so the next person can resume quickly.
 
+Project north star:
+
+- Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
+- priority order: WebComponents / shadow DOM details, DOM mutation to reflow / hit-test synchronization, fetch / XHR / history / storage browser-grade behavior, then real-site stability checks
+
 Current capabilities:
 
 - Hand-rolled `http://` and `https://` client
