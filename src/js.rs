@@ -40,6 +40,7 @@ pub struct ProcessedScriptHtml {
     pub navigation_target: Option<String>,
     pub soft_navigation_target: Option<String>,
     pub scroll_y: u32,
+    pub input_selection_states: BTreeMap<usize, TextSelectionState>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -72,6 +73,21 @@ pub struct DomEventDispatchResult {
     pub default_prevented: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextSelectionDirection {
+    #[default]
+    None,
+    Forward,
+    Backward,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextSelectionState {
+    pub start: usize,
+    pub end: usize,
+    pub direction: TextSelectionDirection,
+}
+
 #[derive(Debug, Clone)]
 pub struct JavaScriptSession {
     command_tx: Sender<JavaScriptSessionCommand>,
@@ -100,6 +116,10 @@ enum JavaScriptSessionCommand {
         node_id: usize,
         name: String,
         value: String,
+    },
+    SetInputSelection {
+        node_id: usize,
+        selection: TextSelectionState,
     },
     Snapshot {
         response_tx: Sender<ProcessedScriptHtml>,
@@ -147,6 +167,16 @@ impl JavaScriptSession {
                 name: name.to_string(),
                 value: value.to_string(),
             })
+            .is_ok()
+    }
+
+    pub(crate) fn set_input_selection(
+        &self,
+        node_id: usize,
+        selection: TextSelectionState,
+    ) -> bool {
+        self.command_tx
+            .send(JavaScriptSessionCommand::SetInputSelection { node_id, selection })
             .is_ok()
     }
 
@@ -212,6 +242,7 @@ struct JavaScriptState {
     viewport_height: u32,
     scroll_y: u32,
     active_element_node_id: Option<usize>,
+    input_selection_states: BTreeMap<usize, TextSelectionState>,
     pending_tasks: VecDeque<PendingTask>,
     next_task_handle: usize,
     custom_elements: BTreeMap<String, CustomElementDefinition>,
@@ -479,6 +510,9 @@ pub fn start_document_script_session(
                         } => {
                             runtime.set_dom_attribute(node_id, &name, &value);
                         }
+                        JavaScriptSessionCommand::SetInputSelection { node_id, selection } => {
+                            runtime.set_input_selection(node_id, selection);
+                        }
                         JavaScriptSessionCommand::Snapshot { response_tx } => {
                             let _ = response_tx.send(runtime.snapshot());
                         }
@@ -517,6 +551,7 @@ fn process_document_scripts_error(html: String, message: String) -> ProcessedScr
         navigation_target: None,
         soft_navigation_target: None,
         scroll_y: 0,
+        input_selection_states: BTreeMap::new(),
     }
 }
 
@@ -565,6 +600,7 @@ impl JavaScriptRuntime {
                 viewport_height: DEFAULT_VIEWPORT_HEIGHT,
                 scroll_y: 0,
                 active_element_node_id: None,
+                input_selection_states: BTreeMap::new(),
                 pending_tasks: VecDeque::new(),
                 next_task_handle: 1,
                 custom_elements: BTreeMap::new(),
@@ -715,6 +751,11 @@ impl JavaScriptRuntime {
             navigation_target: self.navigation_target(),
             soft_navigation_target: self.take_soft_navigation_target(),
             scroll_y: scroll_position(&mut self.context),
+            input_selection_states: self
+                .context
+                .get_data::<JavaScriptHostData>()
+                .map(|host| host.state.borrow().input_selection_states.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -748,7 +789,14 @@ impl JavaScriptRuntime {
                 .set_attribute(node_id, name, value);
             record_dom_attribute_mutation(&mut self.context, node_id, name, old_value);
         }
+        if name == "value" {
+            clamp_current_text_selection_to_value(&mut self.context, node_id);
+        }
         flush_mutation_observers(&mut self.context);
+    }
+
+    fn set_input_selection(&mut self, node_id: usize, selection: TextSelectionState) {
+        set_current_text_selection_state(&mut self.context, node_id, selection);
     }
 
     fn dispatch_dom_event(&mut self, request: DomEventRequest) -> DomEventDispatchResult {
@@ -5152,6 +5200,18 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_dataset).to_js_function(context.realm());
     let get_value = NativeFunction::from_fn_ptr(js_dom_get_value).to_js_function(context.realm());
     let set_value = NativeFunction::from_fn_ptr(js_dom_set_value).to_js_function(context.realm());
+    let get_selection_start =
+        NativeFunction::from_fn_ptr(js_dom_get_selection_start).to_js_function(context.realm());
+    let set_selection_start =
+        NativeFunction::from_fn_ptr(js_dom_set_selection_start).to_js_function(context.realm());
+    let get_selection_end =
+        NativeFunction::from_fn_ptr(js_dom_get_selection_end).to_js_function(context.realm());
+    let set_selection_end =
+        NativeFunction::from_fn_ptr(js_dom_set_selection_end).to_js_function(context.realm());
+    let get_selection_direction =
+        NativeFunction::from_fn_ptr(js_dom_get_selection_direction).to_js_function(context.realm());
+    let set_selection_direction =
+        NativeFunction::from_fn_ptr(js_dom_set_selection_direction).to_js_function(context.realm());
     let get_src = NativeFunction::from_fn_ptr(js_dom_get_src).to_js_function(context.realm());
     let set_src = NativeFunction::from_fn_ptr(js_dom_set_src).to_js_function(context.realm());
     let get_href = NativeFunction::from_fn_ptr(js_dom_get_href).to_js_function(context.realm());
@@ -5495,6 +5555,34 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             Some(get_value),
             Some(set_value),
             Attribute::all(),
+        )
+        .accessor(
+            js_string!("selectionStart"),
+            Some(get_selection_start),
+            Some(set_selection_start),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("selectionEnd"),
+            Some(get_selection_end),
+            Some(set_selection_end),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("selectionDirection"),
+            Some(get_selection_direction),
+            Some(set_selection_direction),
+            Attribute::all(),
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_set_selection_range),
+            js_string!("setSelectionRange"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_select),
+            js_string!("select"),
+            0,
         )
         .accessor(
             js_string!("src"),
@@ -9129,15 +9217,22 @@ fn js_dom_set_property_attribute(
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let value = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
-    if let Some(node_id) = this_node_id(this)
-        && let Some(host) = context.get_data::<JavaScriptHostData>()
-    {
-        let old_value = host.state.borrow().dom.get_attribute(node_id, name);
-        host.state
-            .borrow_mut()
-            .dom
-            .set_attribute(node_id, name, &value);
-        let new_value = host.state.borrow().dom.get_attribute(node_id, name);
+    if let Some(node_id) = this_node_id(this) {
+        let old_value = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.get_attribute(node_id, name));
+        if let Some(host) = context.get_data::<JavaScriptHostData>() {
+            host.state
+                .borrow_mut()
+                .dom
+                .set_attribute(node_id, name, &value);
+        }
+        if name == "value" {
+            clamp_current_text_selection_to_value(context, node_id);
+        }
+        let new_value = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.get_attribute(node_id, name));
         record_dom_attribute_mutation(context, node_id, name, old_value.clone());
         custom_element_try_attribute_changed_callback(context, node_id, name, old_value, new_value);
         flush_mutation_observers(context);
@@ -9513,11 +9608,374 @@ fn js_dom_get_dataset(this: &JsValue, _: &[JsValue], context: &mut Context) -> J
 fn js_dom_get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     // The DOM attribute stays in step with GUI edits, so `value` reflects the
     // current live control state for both script-driven and native input paths.
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(js_string!("")));
+    };
+    if is_textarea_node(context, node_id) {
+        return js_dom_get_text_content(this, &[], context);
+    }
     js_dom_get_property_attribute(this, "value", context)
 }
 
 fn js_dom_set_value(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return js_dom_set_property_attribute(this, args, "value", context);
+    };
+    if is_textarea_node(context, node_id) {
+        let result = js_dom_set_text_content(this, args, context)?;
+        clamp_current_text_selection_to_value(context, node_id);
+        return Ok(result);
+    }
     js_dom_set_property_attribute(this, args, "value", context)
+}
+
+fn js_dom_get_selection_start(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    let Some(selection) = current_text_selection_state(context, node_id) else {
+        return Ok(JsValue::null());
+    };
+    Ok(JsValue::new(selection.start as i32))
+}
+
+fn js_dom_set_selection_start(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if !text_input_supports_selection(context, node_id) {
+        return Err(JsNativeError::typ()
+            .with_message("selectionStart is only supported on text inputs and textareas")
+            .into());
+    }
+    let mut selection = current_text_selection_state(context, node_id).unwrap_or_default();
+    selection.start = args
+        .first()
+        .unwrap_or(&JsValue::undefined())
+        .to_number(context)?
+        .max(0.0) as usize;
+    set_current_text_selection_state(context, node_id, selection);
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_get_selection_end(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    let Some(selection) = current_text_selection_state(context, node_id) else {
+        return Ok(JsValue::null());
+    };
+    Ok(JsValue::new(selection.end as i32))
+}
+
+fn js_dom_set_selection_end(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if !text_input_supports_selection(context, node_id) {
+        return Err(JsNativeError::typ()
+            .with_message("selectionEnd is only supported on text inputs and textareas")
+            .into());
+    }
+    let mut selection = current_text_selection_state(context, node_id).unwrap_or_default();
+    selection.end = args
+        .first()
+        .unwrap_or(&JsValue::undefined())
+        .to_number(context)?
+        .max(0.0) as usize;
+    set_current_text_selection_state(context, node_id, selection);
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_get_selection_direction(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    let Some(selection) = current_text_selection_state(context, node_id) else {
+        return Ok(JsValue::null());
+    };
+    let value = match selection.direction {
+        TextSelectionDirection::None => "none",
+        TextSelectionDirection::Forward => "forward",
+        TextSelectionDirection::Backward => "backward",
+    };
+    Ok(JsValue::from(js_string!(value)))
+}
+
+fn js_dom_set_selection_direction(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if !text_input_supports_selection(context, node_id) {
+        return Err(JsNativeError::typ()
+            .with_message("selectionDirection is only supported on text inputs and textareas")
+            .into());
+    }
+    let direction = match args.first() {
+        None => TextSelectionDirection::None,
+        Some(value) if value.is_undefined() || value.is_null() => TextSelectionDirection::None,
+        Some(value) => {
+            let direction_text = js_value_to_string(value, context)?;
+            selection_direction_from_string(&direction_text).ok_or_else(|| {
+                JsNativeError::typ()
+                    .with_message("selectionDirection must be 'none', 'forward', or 'backward'")
+            })?
+        }
+    };
+    let mut selection = current_text_selection_state(context, node_id).unwrap_or_default();
+    selection.direction = direction;
+    set_current_text_selection_state(context, node_id, selection);
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_set_selection_range(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if !text_input_supports_selection(context, node_id) {
+        return Err(JsNativeError::typ()
+            .with_message("setSelectionRange is only supported on text inputs and textareas")
+            .into());
+    }
+    let (start, end, direction) = selection_range_from_args(args, context)?;
+    set_current_text_selection_state(
+        context,
+        node_id,
+        TextSelectionState {
+            start,
+            end,
+            direction,
+        },
+    );
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_select(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if !text_input_supports_selection(context, node_id) {
+        return Err(JsNativeError::typ()
+            .with_message("select is only supported on text inputs and textareas")
+            .into());
+    }
+    let length = text_input_value_char_len(context, node_id);
+    set_current_text_selection_state(
+        context,
+        node_id,
+        TextSelectionState {
+            start: 0,
+            end: length,
+            direction: TextSelectionDirection::None,
+        },
+    );
+    Ok(JsValue::undefined())
+}
+
+fn text_input_supports_selection(context: &mut Context, node_id: usize) -> bool {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            let state = host.state.borrow();
+            let element = state.dom.element(node_id)?;
+            let tag = element.tag_name.as_str();
+            if tag.eq_ignore_ascii_case("textarea") {
+                return Some(true);
+            }
+            if !tag.eq_ignore_ascii_case("input") {
+                return Some(false);
+            }
+            let input_type = element
+                .attributes
+                .get("type")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "text".to_string());
+            Some(matches!(
+                input_type.as_str(),
+                "text" | "search" | "url" | "tel" | "email" | "password" | "number"
+            ))
+        })
+        .unwrap_or(false)
+}
+
+fn is_textarea_node(context: &mut Context, node_id: usize) -> bool {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            let state = host.state.borrow();
+            let element = state.dom.element(node_id)?;
+            Some(element.tag_name.eq_ignore_ascii_case("textarea"))
+        })
+        .unwrap_or(false)
+}
+
+fn text_input_value_string(context: &mut Context, node_id: usize) -> Option<String> {
+    context.get_data::<JavaScriptHostData>().and_then(|host| {
+        let state = host.state.borrow();
+        let element = state.dom.element(node_id)?;
+        if element.tag_name.eq_ignore_ascii_case("textarea") {
+            return Some(state.dom.text_content(node_id));
+        }
+        if element.tag_name.eq_ignore_ascii_case("input") {
+            return Some(
+                state
+                    .dom
+                    .get_attribute(node_id, "value")
+                    .unwrap_or_default(),
+            );
+        }
+        None
+    })
+}
+
+fn text_input_value_char_len(context: &mut Context, node_id: usize) -> usize {
+    text_input_value_string(context, node_id)
+        .map(|value| value.chars().count())
+        .unwrap_or(0)
+}
+
+fn normalize_text_selection_state(
+    context: &mut Context,
+    node_id: usize,
+    mut selection: TextSelectionState,
+) -> TextSelectionState {
+    let value_len = text_input_value_char_len(context, node_id);
+    selection.start = selection.start.min(value_len);
+    selection.end = selection.end.min(value_len);
+    if selection.start > selection.end {
+        std::mem::swap(&mut selection.start, &mut selection.end);
+    }
+    if selection.start == selection.end {
+        selection.direction = TextSelectionDirection::None;
+    }
+    selection
+}
+
+fn current_text_selection_state(
+    context: &mut Context,
+    node_id: usize,
+) -> Option<TextSelectionState> {
+    if !text_input_supports_selection(context, node_id) {
+        return None;
+    }
+    let selection = context.get_data::<JavaScriptHostData>().map(|host| {
+        let state = host.state.borrow();
+        state
+            .input_selection_states
+            .get(&node_id)
+            .copied()
+            .unwrap_or_default()
+    })?;
+    Some(normalize_text_selection_state(context, node_id, selection))
+}
+
+fn set_current_text_selection_state(
+    context: &mut Context,
+    node_id: usize,
+    selection: TextSelectionState,
+) {
+    if !text_input_supports_selection(context, node_id) {
+        return;
+    }
+    let selection = normalize_text_selection_state(context, node_id, selection);
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state
+            .borrow_mut()
+            .input_selection_states
+            .insert(node_id, selection);
+    }
+}
+
+fn clamp_current_text_selection_to_value(context: &mut Context, node_id: usize) {
+    if !text_input_supports_selection(context, node_id) {
+        return;
+    }
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return;
+    };
+    let mut state = host.state.borrow_mut();
+    let value_len = state
+        .dom
+        .get_attribute(node_id, "value")
+        .unwrap_or_default()
+        .chars()
+        .count();
+    let Some(selection) = state.input_selection_states.get_mut(&node_id) else {
+        return;
+    };
+    selection.start = selection.start.min(value_len);
+    selection.end = selection.end.min(value_len);
+    if selection.start > selection.end {
+        std::mem::swap(&mut selection.start, &mut selection.end);
+    }
+    if selection.start == selection.end {
+        selection.direction = TextSelectionDirection::None;
+    }
+}
+
+fn selection_direction_from_string(value: &str) -> Option<TextSelectionDirection> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Some(TextSelectionDirection::None),
+        "forward" => Some(TextSelectionDirection::Forward),
+        "backward" => Some(TextSelectionDirection::Backward),
+        _ => None,
+    }
+}
+
+fn selection_range_from_args(
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<(usize, usize, TextSelectionDirection)> {
+    let start = args
+        .first()
+        .unwrap_or(&JsValue::undefined())
+        .to_number(context)?
+        .max(0.0) as usize;
+    let end = args
+        .get(1)
+        .unwrap_or(&JsValue::undefined())
+        .to_number(context)?
+        .max(0.0) as usize;
+    let direction = match args.get(2) {
+        None => TextSelectionDirection::None,
+        Some(value) if value.is_undefined() || value.is_null() => TextSelectionDirection::None,
+        Some(value) => {
+            let direction_text = js_value_to_string(value, context)?;
+            selection_direction_from_string(&direction_text).ok_or_else(|| {
+                JsNativeError::typ()
+                    .with_message("selectionDirection must be 'none', 'forward', or 'backward'")
+            })?
+        }
+    };
+    Ok((start, end, direction))
 }
 
 fn js_dom_get_src(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -12967,6 +13425,39 @@ mod tests {
             processed.html.contains(
                 "data-toggle=\"true|false|true|true|uno|1|uno|uno|uno|true|false|true|false\""
             ),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_text_input_selection_accessors_and_select() {
+        let processed = process_document_scripts(
+            "<html><body><input id=\"input\" value=\"hello\"><textarea id=\"area\">world</textarea><script>var input = document.getElementById('input'); var area = document.getElementById('area'); input.setSelectionRange(1, 4, 'backward'); area.select(); document.body.setAttribute('data-input', [input.selectionStart, input.selectionEnd, input.selectionDirection].join('|')); document.body.setAttribute('data-area', [area.selectionStart, area.selectionEnd, area.selectionDirection].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed.html.contains("data-input=\"1|4|backward\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-area=\"0|5|none\""),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn rejects_selection_accessors_for_unsupported_controls() {
+        let processed = process_document_scripts(
+            "<html><body><button id=\"btn\">Go</button><script>var btn = document.getElementById('btn'); var start = btn.selectionStart; var threw = false; try { btn.setSelectionRange(1, 2); } catch (error) { threw = true; } document.body.setAttribute('data-unsupported', [String(start === null), String(threw)].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed.html.contains("data-unsupported=\"true|true\""),
             "{}",
             processed.html
         );

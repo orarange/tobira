@@ -22,7 +22,9 @@ use crate::css::{
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
 use crate::image::{DecodedImage, ImageStore};
-use crate::js::{DomEventDispatchResult, DomEventRequest};
+use crate::js::{
+    DomEventDispatchResult, DomEventRequest, TextSelectionDirection, TextSelectionState,
+};
 use crate::layout::{
     DrawCommand, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument, TextCommand,
     layout_styled_document,
@@ -1197,6 +1199,7 @@ impl BrowserApp {
                             .unwrap_or(false)
                     };
                     if changed {
+                        self.sync_focused_page_input_selection();
                         self.sync_input_method();
                         self.request_redraw();
                     }
@@ -1213,6 +1216,7 @@ impl BrowserApp {
                             .unwrap_or(false)
                     };
                     if changed {
+                        self.sync_focused_page_input_selection();
                         self.sync_input_method();
                         self.request_redraw();
                     }
@@ -1224,6 +1228,7 @@ impl BrowserApp {
                         .map(|editor| editor.move_home(shift))
                         .unwrap_or(false)
                     {
+                        self.sync_focused_page_input_selection();
                         self.sync_input_method();
                         self.request_redraw();
                     }
@@ -1235,6 +1240,7 @@ impl BrowserApp {
                         .map(|editor| editor.move_end(shift))
                         .unwrap_or(false)
                     {
+                        self.sync_focused_page_input_selection();
                         self.sync_input_method();
                         self.request_redraw();
                     }
@@ -1246,6 +1252,7 @@ impl BrowserApp {
                         .map(AddressBarState::select_all)
                         .unwrap_or(false)
                     {
+                        self.sync_focused_page_input_selection();
                         self.sync_input_method();
                         self.request_redraw();
                     }
@@ -1460,6 +1467,15 @@ impl BrowserApp {
         };
 
         self.document.set_dom_attribute(node_id, "value", &value);
+        self.sync_focused_page_input_selection();
+    }
+
+    fn sync_focused_page_input_selection(&mut self) {
+        let Some(focused) = self.focused_page_input.as_ref() else {
+            return;
+        };
+        self.document
+            .set_input_selection(focused.node_id, focused.editor.selection_state());
     }
 
     fn refresh_focused_page_input_from_document(&mut self) {
@@ -1474,17 +1490,20 @@ impl BrowserApp {
             self.focused_page_input = None;
             return;
         };
-        if let Some(focused) = self.focused_page_input.as_mut()
-            && control.value != focused.initial_value
-            && focused.editor.text() != control.value
-        {
-            let cursor = focused
-                .editor
-                .cursor_chars
-                .min(control.value.chars().count());
-            focused.editor.set_text(control.value.clone());
-            focused.editor.focus_at(cursor);
-            focused.initial_value = control.value.clone();
+        let selection_node_id = self
+            .focused_page_input
+            .as_ref()
+            .and_then(|focused| focused.node_id.or(control.node_id));
+        let document_selection = self.document.input_selection_state(selection_node_id);
+        if let Some(focused) = self.focused_page_input.as_mut() {
+            let selection = document_selection.unwrap_or_else(|| focused.editor.selection_state());
+            if control.value != focused.initial_value || focused.editor.text() != control.value {
+                focused.editor.set_text(control.value.clone());
+                focused.editor.set_selection_state(selection);
+                focused.initial_value = control.value.clone();
+            } else {
+                focused.editor.set_selection_state(selection);
+            }
         }
         self.sync_page_input_value();
     }
@@ -2184,6 +2203,20 @@ impl DocumentView {
         }
     }
 
+    fn set_input_selection(&mut self, node_id: Option<usize>, selection: TextSelectionState) {
+        if let DocumentContent::Loaded(page) = &mut self.content {
+            page.set_input_selection(node_id, selection);
+        }
+    }
+
+    fn input_selection_state(&self, node_id: Option<usize>) -> Option<TextSelectionState> {
+        let DocumentContent::Loaded(page) = &self.content else {
+            return None;
+        };
+        let node_id = node_id?;
+        page.input_selection_state(node_id)
+    }
+
     fn set_viewport_size(&mut self, width: u32, height: u32) -> bool {
         match &mut self.content {
             DocumentContent::Loaded(page) => page.set_viewport_size(width, height),
@@ -2375,6 +2408,7 @@ struct AddressBarState {
     text: String,
     cursor_chars: usize,
     selection_anchor: Option<usize>,
+    selection_direction: TextSelectionDirection,
     focused: bool,
 }
 
@@ -2395,6 +2429,7 @@ impl AddressBarState {
             text,
             cursor_chars,
             selection_anchor: None,
+            selection_direction: TextSelectionDirection::None,
             focused: false,
         }
     }
@@ -2407,6 +2442,7 @@ impl AddressBarState {
         self.text = text;
         self.cursor_chars = self.text.chars().count();
         self.selection_anchor = None;
+        self.selection_direction = TextSelectionDirection::None;
     }
 
     fn char_len(&self) -> usize {
@@ -2417,11 +2453,13 @@ impl AddressBarState {
         self.focused = true;
         self.cursor_chars = char_index.min(self.char_len());
         self.selection_anchor = None;
+        self.selection_direction = TextSelectionDirection::None;
     }
 
     fn blur(&mut self) {
         self.focused = false;
         self.selection_anchor = None;
+        self.selection_direction = TextSelectionDirection::None;
     }
 
     fn selection_range(&self) -> Option<(usize, usize)> {
@@ -2433,12 +2471,62 @@ impl AddressBarState {
         Some((anchor.min(self.cursor_chars), anchor.max(self.cursor_chars)))
     }
 
+    fn selection_direction(&self) -> TextSelectionDirection {
+        if self.selection_range().is_none() {
+            TextSelectionDirection::None
+        } else {
+            self.selection_direction
+        }
+    }
+
+    fn selection_state(&self) -> TextSelectionState {
+        let (start, end) = self
+            .selection_range()
+            .unwrap_or((self.cursor_chars, self.cursor_chars));
+        TextSelectionState {
+            start,
+            end,
+            direction: self.selection_direction(),
+        }
+    }
+
+    fn set_selection_state(&mut self, selection: TextSelectionState) {
+        let char_len = self.char_len();
+        let mut start = selection.start.min(char_len);
+        let mut end = selection.end.min(char_len);
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+        }
+
+        self.focused = true;
+        if start == end {
+            self.cursor_chars = start;
+            self.selection_anchor = None;
+            self.selection_direction = TextSelectionDirection::None;
+            return;
+        }
+
+        match selection.direction {
+            TextSelectionDirection::Backward => {
+                self.cursor_chars = start;
+                self.selection_anchor = Some(end);
+                self.selection_direction = TextSelectionDirection::Backward;
+            }
+            _ => {
+                self.cursor_chars = end;
+                self.selection_anchor = Some(start);
+                self.selection_direction = selection.direction;
+            }
+        }
+    }
+
     fn select_all(&mut self) -> bool {
         let end = self.char_len();
         let changed = self.cursor_chars != end || self.selection_range() != Some((0, end));
         self.focused = true;
         self.cursor_chars = end;
         self.selection_anchor = Some(0);
+        self.selection_direction = TextSelectionDirection::None;
         changed
     }
 
@@ -2452,6 +2540,7 @@ impl AddressBarState {
         self.text.replace_range(start_byte..end_byte, "");
         self.cursor_chars = start;
         self.selection_anchor = None;
+        self.selection_direction = TextSelectionDirection::None;
         true
     }
 
@@ -2480,6 +2569,7 @@ impl AddressBarState {
         self.text.insert_str(byte_index, &filtered);
         self.cursor_chars = self.cursor_chars.saturating_add(filtered.chars().count());
         self.selection_anchor = None;
+        self.selection_direction = TextSelectionDirection::None;
         true
     }
 
@@ -2497,6 +2587,7 @@ impl AddressBarState {
         self.text.replace_range(start..end, "");
         self.cursor_chars -= 1;
         self.selection_anchor = None;
+        self.selection_direction = TextSelectionDirection::None;
         true
     }
 
@@ -2513,6 +2604,7 @@ impl AddressBarState {
         let end = self.byte_index_for_char(self.cursor_chars + 1);
         self.text.replace_range(start..end, "");
         self.selection_anchor = None;
+        self.selection_direction = TextSelectionDirection::None;
         true
     }
 
@@ -2579,6 +2671,7 @@ impl AddressBarState {
         self.text.replace_range(start..end, "");
         self.cursor_chars = target;
         self.selection_anchor = None;
+        self.selection_direction = TextSelectionDirection::None;
         true
     }
 
@@ -2595,6 +2688,7 @@ impl AddressBarState {
         let end = self.byte_index_for_char(target);
         self.text.replace_range(start..end, "");
         self.selection_anchor = None;
+        self.selection_direction = TextSelectionDirection::None;
         true
     }
 
@@ -2619,11 +2713,23 @@ impl AddressBarState {
             self.selection_anchor.get_or_insert(previous_cursor);
         } else {
             self.selection_anchor = None;
+            self.selection_direction = TextSelectionDirection::None;
         }
 
         self.cursor_chars = target;
         if self.selection_anchor == Some(self.cursor_chars) {
             self.selection_anchor = None;
+            self.selection_direction = TextSelectionDirection::None;
+        } else if extend_selection {
+            self.selection_direction = if let Some(anchor) = self.selection_anchor {
+                if self.cursor_chars >= anchor {
+                    TextSelectionDirection::Forward
+                } else {
+                    TextSelectionDirection::Backward
+                }
+            } else {
+                TextSelectionDirection::None
+            };
         }
 
         previous_cursor != self.cursor_chars || previous_anchor != self.selection_anchor

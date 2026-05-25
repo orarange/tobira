@@ -164,6 +164,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - JS support is still far from a full browser DOM / framework runtime.
   - GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics and `{ signal }` cancellation are in place, and `location.hash` plus `history.pushState(...)` / `replaceState(...)` now support soft navigation without a reload, while the rest of the option matrix and back/forward stack still need depth.
 - Native page input typing now syncs `value` into the JS DOM.
+- Text inputs and textareas now support browser-like selection APIs (`selectionStart`, `selectionEnd`, `selectionDirection`, `setSelectionRange(...)`, `select()`), and the focused GUI editor mirrors selection state back into the JS DOM.
 - DOM traversal APIs now include `matches(...)`, `closest(...)`, `contains(...)`, and element sibling / child accessors for event delegation and framework-style code paths.
 - The richer `attributes` / `dataset` surface still needs deeper parity, even though `element.attributes` is now a live collection and `hasAttributes(...)` / `toggleAttribute(...)` now exist.
 - `MutationObserver` now fires for `attributes`, `childList`, and `characterData`, and the JS layer also exposes browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) plus `AbortController` / `AbortSignal`.

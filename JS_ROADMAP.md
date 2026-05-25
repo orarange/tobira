@@ -108,6 +108,7 @@ Tasks:
 - `addEventListener(...)` and basic listener registration are in place
 - basic capture + bubbling exists for `click`, `input`, `change`, `submit`, `keydown`, and `keyup`; `focus` and `blur` are target-only
 - page controls now dispatch DOM events before default actions
+- native GUI typing now tracks `value` plus selection state for text inputs and textareas
 - queued host-task plumbing now defers `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)` callbacks instead of running them synchronously
 - submit and link clicks can be canceled with `preventDefault()`
 - browser chrome back/forward navigation is now in place

@@ -248,6 +248,7 @@ Current JS support is intentionally small:
 - `addEventListener(...)` / `removeEventListener(...)` on page inputs, buttons, links, forms, and document nodes
 - `click`, `focus`, `blur`, `input`, `change`, `submit`, `keydown`, and `keyup` event dispatch, including `once`, capture-phase, and passive listeners
 - native GUI typing stays in sync with DOM `input.value`
+- text inputs and textareas expose browser-like `selectionStart` / `selectionEnd` / `selectionDirection` plus `setSelectionRange(...)` / `select()`
 - `location.hash` plus `history.pushState(...)` / `replaceState(...)` soft navigation
 - `history.state`
 - `popstate` / `hashchange`

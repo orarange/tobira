@@ -9,7 +9,7 @@ use crate::http::fetch;
 use crate::image::{ImageStore, decode_image};
 use crate::js::{
     DomEventDispatchResult, DomEventRequest, JavaScriptSession, ProcessedScriptHtml,
-    start_document_script_session,
+    TextSelectionState, start_document_script_session,
 };
 use crate::render::render_document;
 use crate::text::decode_text_response;
@@ -32,6 +32,7 @@ pub struct BrowserPage {
     pub images: ImageStore,
     pub rendered: Option<String>,
     pub javascript_session: Option<JavaScriptSession>,
+    input_selection_states: BTreeMap<usize, TextSelectionState>,
     layout_revision: u64,
     scroll_y: u32,
 }
@@ -70,6 +71,7 @@ impl BrowserPage {
             include_rendered_output,
             layout_revision,
             javascript_session,
+            snapshot.input_selection_states.clone(),
         );
         *self = rebuilt;
         self.scroll_y = snapshot.scroll_y;
@@ -81,6 +83,26 @@ impl BrowserPage {
 
     pub(crate) fn scroll_y(&self) -> u32 {
         self.scroll_y
+    }
+
+    pub fn input_selection_state(&self, node_id: usize) -> Option<TextSelectionState> {
+        self.input_selection_states.get(&node_id).copied()
+    }
+
+    pub fn set_input_selection(
+        &mut self,
+        node_id: Option<usize>,
+        selection: TextSelectionState,
+    ) -> bool {
+        let Some(node_id) = node_id else {
+            return false;
+        };
+        let changed = self.input_selection_states.get(&node_id) != Some(&selection);
+        self.input_selection_states.insert(node_id, selection);
+        if changed && let Some(session) = &self.javascript_session {
+            let _ = session.set_input_selection(node_id, selection);
+        }
+        changed
     }
 
     pub fn dispatch_dom_event(
@@ -218,6 +240,7 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
         include_rendered_output,
         0,
         source.javascript_session,
+        source.processed_html.input_selection_states,
     );
     page.scroll_y = source.processed_html.scroll_y;
     if let Some(soft_target) = source
@@ -241,6 +264,7 @@ fn rebuild_page_from_html(
     include_rendered_output: bool,
     layout_revision: u64,
     javascript_session: Option<JavaScriptSession>,
+    input_selection_states: BTreeMap<usize, TextSelectionState>,
 ) -> BrowserPage {
     let mut parsed_document = parse_document(html);
     if let Some(rewritten) = build_site_specific_document(&parsed_document, html, url) {
@@ -269,6 +293,7 @@ fn rebuild_page_from_html(
         include_rendered_output,
         layout_revision,
         javascript_session,
+        input_selection_states,
     )
 }
 
@@ -283,6 +308,7 @@ fn rebuild_page_from_document(
     include_rendered_output: bool,
     layout_revision: u64,
     javascript_session: Option<JavaScriptSession>,
+    input_selection_states: BTreeMap<usize, TextSelectionState>,
 ) -> BrowserPage {
     annotate_node_ids(&mut document);
     let original_title = title_override.or_else(|| document_title(&document));
@@ -311,6 +337,7 @@ fn rebuild_page_from_document(
         images,
         rendered,
         javascript_session,
+        input_selection_states,
         layout_revision,
         scroll_y: 0,
     }
@@ -3110,6 +3137,7 @@ mod tests {
             images: crate::image::ImageStore::default(),
             rendered: Some("   ".to_string()),
             javascript_session: None,
+            input_selection_states: std::collections::BTreeMap::new(),
             layout_revision: 0,
             scroll_y: 0,
         };
@@ -3132,6 +3160,7 @@ mod tests {
             images: crate::image::ImageStore::default(),
             rendered: Some("# Hello".to_string()),
             javascript_session: None,
+            input_selection_states: std::collections::BTreeMap::new(),
             layout_revision: 0,
             scroll_y: 0,
         };
@@ -3274,6 +3303,7 @@ mod tests {
             images: crate::image::ImageStore::default(),
             rendered: None,
             javascript_session: None,
+            input_selection_states: std::collections::BTreeMap::new(),
             layout_revision: 0,
             scroll_y: 0,
         };
@@ -3284,6 +3314,7 @@ mod tests {
             navigation_target: None,
             soft_navigation_target: None,
             scroll_y: 0,
+            input_selection_states: std::collections::BTreeMap::new(),
         };
 
         page.apply_script_snapshot(snapshot);
@@ -3306,6 +3337,7 @@ mod tests {
             true,
             0,
             session,
+            std::collections::BTreeMap::new(),
         );
 
         let initial_html = page.html_source.clone();
