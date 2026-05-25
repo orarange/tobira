@@ -51,6 +51,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - first-class GUI page controls for:
     - text inputs
     - buttons
+    - checkbox / radio toggles
     - caret / selection / clipboard shortcuts
     - IME cursor placement
     - basic `GET` form submission with relative action resolution and query encoding
@@ -175,7 +176,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Modern app-shell sites still need more DOM APIs, richer history replay, and CSS Phase 6 visual effects / advanced rendering.
 - Incremental reflow still needs deeper invalidation for more DOM/style mutations.
 - The inline style bridge still needs broader CSS property coverage and more computed-style parity to be browser-grade, but the core CSS parser/layout baseline is already part of the shared codebase.
-- Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
+- Form support is still limited to simple text-like fields and `GET` submission; `POST`, selects, and file inputs are not wired yet.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
 - CSS Phase 5 baseline is already part of the shared codebase; remaining CSS work is mostly the Phase 6 visual-effects / advanced-rendering surface.
@@ -201,6 +202,12 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-26 - Codex (checkbox / radio form controls)
+
+- Added first-class checkbox and radio controls to the native page form pipeline so they now render, hit-test, toggle, and serialize through `GET` submissions.
+- Added a browser-like `checked` accessor on DOM nodes that reflects the underlying attribute state, plus JS setter support so scripts can toggle checkable inputs.
+- Expanded the local form demo to cover checkbox and radio interactions, and verified the update with `cargo test` (`208` passing tests) and `cargo build`.
 
 ### 2026-05-25 - Codex (shadow DOM / composed path)
 

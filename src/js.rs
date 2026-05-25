@@ -117,6 +117,10 @@ enum JavaScriptSessionCommand {
         name: String,
         value: String,
     },
+    RemoveAttribute {
+        node_id: usize,
+        name: String,
+    },
     SetInputSelection {
         node_id: usize,
         selection: TextSelectionState,
@@ -166,6 +170,15 @@ impl JavaScriptSession {
                 node_id,
                 name: name.to_string(),
                 value: value.to_string(),
+            })
+            .is_ok()
+    }
+
+    pub(crate) fn remove_attribute(&self, node_id: usize, name: &str) -> bool {
+        self.command_tx
+            .send(JavaScriptSessionCommand::RemoveAttribute {
+                node_id,
+                name: name.to_string(),
             })
             .is_ok()
     }
@@ -510,6 +523,9 @@ pub fn start_document_script_session(
                         } => {
                             runtime.set_dom_attribute(node_id, &name, &value);
                         }
+                        JavaScriptSessionCommand::RemoveAttribute { node_id, name } => {
+                            runtime.remove_dom_attribute(node_id, &name);
+                        }
                         JavaScriptSessionCommand::SetInputSelection { node_id, selection } => {
                             runtime.set_input_selection(node_id, selection);
                         }
@@ -795,6 +811,29 @@ impl JavaScriptRuntime {
                 .borrow_mut()
                 .dom
                 .set_attribute(node_id, name, value);
+            record_dom_attribute_mutation(&mut self.context, node_id, name, old_value);
+        }
+        if name == "value" {
+            clamp_current_text_selection_to_value(&mut self.context, node_id);
+        }
+        flush_mutation_observers(&mut self.context);
+    }
+
+    fn remove_dom_attribute(&mut self, node_id: usize, name: &str) {
+        if name == "value" && is_textarea_node(&mut self.context, node_id) {
+            let node = build_dom_node_object(&mut self.context, node_id);
+            let _ = js_dom_set_text_content(
+                &JsValue::from(node),
+                &[JsValue::from(js_string!(""))],
+                &mut self.context,
+            );
+            clamp_current_text_selection_to_value(&mut self.context, node_id);
+            flush_mutation_observers(&mut self.context);
+            return;
+        }
+        if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+            let old_value = host.state.borrow().dom.get_attribute(node_id, name);
+            host.state.borrow_mut().dom.remove_attribute(node_id, name);
             record_dom_attribute_mutation(&mut self.context, node_id, name, old_value);
         }
         if name == "value" {
@@ -5307,6 +5346,10 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
     let is_element = !tag_name.is_empty();
     let is_slot = is_element && tag_name == "slot";
     let style = build_dom_style_object(context, node_id);
+    let checked_getter =
+        NativeFunction::from_fn_ptr(js_dom_get_checked).to_js_function(context.realm());
+    let checked_setter =
+        NativeFunction::from_fn_ptr(js_dom_set_checked).to_js_function(context.realm());
     let mut object = ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context);
     let mut object = object
         .function(
@@ -5713,7 +5756,12 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             Attribute::all(),
         )
         .property(js_string!("style"), style, Attribute::all())
-        .property(js_string!("checked"), false, Attribute::all())
+        .accessor(
+            js_string!("checked"),
+            Some(checked_getter),
+            Some(checked_setter),
+            Attribute::all(),
+        )
         .property(js_string!("hidden"), false, Attribute::all())
         .accessor(
             js_string!("clientWidth"),
@@ -9637,6 +9685,86 @@ fn js_dom_set_value(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     js_dom_set_property_attribute(this, args, "value", context)
 }
 
+fn js_dom_get_checked(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(false));
+    };
+    Ok(JsValue::from(input_checked_state(context, node_id)))
+}
+
+fn js_dom_set_checked(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let checked = args
+        .first()
+        .cloned()
+        .unwrap_or_else(JsValue::undefined)
+        .to_boolean();
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return Ok(JsValue::undefined());
+    };
+    let input_type = host
+        .state
+        .borrow()
+        .dom
+        .get_attribute(node_id, "type")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if input_type != "checkbox" && input_type != "radio" {
+        return Ok(JsValue::undefined());
+    }
+
+    let old_value = host.state.borrow().dom.get_attribute(node_id, "checked");
+    let mut radio_group_changes: Vec<(usize, Option<String>)> = Vec::new();
+    let mut state = host.state.borrow_mut();
+    if input_type == "radio" && checked {
+        let name = state.dom.get_attribute(node_id, "name").unwrap_or_default();
+        if !name.is_empty() {
+            let group_owner = state.dom.closest_selector(node_id, "form");
+            let candidates = state.dom.descendant_nodes(state.dom.document_id, true);
+            for candidate in candidates {
+                if candidate == node_id {
+                    continue;
+                }
+                if state
+                    .dom
+                    .get_attribute(candidate, "type")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("radio"))
+                    && state.dom.get_attribute(candidate, "name").as_deref() == Some(&name)
+                    && state.dom.closest_selector(candidate, "form") == group_owner
+                    && state.dom.has_attribute(candidate, "checked")
+                {
+                    let old_candidate = state.dom.get_attribute(candidate, "checked");
+                    state.dom.remove_attribute(candidate, "checked");
+                    radio_group_changes.push((candidate, old_candidate));
+                }
+            }
+        }
+    }
+    if checked {
+        state.dom.set_attribute(node_id, "checked", "");
+    } else {
+        state.dom.remove_attribute(node_id, "checked");
+    }
+    let new_value = state.dom.get_attribute(node_id, "checked");
+    drop(state);
+
+    for (candidate, old_candidate) in radio_group_changes {
+        record_dom_attribute_mutation(context, candidate, "checked", old_candidate);
+    }
+    record_dom_attribute_mutation(context, node_id, "checked", old_value.clone());
+    custom_element_try_attribute_changed_callback(
+        context, node_id, "checked", old_value, new_value,
+    );
+    flush_mutation_observers(context);
+    Ok(JsValue::from(checked))
+}
+
 fn js_dom_get_selection_start(
     this: &JsValue,
     _: &[JsValue],
@@ -9841,6 +9969,28 @@ fn is_textarea_node(context: &mut Context, node_id: usize) -> bool {
             let state = host.state.borrow();
             let element = state.dom.element(node_id)?;
             Some(element.tag_name.eq_ignore_ascii_case("textarea"))
+        })
+        .unwrap_or(false)
+}
+
+fn input_checked_state(context: &mut Context, node_id: usize) -> bool {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            let state = host.state.borrow();
+            let element = state.dom.element(node_id)?;
+            if !element.tag_name.eq_ignore_ascii_case("input") {
+                return Some(false);
+            }
+            let input_type = element
+                .attributes
+                .get("type")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .unwrap_or_default();
+            Some(
+                matches!(input_type.as_str(), "checkbox" | "radio")
+                    && state.dom.has_attribute(node_id, "checked"),
+            )
         })
         .unwrap_or(false)
 }
@@ -13292,6 +13442,22 @@ mod tests {
 
         assert!(processed.html.contains("<span class=\"chip\">Hello</span>"));
         assert!(processed.html.contains("<img src=\"/avatar.png\">"));
+    }
+
+    #[test]
+    fn supports_checkbox_and_radio_checked_state() {
+        let processed = process_document_scripts(
+            "<html><body><form><input id=\"check\" type=\"checkbox\" checked><input id=\"radio-a\" type=\"radio\" name=\"mode\"><input id=\"radio-b\" type=\"radio\" name=\"mode\" checked></form><script>var check = document.getElementById('check'); var radioA = document.getElementById('radio-a'); var radioB = document.getElementById('radio-b'); check.checked = false; radioA.checked = true; document.body.setAttribute('data-checked', [check.checked, check.hasAttribute('checked'), radioA.checked, radioB.checked].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-checked=\"false|false|true|false\""),
+            "{}",
+            processed.html
+        );
     }
 
     #[test]

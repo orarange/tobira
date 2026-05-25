@@ -74,6 +74,23 @@
         <button type="submit">Open DOM demo with query string</button>
         <small>This one stays on the local demo server and exercises relative form actions.</small>
       </form>
+
+      <form action="/demo/dom-demo.html" method="get">
+        <label>
+          <input type="checkbox" name="subscribe" value="yes" checked>
+          Subscribe to updates
+        </label>
+        <label>
+          <input type="radio" name="plan" value="basic">
+          Basic plan
+        </label>
+        <label>
+          <input type="radio" name="plan" value="pro" checked>
+          Pro plan
+        </label>
+        <button type="submit">Submit preference form</button>
+        <small>Checkboxes and radio buttons should toggle and serialize like a browser form.</small>
+      </form>
     </main>
   </body>
 </html>

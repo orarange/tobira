@@ -76,7 +76,7 @@ Current capabilities:
   - `location.reload()` plus `history.go(0)` reload requests and `history.scrollRestoration` auto/manual switching
   - Scroll restoration for both same-document and full-document history entries
   - Page navigation and content rendering complete asynchronously without showing a loading-screen UI
-  - Clickable page links plus basic GUI form controls for `GET` submissions
+  - Clickable page links plus basic GUI form controls for `GET` submissions, including text inputs, buttons, and checkbox/radio toggles
   - Basic DOM event plumbing (bubbles `click`, `input`, `change`, `submit`; target-only `focus`, `blur`)
   - `MutationObserver` callbacks for `attributes`, `childList`, and `characterData`, plus browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) and `AbortController` / `AbortSignal`
   - `addEventListener(..., { signal })` listener cancellation support alongside capture / once / passive handling

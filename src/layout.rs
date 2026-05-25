@@ -1,8 +1,8 @@
 use crate::css::{
-    BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
-    FontFamilyKind, GridTrackSize, LengthValue, ObjectFit, Overflow, Position, FlexDirection,
-    AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
-    VerticalAlign, WhiteSpaceMode, apply_text_transform,
+    AlignItems, AlignSelf, BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind,
+    DEFAULT_BACKGROUND_COLOR, Display, FlexDirection, FontFamilyKind, GridTrackSize,
+    JustifyContent, LengthValue, ObjectFit, Overflow, Position, StyledElement, StyledNode,
+    TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode, apply_text_transform,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
@@ -41,14 +41,14 @@ pub struct LayerCommand {
     pub width: u32,
     pub height: u32,
     pub opacity: u8,
-    pub blur_px: u32,       // CSS filter: blur() radius; 0 = no blur
-    pub brightness: u32,    // CSS filter: brightness() in 1/10000; 10000 = no change
+    pub blur_px: u32,    // CSS filter: blur() radius; 0 = no blur
+    pub brightness: u32, // CSS filter: brightness() in 1/10000; 10000 = no change
     // CSS transform (applied during composite)
-    pub scale_x: u32,          // millis: 1000 = 1.0. 0 = no scale (treated as 1000)
-    pub scale_y: u32,          // millis: 1000 = 1.0. 0 = no scale (treated as 1000)
-    pub rotate_millideg: i32,  // rotation in millidegrees. 0 = no rotation
-    pub origin_x: u32,         // transform-origin X as permille of width (500 = 50% = center)
-    pub origin_y: u32,         // transform-origin Y as permille of height (500 = 50% = center)
+    pub scale_x: u32,         // millis: 1000 = 1.0. 0 = no scale (treated as 1000)
+    pub scale_y: u32,         // millis: 1000 = 1.0. 0 = no scale (treated as 1000)
+    pub rotate_millideg: i32, // rotation in millidegrees. 0 = no rotation
+    pub origin_x: u32,        // transform-origin X as permille of width (500 = 50% = center)
+    pub origin_y: u32,        // transform-origin Y as permille of height (500 = 50% = center)
     pub commands: Vec<DrawCommand>,
 }
 
@@ -188,10 +188,18 @@ fn collect_texts(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec<
                 out.push(t2);
             }
             DrawCommand::Layer(l) => {
-                out.extend(collect_texts(&l.commands, offset_x.saturating_add(l.x), offset_y.saturating_add(l.y)));
+                out.extend(collect_texts(
+                    &l.commands,
+                    offset_x.saturating_add(l.x),
+                    offset_y.saturating_add(l.y),
+                ));
             }
             DrawCommand::Sticky(s) => {
-                out.extend(collect_texts(&s.layer.commands, offset_x.saturating_add(s.layer.x), offset_y.saturating_add(s.layer.y)));
+                out.extend(collect_texts(
+                    &s.layer.commands,
+                    offset_x.saturating_add(s.layer.x),
+                    offset_y.saturating_add(s.layer.y),
+                ));
             }
             _ => {}
         }
@@ -210,10 +218,18 @@ fn collect_rects(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec<
                 out.push(r2);
             }
             DrawCommand::Layer(l) => {
-                out.extend(collect_rects(&l.commands, offset_x.saturating_add(l.x), offset_y.saturating_add(l.y)));
+                out.extend(collect_rects(
+                    &l.commands,
+                    offset_x.saturating_add(l.x),
+                    offset_y.saturating_add(l.y),
+                ));
             }
             DrawCommand::Sticky(s) => {
-                out.extend(collect_rects(&s.layer.commands, offset_x.saturating_add(s.layer.x), offset_y.saturating_add(s.layer.y)));
+                out.extend(collect_rects(
+                    &s.layer.commands,
+                    offset_x.saturating_add(s.layer.x),
+                    offset_y.saturating_add(s.layer.y),
+                ));
             }
             _ => {}
         }
@@ -232,10 +248,18 @@ fn collect_images(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec
                 out.push(i2);
             }
             DrawCommand::Layer(l) => {
-                out.extend(collect_images(&l.commands, offset_x.saturating_add(l.x), offset_y.saturating_add(l.y)));
+                out.extend(collect_images(
+                    &l.commands,
+                    offset_x.saturating_add(l.x),
+                    offset_y.saturating_add(l.y),
+                ));
             }
             DrawCommand::Sticky(s) => {
-                out.extend(collect_images(&s.layer.commands, offset_x.saturating_add(s.layer.x), offset_y.saturating_add(s.layer.y)));
+                out.extend(collect_images(
+                    &s.layer.commands,
+                    offset_x.saturating_add(s.layer.x),
+                    offset_y.saturating_add(s.layer.y),
+                ));
             }
             _ => {}
         }
@@ -280,7 +304,7 @@ pub struct ImageCommand {
     pub object_fit: ObjectFit,
     pub object_position_x: u32,
     pub object_position_y: u32,
-    pub tile: bool,  // true = background-repeat tile at natural size
+    pub tile: bool, // true = background-repeat tile at natural size
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,6 +322,8 @@ pub enum FormControlKind {
     TextInput,
     Button,
     Hidden,
+    Checkbox,
+    Radio,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,6 +338,7 @@ pub struct FormControlCommand {
     pub height: u32,
     pub name: Option<String>,
     pub value: String,
+    pub checked: bool,
     pub label: String,
     pub placeholder: Option<String>,
     pub form_id: Option<usize>,
@@ -361,7 +388,6 @@ fn extract_body_background(node: &StyledNode) -> Option<u32> {
     }
     None
 }
-
 
 pub fn layout_styled_document(
     document: &StyledNode,
@@ -505,6 +531,7 @@ struct FormControlSpec {
     style: ComputedStyle,
     name: Option<String>,
     value: String,
+    checked: bool,
     placeholder: Option<String>,
     label: String,
     form_id: Option<usize>,
@@ -634,6 +661,7 @@ fn build_form_control_spec(
                     style: element.style.clone(),
                     name: element.attributes.get("name").cloned(),
                     value: element.attributes.get("value").cloned().unwrap_or_default(),
+                    checked: false,
                     placeholder: None,
                     label: String::new(),
                     form_id,
@@ -644,7 +672,53 @@ fn build_form_control_spec(
                     masked: false,
                     size_chars: None,
                 }),
-                "checkbox" | "radio" | "file" | "image" | "reset" => None,
+                "checkbox" => Some(FormControlSpec {
+                    id: context.allocate_control_id(),
+                    node_id,
+                    form_node_id,
+                    kind: FormControlKind::Checkbox,
+                    style: element.style.clone(),
+                    name: element.attributes.get("name").cloned(),
+                    value: element
+                        .attributes
+                        .get("value")
+                        .cloned()
+                        .unwrap_or_else(|| "on".to_string()),
+                    checked: element.attributes.contains_key("checked"),
+                    placeholder: None,
+                    label: String::new(),
+                    form_id,
+                    form_action,
+                    form_method,
+                    activates_submit: false,
+                    disabled,
+                    masked: false,
+                    size_chars: None,
+                }),
+                "radio" => Some(FormControlSpec {
+                    id: context.allocate_control_id(),
+                    node_id,
+                    form_node_id,
+                    kind: FormControlKind::Radio,
+                    style: element.style.clone(),
+                    name: element.attributes.get("name").cloned(),
+                    value: element
+                        .attributes
+                        .get("value")
+                        .cloned()
+                        .unwrap_or_else(|| "on".to_string()),
+                    checked: element.attributes.contains_key("checked"),
+                    placeholder: None,
+                    label: String::new(),
+                    form_id,
+                    form_action,
+                    form_method,
+                    activates_submit: false,
+                    disabled,
+                    masked: false,
+                    size_chars: None,
+                }),
+                "file" | "image" | "reset" => None,
                 "submit" | "button" => Some(FormControlSpec {
                     id: context.allocate_control_id(),
                     node_id,
@@ -653,6 +727,7 @@ fn build_form_control_spec(
                     style: element.style.clone(),
                     name: element.attributes.get("name").cloned(),
                     value: element.attributes.get("value").cloned().unwrap_or_default(),
+                    checked: false,
                     placeholder: None,
                     label: element
                         .attributes
@@ -682,6 +757,7 @@ fn build_form_control_spec(
                     style: element.style.clone(),
                     name: element.attributes.get("name").cloned(),
                     value: element.attributes.get("value").cloned().unwrap_or_default(),
+                    checked: false,
                     placeholder: element.attributes.get("placeholder").cloned(),
                     label: String::new(),
                     form_id,
@@ -703,6 +779,7 @@ fn build_form_control_spec(
                     style: element.style.clone(),
                     name: element.attributes.get("name").cloned(),
                     value: element.attributes.get("value").cloned().unwrap_or_default(),
+                    checked: false,
                     placeholder: element.attributes.get("placeholder").cloned(),
                     label: String::new(),
                     form_id,
@@ -726,6 +803,7 @@ fn build_form_control_spec(
             style: element.style.clone(),
             name: element.attributes.get("name").cloned(),
             value: collect_raw_text_content(&element.children),
+            checked: false,
             placeholder: element.attributes.get("placeholder").cloned(),
             label: String::new(),
             form_id,
@@ -762,6 +840,7 @@ fn build_form_control_spec(
                 style: element.style.clone(),
                 name: element.attributes.get("name").cloned(),
                 value: element.attributes.get("value").cloned().unwrap_or_default(),
+                checked: false,
                 placeholder: None,
                 label,
                 form_id,
@@ -794,6 +873,10 @@ fn measure_form_control(control: &FormControlSpec, fonts: &mut FontContext) -> (
             let char_width = char_width(&control.style, 'M', fonts).max(7);
             let text_width = char_width.saturating_mul(size_chars);
             (text_width.saturating_add(18).max(120), height)
+        }
+        FormControlKind::Checkbox | FormControlKind::Radio => {
+            let size = line_height.saturating_add(8).max(20);
+            (size, size)
         }
         FormControlKind::Button => {
             let label = control.label.trim();
@@ -858,8 +941,19 @@ fn layout_node(
             }
 
             // Handle positioned elements (absolute/fixed) — they don't contribute to flow
-            if element.style.position == Position::Absolute || element.style.position == Position::Fixed {
-                layout_positioned_element(element, x, width, cursor_y, context, images, fonts, current_form.clone());
+            if element.style.position == Position::Absolute
+                || element.style.position == Position::Fixed
+            {
+                layout_positioned_element(
+                    element,
+                    x,
+                    width,
+                    cursor_y,
+                    context,
+                    images,
+                    fonts,
+                    current_form.clone(),
+                );
                 return;
             }
 
@@ -916,13 +1010,24 @@ fn layout_node(
                 }
                 Display::Flex => {
                     let current_form = form_context_for_element(element, context, current_form);
-                    layout_flex_container(element, x, width, cursor_y, context, images, fonts, current_form.clone());
+                    layout_flex_container(
+                        element,
+                        x,
+                        width,
+                        cursor_y,
+                        context,
+                        images,
+                        fonts,
+                        current_form.clone(),
+                    );
                 }
                 Display::InlineFlex => {
                     // Inline-flex: behaves like flex internally but inline in parent flow.
                     // Treat it as a flex container with full available width here (block-level fallback).
                     let current_form = form_context_for_element(element, context, current_form);
-                    let inline_width = element.style.width
+                    let inline_width = element
+                        .style
+                        .width
                         .map(|w| match w {
                             LengthValue::Pixels(px) => px,
                             LengthValue::Percent(pct) => (width as f32 * pct as f32 / 100.0) as u32,
@@ -931,15 +1036,35 @@ fn layout_node(
                             LengthValue::FitContent(max_px) => width.min(max_px),
                         })
                         .unwrap_or(width);
-                    layout_flex_container(element, x, inline_width, cursor_y, context, images, fonts, current_form.clone());
+                    layout_flex_container(
+                        element,
+                        x,
+                        inline_width,
+                        cursor_y,
+                        context,
+                        images,
+                        fonts,
+                        current_form.clone(),
+                    );
                 }
                 Display::Grid => {
                     let current_form = form_context_for_element(element, context, current_form);
-                    layout_grid_container(element, x, width, cursor_y, context, images, fonts, current_form);
+                    layout_grid_container(
+                        element,
+                        x,
+                        width,
+                        cursor_y,
+                        context,
+                        images,
+                        fonts,
+                        current_form,
+                    );
                 }
                 Display::InlineGrid => {
                     let current_form = form_context_for_element(element, context, current_form);
-                    let inline_width = element.style.width
+                    let inline_width = element
+                        .style
+                        .width
                         .map(|w| match w {
                             LengthValue::Pixels(px) => px,
                             LengthValue::Percent(pct) => (width as f32 * pct as f32 / 100.0) as u32,
@@ -948,7 +1073,16 @@ fn layout_node(
                             LengthValue::FitContent(max_px) => width.min(max_px),
                         })
                         .unwrap_or(width);
-                    layout_grid_container(element, x, inline_width, cursor_y, context, images, fonts, current_form);
+                    layout_grid_container(
+                        element,
+                        x,
+                        inline_width,
+                        cursor_y,
+                        context,
+                        images,
+                        fonts,
+                        current_form,
+                    );
                 }
             }
         }
@@ -987,7 +1121,16 @@ fn layout_block_element(
             sub_context.next_form_id = context.next_form_id;
 
             let y_before = *cursor_y;
-            layout_table_element(element, x, width, cursor_y, &mut sub_context, images, fonts, current_form.clone());
+            layout_table_element(
+                element,
+                x,
+                width,
+                cursor_y,
+                &mut sub_context,
+                images,
+                fonts,
+                current_form.clone(),
+            );
             let table_height = cursor_y.saturating_sub(y_before).max(1);
             rebase_commands(&mut sub_context.commands, x, y_before);
             context.commands.push(DrawCommand::Layer(LayerCommand {
@@ -1007,11 +1150,22 @@ fn layout_block_element(
             }));
             context.links.extend(sub_context.links);
             context.controls.extend(sub_context.controls);
-            context.element_hitboxes.extend(sub_context.element_hitboxes);
+            context
+                .element_hitboxes
+                .extend(sub_context.element_hitboxes);
             context.next_control_id = sub_context.next_control_id;
             context.next_form_id = sub_context.next_form_id;
         } else {
-            layout_table_element(element, x, width, cursor_y, context, images, fonts, current_form);
+            layout_table_element(
+                element,
+                x,
+                width,
+                cursor_y,
+                context,
+                images,
+                fonts,
+                current_form,
+            );
         }
         return;
     }
@@ -1031,18 +1185,28 @@ fn layout_block_element(
 
     // Container-derived width (what the element would be without explicit width)
     let container_derived_width = {
-        let ml = if element.style.margin_left_auto { 0 } else { element.style.margin.left };
-        let mr = if element.style.margin_right_auto { 0 } else { element.style.margin.right };
-        width.saturating_sub(ml + mr)
-             .min(element.style.max_width.unwrap_or(u32::MAX))
-             .max(element.style.min_width)
+        let ml = if element.style.margin_left_auto {
+            0
+        } else {
+            element.style.margin.left
+        };
+        let mr = if element.style.margin_right_auto {
+            0
+        } else {
+            element.style.margin.right
+        };
+        width
+            .saturating_sub(ml + mr)
+            .min(element.style.max_width.unwrap_or(u32::MAX))
+            .max(element.style.min_width)
     };
 
     // Compute outer_width: only use explicit width when it actually constrains (is narrower).
     // This prevents HTML width="" attributes from incorrectly shrinking table-allocated cells.
     let (outer_width, width_is_constrained) = if let Some(ew) = explicit_width {
-        let clamped = ew.min(element.style.max_width.unwrap_or(u32::MAX))
-                        .max(element.style.min_width);
+        let clamped = ew
+            .min(element.style.max_width.unwrap_or(u32::MAX))
+            .max(element.style.min_width);
         if clamped < container_derived_width {
             (clamped, true)
         } else {
@@ -1053,7 +1217,10 @@ fn layout_block_element(
     };
 
     // Compute outer_x: center when both margins are auto AND width is actually constrained.
-    let outer_x = if element.style.margin_left_auto && element.style.margin_right_auto && width_is_constrained {
+    let outer_x = if element.style.margin_left_auto
+        && element.style.margin_right_auto
+        && width_is_constrained
+    {
         let total_margin = width.saturating_sub(outer_width);
         x.saturating_add(total_margin / 2)
     } else if element.style.margin_right_auto && !element.style.margin_left_auto {
@@ -1073,7 +1240,15 @@ fn layout_block_element(
         || element.style.transform_rotate_millideg != 0;
     if needs_layer {
         layout_block_element_as_layer(
-            element, outer_x, outer_width, background_top, cursor_y, context, images, fonts, current_form,
+            element,
+            outer_x,
+            outer_width,
+            background_top,
+            cursor_y,
+            context,
+            images,
+            fonts,
+            current_form,
         );
         *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
         return;
@@ -1127,9 +1302,13 @@ fn layout_block_element(
     };
 
     // Insert background image placeholder BEFORE children so it renders behind them.
-    let bg_img_tile = matches!(element.style.background_repeat,
-        BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
-    let bg_img_object_fit = if bg_img_tile { ObjectFit::None } else {
+    let bg_img_tile = matches!(
+        element.style.background_repeat,
+        BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY
+    );
+    let bg_img_object_fit = if bg_img_tile {
+        ObjectFit::None
+    } else {
         match element.style.background_size {
             BackgroundSize::Cover => ObjectFit::Cover,
             BackgroundSize::Contain => ObjectFit::Contain,
@@ -1232,7 +1411,12 @@ fn layout_block_element(
 
     if let Some(shadow_idx) = shadow_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(shadow_idx) {
-            let blur = element.style.box_shadow.as_ref().map(|s| s.blur).unwrap_or(0);
+            let blur = element
+                .style
+                .box_shadow
+                .as_ref()
+                .map(|s| s.blur)
+                .unwrap_or(0);
             rect.height = background_height.saturating_add(blur.saturating_mul(2));
         }
     }
@@ -1249,19 +1433,25 @@ fn layout_block_element(
 
     // Emit gradient overlay if background_gradient is set
     if let Some(ref gradient) = element.style.background_gradient {
-        let stops: Vec<GradientStop> = gradient.stops.iter().map(|(c, p)| GradientStop {
-            color: *c,
-            position: *p,
-        }).collect();
-        context.commands.push(DrawCommand::Gradient(GradientCommand {
-            x: outer_x,
-            y: background_top,
-            width: outer_width.max(1),
-            height: background_height,
-            border_radius: element.style.border_radius,
-            angle_deg_x1000: gradient.angle_deg_x1000,
-            stops,
-        }));
+        let stops: Vec<GradientStop> = gradient
+            .stops
+            .iter()
+            .map(|(c, p)| GradientStop {
+                color: *c,
+                position: *p,
+            })
+            .collect();
+        context
+            .commands
+            .push(DrawCommand::Gradient(GradientCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: background_height,
+                border_radius: element.style.border_radius,
+                angle_deg_x1000: gradient.angle_deg_x1000,
+                stops,
+            }));
     }
 
     // Restore parent background color after children are rendered
@@ -1271,11 +1461,15 @@ fn layout_block_element(
     // Use clip_start_idx (captured before children were laid out) so that child
     // commands are correctly filtered even when there is no background rect.
     if element.style.overflow == Overflow::Hidden {
-        let clip_height = element.style.height
+        let clip_height = element
+            .style
+            .height
             .map(|lv| match lv {
                 LengthValue::Pixels(px) => px,
                 LengthValue::Percent(_) => background_height, // can't resolve % without context
-                LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => background_height,
+                LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => {
+                    background_height
+                }
             })
             .unwrap_or(background_height);
         clip_commands_to_box(
@@ -1359,7 +1553,8 @@ fn layout_block_element(
     if element.style.position == Position::Sticky {
         if let Some(top_px) = element.style.top {
             let height = cursor_y.saturating_sub(background_top).max(1);
-            let mut sticky_cmds: Vec<DrawCommand> = context.commands.drain(block_cmd_start..).collect();
+            let mut sticky_cmds: Vec<DrawCommand> =
+                context.commands.drain(block_cmd_start..).collect();
             rebase_commands(&mut sticky_cmds, outer_x, background_top);
             context.commands.push(DrawCommand::Sticky(StickyCommand {
                 normal_y: background_top,
@@ -1419,89 +1614,98 @@ fn clip_commands_to_box(
     let clip_y2 = clip_y.saturating_add(clip_h);
 
     let tail = commands.split_off(start);
-    let clamped: Vec<DrawCommand> = tail.into_iter().filter_map(|cmd| {
-        match cmd {
-            DrawCommand::Rect(mut r) => {
-                let rx2 = r.x.saturating_add(r.width);
-                let ry2 = r.y.saturating_add(r.height);
-                // entirely outside?
-                if r.x >= clip_x2 || r.y >= clip_y2 || rx2 <= clip_x || ry2 <= clip_y {
-                    return None;
+    let clamped: Vec<DrawCommand> = tail
+        .into_iter()
+        .filter_map(|cmd| {
+            match cmd {
+                DrawCommand::Rect(mut r) => {
+                    let rx2 = r.x.saturating_add(r.width);
+                    let ry2 = r.y.saturating_add(r.height);
+                    // entirely outside?
+                    if r.x >= clip_x2 || r.y >= clip_y2 || rx2 <= clip_x || ry2 <= clip_y {
+                        return None;
+                    }
+                    // clamp to clip box
+                    let new_x = r.x.max(clip_x);
+                    let new_y = r.y.max(clip_y);
+                    let new_x2 = rx2.min(clip_x2);
+                    let new_y2 = ry2.min(clip_y2);
+                    r.x = new_x;
+                    r.y = new_y;
+                    r.width = new_x2.saturating_sub(new_x).max(1);
+                    r.height = new_y2.saturating_sub(new_y).max(1);
+                    Some(DrawCommand::Rect(r))
                 }
-                // clamp to clip box
-                let new_x = r.x.max(clip_x);
-                let new_y = r.y.max(clip_y);
-                let new_x2 = rx2.min(clip_x2);
-                let new_y2 = ry2.min(clip_y2);
-                r.x = new_x; r.y = new_y;
-                r.width = new_x2.saturating_sub(new_x).max(1);
-                r.height = new_y2.saturating_sub(new_y).max(1);
-                Some(DrawCommand::Rect(r))
-            }
-            DrawCommand::Image(img) => {
-                let ix2 = img.x.saturating_add(img.width);
-                let iy2 = img.y.saturating_add(img.height);
-                // Only discard entirely-outside images; don't resize (clamping x/y/width/height
-                // would rescale the full image into a smaller rect instead of cropping it).
-                // Pixel-accurate cropping would require source-rect support in the renderer.
-                if img.x >= clip_x2 || img.y >= clip_y2 || ix2 <= clip_x || iy2 <= clip_y {
-                    None
-                } else {
-                    Some(DrawCommand::Image(img))
+                DrawCommand::Image(img) => {
+                    let ix2 = img.x.saturating_add(img.width);
+                    let iy2 = img.y.saturating_add(img.height);
+                    // Only discard entirely-outside images; don't resize (clamping x/y/width/height
+                    // would rescale the full image into a smaller rect instead of cropping it).
+                    // Pixel-accurate cropping would require source-rect support in the renderer.
+                    if img.x >= clip_x2 || img.y >= clip_y2 || ix2 <= clip_x || iy2 <= clip_y {
+                        None
+                    } else {
+                        Some(DrawCommand::Image(img))
+                    }
+                }
+                DrawCommand::Layer(mut l) => {
+                    let lx2 = l.x.saturating_add(l.width);
+                    let ly2 = l.y.saturating_add(l.height);
+                    if l.x >= clip_x2 || l.y >= clip_y2 || lx2 <= clip_x || ly2 <= clip_y {
+                        return None;
+                    }
+                    // Clamp width/height only — do NOT change x/y.
+                    // Changing x/y would shift the layer's screen position without rebasing inner
+                    // commands (which are layer-relative), causing them to render at the wrong position.
+                    // The compositor clips at the layer's dimensions, so reducing width/height is enough
+                    // to limit the visible area.
+                    l.width = lx2.min(clip_x2).saturating_sub(l.x).max(1);
+                    l.height = ly2.min(clip_y2).saturating_sub(l.y).max(1);
+                    Some(DrawCommand::Layer(l))
+                }
+                DrawCommand::Text(t) => {
+                    let ty2 = t.y.saturating_add(t.line_height_px);
+                    let tx2 = t.x.saturating_add(t.width);
+                    if t.x >= clip_x2 || t.y >= clip_y2 || tx2 <= clip_x || ty2 <= clip_y {
+                        None
+                    } else {
+                        Some(DrawCommand::Text(t))
+                    }
+                }
+                DrawCommand::Gradient(mut g) => {
+                    let gx2 = g.x.saturating_add(g.width);
+                    let gy2 = g.y.saturating_add(g.height);
+                    if g.x >= clip_x2 || g.y >= clip_y2 || gx2 <= clip_x || gy2 <= clip_y {
+                        return None;
+                    }
+                    let new_x = g.x.max(clip_x);
+                    let new_y = g.y.max(clip_y);
+                    let new_x2 = gx2.min(clip_x2);
+                    let new_y2 = gy2.min(clip_y2);
+                    g.x = new_x;
+                    g.y = new_y;
+                    g.width = new_x2.saturating_sub(new_x).max(1);
+                    g.height = new_y2.saturating_sub(new_y).max(1);
+                    Some(DrawCommand::Gradient(g))
+                }
+                DrawCommand::Sticky(mut s) => {
+                    let lx2 = s.layer.x.saturating_add(s.layer.width);
+                    let ly2 = s.layer.y.saturating_add(s.layer.height);
+                    if s.layer.x >= clip_x2
+                        || s.layer.y >= clip_y2
+                        || lx2 <= clip_x
+                        || ly2 <= clip_y
+                    {
+                        return None;
+                    }
+                    // Clamp width/height only — same as Layer arm
+                    s.layer.width = lx2.min(clip_x2).saturating_sub(s.layer.x).max(1);
+                    s.layer.height = ly2.min(clip_y2).saturating_sub(s.layer.y).max(1);
+                    Some(DrawCommand::Sticky(s))
                 }
             }
-            DrawCommand::Layer(mut l) => {
-                let lx2 = l.x.saturating_add(l.width);
-                let ly2 = l.y.saturating_add(l.height);
-                if l.x >= clip_x2 || l.y >= clip_y2 || lx2 <= clip_x || ly2 <= clip_y {
-                    return None;
-                }
-                // Clamp width/height only — do NOT change x/y.
-                // Changing x/y would shift the layer's screen position without rebasing inner
-                // commands (which are layer-relative), causing them to render at the wrong position.
-                // The compositor clips at the layer's dimensions, so reducing width/height is enough
-                // to limit the visible area.
-                l.width = lx2.min(clip_x2).saturating_sub(l.x).max(1);
-                l.height = ly2.min(clip_y2).saturating_sub(l.y).max(1);
-                Some(DrawCommand::Layer(l))
-            }
-            DrawCommand::Text(t) => {
-                let ty2 = t.y.saturating_add(t.line_height_px);
-                let tx2 = t.x.saturating_add(t.width);
-                if t.x >= clip_x2 || t.y >= clip_y2 || tx2 <= clip_x || ty2 <= clip_y {
-                    None
-                } else {
-                    Some(DrawCommand::Text(t))
-                }
-            }
-            DrawCommand::Gradient(mut g) => {
-                let gx2 = g.x.saturating_add(g.width);
-                let gy2 = g.y.saturating_add(g.height);
-                if g.x >= clip_x2 || g.y >= clip_y2 || gx2 <= clip_x || gy2 <= clip_y {
-                    return None;
-                }
-                let new_x = g.x.max(clip_x);
-                let new_y = g.y.max(clip_y);
-                let new_x2 = gx2.min(clip_x2);
-                let new_y2 = gy2.min(clip_y2);
-                g.x = new_x; g.y = new_y;
-                g.width = new_x2.saturating_sub(new_x).max(1);
-                g.height = new_y2.saturating_sub(new_y).max(1);
-                Some(DrawCommand::Gradient(g))
-            }
-            DrawCommand::Sticky(mut s) => {
-                let lx2 = s.layer.x.saturating_add(s.layer.width);
-                let ly2 = s.layer.y.saturating_add(s.layer.height);
-                if s.layer.x >= clip_x2 || s.layer.y >= clip_y2 || lx2 <= clip_x || ly2 <= clip_y {
-                    return None;
-                }
-                // Clamp width/height only — same as Layer arm
-                s.layer.width = lx2.min(clip_x2).saturating_sub(s.layer.x).max(1);
-                s.layer.height = ly2.min(clip_y2).saturating_sub(s.layer.y).max(1);
-                Some(DrawCommand::Sticky(s))
-            }
-        }
-    }).collect();
+        })
+        .collect();
     commands.extend(clamped);
 }
 
@@ -1575,8 +1779,7 @@ fn layout_block_element_as_layer(
         // saturating_sub(outer_x, background_top), which clamps negative offsets to 0 and
         // corrupts the shadow position. By clamping to the element box we lose shadow that
         // extends above/left of the element, but avoid rebase corruption.
-        let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64)
-            .max(outer_x as i64) as u32; // don't go left of element
+        let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64).max(outer_x as i64) as u32; // don't go left of element
         let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64)
             .max(background_top as i64) as u32; // don't go above element
         let sw = outer_width.saturating_add(blur.saturating_mul(2)).max(1);
@@ -1676,7 +1879,12 @@ fn layout_block_element_as_layer(
 
     if let Some(shadow_idx) = shadow_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(shadow_idx) {
-            let blur = element.style.box_shadow.as_ref().map(|s| s.blur).unwrap_or(0);
+            let blur = element
+                .style
+                .box_shadow
+                .as_ref()
+                .map(|s| s.blur)
+                .unwrap_or(0);
             rect.height = final_height.saturating_add(blur.saturating_mul(2));
         }
     }
@@ -1688,24 +1896,33 @@ fn layout_block_element_as_layer(
 
     // Emit gradient overlay if background_gradient is set
     if let Some(ref gradient) = element.style.background_gradient {
-        let stops: Vec<GradientStop> = gradient.stops.iter().map(|(c, p)| GradientStop {
-            color: *c,
-            position: *p,
-        }).collect();
-        sub_context.commands.push(DrawCommand::Gradient(GradientCommand {
-            x: outer_x,
-            y: background_top,
-            width: outer_width.max(1),
-            height: final_height,
-            border_radius: element.style.border_radius,
-            angle_deg_x1000: gradient.angle_deg_x1000,
-            stops,
-        }));
+        let stops: Vec<GradientStop> = gradient
+            .stops
+            .iter()
+            .map(|(c, p)| GradientStop {
+                color: *c,
+                position: *p,
+            })
+            .collect();
+        sub_context
+            .commands
+            .push(DrawCommand::Gradient(GradientCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: final_height,
+                border_radius: element.style.border_radius,
+                angle_deg_x1000: gradient.angle_deg_x1000,
+                stops,
+            }));
     }
 
     // Emit background image if background_image_url is set
     if let Some(ref url) = element.style.background_image_url {
-        let tile = matches!(element.style.background_repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
+        let tile = matches!(
+            element.style.background_repeat,
+            BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY
+        );
         let object_fit = if tile {
             ObjectFit::None
         } else {
@@ -1768,7 +1985,8 @@ fn layout_block_element_as_layer(
             }));
         }
         if border_right_w > 0 {
-            sub_context.commands.push(DrawCommand::Rect(RectCommand {                x: outer_x
+            sub_context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x
                     .saturating_add(outer_width)
                     .saturating_sub(border_right_w),
                 y: background_top,
@@ -1782,11 +2000,15 @@ fn layout_block_element_as_layer(
 
     // overflow: hidden — clip child commands within the element box
     if element.style.overflow == Overflow::Hidden {
-        let clip_height = element.style.height
+        let clip_height = element
+            .style
+            .height
             .map(|lv| match lv {
                 LengthValue::Pixels(px) => px,
                 LengthValue::Percent(_) => final_height,
-                LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => final_height,
+                LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => {
+                    final_height
+                }
             })
             .unwrap_or(final_height);
         clip_commands_to_box(
@@ -1822,7 +2044,9 @@ fn layout_block_element_as_layer(
     // Propagate links, controls, and element hitboxes from sub_context to parent
     context.links.extend(sub_context.links);
     context.controls.extend(sub_context.controls);
-    context.element_hitboxes.extend(sub_context.element_hitboxes);
+    context
+        .element_hitboxes
+        .extend(sub_context.element_hitboxes);
     context.next_control_id = sub_context.next_control_id;
     context.next_form_id = sub_context.next_form_id;
 }
@@ -1856,7 +2080,10 @@ fn layout_image_element(
         TextAlign::Left => x,
     };
 
-    if element.style.opacity < 255 || element.style.filter_blur_px > 0 || element.style.filter_brightness != 10000 {
+    if element.style.opacity < 255
+        || element.style.filter_blur_px > 0
+        || element.style.filter_brightness != 10000
+    {
         // Wrap the image in a LayerCommand so opacity/filters are applied correctly
         let img_cmd = DrawCommand::Image(ImageCommand {
             x: 0,
@@ -2059,7 +2286,10 @@ fn layout_table_element(
         let span_width = span_width(&column_widths, placement.column_index, placement.colspan)
             .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
         let inner_width = span_width.saturating_sub(padding.saturating_mul(2)).max(1);
-        let cell_backdrop = placement.cell.style.background_color
+        let cell_backdrop = placement
+            .cell
+            .style
+            .background_color
             .unwrap_or(context.background_color);
         let layout = layout_table_cell(
             placement.cell,
@@ -2124,7 +2354,9 @@ fn layout_table_element(
         };
 
         let content_x = cell_x.saturating_add(padding);
-        let content_y = cell_y.saturating_add(padding).saturating_add(vertical_offset);
+        let content_y = cell_y
+            .saturating_add(padding)
+            .saturating_add(vertical_offset);
 
         if placement.cell.style.opacity < 255 {
             // Wrap cell content in a LayerCommand for opacity compositing.
@@ -2144,7 +2376,12 @@ fn layout_table_element(
                 }));
             }
             if let Some(ref url) = placement.cell.style.background_image_url {
-                let tile = matches!(placement.cell.style.background_repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
+                let tile = matches!(
+                    placement.cell.style.background_repeat,
+                    BackgroundRepeat::Repeat
+                        | BackgroundRepeat::RepeatX
+                        | BackgroundRepeat::RepeatY
+                );
                 let object_fit = if tile {
                     ObjectFit::None
                 } else {
@@ -2190,47 +2427,67 @@ fn layout_table_element(
                 commands: layer_commands,
             }));
             // Links are content-relative; shift by cell position + padding/valign
-            context.links.extend(layout.links.iter().map(|link| LinkCommand {
-                node_id: link.node_id,
-                x: link.x.saturating_add(cell_x).saturating_add(padding),
-                y: link.y.saturating_add(cell_y).saturating_add(padding).saturating_add(vertical_offset),
-                width: link.width,
-                height: link.height,
-                href: link.href.clone(),
+            context.links.extend(layout.links.iter().map(|link| {
+                LinkCommand {
+                    node_id: link.node_id,
+                    x: link.x.saturating_add(cell_x).saturating_add(padding),
+                    y: link
+                        .y
+                        .saturating_add(cell_y)
+                        .saturating_add(padding)
+                        .saturating_add(vertical_offset),
+                    width: link.width,
+                    height: link.height,
+                    href: link.href.clone(),
+                }
             }));
-            context.controls.extend(layout.controls.iter().map(|ctrl| FormControlCommand {
-                id: ctrl.id,
-                node_id: ctrl.node_id,
-                form_node_id: ctrl.form_node_id,
-                kind: ctrl.kind,
-                x: ctrl.x.saturating_add(cell_x).saturating_add(padding),
-                y: ctrl.y.saturating_add(cell_y).saturating_add(padding).saturating_add(vertical_offset),
-                width: ctrl.width,
-                height: ctrl.height,
-                name: ctrl.name.clone(),
-                value: ctrl.value.clone(),
-                label: ctrl.label.clone(),
-                placeholder: ctrl.placeholder.clone(),
-                form_id: ctrl.form_id,
-                form_action: ctrl.form_action.clone(),
-                form_method: ctrl.form_method.clone(),
-                activates_submit: ctrl.activates_submit,
-                disabled: ctrl.disabled,
-                masked: ctrl.masked,
-                font_size_px: ctrl.font_size_px,
-                font_family: ctrl.font_family,
-                text_color: ctrl.text_color,
-                background_color: ctrl.background_color,
-                border_color: ctrl.border_color,
+            context.controls.extend(layout.controls.iter().map(|ctrl| {
+                FormControlCommand {
+                    id: ctrl.id,
+                    node_id: ctrl.node_id,
+                    form_node_id: ctrl.form_node_id,
+                    kind: ctrl.kind,
+                    x: ctrl.x.saturating_add(cell_x).saturating_add(padding),
+                    y: ctrl
+                        .y
+                        .saturating_add(cell_y)
+                        .saturating_add(padding)
+                        .saturating_add(vertical_offset),
+                    width: ctrl.width,
+                    height: ctrl.height,
+                    name: ctrl.name.clone(),
+                    value: ctrl.value.clone(),
+                    checked: ctrl.checked,
+                    label: ctrl.label.clone(),
+                    placeholder: ctrl.placeholder.clone(),
+                    form_id: ctrl.form_id,
+                    form_action: ctrl.form_action.clone(),
+                    form_method: ctrl.form_method.clone(),
+                    activates_submit: ctrl.activates_submit,
+                    disabled: ctrl.disabled,
+                    masked: ctrl.masked,
+                    font_size_px: ctrl.font_size_px,
+                    font_family: ctrl.font_family,
+                    text_color: ctrl.text_color,
+                    background_color: ctrl.background_color,
+                    border_color: ctrl.border_color,
+                }
             }));
-            context.element_hitboxes.extend(layout.element_hitboxes.iter().map(|h| ElementHitbox {
-                node_id: h.node_id,
-                x: h.x.saturating_add(cell_x).saturating_add(padding),
-                y: h.y.saturating_add(cell_y).saturating_add(padding).saturating_add(vertical_offset),
-                width: h.width,
-                height: h.height,
-                cursor_kind: h.cursor_kind,
-            }));
+            context
+                .element_hitboxes
+                .extend(layout.element_hitboxes.iter().map(|h| {
+                    ElementHitbox {
+                        node_id: h.node_id,
+                        x: h.x.saturating_add(cell_x).saturating_add(padding),
+                        y: h.y
+                            .saturating_add(cell_y)
+                            .saturating_add(padding)
+                            .saturating_add(vertical_offset),
+                        width: h.width,
+                        height: h.height,
+                        cursor_kind: h.cursor_kind,
+                    }
+                }));
         } else {
             // opacity == 255: emit background rect directly into parent context
             if let Some(background_color) = placement.cell.style.background_color {
@@ -2249,7 +2506,12 @@ fn layout_table_element(
                 }));
             }
             if let Some(ref url) = placement.cell.style.background_image_url {
-                let tile = matches!(placement.cell.style.background_repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
+                let tile = matches!(
+                    placement.cell.style.background_repeat,
+                    BackgroundRepeat::Repeat
+                        | BackgroundRepeat::RepeatX
+                        | BackgroundRepeat::RepeatY
+                );
                 let object_fit = if tile {
                     ObjectFit::None
                 } else {
@@ -2504,7 +2766,9 @@ fn merge_fragment(
     offset_y: u32,
 ) {
     for cmd in &fragment.commands {
-        context.commands.push(offset_draw_command(cmd, offset_x, offset_y));
+        context
+            .commands
+            .push(offset_draw_command(cmd, offset_x, offset_y));
     }
     context
         .links
@@ -2529,6 +2793,7 @@ fn merge_fragment(
             height: control.height,
             name: control.name.clone(),
             value: control.value.clone(),
+            checked: control.checked,
             label: control.label.clone(),
             placeholder: control.placeholder.clone(),
             form_id: control.form_id,
@@ -2912,7 +3177,12 @@ fn layout_nowrap_fragments(
                 line.push_control(control, fonts);
                 pending_space = true;
             }
-            InlineFragment::Text { text, style, link_href, link_node_id } => {
+            InlineFragment::Text {
+                text,
+                style,
+                link_href,
+                link_node_id,
+            } => {
                 let had_whitespace = text.chars().any(char::is_whitespace);
                 for word in text.split_whitespace() {
                     if pending_space && !line.is_empty() {
@@ -2950,7 +3220,8 @@ fn layout_normal_fragments(
     context: &mut LayoutContext,
     fonts: &mut FontContext,
 ) {
-    let ellipsis_mode = container_style.text_overflow_ellipsis && container_style.overflow == Overflow::Hidden;
+    let ellipsis_mode =
+        container_style.text_overflow_ellipsis && container_style.overflow == Overflow::Hidden;
     let mut line = LineBuilder::default();
     let mut pending_space = false;
     let text_indent = container_style.text_indent;
@@ -2994,7 +3265,12 @@ fn layout_normal_fragments(
                     if line.width.saturating_add(space_width) > effective_width {
                         if ellipsis_mode {
                             // Apply ellipsis and stop
-                            apply_ellipsis_to_line(&mut line, effective_width, container_style, fonts);
+                            apply_ellipsis_to_line(
+                                &mut line,
+                                effective_width,
+                                container_style,
+                                fonts,
+                            );
                             ellipsis_done = true;
                             break 'outer;
                         }
@@ -3062,7 +3338,12 @@ fn layout_normal_fragments(
                         let space_width = char_width(style, ' ', fonts);
                         if line.width.saturating_add(space_width) > effective_width {
                             if ellipsis_mode {
-                                apply_ellipsis_to_line(&mut line, effective_width, container_style, fonts);
+                                apply_ellipsis_to_line(
+                                    &mut line,
+                                    effective_width,
+                                    container_style,
+                                    fonts,
+                                );
                                 ellipsis_done = true;
                                 break;
                             }
@@ -3082,7 +3363,9 @@ fn layout_normal_fragments(
                         }
                     }
 
-                    if ellipsis_done { break; }
+                    if ellipsis_done {
+                        break;
+                    }
 
                     let effective_width2 = if first_line && line.is_empty() {
                         width.saturating_sub(text_indent)
@@ -3096,10 +3379,20 @@ fn layout_normal_fragments(
                         let ellipsis_width = text_width(style, "...", fonts);
                         if line.width.saturating_add(word_width) > effective_width2 {
                             // Word doesn't fit - apply ellipsis to current line
-                            apply_ellipsis_to_line(&mut line, effective_width2, container_style, fonts);
+                            apply_ellipsis_to_line(
+                                &mut line,
+                                effective_width2,
+                                container_style,
+                                fonts,
+                            );
                             ellipsis_done = true;
                             break;
-                        } else if line.width.saturating_add(word_width).saturating_add(ellipsis_width) > effective_width2 {
+                        } else if line
+                            .width
+                            .saturating_add(word_width)
+                            .saturating_add(ellipsis_width)
+                            > effective_width2
+                        {
                             // Word fits but we can't guarantee another word will fit - add it
                             line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
                             pending_space = true;
@@ -3158,7 +3451,11 @@ fn apply_ellipsis_to_line(
 ) {
     let ellipsis = "...";
     // Find a style to use for ellipsis (last span or container style)
-    let ellipsis_style = line.spans.last().map(|s| s.style.clone()).unwrap_or_else(|| container_style.clone());
+    let ellipsis_style = line
+        .spans
+        .last()
+        .map(|s| s.style.clone())
+        .unwrap_or_else(|| container_style.clone());
     let ellipsis_width = text_width(&ellipsis_style, ellipsis, fonts);
     let target = max_width.saturating_sub(ellipsis_width);
 
@@ -3179,7 +3476,8 @@ fn apply_ellipsis_to_line(
                 let mut truncated_text = String::new();
                 let mut tw = 0u32;
                 for ch in span.text.chars() {
-                    let cw = fonts.glyph_advance_px(ch, span.style.font_size_px, span.style.font_family);
+                    let cw =
+                        fonts.glyph_advance_px(ch, span.style.font_size_px, span.style.font_family);
                     if tw.saturating_add(cw) > available {
                         break;
                     }
@@ -3194,7 +3492,8 @@ fn apply_ellipsis_to_line(
         }
     }
     // Remove empty trailing spans
-    line.spans.retain(|s| !s.text.is_empty() || s.control.is_some());
+    line.spans
+        .retain(|s| !s.text.is_empty() || s.control.is_some());
     // Append ellipsis as a new span
     let mut ellipsis_span = LineSpan {
         text: ellipsis.to_string(),
@@ -3227,7 +3526,13 @@ fn layout_preformatted_fragments(
         match fragment {
             InlineFragment::LineBreak => {
                 emit_line_with_indent(
-                    &mut line, container_style, x, width, cursor_y, context, fonts,
+                    &mut line,
+                    container_style,
+                    x,
+                    width,
+                    cursor_y,
+                    context,
+                    fonts,
                     if first_line { text_indent } else { 0 },
                 );
                 first_line = false;
@@ -3242,7 +3547,13 @@ fn layout_preformatted_fragments(
                 // Only emit current line if the control won't fit inline
                 if !line.is_empty() && line.width.saturating_add(control_width) > effective_width {
                     emit_line_with_indent(
-                        &mut line, container_style, x, width, cursor_y, context, fonts,
+                        &mut line,
+                        container_style,
+                        x,
+                        width,
+                        cursor_y,
+                        context,
+                        fonts,
                         if first_line { text_indent } else { 0 },
                     );
                     first_line = false;
@@ -3258,7 +3569,13 @@ fn layout_preformatted_fragments(
                 for character in text.chars() {
                     if character == '\n' {
                         emit_line_with_indent(
-                            &mut line, container_style, x, width, cursor_y, context, fonts,
+                            &mut line,
+                            container_style,
+                            x,
+                            width,
+                            cursor_y,
+                            context,
+                            fonts,
                             if first_line { text_indent } else { 0 },
                         );
                         first_line = false;
@@ -3266,10 +3583,20 @@ fn layout_preformatted_fragments(
                     }
 
                     let character_width = char_width(style, character, fonts);
-                    let eff_w = if first_line { width.saturating_sub(text_indent) } else { width };
+                    let eff_w = if first_line {
+                        width.saturating_sub(text_indent)
+                    } else {
+                        width
+                    };
                     if !line.is_empty() && line.width.saturating_add(character_width) > eff_w {
                         emit_line_with_indent(
-                            &mut line, container_style, x, width, cursor_y, context, fonts,
+                            &mut line,
+                            container_style,
+                            x,
+                            width,
+                            cursor_y,
+                            context,
+                            fonts,
                             if first_line { text_indent } else { 0 },
                         );
                         first_line = false;
@@ -3432,6 +3759,7 @@ fn emit_line_impl(
                 height: span.height.max(1),
                 name: control.name.clone(),
                 value: control.value.clone(),
+                checked: control.checked,
                 label: control.label.clone(),
                 placeholder: control.placeholder.clone(),
                 form_id: control.form_id,
@@ -3461,7 +3789,8 @@ fn emit_line_impl(
         // the block-level backdrop — ignoring any inline content painted underneath.
         // This is an intentional approximation (see css.rs nested_inline_opacity test).
         if let Some(background_color) = span.style.background_color {
-            let blended_bg = apply_opacity(background_color, context.background_color, span_opacity);
+            let blended_bg =
+                apply_opacity(background_color, context.background_color, span_opacity);
             context.commands.push(DrawCommand::Rect(RectCommand {
                 x: cursor_x,
                 y: *cursor_y,
@@ -3739,7 +4068,9 @@ fn layout_positioned_element(
         context.containing_block_origin
     };
 
-    let elem_width = element.style.width
+    let elem_width = element
+        .style
+        .width
         .as_ref()
         .and_then(|lv| match lv {
             LengthValue::Pixels(px) => Some(*px),
@@ -3762,12 +4093,23 @@ fn layout_positioned_element(
     // Use sub_context for form allocation so next_form_id counter stays consistent
     // when propagated back — avoids form_id going backwards if element is a <form>
     let current_form = form_context_for_element(element, &mut sub_context, current_form);
-    layout_block_element(element, x, elem_width, &mut cursor_y, &mut sub_context, images, fonts, current_form);
+    layout_block_element(
+        element,
+        x,
+        elem_width,
+        &mut cursor_y,
+        &mut sub_context,
+        images,
+        fonts,
+        current_form,
+    );
     let z = element.style.z_index.unwrap_or(0);
     context.positioned_commands.push((z, sub_context.commands));
     context.links.extend(sub_context.links);
     context.controls.extend(sub_context.controls);
-    context.element_hitboxes.extend(sub_context.element_hitboxes);
+    context
+        .element_hitboxes
+        .extend(sub_context.element_hitboxes);
     context.next_control_id = sub_context.next_control_id;
     context.next_form_id = sub_context.next_form_id;
 }
@@ -3788,8 +4130,8 @@ fn layout_grid_container(
 ) {
     *cursor_y = cursor_y.saturating_add(element.style.margin.top);
     let outer_x = x.saturating_add(element.style.margin.left);
-    let outer_width = available_width
-        .saturating_sub(element.style.margin.left + element.style.margin.right);
+    let outer_width =
+        available_width.saturating_sub(element.style.margin.left + element.style.margin.right);
     let background_top = *cursor_y;
 
     let border_h = if !element.style.border_style_none {
@@ -3803,7 +4145,11 @@ fn layout_grid_container(
         0
     };
     let content_x = outer_x
-        .saturating_add(if !element.style.border_style_none { element.style.border.left } else { 0 })
+        .saturating_add(if !element.style.border_style_none {
+            element.style.border.left
+        } else {
+            0
+        })
         .saturating_add(element.style.padding.left);
     let content_width = outer_width
         .saturating_sub(border_v + element.style.padding.left + element.style.padding.right)
@@ -3820,13 +4166,21 @@ fn layout_grid_container(
     let n_cols = col_widths.len().max(1);
 
     // ── Collect grid items ─────────────────────────────────────────────────
-    let children: Vec<&StyledElement> = element.children.iter().filter_map(|c| {
-        if let StyledNode::Element(el) = c {
-            if el.style.display != Display::None { Some(el) } else { None }
-        } else {
-            None
-        }
-    }).collect();
+    let children: Vec<&StyledElement> = element
+        .children
+        .iter()
+        .filter_map(|c| {
+            if let StyledNode::Element(el) = c {
+                if el.style.display != Display::None {
+                    Some(el)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
 
     // ── Auto-place items into grid cells ──────────────────────────────────
     let mut col_cursor = 0usize;
@@ -3861,10 +4215,11 @@ fn layout_grid_container(
             let r = row_start.unwrap_or_else(|| {
                 let mut r = row_cursor;
                 loop {
-                    let fits = (c..c + col_span).all(|cc| {
-                        (r..r + row_span).all(|rr| !occupied.contains(&(rr, cc)))
-                    });
-                    if fits { return r; }
+                    let fits = (c..c + col_span)
+                        .all(|cc| (r..r + row_span).all(|rr| !occupied.contains(&(rr, cc))));
+                    if fits {
+                        return r;
+                    }
                     r += 1;
                 }
             });
@@ -3877,10 +4232,11 @@ fn layout_grid_container(
                     c = 0;
                     r += 1;
                 }
-                let fits = (c..c + col_span).all(|cc| {
-                    (r..r + row_span).all(|rr| !occupied.contains(&(rr, cc)))
-                });
-                if fits { break; }
+                let fits = (c..c + col_span)
+                    .all(|cc| (r..r + row_span).all(|rr| !occupied.contains(&(rr, cc))));
+                if fits {
+                    break;
+                }
                 c += 1;
                 if c + col_span > n_cols {
                     c = 0;
@@ -3997,7 +4353,11 @@ fn layout_grid_container(
 
     // Background placeholder
     let bg_cmd_index = if let Some(bg) = element.style.background_color {
-        let blended = apply_opacity(bg, context.background_color, element.style.effective_opacity);
+        let blended = apply_opacity(
+            bg,
+            context.background_color,
+            element.style.effective_opacity,
+        );
         context.commands.push(DrawCommand::Rect(RectCommand {
             x: outer_x,
             y: background_top,
@@ -4012,19 +4372,21 @@ fn layout_grid_container(
     };
 
     let content_top = background_top
-        .saturating_add(if !element.style.border_style_none { element.style.border.top } else { 0 })
+        .saturating_add(if !element.style.border_style_none {
+            element.style.border.top
+        } else {
+            0
+        })
         .saturating_add(element.style.padding.top);
 
     // ── Render items ──────────────────────────────────────────────────────
     for item in &measured {
         let cell_x: u32 = {
-            let x_offset: u32 = col_widths[..item.col].iter().sum::<u32>()
-                + gap * item.col as u32;
+            let x_offset: u32 = col_widths[..item.col].iter().sum::<u32>() + gap * item.col as u32;
             content_x + x_offset
         };
         let cell_y: u32 = {
-            let y_offset: u32 = row_heights[..item.row].iter().sum::<u32>()
-                + gap * item.row as u32;
+            let y_offset: u32 = row_heights[..item.row].iter().sum::<u32>() + gap * item.row as u32;
             content_top + y_offset
         };
 
@@ -4043,12 +4405,15 @@ fn layout_grid_container(
     }
 
     // Total content height
-    let total_h: u32 = row_heights.iter().sum::<u32>()
-        + gap * max_row.saturating_sub(1) as u32;
+    let total_h: u32 = row_heights.iter().sum::<u32>() + gap * max_row.saturating_sub(1) as u32;
     let content_bottom = content_top + total_h;
     let background_bottom = content_bottom
         .saturating_add(element.style.padding.bottom)
-        .saturating_add(if !element.style.border_style_none { element.style.border.bottom } else { 0 });
+        .saturating_add(if !element.style.border_style_none {
+            element.style.border.bottom
+        } else {
+            0
+        });
 
     // Fix background rect height
     if let Some(idx) = bg_cmd_index {
@@ -4065,10 +4430,26 @@ fn layout_grid_container(
             element.style.effective_opacity,
         );
         let background_height = background_bottom.saturating_sub(background_top).max(1);
-        let border_top_h = if border_h > 0 { element.style.border.top } else { 0 };
-        let border_bottom_h = if border_h > 0 { element.style.border.bottom } else { 0 };
-        let border_left_w = if border_v > 0 { element.style.border.left } else { 0 };
-        let border_right_w = if border_v > 0 { element.style.border.right } else { 0 };
+        let border_top_h = if border_h > 0 {
+            element.style.border.top
+        } else {
+            0
+        };
+        let border_bottom_h = if border_h > 0 {
+            element.style.border.bottom
+        } else {
+            0
+        };
+        let border_left_w = if border_v > 0 {
+            element.style.border.left
+        } else {
+            0
+        };
+        let border_right_w = if border_v > 0 {
+            element.style.border.right
+        } else {
+            0
+        };
         if border_top_h > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
                 x: outer_x,
@@ -4101,7 +4482,9 @@ fn layout_grid_container(
         }
         if border_right_w > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x.saturating_add(outer_width).saturating_sub(border_right_w),
+                x: outer_x
+                    .saturating_add(outer_width)
+                    .saturating_sub(border_right_w),
                 y: background_top,
                 width: border_right_w,
                 height: background_height,
@@ -4146,8 +4529,16 @@ fn resolve_grid_tracks(tracks: &[GridTrackSize], available_px: u32, gap: u32) ->
     }
 
     let remaining = remaining_after_gap.saturating_sub(fixed_total);
-    let fr_space = if auto_count == 0 { remaining } else { remaining * 2 / 3 };
-    let auto_space = if auto_count > 0 { remaining - fr_space } else { 0 };
+    let fr_space = if auto_count == 0 {
+        remaining
+    } else {
+        remaining * 2 / 3
+    };
+    let auto_space = if auto_count > 0 {
+        remaining - fr_space
+    } else {
+        0
+    };
 
     if fr_total > 0 {
         for (i, track) in tracks.iter().enumerate() {
@@ -4183,42 +4574,77 @@ fn layout_flex_container(
 ) {
     *cursor_y = cursor_y.saturating_add(element.style.margin.top);
     let outer_x = x.saturating_add(element.style.margin.left);
-    let outer_width = width.saturating_sub(
-        element.style.margin.left + element.style.margin.right
-    );
+    let outer_width = width.saturating_sub(element.style.margin.left + element.style.margin.right);
     let background_top = *cursor_y;
 
-    let border_left = if !element.style.border_style_none { element.style.border.left } else { 0 };
-    let border_right = if !element.style.border_style_none { element.style.border.right } else { 0 };
-    let border_top = if !element.style.border_style_none { element.style.border.top } else { 0 };
-    let border_bottom_sz = if !element.style.border_style_none { element.style.border.bottom } else { 0 };
+    let border_left = if !element.style.border_style_none {
+        element.style.border.left
+    } else {
+        0
+    };
+    let border_right = if !element.style.border_style_none {
+        element.style.border.right
+    } else {
+        0
+    };
+    let border_top = if !element.style.border_style_none {
+        element.style.border.top
+    } else {
+        0
+    };
+    let border_bottom_sz = if !element.style.border_style_none {
+        element.style.border.bottom
+    } else {
+        0
+    };
 
     let content_x = outer_x
         .saturating_add(border_left)
         .saturating_add(element.style.padding.left);
     let content_width = outer_width
-        .saturating_sub(border_left + border_right + element.style.padding.left + element.style.padding.right)
+        .saturating_sub(
+            border_left + border_right + element.style.padding.left + element.style.padding.right,
+        )
         .max(1);
     let content_y = background_top
         .saturating_add(border_top)
         .saturating_add(element.style.padding.top);
 
     let gap = element.style.gap;
-    let is_row = matches!(element.style.flex_direction, FlexDirection::Row | FlexDirection::RowReverse);
+    let is_row = matches!(
+        element.style.flex_direction,
+        FlexDirection::Row | FlexDirection::RowReverse
+    );
 
     // Collect visible flex items (only element children, not text nodes)
-    let children: Vec<&StyledElement> = element.children.iter().filter_map(|child| {
-        if let StyledNode::Element(el) = child {
-            if el.style.display != Display::None { Some(el) } else { None }
-        } else { None }
-    }).collect();
+    let children: Vec<&StyledElement> = element
+        .children
+        .iter()
+        .filter_map(|child| {
+            if let StyledNode::Element(el) = child {
+                if el.style.display != Display::None {
+                    Some(el)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
 
     // Reserve a slot for background rect — insert placeholder now, update height later
     let bg_cmd_index = if let Some(background_color) = element.style.background_color {
-        let blended = apply_opacity(background_color, context.background_color, element.style.effective_opacity);
+        let blended = apply_opacity(
+            background_color,
+            context.background_color,
+            element.style.effective_opacity,
+        );
         context.commands.push(DrawCommand::Rect(RectCommand {
-            x: outer_x, y: background_top,
-            width: outer_width.max(1), height: 1,
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1,
             color: blended,
             border_radius: element.style.border_radius,
         }));
@@ -4240,51 +4666,102 @@ fn layout_flex_container(
             let total_gap = gap.saturating_mul((n.saturating_sub(1)) as u32);
 
             // Calculate total width of children with explicit widths (+ margins)
-            let total_fixed: u32 = children.iter().map(|child| {
-                child.style.width.as_ref().and_then(|lv| match lv {
-                    LengthValue::Pixels(px) => Some(*px),
-                    LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
-                    LengthValue::MinContent => Some(0),
-                    LengthValue::MaxContent => Some(content_width),
-                    LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
-                }).unwrap_or(0)
-                + child.style.margin.left + child.style.margin.right
-            }).sum();
-            let n_auto = children.iter().filter(|child| child.style.width.is_none()).count() as u32;
-            let remaining = content_width.saturating_sub(total_fixed).saturating_sub(total_gap);
+            let total_fixed: u32 = children
+                .iter()
+                .map(|child| {
+                    child
+                        .style
+                        .width
+                        .as_ref()
+                        .and_then(|lv| match lv {
+                            LengthValue::Pixels(px) => Some(*px),
+                            LengthValue::Percent(p) => {
+                                Some((content_width as f32 * (*p as f32) / 100.0) as u32)
+                            }
+                            LengthValue::MinContent => Some(0),
+                            LengthValue::MaxContent => Some(content_width),
+                            LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
+                        })
+                        .unwrap_or(0)
+                        + child.style.margin.left
+                        + child.style.margin.right
+                })
+                .sum();
+            let n_auto = children
+                .iter()
+                .filter(|child| child.style.width.is_none())
+                .count() as u32;
+            let remaining = content_width
+                .saturating_sub(total_fixed)
+                .saturating_sub(total_gap);
             let auto_width = if n_auto > 0 { remaining / n_auto } else { 0 };
 
             // First pass: measure heights for alignment
-            let item_heights: Vec<u32> = children.iter().map(|child| {
-                let child_w = child.style.width.as_ref().and_then(|lv| match lv {
-                    LengthValue::Pixels(px) => Some(*px),
-                    LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
-                    LengthValue::MinContent => Some(0),
-                    LengthValue::MaxContent => Some(content_width),
-                    LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
-                }).unwrap_or(auto_width).max(1);
-                let mut dummy_y = content_y;
-                let mut dummy_ctx = LayoutContext { background_color: context.background_color, ..LayoutContext::default() };
-                layout_block_element(child, content_x, child_w, &mut dummy_y, &mut dummy_ctx, images, fonts, current_form.clone());
-                dummy_y.saturating_sub(content_y)
-            }).collect();
+            let item_heights: Vec<u32> = children
+                .iter()
+                .map(|child| {
+                    let child_w = child
+                        .style
+                        .width
+                        .as_ref()
+                        .and_then(|lv| match lv {
+                            LengthValue::Pixels(px) => Some(*px),
+                            LengthValue::Percent(p) => {
+                                Some((content_width as f32 * (*p as f32) / 100.0) as u32)
+                            }
+                            LengthValue::MinContent => Some(0),
+                            LengthValue::MaxContent => Some(content_width),
+                            LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
+                        })
+                        .unwrap_or(auto_width)
+                        .max(1);
+                    let mut dummy_y = content_y;
+                    let mut dummy_ctx = LayoutContext {
+                        background_color: context.background_color,
+                        ..LayoutContext::default()
+                    };
+                    layout_block_element(
+                        child,
+                        content_x,
+                        child_w,
+                        &mut dummy_y,
+                        &mut dummy_ctx,
+                        images,
+                        fonts,
+                        current_form.clone(),
+                    );
+                    dummy_y.saturating_sub(content_y)
+                })
+                .collect();
             let max_height = *item_heights.iter().max().unwrap_or(&0);
 
             // Compute justify-content offsets
             let (start_offset, item_gap) = justify_content_offsets(
-                element.style.justify_content, content_width, total_fixed, total_gap, n as u32
+                element.style.justify_content,
+                content_width,
+                total_fixed,
+                total_gap,
+                n as u32,
             );
 
             // Second pass: actual layout
             let mut cursor_x = content_x.saturating_add(start_offset);
             for (i, child) in children.iter().enumerate() {
-                let child_w = child.style.width.as_ref().and_then(|lv| match lv {
-                    LengthValue::Pixels(px) => Some(*px),
-                    LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
-                    LengthValue::MinContent => Some(0),
-                    LengthValue::MaxContent => Some(content_width),
-                    LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
-                }).unwrap_or(auto_width).max(1);
+                let child_w = child
+                    .style
+                    .width
+                    .as_ref()
+                    .and_then(|lv| match lv {
+                        LengthValue::Pixels(px) => Some(*px),
+                        LengthValue::Percent(p) => {
+                            Some((content_width as f32 * (*p as f32) / 100.0) as u32)
+                        }
+                        LengthValue::MinContent => Some(0),
+                        LengthValue::MaxContent => Some(content_width),
+                        LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
+                    })
+                    .unwrap_or(auto_width)
+                    .max(1);
 
                 let self_align = match child.style.align_self {
                     AlignSelf::Auto => element.style.align_items,
@@ -4302,11 +4779,21 @@ fn layout_flex_container(
 
                 let mut child_y = content_y.saturating_add(child_y_offset);
                 let child_form = form_context_for_element(child, context, current_form.clone());
-                layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts, child_form);
+                layout_block_element(
+                    child,
+                    cursor_x,
+                    child_w,
+                    &mut child_y,
+                    context,
+                    images,
+                    fonts,
+                    child_form,
+                );
                 cursor_x = cursor_x.saturating_add(child_w).saturating_add(item_gap);
             }
 
-            *cursor_y = content_y.saturating_add(max_height)
+            *cursor_y = content_y
+                .saturating_add(max_height)
                 .saturating_add(element.style.padding.bottom)
                 .saturating_add(border_bottom_sz);
         } else {
@@ -4314,16 +4801,28 @@ fn layout_flex_container(
             *cursor_y = content_y;
             for (i, child) in children.iter().enumerate() {
                 let child_form = form_context_for_element(child, context, current_form.clone());
-                layout_block_element(child, content_x, content_width, cursor_y, context, images, fonts, child_form);
+                layout_block_element(
+                    child,
+                    content_x,
+                    content_width,
+                    cursor_y,
+                    context,
+                    images,
+                    fonts,
+                    child_form,
+                );
                 if i < children.len() - 1 {
                     *cursor_y = cursor_y.saturating_add(gap);
                 }
             }
-            *cursor_y = cursor_y.saturating_add(element.style.padding.bottom)
+            *cursor_y = cursor_y
+                .saturating_add(element.style.padding.bottom)
                 .saturating_add(border_bottom_sz);
         }
     } else {
-        *cursor_y = content_y.saturating_add(element.style.padding.bottom).saturating_add(border_bottom_sz);
+        *cursor_y = content_y
+            .saturating_add(element.style.padding.bottom)
+            .saturating_add(border_bottom_sz);
     }
 
     // Update background rect height
@@ -4338,34 +4837,51 @@ fn layout_flex_container(
 
     // Draw borders
     if !element.style.border_style_none {
-        let bc = apply_opacity(element.style.border_color, context.background_color, element.style.effective_opacity);
+        let bc = apply_opacity(
+            element.style.border_color,
+            context.background_color,
+            element.style.effective_opacity,
+        );
         if border_top > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x, y: background_top,
-                width: outer_width.max(1), height: border_top,
-                color: bc, border_radius: element.style.border_radius,
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: border_top,
+                color: bc,
+                border_radius: element.style.border_radius,
             }));
         }
         if border_bottom_sz > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x, y: cursor_y.saturating_sub(border_bottom_sz),
-                width: outer_width.max(1), height: border_bottom_sz,
-                color: bc, border_radius: element.style.border_radius,
+                x: outer_x,
+                y: cursor_y.saturating_sub(border_bottom_sz),
+                width: outer_width.max(1),
+                height: border_bottom_sz,
+                color: bc,
+                border_radius: element.style.border_radius,
             }));
         }
         if border_left > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x, y: background_top,
-                width: border_left, height: background_height,
-                color: bc, border_radius: 0,
+                x: outer_x,
+                y: background_top,
+                width: border_left,
+                height: background_height,
+                color: bc,
+                border_radius: 0,
             }));
         }
         if border_right > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x.saturating_add(outer_width).saturating_sub(border_right),
+                x: outer_x
+                    .saturating_add(outer_width)
+                    .saturating_sub(border_right),
                 y: background_top,
-                width: border_right, height: background_height,
-                color: bc, border_radius: 0,
+                width: border_right,
+                height: background_height,
+                color: bc,
+                border_radius: 0,
             }));
         }
     }
@@ -4381,13 +4897,22 @@ fn justify_content_offsets(
     n: u32,
 ) -> (u32, u32) {
     // Returns (start_offset, gap_between_items)
-    let free = container_w.saturating_sub(total_fixed).saturating_sub(total_gap);
+    let free = container_w
+        .saturating_sub(total_fixed)
+        .saturating_sub(total_gap);
     let base_gap = if n > 1 { total_gap / (n - 1) } else { 0 };
     match justify {
         JustifyContent::FlexStart => (0, base_gap),
         JustifyContent::FlexEnd => (free, base_gap),
         JustifyContent::Center => (free / 2, base_gap),
-        JustifyContent::SpaceBetween => (0, if n > 1 { (free + total_gap) / (n - 1) } else { 0 }),
+        JustifyContent::SpaceBetween => (
+            0,
+            if n > 1 {
+                (free + total_gap) / (n - 1)
+            } else {
+                0
+            },
+        ),
         JustifyContent::SpaceAround => {
             let per = free / n.max(1);
             (per / 2, per + base_gap)
@@ -4411,7 +4936,12 @@ mod tests {
     fn hides_display_none_content() {
         let document = parse_document("<div><p>Hello</p><span class=\"hide\">Nope</span></div>");
         let stylesheet = parse_stylesheet(".hide { display: none; } p { color: #ff0000; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -4425,7 +4955,12 @@ mod tests {
     fn centers_text_when_requested() {
         let document = parse_document("<p>Hello</p>");
         let stylesheet = parse_stylesheet("p { text-align: center; font-size: 16px; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 200, &mut fonts);
 
@@ -4440,7 +4975,12 @@ mod tests {
     fn wraps_text_across_multiple_lines() {
         let document = parse_document("<p>alpha beta gamma delta epsilon</p>");
         let stylesheet = parse_stylesheet("p { font-size: 16px; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 90, &mut fonts);
 
@@ -4457,7 +4997,12 @@ mod tests {
     fn keeps_text_align_inherited() {
         let document = parse_document("<div><p>Hello</p></div>");
         let stylesheet = parse_stylesheet("div { text-align: right; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
 
         let paragraph = match styled {
             crate::css::StyledNode::Element(ref root) => {
@@ -4472,7 +5017,12 @@ mod tests {
     #[test]
     fn places_table_cells_side_by_side() {
         let document = parse_document("<table><tr><td>Left</td><td>Right</td></tr></table>");
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
         let texts = layout.texts();
@@ -4494,7 +5044,12 @@ mod tests {
         let document = parse_document(
             "<div><img src=\"https://example.com/pic.jpg\" data-scratch-src=\"https://example.com/pic.jpg\" width=\"40\" height=\"20\"></div>",
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let mut images = ImageStore::default();
         images.insert(
@@ -4518,7 +5073,12 @@ mod tests {
     fn auto_width_tables_do_not_expand_to_full_container() {
         let document =
             parse_document("<table align=\"center\"><tr><td>Hello</td><td>World</td></tr></table>");
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 500, &mut fonts);
         let texts = layout.texts();
@@ -4540,7 +5100,12 @@ mod tests {
         let document = parse_document(
             "<table><tr><td valign=\"middle\">short</td><td><br><br><br><br><br>tall</td></tr></table>",
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
         let texts = layout.texts();
@@ -4557,7 +5122,12 @@ mod tests {
         let document = parse_document(
             "<table><tr><td rowspan=\"2\">Left</td><td>Top</td></tr><tr><td>Bottom</td></tr></table>",
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
         let texts = layout.texts();
@@ -4577,9 +5147,15 @@ mod tests {
     #[test]
     fn uses_document_background_for_opacity_blending() {
         let document = parse_document("<body><div>Hi</div></body>");
-        let stylesheet =
-            parse_stylesheet("body { background-color: #000000; } div { background-color: #ff0000; opacity: 0.5; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let stylesheet = parse_stylesheet(
+            "body { background-color: #000000; } div { background-color: #ff0000; opacity: 0.5; }",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -4596,9 +5172,10 @@ mod tests {
         // The raw red rect should be inside the layer
         let has_raw_red = layout.commands.iter().any(|cmd| {
             if let DrawCommand::Layer(layer) = cmd {
-                layer.commands.iter().any(|inner| {
-                    matches!(inner, DrawCommand::Rect(r) if r.color == 0xFF0000)
-                })
+                layer
+                    .commands
+                    .iter()
+                    .any(|inner| matches!(inner, DrawCommand::Rect(r) if r.color == 0xFF0000))
             } else {
                 false
             }
@@ -4615,7 +5192,12 @@ mod tests {
         let stylesheet = parse_stylesheet(
             "body { background-color: #000000; } div { opacity: 0.5; } span { opacity: 0.5; color: #ffffff; }",
         );
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -4624,10 +5206,14 @@ mod tests {
         // The text color inside the layer is pre-blended with the span's own opacity (0.5)
         // against the layer's local backdrop (black #000000 from body background).
         // span.opacity=0.5=128, color=white=#ffffff blended against black => ~0x808080
-        let has_layer = layout.commands.iter().any(|cmd| {
-            matches!(cmd, DrawCommand::Layer(_))
-        });
-        assert!(has_layer, "div with opacity: 0.5 should produce a LayerCommand");
+        let has_layer = layout
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, DrawCommand::Layer(_)));
+        assert!(
+            has_layer,
+            "div with opacity: 0.5 should produce a LayerCommand"
+        );
 
         // Text color inside layer should be pre-blended with span's own opacity against the
         // layer's local backdrop color. The layer's backdrop is black (body bg).
@@ -4636,8 +5222,10 @@ mod tests {
         let texts = layout.texts();
         let text = texts.first().expect("text command should exist");
         // The text should be blended with span's 50% opacity against the layer backdrop (black)
-        assert_eq!(text.color, 0x808080,
-            "text inside stacking context should be pre-blended with span's own opacity against layer backdrop");
+        assert_eq!(
+            text.color, 0x808080,
+            "text inside stacking context should be pre-blended with span's own opacity against layer backdrop"
+        );
     }
 
     #[test]
@@ -4645,7 +5233,12 @@ mod tests {
         let document = parse_document(
             r#"<form action="/search"><input name="q" value="rust"><button type="submit">Go</button></form>"#,
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -4677,15 +5270,20 @@ mod tests {
     }
     #[test]
     fn test_overflow_hidden_clips_commands() {
-        use crate::css::{parse_stylesheet, build_styled_tree};
-        use crate::html::parse_document;
+        use crate::css::{build_styled_tree, parse_stylesheet};
         use crate::font::FontContext;
+        use crate::html::parse_document;
         use crate::image::ImageStore;
 
         let html = r#"<div style="overflow:hidden;height:50px;background:#ffffff"><div style="height:100px;background:#ff0000">Content</div></div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
@@ -4698,38 +5296,53 @@ mod tests {
                 assert!(
                     rect.y.saturating_add(rect.height) <= max_y + 2,
                     "Rect y={} height={} exceeds overflow:hidden boundary y={}",
-                    rect.y, rect.height, max_y
+                    rect.y,
+                    rect.height,
+                    max_y
                 );
             }
         }
     }
     #[test]
     fn test_border_radius_in_rect_command() {
-        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::css::{build_styled_tree, parse_stylesheet};
         use crate::html::parse_document;
 
         let html = r#"<div style="background:#ff0000;border-radius:10px">Hello</div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
 
         let rects = layout.rects();
         let bg_rect = rects.iter().find(|r| r.border_radius == 10);
-        assert!(bg_rect.is_some(), "Should have a rect with border_radius=10");
+        assert!(
+            bg_rect.is_some(),
+            "Should have a rect with border_radius=10"
+        );
         assert_eq!(bg_rect.unwrap().border_radius, 10);
     }
     #[test]
     fn test_box_shadow_generates_shadow_rect() {
-        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::css::{build_styled_tree, parse_stylesheet};
         use crate::html::parse_document;
 
         let html = r#"<div style="background:#ffffff;box-shadow:2px 2px #000000">Hello</div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
@@ -4737,52 +5350,89 @@ mod tests {
         // Should have a black shadow rect
         let rects = layout.rects();
         let shadow_rect = rects.iter().find(|r| r.color == 0x000000);
-        assert!(shadow_rect.is_some(), "Should have a shadow rect with black color");
+        assert!(
+            shadow_rect.is_some(),
+            "Should have a shadow rect with black color"
+        );
     }
 
     #[test]
     fn grid_children_placed_side_by_side() {
-        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::css::{build_styled_tree, parse_stylesheet};
         use crate::html::parse_document;
 
         // 2-column grid: two children should be placed side by side (different x values)
         let html = r#"<div style="display:grid;grid-template-columns:200px 200px;gap:0px;"><div>Left</div><div>Right</div></div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
 
         let texts = layout.texts();
-        let left = texts.iter().find(|t| t.text.contains("Left")).expect("Left text should be rendered");
-        let right = texts.iter().find(|t| t.text.contains("Right")).expect("Right text should be rendered");
+        let left = texts
+            .iter()
+            .find(|t| t.text.contains("Left"))
+            .expect("Left text should be rendered");
+        let right = texts
+            .iter()
+            .find(|t| t.text.contains("Right"))
+            .expect("Right text should be rendered");
 
         // Left and Right should have different x positions (side by side)
-        assert_ne!(left.x, right.x, "Grid children should be placed at different x positions");
+        assert_ne!(
+            left.x, right.x,
+            "Grid children should be placed at different x positions"
+        );
         // Right should be to the right of left
-        assert!(right.x > left.x, "Right item should have a larger x than Left item");
+        assert!(
+            right.x > left.x,
+            "Right item should have a larger x than Left item"
+        );
         // They should be on the same row (same y)
-        assert_eq!(left.y, right.y, "Grid children in the same row should have the same y");
+        assert_eq!(
+            left.y, right.y,
+            "Grid children in the same row should have the same y"
+        );
     }
 
     #[test]
     fn grid_three_column_equal_fr_layout() {
-        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::css::{build_styled_tree, parse_stylesheet};
         use crate::html::parse_document;
 
         let html = r#"<div style="display:grid;grid-template-columns:repeat(3,1fr);"><div>A</div><div>B</div><div>C</div></div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 600, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            600,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 600, &mut fonts);
 
         let texts = layout.texts();
-        let a = texts.iter().find(|t| t.text.contains('A')).expect("A should be rendered");
-        let b = texts.iter().find(|t| t.text.contains('B')).expect("B should be rendered");
-        let c = texts.iter().find(|t| t.text.contains('C')).expect("C should be rendered");
+        let a = texts
+            .iter()
+            .find(|t| t.text.contains('A'))
+            .expect("A should be rendered");
+        let b = texts
+            .iter()
+            .find(|t| t.text.contains('B'))
+            .expect("B should be rendered");
+        let c = texts
+            .iter()
+            .find(|t| t.text.contains('C'))
+            .expect("C should be rendered");
 
         // All three should be on the same row
         assert_eq!(a.y, b.y, "A and B should be on the same row");
@@ -4798,7 +5448,12 @@ mod tests {
 
         let document = parse_document(r#"<div style="filter: blur(4px);">Hello</div>"#);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 320, &mut fonts);
@@ -4816,7 +5471,10 @@ mod tests {
         }
 
         let layers = find_layers(&layout.commands);
-        assert!(!layers.is_empty(), "Expected at least one LayerCommand for filter: blur()");
+        assert!(
+            !layers.is_empty(),
+            "Expected at least one LayerCommand for filter: blur()"
+        );
         assert!(
             layers.iter().any(|l| l.blur_px > 0),
             "Expected a LayerCommand with blur_px > 0, got: {:?}",
@@ -4830,7 +5488,12 @@ mod tests {
 
         let document = parse_document(r#"<div style="filter: brightness(0.5);">Hello</div>"#);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 320, &mut fonts);
@@ -4847,7 +5510,10 @@ mod tests {
         }
 
         let layers = find_layers(&layout.commands);
-        assert!(!layers.is_empty(), "Expected at least one LayerCommand for filter: brightness()");
+        assert!(
+            !layers.is_empty(),
+            "Expected at least one LayerCommand for filter: brightness()"
+        );
         assert!(
             layers.iter().any(|l| l.brightness != 10000),
             "Expected a LayerCommand with brightness != 10000, got: {:?}",
@@ -4865,26 +5531,41 @@ mod tests {
     fn block_with_explicit_width_is_constrained() {
         let document = parse_document(r#"<div style="width:200px;background:red;">x</div>"#);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
 
         let rects = layout.rects();
-        let bg = rects.iter().find(|r| r.color == 0xFF0000)
+        let bg = rects
+            .iter()
+            .find(|r| r.color == 0xFF0000)
             .expect("red background rect should exist");
         assert_eq!(bg.width, 200, "div should be 200px wide, got {}", bg.width);
     }
 
     #[test]
     fn margin_auto_centers_block_element() {
-        let document = parse_document(r#"<div style="width:200px;margin:0 auto;background:red;">x</div>"#);
+        let document =
+            parse_document(r#"<div style="width:200px;margin:0 auto;background:red;">x</div>"#);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
 
         let rects = layout.rects();
-        let bg = rects.iter().find(|r| r.color == 0xFF0000)
+        let bg = rects
+            .iter()
+            .find(|r| r.color == 0xFF0000)
             .expect("red background rect should exist");
         // (800 - 200) / 2 = 300
         assert_eq!(bg.x, 300, "div should be centered at x=300, got {}", bg.x);

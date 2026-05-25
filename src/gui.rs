@@ -828,6 +828,9 @@ impl BrowserApp {
             {
                 return Some(match control.kind {
                     FormControlKind::TextInput => HitTarget::PageTextInput(control.id),
+                    FormControlKind::Checkbox | FormControlKind::Radio => {
+                        HitTarget::PageToggle(control.id)
+                    }
                     FormControlKind::Button => HitTarget::PageButton(control.id),
                     FormControlKind::Hidden => return None,
                 });
@@ -1773,13 +1776,23 @@ impl BrowserApp {
             if control.form_id != Some(trigger_form_id) || control.disabled {
                 continue;
             }
-            if matches!(
-                control.kind,
-                FormControlKind::TextInput | FormControlKind::Hidden
-            ) && let Some(name) = &control.name
-                && !name.is_empty()
-            {
-                fields.push((name.clone(), self.control_current_value(control)));
+            match control.kind {
+                FormControlKind::TextInput | FormControlKind::Hidden => {
+                    if let Some(name) = &control.name
+                        && !name.is_empty()
+                    {
+                        fields.push((name.clone(), self.control_current_value(control)));
+                    }
+                }
+                FormControlKind::Checkbox | FormControlKind::Radio => {
+                    if control.checked
+                        && let Some(name) = &control.name
+                        && !name.is_empty()
+                    {
+                        fields.push((name.clone(), control.value.clone()));
+                    }
+                }
+                FormControlKind::Button => {}
             }
         }
         if matches!(trigger_kind, FormControlKind::Button)
@@ -1862,6 +1875,91 @@ impl BrowserApp {
                     );
                     self.focus_page_input_at(&control, Some(char_index));
                 }
+            }
+            HitTarget::PageToggle(control_id) => {
+                let control = self.current_page_control(control_id);
+                if control
+                    .as_ref()
+                    .map(|control| control.disabled)
+                    .unwrap_or(false)
+                {
+                    return false;
+                }
+                self.blur_address_bar();
+                self.blur_page_input();
+                let Some(control) = control else {
+                    return false;
+                };
+                let click_result =
+                    self.dispatch_page_dom_event(control.node_id, "click", true, true);
+                if let Some(result) = click_result {
+                    if result.default_prevented || result.snapshot.navigation_target.is_some() {
+                        return false;
+                    }
+                }
+                let Some(control_after_click) = self.current_page_control(control_id) else {
+                    return false;
+                };
+                let mut checked_changed = false;
+                match control_after_click.kind {
+                    FormControlKind::Checkbox => {
+                        let next_checked = !control_after_click.checked;
+                        if next_checked {
+                            self.document.set_dom_attribute(
+                                control_after_click.node_id,
+                                "checked",
+                                "checked",
+                            );
+                        } else {
+                            self.document
+                                .remove_dom_attribute(control_after_click.node_id, "checked");
+                        }
+                        checked_changed = true;
+                    }
+                    FormControlKind::Radio => {
+                        if !control_after_click.checked {
+                            let group_members: Vec<usize> = self
+                                .current_layout()
+                                .controls
+                                .into_iter()
+                                .filter(|control| {
+                                    control.id != control_after_click.id
+                                        && matches!(control.kind, FormControlKind::Radio)
+                                        && control.form_id == control_after_click.form_id
+                                        && control.name == control_after_click.name
+                                        && control.checked
+                                })
+                                .filter_map(|control| control.node_id)
+                                .collect();
+                            self.document.set_dom_attribute(
+                                control_after_click.node_id,
+                                "checked",
+                                "checked",
+                            );
+                            for node_id in group_members {
+                                self.document.remove_dom_attribute(Some(node_id), "checked");
+                            }
+                            checked_changed = true;
+                        }
+                    }
+                    _ => {}
+                }
+                if checked_changed {
+                    let _ = self.dispatch_page_dom_event(
+                        control_after_click.node_id,
+                        "input",
+                        true,
+                        false,
+                    );
+                    let _ = self.dispatch_page_dom_event(
+                        control_after_click.node_id,
+                        "change",
+                        true,
+                        false,
+                    );
+                }
+                self.request_content_render();
+                self.request_redraw();
             }
             HitTarget::PageButton(control_id) => {
                 let control = self.current_page_control(control_id);
@@ -2200,6 +2298,12 @@ impl DocumentView {
     fn set_dom_attribute(&mut self, node_id: Option<usize>, name: &str, value: &str) {
         if let DocumentContent::Loaded(page) = &mut self.content {
             page.set_dom_attribute(node_id, name, value);
+        }
+    }
+
+    fn remove_dom_attribute(&mut self, node_id: Option<usize>, name: &str) {
+        if let DocumentContent::Loaded(page) = &mut self.content {
+            page.remove_dom_attribute(node_id, name);
         }
     }
 
@@ -2770,6 +2874,7 @@ enum HitTarget {
     TitleBar,
     AddressBar,
     PageTextInput(usize),
+    PageToggle(usize),
     PageButton(usize),
     Button(ChromeButton),
     Resize(ResizeDirection),
@@ -3309,6 +3414,7 @@ fn cursor_icon_for_target(target: HitTarget) -> CursorIcon {
     match target {
         HitTarget::AddressBar => CursorIcon::Text,
         HitTarget::PageTextInput(_) => CursorIcon::Text,
+        HitTarget::PageToggle(_) => CursorIcon::Pointer,
         HitTarget::PageButton(_) => CursorIcon::Pointer,
         HitTarget::Button(_) => CursorIcon::Pointer,
         HitTarget::Resize(direction) => direction.into(),
@@ -3866,7 +3972,8 @@ fn paint_page_control(
     let absolute_y = offset_y.saturating_add(control.y.saturating_sub(scroll_y));
     let is_hovered = matches!(
         hovered_target,
-        HitTarget::PageTextInput(id) | HitTarget::PageButton(id) if id == control.id
+        HitTarget::PageTextInput(id) | HitTarget::PageToggle(id) | HitTarget::PageButton(id)
+            if id == control.id
     );
     let focused = focused_page_input
         .as_ref()
@@ -3877,12 +3984,16 @@ fn paint_page_control(
         return;
     }
 
-    let background =
-        if matches!(control.kind, FormControlKind::Button) && is_hovered && !control.disabled {
-            COLOR_CONTROL_BUTTON_HOVER
-        } else {
-            control.background_color
-        };
+    let background = if matches!(
+        control.kind,
+        FormControlKind::Button | FormControlKind::Checkbox | FormControlKind::Radio
+    ) && is_hovered
+        && !control.disabled
+    {
+        COLOR_CONTROL_BUTTON_HOVER
+    } else {
+        control.background_color
+    };
     let border = if focused.is_some() {
         COLOR_ADDRESS_BAR_FOCUS
     } else if is_hovered {
@@ -3891,26 +4002,31 @@ fn paint_page_control(
         control.border_color
     };
 
-    draw_rect(
-        buffer,
-        width,
-        height,
-        absolute_x,
-        absolute_y,
-        control.width,
-        control.height,
-        background,
-    );
-    draw_rect_outline(
-        buffer,
-        width,
-        height,
-        absolute_x,
-        absolute_y,
-        control.width,
-        control.height,
-        border,
-    );
+    if matches!(
+        control.kind,
+        FormControlKind::TextInput | FormControlKind::Button
+    ) {
+        draw_rect(
+            buffer,
+            width,
+            height,
+            absolute_x,
+            absolute_y,
+            control.width,
+            control.height,
+            background,
+        );
+        draw_rect_outline(
+            buffer,
+            width,
+            height,
+            absolute_x,
+            absolute_y,
+            control.width,
+            control.height,
+            border,
+        );
+    }
 
     match control.kind {
         FormControlKind::TextInput => {
@@ -4062,6 +4178,70 @@ fn paint_page_control(
                 false,
                 control.font_family,
             );
+        }
+        FormControlKind::Checkbox | FormControlKind::Radio => {
+            let box_size = control.width.min(control.height).max(14);
+            let box_x = absolute_x.saturating_add(control.width.saturating_sub(box_size) / 2);
+            let box_y = absolute_y.saturating_add(control.height.saturating_sub(box_size) / 2);
+
+            if matches!(control.kind, FormControlKind::Checkbox) {
+                draw_rect(
+                    buffer, width, height, box_x, box_y, box_size, box_size, background,
+                );
+                draw_rect_outline(
+                    buffer, width, height, box_x, box_y, box_size, box_size, border,
+                );
+                if control.checked {
+                    let inner = box_size.saturating_sub(6).max(4);
+                    let inner_x = box_x.saturating_add(box_size.saturating_sub(inner) / 2);
+                    let inner_y = box_y.saturating_add(box_size.saturating_sub(inner) / 2);
+                    draw_rect(
+                        buffer,
+                        width,
+                        height,
+                        inner_x,
+                        inner_y,
+                        inner,
+                        inner,
+                        control.text_color,
+                    );
+                }
+            } else {
+                let center_x = box_x.saturating_add(box_size / 2);
+                let center_y = box_y.saturating_add(box_size / 2);
+                let outer_radius = (box_size / 2).max(7);
+                let inner_radius = outer_radius.saturating_sub(1).max(1);
+                let dot_radius = outer_radius.saturating_sub(5).max(2);
+                draw_filled_circle(
+                    buffer,
+                    width,
+                    height,
+                    center_x,
+                    center_y,
+                    outer_radius,
+                    border,
+                );
+                draw_filled_circle(
+                    buffer,
+                    width,
+                    height,
+                    center_x,
+                    center_y,
+                    inner_radius,
+                    background,
+                );
+                if control.checked {
+                    draw_filled_circle(
+                        buffer,
+                        width,
+                        height,
+                        center_x,
+                        center_y,
+                        dot_radius,
+                        control.text_color,
+                    );
+                }
+            }
         }
         FormControlKind::Hidden => {}
     }
@@ -5182,6 +5362,42 @@ fn draw_rect_outline(
         rect_height,
         color,
     );
+}
+
+fn draw_filled_circle(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    center_x: u32,
+    center_y: u32,
+    radius: u32,
+    color: Color,
+) {
+    if radius == 0 {
+        return;
+    }
+
+    let radius_sq = (radius as i64) * (radius as i64);
+    let min_x = center_x.saturating_sub(radius);
+    let max_x = center_x.saturating_add(radius).min(width.saturating_sub(1));
+    let min_y = center_y.saturating_sub(radius);
+    let max_y = center_y
+        .saturating_add(radius)
+        .min(height.saturating_sub(1));
+
+    for y in min_y..=max_y {
+        let dy = y as i64 - center_y as i64;
+        let row_offset = y as usize * width as usize;
+        for x in min_x..=max_x {
+            let dx = x as i64 - center_x as i64;
+            if dx * dx + dy * dy <= radius_sq {
+                let idx = row_offset + x as usize;
+                if idx < buffer.len() {
+                    buffer[idx] = color;
+                }
+            }
+        }
+    }
 }
 
 /// Draw an image tiled at its natural pixel size to fill the region

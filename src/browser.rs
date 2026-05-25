@@ -142,6 +142,20 @@ impl BrowserPage {
         }
     }
 
+    pub fn remove_dom_attribute(&mut self, node_id: Option<usize>, name: &str) {
+        let Some(node_id) = node_id else {
+            return;
+        };
+        let Some(session) = self.javascript_session.as_ref().cloned() else {
+            return;
+        };
+        if session.remove_attribute(node_id, name)
+            && let Some(snapshot) = session.snapshot()
+        {
+            self.apply_script_snapshot(snapshot);
+        }
+    }
+
     pub fn set_viewport_size(&mut self, width: u32, height: u32) -> bool {
         if let Some(session) = &self.javascript_session {
             return session.set_viewport_size(width, height);
