@@ -1502,6 +1502,7 @@ impl BrowserApp {
             event_type: event_type.to_string(),
             bubbles,
             cancelable,
+            composed: default_page_event_composed(event_type),
             ..Default::default()
         })
     }
@@ -3052,6 +3053,7 @@ fn keyboard_dom_event_request(
         event_type: event_type.to_string(),
         bubbles: true,
         cancelable: matches!(event_type, "keydown"),
+        composed: default_page_event_composed(event_type),
         key: Some(dom_key_value_for_key_code(key_code, modifiers.shift_key())),
         code: Some(dom_code_value_for_key_code(key_code)),
         repeat,
@@ -3061,6 +3063,13 @@ fn keyboard_dom_event_request(
         meta_key: modifiers.super_key(),
         ..Default::default()
     }
+}
+
+fn default_page_event_composed(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "click" | "input" | "change" | "submit" | "keydown" | "keyup" | "focus" | "blur"
+    )
 }
 
 fn dom_key_value_for_key_code(key_code: KeyCode, shift: bool) -> String {

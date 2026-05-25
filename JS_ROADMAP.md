@@ -22,6 +22,7 @@ Already working:
 - live `element.attributes` collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
 - browser-grade Node accessors and mutation helpers such as `nodeType`, `nodeName`, `nodeValue`, sibling traversal, `cloneNode(...)`, `replaceChild(...)`, `removeChild(...)`, `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, `replaceChildren(...)`
 - `document.createDocumentFragment(...)` with fragment flattening during insertion
+- WebComponents primitives: `customElements.define(...)` / `get(...)` / `whenDefined(...)` / `upgrade(...)`, `attachShadow(...)`, `slot.assignedNodes(...)`, `slot.assignedElements(...)`, and shadow-boundary `Event.composedPath()` / retargeting
 - native GUI typing stays in sync with live DOM `input.value`
 - basic DOM event plumbing for capture + bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`
 - `Promise` job flushing
@@ -131,6 +132,7 @@ Tasks:
 - support `document.body`, `document.head`, `document.documentElement` consistently
 - add mutation notifications for DOM changes when they affect layout or event targets; `MutationObserver` now fires for `attributes`, `childList`, and `characterData`, browser-style event constructors plus `AbortController` / `AbortSignal` are available, and text nodes now expose `splitText(...)`, but deeper parity and more mutation types are still open
 - improve `innerHTML` parsing and serialization edge cases
+- refine slot distribution / shadow DOM parity beyond the current composed-path and retargeting support
 
 Exit criteria:
 

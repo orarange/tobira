@@ -19,15 +19,15 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-24`
+- Date: `2026-05-25`
 - Repo / package name: `tobira`
 - Working branch: `master`
 - Workflow:
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `196` passing tests on `2026-05-24`
-- `cargo build`: success on `2026-05-24`
+- `cargo test`: `200` passing tests on `2026-05-25`
+- `cargo build`: success on `2026-05-25`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -67,6 +67,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, `replaceChildren(...)`
     - `document.createDocumentFragment(...)` with fragment flattening on insertion
   - page event listeners now support capture + bubbling, plus `once` listeners and capture-sensitive `removeEventListener(...)`
+  - shadow DOM / WebComponents now have `customElements`, `attachShadow(...)`, `slot.assignedNodes(...)`, `slot.assignedElements(...)`, and shadow-boundary event retargeting with `Event.composedPath()`
   - guarded JavaScript execution through `boa_engine`
   - lightweight mutable DOM bridge with:
     - `querySelector(...)`, `querySelectorAll(...)`, `getElementById(...)`
@@ -194,6 +195,13 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-25 - Codex (shadow DOM / composed path)
+
+- Added `customElements` lifecycle scaffolding plus `attachShadow(...)` support, slot assignment helpers, and `ShadowRoot` / `slot` accessors.
+- Implemented shadow-boundary event retargeting and `Event.composedPath()` for composed events so WebComponents listeners see browser-like targets.
+- Added regression coverage for custom element upgrade callbacks, attribute change callbacks, and shadow DOM host / slot behavior.
+- Verified the updated state with `cargo test` (`200` passing tests) and `cargo build`.
 
 ### 2026-05-18 - Codex (Node / fragment DOM APIs)
 

@@ -48,6 +48,7 @@ pub struct DomEventRequest {
     pub event_type: String,
     pub bubbles: bool,
     pub cancelable: bool,
+    pub composed: bool,
     pub key: Option<String>,
     pub code: Option<String>,
     pub detail: Option<String>,
@@ -211,6 +212,8 @@ struct JavaScriptState {
     active_element_node_id: Option<usize>,
     pending_tasks: VecDeque<PendingTask>,
     next_task_handle: usize,
+    custom_elements: BTreeMap<String, CustomElementDefinition>,
+    pending_custom_element_waiters: BTreeMap<String, Vec<boa_engine::builtins::promise::ResolvingFunctions>>,
     dom: DomState,
 }
 
@@ -257,6 +260,8 @@ struct DomState {
     html_id: Option<usize>,
     head_id: Option<usize>,
     body_id: Option<usize>,
+    shadow_roots: BTreeMap<usize, ShadowRootMeta>,
+    shadow_root_by_host: BTreeMap<usize, usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -271,12 +276,35 @@ enum DomNodeKind {
     Element(DomElementData),
     Text(String),
     Fragment,
+    ShadowRoot(ShadowRootMeta),
 }
 
 #[derive(Debug, Clone, Default)]
 struct DomElementData {
     tag_name: String,
     attributes: BTreeMap<String, String>,
+    shadow_root_id: Option<usize>,
+    custom_element_upgraded: bool,
+    custom_element_connected_callback_called: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CustomElementDefinition {
+    constructor: JsObject,
+    prototype: JsObject,
+    observed_attributes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShadowRootMode {
+    Open,
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShadowRootMeta {
+    host_node_id: usize,
+    mode: ShadowRootMode,
 }
 
 #[derive(Debug, Clone, Trace, Finalize, JsData)]
@@ -526,6 +554,8 @@ impl JavaScriptRuntime {
                 active_element_node_id: None,
                 pending_tasks: VecDeque::new(),
                 next_task_handle: 1,
+                custom_elements: BTreeMap::new(),
+                pending_custom_element_waiters: BTreeMap::new(),
                 dom,
             }),
         });
@@ -930,14 +960,19 @@ impl JavaScriptRuntime {
             ..Default::default()
         };
         let target = self.context.global_object();
-        let event = build_dom_event_object(&mut self.context, &request, &target);
+        let event = build_dom_event_object(
+            &mut self.context,
+            &request,
+            &target,
+            &[request.target_node_id],
+        );
         dispatch_global_event_object(&mut self.context, event_type, bubbles, cancelable, &event)
     }
 
     fn serialize_html(&self) -> String {
         self.context
             .get_data::<JavaScriptHostData>()
-            .map(|host| host.state.borrow().dom.serialize_document())
+            .map(|host| host.state.borrow().dom.serialize_render_document())
             .unwrap_or_default()
     }
 }
@@ -961,6 +996,9 @@ impl DomState {
             Node::Element(element) => DomNodeKind::Element(DomElementData {
                 tag_name: element.tag_name.clone(),
                 attributes: element.attributes.clone(),
+                shadow_root_id: None,
+                custom_element_upgraded: false,
+                custom_element_connected_callback_called: false,
             }),
         };
         self.nodes.push(DomNode {
@@ -989,6 +1027,9 @@ impl DomState {
             kind: DomNodeKind::Element(DomElementData {
                 tag_name: tag_name.to_ascii_lowercase(),
                 attributes: BTreeMap::new(),
+                shadow_root_id: None,
+                custom_element_upgraded: false,
+                custom_element_connected_callback_called: false,
             }),
         });
         node_id
@@ -1014,6 +1055,30 @@ impl DomState {
         node_id
     }
 
+    fn create_shadow_root(&mut self, host_node_id: usize, mode: ShadowRootMode) -> usize {
+        let node_id = self.nodes.len();
+        self.nodes.push(DomNode {
+            parent: None,
+            children: Vec::new(),
+            kind: DomNodeKind::ShadowRoot(ShadowRootMeta {
+                host_node_id,
+                mode,
+            }),
+        });
+        self.shadow_roots.insert(
+            node_id,
+            ShadowRootMeta {
+                host_node_id,
+                mode,
+            },
+        );
+        self.shadow_root_by_host.insert(host_node_id, node_id);
+        if let Some(element) = self.element_mut(host_node_id) {
+            element.shadow_root_id = Some(node_id);
+        }
+        node_id
+    }
+
     fn is_document_node(&self, node_id: usize) -> bool {
         node_id == self.document_id && self.node(node_id).is_some()
     }
@@ -1029,15 +1094,103 @@ impl DomState {
     fn element(&self, node_id: usize) -> Option<&DomElementData> {
         match &self.node(node_id)?.kind {
             DomNodeKind::Element(element) => Some(element),
-            DomNodeKind::Text(_) | DomNodeKind::Fragment => None,
+            DomNodeKind::Text(_) | DomNodeKind::Fragment | DomNodeKind::ShadowRoot(_) => None,
         }
     }
 
     fn element_mut(&mut self, node_id: usize) -> Option<&mut DomElementData> {
         match &mut self.node_mut(node_id)?.kind {
             DomNodeKind::Element(element) => Some(element),
-            DomNodeKind::Text(_) | DomNodeKind::Fragment => None,
+            DomNodeKind::Text(_) | DomNodeKind::Fragment | DomNodeKind::ShadowRoot(_) => None,
         }
+    }
+
+    fn shadow_root_meta(&self, node_id: usize) -> Option<&ShadowRootMeta> {
+        self.shadow_roots.get(&node_id)
+    }
+
+    fn shadow_root_for_host(&self, host_node_id: usize) -> Option<usize> {
+        self.shadow_root_by_host.get(&host_node_id).copied()
+    }
+
+    fn is_shadow_root(&self, node_id: usize) -> bool {
+        matches!(self.node(node_id).map(|node| &node.kind), Some(DomNodeKind::ShadowRoot(_)))
+    }
+
+    fn shadow_root_host(&self, node_id: usize) -> Option<usize> {
+        self.shadow_root_meta(node_id).map(|meta| meta.host_node_id)
+    }
+
+    fn enclosing_shadow_root(&self, node_id: usize) -> Option<usize> {
+        let mut current = self.node(node_id).and_then(|node| node.parent);
+        while let Some(parent_id) = current {
+            if self.is_shadow_root(parent_id) {
+                return Some(parent_id);
+            }
+            current = self.node(parent_id).and_then(|node| node.parent);
+        }
+        None
+    }
+
+    fn shadow_root_host_for_node(&self, node_id: usize) -> Option<usize> {
+        if self.is_shadow_root(node_id) {
+            return self.shadow_root_host(node_id);
+        }
+        self.enclosing_shadow_root(node_id)
+            .and_then(|shadow_root_id| self.shadow_root_host(shadow_root_id))
+    }
+
+    fn shadow_including_parent(&self, node_id: usize) -> Option<usize> {
+        let node = self.node(node_id)?;
+        if let Some(parent_id) = node.parent {
+            return Some(parent_id);
+        }
+        self.shadow_root_host(node_id)
+    }
+
+    fn root_node_id(&self, node_id: usize, composed: bool) -> Option<usize> {
+        let mut current = node_id;
+        loop {
+            let parent = if composed {
+                self.shadow_including_parent(current)
+            } else {
+                self.node(current).and_then(|node| node.parent)
+            };
+            match parent {
+                Some(parent_id) => current = parent_id,
+                None => return Some(current),
+            }
+        }
+    }
+
+    fn slot_assigned_nodes(&self, slot_node_id: usize) -> Vec<usize> {
+        let Some(host_id) = self.shadow_root_host_for_node(slot_node_id) else {
+            return Vec::new();
+        };
+        let slot_name = self.get_attribute(slot_node_id, "name").unwrap_or_default();
+        self.node(host_id)
+            .map(|host| {
+                host.children
+                    .iter()
+                    .copied()
+                    .filter(|child_id| {
+                        let child_slot = self.get_attribute(*child_id, "slot").unwrap_or_default();
+                        if slot_name.is_empty() {
+                            child_slot.is_empty()
+                        } else {
+                            child_slot == slot_name
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn slot_assigned_elements(&self, slot_node_id: usize) -> Vec<usize> {
+        self.slot_assigned_nodes(slot_node_id)
+            .into_iter()
+            .filter(|node_id| self.element(*node_id).is_some())
+            .collect()
     }
 
     fn node_type(&self, node_id: usize) -> u16 {
@@ -1051,6 +1204,7 @@ impl DomState {
             Some(DomNodeKind::Element(_)) => 1,
             Some(DomNodeKind::Text(_)) => 3,
             Some(DomNodeKind::Fragment) => 11,
+            Some(DomNodeKind::ShadowRoot(_)) => 11,
             None => 0,
         }
     }
@@ -1063,6 +1217,7 @@ impl DomState {
             Some(DomNodeKind::Element(element)) => Some(element.tag_name.to_ascii_uppercase()),
             Some(DomNodeKind::Text(_)) => Some("#text".to_string()),
             Some(DomNodeKind::Fragment) => Some("#document-fragment".to_string()),
+            Some(DomNodeKind::ShadowRoot(_)) => Some("#document-fragment".to_string()),
             None => None,
         }
     }
@@ -1070,7 +1225,9 @@ impl DomState {
     fn node_value(&self, node_id: usize) -> Option<String> {
         match self.node(node_id).map(|node| &node.kind) {
             Some(DomNodeKind::Text(text)) => Some(text.clone()),
-            Some(DomNodeKind::Element(_)) | Some(DomNodeKind::Fragment) => None,
+            Some(DomNodeKind::Element(_))
+            | Some(DomNodeKind::Fragment)
+            | Some(DomNodeKind::ShadowRoot(_)) => None,
             None => None,
         }
     }
@@ -1080,6 +1237,49 @@ impl DomState {
             return Some(std::mem::replace(text, value.to_string()));
         }
         None
+    }
+
+    fn custom_element_upgraded(&self, node_id: usize) -> bool {
+        self.element(node_id)
+            .map(|element| element.custom_element_upgraded)
+            .unwrap_or(false)
+    }
+
+    fn mark_custom_element_upgraded(&mut self, node_id: usize) {
+        if let Some(element) = self.element_mut(node_id) {
+            element.custom_element_upgraded = true;
+        }
+    }
+
+    fn custom_element_connected_callback_called(&self, node_id: usize) -> bool {
+        self.element(node_id)
+            .map(|element| element.custom_element_connected_callback_called)
+            .unwrap_or(false)
+    }
+
+    fn mark_custom_element_connected_callback_called(&mut self, node_id: usize) {
+        if let Some(element) = self.element_mut(node_id) {
+            element.custom_element_connected_callback_called = true;
+        }
+    }
+
+    fn clear_custom_element_connected_state(&mut self, node_id: usize) {
+        if let Some(element) = self.element_mut(node_id) {
+            element.custom_element_connected_callback_called = false;
+        }
+        let children = self
+            .node(node_id)
+            .map(|node| node.children.clone())
+            .unwrap_or_default();
+        let shadow_root_id = self
+            .element(node_id)
+            .and_then(|element| element.shadow_root_id);
+        for child_id in children {
+            self.clear_custom_element_connected_state(child_id);
+        }
+        if let Some(shadow_root_id) = shadow_root_id {
+            self.clear_custom_element_connected_state(shadow_root_id);
+        }
     }
 
     fn text_length(&self, node_id: usize) -> Option<usize> {
@@ -1269,7 +1469,7 @@ impl DomState {
                 });
                 cloned_id
             }
-            DomNodeKind::Fragment => self.create_document_fragment(),
+            DomNodeKind::Fragment | DomNodeKind::ShadowRoot(_) => self.create_document_fragment(),
         };
         if deep {
             for child_id in node.children {
@@ -1469,7 +1669,7 @@ impl DomState {
         };
         match &node.kind {
             DomNodeKind::Text(text) => text.clone(),
-            DomNodeKind::Element(_) | DomNodeKind::Fragment => node
+            DomNodeKind::Element(_) | DomNodeKind::Fragment | DomNodeKind::ShadowRoot(_) => node
                 .children
                 .iter()
                 .map(|child_id| self.text_content(*child_id))
@@ -1522,6 +1722,139 @@ impl DomState {
             .unwrap_or_default()
     }
 
+    fn serialize_render_document(&self) -> String {
+        self.node(self.document_id)
+            .map(|node| {
+                node.children
+                    .iter()
+                    .map(|child_id| self.serialize_render_node(*child_id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn serialize_render_shadow_children(&self, shadow_root_id: usize) -> String {
+        let Some(meta) = self.shadow_root_meta(shadow_root_id) else {
+            return String::new();
+        };
+        self.node(shadow_root_id)
+            .map(|node| {
+                node.children
+                    .iter()
+                    .map(|child_id| {
+                        self.serialize_render_node_with_host(*child_id, Some(meta.host_node_id))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn serialize_render_node(&self, node_id: usize) -> String {
+        self.serialize_render_node_with_host(node_id, self.shadow_root_host(node_id))
+    }
+
+    fn serialize_render_node_with_host(&self, node_id: usize, host_id: Option<usize>) -> String {
+        let Some(node) = self.node(node_id) else {
+            return String::new();
+        };
+        match &node.kind {
+            DomNodeKind::Text(text) => escape_html_text(text),
+            DomNodeKind::Element(element) => {
+                let mut html = String::new();
+                html.push('<');
+                html.push_str(&element.tag_name);
+                for (name, value) in &element.attributes {
+                    html.push(' ');
+                    html.push_str(name);
+                    if !value.is_empty() {
+                        html.push_str("=\"");
+                        html.push_str(&escape_html_attribute(value));
+                        html.push('"');
+                    }
+                }
+                if is_void_element(&element.tag_name) {
+                    html.push('>');
+                    return html;
+                }
+                html.push('>');
+                if let Some(shadow_root_id) = element.shadow_root_id {
+                    html.push_str(&self.serialize_render_shadow_children(shadow_root_id));
+                } else if is_raw_text_element(&element.tag_name) {
+                    html.push_str(&self.raw_text(node_id));
+                } else if element.tag_name == "slot" {
+                    html.push_str(&self.serialize_slot_render(node_id, host_id));
+                } else {
+                    for child_id in &node.children {
+                        html.push_str(&self.serialize_render_node_with_host(*child_id, host_id));
+                    }
+                }
+                html.push_str("</");
+                html.push_str(&element.tag_name);
+                html.push('>');
+                html
+            }
+            DomNodeKind::Fragment => node
+                .children
+                .iter()
+                .map(|child_id| self.serialize_render_node_with_host(*child_id, host_id))
+                .collect(),
+            DomNodeKind::ShadowRoot(meta) => node
+                .children
+                .iter()
+                .map(|child_id| {
+                    self.serialize_render_node_with_host(*child_id, Some(meta.host_node_id))
+                })
+                .collect(),
+        }
+    }
+
+    fn serialize_slot_render(&self, slot_node_id: usize, host_id: Option<usize>) -> String {
+        let Some(host_id) = host_id else {
+            return self
+                .node(slot_node_id)
+                .map(|node| {
+                    node.children
+                        .iter()
+                        .map(|child_id| self.serialize_render_node(*child_id))
+                        .collect()
+                })
+                .unwrap_or_default();
+        };
+        let slot_name = self.get_attribute(slot_node_id, "name").unwrap_or_default();
+        let assigned = self
+            .node(host_id)
+            .map(|host| {
+                host.children
+                    .iter()
+                    .copied()
+                    .filter(|child_id| {
+                        let child_slot = self.get_attribute(*child_id, "slot").unwrap_or_default();
+                        if slot_name.is_empty() {
+                            child_slot.is_empty()
+                        } else {
+                            child_slot == slot_name
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if assigned.is_empty() {
+            self.node(slot_node_id)
+                .map(|node| {
+                    node.children
+                        .iter()
+                        .map(|child_id| self.serialize_render_node(*child_id))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            assigned
+                .into_iter()
+                .map(|child_id| self.serialize_render_node(child_id))
+                .collect()
+        }
+    }
+
     fn serialize_node(&self, node_id: usize) -> String {
         let Some(node) = self.node(node_id) else {
             return String::new();
@@ -1559,6 +1892,11 @@ impl DomState {
                 html
             }
             DomNodeKind::Fragment => node
+                .children
+                .iter()
+                .map(|child_id| self.serialize_node(*child_id))
+                .collect(),
+            DomNodeKind::ShadowRoot(_) => node
                 .children
                 .iter()
                 .map(|child_id| self.serialize_node(*child_id))
@@ -1622,12 +1960,12 @@ impl DomState {
         if ancestor_id == node_id {
             return self.node(ancestor_id).is_some();
         }
-        let mut cursor = self.node(node_id).and_then(|node| node.parent);
+        let mut cursor = self.shadow_including_parent(node_id);
         while let Some(parent_id) = cursor {
             if parent_id == ancestor_id {
                 return true;
             }
-            cursor = self.node(parent_id).and_then(|node| node.parent);
+            cursor = self.shadow_including_parent(parent_id);
         }
         false
     }
@@ -2501,6 +2839,7 @@ fn install_browser_globals(context: &mut Context) {
         .build();
     let local_storage = build_storage_object(context, StorageKind::Local);
     let session_storage = build_storage_object(context, StorageKind::Session);
+    let custom_elements = build_custom_elements_registry_object(context);
     let ytcfg = ObjectInitializer::new(context)
         .function(
             NativeFunction::from_fn_ptr(js_ytcfg_data),
@@ -2552,6 +2891,13 @@ fn install_browser_globals(context: &mut Context) {
             Attribute::all(),
         )
         .expect("sessionStorage should be installable");
+    context
+        .register_global_property(
+            js_string!("customElements"),
+            custom_elements,
+            Attribute::all(),
+        )
+        .expect("customElements should be installable");
     context
         .register_global_property(js_string!("ytcfg"), ytcfg, Attribute::all())
         .expect("ytcfg should be installable");
@@ -2998,6 +3344,10 @@ if (typeof globalThis.Event !== 'function') {
     this.propagationStopped = true;
     this.cancelBubble = true;
   };
+  Event.prototype.composedPath = function () {
+    var path = this.__tobiraComposedPath;
+    return path && typeof path.slice === 'function' ? path.slice() : [];
+  };
   globalThis.CustomEvent = function CustomEvent(type, init) {
     if (!(this instanceof CustomEvent)) {
       return new CustomEvent(type, init);
@@ -3130,6 +3480,57 @@ if (typeof globalThis.Event !== 'function') {
 "#,
         ))
         .expect("MutationObserver bootstrap should evaluate");
+    context
+        .eval(Source::from_bytes(
+            r#"
+if (typeof globalThis.Node !== 'function') {
+  globalThis.Node = function Node() {};
+  Node.prototype = Object.create(Object.prototype);
+  Node.prototype.constructor = Node;
+}
+if (typeof globalThis.Element !== 'function') {
+  globalThis.Element = function Element() {};
+  Element.prototype = Object.create(Node.prototype);
+  Element.prototype.constructor = Element;
+}
+if (typeof globalThis.HTMLElement !== 'function') {
+  globalThis.HTMLElement = function HTMLElement() {};
+  HTMLElement.prototype = Object.create(Element.prototype);
+  HTMLElement.prototype.constructor = HTMLElement;
+}
+if (typeof globalThis.Document !== 'function') {
+  globalThis.Document = function Document() {};
+  Document.prototype = Object.create(Node.prototype);
+  Document.prototype.constructor = Document;
+}
+if (typeof globalThis.DocumentFragment !== 'function') {
+  globalThis.DocumentFragment = function DocumentFragment() {};
+  DocumentFragment.prototype = Object.create(Node.prototype);
+  DocumentFragment.prototype.constructor = DocumentFragment;
+}
+if (typeof globalThis.ShadowRoot !== 'function') {
+  globalThis.ShadowRoot = function ShadowRoot() {};
+  ShadowRoot.prototype = Object.create(DocumentFragment.prototype);
+  ShadowRoot.prototype.constructor = ShadowRoot;
+}
+if (typeof globalThis.Text !== 'function') {
+  globalThis.Text = function Text() {};
+  Text.prototype = Object.create(Node.prototype);
+  Text.prototype.constructor = Text;
+}
+if (typeof globalThis.CustomElementRegistry !== 'function') {
+  globalThis.CustomElementRegistry = function CustomElementRegistry() {
+    if (!(this instanceof CustomElementRegistry)) {
+      return new CustomElementRegistry();
+    }
+    return customElements;
+  };
+  CustomElementRegistry.prototype = Object.create(Object.prototype);
+  CustomElementRegistry.prototype.constructor = CustomElementRegistry;
+}
+"#,
+        ))
+        .expect("DOM constructor bootstrap should evaluate");
 }
 
 fn build_simple_node_list_stub(context: &mut Context) -> boa_engine::object::JsObject {
@@ -3243,6 +3644,271 @@ fn store_dom_node_object(
             true,
             context,
         );
+    }
+}
+
+fn custom_element_definition_for_node(
+    context: &mut Context,
+    node_id: usize,
+) -> Option<CustomElementDefinition> {
+    let tag_name = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .element(node_id)
+                .map(|element| element.tag_name.clone())
+        })?;
+    context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .custom_elements
+            .get(&tag_name)
+            .cloned()
+    })
+}
+
+fn apply_custom_element_prototype(
+    context: &mut Context,
+    node_id: usize,
+    object: &boa_engine::object::JsObject,
+) {
+    if let Some(definition) = custom_element_definition_for_node(context, node_id) {
+        let _ = object.set_prototype(Some(definition.prototype.clone()));
+    }
+}
+
+fn custom_element_definition_for_name(
+    context: &mut Context,
+    name: &str,
+) -> Option<CustomElementDefinition> {
+    context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .custom_elements
+            .get(&name.to_ascii_lowercase())
+            .cloned()
+    })
+}
+
+fn custom_element_is_defined(context: &mut Context, name: &str) -> bool {
+    custom_element_definition_for_name(context, name).is_some()
+}
+
+fn custom_element_is_eligible_name(name: &str) -> bool {
+    let lowered = name.trim().to_ascii_lowercase();
+    lowered.contains('-') && !lowered.starts_with('-') && !lowered.ends_with('-')
+}
+
+fn custom_element_observed_attributes(
+    constructor: &boa_engine::object::JsObject,
+    context: &mut Context,
+) -> JsResult<Vec<String>> {
+    let observed = constructor.get(js_string!("observedAttributes"), context)?;
+    if observed.is_null() || observed.is_undefined() {
+        return Ok(Vec::new());
+    }
+    let Some(object) = observed.as_object() else {
+        return Ok(Vec::new());
+    };
+    let length = object.get(js_string!("length"), context)?.to_length(context)?;
+    let mut names = Vec::new();
+    for index in 0..length {
+        let value = object.get(js_string!(index.to_string()), context)?;
+        if value.is_null() || value.is_undefined() {
+            continue;
+        }
+        names.push(js_value_to_string(&value, context)?.to_ascii_lowercase());
+    }
+    Ok(names)
+}
+
+fn custom_element_upgrade_node(context: &mut Context, node_id: usize) -> bool {
+    let Some(definition) = custom_element_definition_for_node(context, node_id) else {
+        return false;
+    };
+    if context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.custom_element_upgraded(node_id))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let object = build_dom_node_object(context, node_id);
+    let _ = object.set_prototype(Some(definition.prototype.clone()));
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state.borrow_mut().dom.mark_custom_element_upgraded(node_id);
+    }
+    true
+}
+
+fn custom_element_call_method(
+    context: &mut Context,
+    node_id: usize,
+    method_name: &str,
+    args: &[JsValue],
+) -> JsResult<()> {
+    let node_object = build_dom_node_object(context, node_id);
+    let method = node_object.get(js_string!(method_name), context)?;
+    if let Some(function) = method.as_object() {
+        if JsFunction::from_object(function.clone()).is_some() {
+            let this_value = JsValue::from(node_object);
+            let _ = call_js_callback_with_this(&method, &this_value, args, context)?;
+        }
+    }
+    Ok(())
+}
+
+fn custom_element_try_connected_callback(context: &mut Context, node_id: usize) {
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return;
+    };
+    let should_call = {
+        let state = host.state.borrow();
+        state.dom.custom_element_upgraded(node_id)
+            && !state.dom.custom_element_connected_callback_called(node_id)
+            && state.dom.is_connected(node_id)
+    };
+    if !should_call {
+        return;
+    }
+    let _ = custom_element_call_method(context, node_id, "connectedCallback", &[]);
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state
+            .borrow_mut()
+            .dom
+            .mark_custom_element_connected_callback_called(node_id);
+    }
+}
+
+fn custom_element_try_disconnected_callback(context: &mut Context, node_id: usize) {
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return;
+    };
+    let should_call = {
+        let state = host.state.borrow();
+        state.dom.custom_element_upgraded(node_id)
+            && state.dom.custom_element_connected_callback_called(node_id)
+    };
+    if !should_call {
+        return;
+    }
+    let _ = custom_element_call_method(context, node_id, "disconnectedCallback", &[]);
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state
+            .borrow_mut()
+            .dom
+            .clear_custom_element_connected_state(node_id);
+    }
+}
+
+fn custom_element_try_attribute_changed_callback(
+    context: &mut Context,
+    node_id: usize,
+    name: &str,
+    old_value: Option<String>,
+    new_value: Option<String>,
+) {
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return;
+    };
+    let upgraded = host.state.borrow().dom.custom_element_upgraded(node_id);
+    if !upgraded {
+        return;
+    }
+    let Some(definition) = custom_element_definition_for_node(context, node_id) else {
+        return;
+    };
+    let should_call = definition
+        .observed_attributes
+        .iter()
+        .any(|observed| observed == &name.to_ascii_lowercase());
+    if !should_call {
+        return;
+    }
+    let node_object = build_dom_node_object(context, node_id);
+    let method = match node_object.get(js_string!("attributeChangedCallback"), context) {
+        Ok(method) => method,
+        Err(_) => return,
+    };
+    if method.as_object().and_then(JsFunction::from_object).is_none() {
+        return;
+    }
+    let args = [
+        JsValue::from(js_string!(name.to_ascii_lowercase())),
+        old_value
+            .map(|value| JsValue::from(js_string!(value)))
+            .unwrap_or_else(JsValue::null),
+        new_value
+            .map(|value| JsValue::from(js_string!(value)))
+            .unwrap_or_else(JsValue::null),
+    ];
+    let _ = call_js_callback(&method, &args, context);
+}
+
+fn custom_element_upgrade_subtree(context: &mut Context, root_id: usize) {
+    let mut stack = vec![root_id];
+    while let Some(node_id) = stack.pop() {
+        if context
+            .get_data::<JavaScriptHostData>()
+            .map(|host| host.state.borrow().dom.element(node_id).is_some())
+            .unwrap_or(false)
+        {
+            let _ = custom_element_upgrade_node(context, node_id);
+            custom_element_try_connected_callback(context, node_id);
+        }
+        let children = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.node(node_id).map(|node| node.children.clone()))
+            .unwrap_or_default();
+        for child_id in children.into_iter().rev() {
+            stack.push(child_id);
+        }
+        let shadow_root_id = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| {
+                host.state
+                    .borrow()
+                    .dom
+                    .element(node_id)
+                    .and_then(|element| element.shadow_root_id)
+            });
+        if let Some(shadow_root_id) = shadow_root_id {
+            stack.push(shadow_root_id);
+        }
+    }
+}
+
+fn custom_element_disconnect_subtree(context: &mut Context, root_id: usize) {
+    let mut stack = vec![root_id];
+    while let Some(node_id) = stack.pop() {
+        if context
+            .get_data::<JavaScriptHostData>()
+            .map(|host| host.state.borrow().dom.element(node_id).is_some())
+            .unwrap_or(false)
+        {
+            custom_element_try_disconnected_callback(context, node_id);
+        }
+        let children = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.node(node_id).map(|node| node.children.clone()))
+            .unwrap_or_default();
+        for child_id in children.into_iter().rev() {
+            stack.push(child_id);
+        }
+        let shadow_root_id = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| {
+                host.state
+                    .borrow()
+                    .dom
+                    .element(node_id)
+                    .and_then(|element| element.shadow_root_id)
+            });
+        if let Some(shadow_root_id) = shadow_root_id {
+            stack.push(shadow_root_id);
+        }
     }
 }
 
@@ -3801,7 +4467,15 @@ fn build_dom_event_object(
     context: &mut Context,
     request: &DomEventRequest,
     target: &boa_engine::object::JsObject,
+    composed_path: &[usize],
 ) -> boa_engine::object::JsObject {
+    let composed_path_values: Vec<JsValue> = composed_path
+        .iter()
+        .rev()
+        .copied()
+        .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
+        .collect();
+    let composed_path = JsArray::from_iter(composed_path_values, context);
     let event = ObjectInitializer::new(context)
         .function(
             NativeFunction::from_fn_ptr(js_event_prevent_default),
@@ -3818,6 +4492,11 @@ fn build_dom_event_object(
             js_string!("stopImmediatePropagation"),
             0,
         )
+        .function(
+            NativeFunction::from_fn_ptr(js_event_composed_path),
+            js_string!("composedPath"),
+            0,
+        )
         .property(
             js_string!("type"),
             js_string!(request.event_type.as_str()),
@@ -3829,6 +4508,7 @@ fn build_dom_event_object(
             request.cancelable,
             Attribute::all(),
         )
+        .property(js_string!("composed"), request.composed, Attribute::all())
         .property(js_string!("eventPhase"), 0, Attribute::all())
         .property(js_string!("defaultPrevented"), false, Attribute::all())
         .property(js_string!("cancelBubble"), false, Attribute::all())
@@ -3842,6 +4522,11 @@ fn build_dom_event_object(
         .property(
             js_string!("currentTarget"),
             target.clone(),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("__tobiraComposedPath"),
+            JsValue::from(composed_path),
             Attribute::all(),
         )
         .build();
@@ -4263,6 +4948,7 @@ fn set_event_internal_bool_property(
 
 fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::object::JsObject {
     if let Some(cached) = cached_dom_node_object(context, node_id) {
+        apply_custom_element_prototype(context, node_id, &cached);
         return cached;
     }
 
@@ -4323,6 +5009,8 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_parent_element).to_js_function(context.realm());
     let get_owner_document =
         NativeFunction::from_fn_ptr(js_dom_get_owner_document).to_js_function(context.realm());
+    let get_shadow_root =
+        NativeFunction::from_fn_ptr(js_dom_get_shadow_root).to_js_function(context.realm());
     let get_tag_name =
         NativeFunction::from_fn_ptr(js_dom_get_tag_name).to_js_function(context.realm());
     let get_node_name =
@@ -4360,10 +5048,33 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_get_scroll_top).to_js_function(context.realm());
     let set_scroll_top =
         NativeFunction::from_fn_ptr(js_dom_set_scroll_top).to_js_function(context.realm());
+    let shadow_root_get_host =
+        NativeFunction::from_fn_ptr(js_dom_shadow_root_get_host).to_js_function(context.realm());
+    let shadow_root_get_mode =
+        NativeFunction::from_fn_ptr(js_dom_shadow_root_get_mode).to_js_function(context.realm());
+    let attach_shadow = NativeFunction::from_fn_ptr(js_dom_attach_shadow);
+    let slot_assigned_nodes = NativeFunction::from_fn_ptr(js_dom_slot_assigned_nodes);
+    let slot_assigned_elements = NativeFunction::from_fn_ptr(js_dom_slot_assigned_elements);
     let is_text_node = context
         .get_data::<JavaScriptHostData>()
         .map(|host| host.state.borrow().dom.node_type(node_id) == 3)
         .unwrap_or(false);
+    let is_shadow_root = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.is_shadow_root(node_id))
+        .unwrap_or(false);
+    let tag_name = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .element(node_id)
+                .map(|element| element.tag_name.clone())
+        })
+        .unwrap_or_default();
+    let is_element = !tag_name.is_empty();
+    let is_slot = is_element && tag_name == "slot";
     let style = build_dom_style_object(context, node_id);
     let mut object = ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context);
     let mut object = object
@@ -4440,6 +5151,11 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .function(
             NativeFunction::from_fn_ptr(js_dom_replace_children),
             js_string!("replaceChildren"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_dom_get_root_node),
+            js_string!("getRootNode"),
             0,
         )
         .function(
@@ -4725,6 +5441,12 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             None,
             Attribute::all(),
         )
+        .accessor(
+            js_string!("shadowRoot"),
+            Some(get_shadow_root.clone()),
+            None,
+            Attribute::all(),
+        )
         .property(js_string!("style"), style, Attribute::all())
         .property(js_string!("checked"), false, Attribute::all())
         .property(js_string!("hidden"), false, Attribute::all())
@@ -4758,6 +5480,29 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             None,
             Attribute::all(),
         );
+    if is_element {
+        object = object.function(attach_shadow, js_string!("attachShadow"), 1);
+    }
+    if is_shadow_root {
+        object = object
+            .accessor(
+                js_string!("host"),
+                Some(shadow_root_get_host.clone()),
+                None,
+                Attribute::all(),
+            )
+            .accessor(
+                js_string!("mode"),
+                Some(shadow_root_get_mode.clone()),
+                None,
+                Attribute::all(),
+            );
+    }
+    if is_slot {
+        object = object
+            .function(slot_assigned_nodes, js_string!("assignedNodes"), 0)
+            .function(slot_assigned_elements, js_string!("assignedElements"), 0);
+    }
     if is_text_node {
         object = object
             .accessor(
@@ -4775,6 +5520,7 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             .function(split_text, js_string!("splitText"), 1);
     }
     let object = object.build();
+    apply_custom_element_prototype(context, node_id, &object);
     store_dom_node_object(context, node_id, &object);
     object
 }
@@ -5248,6 +5994,31 @@ fn build_storage_object(context: &mut Context, kind: StorageKind) -> boa_engine:
             Some(length_getter),
             None,
             Attribute::all(),
+        )
+        .build()
+}
+
+fn build_custom_elements_registry_object(context: &mut Context) -> boa_engine::object::JsObject {
+    ObjectInitializer::new(context)
+        .function(
+            NativeFunction::from_fn_ptr(js_custom_elements_define),
+            js_string!("define"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_custom_elements_get),
+            js_string!("get"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_custom_elements_when_defined),
+            js_string!("whenDefined"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_custom_elements_upgrade),
+            js_string!("upgrade"),
+            1,
         )
         .build()
 }
@@ -5989,7 +6760,7 @@ fn dispatch_history_popstate_event(context: &mut Context, state: JsValue) {
         cancelable: false,
         ..Default::default()
     };
-    let event = build_dom_event_object(context, &request, &target);
+    let event = build_dom_event_object(context, &request, &target, &[request.target_node_id]);
     let _ = event.set(js_string!("state"), state, true, context);
     let _ = dispatch_global_event_object(context, "popstate", false, false, &event);
 }
@@ -6016,7 +6787,7 @@ fn dispatch_hashchange_if_needed(
         cancelable: false,
         ..Default::default()
     };
-    let event = build_dom_event_object(context, &request, &target);
+    let event = build_dom_event_object(context, &request, &target, &[request.target_node_id]);
     let _ = event.set(
         js_string!("oldURL"),
         js_string!(previous_href),
@@ -6861,10 +7632,12 @@ fn js_dom_dispatch_event(
         ctrl_key,
         shift_key,
         meta_key,
+        composed,
     ) = if let Some(object) = event_arg.as_object() {
         let event_type = js_value_to_string(&object.get(js_string!("type"), context)?, context)?;
         let bubbles = object.get(js_string!("bubbles"), context)?.to_boolean();
         let cancelable = object.get(js_string!("cancelable"), context)?.to_boolean();
+        let composed = js_optional_bool_property(&object, "composed", context)?;
         let key = js_optional_string_property(&object, "key", context)?;
         let code = js_optional_string_property(&object, "code", context)?;
         let detail = js_optional_string_property(&object, "detail", context)?;
@@ -6899,14 +7672,16 @@ fn js_dom_dispatch_event(
             ctrl_key,
             shift_key,
             meta_key,
+            composed,
         )
     } else {
         let event_type = js_value_to_string(&event_arg, context)?;
         let bubbles = default_event_bubbles(&event_type);
         let cancelable = default_event_cancelable(&event_type);
+        let composed = default_event_composed(&event_type);
         (
             event_type, bubbles, cancelable, None, None, None, None, None, None, None, None, None,
-            false, false, false, false, false, false,
+            false, false, false, false, false, false, composed,
         )
     };
     let request = DomEventRequest {
@@ -6932,6 +7707,7 @@ fn js_dom_dispatch_event(
         ctrl_key,
         shift_key,
         meta_key,
+        composed,
         ..Default::default()
     };
     let prevented = dispatch_dom_event_on_target(target.clone(), &request, context)?;
@@ -7018,6 +7794,33 @@ fn js_event_stop_immediate_propagation(
     set_event_bool_property(this, "immediatePropagationStopped", true, context)?;
     set_event_bool_property(this, "cancelBubble", true, context)?;
     Ok(JsValue::undefined())
+}
+
+fn js_event_composed_path(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(object) = this.as_object() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let path = object
+        .get(js_string!("__tobiraComposedPath"), context)
+        .unwrap_or_else(|_| JsValue::undefined());
+    let Some(path_object) = path.as_object() else {
+        return Ok(JsValue::from(JsArray::new(context)));
+    };
+    let length = path_object
+        .get(js_string!("length"), context)?
+        .to_length(context)? as usize;
+    let values = (0..length)
+        .map(|index| {
+            path_object
+                .get(js_string!(index.to_string()), context)
+                .unwrap_or_else(|_| JsValue::undefined())
+        })
+        .collect::<Vec<_>>();
+    Ok(JsValue::from(JsArray::from_iter(values, context)))
 }
 
 fn js_alert(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -7331,6 +8134,8 @@ fn js_dom_replace_child(
     });
     let new_children = snapshot_dom_children(context, parent_id);
     record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    custom_element_disconnect_subtree(context, old_child_id);
+    custom_element_upgrade_subtree(context, parent_id);
     flush_mutation_observers(context);
     Ok(replaced
         .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
@@ -7357,6 +8162,9 @@ fn js_dom_remove_child(
     });
     let new_children = snapshot_dom_children(context, parent_id);
     record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    if removed.is_some() {
+        custom_element_disconnect_subtree(context, child_id);
+    }
     flush_mutation_observers(context);
     Ok(removed
         .map(|node_id| JsValue::from(build_dom_node_object(context, node_id)))
@@ -7378,6 +8186,7 @@ fn js_dom_append(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     }
     let new_children = snapshot_dom_children(context, parent_id);
     record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    custom_element_upgrade_subtree(context, parent_id);
     flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
@@ -7400,6 +8209,7 @@ fn js_dom_prepend(this: &JsValue, args: &[JsValue], context: &mut Context) -> Js
     }
     let new_children = snapshot_dom_children(context, parent_id);
     record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    custom_element_upgrade_subtree(context, parent_id);
     flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
@@ -7431,6 +8241,7 @@ fn js_dom_before(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     }
     let new_children = snapshot_dom_children(context, parent_id);
     record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    custom_element_upgrade_subtree(context, parent_id);
     flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
@@ -7462,6 +8273,8 @@ fn js_dom_after(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     }
     let new_children = snapshot_dom_children(context, parent_id);
     record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    custom_element_disconnect_subtree(context, target_id);
+    custom_element_upgrade_subtree(context, parent_id);
     flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
@@ -7495,6 +8308,8 @@ fn js_dom_replace_with(
     }
     let new_children = snapshot_dom_children(context, parent_id);
     record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    custom_element_disconnect_subtree(context, target_id);
+    custom_element_upgrade_subtree(context, parent_id);
     flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
@@ -7517,6 +8332,10 @@ fn js_dom_replace_children(
     }
     let new_children = snapshot_dom_children(context, node_id);
     record_dom_child_list_mutation(context, node_id, &old_children, &new_children);
+    for child_id in old_children {
+        custom_element_disconnect_subtree(context, child_id);
+    }
+    custom_element_upgrade_subtree(context, node_id);
     flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
@@ -7662,6 +8481,140 @@ fn js_document_create_document_fragment(
     Ok(JsValue::from(build_dom_node_object(context, node_id)))
 }
 
+fn js_custom_elements_define(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    if !custom_element_is_eligible_name(&name) {
+        return Err(JsNativeError::typ()
+            .with_message("custom element name must contain a hyphen")
+            .into());
+    }
+    let Some(constructor_value) = args.get(1) else {
+        return Err(JsNativeError::typ()
+            .with_message("custom element constructor is required")
+            .into());
+    };
+    let Some(constructor) = constructor_value.as_object() else {
+        return Err(JsNativeError::typ()
+            .with_message("custom element constructor must be callable")
+            .into());
+    };
+    if JsFunction::from_object(constructor.clone()).is_none() {
+        return Err(JsNativeError::typ()
+            .with_message("custom element constructor must be callable")
+            .into());
+    }
+    if custom_element_is_defined(context, &name) {
+        return Err(JsNativeError::typ()
+            .with_message("custom element already defined")
+            .into());
+    }
+    if let Some(options) = args.get(2).and_then(JsValue::as_object)
+        && let Ok(extends) = options.get(js_string!("extends"), context)
+        && !extends.is_undefined()
+    {
+        return Err(JsNativeError::typ()
+            .with_message("customized built-in elements are not supported yet")
+            .into());
+    }
+    let prototype_value = constructor.get(js_string!("prototype"), context)?;
+    let Some(prototype) = prototype_value.as_object() else {
+        return Err(JsNativeError::typ()
+            .with_message("custom element constructor prototype must be an object")
+            .into());
+    };
+    let observed_attributes = custom_element_observed_attributes(&constructor, context)?;
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        state.custom_elements.insert(
+            name.to_ascii_lowercase(),
+            CustomElementDefinition {
+                constructor: constructor.clone(),
+                prototype: prototype.clone(),
+                observed_attributes,
+            },
+        );
+        let waiters = state
+            .pending_custom_element_waiters
+            .remove(&name.to_ascii_lowercase())
+            .unwrap_or_default();
+        drop(state);
+        for resolvers in waiters {
+            let _ = resolvers
+                .resolve
+                .call(&JsValue::undefined(), &[JsValue::undefined()], context);
+        }
+    }
+    let document_id = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.document_id)
+        .unwrap_or(0);
+    custom_element_upgrade_subtree(context, document_id);
+    Ok(JsValue::undefined())
+}
+
+fn js_custom_elements_get(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let value = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .custom_elements
+                .get(&name.to_ascii_lowercase())
+                .map(|definition| JsValue::from(definition.constructor.clone()))
+        })
+        .unwrap_or_else(JsValue::undefined);
+    Ok(value)
+}
+
+fn js_custom_elements_when_defined(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+    let name = name.to_ascii_lowercase();
+    if custom_element_is_defined(context, &name) {
+        return Ok(JsValue::from(JsPromise::resolve(
+            JsValue::undefined(),
+            context,
+        )));
+    }
+    let (promise, resolvers) = JsPromise::new_pending(context);
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        host.state
+            .borrow_mut()
+            .pending_custom_element_waiters
+            .entry(name)
+            .or_default()
+            .push(resolvers);
+    }
+    Ok(JsValue::from(promise))
+}
+
+fn js_custom_elements_upgrade(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = node_id_argument(args.first()).unwrap_or_else(|| {
+        context
+            .get_data::<JavaScriptHostData>()
+            .map(|host| host.state.borrow().dom.document_id)
+            .unwrap_or(0)
+    });
+    custom_element_upgrade_subtree(context, node_id);
+    Ok(JsValue::undefined())
+}
+
 fn js_get_node_by_id(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)
         .ok()
@@ -7739,6 +8692,7 @@ fn js_dom_append_child(
     }
     let new_children = snapshot_dom_children(context, parent_id);
     record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    custom_element_upgrade_subtree(context, parent_id);
     flush_mutation_observers(context);
     Ok(args.first().cloned().unwrap_or_else(JsValue::undefined))
 }
@@ -7764,6 +8718,7 @@ fn js_dom_insert_before(
     }
     let new_children = snapshot_dom_children(context, parent_id);
     record_dom_child_list_mutation(context, parent_id, &old_children, &new_children);
+    custom_element_upgrade_subtree(context, parent_id);
     flush_mutation_observers(context);
     Ok(args.first().cloned().unwrap_or_else(JsValue::undefined))
 }
@@ -7876,7 +8831,15 @@ fn js_dom_set_attribute(
             .borrow_mut()
             .dom
             .set_attribute(node_id, &name, &value);
-        record_dom_attribute_mutation(context, node_id, &name, old_value);
+        let new_value = host.state.borrow().dom.get_attribute(node_id, &name);
+        record_dom_attribute_mutation(context, node_id, &name, old_value.clone());
+        custom_element_try_attribute_changed_callback(
+            context,
+            node_id,
+            &name,
+            old_value,
+            new_value,
+        );
         flush_mutation_observers(context);
     }
     Ok(JsValue::undefined())
@@ -7910,8 +8873,16 @@ fn js_dom_toggle_attribute(
             state.dom.set_attribute(node_id, &name, "");
             true
         };
+        let new_value = state.dom.get_attribute(node_id, &name);
         drop(state);
-        record_dom_attribute_mutation(context, node_id, &name, old_value);
+        record_dom_attribute_mutation(context, node_id, &name, old_value.clone());
+        custom_element_try_attribute_changed_callback(
+            context,
+            node_id,
+            &name,
+            old_value,
+            new_value,
+        );
         flush_mutation_observers(context);
         toggled
     } else {
@@ -7935,7 +8906,15 @@ fn js_dom_set_property_attribute(
             .borrow_mut()
             .dom
             .set_attribute(node_id, name, &value);
-        record_dom_attribute_mutation(context, node_id, name, old_value);
+        let new_value = host.state.borrow().dom.get_attribute(node_id, name);
+        record_dom_attribute_mutation(context, node_id, name, old_value.clone());
+        custom_element_try_attribute_changed_callback(
+            context,
+            node_id,
+            name,
+            old_value,
+            new_value,
+        );
         flush_mutation_observers(context);
     }
     Ok(JsValue::undefined())
@@ -7952,7 +8931,14 @@ fn js_dom_remove_attribute(
     {
         let old_value = host.state.borrow().dom.get_attribute(node_id, &name);
         host.state.borrow_mut().dom.remove_attribute(node_id, &name);
-        record_dom_attribute_mutation(context, node_id, &name, old_value);
+        record_dom_attribute_mutation(context, node_id, &name, old_value.clone());
+        custom_element_try_attribute_changed_callback(
+            context,
+            node_id,
+            &name,
+            old_value,
+            None,
+        );
         flush_mutation_observers(context);
     }
     Ok(JsValue::undefined())
@@ -7993,6 +8979,16 @@ fn js_dom_insert_adjacent_html(
     let Some(node_id) = this_node_id(this) else {
         return Ok(JsValue::undefined());
     };
+    let parent_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .node(node_id)
+                .and_then(|node| node.parent)
+        })
+        .unwrap_or(node_id);
     let target_id = if matches!(position.as_str(), "beforebegin" | "afterend") {
         context
             .get_data::<JavaScriptHostData>()
@@ -8021,6 +9017,10 @@ fn js_dom_insert_adjacent_html(
     }
     let new_children = snapshot_dom_children(context, target_id);
     record_dom_child_list_mutation(context, target_id, &old_children, &new_children);
+    custom_element_upgrade_subtree(context, target_id);
+    if parent_id != target_id {
+        custom_element_upgrade_subtree(context, parent_id);
+    }
     flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
@@ -8161,6 +9161,10 @@ fn js_dom_set_text_content(
     }
     let new_children = snapshot_dom_children(context, node_id);
     record_dom_child_list_mutation(context, node_id, &old_children, &new_children);
+    for child_id in old_children {
+        custom_element_disconnect_subtree(context, child_id);
+    }
+    custom_element_upgrade_subtree(context, node_id);
     flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
@@ -8194,6 +9198,10 @@ fn js_dom_set_inner_html(
     }
     let new_children = snapshot_dom_children(context, node_id);
     record_dom_child_list_mutation(context, node_id, &old_children, &new_children);
+    for child_id in old_children {
+        custom_element_disconnect_subtree(context, child_id);
+    }
+    custom_element_upgrade_subtree(context, node_id);
     flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
@@ -8239,6 +9247,15 @@ fn js_dom_set_outer_html(
     }
     let new_children = snapshot_dom_children(context, target_id);
     record_dom_child_list_mutation(context, target_id, &old_children, &new_children);
+    if parent_id.is_some() {
+        custom_element_disconnect_subtree(context, node_id);
+        custom_element_upgrade_subtree(context, parent_id.unwrap_or(node_id));
+    } else {
+        for child_id in old_children {
+            custom_element_disconnect_subtree(context, child_id);
+        }
+        custom_element_upgrade_subtree(context, node_id);
+    }
     flush_mutation_observers(context);
     Ok(JsValue::undefined())
 }
@@ -8411,6 +9428,169 @@ fn js_dom_get_owner_document(
         .map(|host| host.state.borrow().dom.document_id)
         .unwrap_or(0);
     Ok(JsValue::from(build_dom_node_object(context, document_id)))
+}
+
+fn js_dom_get_shadow_root(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    let shadow_root_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        let state = host.state.borrow();
+        let Some(element) = state.dom.element(node_id) else {
+            return None;
+        };
+        let Some(shadow_root_id) = element.shadow_root_id else {
+            return None;
+        };
+        state
+            .dom
+            .shadow_root_meta(shadow_root_id)
+            .and_then(|meta| matches!(meta.mode, ShadowRootMode::Open).then_some(shadow_root_id))
+    });
+    Ok(shadow_root_id
+        .map(|shadow_root_id| JsValue::from(build_dom_node_object(context, shadow_root_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_attach_shadow(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(host_node_id) = this_node_id(this) else {
+        return Err(JsNativeError::typ()
+            .with_message("attachShadow is only available on elements")
+            .into());
+    };
+    let mode = args
+        .first()
+        .and_then(JsValue::as_object)
+        .and_then(|options| options.get(js_string!("mode"), context).ok())
+        .and_then(|value| js_value_to_string(&value, context).ok())
+        .unwrap_or_else(|| "open".to_string());
+    let mode = match mode.to_ascii_lowercase().as_str() {
+        "open" => ShadowRootMode::Open,
+        "closed" => ShadowRootMode::Closed,
+        _ => {
+            return Err(JsNativeError::typ()
+                .with_message("shadow root mode must be 'open' or 'closed'")
+                .into())
+        }
+    };
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return Ok(JsValue::null());
+    };
+    let shadow_root_id = {
+        let mut state = host.state.borrow_mut();
+        if state.dom.element(host_node_id).is_none() {
+            return Err(JsNativeError::typ()
+                .with_message("attachShadow is only available on elements")
+                .into());
+        }
+        if state.dom.shadow_root_for_host(host_node_id).is_some() {
+            return Err(JsNativeError::typ()
+                .with_message("shadow root already exists")
+                .into());
+        }
+        state.dom.create_shadow_root(host_node_id, mode)
+    };
+    custom_element_upgrade_subtree(context, shadow_root_id);
+    Ok(JsValue::from(build_dom_node_object(context, shadow_root_id)))
+}
+
+fn js_dom_get_root_node(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    let composed = args
+        .first()
+        .and_then(JsValue::as_object)
+        .and_then(|options| options.get(js_string!("composed"), context).ok())
+        .map(|value| value.to_boolean())
+        .unwrap_or(false);
+    let root_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.root_node_id(node_id, composed));
+    Ok(root_id
+        .map(|root_id| JsValue::from(build_dom_node_object(context, root_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_shadow_root_get_host(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    let host_id = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| host.state.borrow().dom.shadow_root_host(node_id));
+    Ok(host_id
+        .map(|host_id| JsValue::from(build_dom_node_object(context, host_id)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_shadow_root_get_mode(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    let mode = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        host.state
+            .borrow()
+            .dom
+            .shadow_root_meta(node_id)
+            .map(|meta| match meta.mode {
+                ShadowRootMode::Open => "open",
+                ShadowRootMode::Closed => "closed",
+            })
+    });
+    Ok(mode
+        .map(|value| JsValue::from(js_string!(value)))
+        .unwrap_or_else(JsValue::null))
+}
+
+fn js_dom_slot_assigned_nodes(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(build_dom_node_list_object(context, Vec::new())));
+    };
+    let node_ids = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.slot_assigned_nodes(node_id))
+        .unwrap_or_default();
+    Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
+}
+
+fn js_dom_slot_assigned_elements(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(build_dom_node_list_object(context, Vec::new())));
+    };
+    let node_ids = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.slot_assigned_elements(node_id))
+        .unwrap_or_default();
+    Ok(JsValue::from(build_dom_node_list_object(context, node_ids)))
 }
 
 fn dataset_node_id(this: &JsValue, context: &mut Context) -> Option<usize> {
@@ -9750,6 +10930,7 @@ fn class_list_value(context: &mut Context, node_id: usize) -> String {
 
 fn set_class_list_value(context: &mut Context, node_id: usize, value: &str) {
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let old_value = host.state.borrow().dom.get_attribute(node_id, "class");
         let mut state = host.state.borrow_mut();
         let value = value.trim();
         if value.is_empty() {
@@ -9757,6 +10938,16 @@ fn set_class_list_value(context: &mut Context, node_id: usize, value: &str) {
         } else {
             state.dom.set_attribute(node_id, "class", value);
         }
+        let new_value = state.dom.get_attribute(node_id, "class");
+        drop(state);
+        record_dom_attribute_mutation(context, node_id, "class", old_value.clone());
+        custom_element_try_attribute_changed_callback(
+            context,
+            node_id,
+            "class",
+            old_value,
+            new_value,
+        );
     }
 }
 
@@ -10285,6 +11476,13 @@ fn default_event_bubbles(event_type: &str) -> bool {
     )
 }
 
+pub(crate) fn default_event_composed(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "click" | "input" | "change" | "submit" | "keydown" | "keyup" | "focus" | "blur"
+    )
+}
+
 fn default_event_cancelable(event_type: &str) -> bool {
     matches!(event_type, "click" | "submit" | "keydown" | "keyup")
 }
@@ -10302,6 +11500,15 @@ fn set_event_current_target(
     context: &mut Context,
 ) -> JsResult<()> {
     event.set(js_string!("currentTarget"), target.clone(), true, context)?;
+    Ok(())
+}
+
+fn set_event_target(
+    event: &boa_engine::object::JsObject,
+    target: &boa_engine::object::JsObject,
+    context: &mut Context,
+) -> JsResult<()> {
+    event.set(js_string!("target"), target.clone(), true, context)?;
     Ok(())
 }
 
@@ -10365,17 +11572,18 @@ fn dispatch_listeners_on_target(
     Ok(())
 }
 
-fn dom_event_path(node_id: usize, context: &mut Context) -> Vec<usize> {
+fn dom_event_path(node_id: usize, composed: bool, context: &mut Context) -> Vec<usize> {
     let mut path = vec![node_id];
     let mut current = node_id;
 
     loop {
         let Some(parent_id) = context.get_data::<JavaScriptHostData>().and_then(|host| {
-            host.state
-                .borrow()
-                .dom
-                .node(current)
-                .and_then(|node| node.parent)
+            let state = host.state.borrow();
+            if composed {
+                state.dom.shadow_including_parent(current)
+            } else {
+                state.dom.node(current).and_then(|node| node.parent)
+            }
         }) else {
             break;
         };
@@ -10385,6 +11593,39 @@ fn dom_event_path(node_id: usize, context: &mut Context) -> Vec<usize> {
 
     path.reverse();
     path
+}
+
+fn retarget_dom_event_target(
+    target_node_id: usize,
+    current_target_node_id: usize,
+    context: &mut Context,
+) -> usize {
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return target_node_id;
+    };
+    let state = host.state.borrow();
+    let current_root = state
+        .dom
+        .root_node_id(current_target_node_id, false)
+        .unwrap_or(current_target_node_id);
+    let mut candidate = target_node_id;
+
+    loop {
+        let candidate_root = state
+            .dom
+            .root_node_id(candidate, false)
+            .unwrap_or(candidate);
+        if candidate_root == current_root {
+            return candidate;
+        }
+        let Some(next_candidate) = state.dom.shadow_root_host_for_node(candidate) else {
+            return candidate;
+        };
+        if next_candidate == candidate {
+            return candidate;
+        }
+        candidate = next_candidate;
+    }
 }
 
 fn dispatch_dom_event_on_target(
@@ -10402,13 +11643,13 @@ fn dispatch_dom_event_on_target(
             state.active_element_node_id = None;
         }
     }
-    let event = build_dom_event_object(context, request, &target);
     let listener_event_type = request.event_type.to_ascii_lowercase();
     if let Some(target_node_id) = target
         .downcast_ref::<DomNodeHandle>()
         .map(|handle| handle.node_id)
     {
-        let path = dom_event_path(target_node_id, context);
+        let path = dom_event_path(target_node_id, request.composed, context);
+        let event = build_dom_event_object(context, request, &target, &path);
         let ancestors = path
             .len()
             .checked_sub(1)
@@ -10417,6 +11658,10 @@ fn dispatch_dom_event_on_target(
 
         for ancestor_id in ancestors.iter().copied() {
             let current_target = build_dom_node_object(context, ancestor_id);
+            let retargeted_target =
+                retarget_dom_event_target(target_node_id, ancestor_id, context);
+            let retargeted_target = build_dom_node_object(context, retargeted_target);
+            set_event_target(&event, &retargeted_target, context)?;
             set_event_current_target(&event, &current_target, context)?;
             dispatch_listeners_on_target(
                 &current_target,
@@ -10434,6 +11679,7 @@ fn dispatch_dom_event_on_target(
         }
 
         let current_target = target.clone();
+        set_event_target(&event, &current_target, context)?;
         set_event_current_target(&event, &current_target, context)?;
         dispatch_listeners_on_target(
             &current_target,
@@ -10463,6 +11709,10 @@ fn dispatch_dom_event_on_target(
         if request.bubbles {
             for ancestor_id in ancestors.iter().rev().copied() {
                 let current_target = build_dom_node_object(context, ancestor_id);
+                let retargeted_target =
+                    retarget_dom_event_target(target_node_id, ancestor_id, context);
+                let retargeted_target = build_dom_node_object(context, retargeted_target);
+                set_event_target(&event, &retargeted_target, context)?;
                 set_event_current_target(&event, &current_target, context)?;
                 dispatch_listeners_on_target(
                     &current_target,
@@ -10479,8 +11729,13 @@ fn dispatch_dom_event_on_target(
                 }
             }
         }
+
+        return Ok(event_flag_value(&event, "defaultPrevented", context));
     } else {
+        let path = vec![request.target_node_id];
+        let event = build_dom_event_object(context, request, &target, &path);
         let current_target = target.clone();
+        set_event_target(&event, &current_target, context)?;
         set_event_current_target(&event, &current_target, context)?;
         dispatch_listeners_on_target(
             &current_target,
@@ -10500,9 +11755,8 @@ fn dispatch_dom_event_on_target(
                 context,
             )?;
         }
+        return Ok(event_flag_value(&event, "defaultPrevented", context));
     }
-
-    Ok(event_flag_value(&event, "defaultPrevented", context))
 }
 
 fn performance_now_ms() -> f64 {
@@ -11509,5 +12763,51 @@ mod tests {
             .unwrap();
         let xhr_summary = js_value_to_string(&xhr_summary, &mut runtime.context).unwrap();
         assert!(xhr_summary.contains("text/plain|two|content-type: text/plain"));
+    }
+
+    #[test]
+    fn supports_custom_elements_upgrade_and_attribute_callbacks() {
+        let processed = process_document_scripts(
+            "<html><body><x-box id=\"box\" data-ready=\"yes\"></x-box><script>class XBox extends HTMLElement { connectedCallback() { document.title = [this.getAttribute('data-ready'), String(this instanceof XBox)].join('|'); } } customElements.define('x-box', XBox);</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(processed.title_override.as_deref(), Some("yes|true"));
+    }
+
+    #[test]
+    fn supports_custom_elements_attribute_changed_callback() {
+        let processed = process_document_scripts(
+            "<html><body><x-attr id=\"attr\"></x-attr><script>class XAttr extends HTMLElement { static get observedAttributes() { return ['data-state']; } attributeChangedCallback(name, oldValue, newValue) { document.title = [name, oldValue === null ? 'null' : oldValue, newValue].join('|'); } } customElements.define('x-attr', XAttr); document.getElementById('attr').setAttribute('data-state', 'live');</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(processed.title_override.as_deref(), Some("data-state|null|live"));
+    }
+
+    #[test]
+    fn supports_attach_shadow_get_root_node_and_slots() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"host\"><span slot=\"lead\">Light</span></div><script>var host = document.getElementById('host'); var shadow = host.attachShadow({ mode: 'open' }); shadow.innerHTML = '<slot name=\"lead\"></slot><span id=\"shadow\">S</span>'; var slot = shadow.querySelector('slot'); document.title = [String(host.shadowRoot === shadow), String(shadow.host === host), String(shadow.getRootNode() === shadow), String(shadow.getRootNode({ composed: true }) === document), String(slot.assignedNodes().length), String(slot.assignedElements().length)].join('|');</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("true|true|true|true|1|1")
+        );
+    }
+
+    #[test]
+    fn retargets_shadow_dom_events_and_exposes_composed_path() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"host\"></div><script>var host = document.getElementById('host'); var shadow = host.attachShadow({ mode: 'open' }); shadow.innerHTML = '<button id=\"btn\">Go</button>'; var btn = shadow.querySelector('#btn'); host.addEventListener('click', function (event) { document.title = [String(typeof event.composedPath), String(event.composedPath().length), String(event.target === host), String(event.currentTarget === host), String(event.composedPath()[0] === btn)].join('|'); }); btn.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert_eq!(
+            processed.title_override.as_deref(),
+            Some("function|6|true|true|true")
+        );
     }
 }
