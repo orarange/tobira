@@ -781,7 +781,15 @@ impl JavaScriptRuntime {
     }
 
     fn set_dom_attribute(&mut self, node_id: usize, name: &str, value: &str) {
-        if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+        if name == "value" && is_textarea_node(&mut self.context, node_id) {
+            let node = build_dom_node_object(&mut self.context, node_id);
+            let _ = js_dom_set_text_content(
+                &JsValue::from(node),
+                &[JsValue::from(js_string!(value))],
+                &mut self.context,
+            );
+            clamp_current_text_selection_to_value(&mut self.context, node_id);
+        } else if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
             let old_value = host.state.borrow().dom.get_attribute(node_id, name);
             host.state
                 .borrow_mut()
