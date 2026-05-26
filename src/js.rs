@@ -5344,12 +5344,28 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         })
         .unwrap_or_default();
     let is_element = !tag_name.is_empty();
+    let is_select_element = is_element && tag_name.eq_ignore_ascii_case("select");
+    let is_option_element = is_element && tag_name.eq_ignore_ascii_case("option");
     let is_slot = is_element && tag_name == "slot";
     let style = build_dom_style_object(context, node_id);
     let checked_getter =
         NativeFunction::from_fn_ptr(js_dom_get_checked).to_js_function(context.realm());
     let checked_setter =
         NativeFunction::from_fn_ptr(js_dom_set_checked).to_js_function(context.realm());
+    let disabled_getter =
+        NativeFunction::from_fn_ptr(js_dom_get_disabled).to_js_function(context.realm());
+    let disabled_setter =
+        NativeFunction::from_fn_ptr(js_dom_set_disabled).to_js_function(context.realm());
+    let get_selected_index =
+        NativeFunction::from_fn_ptr(js_dom_get_selected_index).to_js_function(context.realm());
+    let set_selected_index =
+        NativeFunction::from_fn_ptr(js_dom_set_selected_index).to_js_function(context.realm());
+    let get_selected =
+        NativeFunction::from_fn_ptr(js_dom_get_selected).to_js_function(context.realm());
+    let set_selected =
+        NativeFunction::from_fn_ptr(js_dom_set_selected).to_js_function(context.realm());
+    let get_options =
+        NativeFunction::from_fn_ptr(js_dom_get_options).to_js_function(context.realm());
     let mut object = ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context);
     let mut object = object
         .function(
@@ -5762,6 +5778,12 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             Some(checked_setter),
             Attribute::all(),
         )
+        .accessor(
+            js_string!("disabled"),
+            Some(disabled_getter),
+            Some(disabled_setter),
+            Attribute::all(),
+        )
         .property(js_string!("hidden"), false, Attribute::all())
         .accessor(
             js_string!("clientWidth"),
@@ -5795,6 +5817,29 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         );
     if is_element {
         object = object.function(attach_shadow, js_string!("attachShadow"), 1);
+    }
+    if is_select_element {
+        object = object
+            .accessor(
+                js_string!("selectedIndex"),
+                Some(get_selected_index),
+                Some(set_selected_index),
+                Attribute::all(),
+            )
+            .accessor(
+                js_string!("options"),
+                Some(get_options),
+                None,
+                Attribute::all(),
+            );
+    }
+    if is_option_element {
+        object = object.accessor(
+            js_string!("selected"),
+            Some(get_selected),
+            Some(set_selected),
+            Attribute::all(),
+        );
     }
     if is_shadow_root {
         object = object
@@ -9667,6 +9712,14 @@ fn js_dom_get_value(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsR
     let Some(node_id) = this_node_id(this) else {
         return Ok(JsValue::from(js_string!("")));
     };
+    if is_select_node(context, node_id) {
+        let value = select_selected_value(context, node_id).unwrap_or_default();
+        return Ok(JsValue::from(js_string!(value)));
+    }
+    if is_option_node(context, node_id) {
+        let value = select_option_value(context, node_id).unwrap_or_default();
+        return Ok(JsValue::from(js_string!(value)));
+    }
     if is_textarea_node(context, node_id) {
         return js_dom_get_text_content(this, &[], context);
     }
@@ -9677,12 +9730,117 @@ fn js_dom_set_value(this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     let Some(node_id) = this_node_id(this) else {
         return js_dom_set_property_attribute(this, args, "value", context);
     };
+    if is_select_node(context, node_id) {
+        let value = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?;
+        let _ = select_set_value(context, node_id, &value);
+        return Ok(JsValue::from(js_string!(select_selected_value(context, node_id).unwrap_or(value))));
+    }
+    if is_option_node(context, node_id) {
+        let value = args.first().cloned().unwrap_or_else(JsValue::undefined);
+        return js_dom_set_property_attribute(this, &[value], "value", context);
+    }
     if is_textarea_node(context, node_id) {
         let result = js_dom_set_text_content(this, args, context)?;
         clamp_current_text_selection_to_value(context, node_id);
         return Ok(result);
     }
     js_dom_set_property_attribute(this, args, "value", context)
+}
+
+fn js_dom_get_selected_index(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(-1));
+    };
+    if !is_select_node(context, node_id) {
+        return Ok(JsValue::from(-1));
+    }
+    let Some(selected_index) = select_selected_index(context, node_id) else {
+        return Ok(JsValue::from(-1));
+    };
+    Ok(JsValue::from(selected_index as i32))
+}
+
+fn js_dom_set_selected_index(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if !is_select_node(context, node_id) {
+        return Ok(JsValue::undefined());
+    }
+    let selected_index = args
+        .first()
+        .unwrap_or(&JsValue::undefined())
+        .to_number(context)?;
+    if !selected_index.is_finite() || selected_index < 0.0 {
+        return Ok(JsValue::undefined());
+    }
+    let _ = select_set_selected_index(context, node_id, selected_index as usize);
+    Ok(JsValue::undefined())
+}
+
+fn js_dom_get_selected(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(false));
+    };
+    if !is_option_node(context, node_id) {
+        return Ok(JsValue::from(false));
+    }
+    Ok(JsValue::from(option_is_selected(context, node_id)))
+}
+
+fn js_dom_set_selected(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(false));
+    };
+    if !is_option_node(context, node_id) {
+        return Ok(JsValue::from(false));
+    }
+    let selected = args
+        .first()
+        .cloned()
+        .unwrap_or_else(JsValue::undefined)
+        .to_boolean();
+    let current = option_is_selected(context, node_id);
+    if selected {
+        let _ = set_option_selected(context, node_id, true);
+    } else if current && option_has_selected_attribute(context, node_id) {
+        let _ = set_option_selected(context, node_id, false);
+    }
+    Ok(JsValue::from(option_is_selected(context, node_id)))
+}
+
+fn js_dom_get_options(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(build_dom_node_list_object(context, Vec::new())));
+    };
+    if !is_select_node(context, node_id) {
+        return Ok(JsValue::from(build_dom_node_list_object(context, Vec::new())));
+    }
+    let options = select_option_nodes(context, node_id);
+    Ok(JsValue::from(build_dom_node_list_object(
+        context,
+        options,
+    )))
 }
 
 fn js_dom_get_checked(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -9763,6 +9921,41 @@ fn js_dom_set_checked(
     );
     flush_mutation_observers(context);
     Ok(JsValue::from(checked))
+}
+
+fn js_dom_get_disabled(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(false));
+    };
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return Ok(JsValue::from(false));
+    };
+    Ok(JsValue::from(host.state.borrow().dom.is_disabled(node_id)))
+}
+
+fn js_dom_set_disabled(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    if this_node_id(this).is_none() {
+        return Ok(JsValue::from(false));
+    }
+    let disabled = args
+        .first()
+        .cloned()
+        .unwrap_or_else(JsValue::undefined)
+        .to_boolean();
+    if disabled {
+        let _ = js_dom_set_attribute(
+            this,
+            &[JsValue::from(js_string!("disabled")), JsValue::from(js_string!(""))],
+            context,
+        )?;
+    } else {
+        let _ = js_dom_remove_attribute(this, &[JsValue::from(js_string!("disabled"))], context)?;
+    }
+    Ok(JsValue::from(disabled))
 }
 
 fn js_dom_get_selection_start(
@@ -9993,6 +10186,305 @@ fn input_checked_state(context: &mut Context, node_id: usize) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn is_select_node(context: &mut Context, node_id: usize) -> bool {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            let state = host.state.borrow();
+            let element = state.dom.element(node_id)?;
+            Some(element.tag_name.eq_ignore_ascii_case("select"))
+        })
+        .unwrap_or(false)
+}
+
+fn is_option_node(context: &mut Context, node_id: usize) -> bool {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            let state = host.state.borrow();
+            let element = state.dom.element(node_id)?;
+            Some(element.tag_name.eq_ignore_ascii_case("option"))
+        })
+        .unwrap_or(false)
+}
+
+fn select_option_nodes(context: &mut Context, select_node_id: usize) -> Vec<usize> {
+    context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| {
+            let state = host.state.borrow();
+            state
+                .dom
+                .descendant_nodes(select_node_id, false)
+                .into_iter()
+                .filter(|option_id| {
+                    state
+                        .dom
+                        .element(*option_id)
+                        .is_some_and(|element| element.tag_name.eq_ignore_ascii_case("option"))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn option_has_selected_attribute(context: &mut Context, option_node_id: usize) -> bool {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            let state = host.state.borrow();
+            let element = state.dom.element(option_node_id)?;
+            if !element.tag_name.eq_ignore_ascii_case("option") {
+                return Some(false);
+            }
+            Some(state.dom.has_attribute(option_node_id, "selected"))
+        })
+        .unwrap_or(false)
+}
+
+fn option_is_disabled(context: &mut Context, option_node_id: usize) -> bool {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            let state = host.state.borrow();
+            let element = state.dom.element(option_node_id)?;
+            if !element.tag_name.eq_ignore_ascii_case("option") {
+                return Some(false);
+            }
+            Some(state.dom.is_disabled(option_node_id))
+        })
+        .unwrap_or(false)
+}
+
+fn option_value(context: &mut Context, option_node_id: usize) -> Option<String> {
+    context.get_data::<JavaScriptHostData>().and_then(|host| {
+        let state = host.state.borrow();
+        let element = state.dom.element(option_node_id)?;
+        if !element.tag_name.eq_ignore_ascii_case("option") {
+            return None;
+        }
+        Some(
+            state
+                .dom
+                .get_attribute(option_node_id, "value")
+                .unwrap_or_else(|| state.dom.text_content(option_node_id)),
+        )
+    })
+}
+
+fn select_selected_index(context: &mut Context, select_node_id: usize) -> Option<usize> {
+    let options = select_option_nodes(context, select_node_id);
+    if options.is_empty() {
+        return None;
+    }
+    let mut fallback_index = None;
+    for (index, option_id) in options.iter().enumerate() {
+        if option_has_selected_attribute(context, *option_id) {
+            return Some(index);
+        }
+        if fallback_index.is_none() && !option_is_disabled(context, *option_id) {
+            fallback_index = Some(index);
+        }
+    }
+    Some(fallback_index.unwrap_or(0))
+}
+
+fn select_selected_value(context: &mut Context, select_node_id: usize) -> Option<String> {
+    let options = select_option_nodes(context, select_node_id);
+    let index = select_selected_index(context, select_node_id)?;
+    options
+        .get(index)
+        .and_then(|option_id| option_value(context, *option_id))
+}
+
+fn select_option_value(context: &mut Context, option_node_id: usize) -> Option<String> {
+    option_value(context, option_node_id)
+}
+
+fn select_set_selected_index(
+    context: &mut Context,
+    select_node_id: usize,
+    selected_index: usize,
+) -> bool {
+    let options = select_option_nodes(context, select_node_id);
+    if options.is_empty() || selected_index >= options.len() {
+        return false;
+    }
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return false;
+    };
+    let mut changes = Vec::new();
+    {
+        let mut state = host.state.borrow_mut();
+        for (index, option_id) in options.iter().copied().enumerate() {
+            let old_value = state.dom.get_attribute(option_id, "selected");
+            if index == selected_index {
+                state.dom.set_attribute(option_id, "selected", "");
+            } else if old_value.is_some() {
+                state.dom.remove_attribute(option_id, "selected");
+            }
+            let new_value = state.dom.get_attribute(option_id, "selected");
+            if old_value != new_value {
+                changes.push((option_id, old_value, new_value));
+            }
+        }
+    }
+    for (option_id, old_value, new_value) in changes {
+        record_dom_attribute_mutation(context, option_id, "selected", old_value.clone());
+        custom_element_try_attribute_changed_callback(
+            context,
+            option_id,
+            "selected",
+            old_value,
+            new_value,
+        );
+    }
+    flush_mutation_observers(context);
+    true
+}
+
+fn select_set_value(context: &mut Context, select_node_id: usize, value: &str) -> bool {
+    let options = select_option_nodes(context, select_node_id);
+    let Some((index, _)) = options.iter().enumerate().find(|(_, option_id)| {
+        option_value(context, **option_id).as_deref() == Some(value)
+    }) else {
+        return false;
+    };
+    select_set_selected_index(context, select_node_id, index)
+}
+
+fn set_option_selected(context: &mut Context, option_node_id: usize, selected: bool) -> bool {
+    let select_node_id = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        let state = host.state.borrow();
+        state.dom.closest_selector(option_node_id, "select")
+    });
+    if select_node_id.is_none() {
+        let old_value = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.get_attribute(option_node_id, "selected"));
+        if let Some(host) = context.get_data::<JavaScriptHostData>() {
+            if selected {
+                host.state
+                    .borrow_mut()
+                    .dom
+                    .set_attribute(option_node_id, "selected", "");
+            } else if old_value.is_some() {
+                host.state
+                    .borrow_mut()
+                    .dom
+                    .remove_attribute(option_node_id, "selected");
+            }
+        }
+        let new_value = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.get_attribute(option_node_id, "selected"));
+        if old_value != new_value {
+            record_dom_attribute_mutation(context, option_node_id, "selected", old_value.clone());
+            custom_element_try_attribute_changed_callback(
+                context,
+                option_node_id,
+                "selected",
+                old_value,
+                new_value.clone(),
+            );
+            flush_mutation_observers(context);
+        }
+        return new_value.is_some();
+    }
+
+    let select_node_id = select_node_id.unwrap();
+    let options = select_option_nodes(context, select_node_id);
+    let option_index = options
+        .iter()
+        .position(|candidate| *candidate == option_node_id);
+    let Some(option_index) = option_index else {
+        return option_has_selected_attribute(context, option_node_id);
+    };
+    if selected {
+        select_set_selected_index(context, select_node_id, option_index)
+    } else {
+        if !option_has_selected_attribute(context, option_node_id) {
+            return option_is_selected(context, option_node_id);
+        }
+        let old_value = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.get_attribute(option_node_id, "selected"));
+        if let Some(host) = context.get_data::<JavaScriptHostData>() {
+            host.state
+                .borrow_mut()
+                .dom
+                .remove_attribute(option_node_id, "selected");
+        }
+        let new_value = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.get_attribute(option_node_id, "selected"));
+        if old_value != new_value {
+            record_dom_attribute_mutation(context, option_node_id, "selected", old_value.clone());
+            custom_element_try_attribute_changed_callback(
+                context,
+                option_node_id,
+                "selected",
+                old_value,
+                new_value.clone(),
+            );
+            flush_mutation_observers(context);
+        }
+        option_is_selected(context, option_node_id)
+    }
+}
+
+fn option_is_selected(context: &mut Context, option_node_id: usize) -> bool {
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return false;
+    };
+    let state = host.state.borrow();
+    let Some(element) = state.dom.element(option_node_id) else {
+        return false;
+    };
+    if !element.tag_name.eq_ignore_ascii_case("option") {
+        return false;
+    }
+    if state.dom.has_attribute(option_node_id, "selected") {
+        return true;
+    }
+    let Some(select_node_id) = state.dom.closest_selector(option_node_id, "select") else {
+        return false;
+    };
+    let options = state
+        .dom
+        .descendant_nodes(select_node_id, false)
+        .into_iter()
+        .filter(|candidate_id| {
+            state
+                .dom
+                .element(*candidate_id)
+                .is_some_and(|candidate| candidate.tag_name.eq_ignore_ascii_case("option"))
+        })
+        .collect::<Vec<_>>();
+    let selected_index = options
+        .iter()
+        .enumerate()
+        .find_map(|(index, candidate_id)| {
+            if state.dom.has_attribute(*candidate_id, "selected") {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            options
+                .iter()
+                .enumerate()
+                .find(|(_, candidate_id)| !state.dom.is_disabled(**candidate_id))
+                .map(|(index, _)| index)
+                .unwrap_or(0)
+        });
+    options
+        .get(selected_index)
+        .copied()
+        .is_some_and(|candidate_id| candidate_id == option_node_id)
 }
 
 fn text_input_value_string(context: &mut Context, node_id: usize) -> Option<String> {
@@ -13618,6 +14110,32 @@ mod tests {
         );
         assert!(
             processed.html.contains("data-area=\"0|5|none\""),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_select_value_selected_index_and_option_selection() {
+        let processed = process_document_scripts(
+            "<html><body><select id=\"select\"><option value=\"one\">One</option><option value=\"two\" selected>Two</option><option>Three</option></select><script>var select = document.getElementById('select'); var options = select.options; document.body.setAttribute('data-before', [select.value, select.selectedIndex, options.length, options.item(1).selected, options.item(2).value].join('|')); select.value = 'Three'; document.body.setAttribute('data-after', [select.value, select.selectedIndex, options.item(2).selected].join('|')); options.item(0).selected = true; document.body.setAttribute('data-final', [select.value, select.selectedIndex, select.options.item(0).selected, select.options.item(2).selected].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-before=\"two|1|3|true|Three\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-after=\"Three|2|true\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-final=\"one|0|true|false\""),
             "{}",
             processed.html
         );

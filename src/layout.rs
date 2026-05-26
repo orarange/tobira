@@ -324,6 +324,16 @@ pub enum FormControlKind {
     Hidden,
     Checkbox,
     Radio,
+    Select,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectOptionSpec {
+    pub node_id: Option<usize>,
+    pub label: String,
+    pub value: String,
+    pub selected: bool,
+    pub disabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +349,8 @@ pub struct FormControlCommand {
     pub name: Option<String>,
     pub value: String,
     pub checked: bool,
+    pub options: Vec<SelectOptionSpec>,
+    pub selected_index: usize,
     pub label: String,
     pub placeholder: Option<String>,
     pub form_id: Option<usize>,
@@ -532,6 +544,8 @@ struct FormControlSpec {
     name: Option<String>,
     value: String,
     checked: bool,
+    options: Vec<SelectOptionSpec>,
+    selected_index: usize,
     placeholder: Option<String>,
     label: String,
     form_id: Option<usize>,
@@ -662,6 +676,8 @@ fn build_form_control_spec(
                     name: element.attributes.get("name").cloned(),
                     value: element.attributes.get("value").cloned().unwrap_or_default(),
                     checked: false,
+                    options: Vec::new(),
+                    selected_index: 0,
                     placeholder: None,
                     label: String::new(),
                     form_id,
@@ -685,6 +701,8 @@ fn build_form_control_spec(
                         .cloned()
                         .unwrap_or_else(|| "on".to_string()),
                     checked: element.attributes.contains_key("checked"),
+                    options: Vec::new(),
+                    selected_index: 0,
                     placeholder: None,
                     label: String::new(),
                     form_id,
@@ -708,6 +726,8 @@ fn build_form_control_spec(
                         .cloned()
                         .unwrap_or_else(|| "on".to_string()),
                     checked: element.attributes.contains_key("checked"),
+                    options: Vec::new(),
+                    selected_index: 0,
                     placeholder: None,
                     label: String::new(),
                     form_id,
@@ -719,6 +739,70 @@ fn build_form_control_spec(
                     size_chars: None,
                 }),
                 "file" | "image" | "reset" => None,
+                "select" => {
+                    let mut options = collect_select_options(&element.children);
+                    if options.is_empty() {
+                        options.push(SelectOptionSpec {
+                            node_id: None,
+                            label: String::new(),
+                            value: String::new(),
+                            selected: true,
+                            disabled: false,
+                        });
+                    } else {
+                        let mut selected_seen = false;
+                        let mut fallback_index = None;
+                        for (index, option) in options.iter_mut().enumerate() {
+                            if fallback_index.is_none() && !option.disabled {
+                                fallback_index = Some(index);
+                            }
+                            if option.selected {
+                                if selected_seen {
+                                    option.selected = false;
+                                } else {
+                                    selected_seen = true;
+                                }
+                            }
+                        }
+                        if !selected_seen && let Some(index) = fallback_index {
+                            if let Some(option) = options.get_mut(index) {
+                                option.selected = true;
+                            }
+                        }
+                    }
+                    let selected_index = options
+                        .iter()
+                        .position(|option| option.selected)
+                        .unwrap_or(0);
+                    let selected_option = options.get(selected_index).cloned();
+                    Some(FormControlSpec {
+                        id: context.allocate_control_id(),
+                        node_id,
+                        form_node_id,
+                        kind: FormControlKind::Select,
+                        style: element.style.clone(),
+                        name: element.attributes.get("name").cloned(),
+                        value: selected_option
+                            .as_ref()
+                            .map(|option| option.value.clone())
+                            .unwrap_or_default(),
+                        checked: false,
+                        options,
+                        selected_index,
+                        placeholder: None,
+                        label: selected_option
+                            .as_ref()
+                            .map(|option| option.label.clone())
+                            .unwrap_or_default(),
+                        form_id,
+                        form_action,
+                        form_method,
+                        activates_submit: false,
+                        disabled,
+                        masked: false,
+                        size_chars: None,
+                    })
+                }
                 "submit" | "button" => Some(FormControlSpec {
                     id: context.allocate_control_id(),
                     node_id,
@@ -728,6 +812,8 @@ fn build_form_control_spec(
                     name: element.attributes.get("name").cloned(),
                     value: element.attributes.get("value").cloned().unwrap_or_default(),
                     checked: false,
+                    options: Vec::new(),
+                    selected_index: 0,
                     placeholder: None,
                     label: element
                         .attributes
@@ -758,6 +844,8 @@ fn build_form_control_spec(
                     name: element.attributes.get("name").cloned(),
                     value: element.attributes.get("value").cloned().unwrap_or_default(),
                     checked: false,
+                    options: Vec::new(),
+                    selected_index: 0,
                     placeholder: element.attributes.get("placeholder").cloned(),
                     label: String::new(),
                     form_id,
@@ -780,6 +868,8 @@ fn build_form_control_spec(
                     name: element.attributes.get("name").cloned(),
                     value: element.attributes.get("value").cloned().unwrap_or_default(),
                     checked: false,
+                    options: Vec::new(),
+                    selected_index: 0,
                     placeholder: element.attributes.get("placeholder").cloned(),
                     label: String::new(),
                     form_id,
@@ -804,6 +894,8 @@ fn build_form_control_spec(
             name: element.attributes.get("name").cloned(),
             value: collect_raw_text_content(&element.children),
             checked: false,
+            options: Vec::new(),
+            selected_index: 0,
             placeholder: element.attributes.get("placeholder").cloned(),
             label: String::new(),
             form_id,
@@ -841,6 +933,8 @@ fn build_form_control_spec(
                 name: element.attributes.get("name").cloned(),
                 value: element.attributes.get("value").cloned().unwrap_or_default(),
                 checked: false,
+                options: Vec::new(),
+                selected_index: 0,
                 placeholder: None,
                 label,
                 form_id,
@@ -878,6 +972,26 @@ fn measure_form_control(control: &FormControlSpec, fonts: &mut FontContext) -> (
             let size = line_height.saturating_add(8).max(20);
             (size, size)
         }
+        FormControlKind::Select => {
+            let label = control
+                .options
+                .get(control.selected_index)
+                .map(|option| option.label.as_str())
+                .unwrap_or_else(|| control.label.as_str());
+            let label_width = if label.is_empty() {
+                char_width(&control.style, 'M', fonts).saturating_mul(6)
+            } else {
+                text_width(&control.style, label, fonts)
+            };
+            let arrow_width = char_width(&control.style, 'v', fonts).max(10);
+            (
+                label_width
+                    .saturating_add(24)
+                    .saturating_add(arrow_width)
+                    .max(96),
+                height,
+            )
+        }
         FormControlKind::Button => {
             let label = control.label.trim();
             let label_width = if label.is_empty() {
@@ -886,6 +1000,38 @@ fn measure_form_control(control: &FormControlSpec, fonts: &mut FontContext) -> (
                 text_width(&control.style, label, fonts)
             };
             (label_width.saturating_add(24).max(64), height)
+        }
+    }
+}
+
+fn collect_select_options(children: &[StyledNode]) -> Vec<SelectOptionSpec> {
+    let mut options = Vec::new();
+    collect_select_options_into(children, &mut options);
+    options
+}
+
+fn collect_select_options_into(children: &[StyledNode], options: &mut Vec<SelectOptionSpec>) {
+    for child in children {
+        if let StyledNode::Element(element) = child {
+            match element.tag_name.as_str() {
+                "option" => {
+                    let label = collect_text_content(&element.children);
+                    let value = element
+                        .attributes
+                        .get("value")
+                        .cloned()
+                        .unwrap_or_else(|| label.clone());
+                    options.push(SelectOptionSpec {
+                        node_id: element_node_id(element),
+                        label,
+                        value,
+                        selected: element.attributes.contains_key("selected"),
+                        disabled: element.attributes.contains_key("disabled"),
+                    });
+                }
+                "optgroup" => collect_select_options_into(&element.children, options),
+                _ => collect_select_options_into(&element.children, options),
+            }
         }
     }
 }
@@ -2458,6 +2604,8 @@ fn layout_table_element(
                     name: ctrl.name.clone(),
                     value: ctrl.value.clone(),
                     checked: ctrl.checked,
+                    options: ctrl.options.clone(),
+                    selected_index: ctrl.selected_index,
                     label: ctrl.label.clone(),
                     placeholder: ctrl.placeholder.clone(),
                     form_id: ctrl.form_id,
@@ -2794,6 +2942,8 @@ fn merge_fragment(
             name: control.name.clone(),
             value: control.value.clone(),
             checked: control.checked,
+            options: control.options.clone(),
+            selected_index: control.selected_index,
             label: control.label.clone(),
             placeholder: control.placeholder.clone(),
             form_id: control.form_id,
@@ -3760,6 +3910,8 @@ fn emit_line_impl(
                 name: control.name.clone(),
                 value: control.value.clone(),
                 checked: control.checked,
+                options: control.options.clone(),
+                selected_index: control.selected_index,
                 label: control.label.clone(),
                 placeholder: control.placeholder.clone(),
                 form_id: control.form_id,

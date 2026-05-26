@@ -115,6 +115,7 @@ struct BrowserApp {
     cursor_position: PhysicalPosition<f64>,
     address_bar: AddressBarState,
     focused_page_input: Option<FocusedPageInput>,
+    open_page_select_control_id: Option<usize>,
     hovered_target: HitTarget,
     hovered_link_url: Option<String>,
     hovered_link_node_id: Option<usize>,
@@ -232,6 +233,7 @@ impl BrowserApp {
             cursor_position: PhysicalPosition::new(0.0, 0.0),
             address_bar,
             focused_page_input: None,
+            open_page_select_control_id: None,
             hovered_target: HitTarget::None,
             hovered_link_url: None,
             hovered_link_node_id: None,
@@ -522,6 +524,7 @@ impl BrowserApp {
         }
 
         self.address_bar.blur();
+        self.close_page_select();
         self.ime_composing = false;
         self.sync_input_method();
         self.request_redraw();
@@ -753,6 +756,7 @@ impl BrowserApp {
                 &layout,
                 self.focused_page_input.as_ref(),
                 self.hovered_target,
+                self.open_page_select_control_id,
                 &mut self.scratch,
             );
         }
@@ -831,12 +835,48 @@ impl BrowserApp {
                     FormControlKind::Checkbox | FormControlKind::Radio => {
                         HitTarget::PageToggle(control.id)
                     }
+                    FormControlKind::Select => HitTarget::PageSelect(control.id),
                     FormControlKind::Button => HitTarget::PageButton(control.id),
                     FormControlKind::Hidden => return None,
                 });
             }
         }
         None
+    }
+
+    fn select_popup_hit(&mut self, window_size: PhysicalSize<u32>) -> Option<HitTarget> {
+        let control_id = self.open_page_select_control_id?;
+        let control = self.current_page_control(control_id)?;
+        let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
+        let body_top = chrome.height + FRAME_PADDING;
+        let pos_x = self.cursor_position.x;
+        let pos_y = self.cursor_position.y;
+        if pos_y < body_top as f64 {
+            return None;
+        }
+        let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
+        let content_y = (pos_y as u32)
+            .saturating_sub(body_top)
+            .saturating_add(self.scroll_y);
+        let row_height = select_popup_row_height(&control, &mut self.fonts);
+        let popup_x = control.x;
+        let popup_y = control.y.saturating_add(control.height);
+        let popup_width = select_popup_width(&control, &mut self.fonts);
+        let popup_height = row_height.saturating_mul(control.options.len() as u32).max(1);
+        if content_x < popup_x
+            || content_x >= popup_x.saturating_add(popup_width)
+            || content_y < popup_y
+            || content_y >= popup_y.saturating_add(popup_height)
+        {
+            return None;
+        }
+
+        let option_index = ((content_y - popup_y) / row_height.max(1)) as usize;
+        if option_index < control.options.len() {
+            Some(HitTarget::PageSelectOption(control.id, option_index))
+        } else {
+            None
+        }
     }
 
     fn update_hover(&mut self, window_size: PhysicalSize<u32>) {
@@ -991,6 +1031,9 @@ impl BrowserApp {
         if chrome.address_bar.contains(position) {
             return HitTarget::AddressBar;
         }
+        if let Some(target) = self.select_popup_hit(window_size) {
+            return target;
+        }
         if let Some(target) = self.find_hovered_page_control(window_size) {
             return target;
         }
@@ -1018,6 +1061,38 @@ impl BrowserApp {
                 }
                 KeyCode::ArrowRight => {
                     self.go_forward();
+                    return false;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(control_id) = self.open_page_select_control_id {
+            match key_code {
+                KeyCode::Escape if !repeat => {
+                    self.close_page_select();
+                    self.request_redraw();
+                    return false;
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space if !repeat => {
+                    self.close_page_select();
+                    self.request_redraw();
+                    return false;
+                }
+                KeyCode::ArrowDown | KeyCode::ArrowRight => {
+                    self.cycle_select_option(control_id, 1);
+                    return false;
+                }
+                KeyCode::ArrowUp | KeyCode::ArrowLeft => {
+                    self.cycle_select_option(control_id, -1);
+                    return false;
+                }
+                KeyCode::Home => {
+                    self.select_first_enabled_option(control_id);
+                    return false;
+                }
+                KeyCode::End => {
+                    self.select_last_enabled_option(control_id);
                     return false;
                 }
                 _ => {}
@@ -1404,6 +1479,7 @@ impl BrowserApp {
 
     fn clear_page_control_state(&mut self) {
         self.focused_page_input = None;
+        self.close_page_select();
         self.ime_composing = false;
         self.hovered_target = HitTarget::None;
         self.hovered_link_url = None;
@@ -1423,6 +1499,7 @@ impl BrowserApp {
         }
 
         self.focused_page_input = None;
+        self.close_page_select();
         self.ime_composing = false;
         self.sync_input_method();
         self.request_content_render();
@@ -1678,6 +1755,100 @@ impl BrowserApp {
             .find(|control| control.id == id)
     }
 
+    fn close_page_select(&mut self) {
+        self.open_page_select_control_id = None;
+    }
+
+    fn current_page_select(&mut self, id: usize) -> Option<FormControlCommand> {
+        self.current_page_control(id)
+            .filter(|control| matches!(control.kind, FormControlKind::Select))
+    }
+
+    fn selected_select_option_index(&mut self, control_id: usize) -> Option<usize> {
+        self.current_page_select(control_id).and_then(|control| {
+            control
+                .options
+                .iter()
+                .position(|option| option.selected)
+        })
+    }
+
+    fn set_select_option_selected(&mut self, control_id: usize, option_index: usize) -> bool {
+        let Some(control) = self.current_page_select(control_id) else {
+            return false;
+        };
+        if control.disabled || option_index >= control.options.len() {
+            return false;
+        }
+
+        for (index, option) in control.options.iter().enumerate() {
+            if let Some(node_id) = option.node_id {
+                if index == option_index {
+                    self.document
+                        .set_dom_attribute(Some(node_id), "selected", "selected");
+                } else {
+                    self.document.remove_dom_attribute(Some(node_id), "selected");
+                }
+            }
+        }
+
+        self.sync_select_value(control_id);
+        true
+    }
+
+    fn sync_select_value(&mut self, control_id: usize) {
+        if let Some(control) = self.current_page_select(control_id) {
+            let _ = self.dispatch_page_dom_event(control.node_id, "input", true, false);
+            let _ = self.dispatch_page_dom_event(control.node_id, "change", true, false);
+        }
+        self.request_content_render();
+        self.request_redraw();
+    }
+
+    fn cycle_select_option(&mut self, control_id: usize, step: i32) -> bool {
+        let Some(control) = self.current_page_select(control_id) else {
+            return false;
+        };
+        if control.disabled || control.options.is_empty() {
+            return false;
+        }
+
+        let len = control.options.len() as i32;
+        let current = self
+            .selected_select_option_index(control_id)
+            .unwrap_or(0) as i32;
+        let mut next = current;
+        for _ in 0..len {
+            next = (next + step).rem_euclid(len);
+            if let Some(option) = control.options.get(next as usize)
+                && !option.disabled
+            {
+                break;
+            }
+        }
+        self.set_select_option_selected(control_id, next as usize)
+    }
+
+    fn select_first_enabled_option(&mut self, control_id: usize) -> bool {
+        let Some(control) = self.current_page_select(control_id) else {
+            return false;
+        };
+        let Some(index) = control.options.iter().position(|option| !option.disabled) else {
+            return false;
+        };
+        self.set_select_option_selected(control_id, index)
+    }
+
+    fn select_last_enabled_option(&mut self, control_id: usize) -> bool {
+        let Some(control) = self.current_page_select(control_id) else {
+            return false;
+        };
+        let Some(index) = control.options.iter().rposition(|option| !option.disabled) else {
+            return false;
+        };
+        self.set_select_option_selected(control_id, index)
+    }
+
     fn copy_page_input_selection(&self) -> bool {
         let Some(text) = self
             .focused_page_input
@@ -1784,6 +1955,13 @@ impl BrowserApp {
                         fields.push((name.clone(), self.control_current_value(control)));
                     }
                 }
+                FormControlKind::Select => {
+                    if let Some(name) = &control.name
+                        && !name.is_empty()
+                    {
+                        fields.push((name.clone(), control.value.clone()));
+                    }
+                }
                 FormControlKind::Checkbox | FormControlKind::Radio => {
                     if control.checked
                         && let Some(name) = &control.name
@@ -1825,6 +2003,28 @@ impl BrowserApp {
         let Some(window) = self.window.as_ref().cloned() else {
             return false;
         };
+
+        if let Some(open_control_id) = self.open_page_select_control_id {
+            match hit {
+                HitTarget::PageSelectOption(control_id, option_index)
+                    if control_id == open_control_id =>
+                {
+                    self.set_select_option_selected(control_id, option_index);
+                    self.close_page_select();
+                    return true;
+                }
+                HitTarget::PageSelect(control_id) if control_id == open_control_id => {
+                    self.close_page_select();
+                    self.request_redraw();
+                    return true;
+                }
+                _ => {
+                    self.close_page_select();
+                    self.request_redraw();
+                    return true;
+                }
+            }
+        }
 
         match hit {
             HitTarget::Button(button) => return self.handle_button(button),
@@ -1961,6 +2161,34 @@ impl BrowserApp {
                 self.request_content_render();
                 self.request_redraw();
             }
+            HitTarget::PageSelect(control_id) => {
+                let control = self.current_page_control(control_id);
+                if control
+                    .as_ref()
+                    .map(|control| control.disabled)
+                    .unwrap_or(false)
+                {
+                    return false;
+                }
+                self.blur_address_bar();
+                self.blur_page_input();
+                if let Some(control) = control {
+                    let click_result =
+                        self.dispatch_page_dom_event(control.node_id, "click", true, true);
+                    if let Some(result) = click_result {
+                        if result.default_prevented || result.snapshot.navigation_target.is_some() {
+                            return false;
+                        }
+                    }
+                    if self.open_page_select_control_id == Some(control.id) {
+                        self.close_page_select();
+                    } else {
+                        self.open_page_select_control_id = Some(control.id);
+                    }
+                    self.request_redraw();
+                }
+            }
+            HitTarget::PageSelectOption(_, _) => {}
             HitTarget::PageButton(control_id) => {
                 let control = self.current_page_control(control_id);
                 if control
@@ -2875,6 +3103,8 @@ enum HitTarget {
     AddressBar,
     PageTextInput(usize),
     PageToggle(usize),
+    PageSelect(usize),
+    PageSelectOption(usize, usize),
     PageButton(usize),
     Button(ChromeButton),
     Resize(ResizeDirection),
@@ -3415,6 +3645,8 @@ fn cursor_icon_for_target(target: HitTarget) -> CursorIcon {
         HitTarget::AddressBar => CursorIcon::Text,
         HitTarget::PageTextInput(_) => CursorIcon::Text,
         HitTarget::PageToggle(_) => CursorIcon::Pointer,
+        HitTarget::PageSelect(_) => CursorIcon::Pointer,
+        HitTarget::PageSelectOption(_, _) => CursorIcon::Pointer,
         HitTarget::PageButton(_) => CursorIcon::Pointer,
         HitTarget::Button(_) => CursorIcon::Pointer,
         HitTarget::Resize(direction) => direction.into(),
@@ -3967,12 +4199,17 @@ fn paint_page_control(
     control: &FormControlCommand,
     focused_page_input: Option<&FocusedPageInput>,
     hovered_target: HitTarget,
+    open_page_select_control_id: Option<usize>,
 ) {
     let absolute_x = offset_x.saturating_add(control.x);
     let absolute_y = offset_y.saturating_add(control.y.saturating_sub(scroll_y));
     let is_hovered = matches!(
         hovered_target,
-        HitTarget::PageTextInput(id) | HitTarget::PageToggle(id) | HitTarget::PageButton(id)
+        HitTarget::PageTextInput(id)
+            | HitTarget::PageToggle(id)
+            | HitTarget::PageSelect(id)
+            | HitTarget::PageSelectOption(id, _)
+            | HitTarget::PageButton(id)
             if id == control.id
     );
     let focused = focused_page_input
@@ -4004,7 +4241,7 @@ fn paint_page_control(
 
     if matches!(
         control.kind,
-        FormControlKind::TextInput | FormControlKind::Button
+        FormControlKind::TextInput | FormControlKind::Button | FormControlKind::Select
     ) {
         draw_rect(
             buffer,
@@ -4145,6 +4382,61 @@ fn paint_page_control(
                 }
             }
         }
+        FormControlKind::Select => {
+            let selected_label = control
+                .options
+                .get(control.selected_index)
+                .map(|option| option.label.as_str())
+                .unwrap_or_else(|| control.label.as_str());
+            let available_width =
+                control.width.saturating_sub(CONTROL_PADDING_X * 3 + CONTROL_PADDING_Y);
+            let label = fit_text_to_width(
+                fonts,
+                selected_label,
+                available_width,
+                control.font_size_px,
+                control.font_family,
+            );
+            let line_height = fonts.line_height_px(control.font_size_px, control.font_family);
+            let text_y = absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
+            let text_x = absolute_x.saturating_add(CONTROL_PADDING_X);
+            fonts.draw_text(
+                buffer,
+                width,
+                height,
+                text_x,
+                text_y,
+                &label,
+                control.font_size_px,
+                control.text_color,
+                false,
+                false,
+                false,
+                control.font_family,
+            );
+            let arrow = if open_page_select_control_id == Some(control.id) {
+                "^"
+            } else {
+                "v"
+            };
+            let arrow_width = fonts.text_width_px(arrow, control.font_size_px, control.font_family);
+            let arrow_x = absolute_x
+                .saturating_add(control.width.saturating_sub(CONTROL_PADDING_X + arrow_width));
+            fonts.draw_text(
+                buffer,
+                width,
+                height,
+                arrow_x,
+                text_y,
+                arrow,
+                control.font_size_px,
+                control.text_color,
+                false,
+                false,
+                false,
+                control.font_family,
+            );
+        }
         FormControlKind::Button => {
             let label = if !control.label.trim().is_empty() {
                 control.label.as_str()
@@ -4247,6 +4539,135 @@ fn paint_page_control(
     }
 }
 
+fn select_popup_row_height(control: &FormControlCommand, fonts: &mut FontContext) -> u32 {
+    let line_height = fonts.line_height_px(control.font_size_px, control.font_family);
+    line_height.saturating_add(10).max(control.height.max(24))
+}
+
+fn select_popup_width(control: &FormControlCommand, fonts: &mut FontContext) -> u32 {
+    let arrow_width = fonts.text_width_px("v", control.font_size_px, control.font_family);
+    let widest_label = control
+        .options
+        .iter()
+        .map(|option| {
+            fonts.text_width_px(&option.label, control.font_size_px, control.font_family)
+        })
+        .max()
+        .unwrap_or(0);
+    control
+        .width
+        .max(widest_label.saturating_add(CONTROL_PADDING_X * 2 + arrow_width + 18))
+}
+
+fn paint_page_select_dropdown(
+    fonts: &mut FontContext,
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    offset_x: u32,
+    offset_y: u32,
+    scroll_y: u32,
+    control: &FormControlCommand,
+    hovered_target: HitTarget,
+) {
+    if control.options.is_empty() {
+        return;
+    }
+
+    let absolute_x = offset_x.saturating_add(control.x);
+    let absolute_y = offset_y.saturating_add(control.y.saturating_sub(scroll_y));
+    let popup_x = absolute_x;
+    let popup_y = absolute_y.saturating_add(control.height);
+    let row_height = select_popup_row_height(control, fonts);
+    let popup_width = select_popup_width(control, fonts);
+    let popup_height = row_height.saturating_mul(control.options.len() as u32).max(1);
+
+    draw_rect(
+        buffer,
+        width,
+        height,
+        popup_x,
+        popup_y,
+        popup_width,
+        popup_height,
+        0xF8FAFD,
+    );
+    draw_rect_outline(
+        buffer,
+        width,
+        height,
+        popup_x,
+        popup_y,
+        popup_width,
+        popup_height,
+        COLOR_ADDRESS_BAR_BORDER,
+    );
+
+    for (index, option) in control.options.iter().enumerate() {
+        let row_y = popup_y.saturating_add(row_height.saturating_mul(index as u32));
+        let is_selected = option.selected;
+        let is_hovered =
+            matches!(hovered_target, HitTarget::PageSelectOption(id, option_index) if id == control.id && option_index == index);
+        let row_background = if is_hovered {
+            COLOR_CONTROL_BUTTON_HOVER
+        } else if is_selected {
+            COLOR_CONTROL_SELECTION
+        } else {
+            0xFFFFFF
+        };
+        draw_rect(
+            buffer,
+            width,
+            height,
+            popup_x,
+            row_y,
+            popup_width,
+            row_height,
+            row_background,
+        );
+        if index + 1 < control.options.len() {
+            draw_rect(
+                buffer,
+                width,
+                height,
+                popup_x,
+                row_y.saturating_add(row_height.saturating_sub(1)),
+                popup_width,
+                1,
+                COLOR_PANEL_BORDER,
+            );
+        }
+        let label = fit_text_to_width(
+            fonts,
+            &option.label,
+            popup_width.saturating_sub(CONTROL_PADDING_X * 2),
+            control.font_size_px,
+            control.font_family,
+        );
+        let label_y = row_y.saturating_add(row_height.saturating_sub(
+            fonts.line_height_px(control.font_size_px, control.font_family),
+        ) / 2);
+        fonts.draw_text(
+            buffer,
+            width,
+            height,
+            popup_x.saturating_add(CONTROL_PADDING_X),
+            label_y,
+            &label,
+            control.font_size_px,
+            if option.disabled {
+                COLOR_CONTROL_PLACEHOLDER
+            } else {
+                control.text_color
+            },
+            false,
+            false,
+            false,
+            control.font_family,
+        );
+    }
+}
+
 fn paint_layout(
     page_images: Option<&ImageStore>,
     fonts: &mut FontContext,
@@ -4260,6 +4681,7 @@ fn paint_layout(
     layout: &LayoutDocument,
     focused_page_input: Option<&FocusedPageInput>,
     hovered_target: HitTarget,
+    open_page_select_control_id: Option<usize>,
     scratch: &mut Vec<Vec<u32>>,
 ) {
     render_commands(
@@ -4294,6 +4716,23 @@ fn paint_layout(
             scroll_y,
             control,
             focused_page_input,
+            hovered_target,
+            open_page_select_control_id,
+        );
+    }
+
+    if let Some(control_id) = open_page_select_control_id
+        && let Some(control) = layout.controls.iter().find(|control| control.id == control_id)
+    {
+        paint_page_select_dropdown(
+            fonts,
+            buffer,
+            width,
+            height,
+            offset_x,
+            offset_y,
+            scroll_y,
+            control,
             hovered_target,
         );
     }
@@ -5028,6 +5467,7 @@ fn render_content_frame(
         &layout,
         request.focused_page_input.as_ref(),
         request.hovered_target,
+        None,
         &mut scratch,
     );
 
