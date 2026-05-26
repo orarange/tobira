@@ -99,6 +99,10 @@ enum JavaScriptSessionCommand {
         request: DomEventRequest,
         response_tx: Sender<DomEventDispatchResult>,
     },
+    QueryLabelControl {
+        node_id: usize,
+        response_tx: Sender<Option<usize>>,
+    },
     DispatchGlobalEvent {
         event_type: String,
         bubbles: bool,
@@ -149,6 +153,22 @@ impl JavaScriptSession {
         }
 
         response_rx.recv().ok()
+    }
+
+    pub(crate) fn label_control_node_id(&self, node_id: usize) -> Option<usize> {
+        let (response_tx, response_rx) = mpsc::channel();
+        if self
+            .command_tx
+            .send(JavaScriptSessionCommand::QueryLabelControl {
+                node_id,
+                response_tx,
+            })
+            .is_err()
+        {
+            return None;
+        }
+
+        response_rx.recv().ok().flatten()
     }
 
     pub(crate) fn snapshot(&self) -> Option<ProcessedScriptHtml> {
@@ -497,6 +517,12 @@ pub fn start_document_script_session(
                             let result = runtime.dispatch_dom_event(request);
                             let _ = response_tx.send(result);
                         }
+                        JavaScriptSessionCommand::QueryLabelControl {
+                            node_id,
+                            response_tx,
+                        } => {
+                            let _ = response_tx.send(runtime.label_control_node_id(node_id));
+                        }
                         JavaScriptSessionCommand::DispatchGlobalEvent {
                             event_type,
                             bubbles,
@@ -844,6 +870,10 @@ impl JavaScriptRuntime {
 
     fn set_input_selection(&mut self, node_id: usize, selection: TextSelectionState) {
         set_current_text_selection_state(&mut self.context, node_id, selection);
+    }
+
+    fn label_control_node_id(&mut self, node_id: usize) -> Option<usize> {
+        label_control_node_id(&mut self.context, node_id)
     }
 
     fn dispatch_dom_event(&mut self, request: DomEventRequest) -> DomEventDispatchResult {
@@ -5366,6 +5396,12 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_set_selected).to_js_function(context.realm());
     let get_options =
         NativeFunction::from_fn_ptr(js_dom_get_options).to_js_function(context.realm());
+    let get_html_for =
+        NativeFunction::from_fn_ptr(js_dom_get_html_for).to_js_function(context.realm());
+    let set_html_for =
+        NativeFunction::from_fn_ptr(js_dom_set_html_for).to_js_function(context.realm());
+    let get_control =
+        NativeFunction::from_fn_ptr(js_dom_get_control).to_js_function(context.realm());
     let mut object = ObjectInitializer::with_native_data(DomNodeHandle { node_id }, context);
     let mut object = object
         .function(
@@ -5614,6 +5650,18 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         .accessor(
             js_string!("dataset"),
             Some(get_dataset),
+            None,
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("htmlFor"),
+            Some(get_html_for),
+            Some(set_html_for),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("control"),
+            Some(get_control),
             None,
             Attribute::all(),
         )
@@ -10210,6 +10258,67 @@ fn is_option_node(context: &mut Context, node_id: usize) -> bool {
         .unwrap_or(false)
 }
 
+fn is_label_node(context: &mut Context, node_id: usize) -> bool {
+    context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            let state = host.state.borrow();
+            let element = state.dom.element(node_id)?;
+            Some(element.tag_name.eq_ignore_ascii_case("label"))
+        })
+        .unwrap_or(false)
+}
+
+fn label_control_node_id(context: &mut Context, label_node_id: usize) -> Option<usize> {
+    let host = context.get_data::<JavaScriptHostData>()?;
+    let state = host.state.borrow();
+    let element = state.dom.element(label_node_id)?;
+    if !element.tag_name.eq_ignore_ascii_case("label") {
+        return None;
+    }
+
+    if let Some(for_id) = state
+        .dom
+        .get_attribute(label_node_id, "for")
+        .filter(|value| !value.trim().is_empty())
+    {
+        let scope_id = state.dom.tree_root(label_node_id);
+        if let Some(control_node_id) = state.dom.get_element_by_id(scope_id, &for_id)
+            && is_labelable_control_node_in_dom(&state.dom, control_node_id)
+            && !state.dom.is_disabled(control_node_id)
+        {
+            return Some(control_node_id);
+        }
+    }
+
+    state
+        .dom
+        .descendant_nodes(label_node_id, false)
+        .into_iter()
+        .find(|node_id| {
+            is_labelable_control_node_in_dom(&state.dom, *node_id)
+                && !state.dom.is_disabled(*node_id)
+        })
+}
+
+fn is_labelable_control_node_in_dom(dom: &DomState, node_id: usize) -> bool {
+    let Some(element) = dom.element(node_id) else {
+        return false;
+    };
+    match element.tag_name.as_str() {
+        "textarea" | "select" | "button" => true,
+        "input" => {
+            let input_type = element
+                .attributes
+                .get("type")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "text".to_string());
+            input_type != "hidden"
+        }
+        _ => false,
+    }
+}
+
 fn select_option_nodes(context: &mut Context, select_node_id: usize) -> Vec<usize> {
     context
         .get_data::<JavaScriptHostData>()
@@ -10485,6 +10594,48 @@ fn option_is_selected(context: &mut Context, option_node_id: usize) -> bool {
         .get(selected_index)
         .copied()
         .is_some_and(|candidate_id| candidate_id == option_node_id)
+}
+
+fn js_dom_get_html_for(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::from(js_string!("")));
+    };
+    if !is_label_node(context, node_id) {
+        return Ok(JsValue::from(js_string!("")));
+    }
+    Ok(JsValue::from(js_string!(
+        context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.get_attribute(node_id, "for"))
+            .unwrap_or_default()
+    )))
+}
+
+fn js_dom_set_html_for(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if !is_label_node(context, node_id) {
+        return Ok(JsValue::undefined());
+    }
+    js_dom_set_property_attribute(this, args, "for", context)
+}
+
+fn js_dom_get_control(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    if !is_label_node(context, node_id) {
+        return Ok(JsValue::null());
+    }
+    let Some(control_id) = label_control_node_id(context, node_id) else {
+        return Ok(JsValue::null());
+    };
+    Ok(JsValue::from(build_dom_node_object(context, control_id)))
 }
 
 fn text_input_value_string(context: &mut Context, node_id: usize) -> Option<String> {
@@ -14136,6 +14287,25 @@ mod tests {
         );
         assert!(
             processed.html.contains("data-final=\"one|0|true|false\""),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_label_html_for_and_control_association() {
+        let processed = process_document_scripts(
+            "<html><body><label id=\"label\" for=\"target\">Use target</label><input id=\"target\" type=\"checkbox\"><script>var label = document.getElementById('label'); document.body.setAttribute('data-before', [label.htmlFor, label.control && label.control.id].join('|')); label.htmlFor = 'target'; document.body.setAttribute('data-after', [label.htmlFor, label.control && label.control.id].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed.html.contains("data-before=\"target|target\""),
+            "{}",
+            processed.html
+        );
+        assert!(
+            processed.html.contains("data-after=\"target|target\""),
             "{}",
             processed.html
         );

@@ -19,15 +19,15 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-25`
+- Date: `2026-05-26`
 - Repo / package name: `tobira`
-- Working branch: `master`
+- Working branch: `codex/js-reflow-invalidation`
 - Workflow:
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `200` passing tests on `2026-05-25`
-- `cargo build`: success on `2026-05-25`
+- `cargo test`: `210` passing tests on `2026-05-26`
+- `cargo build`: success on `2026-05-26`
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
   - priority order: WebComponents / shadow DOM details -> DOM mutation to reflow / hit-test sync -> fetch/XHR / history / storage browser-grade behavior -> real-site stability checks
@@ -52,6 +52,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - text inputs
     - buttons
     - checkbox / radio toggles
+    - label click activation plus `label.htmlFor` / `label.control` associations
     - caret / selection / clipboard shortcuts
     - IME cursor placement
     - basic `GET` form submission with relative action resolution and query encoding
@@ -78,6 +79,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `createElement(...)`, `createTextNode(...)`
     - `appendChild(...)`, `insertBefore(...)`, `remove()`
     - dynamic `document.body`, `document.head`, and `document.documentElement`
+    - `label.htmlFor` / `label.control` association accessors
     - `hasAttribute(...)`, `hasAttributes(...)`, `getAttributeNames(...)`, `toggleAttribute(...)`
     - `matches(...)`, `closest(...)`, `contains(...)`
     - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
@@ -208,6 +210,12 @@ git log --oneline -n 20
 - Added first-class checkbox and radio controls to the native page form pipeline so they now render, hit-test, toggle, and serialize through `GET` submissions.
 - Added a browser-like `checked` accessor on DOM nodes that reflects the underlying attribute state, plus JS setter support so scripts can toggle checkable inputs.
 - Expanded the local form demo to cover checkbox and radio interactions, and verified the update with `cargo test` (`208` passing tests) and `cargo build`.
+
+### 2026-05-26 - Codex (label associations)
+
+- Added `label.htmlFor` / `label.control` support in the JS DOM bridge so labels can point at associated controls through `for` or descendant lookup.
+- Added GUI click forwarding from labels to their associated form controls, so clicking a label activates the linked input / select / button like a browser.
+- Verified the update with `cargo test` (`210` passing tests) and `cargo build`.
 
 ### 2026-05-25 - Codex (shadow DOM / composed path)
 

@@ -36,6 +36,7 @@ Already working:
 - same-origin navigation checks
 - loop-iteration runtime budget for runaway scripts
 - native GUI form controls for `GET` submissions, including checkbox / radio toggles
+- label association support for `label.htmlFor` / `label.control` plus label-click activation
 - passive listener semantics
 - `location.hash`, `history.pushState(...)`, `replaceState(...)`, `back()`, and `forward()` for same-document navigation
 - `history.state`, `popstate`, and `hashchange` for same-document session history changes
@@ -75,7 +76,7 @@ If we want to keep momentum and avoid getting stuck on the biggest browser gaps 
 
 1. attribute / DOM introspection helpers like `hasAttribute(...)`, `hasAttributes(...)`, `getAttributeNames(...)`, `toggleAttribute(...)`, live `element.attributes`, and broader property reflection
 2. event-delegation helpers like `matches(...)`, `closest(...)`, `contains(...)`, and element traversal accessors
-3. basic listener-option edge cases and default-action sequencing
+3. form-control association helpers such as `label.htmlFor` / `label.control`, plus basic listener-option edge cases and default-action sequencing
 4. `document.body` / `document.head` / `document.documentElement` consistency and `innerHTML` edge cases
 5. mutation notifications plus incremental reflow invalidation for DOM and style changes
 6. same-document and full-document history replay polish, including scroll restoration

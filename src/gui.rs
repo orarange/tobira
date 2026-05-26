@@ -1764,6 +1764,160 @@ impl BrowserApp {
             .filter(|control| matches!(control.kind, FormControlKind::Select))
     }
 
+    fn activate_page_control(&mut self, control_id: usize, _window_size: PhysicalSize<u32>) {
+        let control = self.current_page_control(control_id);
+        if control
+            .as_ref()
+            .map(|control| control.disabled)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.blur_address_bar();
+        self.blur_page_input();
+        let Some(control) = control else {
+            return;
+        };
+        match control.kind {
+            FormControlKind::TextInput => {
+                let click_result =
+                    self.dispatch_page_dom_event(control.node_id, "click", true, true);
+                if let Some(result) = click_result {
+                    if result.default_prevented || result.snapshot.navigation_target.is_some() {
+                        return;
+                    }
+                }
+                let Some(control) = self.current_page_control(control_id) else {
+                    return;
+                };
+                let local_x = self
+                    .cursor_position
+                    .x
+                    .max((FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64)
+                    - (FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64;
+                let mut editor = AddressBarState::new(self.control_current_value(&control));
+                editor.focus_at(editor.char_len());
+                let char_index = cursor_index_for_text_x(
+                    &editor,
+                    &mut self.fonts,
+                    control.width.saturating_sub(CONTROL_PADDING_X * 2),
+                    local_x,
+                    control.font_size_px,
+                    control.font_family,
+                );
+                self.focus_page_input_at(&control, Some(char_index));
+            }
+            FormControlKind::Checkbox => {
+                let click_result =
+                    self.dispatch_page_dom_event(control.node_id, "click", true, true);
+                if let Some(result) = click_result {
+                    if result.default_prevented || result.snapshot.navigation_target.is_some() {
+                        return;
+                    }
+                }
+                let Some(control_after_click) = self.current_page_control(control_id) else {
+                    return;
+                };
+                let next_checked = !control_after_click.checked;
+                if next_checked {
+                    self.document.set_dom_attribute(
+                        control_after_click.node_id,
+                        "checked",
+                        "checked",
+                    );
+                } else {
+                    self.document
+                        .remove_dom_attribute(control_after_click.node_id, "checked");
+                }
+                let _ =
+                    self.dispatch_page_dom_event(control_after_click.node_id, "input", true, false);
+                let _ = self.dispatch_page_dom_event(
+                    control_after_click.node_id,
+                    "change",
+                    true,
+                    false,
+                );
+                self.request_content_render();
+                self.request_redraw();
+            }
+            FormControlKind::Radio => {
+                let click_result =
+                    self.dispatch_page_dom_event(control.node_id, "click", true, true);
+                if let Some(result) = click_result {
+                    if result.default_prevented || result.snapshot.navigation_target.is_some() {
+                        return;
+                    }
+                }
+                let Some(control_after_click) = self.current_page_control(control_id) else {
+                    return;
+                };
+                if !control_after_click.checked {
+                    let group_members: Vec<usize> = self
+                        .current_layout()
+                        .controls
+                        .into_iter()
+                        .filter(|control| {
+                            control.id != control_after_click.id
+                                && matches!(control.kind, FormControlKind::Radio)
+                                && control.form_id == control_after_click.form_id
+                                && control.name == control_after_click.name
+                                && control.checked
+                        })
+                        .filter_map(|control| control.node_id)
+                        .collect();
+                    self.document.set_dom_attribute(
+                        control_after_click.node_id,
+                        "checked",
+                        "checked",
+                    );
+                    for node_id in group_members {
+                        self.document.remove_dom_attribute(Some(node_id), "checked");
+                    }
+                    let _ = self.dispatch_page_dom_event(
+                        control_after_click.node_id,
+                        "input",
+                        true,
+                        false,
+                    );
+                    let _ = self.dispatch_page_dom_event(
+                        control_after_click.node_id,
+                        "change",
+                        true,
+                        false,
+                    );
+                    self.request_content_render();
+                    self.request_redraw();
+                }
+            }
+            FormControlKind::Select => {
+                let click_result =
+                    self.dispatch_page_dom_event(control.node_id, "click", true, true);
+                if let Some(result) = click_result {
+                    if result.default_prevented || result.snapshot.navigation_target.is_some() {
+                        return;
+                    }
+                }
+                if self.open_page_select_control_id == Some(control.id) {
+                    self.close_page_select();
+                } else {
+                    self.open_page_select_control_id = Some(control.id);
+                }
+                self.request_redraw();
+            }
+            FormControlKind::Button => {
+                let click_result =
+                    self.dispatch_page_dom_event(control.node_id, "click", true, true);
+                if let Some(result) = click_result {
+                    if result.default_prevented || result.snapshot.navigation_target.is_some() {
+                        return;
+                    }
+                }
+                self.submit_page_form(control_id);
+            }
+            FormControlKind::Hidden => {}
+        }
+    }
+
     fn selected_select_option_index(&mut self, control_id: usize) -> Option<usize> {
         self.current_page_select(control_id).and_then(|control| {
             control
@@ -2044,172 +2198,17 @@ impl BrowserApp {
                 self.focus_address_bar(char_index);
             }
             HitTarget::PageTextInput(control_id) => {
-                if let Some(control) = self.current_page_control(control_id) {
-                    if control.disabled {
-                        return false;
-                    }
-                    let click_result =
-                        self.dispatch_page_dom_event(control.node_id, "click", true, true);
-                    if let Some(result) = click_result {
-                        if result.default_prevented || result.snapshot.navigation_target.is_some() {
-                            return false;
-                        }
-                    }
-                    let Some(control) = self.current_page_control(control_id) else {
-                        return false;
-                    };
-                    let local_x = self
-                        .cursor_position
-                        .x
-                        .max((FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64)
-                        - (FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64;
-                    let mut editor = AddressBarState::new(self.control_current_value(&control));
-                    editor.focus_at(editor.char_len());
-                    let char_index = cursor_index_for_text_x(
-                        &editor,
-                        &mut self.fonts,
-                        control.width.saturating_sub(CONTROL_PADDING_X * 2),
-                        local_x,
-                        control.font_size_px,
-                        control.font_family,
-                    );
-                    self.focus_page_input_at(&control, Some(char_index));
-                }
+                self.activate_page_control(control_id, window_size);
             }
             HitTarget::PageToggle(control_id) => {
-                let control = self.current_page_control(control_id);
-                if control
-                    .as_ref()
-                    .map(|control| control.disabled)
-                    .unwrap_or(false)
-                {
-                    return false;
-                }
-                self.blur_address_bar();
-                self.blur_page_input();
-                let Some(control) = control else {
-                    return false;
-                };
-                let click_result =
-                    self.dispatch_page_dom_event(control.node_id, "click", true, true);
-                if let Some(result) = click_result {
-                    if result.default_prevented || result.snapshot.navigation_target.is_some() {
-                        return false;
-                    }
-                }
-                let Some(control_after_click) = self.current_page_control(control_id) else {
-                    return false;
-                };
-                let mut checked_changed = false;
-                match control_after_click.kind {
-                    FormControlKind::Checkbox => {
-                        let next_checked = !control_after_click.checked;
-                        if next_checked {
-                            self.document.set_dom_attribute(
-                                control_after_click.node_id,
-                                "checked",
-                                "checked",
-                            );
-                        } else {
-                            self.document
-                                .remove_dom_attribute(control_after_click.node_id, "checked");
-                        }
-                        checked_changed = true;
-                    }
-                    FormControlKind::Radio => {
-                        if !control_after_click.checked {
-                            let group_members: Vec<usize> = self
-                                .current_layout()
-                                .controls
-                                .into_iter()
-                                .filter(|control| {
-                                    control.id != control_after_click.id
-                                        && matches!(control.kind, FormControlKind::Radio)
-                                        && control.form_id == control_after_click.form_id
-                                        && control.name == control_after_click.name
-                                        && control.checked
-                                })
-                                .filter_map(|control| control.node_id)
-                                .collect();
-                            self.document.set_dom_attribute(
-                                control_after_click.node_id,
-                                "checked",
-                                "checked",
-                            );
-                            for node_id in group_members {
-                                self.document.remove_dom_attribute(Some(node_id), "checked");
-                            }
-                            checked_changed = true;
-                        }
-                    }
-                    _ => {}
-                }
-                if checked_changed {
-                    let _ = self.dispatch_page_dom_event(
-                        control_after_click.node_id,
-                        "input",
-                        true,
-                        false,
-                    );
-                    let _ = self.dispatch_page_dom_event(
-                        control_after_click.node_id,
-                        "change",
-                        true,
-                        false,
-                    );
-                }
-                self.request_content_render();
-                self.request_redraw();
+                self.activate_page_control(control_id, window_size);
             }
             HitTarget::PageSelect(control_id) => {
-                let control = self.current_page_control(control_id);
-                if control
-                    .as_ref()
-                    .map(|control| control.disabled)
-                    .unwrap_or(false)
-                {
-                    return false;
-                }
-                self.blur_address_bar();
-                self.blur_page_input();
-                if let Some(control) = control {
-                    let click_result =
-                        self.dispatch_page_dom_event(control.node_id, "click", true, true);
-                    if let Some(result) = click_result {
-                        if result.default_prevented || result.snapshot.navigation_target.is_some() {
-                            return false;
-                        }
-                    }
-                    if self.open_page_select_control_id == Some(control.id) {
-                        self.close_page_select();
-                    } else {
-                        self.open_page_select_control_id = Some(control.id);
-                    }
-                    self.request_redraw();
-                }
+                self.activate_page_control(control_id, window_size);
             }
             HitTarget::PageSelectOption(_, _) => {}
             HitTarget::PageButton(control_id) => {
-                let control = self.current_page_control(control_id);
-                if control
-                    .as_ref()
-                    .map(|control| control.disabled)
-                    .unwrap_or(false)
-                {
-                    return false;
-                }
-                self.blur_address_bar();
-                self.blur_page_input();
-                if let Some(control) = control {
-                    let click_result =
-                        self.dispatch_page_dom_event(control.node_id, "click", true, true);
-                    if let Some(result) = click_result {
-                        if result.default_prevented || result.snapshot.navigation_target.is_some() {
-                            return false;
-                        }
-                    }
-                }
-                self.submit_page_form(control_id);
+                self.activate_page_control(control_id, window_size);
             }
             HitTarget::Resize(direction) => {
                 self.blur_address_bar();
@@ -2235,6 +2234,30 @@ impl BrowserApp {
                     let resolved = resolve_content_href(&href, self.page_base_url());
                     if let Ok(url) = parse_address_input(&resolved) {
                         self.load_url(url);
+                    }
+                } else if let Some(label_node_id) = self.hovered_element_node_id {
+                    if let Some(control_node_id) =
+                        self.document.label_associated_control_node_id(label_node_id)
+                        && let Some(control_id) = self
+                            .current_layout()
+                            .controls
+                            .iter()
+                            .find(|control| control.node_id == Some(control_node_id))
+                            .map(|control| control.id)
+                    {
+                        let click_result = self.dispatch_page_dom_event(
+                            Some(label_node_id),
+                            "click",
+                            true,
+                            true,
+                        );
+                        if let Some(result) = click_result {
+                            if result.default_prevented || result.snapshot.navigation_target.is_some()
+                            {
+                                return false;
+                            }
+                        }
+                        self.activate_page_control(control_id, window_size);
                     }
                 }
             }
@@ -2547,6 +2570,13 @@ impl DocumentView {
         };
         let node_id = node_id?;
         page.input_selection_state(node_id)
+    }
+
+    fn label_associated_control_node_id(&self, node_id: usize) -> Option<usize> {
+        let DocumentContent::Loaded(page) = &self.content else {
+            return None;
+        };
+        page.label_associated_control_node_id(node_id)
     }
 
     fn set_viewport_size(&mut self, width: u32, height: u32) -> bool {

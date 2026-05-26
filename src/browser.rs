@@ -89,6 +89,12 @@ impl BrowserPage {
         self.input_selection_states.get(&node_id).copied()
     }
 
+    pub fn label_associated_control_node_id(&self, node_id: usize) -> Option<usize> {
+        self.javascript_session
+            .as_ref()
+            .and_then(|session| session.label_control_node_id(node_id))
+    }
+
     pub fn set_input_selection(
         &mut self,
         node_id: Option<usize>,

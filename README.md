@@ -77,6 +77,7 @@ Current capabilities:
   - Scroll restoration for both same-document and full-document history entries
   - Page navigation and content rendering complete asynchronously without showing a loading-screen UI
   - Clickable page links plus basic GUI form controls for `GET` submissions, including text inputs, buttons, and checkbox/radio toggles
+  - `<label>` click activation plus `label.htmlFor` / `label.control` association for linked form controls
   - Basic DOM event plumbing (bubbles `click`, `input`, `change`, `submit`; target-only `focus`, `blur`)
   - `MutationObserver` callbacks for `attributes`, `childList`, and `characterData`, plus browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) and `AbortController` / `AbortSignal`
   - `addEventListener(..., { signal })` listener cancellation support alongside capture / once / passive handling
@@ -93,6 +94,7 @@ Current capabilities:
   - Node introspection helpers: `nodeType`, `nodeName`, `nodeValue`, `firstChild`, `lastChild`, `previousSibling`, `nextSibling`, `isConnected`
   - text node `CharacterData` support: `data`, `length`, `nodeValue`, `textContent`, and `splitText(...)`
   - `hasAttribute(...)`, `getAttributeNames(...)`
+  - `label.htmlFor` / `label.control` plus label-click forwarding to associated controls
   - `toggleAttribute(...)`
   - `element.attributes` as a live NamedNodeMap-style collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
   - `matches(...)`, `closest(...)`, `contains(...)`
