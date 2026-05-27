@@ -365,7 +365,7 @@ Exit: all five targets are browsable in their core flows without falling back to
 
 - `<video>` and `<audio>` element stubs (show poster image, handle `play()`/`pause()` events)
 - `<canvas>` 2D context (minimal: `fillRect`, `drawImage`, `fillText`)
-- `ResizeObserver` / `IntersectionObserver` stubs
+- `ResizeObserver` / `IntersectionObserver` support, enough for layout-driven and viewport-driven lazy UI updates
 - `navigator.userAgent`, `navigator.language`, feature-detection shims
 - `requestAnimationFrame` loop (queued, but still not a full browser frame clock)
 

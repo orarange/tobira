@@ -25,7 +25,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-24`
+- Date: `2026-05-28`
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
 - Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
@@ -34,8 +34,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - run Codex implementation from a separate `codex/js-event-capture` worktree
   - Codex is the primary implementation owner for this worktree and may touch both CSS and JS when needed
 - Verification status:
-- `cargo test`: `197` passing tests on `2026-05-24`
-- `cargo build`: success on `2026-05-24`
+- `cargo test`: `201` passing tests on `2026-05-28`
+- `cargo build`: success on `2026-05-28`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -171,6 +171,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - DOM traversal APIs now include `matches(...)`, `closest(...)`, `contains(...)`, and element sibling / child accessors for event delegation and framework-style code paths.
 - The richer `attributes` / `dataset` surface still needs deeper parity, even though `element.attributes` is now a live collection and `hasAttributes(...)` / `toggleAttribute(...)` now exist.
 - `MutationObserver` now fires for `attributes`, `childList`, and `characterData`, and the JS layer also exposes browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) plus `AbortController` / `AbortSignal`.
+- `ResizeObserver` and `IntersectionObserver` now fire from layout / viewport / scroll updates, so lazy-loaded and virtualized UI can react without waiting for a manual reload.
 - text nodes now expose browser-like `CharacterData` helpers including `data`, `length`, `nodeValue`, and `splitText(...)`.
 - Framework-facing browser APIs still need a lot more depth.
 - History / back-forward replay still needs depth beyond the current scroll restoration work.
@@ -204,6 +205,12 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-28 - Codex (observer-driven layout reactivity)
+
+- Added `ResizeObserver` and `IntersectionObserver` support so layout and viewport changes can wake lazy-loaded or virtualized UI without a synthetic fallback path.
+- Flushed observer callbacks from layout hitbox updates and scroll changes, which keeps the timing close enough to real browser behavior for heavy DOM sites.
+- Added regression tests for both observers and refreshed the docs snapshot to match the new state.
 
 ### 2026-05-24 - Codex (async navigation handoff)
 

@@ -839,19 +839,25 @@ impl JavaScriptRuntime {
         if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
             host.state.borrow_mut().layout_hitboxes = hitboxes;
         }
+        flush_resize_and_intersection_observers(&mut self.context);
     }
 
     fn set_scroll_position(&mut self, y: u32) -> bool {
-        if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
+        let changed = if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
             let mut state = host.state.borrow_mut();
             let changed = state.scroll_y != y;
             state.scroll_y = y;
             if changed {
                 sync_current_history_entry_scroll(&mut state);
             }
-            return changed;
+            changed
+        } else {
+            false
+        };
+        if changed {
+            flush_resize_and_intersection_observers(&mut self.context);
         }
-        false
+        changed
     }
 
     fn set_dom_attribute(&mut self, node_id: usize, name: &str, value: &str) {
@@ -3156,6 +3162,20 @@ fn install_browser_globals(context: &mut Context) {
         )
         .expect("__tobiraCustomElementsUpgrade should be installable");
     context
+        .register_global_builtin_callable(
+            js_string!("__tobiraCreateResizeObserver"),
+            1,
+            NativeFunction::from_fn_ptr(js_create_resize_observer),
+        )
+        .expect("__tobiraCreateResizeObserver should be installable");
+    context
+        .register_global_builtin_callable(
+            js_string!("__tobiraCreateIntersectionObserver"),
+            1,
+            NativeFunction::from_fn_ptr(js_create_intersection_observer),
+        )
+        .expect("__tobiraCreateIntersectionObserver should be installable");
+    context
         .eval(Source::from_bytes(
             r#"
 globalThis.__tobiraMutationObservers = [];
@@ -3483,6 +3503,263 @@ globalThis.customElements.upgrade = function upgrade(root) {
 "#,
         ))
         .expect("custom elements bootstrap should evaluate");
+    context
+        .eval(Source::from_bytes(
+            r#"
+globalThis.__tobiraResizeObservers = [];
+globalThis.ResizeObserver = function ResizeObserver(callback) {
+  var observer = __tobiraCreateResizeObserver(callback);
+  observer.observe = function (target) {
+    if (!target || typeof target !== 'object') {
+      return;
+    }
+    for (var i = 0; i < this.observations.length; i += 1) {
+      if (this.observations[i] && this.observations[i].target === target) {
+        return;
+      }
+    }
+    this.observations.push({
+      target: target,
+      lastWidth: null,
+      lastHeight: null,
+      initial: true,
+    });
+  };
+  observer.unobserve = function (target) {
+    if (!target || typeof target !== 'object') {
+      return;
+    }
+    var next = [];
+    for (var i = 0; i < this.observations.length; i += 1) {
+      var observation = this.observations[i];
+      if (observation && observation.target !== target) {
+        next.push(observation);
+      }
+    }
+    this.observations = next;
+  };
+  observer.disconnect = function () {
+    this.observations.length = 0;
+    this.records.length = 0;
+  };
+  observer.takeRecords = function () {
+    var records = this.records.slice();
+    this.records.length = 0;
+    return records;
+  };
+  __tobiraResizeObservers.push(observer);
+  return observer;
+};
+globalThis.__tobiraResizeObserverEntryFor = function (target, rect) {
+  var size = { inlineSize: rect.width, blockSize: rect.height };
+  return {
+    target: target,
+    contentRect: rect,
+    borderBoxSize: [size],
+    contentBoxSize: [size],
+    devicePixelContentBoxSize: [size],
+  };
+};
+globalThis.__tobiraFlushResizeObservers = function () {
+  if (!globalThis.__tobiraResizeObservers || !globalThis.__tobiraResizeObservers.length) {
+    return false;
+  }
+  var delivered = false;
+  for (var i = 0; i < __tobiraResizeObservers.length; i += 1) {
+    var observer = __tobiraResizeObservers[i];
+    if (!observer || !observer.observations.length) {
+      continue;
+    }
+    for (var j = 0; j < observer.observations.length; j += 1) {
+      var observation = observer.observations[j];
+      if (!observation || !observation.target || typeof observation.target.getBoundingClientRect !== 'function') {
+        continue;
+      }
+      var rect = observation.target.getBoundingClientRect();
+      var width = rect && typeof rect.width === 'number' ? rect.width : 0;
+      var height = rect && typeof rect.height === 'number' ? rect.height : 0;
+      if (observation.initial || observation.lastWidth !== width || observation.lastHeight !== height) {
+        observation.initial = false;
+        observation.lastWidth = width;
+        observation.lastHeight = height;
+        observer.records.push(__tobiraResizeObserverEntryFor(observation.target, rect));
+      }
+    }
+    if (observer.records.length) {
+      delivered = true;
+      var records = observer.takeRecords();
+      observer.callback.call(observer, records, observer);
+    }
+  }
+  return delivered;
+};
+globalThis.__tobiraIntersectionObservers = [];
+globalThis.IntersectionObserver = function IntersectionObserver(callback, options) {
+  var observer = __tobiraCreateIntersectionObserver(callback);
+  options = options && typeof options === 'object' ? options : {};
+  var thresholds = options.threshold;
+  if (thresholds == null) {
+    thresholds = [0];
+  } else if (typeof thresholds === 'number') {
+    thresholds = [thresholds];
+  } else if (!Array.isArray(thresholds)) {
+    thresholds = [0];
+  }
+  var normalizedThresholds = [];
+  for (var i = 0; i < thresholds.length; i += 1) {
+    var threshold = Number(thresholds[i]);
+    if (!isFinite(threshold)) {
+      continue;
+    }
+    threshold = Math.max(0, Math.min(1, threshold));
+    if (normalizedThresholds.indexOf(threshold) === -1) {
+      normalizedThresholds.push(threshold);
+    }
+  }
+  if (!normalizedThresholds.length) {
+    normalizedThresholds.push(0);
+  }
+  normalizedThresholds.sort(function (a, b) {
+    return a - b;
+  });
+  observer.root = null;
+  observer.rootMargin = '0px';
+  observer.thresholds = normalizedThresholds;
+  observer.observe = function (target) {
+    if (!target || typeof target !== 'object') {
+      return;
+    }
+    for (var i = 0; i < this.observations.length; i += 1) {
+      if (this.observations[i] && this.observations[i].target === target) {
+        return;
+      }
+    }
+    this.observations.push({
+      target: target,
+      lastRatio: null,
+      lastIntersecting: null,
+      initial: true,
+    });
+  };
+  observer.unobserve = function (target) {
+    if (!target || typeof target !== 'object') {
+      return;
+    }
+    var next = [];
+    for (var i = 0; i < this.observations.length; i += 1) {
+      var observation = this.observations[i];
+      if (observation && observation.target !== target) {
+        next.push(observation);
+      }
+    }
+    this.observations = next;
+  };
+  observer.disconnect = function () {
+    this.observations.length = 0;
+    this.records.length = 0;
+  };
+  observer.takeRecords = function () {
+    var records = this.records.slice();
+    this.records.length = 0;
+    return records;
+  };
+  __tobiraIntersectionObservers.push(observer);
+  return observer;
+};
+globalThis.__tobiraIntersectionObserverEntryFor = function (target, rect, viewportWidth, viewportHeight) {
+  var left = Math.max(0, rect.left);
+  var top = Math.max(0, rect.top);
+  var right = Math.min(viewportWidth, rect.right);
+  var bottom = Math.min(viewportHeight, rect.bottom);
+  var width = Math.max(0, right - left);
+  var height = Math.max(0, bottom - top);
+  var area = Math.max(0, rect.width) * Math.max(0, rect.height);
+  var ratio = area > 0 ? (width * height) / area : (width > 0 && height > 0 ? 1 : 0);
+  return {
+    time: performance.now(),
+    target: target,
+    rootBounds: {
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: viewportWidth,
+      bottom: viewportHeight,
+      width: viewportWidth,
+      height: viewportHeight,
+    },
+    boundingClientRect: rect,
+    intersectionRect: {
+      x: left,
+      y: top,
+      top: top,
+      left: left,
+      right: right,
+      bottom: bottom,
+      width: width,
+      height: height,
+    },
+    isIntersecting: width > 0 && height > 0,
+    intersectionRatio: ratio,
+  };
+};
+globalThis.__tobiraFlushIntersectionObservers = function () {
+  if (!globalThis.__tobiraIntersectionObservers || !globalThis.__tobiraIntersectionObservers.length) {
+    return false;
+  }
+  var viewportWidth = typeof window !== 'undefined' && typeof window.innerWidth === 'number'
+    ? window.innerWidth
+    : 0;
+  var viewportHeight = typeof window !== 'undefined' && typeof window.innerHeight === 'number'
+    ? window.innerHeight
+    : 0;
+  var delivered = false;
+  for (var i = 0; i < __tobiraIntersectionObservers.length; i += 1) {
+    var observer = __tobiraIntersectionObservers[i];
+    if (!observer || !observer.observations.length) {
+      continue;
+    }
+    for (var j = 0; j < observer.observations.length; j += 1) {
+      var observation = observer.observations[j];
+      if (!observation || !observation.target || typeof observation.target.getBoundingClientRect !== 'function') {
+        continue;
+      }
+      var rect = observation.target.getBoundingClientRect();
+      var left = Math.max(0, rect.left);
+      var top = Math.max(0, rect.top);
+      var right = Math.min(viewportWidth, rect.right);
+      var bottom = Math.min(viewportHeight, rect.bottom);
+      var width = Math.max(0, right - left);
+      var height = Math.max(0, bottom - top);
+      var area = Math.max(0, rect.width) * Math.max(0, rect.height);
+      var ratio = area > 0 ? (width * height) / area : (width > 0 && height > 0 ? 1 : 0);
+      var intersecting = width > 0 && height > 0;
+      var changed = observation.initial
+        || observation.lastRatio !== ratio
+        || observation.lastIntersecting !== intersecting;
+      if (changed) {
+        observation.initial = false;
+        observation.lastRatio = ratio;
+        observation.lastIntersecting = intersecting;
+        observer.records.push(__tobiraIntersectionObserverEntryFor(
+          observation.target,
+          rect,
+          viewportWidth,
+          viewportHeight
+        ));
+      }
+    }
+    if (observer.records.length) {
+      delivered = true;
+      var records = observer.takeRecords();
+      observer.callback.call(observer, records, observer);
+    }
+  }
+  return delivered;
+};
+"#,
+        ))
+        .expect("observer bootstrap should evaluate");
 }
 
 fn build_simple_node_list_stub(context: &mut Context) -> boa_engine::object::JsObject {
@@ -9169,6 +9446,68 @@ fn js_create_mutation_observer(
     Ok(JsValue::from(observer))
 }
 
+fn js_create_resize_observer(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(callback) = args.first().cloned() else {
+        return Err(JsNativeError::typ()
+            .with_message("ResizeObserver callback is required")
+            .into());
+    };
+    let Some(callback_object) = callback.as_object() else {
+        return Err(JsNativeError::typ()
+            .with_message("ResizeObserver callback must be callable")
+            .into());
+    };
+    if JsFunction::from_object(callback_object.clone()).is_none() {
+        return Err(JsNativeError::typ()
+            .with_message("ResizeObserver callback must be callable")
+            .into());
+    }
+
+    let records = JsArray::new(context);
+    let observations = JsArray::new(context);
+    let observer = ObjectInitializer::new(context)
+        .property(js_string!("callback"), callback, Attribute::all())
+        .property(js_string!("records"), records, Attribute::all())
+        .property(js_string!("observations"), observations, Attribute::all())
+        .build();
+    Ok(JsValue::from(observer))
+}
+
+fn js_create_intersection_observer(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(callback) = args.first().cloned() else {
+        return Err(JsNativeError::typ()
+            .with_message("IntersectionObserver callback is required")
+            .into());
+    };
+    let Some(callback_object) = callback.as_object() else {
+        return Err(JsNativeError::typ()
+            .with_message("IntersectionObserver callback must be callable")
+            .into());
+    };
+    if JsFunction::from_object(callback_object.clone()).is_none() {
+        return Err(JsNativeError::typ()
+            .with_message("IntersectionObserver callback must be callable")
+            .into());
+    }
+
+    let records = JsArray::new(context);
+    let observations = JsArray::new(context);
+    let observer = ObjectInitializer::new(context)
+        .property(js_string!("callback"), callback, Attribute::all())
+        .property(js_string!("records"), records, Attribute::all())
+        .property(js_string!("observations"), observations, Attribute::all())
+        .build();
+    Ok(JsValue::from(observer))
+}
+
 fn custom_element_name_from_value(value: &JsValue, context: &mut Context) -> JsResult<String> {
     let name = js_value_to_string(value, context)?
         .trim()
@@ -11794,6 +12133,32 @@ fn flush_mutation_observers(context: &mut Context) {
     }
 }
 
+fn flush_resize_and_intersection_observers(context: &mut Context) {
+    for _ in 0..8 {
+        let delivered = context
+            .eval(Source::from_bytes(
+                r#"
+(function () {
+  var delivered = false;
+  if (typeof __tobiraFlushResizeObservers === 'function') {
+    delivered = __tobiraFlushResizeObservers() || delivered;
+  }
+  if (typeof __tobiraFlushIntersectionObservers === 'function') {
+    delivered = __tobiraFlushIntersectionObservers() || delivered;
+  }
+  return delivered;
+})()
+"#,
+            ))
+            .ok()
+            .map(|value| value.to_boolean())
+            .unwrap_or(false);
+        if !delivered {
+            break;
+        }
+    }
+}
+
 fn js_document_get_cookie(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let cookie = current_document_url(context)
         .map(|url| site_state::document_cookie_get(&url))
@@ -13075,6 +13440,106 @@ mod tests {
             "{}",
             processed.html
         );
+    }
+
+    #[test]
+    fn supports_resize_observer_callbacks_after_layout_changes() {
+        let mut runtime = JavaScriptRuntime::new(
+            &Url::parse("https://example.com").unwrap(),
+            "<html><body><div id=\"box\">Hi</div></body></html>",
+        );
+        runtime
+            .context
+            .eval(Source::from_bytes(
+                "var box = document.getElementById('box'); var resizeLog = []; var observer = new ResizeObserver(function(records) { resizeLog.push(records.map(function(entry) { return entry.contentRect.width + 'x' + entry.contentRect.height; }).join(',')); document.body.setAttribute('data-resize', resizeLog.join(';')); }); observer.observe(box);",
+            ))
+            .unwrap();
+        let box_value = runtime
+            .context
+            .eval(Source::from_bytes("document.getElementById('box')"))
+            .unwrap();
+        let node_id = super::this_node_id(&box_value).unwrap();
+
+        runtime.set_layout_hitboxes(vec![crate::layout::ElementHitbox {
+            node_id,
+            x: 40,
+            y: 200,
+            width: 120,
+            height: 30,
+            cursor_kind: crate::css::CursorKind::Auto,
+        }]);
+        let first = runtime
+            .context
+            .eval(Source::from_bytes(
+                "document.body.getAttribute('data-resize')",
+            ))
+            .unwrap();
+        let first = js_value_to_string(&first, &mut runtime.context).unwrap();
+        assert_eq!(first, "120x30");
+
+        runtime.set_layout_hitboxes(vec![crate::layout::ElementHitbox {
+            node_id,
+            x: 40,
+            y: 200,
+            width: 144,
+            height: 36,
+            cursor_kind: crate::css::CursorKind::Auto,
+        }]);
+        let second = runtime
+            .context
+            .eval(Source::from_bytes(
+                "document.body.getAttribute('data-resize')",
+            ))
+            .unwrap();
+        let second = js_value_to_string(&second, &mut runtime.context).unwrap();
+        assert_eq!(second, "120x30;144x36");
+    }
+
+    #[test]
+    fn supports_intersection_observer_callbacks_after_scroll_changes() {
+        let mut runtime = JavaScriptRuntime::new(
+            &Url::parse("https://example.com").unwrap(),
+            "<html><body><div id=\"box\">Hi</div></body></html>",
+        );
+        runtime.set_viewport_size(100, 100);
+        runtime
+            .context
+            .eval(Source::from_bytes(
+                "var box = document.getElementById('box'); var intersectionLog = []; var observer = new IntersectionObserver(function(records) { intersectionLog.push(records.map(function(entry) { return entry.isIntersecting + ':' + entry.intersectionRatio.toFixed(2); }).join(',')); document.body.setAttribute('data-intersection', intersectionLog.join(';')); }); observer.observe(box);",
+            ))
+            .unwrap();
+        let box_value = runtime
+            .context
+            .eval(Source::from_bytes("document.getElementById('box')"))
+            .unwrap();
+        let node_id = super::this_node_id(&box_value).unwrap();
+
+        runtime.set_layout_hitboxes(vec![crate::layout::ElementHitbox {
+            node_id,
+            x: 0,
+            y: 200,
+            width: 50,
+            height: 50,
+            cursor_kind: crate::css::CursorKind::Auto,
+        }]);
+        let first = runtime
+            .context
+            .eval(Source::from_bytes(
+                "document.body.getAttribute('data-intersection')",
+            ))
+            .unwrap();
+        let first = js_value_to_string(&first, &mut runtime.context).unwrap();
+        assert_eq!(first, "false:0.00");
+
+        runtime.set_scroll_position(150);
+        let second = runtime
+            .context
+            .eval(Source::from_bytes(
+                "document.body.getAttribute('data-intersection')",
+            ))
+            .unwrap();
+        let second = js_value_to_string(&second, &mut runtime.context).unwrap();
+        assert_eq!(second, "false:0.00;true:1.00");
     }
 
     #[test]

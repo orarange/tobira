@@ -69,7 +69,7 @@ Current capabilities:
   - JS-driven `HTMLFormElement.submit()` / `requestSubmit()` for `GET` forms with event dispatch and query encoding
   - geometry reads now include `getBoundingClientRect()`, `getClientRects()`, and `offset*` / `client*` / `scroll*` box metrics when hitboxes are available
   - Basic DOM event plumbing (bubbles `click`, `input`, `change`, `submit`; target-only `focus`, `blur`)
-  - `MutationObserver` callbacks for `attributes`, `childList`, and `characterData`, plus browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) and `AbortController` / `AbortSignal`
+  - `MutationObserver` callbacks for `attributes`, `childList`, and `characterData`, plus `ResizeObserver` / `IntersectionObserver` callbacks, browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`), and `AbortController` / `AbortSignal`
   - Layout reflow cache keyed by viewport width and page revision
 - Lightweight mutable DOM support for:
   - `document.querySelector(...)` / `querySelectorAll(...)`
