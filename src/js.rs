@@ -357,6 +357,9 @@ enum DomNodeKind {
 struct DomElementData {
     tag_name: String,
     attributes: BTreeMap<String, String>,
+    default_value: Option<String>,
+    default_checked: bool,
+    default_selected: bool,
     shadow_root_id: Option<usize>,
     custom_element_upgraded: bool,
     custom_element_connected_callback_called: bool,
@@ -1119,6 +1122,19 @@ impl JavaScriptRuntime {
     }
 }
 
+fn node_text_content(node: &Node) -> String {
+    match node {
+        Node::Text(text) => text.clone(),
+        Node::Element(element) => {
+            let mut text = String::new();
+            for child in &element.children {
+                text.push_str(&node_text_content(child));
+            }
+            text
+        }
+    }
+}
+
 impl DomState {
     fn from_html(html: &str) -> Self {
         let mut dom = Self::default();
@@ -1138,6 +1154,15 @@ impl DomState {
             Node::Element(element) => DomNodeKind::Element(DomElementData {
                 tag_name: element.tag_name.clone(),
                 attributes: element.attributes.clone(),
+                default_value: match element.tag_name.as_str() {
+                    "textarea" => Some(node_text_content(node)),
+                    "input" | "button" => {
+                        Some(element.attributes.get("value").cloned().unwrap_or_default())
+                    }
+                    _ => None,
+                },
+                default_checked: element.attributes.contains_key("checked"),
+                default_selected: element.attributes.contains_key("selected"),
                 shadow_root_id: None,
                 custom_element_upgraded: false,
                 custom_element_connected_callback_called: false,
@@ -1163,12 +1188,16 @@ impl DomState {
 
     fn create_element(&mut self, tag_name: &str) -> usize {
         let node_id = self.nodes.len();
+        let tag_name = tag_name.to_ascii_lowercase();
         self.nodes.push(DomNode {
             parent: None,
             children: Vec::new(),
             kind: DomNodeKind::Element(DomElementData {
-                tag_name: tag_name.to_ascii_lowercase(),
+                tag_name,
                 attributes: BTreeMap::new(),
+                default_value: None,
+                default_checked: false,
+                default_selected: false,
                 shadow_root_id: None,
                 custom_element_upgraded: false,
                 custom_element_connected_callback_called: false,
@@ -5374,6 +5403,7 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         })
         .unwrap_or_default();
     let is_element = !tag_name.is_empty();
+    let is_form_element = is_element && tag_name.eq_ignore_ascii_case("form");
     let is_select_element = is_element && tag_name.eq_ignore_ascii_case("select");
     let is_option_element = is_element && tag_name.eq_ignore_ascii_case("option");
     let is_slot = is_element && tag_name == "slot";
@@ -5396,6 +5426,7 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
         NativeFunction::from_fn_ptr(js_dom_set_selected).to_js_function(context.realm());
     let get_options =
         NativeFunction::from_fn_ptr(js_dom_get_options).to_js_function(context.realm());
+    let reset_form = NativeFunction::from_fn_ptr(js_dom_form_reset);
     let get_html_for =
         NativeFunction::from_fn_ptr(js_dom_get_html_for).to_js_function(context.realm());
     let set_html_for =
@@ -5880,6 +5911,9 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
                 None,
                 Attribute::all(),
             );
+    }
+    if is_form_element {
+        object = object.function(reset_form, js_string!("reset"), 0);
     }
     if is_option_element {
         object = object.accessor(
@@ -9891,6 +9925,14 @@ fn js_dom_get_options(
     )))
 }
 
+fn js_dom_form_reset(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let _ = form_reset(context, node_id);
+    Ok(JsValue::undefined())
+}
+
 fn js_dom_get_checked(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let Some(node_id) = this_node_id(this) else {
         return Ok(JsValue::from(false));
@@ -10462,6 +10504,134 @@ fn select_set_value(context: &mut Context, select_node_id: usize, value: &str) -
         return false;
     };
     select_set_selected_index(context, select_node_id, index)
+}
+
+fn select_default_selected_index(context: &mut Context, select_node_id: usize) -> Option<usize> {
+    let options = select_option_nodes(context, select_node_id);
+    if options.is_empty() {
+        return None;
+    }
+    let mut fallback_index = None;
+    for (index, option_id) in options.iter().enumerate() {
+        let default_selected = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| {
+                host.state
+                    .borrow()
+                    .dom
+                    .element(*option_id)
+                    .map(|element| element.default_selected)
+            })
+            .unwrap_or(false);
+        if default_selected {
+            return Some(index);
+        }
+        if fallback_index.is_none() && !option_is_disabled(context, *option_id) {
+            fallback_index = Some(index);
+        }
+    }
+    Some(fallback_index.unwrap_or(0))
+}
+
+fn form_reset(context: &mut Context, form_node_id: usize) -> bool {
+    let is_form = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| {
+            host.state
+                .borrow()
+                .dom
+                .element(form_node_id)
+                .map(|element| element.tag_name.eq_ignore_ascii_case("form"))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if !is_form {
+        return false;
+    }
+
+    let form = build_dom_node_object(context, form_node_id);
+    let request = DomEventRequest {
+        target_node_id: form_node_id,
+        event_type: "reset".to_string(),
+        bubbles: true,
+        cancelable: true,
+        ..Default::default()
+    };
+    let form_value = JsValue::from(form.clone());
+    let event = build_dom_event_object(context, &request, &form, &[form_node_id]);
+    if !js_dom_dispatch_event(&form_value, &[JsValue::from(event)], context)
+        .unwrap_or_else(|_| JsValue::from(false))
+        .to_boolean()
+    {
+        return false;
+    }
+
+    let descendant_ids = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow().dom.descendant_nodes(form_node_id, false))
+        .unwrap_or_default();
+    let mut changed_selects = Vec::new();
+
+    for node_id in descendant_ids {
+        let Some(element) = context
+            .get_data::<JavaScriptHostData>()
+            .and_then(|host| host.state.borrow().dom.element(node_id).cloned())
+        else {
+            continue;
+        };
+        match element.tag_name.as_str() {
+            "textarea" => {
+                let default_value = element.default_value.unwrap_or_default();
+                let node = build_dom_node_object(context, node_id);
+                let _ = js_dom_set_text_content(
+                    &JsValue::from(node),
+                    &[JsValue::from(js_string!(default_value))],
+                    context,
+                );
+                clamp_current_text_selection_to_value(context, node_id);
+            }
+            "input" => {
+                let input_type = element
+                    .attributes
+                    .get("type")
+                    .map(|value| value.trim().to_ascii_lowercase())
+                    .unwrap_or_else(|| "text".to_string());
+                match input_type.as_str() {
+                    "checkbox" | "radio" => {
+                        let node = build_dom_node_object(context, node_id);
+                        let _ = js_dom_set_checked(
+                            &JsValue::from(node),
+                            &[JsValue::from(element.default_checked)],
+                            context,
+                        );
+                    }
+                    "file" | "image" | "button" | "submit" | "reset" => {}
+                    _ => {
+                        let default_value = element.default_value.unwrap_or_default();
+                        let node = build_dom_node_object(context, node_id);
+                        let _ = js_dom_set_value(
+                            &JsValue::from(node),
+                            &[JsValue::from(js_string!(default_value))],
+                            context,
+                        );
+                    }
+                }
+            }
+            "select" => {
+                if let Some(index) = select_default_selected_index(context, node_id) {
+                    changed_selects.push((node_id, index));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (select_node_id, index) in changed_selects {
+        let _ = select_set_selected_index(context, select_node_id, index);
+    }
+
+    flush_mutation_observers(context);
+    true
 }
 
 fn set_option_selected(context: &mut Context, option_node_id: usize, selected: bool) -> bool {
@@ -14098,6 +14268,22 @@ mod tests {
             processed
                 .html
                 .contains("data-checked=\"false|false|true|false\""),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_form_reset_restores_default_control_state() {
+        let processed = process_document_scripts(
+            "<html><body><form id=\"form\"><input id=\"text\" name=\"q\" value=\"alpha\"><input id=\"check\" type=\"checkbox\" checked><select id=\"pick\" name=\"choice\"><option value=\"one\">One</option><option value=\"two\" selected>Two</option></select><textarea id=\"area\">hello</textarea></form><script>var form = document.getElementById('form'); var text = document.getElementById('text'); var check = document.getElementById('check'); var pick = document.getElementById('pick'); var area = document.getElementById('area'); text.value = 'beta'; check.checked = false; pick.selectedIndex = 0; area.textContent = 'world'; form.reset(); document.body.setAttribute('data-reset', [text.value, check.checked, pick.value, area.textContent].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-reset=\"alpha|true|two|hello\""),
             "{}",
             processed.html
         );

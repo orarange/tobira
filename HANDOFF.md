@@ -19,15 +19,15 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-26`
+- Date: `2026-05-27`
 - Repo / package name: `tobira`
 - Working branch: `codex/js-reflow-invalidation`
 - Workflow:
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `210` passing tests on `2026-05-26`
-- `cargo build`: success on `2026-05-26`
+- `cargo test`: `211` passing tests on `2026-05-27`
+- `cargo build`: success on `2026-05-27`
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
   - priority order: WebComponents / shadow DOM details -> DOM mutation to reflow / hit-test sync -> fetch/XHR / history / storage browser-grade behavior -> real-site stability checks
@@ -56,6 +56,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - caret / selection / clipboard shortcuts
     - IME cursor placement
     - basic `GET` form submission with relative action resolution and query encoding
+    - `form.reset()` restores default control state for text inputs, textareas, checkbox/radio controls, and selects
     - focused-input keyboard event delivery for `keydown` / `keyup`
     - live GUI typing synchronized into DOM-backed `value`
   - page keyboard events:
@@ -178,7 +179,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Modern app-shell sites still need more DOM APIs, richer history replay, and CSS Phase 6 visual effects / advanced rendering.
 - Incremental reflow still needs deeper invalidation for more DOM/style mutations.
 - The inline style bridge still needs broader CSS property coverage and more computed-style parity to be browser-grade, but the core CSS parser/layout baseline is already part of the shared codebase.
-- Form support is still limited to simple text-like fields and `GET` submission; `POST`, selects, and file inputs are not wired yet.
+- Form support is still limited to simple text-like fields and `GET` submission; `POST` and file inputs are not wired yet.
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
 - CSS Phase 5 baseline is already part of the shared codebase; remaining CSS work is mostly the Phase 6 visual-effects / advanced-rendering surface.
@@ -204,6 +205,11 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-27 - Codex (form reset support)
+
+- Added `HTMLFormElement.reset()` support so forms can restore default text, textarea, checkbox/radio, and select state through the existing DOM event plumbing.
+- Updated the roadmap and README to reflect the current form-control surface and the latest `211`-test verification snapshot.
 
 ### 2026-05-26 - Codex (checkbox / radio form controls)
 

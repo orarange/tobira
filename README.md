@@ -77,6 +77,7 @@ Current capabilities:
   - Scroll restoration for both same-document and full-document history entries
   - Page navigation and content rendering complete asynchronously without showing a loading-screen UI
   - Clickable page links plus basic GUI form controls for `GET` submissions, including text inputs, buttons, and checkbox/radio toggles
+  - `HTMLFormElement.reset()` restores default control state for text inputs, textareas, checkbox/radio controls, and selects
   - `<label>` click activation plus `label.htmlFor` / `label.control` association for linked form controls
   - Basic DOM event plumbing (bubbles `click`, `input`, `change`, `submit`; target-only `focus`, `blur`)
   - `MutationObserver` callbacks for `attributes`, `childList`, and `characterData`, plus browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) and `AbortController` / `AbortSignal`
@@ -105,7 +106,7 @@ Current capabilities:
   - recursive `document.write(...)`
   - GUI-driven DOM attribute changes now refresh the live page snapshot, so reflow follows mutation notifications instead of waiting for a reload
   - inline `element.style` updates through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
-- Site-specific rendering paths for YouTube and Google
+- Generic rendering paths handle YouTube and Google without site-specific rewrites
 
 Still missing:
 
@@ -115,7 +116,7 @@ Still missing:
 - session-history replay polish across full document loads (basic scroll restoration is now in place)
 - deeper scroll restoration beyond the current full-document / same-document history support
 - inline style mutations still need broader coverage across the full CSS property matrix and computed-style parity
-- POST forms, complex widgets, and modern app-shell browser APIs
+- POST forms, file inputs, complex widgets, and modern app-shell browser APIs
 
 ## Run
 

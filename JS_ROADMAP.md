@@ -36,6 +36,7 @@ Already working:
 - same-origin navigation checks
 - loop-iteration runtime budget for runaway scripts
 - native GUI form controls for `GET` submissions, including checkbox / radio toggles
+- `HTMLFormElement.reset()` restores default control state for text inputs, textareas, checkbox / radio controls, and selects
 - label association support for `label.htmlFor` / `label.control` plus label-click activation
 - passive listener semantics
 - `location.hash`, `history.pushState(...)`, `replaceState(...)`, `back()`, and `forward()` for same-document navigation
