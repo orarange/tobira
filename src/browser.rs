@@ -287,16 +287,6 @@ fn rebuild_page_from_html(
     input_selection_states: BTreeMap<usize, TextSelectionState>,
 ) -> BrowserPage {
     let mut parsed_document = parse_document(html);
-    if let Some(rewritten) = build_site_specific_document(&parsed_document, html, url) {
-        parsed_document = rewritten;
-    } else if is_google_host(url) && !document_has_meaningful_body(&parsed_document) {
-        parsed_document = build_google_document_from_html(html, url);
-    } else if is_youtube_host(url)
-        && !is_youtube_watch_url(url)
-        && !document_has_meaningful_body(&parsed_document)
-    {
-        parsed_document = build_youtube_generic_document_from_html(html, url);
-    }
     annotate_resource_urls(&mut parsed_document, url);
     let document = expand_frames(&parsed_document, url, 1)
         .ok()
@@ -390,19 +380,6 @@ fn load_document_source_with_script_navigation(
         }
     }
     let mut parsed_document = parse_document(&scripted.html);
-    if let Some(rewritten) =
-        build_site_specific_document(&parsed_document, &text, &response.final_url)
-    {
-        parsed_document = rewritten;
-    } else if is_google_host(&response.final_url) && !document_has_meaningful_body(&parsed_document)
-    {
-        parsed_document = build_google_document_from_html(&text, &response.final_url);
-    } else if is_youtube_host(&response.final_url)
-        && !is_youtube_watch_url(&response.final_url)
-        && !document_has_meaningful_body(&parsed_document)
-    {
-        parsed_document = build_youtube_generic_document_from_html(&text, &response.final_url);
-    }
     annotate_resource_urls(&mut parsed_document, &response.final_url);
     let document = if frame_depth < MAX_FRAME_DEPTH {
         expand_frames(&parsed_document, &response.final_url, frame_depth + 1)?
@@ -1143,15 +1120,6 @@ struct YouTubeHomeData {
     category_chips: Vec<String>,
     featured_videos: Vec<YouTubeRelatedVideo>,
     quick_links: Vec<String>,
-}
-
-fn build_site_specific_document(document: &Node, html: &str, url: &Url) -> Option<Node> {
-    if is_youtube_watch_url(url) {
-        let data = extract_youtube_watch_data(document, html, url)?;
-        return Some(build_youtube_watch_document(&data));
-    }
-
-    None
 }
 
 fn is_youtube_host(url: &Url) -> bool {
@@ -3040,7 +3008,7 @@ fn collect_raw_text_into(node: &Node, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserPage, build_site_specific_document, build_youtube_generic_document_from_html,
+        BrowserPage,
         collect_frame_specs, collect_stylesheet, document_has_meaningful_body, document_title,
         extract_body_children, rebuild_page_from_html, should_follow_script_navigation,
         synthetic_document,
@@ -3393,77 +3361,6 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_youtube_watch_pages_into_visible_summary() {
-        let html = r#"
-            <html>
-              <head>
-                <title>Video - YouTube</title>
-                <meta name="description" content="fallback description">
-                <meta property="og:image" content="https://i.ytimg.com/vi/demo/hqdefault.jpg">
-                <link rel="canonical" href="https://www.youtube.com/watch?v=demo123">
-              </head>
-              <body>
-                <script>
-                  var ytInitialPlayerResponse = {
-                    "videoDetails": {
-                      "title": "Demo Video",
-                      "author": "Demo Channel",
-                      "viewCount": "1234567",
-                      "lengthSeconds": "214",
-                      "shortDescription": "Line one\nLine two",
-                      "thumbnail": {
-                        "thumbnails": [
-                          {"url": "https://i.ytimg.com/vi/demo/default.jpg"},
-                          {"url": "https://i.ytimg.com/vi/demo/maxresdefault.jpg"}
-                        ]
-                      },
-                      "videoId": "demo123"
-                    },
-                    "microformat": {
-                      "playerMicroformatRenderer": {
-                        "publishDate": "2026-05-13",
-                        "embed": {
-                          "iframeUrl": "https://www.youtube.com/embed/demo123"
-                        }
-                      }
-                    }
-                  };
-                </script>
-              </body>
-            </html>
-        "#;
-        let document = parse_document(html);
-
-        let rewritten = build_site_specific_document(
-            &document,
-            html,
-            &Url::parse("https://www.youtube.com/watch?v=demo123").unwrap(),
-        )
-        .expect("youtube watch pages should be rewritten");
-        let rendered = crate::render::render_document(&rewritten);
-
-        assert!(rendered.contains("Demo Video"));
-        assert!(rendered.contains("Demo Channel"));
-        assert!(rendered.contains("1,234,567"));
-        assert!(rendered.contains("3:34"));
-        assert!(rendered.contains("2026-05-13"));
-    }
-
-    #[test]
-    fn does_not_rewrite_generic_youtube_pages_through_site_specific_path() {
-        let html = "<html><body><div id=\"app\">Real shell</div></body></html>";
-        let document = parse_document(html);
-
-        let rewritten = build_site_specific_document(
-            &document,
-            html,
-            &Url::parse("https://www.youtube.com/").unwrap(),
-        );
-
-        assert!(rewritten.is_none());
-    }
-
-    #[test]
     fn meaningful_body_detection_ignores_script_only_shells() {
         let document = parse_document(
             "<html><head><title>Demo</title></head><body><script>boot()</script></body></html>",
@@ -3489,113 +3386,6 @@ mod tests {
 
         assert!(should_follow_script_navigation(&current, &same_origin));
         assert!(!should_follow_script_navigation(&current, &cross_origin));
-    }
-
-    #[test]
-    fn rewrites_youtube_home_pages_into_shell_ui() {
-        let html = r#"
-            <html>
-              <head>
-                <title>YouTube</title>
-              </head>
-              <body>
-                <script>
-                  var ytInitialData = {
-                    "contents": {
-                      "twoColumnBrowseResultsRenderer": {
-                        "tabs": [
-                          {
-                            "tabRenderer": {
-                              "selected": true,
-                              "content": {
-                                "richGridRenderer": {
-                                  "contents": [
-                                    {
-                                      "richItemRenderer": {
-                                        "content": {
-                                          "videoRenderer": {
-                                            "title": {"runs": [{"text": "Demo Home Video"}]},
-                                            "ownerText": {"runs": [{"text": "Demo Creator"}]},
-                                            "viewCountText": {"simpleText": "1,234 views"},
-                                            "publishedTimeText": {"simpleText": "2 days ago"},
-                                            "lengthText": {"simpleText": "12:34"},
-                                            "thumbnail": {
-                                              "thumbnails": [
-                                                {"url": "https://i.ytimg.com/vi/demo/hqdefault.jpg"}
-                                              ]
-                                            },
-                                            "navigationEndpoint": {
-                                              "commandMetadata": {
-                                                "webCommandMetadata": {"url": "/watch?v=demo123"}
-                                              }
-                                            }
-                                          }
-                                        }
-                                      }
-                                    },
-                                    {
-                                      "richSectionRenderer": {
-                                        "content": {
-                                          "feedNudgeRenderer": {
-                                            "title": {"runs": [{"text": "Start by searching"}]},
-                                            "subtitle": {"runs": [{"text": "Watch a few videos to build recommendations."}]}
-                                          }
-                                        }
-                                      }
-                                    }
-                                  ]
-                                }
-                              }
-                            }
-                          }
-                        ]
-                      }
-                    },
-                    "header": {
-                      "feedTabbedHeaderRenderer": {
-                        "title": {"runs": [{"text": "Home"}]}
-                      }
-                    },
-                    "topbar": {
-                      "desktopTopbarRenderer": {
-                        "searchbox": {
-                          "fusionSearchboxRenderer": {
-                            "placeholderText": {"runs": [{"text": "Search"}]}
-                          }
-                        },
-                        "topbarButtons": [
-                          {
-                            "topbarMenuButtonRenderer": {
-                              "tooltip": "Settings"
-                            }
-                          },
-                          {
-                            "buttonRenderer": {
-                              "text": {"runs": [{"text": "Sign in"}]}
-                            }
-                          }
-                        ]
-                      }
-                    }
-                  };
-                </script>
-              </body>
-            </html>
-        "#;
-
-        let document = build_youtube_generic_document_from_html(
-            html,
-            &Url::parse("https://www.youtube.com/").unwrap(),
-        );
-        let rendered = crate::render::render_document(&document);
-
-        assert!(rendered.contains("YouTube"));
-        assert!(rendered.contains("Home"));
-        assert!(rendered.contains("Search"));
-        assert!(rendered.contains("Settings"));
-        assert!(rendered.contains("Sign in"));
-        assert!(rendered.contains("Demo Home Video"));
-        assert!(rendered.contains("Demo Creator"));
     }
 
     fn parse_styled_text(text: &str) -> StyledNode {

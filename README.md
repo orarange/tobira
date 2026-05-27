@@ -210,7 +210,7 @@ cargo run -- http://127.0.0.1:8765/demo/storage-demo.html
 - `src/css.rs` — CSS parsing, selector matching, cascade, computed styles, `@media`, `calc()`, color parsing
 - `src/layout.rs` — Styled text layout, block rendering, tables, image placement, background/border drawing, link hitboxes
 - `src/font.rs` — System font loading, glyph rasterization, and text measurement helpers
-- `src/browser.rs` — Page loading pipeline, stylesheet collection, site-specific rewrites, YouTube/Google synthetic documents
+- `src/browser.rs` — Page loading pipeline, stylesheet collection, generic document handling, legacy frame/page support
 - `src/gui.rs` — `winit` event loop, address bar, input handling, software rendering
 - `src/js.rs` — Sandboxed JS execution, block-list filter, mutable DOM bridge, browser-ish stubs
 - `src/render.rs` — Plain text fallback renderer for CLI mode
@@ -259,6 +259,6 @@ Current JS support is intentionally small:
 - lightweight response header iteration plus XHR `getResponseHeader(...)` / `getAllResponseHeaders()`
 - `console.log()` / `warn()` / `error()`
 - queued `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)` callbacks
-- YouTube generic home pages now take a synthetic fast path before the heavy JS session, which keeps the app responsive on startup
+- Google and YouTube now stay on the generic JS/HTML path instead of a synthetic fallback UI
 
 It still does not implement a full browser DOM, async networking, or framework-level browser APIs.

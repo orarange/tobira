@@ -113,13 +113,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
   - inline `element.style` mutations now reflect through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
   - `getComputedStyle(...)` snapshots now expose common layout-sensitive values for DOM-driven callers
-  - site-specific rendering paths for:
-    - YouTube watch pages
-    - YouTube home shell / cards / nudge UI
-    - lightweight Google shell
-    - legacy frame/table-heavy pages such as the Abe Hiroshi site
-  - generic YouTube home / non-watch pages now take a synthetic fast path before the heavy JS session so the app does not spin on the full app shell
-  - generic `google.com` and `youtube.com` now try the real JS/HTML path before synthetic fallback
+  - Google and YouTube now stay on the generic JS/HTML path instead of a synthetic fallback UI
+  - legacy frame/table-heavy pages such as the Abe Hiroshi site are still handled through the generic loading pipeline
   - living JS roadmap tracked in `JS_ROADMAP.md`
 
 ## Important Modules
@@ -205,6 +200,11 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-27 - Codex (synthetic UI removal)
+
+- Removed the Google / YouTube synthetic fallback UI from the runtime load path so those hosts now stay on the generic JS/HTML pipeline.
+- Updated the README and roadmap language to match the no-synthetic-fallback direction.
 
 ### 2026-05-27 - Codex (form reset support)
 
