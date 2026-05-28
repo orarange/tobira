@@ -1,7 +1,8 @@
 use std::num::NonZeroU32;
 use std::rc::Rc;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::Duration;
 
 use arboard::Clipboard;
 use softbuffer::{Context, Surface};
@@ -17,7 +18,7 @@ use winit::window::{CursorIcon, ResizeDirection, Window};
 use crate::browser::{BrowserPage, load_page};
 use crate::css::{
     Color, CursorKind, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind,
-    InteractiveState, ObjectFit, StyledNode,
+    InteractiveState, ObjectFit,
 };
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
@@ -93,35 +94,29 @@ pub fn run(initial_url: Option<Url>) -> Result<()> {
 }
 
 struct BrowserApp {
+    content_tx: Sender<ContentCommand>,
     current_url: Option<Url>,
-    history: Vec<HistoryEntry>,
-    history_index: Option<usize>,
-    document: DocumentView,
+    title: String,
+    status_line: String,
+    subtitle: String,
+    is_error: bool,
+    can_go_back: bool,
+    can_go_forward: bool,
+    latest_render_frame: Option<RenderedContentFrame>,
+    scroll_y: u32,
+    focused_page_input: Option<FocusedPageInput>,
     fonts: FontContext,
     context: Context<OwnedDisplayHandle>,
-    load_request_tx: Sender<NavigationRequest>,
-    render_request_tx: Sender<RenderRequest>,
-    latest_render_frame: Option<RenderedContentFrame>,
-    pending_navigation_id: Option<u64>,
-    pending_render_id: Option<u64>,
-    next_navigation_id: u64,
-    next_render_id: u64,
     window: Option<WindowHandle>,
     surface: Option<SurfaceHandle>,
-    scroll_y: u32,
     modifiers: ModifiersState,
     cursor_position: PhysicalPosition<f64>,
     address_bar: AddressBarState,
-    focused_page_input: Option<FocusedPageInput>,
     hovered_target: HitTarget,
     hovered_link_url: Option<String>,
     hovered_link_node_id: Option<usize>,
     hovered_element_node_id: Option<usize>,
     ime_composing: bool,
-    /// Depth-indexed offscreen buffer pool for layer compositing.
-    /// scratch[depth] holds the pixel buffer used by the layer at that nesting depth.
-    /// Buffers are reused across frames; no per-frame allocation after the first paint.
-    scratch: Vec<Vec<u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +127,155 @@ struct HistoryEntry {
 
 #[derive(Debug, Clone)]
 enum BrowserUserEvent {
+    ContentFrame {
+        render_id: u64,
+        pixels: Vec<u32>,
+        content_width: u32,
+        viewport_height: u32,
+        content_height: u32,
+        scroll_y: u32,
+        layout: LayoutDocument,
+    },
+    ContentMeta {
+        title: Option<String>,
+        url: Option<Url>,
+        can_go_back: bool,
+        can_go_forward: bool,
+        scroll_y: u32,
+        status_line: String,
+        subtitle: String,
+        is_error: bool,
+        focused_page_input: Option<FocusedPageInput>,
+    },
+    #[allow(dead_code)]
+    FetchSettleNeeded,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NavigationHistoryUpdate {
+    Push,
+    #[allow(dead_code)]
+    ReplaceCurrent,
+    PreserveCurrent,
+}
+
+#[derive(Debug, Clone)]
+enum ContentCommand {
+    ShowBlank,
+    ShowError {
+        message: String,
+    },
+    Navigate {
+        url: Url,
+        restore_scroll: Option<u32>,
+        history_update: NavigationHistoryUpdate,
+    },
+    Reload,
+    HistoryBack,
+    HistoryForward,
+    DispatchMouseEvent {
+        request: Option<DomEventRequest>,
+        window_size: PhysicalSize<u32>,
+        hit_target: HitTarget,
+        hovered_link_url: Option<String>,
+        hovered_link_node_id: Option<usize>,
+        hovered_element_node_id: Option<usize>,
+        cursor_position: PhysicalPosition<f64>,
+    },
+    DispatchKeyEvent {
+        key_code: Option<KeyCode>,
+        repeat: bool,
+        text: Option<String>,
+        modifiers: ModifiersState,
+        window_size: PhysicalSize<u32>,
+    },
+    #[allow(dead_code)]
+    TextInput(String),
+    ImeCommit(String),
+    Scroll {
+        delta: MouseScrollDelta,
+        window_size: PhysicalSize<u32>,
+    },
+    Resize {
+        width: u32,
+        height: u32,
+    },
+    UpdateHover {
+        hovered_target: HitTarget,
+        hovered_link_url: Option<String>,
+        hovered_link_node_id: Option<usize>,
+        hovered_element_node_id: Option<usize>,
+        window_size: PhysicalSize<u32>,
+    },
+    #[allow(dead_code)]
+    FocusPageInput {
+        control_id: usize,
+        char_index: Option<usize>,
+    },
+    BlurPageInput,
+    #[allow(dead_code)]
+    SubmitForm {
+        control_id: usize,
+    },
+    JsSettle,
+    Stop,
+}
+
+struct ContentThread;
+
+impl ContentThread {
+    fn spawn(
+        initial_url: Option<Url>,
+        event_proxy: EventLoopProxy<BrowserUserEvent>,
+    ) -> Sender<ContentCommand> {
+        let (command_tx, command_rx) = mpsc::channel::<ContentCommand>();
+        let (worker_event_tx, worker_event_rx) = mpsc::channel::<ContentWorkerEvent>();
+        let (render_request_tx, render_request_rx) = mpsc::channel::<RenderRequest>();
+        start_render_worker(render_request_rx, worker_event_tx.clone());
+        thread::Builder::new()
+            .name("tobira-content".to_string())
+            .spawn(move || {
+                Self::run(
+                    initial_url,
+                    event_proxy,
+                    command_rx,
+                    worker_event_tx,
+                    worker_event_rx,
+                    render_request_tx,
+                )
+            })
+            .expect("content thread should spawn");
+        command_tx
+    }
+
+    fn run(
+        initial_url: Option<Url>,
+        event_proxy: EventLoopProxy<BrowserUserEvent>,
+        command_rx: Receiver<ContentCommand>,
+        worker_event_tx: Sender<ContentWorkerEvent>,
+        worker_event_rx: Receiver<ContentWorkerEvent>,
+        render_request_tx: Sender<RenderRequest>,
+    ) {
+        let mut state =
+            ContentThreadState::new(initial_url, event_proxy, worker_event_tx, render_request_tx);
+
+        loop {
+            while let Ok(event) = worker_event_rx.try_recv() {
+                state.handle_worker_event(event);
+            }
+
+            match command_rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(ContentCommand::Stop) => break,
+                Ok(command) => state.handle_command(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ContentWorkerEvent {
     NavigationFinished {
         navigation_id: u64,
         restore_scroll: Option<u32>,
@@ -144,27 +288,15 @@ enum BrowserUserEvent {
 }
 
 #[derive(Debug, Clone)]
-struct NavigationRequest {
-    id: u64,
-    url: Url,
-    restore_scroll: Option<u32>,
-}
-
-#[derive(Debug, Clone)]
 struct RenderRequest {
     id: u64,
     content_width: u32,
     viewport_height: u32,
     scroll_y: u32,
-    page: RenderPageSnapshot,
+    layout: LayoutDocument,
+    page_images: Option<ImageStore>,
     focused_page_input: Option<FocusedPageInput>,
     hovered_target: HitTarget,
-}
-
-#[derive(Debug, Clone)]
-struct RenderPageSnapshot {
-    styled_document: StyledNode,
-    images: ImageStore,
 }
 
 #[derive(Debug, Clone)]
@@ -177,126 +309,213 @@ struct RenderedContentFrame {
     pixels: Vec<u32>,
 }
 
-impl BrowserApp {
+struct ContentThreadState {
+    event_proxy: EventLoopProxy<BrowserUserEvent>,
+    worker_event_tx: Sender<ContentWorkerEvent>,
+    render_request_tx: Sender<RenderRequest>,
+    current_url: Option<Url>,
+    history: Vec<HistoryEntry>,
+    history_index: Option<usize>,
+    document: DocumentView,
+    fonts: FontContext,
+    pending_navigation_id: Option<u64>,
+    pending_render_id: Option<u64>,
+    next_navigation_id: u64,
+    next_render_id: u64,
+    window_size: PhysicalSize<u32>,
+    scroll_y: u32,
+    focused_page_input: Option<FocusedPageInput>,
+    hovered_target: HitTarget,
+    hovered_link_url: Option<String>,
+    hovered_link_node_id: Option<usize>,
+    hovered_element_node_id: Option<usize>,
+}
+
+impl ContentThreadState {
     fn new(
         initial_url: Option<Url>,
-        context: Context<OwnedDisplayHandle>,
         event_proxy: EventLoopProxy<BrowserUserEvent>,
+        worker_event_tx: Sender<ContentWorkerEvent>,
+        render_request_tx: Sender<RenderRequest>,
     ) -> Self {
-        let (load_request_tx, load_request_rx) = mpsc::channel::<NavigationRequest>();
-        let (render_request_tx, render_request_rx) = mpsc::channel::<RenderRequest>();
-        start_load_worker(load_request_rx, event_proxy.clone());
-        start_render_worker(render_request_rx, event_proxy.clone());
-
         let initial_navigation = initial_url.clone();
-        let (current_url, history, history_index, document, address_bar) = match initial_url {
-            Some(url) => {
-                let mut address_bar = AddressBarState::new(url.to_string());
-                address_bar.focused = false;
-                (
-                    Some(url.clone()),
-                    vec![HistoryEntry { url, scroll_y: 0 }],
-                    Some(0),
-                    DocumentView::blank(),
-                    address_bar,
-                )
-            }
-            None => {
-                let mut address_bar = AddressBarState::new(String::new());
-                address_bar.focus_at(0);
-                (None, Vec::new(), None, DocumentView::blank(), address_bar)
-            }
+        let (current_url, history, history_index, document) = match initial_url {
+            Some(url) => (
+                Some(url.clone()),
+                vec![HistoryEntry { url, scroll_y: 0 }],
+                Some(0),
+                DocumentView::blank(),
+            ),
+            None => (None, Vec::new(), None, DocumentView::blank()),
         };
         let scroll_y = document.scroll_position();
 
-        let mut app = Self {
+        let mut state = Self {
+            event_proxy,
+            worker_event_tx,
+            render_request_tx,
             current_url,
             history,
             history_index,
             document,
             fonts: FontContext::load(),
-            context,
-            load_request_tx,
-            render_request_tx,
-            latest_render_frame: None,
             pending_navigation_id: None,
             pending_render_id: None,
             next_navigation_id: 1,
             next_render_id: 1,
-            window: None,
-            surface: None,
+            window_size: PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT),
             scroll_y,
-            modifiers: ModifiersState::default(),
-            cursor_position: PhysicalPosition::new(0.0, 0.0),
-            address_bar,
             focused_page_input: None,
             hovered_target: HitTarget::None,
             hovered_link_url: None,
             hovered_link_node_id: None,
             hovered_element_node_id: None,
-            ime_composing: false,
-            scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
         };
 
         if let Some(url) = initial_navigation {
-            app.begin_navigation(url, None);
+            state.begin_navigation(url, None, NavigationHistoryUpdate::PreserveCurrent);
+        } else {
+            state.request_content_render();
+            state.emit_meta();
         }
 
-        app
+        state
     }
 
-    fn load_url(&mut self, url: Url) {
-        self.record_history_visit(url.clone());
-        self.begin_navigation(url, None);
-    }
-
-    fn reload(&mut self) {
-        let Some(url) = self.current_url.clone() else {
-            self.document = DocumentView::blank();
-            self.latest_render_frame = None;
-            self.scroll_y = 0;
-            self.scratch.clear();
-            self.sync_window_title();
-            self.request_redraw();
-            return;
-        };
-
-        self.begin_navigation(url, self.current_history_scroll());
-    }
-
-    fn navigate_to_address(&mut self) {
-        let entered = self.address_bar.text().trim().to_string();
-        if entered.is_empty() {
-            self.current_url = None;
-            self.document = DocumentView::blank();
-            self.clear_page_control_state();
-            self.scroll_y = 0;
-            self.scratch.clear();
-            self.sync_window_title();
-            self.request_redraw();
-            return;
-        }
-
-        match parse_address_input(&entered) {
-            Ok(url) => self.load_url(url),
-            Err(error) => {
-                self.document =
-                    DocumentView::error(format!("could not navigate to `{entered}`: {error}"));
-                self.clear_page_control_state();
-                self.scroll_y = 0;
-                self.scratch.clear();
-                self.sync_window_title();
-                self.request_redraw();
+    fn handle_worker_event(&mut self, event: ContentWorkerEvent) {
+        match event {
+            ContentWorkerEvent::NavigationFinished {
+                navigation_id,
+                restore_scroll,
+                result,
+            } => self.finish_navigation(navigation_id, restore_scroll, result),
+            ContentWorkerEvent::RenderFinished { render_id, result } => {
+                self.finish_render(render_id, result)
             }
         }
     }
 
-    fn go_back(&mut self) {
-        self.navigate_history(-1);
+    fn handle_command(&mut self, command: ContentCommand) {
+        match command {
+            ContentCommand::ShowBlank => self.show_blank_document(),
+            ContentCommand::ShowError { message } => self.show_error_document(message),
+            ContentCommand::Navigate {
+                url,
+                restore_scroll,
+                history_update,
+            } => self.begin_navigation(url, restore_scroll, history_update),
+            ContentCommand::Reload => {
+                if let Some(url) = self.current_url.clone() {
+                    self.begin_navigation(
+                        url,
+                        self.current_history_scroll(),
+                        NavigationHistoryUpdate::PreserveCurrent,
+                    );
+                } else {
+                    self.show_blank_document();
+                }
+            }
+            ContentCommand::HistoryBack => self.navigate_history(-1),
+            ContentCommand::HistoryForward => self.navigate_history(1),
+            ContentCommand::DispatchMouseEvent {
+                request,
+                window_size,
+                hit_target,
+                hovered_link_url,
+                hovered_link_node_id,
+                hovered_element_node_id,
+                cursor_position,
+            } => {
+                self.window_size = window_size;
+                self.handle_mouse_command(
+                    request,
+                    hit_target,
+                    hovered_link_url,
+                    hovered_link_node_id,
+                    hovered_element_node_id,
+                    cursor_position,
+                );
+            }
+            ContentCommand::DispatchKeyEvent {
+                key_code,
+                repeat,
+                text,
+                modifiers,
+                window_size,
+            } => {
+                self.window_size = window_size;
+                self.handle_key_command(key_code, repeat, text, modifiers);
+            }
+            ContentCommand::TextInput(text) | ContentCommand::ImeCommit(text) => {
+                self.handle_text_input(&text);
+            }
+            ContentCommand::Scroll { delta, window_size } => {
+                self.window_size = window_size;
+                let (viewport_height, content_height) = self.content_metrics();
+                let previous_scroll_y = self.scroll_y;
+                match delta {
+                    MouseScrollDelta::LineDelta(_, y) => {
+                        self.scroll_by((-(y.round() as i32)) * 24, viewport_height, content_height);
+                    }
+                    MouseScrollDelta::PixelDelta(position) => {
+                        self.scroll_by(
+                            -(position.y.round() as i32),
+                            viewport_height,
+                            content_height,
+                        );
+                    }
+                }
+                if self.scroll_y != previous_scroll_y {
+                    self.sync_scroll_position();
+                }
+            }
+            ContentCommand::Resize { width, height } => {
+                self.window_size = PhysicalSize::new(width, height);
+                self.sync_viewport_size();
+                self.request_content_render();
+                self.emit_meta();
+            }
+            ContentCommand::UpdateHover {
+                hovered_target,
+                hovered_link_url,
+                hovered_link_node_id,
+                hovered_element_node_id,
+                window_size,
+            } => {
+                self.window_size = window_size;
+                self.update_hover_state(
+                    hovered_target,
+                    hovered_link_url,
+                    hovered_link_node_id,
+                    hovered_element_node_id,
+                );
+            }
+            ContentCommand::FocusPageInput {
+                control_id,
+                char_index,
+            } => {
+                if let Some(control) = self.current_page_control(control_id) {
+                    self.focus_page_input_at(&control, char_index);
+                }
+            }
+            ContentCommand::BlurPageInput => self.blur_page_input(),
+            ContentCommand::SubmitForm { control_id } => self.submit_page_form(control_id),
+            ContentCommand::JsSettle | ContentCommand::Stop => {}
+        }
     }
 
-    fn go_forward(&mut self) {
-        self.navigate_history(1);
+    fn emit_meta(&self) {
+        let _ = self.event_proxy.send_event(BrowserUserEvent::ContentMeta {
+            title: Some(self.document.title.clone()),
+            url: self.current_url.clone(),
+            can_go_back: self.can_go_back(),
+            can_go_forward: self.can_go_forward(),
+            scroll_y: self.scroll_y,
+            status_line: self.document.status_line.clone(),
+            subtitle: self.document.subtitle.clone(),
+            is_error: self.document.is_error(),
+            focused_page_input: self.focused_page_input.clone(),
+        });
     }
 
     fn can_go_back(&self) -> bool {
@@ -360,7 +579,11 @@ impl BrowserApp {
         let next_index = next as usize;
         let entry = self.history[next_index].clone();
         self.history_index = Some(next_index);
-        self.begin_navigation(entry.url, Some(entry.scroll_y));
+        self.begin_navigation(
+            entry.url,
+            Some(entry.scroll_y),
+            NavigationHistoryUpdate::PreserveCurrent,
+        );
     }
 
     fn sync_current_history_scroll(&mut self) {
@@ -377,28 +600,83 @@ impl BrowserApp {
         self.history.get(index).map(|entry| entry.scroll_y)
     }
 
-    fn begin_navigation(&mut self, url: Url, restore_scroll: Option<u32>) {
+    fn render_metrics(&mut self) -> (u32, u32) {
+        let chrome = chrome_layout_metrics(&mut self.fonts, self.window_size.width);
+        let content_width = self.window_size.width.saturating_sub(FRAME_PADDING).max(1);
+        let viewport_height = self
+            .window_size
+            .height
+            .saturating_sub(chrome.height + FRAME_PADDING)
+            .max(1);
+        (content_width, viewport_height)
+    }
+
+    fn content_metrics(&mut self) -> (u32, u32) {
+        let chrome = chrome_layout_metrics(&mut self.fonts, self.window_size.width);
+        let body_top = chrome.height + FRAME_PADDING;
+        let viewport_height = self
+            .window_size
+            .height
+            .saturating_sub(body_top + FRAME_PADDING)
+            .max(1);
+        let content_height = self.current_layout().content_height;
+        (viewport_height, content_height)
+    }
+
+    fn show_blank_document(&mut self) {
+        self.current_url = None;
+        self.document = DocumentView::blank();
+        self.scroll_y = 0;
+        self.clear_page_control_state();
+        self.request_content_render();
+        self.emit_meta();
+    }
+
+    fn show_error_document(&mut self, message: impl Into<String>) {
+        self.document = DocumentView::error(message.into());
+        self.scroll_y = 0;
+        self.clear_page_control_state();
+        self.request_content_render();
+        self.emit_meta();
+    }
+
+    fn begin_navigation(
+        &mut self,
+        url: Url,
+        restore_scroll: Option<u32>,
+        history_update: NavigationHistoryUpdate,
+    ) {
+        match history_update {
+            NavigationHistoryUpdate::Push => self.record_history_visit(url.clone()),
+            NavigationHistoryUpdate::ReplaceCurrent => {
+                self.replace_current_history_entry(url.clone())
+            }
+            NavigationHistoryUpdate::PreserveCurrent => {}
+        }
+
         let navigation_id = self.next_navigation_id;
         self.next_navigation_id = self.next_navigation_id.saturating_add(1);
         self.pending_navigation_id = Some(navigation_id);
         self.current_url = Some(url.clone());
-        self.address_bar.set_text(url.to_string());
-        self.address_bar.blur();
         self.document = DocumentView::blank();
         self.document.layout_cache = None;
-        self.latest_render_frame = None;
-        self.clear_page_control_state();
         self.scroll_y = 0;
-        self.scratch.clear();
-        self.sync_window_title();
-        self.sync_input_method();
-        self.request_redraw();
+        self.clear_page_control_state();
+        self.request_content_render();
+        self.emit_meta();
 
-        let _ = self.load_request_tx.send(NavigationRequest {
-            id: navigation_id,
-            url,
-            restore_scroll,
-        });
+        let worker_event_tx = self.worker_event_tx.clone();
+        thread::Builder::new()
+            .name(format!("tobira-nav-{navigation_id}"))
+            .spawn(move || {
+                let result = load_page(&url).map_err(|error| error.to_string());
+                let _ = worker_event_tx.send(ContentWorkerEvent::NavigationFinished {
+                    navigation_id,
+                    restore_scroll,
+                    result,
+                });
+            })
+            .expect("navigation worker should spawn");
     }
 
     fn finish_navigation(
@@ -419,40 +697,18 @@ impl BrowserApp {
                 }
                 self.scroll_y = restore_scroll.unwrap_or_else(|| page.scroll_y());
                 self.document = DocumentView::from_page(page);
-                self.latest_render_frame = None;
                 self.document.layout_cache = None;
                 self.sync_viewport_size();
-                self.sync_window_title();
-                self.sync_input_method();
-                self.request_redraw();
+                self.request_content_render();
+                self.emit_meta();
             }
-            Err(error) => {
-                self.document = DocumentView::error(error.to_string());
-                self.latest_render_frame = None;
-                self.clear_page_control_state();
-                self.scroll_y = 0;
-                self.sync_window_title();
-                self.sync_input_method();
-                self.request_redraw();
-            }
+            Err(error) => self.show_error_document(error),
         }
     }
 
     fn request_content_render(&mut self) {
-        let Some(window) = &self.window else {
-            return;
-        };
-        let Some(page) = self.document.render_snapshot() else {
-            return;
-        };
-
-        let size = window.inner_size();
-        let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
-        let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
-        let viewport_height = size
-            .height
-            .saturating_sub(chrome.height + FRAME_PADDING)
-            .max(1);
+        let (content_width, viewport_height) = self.render_metrics();
+        let layout = self.document.layout(content_width, &mut self.fonts);
         let render_id = self.next_render_id;
         self.next_render_id = self.next_render_id.saturating_add(1);
         self.pending_render_id = Some(render_id);
@@ -461,7 +717,8 @@ impl BrowserApp {
             content_width,
             viewport_height,
             scroll_y: self.scroll_y,
-            page,
+            layout,
+            page_images: self.document.page_images(),
             focused_page_input: self.focused_page_input.clone(),
             hovered_target: self.hovered_target,
         };
@@ -485,28 +742,856 @@ impl BrowserApp {
                     revision: self.document.layout_revision(),
                     layout: frame.layout.clone(),
                 });
-                self.latest_render_frame = Some(frame);
-                self.sync_current_history_scroll();
-                self.sync_window_title();
-                self.sync_input_method();
-                self.request_redraw();
+                let _ = self.event_proxy.send_event(BrowserUserEvent::ContentFrame {
+                    render_id,
+                    pixels: frame.pixels,
+                    content_width: frame.content_width,
+                    viewport_height: frame.viewport_height,
+                    content_height: frame.content_height,
+                    scroll_y: frame.scroll_y,
+                    layout: frame.layout,
+                });
+                self.emit_meta();
             }
             Err(error) => {
                 self.document.status_line = format!("Status: render failed ({error})");
+                self.emit_meta();
+            }
+        }
+    }
+
+    fn sync_viewport_size(&mut self) {
+        if self
+            .document
+            .set_viewport_size(self.window_size.width, self.window_size.height)
+        {
+            let _ = self.document.dispatch_window_resize();
+            self.scroll_y = self.document.scroll_position();
+            self.sync_current_history_scroll();
+            self.document.layout_cache = None;
+        }
+    }
+
+    fn sync_scroll_position(&mut self) {
+        let previous_scroll_y = self.scroll_y;
+        if self.document.set_scroll_position(self.scroll_y) {
+            let _ = self.document.dispatch_scroll_event();
+            self.scroll_y = self.document.scroll_position();
+        }
+        self.sync_current_history_scroll();
+        if self.scroll_y != previous_scroll_y {
+            self.document.layout_cache = None;
+            self.request_content_render();
+            self.emit_meta();
+        }
+    }
+
+    fn scroll_by(&mut self, delta: i32, viewport_height: u32, content_height: u32) {
+        let max_scroll = max_scroll(viewport_height, content_height);
+        let next = if delta.is_negative() {
+            self.scroll_y.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.scroll_y.saturating_add(delta as u32)
+        };
+        self.scroll_y = next.min(max_scroll);
+        self.sync_current_history_scroll();
+    }
+
+    fn current_layout(&mut self) -> LayoutDocument {
+        let (content_width, _) = self.render_metrics();
+        self.document.layout(content_width, &mut self.fonts)
+    }
+
+    fn current_page_control(&mut self, id: usize) -> Option<FormControlCommand> {
+        self.current_layout()
+            .controls
+            .into_iter()
+            .find(|control| control.id == id)
+    }
+
+    fn clear_page_control_state(&mut self) {
+        self.focused_page_input = None;
+        self.hovered_target = HitTarget::None;
+        self.hovered_link_url = None;
+        self.hovered_link_node_id = None;
+        self.hovered_element_node_id = None;
+    }
+
+    fn blur_page_input(&mut self) {
+        let Some(focused) = self.focused_page_input.clone() else {
+            return;
+        };
+
+        let changed = focused.initial_value != focused.editor.text();
+        self.dispatch_page_dom_event(focused.node_id, "blur", false, false);
+        if changed {
+            self.dispatch_page_dom_event(focused.node_id, "change", true, false);
+        }
+
+        self.focused_page_input = None;
+        self.request_content_render();
+        self.emit_meta();
+    }
+
+    fn control_current_value(&self, control: &FormControlCommand) -> String {
+        resolve_text_input_value(
+            self.focused_page_input
+                .as_ref()
+                .filter(|focused| focused.control_id == control.id)
+                .map(|focused| &focused.editor),
+            &control.value,
+        )
+    }
+
+    fn focus_page_input_at(&mut self, control: &FormControlCommand, char_index: Option<usize>) {
+        if control.disabled {
+            return;
+        }
+        let mut editor = AddressBarState::new(self.control_current_value(control));
+        editor.focus_at(char_index.unwrap_or_else(|| editor.char_len()));
+        self.focused_page_input = Some(FocusedPageInput {
+            control_id: control.id,
+            node_id: control.node_id,
+            initial_value: editor.text().to_string(),
+            editor,
+        });
+        self.sync_page_input_value();
+        self.dispatch_page_dom_event(control.node_id, "focus", false, false);
+        self.refresh_focused_page_input_from_document();
+        self.request_content_render();
+        self.emit_meta();
+    }
+
+    fn sync_page_input_value(&mut self) {
+        let Some((node_id, value)) = self
+            .focused_page_input
+            .as_ref()
+            .map(|focused| (focused.node_id, focused.editor.text().to_string()))
+        else {
+            return;
+        };
+
+        self.document.set_dom_attribute(node_id, "value", &value);
+    }
+
+    fn refresh_focused_page_input_from_document(&mut self) {
+        let Some(focused_id) = self
+            .focused_page_input
+            .as_ref()
+            .map(|focused| focused.control_id)
+        else {
+            return;
+        };
+        let Some(control) = self.current_page_control(focused_id) else {
+            self.focused_page_input = None;
+            return;
+        };
+        if let Some(focused) = self.focused_page_input.as_mut()
+            && control.value != focused.initial_value
+            && focused.editor.text() != control.value
+        {
+            let cursor = focused
+                .editor
+                .cursor_chars
+                .min(control.value.chars().count());
+            focused.editor.set_text(control.value.clone());
+            focused.editor.focus_at(cursor);
+            focused.initial_value = control.value.clone();
+        }
+        self.sync_page_input_value();
+    }
+
+    fn dispatch_page_dom_event(
+        &mut self,
+        node_id: Option<usize>,
+        event_type: &str,
+        bubbles: bool,
+        cancelable: bool,
+    ) -> Option<DomEventDispatchResult> {
+        let node_id = node_id?;
+        self.dispatch_page_dom_event_request(DomEventRequest {
+            target_node_id: node_id,
+            event_type: event_type.to_string(),
+            bubbles,
+            cancelable,
+            composed: default_page_event_composed(event_type),
+            ..Default::default()
+        })
+    }
+
+    fn dispatch_page_dom_event_request(
+        &mut self,
+        request: DomEventRequest,
+    ) -> Option<DomEventDispatchResult> {
+        let result = self.document.dispatch_dom_event(request)?;
+
+        if let Some(target_url) = result.snapshot.navigation_target.clone()
+            && let Ok(url) = Url::parse(&target_url)
+        {
+            self.begin_navigation(url, None, NavigationHistoryUpdate::Push);
+            return Some(result);
+        }
+        if let Some(soft_target) = result.snapshot.soft_navigation_target.clone()
+            && let Ok(url) = Url::parse(&soft_target)
+        {
+            self.current_url = Some(url.clone());
+            self.replace_current_history_entry(url);
+        }
+
+        self.scroll_y = self.document.scroll_position();
+        self.sync_current_history_scroll();
+        self.document.sync_from_loaded_page();
+        self.refresh_focused_page_input_from_document();
+        self.request_content_render();
+        self.emit_meta();
+        Some(result)
+    }
+
+    fn dispatch_focused_page_input_event(
+        &mut self,
+        event_type: &str,
+        bubbles: bool,
+        cancelable: bool,
+    ) -> Option<DomEventDispatchResult> {
+        let node_id = self
+            .focused_page_input
+            .as_ref()
+            .and_then(|focused| focused.node_id);
+        self.dispatch_page_dom_event(node_id, event_type, bubbles, cancelable)
+    }
+
+    fn dispatch_focused_page_keyboard_event(
+        &mut self,
+        event_type: &str,
+        key_code: KeyCode,
+        repeat: bool,
+        modifiers: &ModifiersState,
+    ) -> Option<DomEventDispatchResult> {
+        let node_id = self
+            .focused_page_input
+            .as_ref()
+            .and_then(|focused| focused.node_id)?;
+        self.dispatch_page_dom_event_request(keyboard_dom_event_request(
+            node_id, event_type, key_code, repeat, modifiers,
+        ))
+    }
+
+    fn focused_page_editor_mut(&mut self) -> Option<&mut AddressBarState> {
+        self.focused_page_input
+            .as_mut()
+            .map(|focused| &mut focused.editor)
+    }
+
+    fn copy_page_input_selection(&self) -> bool {
+        let Some(text) = self
+            .focused_page_input
+            .as_ref()
+            .and_then(|focused| focused.editor.selected_text())
+        else {
+            return false;
+        };
+
+        write_clipboard_text(&text)
+    }
+
+    fn cut_page_input_selection(&mut self) -> bool {
+        let Some(text) = self
+            .focused_page_input
+            .as_ref()
+            .and_then(|focused| focused.editor.selected_text())
+        else {
+            return false;
+        };
+        if !write_clipboard_text(&text) {
+            return false;
+        }
+
+        let changed = self
+            .focused_page_editor_mut()
+            .and_then(AddressBarState::cut_selection_text)
+            .is_some();
+        if changed {
+            self.sync_page_input_value();
+            self.dispatch_focused_page_input_event("input", true, false);
+        }
+        changed
+    }
+
+    fn paste_into_page_input(&mut self) -> bool {
+        let Some(text) = read_clipboard_text() else {
+            return false;
+        };
+
+        let changed = self
+            .focused_page_editor_mut()
+            .map(|editor| editor.insert_text(&text))
+            .unwrap_or(false);
+        if changed {
+            self.sync_page_input_value();
+            self.dispatch_focused_page_input_event("input", true, false);
+        }
+        changed
+    }
+
+    fn handle_text_input(&mut self, text: &str) {
+        if self
+            .focused_page_editor_mut()
+            .map(|editor| editor.insert_text(text))
+            .unwrap_or(false)
+        {
+            self.sync_page_input_value();
+            self.dispatch_focused_page_input_event("input", true, false);
+            self.request_content_render();
+            self.emit_meta();
+        }
+    }
+
+    fn handle_key_command(
+        &mut self,
+        key_code: Option<KeyCode>,
+        repeat: bool,
+        text: Option<String>,
+        modifiers: ModifiersState,
+    ) {
+        let focused_page_control_id = self
+            .focused_page_input
+            .as_ref()
+            .map(|focused| focused.control_id);
+        let keydown_result = key_code.and_then(|key_code| {
+            focused_page_control_id.and_then(|_| {
+                self.dispatch_focused_page_keyboard_event("keydown", key_code, repeat, &modifiers)
+            })
+        });
+
+        if keydown_result
+            .as_ref()
+            .is_some_and(|result| result.snapshot.navigation_target.is_some())
+        {
+            return;
+        }
+
+        if let Some(key_code) = key_code
+            && !keydown_result
+                .as_ref()
+                .is_some_and(|result| result.default_prevented)
+        {
+            self.handle_page_key(key_code, repeat, modifiers);
+        }
+
+        if let Some(text) = text.as_deref()
+            && !keydown_result
+                .as_ref()
+                .is_some_and(|result| result.default_prevented)
+            && !modifiers.control_key()
+            && !modifiers.alt_key()
+            && !modifiers.super_key()
+        {
+            self.handle_text_input(text);
+        }
+
+        if let (Some(key_code), Some(focused_control_id)) = (key_code, focused_page_control_id)
+            && self
+                .focused_page_input
+                .as_ref()
+                .map(|focused| focused.control_id)
+                == Some(focused_control_id)
+        {
+            let _ =
+                self.dispatch_focused_page_keyboard_event("keyup", key_code, repeat, &modifiers);
+        }
+    }
+
+    fn handle_page_key(&mut self, key_code: KeyCode, repeat: bool, modifiers: ModifiersState) {
+        if self.focused_page_input.is_some() {
+            let control = modifiers.control_key();
+            let shift = modifiers.shift_key();
+            let focused_control_id = self
+                .focused_page_input
+                .as_ref()
+                .map(|focused| focused.control_id);
+            match key_code {
+                KeyCode::Escape if !repeat => {
+                    self.blur_page_input();
+                    return;
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter if !repeat => {
+                    if let Some(control_id) = focused_control_id {
+                        self.submit_page_form(control_id);
+                    }
+                    return;
+                }
+                KeyCode::Backspace => {
+                    let changed = if control {
+                        self.focused_page_editor_mut()
+                            .map(AddressBarState::delete_word_backward)
+                            .unwrap_or(false)
+                    } else {
+                        self.focused_page_editor_mut()
+                            .map(AddressBarState::backspace)
+                            .unwrap_or(false)
+                    };
+                    if changed {
+                        self.sync_page_input_value();
+                        self.dispatch_focused_page_input_event("input", true, false);
+                        self.request_content_render();
+                        self.emit_meta();
+                    }
+                    return;
+                }
+                KeyCode::Delete => {
+                    let changed = if control {
+                        self.focused_page_editor_mut()
+                            .map(AddressBarState::delete_word_forward)
+                            .unwrap_or(false)
+                    } else {
+                        self.focused_page_editor_mut()
+                            .map(AddressBarState::delete_forward)
+                            .unwrap_or(false)
+                    };
+                    if changed {
+                        self.sync_page_input_value();
+                        self.dispatch_focused_page_input_event("input", true, false);
+                        self.request_content_render();
+                        self.emit_meta();
+                    }
+                    return;
+                }
+                KeyCode::ArrowLeft => {
+                    let changed = if control {
+                        self.focused_page_editor_mut()
+                            .map(|editor| editor.move_word_left(shift))
+                            .unwrap_or(false)
+                    } else {
+                        self.focused_page_editor_mut()
+                            .map(|editor| editor.move_left(shift))
+                            .unwrap_or(false)
+                    };
+                    if changed {
+                        self.request_content_render();
+                        self.emit_meta();
+                    }
+                    return;
+                }
+                KeyCode::ArrowRight => {
+                    let changed = if control {
+                        self.focused_page_editor_mut()
+                            .map(|editor| editor.move_word_right(shift))
+                            .unwrap_or(false)
+                    } else {
+                        self.focused_page_editor_mut()
+                            .map(|editor| editor.move_right(shift))
+                            .unwrap_or(false)
+                    };
+                    if changed {
+                        self.request_content_render();
+                        self.emit_meta();
+                    }
+                    return;
+                }
+                KeyCode::Home => {
+                    if self
+                        .focused_page_editor_mut()
+                        .map(|editor| editor.move_home(shift))
+                        .unwrap_or(false)
+                    {
+                        self.request_content_render();
+                        self.emit_meta();
+                    }
+                    return;
+                }
+                KeyCode::End => {
+                    if self
+                        .focused_page_editor_mut()
+                        .map(|editor| editor.move_end(shift))
+                        .unwrap_or(false)
+                    {
+                        self.request_content_render();
+                        self.emit_meta();
+                    }
+                    return;
+                }
+                KeyCode::KeyA if control && !repeat => {
+                    if self
+                        .focused_page_editor_mut()
+                        .map(AddressBarState::select_all)
+                        .unwrap_or(false)
+                    {
+                        self.request_content_render();
+                        self.emit_meta();
+                    }
+                    return;
+                }
+                KeyCode::KeyC if control && !repeat => {
+                    self.copy_page_input_selection();
+                    return;
+                }
+                KeyCode::KeyX if control && !repeat => {
+                    if self.cut_page_input_selection() {
+                        self.request_content_render();
+                        self.emit_meta();
+                    }
+                    return;
+                }
+                KeyCode::KeyV if control && !repeat => {
+                    if self.paste_into_page_input() {
+                        self.request_content_render();
+                        self.emit_meta();
+                    }
+                    return;
+                }
+                _ => return,
+            }
+        }
+
+        let (viewport_height, content_height) = self.content_metrics();
+        let previous_scroll_y = self.scroll_y;
+        match key_code {
+            KeyCode::ArrowDown => self.scroll_by(24, viewport_height, content_height),
+            KeyCode::ArrowUp => self.scroll_by(-24, viewport_height, content_height),
+            KeyCode::PageDown => self.scroll_by(
+                viewport_height.saturating_sub(32) as i32,
+                viewport_height,
+                content_height,
+            ),
+            KeyCode::PageUp => self.scroll_by(
+                -(viewport_height.saturating_sub(32) as i32),
+                viewport_height,
+                content_height,
+            ),
+            KeyCode::Home => self.scroll_y = 0,
+            KeyCode::End => self.scroll_y = max_scroll(viewport_height, content_height),
+            _ => return,
+        }
+
+        if self.scroll_y != previous_scroll_y {
+            self.sync_scroll_position();
+        }
+    }
+
+    fn page_base_url(&self) -> Option<&Url> {
+        match &self.document.content {
+            DocumentContent::Loaded(page) => Some(&page.url),
+            _ => self.current_url.as_ref(),
+        }
+    }
+
+    fn submit_page_form(&mut self, trigger_control_id: usize) {
+        let Some(trigger) = self
+            .current_layout()
+            .controls
+            .into_iter()
+            .find(|control| control.id == trigger_control_id)
+        else {
+            return;
+        };
+        if trigger.disabled {
+            return;
+        }
+        if matches!(trigger.kind, FormControlKind::Button) && !trigger.activates_submit {
+            return;
+        }
+        let Some(trigger_form_id) = trigger.form_id else {
+            return;
+        };
+        let trigger_form_node_id = trigger.form_node_id;
+        let trigger_form_action = trigger.form_action.clone();
+        let trigger_kind = trigger.kind;
+        let trigger_name = trigger.name.clone();
+        let trigger_value = trigger.value.clone();
+
+        if let Some(result) =
+            self.dispatch_page_dom_event(trigger_form_node_id, "submit", true, true)
+        {
+            if result.default_prevented || result.snapshot.navigation_target.is_some() {
+                return;
+            }
+        }
+
+        if !trigger.form_method.eq_ignore_ascii_case("get") {
+            self.document.status_line = format!(
+                "Status: {} forms are not supported yet",
+                trigger.form_method.to_ascii_uppercase()
+            );
+            self.emit_meta();
+            return;
+        }
+
+        let layout = self.current_layout();
+        let mut fields = Vec::new();
+        for control in &layout.controls {
+            if control.form_id != Some(trigger_form_id) || control.disabled {
+                continue;
+            }
+            if matches!(
+                control.kind,
+                FormControlKind::TextInput | FormControlKind::Hidden
+            ) && let Some(name) = &control.name
+                && !name.is_empty()
+            {
+                fields.push((name.clone(), self.control_current_value(control)));
+            }
+        }
+        if matches!(trigger_kind, FormControlKind::Button)
+            && let Some(name) = &trigger_name
+            && !name.is_empty()
+        {
+            fields.push((name.clone(), trigger_value.clone()));
+        }
+
+        let base = self.page_base_url().or(self.current_url.as_ref());
+        let action = trigger_form_action.as_deref().unwrap_or("");
+        let resolved = if action.is_empty() {
+            base.map(ToString::to_string)
+        } else {
+            Some(resolve_content_href(action, base))
+        };
+        let Some(url_text) = resolved else {
+            return;
+        };
+        if let Some(target_url) =
+            build_get_form_submission_url(&url_text, &fields, action.is_empty())
+            && let Ok(url) = Url::parse(&target_url)
+        {
+            self.begin_navigation(url, None, NavigationHistoryUpdate::Push);
+        }
+    }
+
+    fn update_hover_state(
+        &mut self,
+        hovered_target: HitTarget,
+        hovered_link_url: Option<String>,
+        hovered_link_node_id: Option<usize>,
+        hovered_element_node_id: Option<usize>,
+    ) {
+        let element_changed = hovered_element_node_id != self.hovered_element_node_id;
+        if element_changed {
+            self.hovered_element_node_id = hovered_element_node_id;
+            let (content_width, _) = self.render_metrics();
+            let interactive = InteractiveState {
+                hovered_node_id: hovered_element_node_id,
+                ..Default::default()
+            };
+            if let DocumentContent::Loaded(page) = &mut self.document.content {
+                page.relayout(content_width, &interactive);
+            }
+            self.document.layout_cache = None;
+        }
+
+        let changed = hovered_target != self.hovered_target
+            || hovered_link_url != self.hovered_link_url
+            || hovered_link_node_id != self.hovered_link_node_id
+            || element_changed;
+        self.hovered_target = hovered_target;
+        self.hovered_link_url = hovered_link_url;
+        self.hovered_link_node_id = hovered_link_node_id;
+
+        if changed {
+            self.request_content_render();
+        }
+    }
+
+    fn handle_mouse_command(
+        &mut self,
+        request: Option<DomEventRequest>,
+        hit_target: HitTarget,
+        hovered_link_url: Option<String>,
+        hovered_link_node_id: Option<usize>,
+        hovered_element_node_id: Option<usize>,
+        cursor_position: PhysicalPosition<f64>,
+    ) {
+        self.update_hover_state(
+            hit_target,
+            hovered_link_url.clone(),
+            hovered_link_node_id,
+            hovered_element_node_id,
+        );
+
+        match hit_target {
+            HitTarget::PageTextInput(control_id) => {
+                if let Some(control) = self.current_page_control(control_id) {
+                    if control.disabled {
+                        return;
+                    }
+                    let click_result =
+                        request.and_then(|request| self.dispatch_page_dom_event_request(request));
+                    if let Some(result) = click_result {
+                        if result.default_prevented || result.snapshot.navigation_target.is_some() {
+                            return;
+                        }
+                    }
+                    let Some(control) = self.current_page_control(control_id) else {
+                        return;
+                    };
+                    let local_x = cursor_position
+                        .x
+                        .max((FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64)
+                        - (FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64;
+                    let mut editor = AddressBarState::new(self.control_current_value(&control));
+                    editor.focus_at(editor.char_len());
+                    let char_index = cursor_index_for_text_x(
+                        &editor,
+                        &mut self.fonts,
+                        control.width.saturating_sub(CONTROL_PADDING_X * 2),
+                        local_x,
+                        control.font_size_px,
+                        control.font_family,
+                    );
+                    self.focus_page_input_at(&control, Some(char_index));
+                }
+            }
+            HitTarget::PageButton(control_id) => {
+                let control = self.current_page_control(control_id);
+                if control
+                    .as_ref()
+                    .map(|control| control.disabled)
+                    .unwrap_or(false)
+                {
+                    return;
+                }
+                self.blur_page_input();
+                if control.is_some() {
+                    let click_result =
+                        request.and_then(|request| self.dispatch_page_dom_event_request(request));
+                    if let Some(result) = click_result {
+                        if result.default_prevented || result.snapshot.navigation_target.is_some() {
+                            return;
+                        }
+                    }
+                }
+                self.submit_page_form(control_id);
+            }
+            HitTarget::None => {
+                self.blur_page_input();
+                if let Some(href) = hovered_link_url {
+                    let click_result =
+                        request.and_then(|request| self.dispatch_page_dom_event_request(request));
+                    if let Some(result) = click_result {
+                        if result.default_prevented || result.snapshot.navigation_target.is_some() {
+                            return;
+                        }
+                    }
+                    let resolved = resolve_content_href(&href, self.page_base_url());
+                    if let Ok(url) = parse_address_input(&resolved) {
+                        self.begin_navigation(url, None, NavigationHistoryUpdate::Push);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl BrowserApp {
+    fn new(
+        initial_url: Option<Url>,
+        context: Context<OwnedDisplayHandle>,
+        event_proxy: EventLoopProxy<BrowserUserEvent>,
+    ) -> Self {
+        let content_tx = ContentThread::spawn(initial_url.clone(), event_proxy);
+        let address_bar = match initial_url.clone() {
+            Some(url) => {
+                let mut address_bar = AddressBarState::new(url.to_string());
+                address_bar.focused = false;
+                address_bar
+            }
+            None => {
+                let mut address_bar = AddressBarState::new(String::new());
+                address_bar.focus_at(0);
+                address_bar
+            }
+        };
+
+        Self {
+            content_tx,
+            current_url: initial_url,
+            title: "New Tab".to_string(),
+            status_line: "Status: ready".to_string(),
+            subtitle: "Type a URL in the address bar and press Enter.".to_string(),
+            is_error: false,
+            can_go_back: false,
+            can_go_forward: false,
+            latest_render_frame: None,
+            scroll_y: 0,
+            focused_page_input: None,
+            fonts: FontContext::load(),
+            context,
+            window: None,
+            surface: None,
+            modifiers: ModifiersState::default(),
+            cursor_position: PhysicalPosition::new(0.0, 0.0),
+            address_bar,
+            hovered_target: HitTarget::None,
+            hovered_link_url: None,
+            hovered_link_node_id: None,
+            hovered_element_node_id: None,
+            ime_composing: false,
+        }
+    }
+
+    fn load_url(&mut self, url: Url) {
+        let _ = self.content_tx.send(ContentCommand::Navigate {
+            url,
+            restore_scroll: None,
+            history_update: NavigationHistoryUpdate::Push,
+        });
+    }
+
+    fn reload(&mut self) {
+        let _ = self.content_tx.send(ContentCommand::Reload);
+    }
+
+    fn navigate_to_address(&mut self) {
+        let entered = self.address_bar.text().trim().to_string();
+        if entered.is_empty() {
+            self.current_url = None;
+            let _ = self.content_tx.send(ContentCommand::ShowBlank);
+            self.request_redraw();
+            return;
+        }
+
+        match parse_address_input(&entered) {
+            Ok(url) => {
+                self.address_bar.set_text(url.to_string());
+                self.address_bar.blur();
+                self.ime_composing = false;
+                self.sync_input_method();
+                self.load_url(url);
+                self.request_redraw();
+            }
+            Err(error) => {
+                let _ = self.content_tx.send(ContentCommand::ShowError {
+                    message: format!("could not navigate to `{entered}`: {error}"),
+                });
                 self.request_redraw();
             }
         }
     }
 
+    fn go_back(&mut self) {
+        if self.can_go_back {
+            let _ = self.content_tx.send(ContentCommand::HistoryBack);
+        }
+    }
+
+    fn go_forward(&mut self) {
+        if self.can_go_forward {
+            let _ = self.content_tx.send(ContentCommand::HistoryForward);
+        }
+    }
+
     fn focus_address_bar(&mut self, char_index: usize) {
-        self.blur_page_input();
+        let _ = self.content_tx.send(ContentCommand::BlurPageInput);
+        self.focused_page_input = None;
+        self.ime_composing = false;
         self.address_bar.focus_at(char_index);
         self.sync_input_method();
         self.request_redraw();
     }
 
     fn focus_address_bar_select_all(&mut self) {
-        self.blur_page_input();
+        let _ = self.content_tx.send(ContentCommand::BlurPageInput);
+        self.focused_page_input = None;
+        self.ime_composing = false;
         if self.address_bar.select_all() || !self.address_bar.focused {
             self.address_bar.focused = true;
             self.sync_input_method();
@@ -527,7 +1612,7 @@ impl BrowserApp {
 
     fn sync_window_title(&self) {
         if let Some(window) = &self.window {
-            window.set_title(&self.document.window_title());
+            window.set_title(&window_title_from_title(&self.title));
         }
     }
 
@@ -618,43 +1703,23 @@ impl BrowserApp {
         );
     }
 
-    fn sync_viewport_size(&mut self) {
-        let Some(window) = &self.window else {
-            return;
-        };
-
-        let size = window.inner_size();
-        if self.document.set_viewport_size(size.width, size.height) {
-            let _ = self.document.dispatch_window_resize();
-            self.scroll_y = self.document.scroll_position();
-            self.sync_current_history_scroll();
-            self.latest_render_frame = None;
-            self.request_content_render();
-        }
+    fn refresh_address_bar_input(&mut self) {
+        self.sync_input_method();
+        self.request_redraw();
     }
 
-    fn sync_scroll_position(&mut self) {
-        let previous_scroll_y = self.scroll_y;
-        if self.document.set_scroll_position(self.scroll_y) {
-            let _ = self.document.dispatch_scroll_event();
-            self.scroll_y = self.document.scroll_position();
-        }
-        self.sync_current_history_scroll();
-        if self.scroll_y != previous_scroll_y {
-            self.latest_render_frame = None;
-            self.request_content_render();
-        }
+    fn current_layout(&self) -> LayoutDocument {
+        self.latest_render_frame
+            .as_ref()
+            .map(|frame| frame.layout.clone())
+            .unwrap_or_else(empty_layout_document)
     }
 
-    fn scroll_by(&mut self, delta: i32, viewport_height: u32, content_height: u32) {
-        let max_scroll = max_scroll(viewport_height, content_height);
-        let next = if delta.is_negative() {
-            self.scroll_y.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.scroll_y.saturating_add(delta as u32)
-        };
-        self.scroll_y = next.min(max_scroll);
-        self.sync_current_history_scroll();
+    fn current_page_control(&self, id: usize) -> Option<FormControlCommand> {
+        self.current_layout()
+            .controls
+            .into_iter()
+            .find(|control| control.id == id)
     }
 
     fn draw(&mut self) -> Result<()> {
@@ -668,27 +1733,20 @@ impl BrowserApp {
         }
 
         let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
-        let can_go_back = self.can_go_back();
-        let can_go_forward = self.can_go_forward();
         let body_top = chrome.height + FRAME_PADDING;
         let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
         let viewport_height = size.height.saturating_sub(body_top + FRAME_PADDING).max(1);
-        let layout = self.current_layout();
-        let frame_matches = self.latest_render_frame.as_ref().is_some_and(|frame| {
-            frame.content_width == content_width && frame.scroll_y == self.scroll_y
-        });
         let content_height = self
             .latest_render_frame
             .as_ref()
             .map(|frame| frame.content_height)
-            .unwrap_or(layout.content_height);
+            .unwrap_or(0);
         let max_scroll_y = max_scroll(viewport_height, content_height);
-        let previous_scroll_y = self.scroll_y;
-        self.scroll_y = self.scroll_y.min(max_scroll_y);
-        if self.scroll_y != previous_scroll_y {
-            let _ = self.document.set_scroll_position(self.scroll_y);
-            self.sync_current_history_scroll();
-        }
+        let background_color = self
+            .latest_render_frame
+            .as_ref()
+            .map(|frame| frame.layout.background_color)
+            .unwrap_or(DEFAULT_BACKGROUND_COLOR);
 
         let Some(surface) = self.surface.as_mut() else {
             return Ok(());
@@ -710,7 +1768,7 @@ impl BrowserApp {
             size.width,
             size.height,
             chrome.height,
-            layout.background_color,
+            background_color,
         );
         paint_chrome(
             &mut self.fonts,
@@ -718,63 +1776,33 @@ impl BrowserApp {
             size.width,
             size.height,
             &chrome,
-            &self.document,
+            &self.title,
+            &self.status_line,
+            &self.subtitle,
+            self.is_error,
             &self.address_bar,
             self.hovered_target,
-            can_go_back,
-            can_go_forward,
+            self.can_go_back,
+            self.can_go_forward,
             self.scroll_y,
             max_scroll_y,
         );
-        if frame_matches {
-            if let Some(frame) = &self.latest_render_frame {
-                blit_rendered_content_frame(
-                    &mut buffer,
-                    size.width,
-                    size.height,
-                    FRAME_PADDING / 2,
-                    body_top,
-                    frame,
-                );
-            }
-        } else if !matches!(self.document.content, DocumentContent::Loaded(_)) {
-            paint_layout(
-                None,
-                &mut self.fonts,
+        if let Some(frame) = &self.latest_render_frame
+            && frame.content_width == content_width
+        {
+            blit_rendered_content_frame(
                 &mut buffer,
                 size.width,
                 size.height,
                 FRAME_PADDING / 2,
                 body_top,
-                viewport_height,
-                self.scroll_y,
-                &layout,
-                self.focused_page_input.as_ref(),
-                self.hovered_target,
-                &mut self.scratch,
+                frame,
             );
         }
 
         buffer
             .present()
             .map_err(|error| BrowserError::message(error.to_string()))
-    }
-
-    fn content_metrics(&mut self, window_size: PhysicalSize<u32>) -> (u32, u32) {
-        let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
-        let body_top = chrome.height + FRAME_PADDING;
-        let viewport_height = window_size
-            .height
-            .saturating_sub(body_top + FRAME_PADDING)
-            .max(1);
-        let layout = self.current_layout();
-        let content_height = self
-            .latest_render_frame
-            .as_ref()
-            .map(|frame| frame.content_height)
-            .unwrap_or(layout.content_height);
-
-        (viewport_height, content_height)
     }
 
     fn find_hovered_link(
@@ -834,73 +1862,6 @@ impl BrowserApp {
         None
     }
 
-    fn update_hover(&mut self, window_size: PhysicalSize<u32>) {
-        let next = self.hit_test(window_size, self.cursor_position);
-        let (link_url, link_node_id) = if next == HitTarget::None {
-            self.find_hovered_link(window_size)
-                .map(|(href, node_id)| (Some(href), node_id))
-                .unwrap_or((None, None))
-        } else {
-            (None, None)
-        };
-
-        // Determine which element (by node_id) is under the cursor
-        let hovered_element = self.find_hovered_element(window_size);
-
-        let element_changed = hovered_element != self.hovered_element_node_id;
-        // Only relayout when hovered element changes
-        if element_changed {
-            self.hovered_element_node_id = hovered_element;
-            // Trigger a CSS relayout with the new interactive state
-            let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-            let interactive = InteractiveState {
-                hovered_node_id: hovered_element,
-                ..Default::default()
-            };
-            if let DocumentContent::Loaded(page) = &mut self.document.content {
-                page.relayout(content_width, &interactive);
-            }
-        }
-
-        let changed = next != self.hovered_target
-            || link_url != self.hovered_link_url
-            || link_node_id != self.hovered_link_node_id
-            || element_changed;
-        self.hovered_target = next;
-        self.hovered_link_url = link_url;
-        self.hovered_link_node_id = link_node_id;
-        if changed {
-            self.request_content_render();
-            self.request_redraw();
-        }
-        // Determine cursor icon before borrowing self.window
-        let icon = if self.hovered_link_url.is_some() {
-            CursorIcon::Pointer
-        } else if next == HitTarget::None {
-            let elem_cursor = self.find_hovered_element_cursor(window_size);
-            match elem_cursor {
-                CursorKind::Pointer => CursorIcon::Pointer,
-                CursorKind::Text => CursorIcon::Text,
-                CursorKind::Move => CursorIcon::Move,
-                CursorKind::Crosshair => CursorIcon::Crosshair,
-                CursorKind::Wait => CursorIcon::Wait,
-                CursorKind::Help => CursorIcon::Help,
-                CursorKind::NotAllowed => CursorIcon::NotAllowed,
-                CursorKind::Grab => CursorIcon::Grab,
-                CursorKind::Grabbing => CursorIcon::Grabbing,
-                CursorKind::ZoomIn => CursorIcon::ZoomIn,
-                CursorKind::ZoomOut => CursorIcon::ZoomOut,
-                CursorKind::None | CursorKind::Default => CursorIcon::Default,
-                CursorKind::Auto => cursor_icon_for_target(next),
-            }
-        } else {
-            cursor_icon_for_target(next)
-        };
-        if let Some(window) = &self.window {
-            window.set_cursor(icon);
-        }
-    }
-
     fn find_hovered_element_cursor(&mut self, window_size: PhysicalSize<u32>) -> CursorKind {
         let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
         let body_top = chrome.height + FRAME_PADDING;
@@ -941,7 +1902,6 @@ impl BrowserApp {
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
         let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
-        // Find the deepest (last) hitbox that contains the cursor
         layout
             .element_hitboxes
             .iter()
@@ -999,581 +1959,59 @@ impl BrowserApp {
         HitTarget::None
     }
 
-    fn handle_key(
-        &mut self,
-        key_code: KeyCode,
-        window_size: PhysicalSize<u32>,
-        repeat: bool,
-    ) -> bool {
-        if !repeat && self.modifiers.alt_key() && !self.modifiers.control_key() {
-            match key_code {
-                KeyCode::ArrowLeft => {
-                    self.go_back();
-                    return false;
-                }
-                KeyCode::ArrowRight => {
-                    self.go_forward();
-                    return false;
-                }
-                _ => {}
-            }
-        }
-
-        if self.address_bar.focused {
-            let control = self.modifiers.control_key();
-            let shift = self.modifiers.shift_key();
-            match key_code {
-                KeyCode::Escape if !repeat => {
-                    self.blur_address_bar();
-                    return false;
-                }
-                KeyCode::Enter | KeyCode::NumpadEnter if !repeat => {
-                    self.navigate_to_address();
-                    return false;
-                }
-                KeyCode::Backspace => {
-                    let changed = if control {
-                        self.address_bar.delete_word_backward()
-                    } else {
-                        self.address_bar.backspace()
-                    };
-                    if changed {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::Delete => {
-                    let changed = if control {
-                        self.address_bar.delete_word_forward()
-                    } else {
-                        self.address_bar.delete_forward()
-                    };
-                    if changed {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::ArrowLeft => {
-                    let changed = if control {
-                        self.address_bar.move_word_left(shift)
-                    } else {
-                        self.address_bar.move_left(shift)
-                    };
-                    if changed {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::ArrowRight => {
-                    let changed = if control {
-                        self.address_bar.move_word_right(shift)
-                    } else {
-                        self.address_bar.move_right(shift)
-                    };
-                    if changed {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::Home => {
-                    if self.address_bar.move_home(shift) {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::End => {
-                    if self.address_bar.move_end(shift) {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::KeyA if control && !repeat => {
-                    if self.address_bar.select_all() {
-                        self.refresh_address_bar_input();
-                    }
-                    return false;
-                }
-                KeyCode::KeyC if control && !repeat => {
-                    self.copy_address_selection();
-                    return false;
-                }
-                KeyCode::KeyX if control && !repeat => {
-                    if self.cut_address_selection() {
-                        self.refresh_address_bar_input();
-                    }
-                    return false;
-                }
-                KeyCode::KeyV if control && !repeat => {
-                    if self.paste_into_address_bar() {
-                        self.refresh_address_bar_input();
-                    }
-                    return false;
-                }
-                KeyCode::KeyL if control && !repeat => {
-                    self.address_bar.select_all();
-                    self.refresh_address_bar_input();
-                    return false;
-                }
-                KeyCode::KeyR if control && !repeat => {
-                    self.reload();
-                    return false;
-                }
-                KeyCode::F5 if !repeat => {
-                    self.reload();
-                    return false;
-                }
-                _ => return false,
-            }
-        }
-
-        if self.focused_page_input.is_some() {
-            let control = self.modifiers.control_key();
-            let shift = self.modifiers.shift_key();
-            let focused_control_id = self
-                .focused_page_input
-                .as_ref()
-                .map(|focused| focused.control_id);
-            match key_code {
-                KeyCode::Escape if !repeat => {
-                    self.blur_page_input();
-                    return false;
-                }
-                KeyCode::Enter | KeyCode::NumpadEnter if !repeat => {
-                    if let Some(control_id) = focused_control_id {
-                        self.submit_page_form(control_id);
-                    }
-                    return false;
-                }
-                KeyCode::Backspace => {
-                    let changed = if control {
-                        self.focused_page_editor_mut()
-                            .map(AddressBarState::delete_word_backward)
-                            .unwrap_or(false)
-                    } else {
-                        self.focused_page_editor_mut()
-                            .map(AddressBarState::backspace)
-                            .unwrap_or(false)
-                    };
-                    if changed {
-                        self.sync_page_input_value();
-                        self.dispatch_focused_page_input_event("input", true, false);
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::Delete => {
-                    let changed = if control {
-                        self.focused_page_editor_mut()
-                            .map(AddressBarState::delete_word_forward)
-                            .unwrap_or(false)
-                    } else {
-                        self.focused_page_editor_mut()
-                            .map(AddressBarState::delete_forward)
-                            .unwrap_or(false)
-                    };
-                    if changed {
-                        self.sync_page_input_value();
-                        self.dispatch_focused_page_input_event("input", true, false);
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::ArrowLeft => {
-                    let changed = if control {
-                        self.focused_page_editor_mut()
-                            .map(|editor| editor.move_word_left(shift))
-                            .unwrap_or(false)
-                    } else {
-                        self.focused_page_editor_mut()
-                            .map(|editor| editor.move_left(shift))
-                            .unwrap_or(false)
-                    };
-                    if changed {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::ArrowRight => {
-                    let changed = if control {
-                        self.focused_page_editor_mut()
-                            .map(|editor| editor.move_word_right(shift))
-                            .unwrap_or(false)
-                    } else {
-                        self.focused_page_editor_mut()
-                            .map(|editor| editor.move_right(shift))
-                            .unwrap_or(false)
-                    };
-                    if changed {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::Home => {
-                    if self
-                        .focused_page_editor_mut()
-                        .map(|editor| editor.move_home(shift))
-                        .unwrap_or(false)
-                    {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::End => {
-                    if self
-                        .focused_page_editor_mut()
-                        .map(|editor| editor.move_end(shift))
-                        .unwrap_or(false)
-                    {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::KeyA if control && !repeat => {
-                    if self
-                        .focused_page_editor_mut()
-                        .map(AddressBarState::select_all)
-                        .unwrap_or(false)
-                    {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::KeyC if control && !repeat => {
-                    self.copy_page_input_selection();
-                    return false;
-                }
-                KeyCode::KeyX if control && !repeat => {
-                    if self.cut_page_input_selection() {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::KeyV if control && !repeat => {
-                    if self.paste_into_page_input() {
-                        self.sync_input_method();
-                        self.request_redraw();
-                    }
-                    return false;
-                }
-                KeyCode::KeyL if control && !repeat => {
-                    self.blur_page_input();
-                    self.focus_address_bar_select_all();
-                    return false;
-                }
-                _ => return false,
-            }
-        }
-
-        let (viewport_height, content_height) = self.content_metrics(window_size);
-        match key_code {
-            KeyCode::Escape if !repeat => return true,
-            KeyCode::ArrowDown => {
-                let previous_scroll_y = self.scroll_y;
-                self.scroll_by(24, viewport_height, content_height);
-                if self.scroll_y != previous_scroll_y {
-                    self.sync_scroll_position();
-                }
-            }
-            KeyCode::ArrowUp => {
-                let previous_scroll_y = self.scroll_y;
-                self.scroll_by(-24, viewport_height, content_height);
-                if self.scroll_y != previous_scroll_y {
-                    self.sync_scroll_position();
-                }
-            }
-            KeyCode::PageDown => {
-                let previous_scroll_y = self.scroll_y;
-                self.scroll_by(
-                    viewport_height.saturating_sub(32) as i32,
-                    viewport_height,
-                    content_height,
-                );
-                if self.scroll_y != previous_scroll_y {
-                    self.sync_scroll_position();
-                }
-            }
-            KeyCode::PageUp => {
-                let previous_scroll_y = self.scroll_y;
-                self.scroll_by(
-                    -(viewport_height.saturating_sub(32) as i32),
-                    viewport_height,
-                    content_height,
-                );
-                if self.scroll_y != previous_scroll_y {
-                    self.sync_scroll_position();
-                }
-            }
-            KeyCode::Home => {
-                let previous_scroll_y = self.scroll_y;
-                self.scroll_y = 0;
-                if self.scroll_y != previous_scroll_y {
-                    self.sync_scroll_position();
-                }
-            }
-            KeyCode::End => {
-                let previous_scroll_y = self.scroll_y;
-                self.scroll_y = max_scroll(viewport_height, content_height);
-                if self.scroll_y != previous_scroll_y {
-                    self.sync_scroll_position();
-                }
-            }
-            KeyCode::KeyR | KeyCode::F5 if !repeat => self.reload(),
-            KeyCode::KeyL if self.modifiers.control_key() && !repeat => {
-                self.focus_address_bar_select_all();
-                return false;
-            }
-            _ => return false,
-        }
-
-        self.request_redraw();
-        false
-    }
-
-    fn handle_text_input(&mut self, text: &str) {
-        if self.ime_composing {
-            return;
-        }
-
-        if self.address_bar.focused && self.address_bar.insert_text(text) {
-            self.refresh_address_bar_input();
-        } else if self
-            .focused_page_editor_mut()
-            .map(|editor| editor.insert_text(text))
-            .unwrap_or(false)
-        {
-            self.sync_page_input_value();
-            self.dispatch_focused_page_input_event("input", true, false);
-            self.sync_input_method();
+    fn update_hover(&mut self, window_size: PhysicalSize<u32>) {
+        let next = self.hit_test(window_size, self.cursor_position);
+        let (link_url, link_node_id) = if next == HitTarget::None {
+            self.find_hovered_link(window_size)
+                .map(|(href, node_id)| (Some(href), node_id))
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
+        let hovered_element = self.find_hovered_element(window_size);
+        let changed = next != self.hovered_target
+            || link_url != self.hovered_link_url
+            || link_node_id != self.hovered_link_node_id
+            || hovered_element != self.hovered_element_node_id;
+        self.hovered_target = next;
+        self.hovered_link_url = link_url;
+        self.hovered_link_node_id = link_node_id;
+        self.hovered_element_node_id = hovered_element;
+        if changed {
+            let _ = self.content_tx.send(ContentCommand::UpdateHover {
+                hovered_target: self.hovered_target,
+                hovered_link_url: self.hovered_link_url.clone(),
+                hovered_link_node_id: self.hovered_link_node_id,
+                hovered_element_node_id: self.hovered_element_node_id,
+                window_size,
+            });
             self.request_redraw();
         }
-    }
 
-    fn handle_ime(&mut self, ime: Ime) {
-        match ime {
-            Ime::Enabled => {}
-            Ime::Disabled => self.ime_composing = false,
-            Ime::Preedit(text, _) => {
-                self.ime_composing = !text.is_empty();
+        let icon = if self.hovered_link_url.is_some() {
+            CursorIcon::Pointer
+        } else if next == HitTarget::None {
+            match self.find_hovered_element_cursor(window_size) {
+                CursorKind::Pointer => CursorIcon::Pointer,
+                CursorKind::Text => CursorIcon::Text,
+                CursorKind::Move => CursorIcon::Move,
+                CursorKind::Crosshair => CursorIcon::Crosshair,
+                CursorKind::Wait => CursorIcon::Wait,
+                CursorKind::Help => CursorIcon::Help,
+                CursorKind::NotAllowed => CursorIcon::NotAllowed,
+                CursorKind::Grab => CursorIcon::Grab,
+                CursorKind::Grabbing => CursorIcon::Grabbing,
+                CursorKind::ZoomIn => CursorIcon::ZoomIn,
+                CursorKind::ZoomOut => CursorIcon::ZoomOut,
+                CursorKind::None | CursorKind::Default => CursorIcon::Default,
+                CursorKind::Auto => cursor_icon_for_target(next),
             }
-            Ime::Commit(text) => {
-                self.ime_composing = false;
-                if self.address_bar.focused && self.address_bar.insert_text(&text) {
-                    self.refresh_address_bar_input();
-                } else if self
-                    .focused_page_editor_mut()
-                    .map(|editor| editor.insert_text(&text))
-                    .unwrap_or(false)
-                {
-                    self.sync_page_input_value();
-                    self.dispatch_focused_page_input_event("input", true, false);
-                    self.sync_input_method();
-                    self.request_redraw();
-                }
-            }
-        }
-    }
-
-    fn refresh_address_bar_input(&mut self) {
-        self.sync_input_method();
-        self.request_redraw();
-    }
-
-    fn clear_page_control_state(&mut self) {
-        self.focused_page_input = None;
-        self.ime_composing = false;
-        self.hovered_target = HitTarget::None;
-        self.hovered_link_url = None;
-        self.hovered_link_node_id = None;
-        self.hovered_element_node_id = None;
-    }
-
-    fn blur_page_input(&mut self) {
-        let Some(focused) = self.focused_page_input.clone() else {
-            return;
+        } else {
+            cursor_icon_for_target(next)
         };
-
-        let changed = focused.initial_value != focused.editor.text();
-        self.dispatch_page_dom_event(focused.node_id, "blur", false, false);
-        if changed {
-            self.dispatch_page_dom_event(focused.node_id, "change", true, false);
+        if let Some(window) = &self.window {
+            window.set_cursor(icon);
         }
-
-        self.focused_page_input = None;
-        self.ime_composing = false;
-        self.sync_input_method();
-        self.request_content_render();
-        self.request_redraw();
-    }
-
-    fn control_current_value(&self, control: &FormControlCommand) -> String {
-        resolve_text_input_value(
-            self.focused_page_input
-                .as_ref()
-                .filter(|focused| focused.control_id == control.id)
-                .map(|focused| &focused.editor),
-            &control.value,
-        )
-    }
-
-    fn focus_page_input_at(&mut self, control: &FormControlCommand, char_index: Option<usize>) {
-        if control.disabled {
-            return;
-        }
-        self.blur_address_bar();
-        let mut editor = AddressBarState::new(self.control_current_value(control));
-        editor.focus_at(char_index.unwrap_or_else(|| editor.char_len()));
-        self.focused_page_input = Some(FocusedPageInput {
-            control_id: control.id,
-            node_id: control.node_id,
-            initial_value: editor.text().to_string(),
-            editor,
-        });
-        self.sync_page_input_value();
-        self.dispatch_page_dom_event(control.node_id, "focus", false, false);
-        self.refresh_focused_page_input_from_document();
-        self.sync_input_method();
-        self.request_content_render();
-        self.request_redraw();
-    }
-
-    fn sync_page_input_value(&mut self) {
-        let Some((node_id, value)) = self
-            .focused_page_input
-            .as_ref()
-            .map(|focused| (focused.node_id, focused.editor.text().to_string()))
-        else {
-            return;
-        };
-
-        self.document.set_dom_attribute(node_id, "value", &value);
-    }
-
-    fn refresh_focused_page_input_from_document(&mut self) {
-        let Some(focused_id) = self
-            .focused_page_input
-            .as_ref()
-            .map(|focused| focused.control_id)
-        else {
-            return;
-        };
-        let Some(control) = self.current_page_control(focused_id) else {
-            self.focused_page_input = None;
-            return;
-        };
-        if let Some(focused) = self.focused_page_input.as_mut()
-            && control.value != focused.initial_value
-            && focused.editor.text() != control.value
-        {
-            let cursor = focused
-                .editor
-                .cursor_chars
-                .min(control.value.chars().count());
-            focused.editor.set_text(control.value.clone());
-            focused.editor.focus_at(cursor);
-            focused.initial_value = control.value.clone();
-        }
-        self.sync_page_input_value();
-    }
-
-    fn dispatch_page_dom_event(
-        &mut self,
-        node_id: Option<usize>,
-        event_type: &str,
-        bubbles: bool,
-        cancelable: bool,
-    ) -> Option<DomEventDispatchResult> {
-        let node_id = node_id?;
-        self.dispatch_page_dom_event_request(DomEventRequest {
-            target_node_id: node_id,
-            event_type: event_type.to_string(),
-            bubbles,
-            cancelable,
-            composed: default_page_event_composed(event_type),
-            ..Default::default()
-        })
-    }
-
-    fn dispatch_page_dom_event_request(
-        &mut self,
-        request: DomEventRequest,
-    ) -> Option<DomEventDispatchResult> {
-        let result = self.document.dispatch_dom_event(request)?;
-
-        if let Some(target_url) = result.snapshot.navigation_target.clone()
-            && let Ok(url) = Url::parse(&target_url)
-        {
-            self.load_url(url);
-            return Some(result);
-        }
-        if let Some(soft_target) = result.snapshot.soft_navigation_target.clone()
-            && let Ok(url) = Url::parse(&soft_target)
-        {
-            self.current_url = Some(url.clone());
-            self.address_bar.set_text(url.to_string());
-            self.replace_current_history_entry(url);
-        }
-
-        self.scroll_y = self.document.scroll_position();
-        self.sync_current_history_scroll();
-        self.document.sync_from_loaded_page();
-        self.sync_window_title();
-        self.refresh_focused_page_input_from_document();
-        self.sync_input_method();
-        self.request_content_render();
-        self.request_redraw();
-        Some(result)
-    }
-
-    fn dispatch_focused_page_input_event(
-        &mut self,
-        event_type: &str,
-        bubbles: bool,
-        cancelable: bool,
-    ) -> Option<DomEventDispatchResult> {
-        let node_id = self
-            .focused_page_input
-            .as_ref()
-            .and_then(|focused| focused.node_id);
-        self.dispatch_page_dom_event(node_id, event_type, bubbles, cancelable)
-    }
-
-    fn dispatch_focused_page_keyboard_event(
-        &mut self,
-        event_type: &str,
-        key_code: KeyCode,
-        repeat: bool,
-    ) -> Option<DomEventDispatchResult> {
-        let node_id = self
-            .focused_page_input
-            .as_ref()
-            .and_then(|focused| focused.node_id)?;
-        self.dispatch_page_dom_event_request(keyboard_dom_event_request(
-            node_id,
-            event_type,
-            key_code,
-            repeat,
-            &self.modifiers,
-        ))
-    }
-
-    fn focused_page_editor_mut(&mut self) -> Option<&mut AddressBarState> {
-        self.focused_page_input
-            .as_mut()
-            .map(|focused| &mut focused.editor)
     }
 
     fn copy_address_selection(&self) -> bool {
@@ -1603,188 +2041,33 @@ impl BrowserApp {
         self.address_bar.insert_text(&text)
     }
 
-    fn handle_wheel(&mut self, delta: MouseScrollDelta, window_size: PhysicalSize<u32>) {
-        let (viewport_height, content_height) = self.content_metrics(window_size);
-        let previous_scroll_y = self.scroll_y;
-        match delta {
-            MouseScrollDelta::LineDelta(_, y) => {
-                self.scroll_by((-(y.round() as i32)) * 24, viewport_height, content_height);
-            }
-            MouseScrollDelta::PixelDelta(position) => {
-                self.scroll_by(
-                    -(position.y.round() as i32),
-                    viewport_height,
-                    content_height,
-                );
-            }
-        }
-
-        if self.scroll_y != previous_scroll_y {
-            self.sync_scroll_position();
-        }
-        self.request_redraw();
-    }
-
-    fn page_base_url(&self) -> Option<&Url> {
-        match &self.document.content {
-            DocumentContent::Loaded(page) => Some(&page.url),
-            _ => self.current_url.as_ref(),
-        }
-    }
-
-    fn current_layout(&mut self) -> LayoutDocument {
-        if let DocumentContent::Loaded(_) = &self.document.content {
-            if let Some(cache) = &self.document.layout_cache {
-                return cache.layout.clone();
-            }
-            return empty_layout_document();
-        }
-
-        let window_size = self
-            .window
-            .as_ref()
-            .map(|window| window.inner_size())
-            .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
-        let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-        self.document.layout(content_width, &mut self.fonts)
-    }
-
-    fn current_page_control(&mut self, id: usize) -> Option<FormControlCommand> {
-        self.current_layout()
-            .controls
-            .into_iter()
-            .find(|control| control.id == id)
-    }
-
-    fn copy_page_input_selection(&self) -> bool {
-        let Some(text) = self
-            .focused_page_input
-            .as_ref()
-            .and_then(|focused| focused.editor.selected_text())
-        else {
-            return false;
-        };
-
-        write_clipboard_text(&text)
-    }
-
-    fn cut_page_input_selection(&mut self) -> bool {
-        let Some(text) = self
-            .focused_page_input
-            .as_ref()
-            .and_then(|focused| focused.editor.selected_text())
-        else {
-            return false;
-        };
-        if !write_clipboard_text(&text) {
-            return false;
-        }
-
-        let changed = self
-            .focused_page_editor_mut()
-            .and_then(AddressBarState::cut_selection_text)
-            .is_some();
-        if changed {
-            self.sync_page_input_value();
-            self.dispatch_focused_page_input_event("input", true, false);
-        }
-        changed
-    }
-
-    fn paste_into_page_input(&mut self) -> bool {
-        let Some(text) = read_clipboard_text() else {
-            return false;
-        };
-
-        let changed = self
-            .focused_page_editor_mut()
-            .map(|editor| editor.insert_text(&text))
-            .unwrap_or(false);
-        if changed {
-            self.sync_page_input_value();
-            self.dispatch_focused_page_input_event("input", true, false);
-        }
-        changed
-    }
-
-    fn submit_page_form(&mut self, trigger_control_id: usize) {
-        let Some(trigger) = self
-            .current_layout()
-            .controls
-            .into_iter()
-            .find(|control| control.id == trigger_control_id)
-        else {
-            return;
-        };
-        if trigger.disabled {
-            return;
-        }
-        if matches!(trigger.kind, FormControlKind::Button) && !trigger.activates_submit {
-            return;
-        }
-        let Some(trigger_form_id) = trigger.form_id else {
-            return;
-        };
-        let trigger_form_node_id = trigger.form_node_id;
-        let trigger_form_action = trigger.form_action.clone();
-        let trigger_kind = trigger.kind;
-        let trigger_name = trigger.name.clone();
-        let trigger_value = trigger.value.clone();
-
-        if let Some(result) =
-            self.dispatch_page_dom_event(trigger_form_node_id, "submit", true, true)
-        {
-            if result.default_prevented || result.snapshot.navigation_target.is_some() {
-                return;
-            }
-        }
-
-        if !trigger.form_method.eq_ignore_ascii_case("get") {
-            self.document.status_line = format!(
-                "Status: {} forms are not supported yet",
-                trigger.form_method.to_ascii_uppercase()
-            );
-            self.request_redraw();
+    fn handle_text_input(&mut self, text: &str) {
+        if self.ime_composing {
             return;
         }
 
-        let layout = self.current_layout();
-        let mut fields = Vec::new();
-        for control in &layout.controls {
-            if control.form_id != Some(trigger_form_id) || control.disabled {
-                continue;
-            }
-            if matches!(
-                control.kind,
-                FormControlKind::TextInput | FormControlKind::Hidden
-            ) && let Some(name) = &control.name
-                && !name.is_empty()
-            {
-                fields.push((name.clone(), self.control_current_value(control)));
-            }
+        if self.address_bar.focused && self.address_bar.insert_text(text) {
+            self.refresh_address_bar_input();
         }
-        if matches!(trigger_kind, FormControlKind::Button)
-            && let Some(name) = &trigger_name
-            && !name.is_empty()
-        {
-            fields.push((name.clone(), trigger_value.clone()));
-        }
+    }
 
-        let base = self.page_base_url().or(self.current_url.as_ref());
-        let action = trigger_form_action.as_deref().unwrap_or("");
-        let resolved = if action.is_empty() {
-            base.map(ToString::to_string)
-        } else {
-            Some(resolve_content_href(action, base))
-        };
-        let Some(url_text) = resolved else {
-            return;
-        };
-        if let Some(target_url) =
-            build_get_form_submission_url(&url_text, &fields, action.is_empty())
-            && let Ok(url) = Url::parse(&target_url)
-        {
-            self.load_url(url);
+    fn handle_ime(&mut self, ime: Ime) {
+        match ime {
+            Ime::Enabled => {}
+            Ime::Disabled => self.ime_composing = false,
+            Ime::Preedit(text, _) => {
+                self.ime_composing = !text.is_empty();
+            }
+            Ime::Commit(text) => {
+                self.ime_composing = false;
+                if self.address_bar.focused {
+                    if self.address_bar.insert_text(&text) {
+                        self.refresh_address_bar_input();
+                    }
+                } else if self.focused_page_input.is_some() {
+                    let _ = self.content_tx.send(ContentCommand::ImeCommit(text));
+                }
+            }
         }
     }
 
@@ -1797,7 +2080,6 @@ impl BrowserApp {
         match hit {
             HitTarget::Button(button) => return self.handle_button(button),
             HitTarget::AddressBar => {
-                self.blur_page_input();
                 let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
                 let char_index = cursor_index_for_address_x(
                     &self.address_bar,
@@ -1811,87 +2093,74 @@ impl BrowserApp {
                 );
                 self.focus_address_bar(char_index);
             }
-            HitTarget::PageTextInput(control_id) => {
-                if let Some(control) = self.current_page_control(control_id) {
-                    if control.disabled {
-                        return false;
-                    }
-                    let click_result =
-                        self.dispatch_page_dom_event(control.node_id, "click", true, true);
-                    if let Some(result) = click_result {
-                        if result.default_prevented || result.snapshot.navigation_target.is_some() {
-                            return false;
-                        }
-                    }
-                    let Some(control) = self.current_page_control(control_id) else {
-                        return false;
-                    };
-                    let local_x = self
-                        .cursor_position
-                        .x
-                        .max((FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64)
-                        - (FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64;
-                    let mut editor = AddressBarState::new(self.control_current_value(&control));
-                    editor.focus_at(editor.char_len());
-                    let char_index = cursor_index_for_text_x(
-                        &editor,
-                        &mut self.fonts,
-                        control.width.saturating_sub(CONTROL_PADDING_X * 2),
-                        local_x,
-                        control.font_size_px,
-                        control.font_family,
-                    );
-                    self.focus_page_input_at(&control, Some(char_index));
-                }
-            }
-            HitTarget::PageButton(control_id) => {
-                let control = self.current_page_control(control_id);
-                if control
-                    .as_ref()
-                    .map(|control| control.disabled)
-                    .unwrap_or(false)
-                {
-                    return false;
-                }
+            HitTarget::PageTextInput(control_id) | HitTarget::PageButton(control_id) => {
                 self.blur_address_bar();
-                self.blur_page_input();
-                if let Some(control) = control {
-                    let click_result =
-                        self.dispatch_page_dom_event(control.node_id, "click", true, true);
-                    if let Some(result) = click_result {
-                        if result.default_prevented || result.snapshot.navigation_target.is_some() {
-                            return false;
-                        }
-                    }
+                if matches!(hit, HitTarget::PageButton(_)) {
+                    self.focused_page_input = None;
+                    self.ime_composing = false;
                 }
-                self.submit_page_form(control_id);
-            }
-            HitTarget::Resize(direction) => {
-                self.blur_address_bar();
-                self.blur_page_input();
-                let _ = window.drag_resize_window(direction);
-            }
-            HitTarget::TitleBar => {
-                self.blur_address_bar();
-                self.blur_page_input();
-                let _ = window.drag_window();
+                let request = self
+                    .current_page_control(control_id)
+                    .and_then(|control| control.node_id)
+                    .map(|target_node_id| DomEventRequest {
+                        target_node_id,
+                        event_type: "click".to_string(),
+                        bubbles: true,
+                        cancelable: true,
+                        composed: default_page_event_composed("click"),
+                        ..Default::default()
+                    });
+                let _ = self.content_tx.send(ContentCommand::DispatchMouseEvent {
+                    request,
+                    window_size,
+                    hit_target: hit,
+                    hovered_link_url: self.hovered_link_url.clone(),
+                    hovered_link_node_id: self.hovered_link_node_id,
+                    hovered_element_node_id: self.hovered_element_node_id,
+                    cursor_position: self.cursor_position,
+                });
+                self.sync_input_method();
             }
             HitTarget::None => {
                 self.blur_address_bar();
-                self.blur_page_input();
-                if let Some(href) = self.hovered_link_url.clone() {
-                    let node_id = self.hovered_link_node_id;
-                    let click_result = self.dispatch_page_dom_event(node_id, "click", true, true);
-                    if let Some(result) = click_result {
-                        if result.default_prevented || result.snapshot.navigation_target.is_some() {
-                            return false;
-                        }
-                    }
-                    let resolved = resolve_content_href(&href, self.page_base_url());
-                    if let Ok(url) = parse_address_input(&resolved) {
-                        self.load_url(url);
-                    }
-                }
+                self.focused_page_input = None;
+                self.ime_composing = false;
+                let request = self
+                    .hovered_link_node_id
+                    .map(|target_node_id| DomEventRequest {
+                        target_node_id,
+                        event_type: "click".to_string(),
+                        bubbles: true,
+                        cancelable: true,
+                        composed: default_page_event_composed("click"),
+                        ..Default::default()
+                    });
+                let _ = self.content_tx.send(ContentCommand::DispatchMouseEvent {
+                    request,
+                    window_size,
+                    hit_target: hit,
+                    hovered_link_url: self.hovered_link_url.clone(),
+                    hovered_link_node_id: self.hovered_link_node_id,
+                    hovered_element_node_id: self.hovered_element_node_id,
+                    cursor_position: self.cursor_position,
+                });
+                self.sync_input_method();
+            }
+            HitTarget::Resize(direction) => {
+                self.blur_address_bar();
+                self.focused_page_input = None;
+                self.ime_composing = false;
+                let _ = self.content_tx.send(ContentCommand::BlurPageInput);
+                let _ = window.drag_resize_window(direction);
+                self.sync_input_method();
+            }
+            HitTarget::TitleBar => {
+                self.blur_address_bar();
+                self.focused_page_input = None;
+                self.ime_composing = false;
+                let _ = self.content_tx.send(ContentCommand::BlurPageInput);
+                let _ = window.drag_window();
+                self.sync_input_method();
             }
         }
 
@@ -1900,13 +2169,15 @@ impl BrowserApp {
 
     fn handle_button(&mut self, button: ChromeButton) -> bool {
         self.blur_address_bar();
-        self.blur_page_input();
+        self.focused_page_input = None;
+        self.ime_composing = false;
+        let _ = self.content_tx.send(ContentCommand::BlurPageInput);
         let Some(window) = self.window.as_ref().cloned() else {
             return false;
         };
         match button {
-            ChromeButton::Back if self.can_go_back() => self.go_back(),
-            ChromeButton::Forward if self.can_go_forward() => self.go_forward(),
+            ChromeButton::Back if self.can_go_back => self.go_back(),
+            ChromeButton::Forward if self.can_go_forward => self.go_forward(),
             ChromeButton::Reload => self.reload(),
             ChromeButton::Navigate => self.navigate_to_address(),
             ChromeButton::Minimize => window.set_minimized(true),
@@ -1915,7 +2186,14 @@ impl BrowserApp {
             _ => {}
         }
 
+        self.sync_input_method();
         false
+    }
+}
+
+impl Drop for BrowserApp {
+    fn drop(&mut self) {
+        let _ = self.content_tx.send(ContentCommand::Stop);
     }
 }
 
@@ -1930,7 +2208,7 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
         let window = event_loop
             .create_window(
                 Window::default_attributes()
-                    .with_title(self.document.window_title())
+                    .with_title(window_title_from_title(&self.title))
                     .with_decorations(false)
                     .with_inner_size(LogicalSize::new(WINDOW_WIDTH as f64, WINDOW_HEIGHT as f64))
                     .with_min_inner_size(LogicalSize::new(720.0, 480.0)),
@@ -1944,21 +2222,78 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
 
         self.surface = Some(surface);
         self.window = Some(window);
-        self.sync_viewport_size();
         self.sync_window_title();
         self.sync_input_method();
+        if let Some(window) = &self.window {
+            let size = window.inner_size();
+            let _ = self.content_tx.send(ContentCommand::Resize {
+                width: size.width,
+                height: size.height,
+            });
+        }
         self.request_redraw();
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: BrowserUserEvent) {
         match event {
-            BrowserUserEvent::NavigationFinished {
-                navigation_id,
-                restore_scroll,
-                result,
-            } => self.finish_navigation(navigation_id, restore_scroll, result),
-            BrowserUserEvent::RenderFinished { render_id, result } => {
-                self.finish_render(render_id, result)
+            BrowserUserEvent::ContentFrame {
+                render_id,
+                pixels,
+                content_width,
+                viewport_height,
+                content_height,
+                scroll_y,
+                layout,
+            } => {
+                let _ = render_id;
+                self.latest_render_frame = Some(RenderedContentFrame {
+                    content_width,
+                    viewport_height,
+                    scroll_y,
+                    content_height,
+                    layout,
+                    pixels,
+                });
+                if let Some(window) = &self.window {
+                    self.update_hover(window.inner_size());
+                }
+                self.sync_input_method();
+                self.request_redraw();
+            }
+            BrowserUserEvent::ContentMeta {
+                title,
+                url,
+                can_go_back,
+                can_go_forward,
+                scroll_y,
+                status_line,
+                subtitle,
+                is_error,
+                focused_page_input,
+            } => {
+                self.title = title.unwrap_or_else(|| "New Tab".to_string());
+                self.current_url = url;
+                self.can_go_back = can_go_back;
+                self.can_go_forward = can_go_forward;
+                self.scroll_y = scroll_y;
+                self.status_line = status_line;
+                self.subtitle = subtitle;
+                self.is_error = is_error;
+                self.focused_page_input = focused_page_input;
+                if !self.address_bar.focused {
+                    self.address_bar.set_text(
+                        self.current_url
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_default(),
+                    );
+                }
+                self.sync_window_title();
+                self.sync_input_method();
+                self.request_redraw();
+            }
+            BrowserUserEvent::FetchSettleNeeded => {
+                let _ = self.content_tx.send(ContentCommand::JsSettle);
             }
         }
     }
@@ -1981,17 +2316,21 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
                 if let Err(error) = self.draw() {
-                    self.document = DocumentView::error(format!("drawing failed: {error}"));
-                    self.scroll_y = 0;
+                    self.title = "Render Error".to_string();
+                    self.status_line = format!("Status: drawing failed ({error})");
+                    self.subtitle =
+                        "The window surface could not present the latest frame.".to_string();
+                    self.is_error = true;
                     self.sync_window_title();
                     let _ = self.draw();
                 }
             }
             WindowEvent::Resized(size) => {
-                // Clear scratch pool on resize: buffer dimensions change, old buffers may be wrong size.
-                self.scratch.clear();
                 self.update_hover(size);
-                self.sync_viewport_size();
+                let _ = self.content_tx.send(ContentCommand::Resize {
+                    width: size.width,
+                    height: size.height,
+                });
                 self.sync_input_method();
                 self.request_redraw();
             }
@@ -2003,22 +2342,23 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
                 self.hovered_target = HitTarget::None;
                 self.hovered_link_url = None;
                 self.hovered_link_node_id = None;
-                if self.hovered_element_node_id.is_some() {
-                    self.hovered_element_node_id = None;
-                    let content_width = window
-                        .inner_size()
-                        .width
-                        .saturating_sub(FRAME_PADDING)
-                        .max(1);
-                    if let DocumentContent::Loaded(page) = &mut self.document.content {
-                        page.relayout(content_width, &InteractiveState::default());
-                    }
-                    self.request_content_render();
-                }
+                self.hovered_element_node_id = None;
+                let _ = self.content_tx.send(ContentCommand::UpdateHover {
+                    hovered_target: HitTarget::None,
+                    hovered_link_url: None,
+                    hovered_link_node_id: None,
+                    hovered_element_node_id: None,
+                    window_size: window.inner_size(),
+                });
                 window.set_cursor(CursorIcon::Default);
                 self.request_redraw();
             }
-            WindowEvent::MouseWheel { delta, .. } => self.handle_wheel(delta, window.inner_size()),
+            WindowEvent::MouseWheel { delta, .. } => {
+                let _ = self.content_tx.send(ContentCommand::Scroll {
+                    delta,
+                    window_size: window.inner_size(),
+                });
+            }
             WindowEvent::MouseInput {
                 button: MouseButton::Left,
                 state: ElementState::Pressed,
@@ -2037,54 +2377,161 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
                     PhysicalKey::Code(key_code) => Some(key_code),
                     _ => None,
                 };
-                let focused_page_control_id = self
-                    .focused_page_input
-                    .as_ref()
-                    .map(|focused| focused.control_id);
-                let keydown_result = physical_key.and_then(|key_code| {
-                    focused_page_control_id.and_then(|_| {
-                        self.dispatch_focused_page_keyboard_event("keydown", key_code, event.repeat)
-                    })
-                });
+                if let Some(key_code) = physical_key {
+                    if !event.repeat && self.modifiers.alt_key() && !self.modifiers.control_key() {
+                        match key_code {
+                            KeyCode::ArrowLeft => {
+                                self.go_back();
+                                return;
+                            }
+                            KeyCode::ArrowRight => {
+                                self.go_forward();
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
 
-                if keydown_result
-                    .as_ref()
-                    .is_some_and(|result| result.snapshot.navigation_target.is_some())
-                {
-                    return;
+                    if self.address_bar.focused {
+                        let control = self.modifiers.control_key();
+                        let shift = self.modifiers.shift_key();
+                        match key_code {
+                            KeyCode::Escape if !event.repeat => {
+                                self.blur_address_bar();
+                                return;
+                            }
+                            KeyCode::Enter | KeyCode::NumpadEnter if !event.repeat => {
+                                self.navigate_to_address();
+                                return;
+                            }
+                            KeyCode::Backspace => {
+                                let changed = if control {
+                                    self.address_bar.delete_word_backward()
+                                } else {
+                                    self.address_bar.backspace()
+                                };
+                                if changed {
+                                    self.refresh_address_bar_input();
+                                }
+                                return;
+                            }
+                            KeyCode::Delete => {
+                                let changed = if control {
+                                    self.address_bar.delete_word_forward()
+                                } else {
+                                    self.address_bar.delete_forward()
+                                };
+                                if changed {
+                                    self.refresh_address_bar_input();
+                                }
+                                return;
+                            }
+                            KeyCode::ArrowLeft => {
+                                let changed = if control {
+                                    self.address_bar.move_word_left(shift)
+                                } else {
+                                    self.address_bar.move_left(shift)
+                                };
+                                if changed {
+                                    self.refresh_address_bar_input();
+                                }
+                                return;
+                            }
+                            KeyCode::ArrowRight => {
+                                let changed = if control {
+                                    self.address_bar.move_word_right(shift)
+                                } else {
+                                    self.address_bar.move_right(shift)
+                                };
+                                if changed {
+                                    self.refresh_address_bar_input();
+                                }
+                                return;
+                            }
+                            KeyCode::Home => {
+                                if self.address_bar.move_home(shift) {
+                                    self.refresh_address_bar_input();
+                                }
+                                return;
+                            }
+                            KeyCode::End => {
+                                if self.address_bar.move_end(shift) {
+                                    self.refresh_address_bar_input();
+                                }
+                                return;
+                            }
+                            KeyCode::KeyA if control && !event.repeat => {
+                                if self.address_bar.select_all() {
+                                    self.refresh_address_bar_input();
+                                }
+                                return;
+                            }
+                            KeyCode::KeyC if control && !event.repeat => {
+                                self.copy_address_selection();
+                                return;
+                            }
+                            KeyCode::KeyX if control && !event.repeat => {
+                                if self.cut_address_selection() {
+                                    self.refresh_address_bar_input();
+                                }
+                                return;
+                            }
+                            KeyCode::KeyV if control && !event.repeat => {
+                                if self.paste_into_address_bar() {
+                                    self.refresh_address_bar_input();
+                                }
+                                return;
+                            }
+                            KeyCode::KeyL if control && !event.repeat => {
+                                self.address_bar.select_all();
+                                self.refresh_address_bar_input();
+                                return;
+                            }
+                            KeyCode::KeyR if control && !event.repeat => {
+                                self.reload();
+                                return;
+                            }
+                            KeyCode::F5 if !event.repeat => {
+                                self.reload();
+                                return;
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        match key_code {
+                            KeyCode::Escape
+                                if !event.repeat && self.focused_page_input.is_none() =>
+                            {
+                                event_loop.exit();
+                                return;
+                            }
+                            KeyCode::KeyL if self.modifiers.control_key() && !event.repeat => {
+                                self.focus_address_bar_select_all();
+                                return;
+                            }
+                            KeyCode::KeyR | KeyCode::F5 if !event.repeat => {
+                                self.reload();
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
 
-                if let Some(key_code) = physical_key
-                    && !keydown_result
-                        .as_ref()
-                        .is_some_and(|result| result.default_prevented)
-                    && self.handle_key(key_code, window.inner_size(), event.repeat)
-                {
-                    event_loop.exit();
-                    return;
-                }
-
-                if let Some(text) = event.text.as_deref()
-                    && !keydown_result
-                        .as_ref()
-                        .is_some_and(|result| result.default_prevented)
+                if !self.address_bar.focused {
+                    let _ = self.content_tx.send(ContentCommand::DispatchKeyEvent {
+                        key_code: physical_key,
+                        repeat: event.repeat,
+                        text: event.text.as_deref().map(str::to_string),
+                        modifiers: self.modifiers,
+                        window_size: window.inner_size(),
+                    });
+                } else if let Some(text) = event.text.as_deref()
                     && !self.modifiers.control_key()
                     && !self.modifiers.alt_key()
                     && !self.modifiers.super_key()
                 {
                     self.handle_text_input(text);
-                }
-
-                if let (Some(key_code), Some(focused_control_id)) =
-                    (physical_key, focused_page_control_id)
-                    && self
-                        .focused_page_input
-                        .as_ref()
-                        .map(|focused| focused.control_id)
-                        == Some(focused_control_id)
-                {
-                    let _ =
-                        self.dispatch_focused_page_keyboard_event("keyup", key_code, event.repeat);
                 }
             }
             _ => {}
@@ -2131,13 +2578,6 @@ impl DocumentView {
         }
     }
 
-    fn load(url: Url) -> Self {
-        match load_page(&url) {
-            Ok(page) => Self::from_page(page),
-            Err(error) => Self::error(error.to_string()),
-        }
-    }
-
     fn from_page(page: BrowserPage) -> Self {
         let content_type = page
             .content_type
@@ -2160,15 +2600,12 @@ impl DocumentView {
         }
     }
 
-    fn render_snapshot(&self) -> Option<RenderPageSnapshot> {
+    fn page_images(&self) -> Option<ImageStore> {
         let DocumentContent::Loaded(page) = &self.content else {
             return None;
         };
 
-        Some(RenderPageSnapshot {
-            styled_document: page.styled_document.clone(),
-            images: page.images.clone(),
-        })
+        Some(page.images.clone())
     }
 
     fn dispatch_dom_event(&mut self, request: DomEventRequest) -> Option<DomEventDispatchResult> {
@@ -2255,14 +2692,6 @@ impl DocumentView {
         }
     }
 
-    fn window_title(&self) -> String {
-        if self.title.is_empty() {
-            "Tobira".to_string()
-        } else {
-            format!("Tobira - {}", self.title)
-        }
-    }
-
     fn is_error(&self) -> bool {
         matches!(self.content, DocumentContent::Error(_))
     }
@@ -2315,6 +2744,14 @@ fn empty_layout_document() -> LayoutDocument {
         links: Vec::new(),
         controls: Vec::new(),
         element_hitboxes: Vec::new(),
+    }
+}
+
+fn window_title_from_title(title: &str) -> String {
+    if title.is_empty() {
+        "Tobira".to_string()
+    } else {
+        format!("Tobira - {title}")
     }
 }
 
@@ -3286,7 +3723,10 @@ fn paint_chrome(
     width: u32,
     height: u32,
     chrome: &ChromeLayoutMetrics,
-    document: &DocumentView,
+    title: &str,
+    status_line: &str,
+    subtitle: &str,
+    is_error: bool,
     address_bar: &AddressBarState,
     hovered_target: HitTarget,
     can_go_back: bool,
@@ -3361,7 +3801,7 @@ fn paint_chrome(
         .saturating_sub(page_title_x.saturating_add(12));
     let page_title = fit_text_to_width(
         fonts,
-        &document.title,
+        title,
         page_title_max_width,
         TITLE_FONT_SIZE,
         FontFamilyKind::Sans,
@@ -3600,7 +4040,7 @@ fn paint_chrome(
         FontFamilyKind::Sans,
     );
 
-    let meta_left = format!("{} | {}", document.status_line, document.subtitle);
+    let meta_left = format!("{status_line} | {subtitle}");
     let meta_left_max_width = meta_right_x.saturating_sub(FRAME_PADDING.saturating_mul(2));
     let meta_left_text = fit_text_to_width(
         fonts,
@@ -3617,7 +4057,7 @@ fn paint_chrome(
         chrome.info_y,
         &meta_left_text,
         INFO_FONT_SIZE,
-        if document.is_error() {
+        if is_error {
             COLOR_ACCENT
         } else {
             COLOR_HEADER_TEXT
@@ -4239,7 +4679,7 @@ fn render_commands(
                 let gx = g.x;
                 let gy = g.y;
                 let gw_u = g.width;
-                let gh_u = g.height;
+                let _gh_u = g.height;
 
                 let py_start = g.y.max(scroll_y);
                 let py_end = grad_bottom.min(viewport_bottom);
@@ -4676,28 +5116,9 @@ fn render_layer(
     scratch[depth] = offscreen;
 }
 
-fn start_load_worker(
-    request_rx: mpsc::Receiver<NavigationRequest>,
-    event_proxy: EventLoopProxy<BrowserUserEvent>,
-) {
-    thread::Builder::new()
-        .name("tobira-load".to_string())
-        .spawn(move || {
-            for request in request_rx {
-                let result = load_page(&request.url).map_err(|error| error.to_string());
-                let _ = event_proxy.send_event(BrowserUserEvent::NavigationFinished {
-                    navigation_id: request.id,
-                    restore_scroll: request.restore_scroll,
-                    result,
-                });
-            }
-        })
-        .expect("load worker should spawn");
-}
-
 fn start_render_worker(
     request_rx: mpsc::Receiver<RenderRequest>,
-    event_proxy: EventLoopProxy<BrowserUserEvent>,
+    worker_event_tx: Sender<ContentWorkerEvent>,
 ) {
     thread::Builder::new()
         .name("tobira-render".to_string())
@@ -4708,7 +5129,7 @@ fn start_render_worker(
                 let result =
                     render_content_frame(request, &mut fonts).map_err(|error| error.to_string());
                 let _ =
-                    event_proxy.send_event(BrowserUserEvent::RenderFinished { render_id, result });
+                    worker_event_tx.send(ContentWorkerEvent::RenderFinished { render_id, result });
             }
         })
         .expect("render worker should spawn");
@@ -4718,19 +5139,13 @@ fn render_content_frame(
     request: RenderRequest,
     fonts: &mut FontContext,
 ) -> Result<RenderedContentFrame> {
-    let layout = layout_styled_document(
-        &request.page.styled_document,
-        &request.page.images,
-        request.content_width,
-        fonts,
-    );
     let mut pixels = vec![
-        layout.background_color;
+        request.layout.background_color;
         request.content_width as usize * request.viewport_height as usize
     ];
     let mut scratch = Vec::new();
     paint_layout(
-        Some(&request.page.images),
+        request.page_images.as_ref(),
         fonts,
         &mut pixels,
         request.content_width,
@@ -4739,7 +5154,7 @@ fn render_content_frame(
         0,
         request.viewport_height,
         request.scroll_y,
-        &layout,
+        &request.layout,
         request.focused_page_input.as_ref(),
         request.hovered_target,
         &mut scratch,
@@ -4749,8 +5164,8 @@ fn render_content_frame(
         content_width: request.content_width,
         viewport_height: request.viewport_height,
         scroll_y: request.scroll_y,
-        content_height: layout.content_height,
-        layout,
+        content_height: request.layout.content_height,
+        layout: request.layout,
         pixels,
     })
 }
@@ -4812,56 +5227,6 @@ fn apply_affine_transform(buf: &mut [u32], width: u32, height: u32, layer: &Laye
     }
 
     buf.copy_from_slice(&result);
-}
-
-/// Apply a separable box blur of radius `r` pixels to `buf` (width x height).
-/// Uses a simple per-pixel averaging approach for correctness.
-fn box_blur(buf: &mut [u32], width: u32, height: u32, r: u32) {
-    if r == 0 || width == 0 || height == 0 {
-        return;
-    }
-    let w = width as usize;
-    let h = height as usize;
-    let radius = r as usize;
-    let mut tmp = vec![0u32; buf.len()];
-
-    // Horizontal pass: buf -> tmp
-    for y in 0..h {
-        for x in 0..w {
-            let x_start = x.saturating_sub(radius);
-            let x_end = (x + radius + 1).min(w);
-            let count = (x_end - x_start) as u32;
-            let mut r_sum = 0u32;
-            let mut g_sum = 0u32;
-            let mut b_sum = 0u32;
-            for kx in x_start..x_end {
-                let p = buf[y * w + kx];
-                r_sum += (p >> 16) & 0xFF;
-                g_sum += (p >> 8) & 0xFF;
-                b_sum += p & 0xFF;
-            }
-            tmp[y * w + x] = ((r_sum / count) << 16) | ((g_sum / count) << 8) | (b_sum / count);
-        }
-    }
-
-    // Vertical pass: tmp -> buf
-    for y in 0..h {
-        for x in 0..w {
-            let y_start = y.saturating_sub(radius);
-            let y_end = (y + radius + 1).min(h);
-            let count = (y_end - y_start) as u32;
-            let mut r_sum = 0u32;
-            let mut g_sum = 0u32;
-            let mut b_sum = 0u32;
-            for ky in y_start..y_end {
-                let p = tmp[ky * w + x];
-                r_sum += (p >> 16) & 0xFF;
-                g_sum += (p >> 8) & 0xFF;
-                b_sum += p & 0xFF;
-            }
-            buf[y * w + x] = ((r_sum / count) << 16) | ((g_sum / count) << 8) | (b_sum / count);
-        }
-    }
 }
 
 fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {

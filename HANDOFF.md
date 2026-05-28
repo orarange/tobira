@@ -19,19 +19,24 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-25`
+- Date: `2026-05-28`
 - Repo / package name: `tobira`
-- Working branch: `master`
+- Working branch: `codex/content-thread`
 - Workflow:
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `200` passing tests on `2026-05-25`
-- `cargo build`: success on `2026-05-25`
+- `cargo test`: `201` passing tests on `2026-05-28`
+- `cargo build`: success on `2026-05-28`
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
   - priority order: WebComponents / shadow DOM details -> DOM mutation to reflow / hit-test sync -> fetch/XHR / history / storage browser-grade behavior -> real-site stability checks
 - Current implementation highlights:
+  - current branch focus: move all page logic off the winit main thread while keeping `boa` and the rest of the browser build green
+  - BrowserApp is now chrome-only on the main thread: window/surface, address bar, hover state, IME, and latest rendered frame blit
+  - page state now lives on a dedicated `ContentThread`: `DocumentView`, `BrowserPage` / `JavaScriptSession`, content `FontContext`, history, true scroll position, focused page input state, and render dispatch
+  - content renders are shipped back as `ContentFrame` pixel buffers plus `ContentMeta` display copies, so `softbuffer` stays on the main thread while page work stays off it
+  - the existing render worker still handles heavy painting, but it is now driven by the content thread instead of the winit event loop
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
   - CSS engine with broader selector and expression support than the original README says
@@ -198,6 +203,13 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-28 - Codex (content thread split)
+
+- Moved page ownership off the winit main thread into a dedicated `ContentThread`, including `DocumentView`, `BrowserPage` / `JavaScriptSession`, history, true scroll position, focused page input state, and content render dispatch.
+- Kept the main thread chrome-only by replacing direct page mutation with `ContentCommand` messages and by receiving `ContentFrame` / `ContentMeta` user events for blitting and display-copy updates.
+- Preserved the existing render-worker pattern under the content thread so painting still happens off-thread while `softbuffer` stays on the main thread.
+- Verified the split with `cargo check`, `cargo build`, and `cargo test` (`201` passing tests).
 
 ### 2026-05-25 - Codex (shadow DOM / composed path)
 
