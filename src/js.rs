@@ -72,6 +72,7 @@ pub struct DomEventRequest {
     pub client_y: Option<i32>,
     pub button: Option<i32>,
     pub buttons: Option<i32>,
+    pub related_target_node_id: Option<usize>,
     pub is_composing: bool,
     pub repeat: bool,
     pub alt_key: bool,
@@ -5010,6 +5011,15 @@ fn build_dom_event_object(
     if let Some(buttons) = request.buttons {
         let _ = event.set(js_string!("buttons"), JsValue::new(buttons), true, context);
     }
+    if let Some(related_target_node_id) = request.related_target_node_id {
+        let related_target = build_dom_node_object(context, related_target_node_id);
+        let _ = event.set(
+            js_string!("relatedTarget"),
+            JsValue::from(related_target),
+            true,
+            context,
+        );
+    }
     let _ = event.set(
         js_string!("isComposing"),
         JsValue::new(request.is_composing),
@@ -9417,6 +9427,7 @@ fn js_dom_dispatch_event(
         client_y,
         button,
         buttons,
+        related_target_node_id,
         is_composing,
         repeat,
         alt_key,
@@ -9436,6 +9447,10 @@ fn js_dom_dispatch_event(
         let client_y = js_optional_i32_property(&object, "clientY", context)?;
         let button = js_optional_i32_property(&object, "button", context)?;
         let buttons = js_optional_i32_property(&object, "buttons", context)?;
+        let related_target_node_id = match object.get(js_string!("relatedTarget"), context)? {
+            value if value.is_undefined() || value.is_null() => None,
+            value => Some(js_value_to_dom_node_id(&value, context)?),
+        };
         let is_composing = js_optional_bool_property(&object, "isComposing", context)?;
         let repeat = js_optional_bool_property(&object, "repeat", context)?;
         let alt_key = js_optional_bool_property(&object, "altKey", context)?;
@@ -9455,6 +9470,7 @@ fn js_dom_dispatch_event(
             client_y,
             button,
             buttons,
+            related_target_node_id,
             is_composing,
             repeat,
             alt_key,
@@ -9467,8 +9483,25 @@ fn js_dom_dispatch_event(
         let bubbles = default_event_bubbles(&event_type);
         let cancelable = default_event_cancelable(&event_type);
         (
-            event_type, bubbles, cancelable, None, None, None, None, None, None, None, None, None,
-            false, false, false, false, false, false,
+            event_type,
+            bubbles,
+            cancelable,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
         )
     };
     let request = DomEventRequest {
@@ -9488,6 +9521,7 @@ fn js_dom_dispatch_event(
         client_y,
         button,
         buttons,
+        related_target_node_id,
         is_composing,
         repeat,
         alt_key,
@@ -14269,6 +14303,47 @@ mod tests {
 
         assert!(!result.default_prevented);
         assert_eq!(result.snapshot.title_override.as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn dispatches_mouse_events_with_related_target_and_coordinates() {
+        let mut runtime = JavaScriptRuntime::new(
+            &Url::parse("https://example.com").unwrap(),
+            "<html><body><div id=\"from\"></div><div id=\"to\"></div><script>var to = document.getElementById('to'); to.addEventListener('mouseover', function (event) { document.title = [event.type, event.relatedTarget && event.relatedTarget.id, String(event.clientX), String(event.clientY), String(event.button), String(event.buttons)].join('|'); });</script></body></html>",
+        );
+        runtime.process_loaded_document();
+        runtime.dispatch_initial_load_events();
+
+        let (from_id, to_id) = {
+            let host = runtime
+                .context
+                .get_data::<super::JavaScriptHostData>()
+                .unwrap();
+            let state = host.state.borrow();
+            let document_id = state.dom.document_id;
+            let from_id = state.dom.find_first_tag(document_id, "div").unwrap();
+            let to_id = state.dom.next_sibling(from_id).unwrap();
+            (from_id, to_id)
+        };
+
+        let result = runtime.dispatch_dom_event(DomEventRequest {
+            target_node_id: to_id,
+            event_type: "mouseover".to_string(),
+            bubbles: true,
+            cancelable: true,
+            client_x: Some(12),
+            client_y: Some(34),
+            button: Some(0),
+            buttons: Some(0),
+            related_target_node_id: Some(from_id),
+            ..Default::default()
+        });
+
+        assert!(!result.default_prevented);
+        assert_eq!(
+            result.snapshot.title_override.as_deref(),
+            Some("mouseover|from|12|34|0|0")
+        );
     }
 
     #[test]

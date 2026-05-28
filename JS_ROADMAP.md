@@ -31,6 +31,7 @@ Already working:
 - same-origin navigation checks
 - loop-iteration runtime budget for runaway scripts
 - native GUI form controls for `GET` submissions
+- GUI hover transitions now dispatch `mouseover` / `mouseout` / `mouseenter` / `mouseleave` with `relatedTarget`
 - passive listener semantics
 - `location.hash`, `history.pushState(...)`, `replaceState(...)`, `back()`, and `forward()` for same-document navigation
 - `history.state`, `popstate`, and `hashchange` for same-document session history changes

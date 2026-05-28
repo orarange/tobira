@@ -34,7 +34,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - run Codex implementation from a separate `codex/js-event-capture` worktree
   - Codex is the primary implementation owner for this worktree and may touch both CSS and JS when needed
 - Verification status:
-- `cargo test`: `201` passing tests on `2026-05-28`
+- `cargo test`: `207` passing tests on `2026-05-28`
 - `cargo build`: success on `2026-05-28`
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -42,8 +42,9 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - CSS engine with broader selector and expression support than the original README says
     - descendant / child selectors
     - attribute selectors
-    - `:first-child`, `:last-child`, `:nth-child(...)`, `:not(...)`
-    - `@media` handling
+  - `:first-child`, `:last-child`, `:nth-child(...)`, `:not(...)`
+  - `@media` handling
+  - hover transitions now dispatch `mouseover` / `mouseout` / `mouseenter` / `mouseleave` with `relatedTarget` so DOM-driven hover UI can react like a real browser
     - `calc(...)`
     - `rgba(...)` blending
   - CSS Phase 5 baseline is treated as complete on the Claude `claude/phase5-css` branch; Codex can extend CSS when needed and should coordinate overlap rather than duplicating the parser/layout engine.
@@ -205,6 +206,11 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-28 - Codex (hover mouse event plumbing)
+
+- Wired GUI hover transitions into DOM mouse events so moving between page targets now dispatches `mouseover` / `mouseout` and `mouseenter` / `mouseleave` with `relatedTarget` metadata.
+- Added a regression test covering mouse event coordinates plus related-target propagation through the JS runtime.
 
 ### 2026-05-28 - Codex (observer-driven layout reactivity)
 

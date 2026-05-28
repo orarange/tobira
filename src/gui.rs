@@ -1014,7 +1014,13 @@ impl BrowserApp {
         let element_changed = hovered_element != self.hovered_element_node_id;
         // Only relayout when hovered element changes
         if element_changed {
+            let previous_hovered_element = self.hovered_element_node_id;
             self.hovered_element_node_id = hovered_element;
+            self.dispatch_hover_transition_events(
+                window_size,
+                previous_hovered_element,
+                hovered_element,
+            );
             self.request_content_render();
         }
 
@@ -1661,6 +1667,106 @@ impl BrowserApp {
             cancelable,
             ..Default::default()
         })
+    }
+
+    fn dispatch_page_mouse_event(
+        &mut self,
+        node_id: Option<usize>,
+        event_type: &str,
+        bubbles: bool,
+        cancelable: bool,
+        related_target_node_id: Option<usize>,
+        window_size: PhysicalSize<u32>,
+    ) -> Option<DomEventDispatchResult> {
+        let node_id = node_id?;
+        let chrome = chrome_layout_metrics(&mut self.fonts, window_size.width);
+        let client_x = (self.cursor_position.x - (FRAME_PADDING / 2) as f64)
+            .round()
+            .clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+        let client_y = (self.cursor_position.y - (chrome.height + FRAME_PADDING) as f64)
+            .round()
+            .clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+        self.dispatch_page_dom_event_request(DomEventRequest {
+            target_node_id: node_id,
+            event_type: event_type.to_string(),
+            bubbles,
+            cancelable,
+            related_target_node_id,
+            client_x: Some(client_x),
+            client_y: Some(client_y),
+            button: Some(0),
+            buttons: Some(0),
+            ..Default::default()
+        })
+    }
+
+    fn dispatch_hover_transition_events(
+        &mut self,
+        window_size: PhysicalSize<u32>,
+        previous_hovered_element: Option<usize>,
+        next_hovered_element: Option<usize>,
+    ) {
+        if previous_hovered_element == next_hovered_element {
+            return;
+        }
+
+        let page_revision_before = self.document.layout_revision();
+        let current_url_before = self.current_url.clone();
+
+        if let Some(previous) = previous_hovered_element {
+            let _ = self.dispatch_page_mouse_event(
+                Some(previous),
+                "mouseout",
+                true,
+                true,
+                next_hovered_element,
+                window_size,
+            );
+            if self.current_url != current_url_before
+                || self.document.layout_revision() != page_revision_before
+            {
+                return;
+            }
+
+            let _ = self.dispatch_page_mouse_event(
+                Some(previous),
+                "mouseleave",
+                false,
+                false,
+                next_hovered_element,
+                window_size,
+            );
+            if self.current_url != current_url_before
+                || self.document.layout_revision() != page_revision_before
+            {
+                return;
+            }
+        }
+
+        if let Some(next) = next_hovered_element {
+            let _ = self.dispatch_page_mouse_event(
+                Some(next),
+                "mouseover",
+                true,
+                true,
+                previous_hovered_element,
+                window_size,
+            );
+            if self.current_url != current_url_before
+                || self.document.layout_revision() != page_revision_before
+            {
+                return;
+            }
+
+            let _ = self.dispatch_page_mouse_event(
+                Some(next),
+                "mouseenter",
+                false,
+                false,
+                previous_hovered_element,
+                window_size,
+            );
+        }
     }
 
     fn dispatch_page_dom_event_request(
