@@ -673,7 +673,7 @@ impl JavaScriptRuntime {
         }
     }
 
-    fn process_loaded_document(&mut self) {
+    fn process_loaded_document(&mut self) -> bool {
         let started = Instant::now();
         let mut iterations = 0;
         let mut executed_scripts = 0;
@@ -740,6 +740,7 @@ impl JavaScriptRuntime {
             executed_scripts,
             started.elapsed()
         ));
+        executed_scripts > 0
     }
 
     fn settle_pending_state(&mut self) {
@@ -777,10 +778,10 @@ impl JavaScriptRuntime {
         mem::take(&mut state.pending_tasks).into_iter().collect()
     }
 
-    fn flush_pending_tasks(&mut self) {
+    fn flush_pending_tasks(&mut self) -> bool {
         let pending_tasks = self.take_pending_tasks();
         if pending_tasks.is_empty() {
-            return;
+            return false;
         }
 
         let mut microtasks = Vec::new();
@@ -808,6 +809,7 @@ impl JavaScriptRuntime {
                 self.queue_pending_task(task.kind.clone(), task.action.clone());
             }
         }
+        true
     }
 
     fn run_pending_task(&mut self, task: PendingTask) {
@@ -1095,10 +1097,10 @@ impl JavaScriptRuntime {
         }
     }
 
-    fn flush_pending_document_writes(&self) {
+    fn flush_pending_document_writes(&self) -> bool {
         let written = self.take_written_html();
         if written.trim().is_empty() {
-            return;
+            return false;
         }
         if let Some(host) = self.context.get_data::<JavaScriptHostData>() {
             let mut state = host.state.borrow_mut();
@@ -1109,6 +1111,7 @@ impl JavaScriptRuntime {
                 .unwrap_or(state.dom.document_id);
             state.dom.append_fragment(parent_id, &written);
         }
+        true
     }
 
     fn remove_script_node(&self, script_id: usize) {
@@ -13087,7 +13090,8 @@ fn record_dom_character_data_mutation(
     );
 }
 
-fn flush_mutation_observers(context: &mut Context) {
+fn flush_mutation_observers(context: &mut Context) -> bool {
+    let mut delivered_any = false;
     for _ in 0..8 {
         let delivered = context
             .eval(Source::from_bytes(
@@ -13099,7 +13103,9 @@ fn flush_mutation_observers(context: &mut Context) {
         if !delivered {
             break;
         }
+        delivered_any = true;
     }
+    delivered_any
 }
 
 fn flush_resize_and_intersection_observers(context: &mut Context) {

@@ -462,6 +462,11 @@ impl BrowserApp {
     }
 
     fn current_layout(&mut self) -> LayoutDocument {
+        if matches!(&self.document.content, DocumentContent::Loaded(_))
+            && self.document.refresh_loaded_page_from_script_session()
+        {
+            self.document.layout_cache = None;
+        }
         match &self.document.content {
             DocumentContent::Loaded(_) => self
                 .document
@@ -536,6 +541,10 @@ impl BrowserApp {
                 self.scroll_y = self.document.scroll_position();
                 self.sync_current_history_scroll();
                 self.sync_window_title();
+                if self.document.refresh_loaded_page_from_script_session() {
+                    self.document.layout_cache = None;
+                    self.request_content_render();
+                }
                 self.request_redraw();
             }
             Err(error) => {
@@ -2272,7 +2281,8 @@ impl DocumentView {
         }
     }
 
-    fn render_snapshot(&self) -> Option<RenderPageSnapshot> {
+    fn render_snapshot(&mut self) -> Option<RenderPageSnapshot> {
+        self.refresh_loaded_page_from_script_session();
         match &self.content {
             DocumentContent::Loaded(page) => Some(RenderPageSnapshot {
                 styled_document: page.styled_document.clone(),
@@ -2280,6 +2290,18 @@ impl DocumentView {
             }),
             _ => None,
         }
+    }
+
+    fn refresh_loaded_page_from_script_session(&mut self) -> bool {
+        let changed = match &mut self.content {
+            DocumentContent::Loaded(page) => page.refresh_from_script_session(),
+            _ => false,
+        };
+        if changed {
+            self.sync_from_loaded_page();
+            self.layout_cache = None;
+        }
+        changed
     }
 
     fn scroll_position(&self) -> u32 {
@@ -2395,40 +2417,55 @@ impl DocumentView {
     }
 
     fn layout(&mut self, width: u32, fonts: &mut FontContext) -> LayoutDocument {
-        let revision = self.layout_revision();
-        if let Some(cache) = &self.layout_cache
-            && cache.width == width
-            && cache.revision == revision
-        {
-            return cache.layout.clone();
-        }
-
-        let layout = match &self.content {
-            DocumentContent::Blank => LayoutDocument {
-                background_color: DEFAULT_BACKGROUND_COLOR,
-                content_height: 0,
-                commands: Vec::new(),
-                links: Vec::new(),
-                controls: Vec::new(),
-                element_hitboxes: Vec::new(),
-            },
-            DocumentContent::Loading(loading) => layout_loading_document(loading, width, fonts),
-            DocumentContent::Loaded(page) => {
-                layout_styled_document(&page.styled_document, &page.images, width, fonts)
+        const MAX_LAYOUT_FEEDBACK_PASSES: usize = 2;
+        let mut passes = 0;
+        loop {
+            let revision = self.layout_revision();
+            if let Some(cache) = &self.layout_cache
+                && cache.width == width
+                && cache.revision == revision
+            {
+                return cache.layout.clone();
             }
-            DocumentContent::Error(error) => layout_error_document(error, width, fonts),
-        };
 
-        if let DocumentContent::Loaded(page) = &self.content {
-            let _ = page.set_layout_hitboxes(layout.element_hitboxes.clone());
+            let layout = match &self.content {
+                DocumentContent::Blank => LayoutDocument {
+                    background_color: DEFAULT_BACKGROUND_COLOR,
+                    content_height: 0,
+                    commands: Vec::new(),
+                    links: Vec::new(),
+                    controls: Vec::new(),
+                    element_hitboxes: Vec::new(),
+                },
+                DocumentContent::Loading(loading) => {
+                    layout_loading_document(loading, width, fonts)
+                }
+                DocumentContent::Loaded(page) => {
+                    layout_styled_document(&page.styled_document, &page.images, width, fonts)
+                }
+                DocumentContent::Error(error) => layout_error_document(error, width, fonts),
+            };
+
+            let refreshed = if let DocumentContent::Loaded(page) = &mut self.content {
+                page.set_layout_hitboxes(layout.element_hitboxes.clone())
+            } else {
+                false
+            };
+
+            let refreshed_revision = self.layout_revision();
+            if refreshed && refreshed_revision != revision && passes < MAX_LAYOUT_FEEDBACK_PASSES {
+                self.layout_cache = None;
+                passes += 1;
+                continue;
+            }
+
+            self.layout_cache = Some(CachedLayout {
+                width,
+                revision: refreshed_revision,
+                layout: layout.clone(),
+            });
+            return layout;
         }
-
-        self.layout_cache = Some(CachedLayout {
-            width,
-            revision,
-            layout: layout.clone(),
-        });
-        layout
     }
 
     fn layout_revision(&self) -> u64 {

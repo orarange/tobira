@@ -140,7 +140,11 @@ impl BrowserPage {
 
     pub fn set_viewport_size(&mut self, width: u32, height: u32) -> bool {
         if let Some(session) = &self.javascript_session {
-            return session.set_viewport_size(width, height);
+            let changed = session.set_viewport_size(width, height);
+            if changed {
+                self.refresh_from_script_session();
+            }
+            return changed;
         }
         false
     }
@@ -149,18 +153,40 @@ impl BrowserPage {
         if let Some(session) = &self.javascript_session {
             let changed = session.set_scroll_position(y);
             if changed {
-                self.scroll_y = y;
+                self.refresh_from_script_session();
             }
             return changed;
         }
         false
     }
 
-    pub fn set_layout_hitboxes(&self, hitboxes: Vec<ElementHitbox>) -> bool {
-        self.javascript_session
-            .as_ref()
-            .map(|session| session.set_layout_hitboxes(hitboxes))
-            .unwrap_or(false)
+    pub fn set_layout_hitboxes(&mut self, hitboxes: Vec<ElementHitbox>) -> bool {
+        let Some(session) = self.javascript_session.as_ref() else {
+            return false;
+        };
+        let changed = session.set_layout_hitboxes(hitboxes);
+        if changed {
+            self.refresh_from_script_session();
+        }
+        changed
+    }
+
+    pub(crate) fn refresh_from_script_session(&mut self) -> bool {
+        let Some(session) = self.javascript_session.as_ref().cloned() else {
+            return false;
+        };
+        let before_layout_revision = self.layout_revision;
+        let before_html = self.html_source.clone();
+        let before_title = self.title.clone();
+        let before_scroll = self.scroll_y;
+        let Some(snapshot) = session.snapshot() else {
+            return false;
+        };
+        self.apply_script_snapshot(snapshot);
+        before_layout_revision != self.layout_revision
+            || before_html != self.html_source
+            || before_title != self.title
+            || before_scroll != self.scroll_y
     }
 
     pub fn dispatch_window_resize(&mut self) -> Option<DomEventDispatchResult> {
