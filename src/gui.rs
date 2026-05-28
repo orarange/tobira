@@ -24,7 +24,8 @@ use crate::font::FontContext;
 use crate::image::{DecodedImage, ImageStore};
 use crate::js::{DomEventDispatchResult, DomEventRequest};
 use crate::layout::{
-    DrawCommand, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument, TextCommand,
+    DrawCommand, ElementHitbox, FormControlCommand, FormControlKind, LayerCommand,
+    LayoutDocument, TextCommand,
     layout_styled_document,
 };
 use crate::url::Url;
@@ -38,6 +39,7 @@ const CHROME_ROW_GAP: u32 = 10;
 const TITLE_BAR_HEIGHT: u32 = 38;
 const ADDRESS_BAR_HEIGHT: u32 = 42;
 const BUTTON_WIDTH: u32 = 46;
+const MAX_RENDER_FEEDBACK_PASSES: usize = 2;
 const BUTTON_HEIGHT: u32 = 30;
 const BUTTON_GAP: u32 = 2;
 const TOOL_BUTTON_WIDTH: u32 = 52;
@@ -116,6 +118,7 @@ struct BrowserApp {
     ime_composing: bool,
     pending_navigation: Option<PendingNavigation>,
     pending_render_id: Option<u64>,
+    render_feedback_passes: usize,
     next_navigation_id: u64,
     next_render_id: u64,
     /// Depth-indexed offscreen buffer pool for layer compositing.
@@ -311,6 +314,7 @@ impl BrowserApp {
             ime_composing: false,
             pending_navigation: None,
             pending_render_id: None,
+            render_feedback_passes: 0,
             next_navigation_id: 1,
             next_render_id: 1,
             scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
@@ -531,6 +535,7 @@ impl BrowserApp {
 
         match result {
             Ok(frame) => {
+                let hitboxes = frame.layout.element_hitboxes.clone();
                 self.document.layout_cache = Some(CachedLayout {
                     width: frame.content_width,
                     revision: self.document.layout_revision(),
@@ -541,14 +546,24 @@ impl BrowserApp {
                 self.scroll_y = self.document.scroll_position();
                 self.sync_current_history_scroll();
                 self.sync_window_title();
-                if self.document.refresh_loaded_page_from_script_session() {
-                    self.document.layout_cache = None;
-                    self.request_content_render();
+                if self.document.feed_layout_hitboxes(hitboxes) {
+                    if self.render_feedback_passes < MAX_RENDER_FEEDBACK_PASSES {
+                        self.render_feedback_passes += 1;
+                        self.document.layout_cache = None;
+                        self.request_content_render();
+                        self.request_redraw();
+                        return;
+                    }
+                    self.render_feedback_passes = 0;
+                    self.request_redraw();
+                    return;
                 }
+                self.render_feedback_passes = 0;
                 self.request_redraw();
             }
             Err(error) => {
                 self.document.status_line = format!("Status: render failed ({error})");
+                self.render_feedback_passes = 0;
                 self.request_redraw();
             }
         }
@@ -580,6 +595,7 @@ impl BrowserApp {
         self.latest_render_frame = None;
         self.document.layout_cache = None;
         self.pending_render_id = None;
+        self.render_feedback_passes = 0;
         self.scroll_y = 0;
         self.scratch.clear();
         self.sync_window_title();
@@ -627,6 +643,7 @@ impl BrowserApp {
                 self.sync_current_history_scroll();
                 self.latest_render_frame = None;
                 self.document.layout_cache = None;
+                self.render_feedback_passes = 0;
                 self.sync_viewport_size();
                 self.sync_window_title();
                 self.sync_input_method();
@@ -639,6 +656,7 @@ impl BrowserApp {
                 self.document = DocumentView::error(error);
                 self.scroll_y = 0;
                 self.clear_page_control_state();
+                self.render_feedback_passes = 0;
                 self.sync_window_title();
                 self.sync_input_method();
                 self.request_redraw();
@@ -2295,6 +2313,18 @@ impl DocumentView {
     fn refresh_loaded_page_from_script_session(&mut self) -> bool {
         let changed = match &mut self.content {
             DocumentContent::Loaded(page) => page.refresh_from_script_session(),
+            _ => false,
+        };
+        if changed {
+            self.sync_from_loaded_page();
+            self.layout_cache = None;
+        }
+        changed
+    }
+
+    fn feed_layout_hitboxes(&mut self, hitboxes: Vec<ElementHitbox>) -> bool {
+        let changed = match &mut self.content {
+            DocumentContent::Loaded(page) => page.set_layout_hitboxes(hitboxes),
             _ => false,
         };
         if changed {
