@@ -15,6 +15,7 @@ use boa_engine::{
     js_string,
 };
 
+use crate::css::parse_color;
 use crate::html::{Node, parse_document};
 use crate::http::{
     HttpRequestOptions, HttpResponse, fetch, fetch_with_request_with_limits_same_origin,
@@ -32,7 +33,7 @@ const JS_LOOP_ITERATION_LIMIT: u64 = 100_000;
 const JS_MAX_NETWORK_REQUESTS: usize = 8;
 const JS_MAX_NETWORK_RESPONSE_BYTES: usize = 256 * 1024;
 const JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES: usize = 512 * 1024;
-const JS_INITIAL_SCRIPT_PROCESSING_BUDGET: Duration = Duration::from_millis(2_000);
+const JS_INITIAL_SCRIPT_PROCESSING_BUDGET: Duration = Duration::from_millis(5_000);
 const DEFAULT_VIEWPORT_WIDTH: u32 = 1280;
 const DEFAULT_VIEWPORT_HEIGHT: u32 = 720;
 
@@ -253,6 +254,7 @@ struct JavaScriptState {
     scroll_y: u32,
     active_element_node_id: Option<usize>,
     layout_hitboxes: Vec<ElementHitbox>,
+    canvas_2d_contexts: BTreeMap<usize, Canvas2dState>,
     pending_tasks: VecDeque<PendingTask>,
     next_task_handle: usize,
     custom_elements: BTreeMap<String, JsValue>,
@@ -279,6 +281,14 @@ enum PendingTaskKind {
     Microtask,
     AnimationFrame,
     Timeout { repeat: bool },
+}
+
+fn pending_task_kind_label(kind: &PendingTaskKind) -> &'static str {
+    match kind {
+        PendingTaskKind::Microtask => "microtask",
+        PendingTaskKind::AnimationFrame => "animation-frame",
+        PendingTaskKind::Timeout { .. } => "timeout",
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -330,6 +340,20 @@ struct DomElementData {
     custom_element_connected_callback_called: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct Canvas2dState {
+    fill_style: String,
+    last_fill: Option<CanvasPixel>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CanvasPixel {
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShadowRootMode {
     Open,
@@ -374,6 +398,12 @@ struct DomAttributesHandle {
 
 #[derive(Debug, Clone, Trace, Finalize, JsData)]
 struct DomStyleHandle {
+    #[unsafe_ignore_trace]
+    node_id: usize,
+}
+
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
+struct CanvasRenderingContext2DHandle {
     #[unsafe_ignore_trace]
     node_id: usize,
 }
@@ -625,6 +655,7 @@ impl JavaScriptRuntime {
                 scroll_y: 0,
                 active_element_node_id: None,
                 layout_hitboxes: Vec::new(),
+                canvas_2d_contexts: BTreeMap::new(),
                 pending_tasks: VecDeque::new(),
                 next_task_handle: 1,
                 custom_elements: BTreeMap::new(),
@@ -726,6 +757,10 @@ impl JavaScriptRuntime {
         let mut state = host.state.borrow_mut();
         let handle = state.next_task_handle;
         state.next_task_handle = state.next_task_handle.checked_add(1).unwrap_or(1);
+        js_trace(format!(
+            "queue pending task kind={} handle={handle}",
+            pending_task_kind_label(&kind)
+        ));
         state.pending_tasks.push_back(PendingTask {
             handle,
             kind,
@@ -776,6 +811,11 @@ impl JavaScriptRuntime {
     }
 
     fn run_pending_task(&mut self, task: PendingTask) {
+        js_trace(format!(
+            "run pending task kind={} handle={}",
+            pending_task_kind_label(&task.kind),
+            task.handle
+        ));
         let result = match task.action {
             PendingTaskAction::Callback { callback, mut args } => {
                 if matches!(task.kind, PendingTaskKind::AnimationFrame) {
@@ -1795,10 +1835,106 @@ impl DomState {
             .map(|node| {
                 node.children
                     .iter()
-                    .map(|child_id| self.serialize_node(*child_id))
+                    .map(|child_id| self.serialize_composed_node(*child_id, None))
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn serialize_composed_node(&self, node_id: usize, slot_scope: Option<&[usize]>) -> String {
+        let Some(node) = self.node(node_id) else {
+            return String::new();
+        };
+        match &node.kind {
+            DomNodeKind::Text(text) => escape_html_text(text),
+            DomNodeKind::Element(element) => {
+                if element.tag_name.eq_ignore_ascii_case("slot") {
+                    let assigned_nodes = slot_scope
+                        .map(|host_children| self.assigned_nodes_for_slot(node_id, host_children))
+                        .unwrap_or_default();
+                    if !assigned_nodes.is_empty() {
+                        return assigned_nodes
+                            .iter()
+                            .map(|child_id| self.serialize_composed_node(*child_id, slot_scope))
+                            .collect();
+                    }
+                }
+
+                let mut html = String::new();
+                html.push('<');
+                html.push_str(&element.tag_name);
+                for (name, value) in &element.attributes {
+                    html.push(' ');
+                    html.push_str(name);
+                    if !value.is_empty() {
+                        html.push_str("=\"");
+                        html.push_str(&escape_html_attribute(value));
+                        html.push('"');
+                    }
+                }
+                if is_void_element(&element.tag_name) {
+                    html.push('>');
+                    return html;
+                }
+                html.push('>');
+                if is_raw_text_element(&element.tag_name) {
+                    html.push_str(&self.raw_text(node_id));
+                } else if let Some(shadow_root_id) = element.shadow_root_id {
+                    let host_children = node.children.clone();
+                    if let Some(shadow_root) = self.node(shadow_root_id) {
+                        for child_id in &shadow_root.children {
+                            html.push_str(&self.serialize_composed_node(*child_id, Some(&host_children)));
+                        }
+                    }
+                } else {
+                    for child_id in &node.children {
+                        html.push_str(&self.serialize_composed_node(*child_id, slot_scope));
+                    }
+                }
+                html.push_str("</");
+                html.push_str(&element.tag_name);
+                html.push('>');
+                html
+            }
+            DomNodeKind::Fragment => node
+                .children
+                .iter()
+                .map(|child_id| self.serialize_composed_node(*child_id, slot_scope))
+                .collect(),
+        }
+    }
+
+    fn assigned_nodes_for_slot(&self, slot_node_id: usize, host_children: &[usize]) -> Vec<usize> {
+        let slot_name = self
+            .get_attribute(slot_node_id, "name")
+            .unwrap_or_default();
+        let mut assigned = Vec::new();
+        for child_id in host_children {
+            let Some(child) = self.node(*child_id) else {
+                continue;
+            };
+            match &child.kind {
+                DomNodeKind::Text(_) => {
+                    if slot_name.is_empty() {
+                        assigned.push(*child_id);
+                    }
+                }
+                DomNodeKind::Element(element) => {
+                    let child_slot_name = element.attributes.get("slot").cloned().unwrap_or_default();
+                    if child_slot_name == slot_name
+                        || (slot_name.is_empty() && child_slot_name.is_empty())
+                    {
+                        assigned.push(*child_id);
+                    }
+                }
+                DomNodeKind::Fragment => {
+                    if slot_name.is_empty() {
+                        assigned.push(*child_id);
+                    }
+                }
+            }
+        }
+        assigned
     }
 
     fn serialize_node(&self, node_id: usize) -> String {
@@ -2494,7 +2630,7 @@ fn install_browser_globals(context: &mut Context) {
         .to_js_function(context.realm());
 
     let global_object = context.global_object();
-    let document = ObjectInitializer::with_native_data(
+    let mut document = ObjectInitializer::with_native_data(
         DomNodeHandle {
             node_id: document_id,
         },
@@ -2535,6 +2671,11 @@ fn install_browser_globals(context: &mut Context) {
         NativeFunction::from_fn_ptr(js_document_create_element),
         js_string!("createElement"),
         1,
+    )
+    .function(
+        NativeFunction::from_fn_ptr(js_document_create_element_ns),
+        js_string!("createElementNS"),
+        2,
     )
     .function(
         NativeFunction::from_fn_ptr(js_document_create_text_node),
@@ -2681,6 +2822,7 @@ fn install_browser_globals(context: &mut Context) {
         Attribute::all(),
     )
     .build();
+    upgrade_dom_node_object_prototype(context, document_id, &mut document);
     store_dom_node_object(context, document_id, &document);
 
     let console = ObjectInitializer::new(context)
@@ -3163,6 +3305,13 @@ fn install_browser_globals(context: &mut Context) {
         .expect("__tobiraCustomElementsUpgrade should be installable");
     context
         .register_global_builtin_callable(
+            js_string!("__tobiraCanvasGetContext"),
+            3,
+            NativeFunction::from_fn_ptr(js_dom_canvas_get_context),
+        )
+        .expect("__tobiraCanvasGetContext should be installable");
+    context
+        .register_global_builtin_callable(
             js_string!("__tobiraCreateResizeObserver"),
             1,
             NativeFunction::from_fn_ptr(js_create_resize_observer),
@@ -3455,30 +3604,58 @@ globalThis.AbortController = function AbortController() {
         .eval(Source::from_bytes(
             r#"
 globalThis.Node = function Node() {};
+globalThis.Window = function Window() {};
+globalThis.CharacterData = function CharacterData() {};
 globalThis.Element = function Element() {};
 globalThis.HTMLElement = function HTMLElement() {};
+globalThis.HTMLCanvasElement = function HTMLCanvasElement() {};
+globalThis.CanvasRenderingContext2D = function CanvasRenderingContext2D() {};
 globalThis.Document = function Document() {};
 globalThis.DocumentFragment = function DocumentFragment() {};
 globalThis.ShadowRoot = function ShadowRoot() {};
 globalThis.Text = function Text() {};
+globalThis.Comment = function Comment() {};
+globalThis.CDATASection = function CDATASection() {};
+globalThis.ProcessingInstruction = function ProcessingInstruction() {};
 Node.prototype = Object.create(Object.prototype);
 Node.prototype.constructor = Node;
 Node.ELEMENT_NODE = 1;
 Node.TEXT_NODE = 3;
 Node.DOCUMENT_NODE = 9;
 Node.DOCUMENT_FRAGMENT_NODE = 11;
+Window.prototype = Object.create(Object.prototype);
+Window.prototype.constructor = Window;
+Object.setPrototypeOf(globalThis, Window.prototype);
+Window.prototype.dispatchEvent = globalThis.dispatchEvent;
+Window.prototype.addEventListener = globalThis.addEventListener;
+Window.prototype.removeEventListener = globalThis.removeEventListener;
+CharacterData.prototype = Object.create(Node.prototype);
+CharacterData.prototype.constructor = CharacterData;
 Element.prototype = Object.create(Node.prototype);
 Element.prototype.constructor = Element;
 HTMLElement.prototype = Object.create(Element.prototype);
 HTMLElement.prototype.constructor = HTMLElement;
+HTMLCanvasElement.prototype = Object.create(HTMLElement.prototype);
+HTMLCanvasElement.prototype.constructor = HTMLCanvasElement;
+CanvasRenderingContext2D.prototype = Object.create(Object.prototype);
+CanvasRenderingContext2D.prototype.constructor = CanvasRenderingContext2D;
+HTMLCanvasElement.prototype.getContext = function getContext(type, options) {
+  return __tobiraCanvasGetContext(this, type, options);
+};
 Document.prototype = Object.create(Node.prototype);
 Document.prototype.constructor = Document;
 DocumentFragment.prototype = Object.create(Node.prototype);
 DocumentFragment.prototype.constructor = DocumentFragment;
 ShadowRoot.prototype = Object.create(DocumentFragment.prototype);
 ShadowRoot.prototype.constructor = ShadowRoot;
-Text.prototype = Object.create(Node.prototype);
+Text.prototype = Object.create(CharacterData.prototype);
 Text.prototype.constructor = Text;
+Comment.prototype = Object.create(CharacterData.prototype);
+Comment.prototype.constructor = Comment;
+CDATASection.prototype = Object.create(CharacterData.prototype);
+CDATASection.prototype.constructor = CDATASection;
+ProcessingInstruction.prototype = Object.create(CharacterData.prototype);
+ProcessingInstruction.prototype.constructor = ProcessingInstruction;
 globalThis.CustomElementRegistry = function CustomElementRegistry() {};
 CustomElementRegistry.prototype = Object.create(Object.prototype);
 CustomElementRegistry.prototype.constructor = CustomElementRegistry;
@@ -3500,6 +3677,265 @@ globalThis.customElements.whenDefined = function whenDefined(name) {
 globalThis.customElements.upgrade = function upgrade(root) {
   return __tobiraCustomElementsUpgrade(root);
 };
+if (!document.implementation) {
+  document.implementation = Object.create(null);
+}
+if (typeof document.implementation.createHTMLDocument !== 'function') {
+  document.implementation.createHTMLDocument = function createHTMLDocument() {
+    return document;
+  };
+}
+globalThis.NodeFilter = globalThis.NodeFilter || Object.create(Object.prototype);
+NodeFilter.FILTER_ACCEPT = 1;
+NodeFilter.FILTER_REJECT = 2;
+NodeFilter.FILTER_SKIP = 3;
+NodeFilter.SHOW_ALL = -1;
+NodeFilter.SHOW_ELEMENT = 1;
+NodeFilter.SHOW_ATTRIBUTE = 2;
+NodeFilter.SHOW_TEXT = 4;
+NodeFilter.SHOW_CDATA_SECTION = 8;
+NodeFilter.SHOW_ENTITY_REFERENCE = 16;
+NodeFilter.SHOW_ENTITY = 32;
+NodeFilter.SHOW_PROCESSING_INSTRUCTION = 64;
+NodeFilter.SHOW_COMMENT = 128;
+NodeFilter.SHOW_DOCUMENT = 256;
+NodeFilter.SHOW_DOCUMENT_TYPE = 512;
+NodeFilter.SHOW_DOCUMENT_FRAGMENT = 1024;
+NodeFilter.SHOW_NOTATION = 2048;
+function __tobiraNodeFilterMask(node) {
+  if (!node) {
+    return 0;
+  }
+  switch (node.nodeType) {
+    case Node.ELEMENT_NODE:
+      return NodeFilter.SHOW_ELEMENT;
+    case Node.TEXT_NODE:
+      return NodeFilter.SHOW_TEXT;
+    case Node.DOCUMENT_NODE:
+      return NodeFilter.SHOW_DOCUMENT;
+    case Node.DOCUMENT_FRAGMENT_NODE:
+      return NodeFilter.SHOW_DOCUMENT_FRAGMENT;
+    default:
+      return 0;
+  }
+}
+function __tobiraNodeFilterAccept(node, whatToShow, filter) {
+  if (!node) {
+    return NodeFilter.FILTER_SKIP;
+  }
+  if ((whatToShow & __tobiraNodeFilterMask(node)) === 0 && whatToShow !== NodeFilter.SHOW_ALL) {
+    return NodeFilter.FILTER_SKIP;
+  }
+  if (!filter) {
+    return NodeFilter.FILTER_ACCEPT;
+  }
+  var callback = null;
+  if (typeof filter === 'function') {
+    callback = filter;
+  } else if (filter && typeof filter.acceptNode === 'function') {
+    callback = function (candidate) {
+      return filter.acceptNode(candidate);
+    };
+  }
+  if (!callback) {
+    return NodeFilter.FILTER_ACCEPT;
+  }
+  var result = callback.call(filter, node);
+  if (result === NodeFilter.FILTER_ACCEPT || result === NodeFilter.FILTER_REJECT || result === NodeFilter.FILTER_SKIP) {
+    return result;
+  }
+  return NodeFilter.FILTER_ACCEPT;
+}
+function __tobiraNextNode(node, root) {
+  if (!node) {
+    return null;
+  }
+  if (node.firstChild) {
+    return node.firstChild;
+  }
+  var current = node;
+  while (current && current !== root) {
+    if (current.nextSibling) {
+      return current.nextSibling;
+    }
+    current = current.parentNode;
+  }
+  return null;
+}
+function __tobiraNextNodeAfterSubtree(node, root) {
+  if (!node) {
+    return null;
+  }
+  var current = node;
+  while (current && current !== root) {
+    if (current.nextSibling) {
+      return current.nextSibling;
+    }
+    current = current.parentNode;
+  }
+  return null;
+}
+function __tobiraPreviousNode(node, root) {
+  if (!node || node === root) {
+    return null;
+  }
+  if (node.previousSibling) {
+    var current = node.previousSibling;
+    while (current && current.lastChild) {
+      current = current.lastChild;
+    }
+    return current;
+  }
+  return node.parentNode === root ? root : node.parentNode;
+}
+function TreeWalker(root, whatToShow, filter) {
+  if (!(this instanceof TreeWalker)) {
+    return new TreeWalker(root, whatToShow, filter);
+  }
+  this.root = root || null;
+  this.whatToShow = whatToShow == null ? NodeFilter.SHOW_ALL : whatToShow;
+  this.filter = filter || null;
+  this.currentNode = root || null;
+}
+TreeWalker.prototype._accept = function (node) {
+  return __tobiraNodeFilterAccept(node, this.whatToShow, this.filter);
+};
+TreeWalker.prototype.nextNode = function () {
+  var candidate = __tobiraNextNode(this.currentNode, this.root);
+  while (candidate) {
+    var decision = this._accept(candidate);
+    if (decision === NodeFilter.FILTER_ACCEPT) {
+      this.currentNode = candidate;
+      return candidate;
+    }
+    candidate = decision === NodeFilter.FILTER_REJECT
+      ? __tobiraNextNodeAfterSubtree(candidate, this.root)
+      : __tobiraNextNode(candidate, this.root);
+  }
+  return null;
+};
+TreeWalker.prototype.previousNode = function () {
+  var candidate = __tobiraPreviousNode(this.currentNode, this.root);
+  while (candidate) {
+    var decision = this._accept(candidate);
+    if (decision === NodeFilter.FILTER_ACCEPT) {
+      this.currentNode = candidate;
+      return candidate;
+    }
+    candidate = __tobiraPreviousNode(candidate, this.root);
+  }
+  return null;
+};
+TreeWalker.prototype.parentNode = function () {
+  var candidate = this.currentNode && this.currentNode.parentNode ? this.currentNode.parentNode : null;
+  while (candidate && candidate !== this.root.parentNode) {
+    var decision = this._accept(candidate);
+    if (decision === NodeFilter.FILTER_ACCEPT) {
+      this.currentNode = candidate;
+      return candidate;
+    }
+    candidate = candidate.parentNode;
+  }
+  return null;
+};
+TreeWalker.prototype.firstChild = function () {
+  var candidate = this.currentNode && this.currentNode.firstChild ? this.currentNode.firstChild : null;
+  while (candidate) {
+    var decision = this._accept(candidate);
+    if (decision === NodeFilter.FILTER_ACCEPT) {
+      this.currentNode = candidate;
+      return candidate;
+    }
+    candidate = __tobiraNextNode(candidate, this.currentNode);
+  }
+  return null;
+};
+TreeWalker.prototype.lastChild = function () {
+  var candidate = this.currentNode && this.currentNode.lastChild ? this.currentNode.lastChild : null;
+  while (candidate) {
+    var decision = this._accept(candidate);
+    if (decision === NodeFilter.FILTER_ACCEPT) {
+      this.currentNode = candidate;
+      return candidate;
+    }
+    candidate = __tobiraPreviousNode(candidate, this.currentNode);
+  }
+  return null;
+};
+TreeWalker.prototype.nextSibling = function () {
+  var candidate = this.currentNode && this.currentNode.nextSibling ? this.currentNode.nextSibling : null;
+  while (candidate) {
+    var decision = this._accept(candidate);
+    if (decision === NodeFilter.FILTER_ACCEPT) {
+      this.currentNode = candidate;
+      return candidate;
+    }
+    candidate = candidate.nextSibling;
+  }
+  return null;
+};
+TreeWalker.prototype.previousSibling = function () {
+  var candidate = this.currentNode && this.currentNode.previousSibling ? this.currentNode.previousSibling : null;
+  while (candidate) {
+    var decision = this._accept(candidate);
+    if (decision === NodeFilter.FILTER_ACCEPT) {
+      this.currentNode = candidate;
+      return candidate;
+    }
+    candidate = candidate.previousSibling;
+  }
+  return null;
+};
+function NodeIterator(root, whatToShow, filter) {
+  if (!(this instanceof NodeIterator)) {
+    return new NodeIterator(root, whatToShow, filter);
+  }
+  this.root = root || null;
+  this.whatToShow = whatToShow == null ? NodeFilter.SHOW_ALL : whatToShow;
+  this.filter = filter || null;
+  this.referenceNode = root || null;
+  this.pointerBeforeReferenceNode = true;
+}
+NodeIterator.prototype._accept = function (node) {
+  return __tobiraNodeFilterAccept(node, this.whatToShow, this.filter);
+};
+NodeIterator.prototype.nextNode = function () {
+  var candidate = this.pointerBeforeReferenceNode ? this.referenceNode : __tobiraNextNode(this.referenceNode, this.root);
+  while (candidate) {
+    this.pointerBeforeReferenceNode = false;
+    this.referenceNode = candidate;
+    var decision = this._accept(candidate);
+    if (decision === NodeFilter.FILTER_ACCEPT) {
+      return candidate;
+    }
+    candidate = decision === NodeFilter.FILTER_REJECT
+      ? __tobiraNextNodeAfterSubtree(candidate, this.root)
+      : __tobiraNextNode(candidate, this.root);
+  }
+  return null;
+};
+NodeIterator.prototype.previousNode = function () {
+  var candidate = this.pointerBeforeReferenceNode ? __tobiraPreviousNode(this.referenceNode, this.root) : this.referenceNode;
+  while (candidate) {
+    this.pointerBeforeReferenceNode = true;
+    this.referenceNode = candidate;
+    var decision = this._accept(candidate);
+    if (decision === NodeFilter.FILTER_ACCEPT) {
+      return candidate;
+    }
+    candidate = __tobiraPreviousNode(candidate, this.root);
+  }
+  return null;
+};
+NodeIterator.prototype.detach = function () {};
+Document.prototype.createTreeWalker = function (root, whatToShow, filter) {
+  return new TreeWalker(root, whatToShow, filter);
+};
+Document.prototype.createNodeIterator = function (root, whatToShow, filter) {
+  return new NodeIterator(root, whatToShow, filter);
+};
+document.createTreeWalker = Document.prototype.createTreeWalker;
+document.createNodeIterator = Document.prototype.createNodeIterator;
 "#,
         ))
         .expect("custom elements bootstrap should evaluate");
@@ -3948,6 +4384,46 @@ fn store_dom_attributes_object(
     object: &boa_engine::object::JsObject,
 ) {
     if let Ok(cache) = dom_attributes_cache(context) {
+        let _ = cache.set(
+            js_string!(node_id.to_string()),
+            object.clone(),
+            true,
+            context,
+        );
+    }
+}
+
+fn canvas_context_cache(context: &mut Context) -> JsResult<boa_engine::object::JsObject> {
+    let global = context.global_object();
+    let cache_key = js_string!("__tobiraCanvasContextCache");
+    let existing = global.get(cache_key.clone(), context)?;
+    if let Some(object) = existing.as_object() {
+        return Ok(object.clone());
+    }
+
+    let cache = ObjectInitializer::new(context).build();
+    global.set(cache_key, cache.clone(), true, context)?;
+    Ok(cache)
+}
+
+fn cached_canvas_context_object(
+    context: &mut Context,
+    node_id: usize,
+) -> Option<boa_engine::object::JsObject> {
+    let cache = canvas_context_cache(context).ok()?;
+    let key = js_string!(node_id.to_string());
+    cache
+        .get(key, context)
+        .ok()
+        .and_then(|value| value.as_object())
+}
+
+fn store_canvas_context_object(
+    context: &mut Context,
+    node_id: usize,
+    object: &boa_engine::object::JsObject,
+) {
+    if let Ok(cache) = canvas_context_cache(context) {
         let _ = cache.set(
             js_string!(node_id.to_string()),
             object.clone(),
@@ -4980,7 +5456,7 @@ fn upgrade_dom_node_object_prototype(
     node_id: usize,
     object: &mut boa_engine::object::JsObject,
 ) {
-    let (is_document, is_shadow_root, is_text_node, tag_name, custom_upgraded) = context
+    let (is_document, is_shadow_root, is_text_node, is_canvas_node, tag_name, custom_upgraded) = context
         .get_data::<JavaScriptHostData>()
         .map(|host| {
             let state = host.state.borrow();
@@ -4994,16 +5470,18 @@ fn upgrade_dom_node_object_prototype(
                 .dom
                 .element(node_id)
                 .map(|element| element.tag_name.clone());
+            let is_canvas_node = tag_name.as_deref() == Some("canvas");
             let custom_upgraded = state.dom.custom_element_upgraded(node_id);
             (
                 is_document,
                 is_shadow_root,
                 is_text_node,
+                is_canvas_node,
                 tag_name,
                 custom_upgraded,
             )
         })
-        .unwrap_or((false, false, false, None, false));
+        .unwrap_or((false, false, false, false, None, false));
 
     if is_document {
         if let Some(prototype) = global_constructor_prototype(context, "Document") {
@@ -5023,6 +5501,17 @@ fn upgrade_dom_node_object_prototype(
 
     if is_text_node {
         if let Some(prototype) = global_constructor_prototype(context, "Text")
+            .or_else(|| global_constructor_prototype(context, "Node"))
+        {
+            object.set_prototype(Some(prototype));
+        }
+        return;
+    }
+
+    if is_canvas_node {
+        if let Some(prototype) = global_constructor_prototype(context, "HTMLCanvasElement")
+            .or_else(|| global_constructor_prototype(context, "HTMLElement"))
+            .or_else(|| global_constructor_prototype(context, "Element"))
             .or_else(|| global_constructor_prototype(context, "Node"))
         {
             object.set_prototype(Some(prototype));
@@ -5085,6 +5574,7 @@ fn custom_element_upgrade_targets(context: &mut Context, node_ids: &[usize]) -> 
 
 fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::object::JsObject {
     if let Some(mut cached) = cached_dom_node_object(context, node_id) {
+        ensure_canvas_node_methods(context, node_id, &mut cached);
         upgrade_dom_node_object_prototype(context, node_id, &mut cached);
         store_dom_node_object(context, node_id, &cached);
         return cached;
@@ -5706,9 +6196,202 @@ fn build_dom_node_object(context: &mut Context, node_id: usize) -> boa_engine::o
             );
     }
     let mut object = object.build();
+    ensure_canvas_node_methods(context, node_id, &mut object);
     upgrade_dom_node_object_prototype(context, node_id, &mut object);
     store_dom_node_object(context, node_id, &object);
     object
+}
+
+fn canvas_hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h_prime = h / 60.0;
+    let x = c * (1.0 - (h_prime % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = if h_prime < 1.0 {
+        (c, x, 0.0)
+    } else if h_prime < 2.0 {
+        (x, c, 0.0)
+    } else if h_prime < 3.0 {
+        (0.0, c, x)
+    } else if h_prime < 4.0 {
+        (0.0, x, c)
+    } else if h_prime < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let m = l - c / 2.0;
+    let to_byte = |v: f32| ((v + m).clamp(0.0, 1.0) * 255.0).round() as u8;
+    (to_byte(r1), to_byte(g1), to_byte(b1))
+}
+
+fn canvas_pixel_from_color(input: &str) -> Option<CanvasPixel> {
+    let value = input.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return None;
+    }
+    if value == "transparent" || value == "none" || value == "currentcolor" {
+        return Some(CanvasPixel {
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 0,
+        });
+    }
+
+    if let Some(hex) = value.strip_prefix('#') {
+        return match hex.len() {
+            3 => {
+                let red = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
+                let green = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
+                let blue = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
+                Some(CanvasPixel {
+                    red,
+                    green,
+                    blue,
+                    alpha: 255,
+                })
+            }
+            4 => {
+                let red = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
+                let green = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
+                let blue = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
+                let alpha = u8::from_str_radix(&hex[3..4].repeat(2), 16).ok()?;
+                Some(CanvasPixel {
+                    red,
+                    green,
+                    blue,
+                    alpha,
+                })
+            }
+            6 => {
+                let red = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let green = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let blue = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                Some(CanvasPixel {
+                    red,
+                    green,
+                    blue,
+                    alpha: 255,
+                })
+            }
+            8 => {
+                let red = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let green = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let blue = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                let alpha = u8::from_str_radix(&hex[6..8], 16).ok()?;
+                Some(CanvasPixel {
+                    red,
+                    green,
+                    blue,
+                    alpha,
+                })
+            }
+            _ => None,
+        };
+    }
+
+    if let Some(arguments) = value
+        .strip_prefix("rgba(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let parts: Vec<&str> = arguments.split(',').collect();
+        if parts.len() >= 4 {
+            let red = parts[0].trim().parse::<u8>().ok()?;
+            let green = parts[1].trim().parse::<u8>().ok()?;
+            let blue = parts[2].trim().parse::<u8>().ok()?;
+            let alpha = (parts[3].trim().parse::<f32>().ok()?.clamp(0.0, 1.0) * 255.0).round()
+                as u8;
+            return Some(CanvasPixel {
+                red,
+                green,
+                blue,
+                alpha,
+            });
+        }
+    }
+
+    if let Some(arguments) = value
+        .strip_prefix("rgb(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let parts: Vec<&str> = arguments.split(',').collect();
+        if parts.len() >= 3 {
+            let red = parts[0].trim().parse::<u8>().ok()?;
+            let green = parts[1].trim().parse::<u8>().ok()?;
+            let blue = parts[2].trim().parse::<u8>().ok()?;
+            return Some(CanvasPixel {
+                red,
+                green,
+                blue,
+                alpha: 255,
+            });
+        }
+    }
+
+    if let Some(arguments) = value
+        .strip_prefix("hsla(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let parts: Vec<&str> = arguments.split(',').collect();
+        if parts.len() >= 4 {
+            let h = parts[0].trim().parse::<f32>().ok()?;
+            let s = parts[1].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
+            let l = parts[2].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
+            let alpha = (parts[3].trim().parse::<f32>().ok()?.clamp(0.0, 1.0) * 255.0).round()
+                as u8;
+            let (red, green, blue) = canvas_hsl_to_rgb(h, s, l);
+            return Some(CanvasPixel {
+                red,
+                green,
+                blue,
+                alpha,
+            });
+        }
+    }
+
+    if let Some(arguments) = value
+        .strip_prefix("hsl(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let parts: Vec<&str> = arguments.split(',').collect();
+        if parts.len() >= 3 {
+            let h = parts[0].trim().parse::<f32>().ok()?;
+            let s = parts[1].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
+            let l = parts[2].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
+            let (red, green, blue) = canvas_hsl_to_rgb(h, s, l);
+            return Some(CanvasPixel {
+                red,
+                green,
+                blue,
+                alpha: 255,
+            });
+        }
+    }
+
+    parse_color(&value).map(|color| CanvasPixel {
+        red: ((color >> 16) & 0xff) as u8,
+        green: ((color >> 8) & 0xff) as u8,
+        blue: (color & 0xff) as u8,
+        alpha: 255,
+    })
+}
+
+fn ensure_canvas_node_methods(context: &mut Context, node_id: usize, object: &mut JsObject) {
+    let is_canvas_node = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            host.state
+                .borrow()
+                .dom
+                .element(node_id)
+                .map(|element| element.tag_name == "canvas")
+        })
+        .unwrap_or(false);
+    if is_canvas_node {
+        let get_context = NativeFunction::from_fn_ptr(js_dom_canvas_get_context)
+            .to_js_function(context.realm());
+        let _ = object.set(js_string!("getContext"), get_context, true, context);
+    }
 }
 
 fn build_dom_style_object(context: &mut Context, node_id: usize) -> boa_engine::object::JsObject {
@@ -6044,6 +6727,58 @@ fn build_dom_style_object(context: &mut Context, node_id: usize) -> boa_engine::
         )
         .build();
     store_dom_style_object(context, node_id, &object);
+    object
+}
+
+fn build_canvas_rendering_context_object(
+    context: &mut Context,
+    node_id: usize,
+) -> boa_engine::object::JsObject {
+    if let Some(cached) = cached_canvas_context_object(context, node_id) {
+        return cached;
+    }
+
+    let fill_style_getter =
+        NativeFunction::from_fn_ptr(js_canvas_context_get_fill_style).to_js_function(context.realm());
+    let fill_style_setter =
+        NativeFunction::from_fn_ptr(js_canvas_context_set_fill_style).to_js_function(context.realm());
+    let canvas_getter =
+        NativeFunction::from_fn_ptr(js_canvas_context_get_canvas).to_js_function(context.realm());
+    let object = ObjectInitializer::with_native_data(CanvasRenderingContext2DHandle { node_id }, context)
+        .function(
+            NativeFunction::from_fn_ptr(js_canvas_context_fill_rect),
+            js_string!("fillRect"),
+            4,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_canvas_context_clear_rect),
+            js_string!("clearRect"),
+            4,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(js_canvas_context_get_image_data),
+            js_string!("getImageData"),
+            4,
+        )
+        .accessor(
+            js_string!("fillStyle"),
+            Some(fill_style_getter),
+            Some(fill_style_setter),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("canvas"),
+            Some(canvas_getter),
+            None,
+            Attribute::all(),
+        )
+        .build();
+
+    if let Some(prototype) = global_constructor_prototype(context, "CanvasRenderingContext2D") {
+        object.set_prototype(Some(prototype));
+    }
+
+    store_canvas_context_object(context, node_id, &object);
     object
 }
 
@@ -7891,6 +8626,15 @@ fn js_fetch(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<Js
     }
     let url = resolve_requested_url(&request, context);
     let request_options = script_request_options_from_js(&request, &options, context);
+    if let (Ok(url), Ok(request_options)) = (&url, request_options.as_ref()) {
+        js_trace(format!(
+            "fetch request url={} method={} body_bytes={} headers={}",
+            url,
+            request_options.method,
+            request_options.body.as_ref().map_or(0, |body| body.len()),
+            request_options.headers.len()
+        ));
+    }
     let promise = match url {
         Ok(url) => JsPromise::from_result(
             request_options
@@ -8140,6 +8884,7 @@ fn js_xhr_open(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     let method = js_value_to_string(args.first().unwrap_or(&JsValue::undefined()), context)?
         .to_ascii_uppercase();
     let url = js_value_to_string(args.get(1).unwrap_or(&JsValue::undefined()), context)?;
+    js_trace(format!("xhr open method={} url={}", method, url));
     if let Some(object) = this.as_object()
         && let Some(handle) = object.downcast_ref::<XmlHttpRequestHandle>()
     {
@@ -8194,6 +8939,12 @@ fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     };
 
     let body = js_request_body_bytes(args.first(), context)?;
+    js_trace(format!(
+        "xhr send method={} url={} body_bytes={}",
+        method,
+        target_url,
+        body.as_ref().map_or(0, |bytes| bytes.len())
+    ));
     let request = ScriptRequestOptions {
         method,
         headers: handle.state.borrow().request_headers.clone(),
@@ -8201,13 +8952,22 @@ fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     };
 
     let result = match finalize_script_request(request, false) {
-        Ok(request) => resolve_requested_url(&JsValue::from(js_string!(target_url)), context)
+        Ok(request) => resolve_requested_url(
+            &JsValue::from(js_string!(target_url.as_str())),
+            context,
+        )
             .and_then(|url| fetch_for_script_with_request(&url, &request, context)),
         Err(error) => Err(error),
     };
 
     match result {
         Ok(response) => {
+            js_trace(format!(
+                "xhr response url={} status={} bytes={}",
+                response.final_url,
+                response.status_code,
+                response.body.len()
+            ));
             let text = decode_text_response(&response.body, response.header("content-type"));
             {
                 let mut state = handle.state.borrow_mut();
@@ -8227,6 +8987,7 @@ fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
             trigger_xhr_handler(&object, "onloadend", context)?;
         }
         Err(error) => {
+            js_trace(format!("xhr error url={} error={error}", target_url));
             {
                 let mut state = handle.state.borrow_mut();
                 state.ready_state = 4;
@@ -8778,6 +9539,199 @@ fn node_id_argument(arg: Option<&JsValue>) -> Option<usize> {
             .downcast_ref::<DomNodeHandle>()
             .map(|handle| handle.node_id)
     })
+}
+
+fn canvas_context_node_id_from_this(this: &JsValue) -> Option<usize> {
+    this.as_object()?
+        .downcast_ref::<CanvasRenderingContext2DHandle>()
+        .map(|handle| handle.node_id)
+}
+
+fn js_dom_canvas_get_context(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = this_node_id(this) else {
+        return Ok(JsValue::null());
+    };
+    let Some(kind) = args.first() else {
+        return Ok(JsValue::null());
+    };
+    let requested = kind.to_string(context)?.to_std_string_escaped();
+    if requested.to_ascii_lowercase() != "2d" {
+        return Ok(JsValue::null());
+    }
+    Ok(JsValue::from(build_canvas_rendering_context_object(context, node_id)))
+}
+
+fn js_canvas_context_get_fill_style(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = canvas_context_node_id_from_this(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let fill_style = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            let mut state = host.state.borrow_mut();
+            let entry = state.canvas_2d_contexts.entry(node_id).or_default();
+            if entry.fill_style.is_empty() {
+                entry.fill_style = "#000000".to_string();
+            }
+            Some(entry.fill_style.clone())
+        })
+        .unwrap_or_else(|| "#000000".to_string());
+    Ok(JsValue::from(js_string!(fill_style)))
+}
+
+fn js_canvas_context_set_fill_style(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = canvas_context_node_id_from_this(this) else {
+        return Ok(JsValue::undefined());
+    };
+    let Some(value) = args.first() else {
+        return Ok(JsValue::undefined());
+    };
+    let fill_style = value.to_string(context)?.to_std_string_escaped();
+    if canvas_pixel_from_color(&fill_style).is_none() {
+        return Ok(JsValue::undefined());
+    }
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let entry = state.canvas_2d_contexts.entry(node_id).or_default();
+        entry.fill_style = fill_style;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_canvas_context_fill_rect(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = canvas_context_node_id_from_this(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if args.len() < 4 {
+        return Ok(JsValue::undefined());
+    }
+    let x = args[0].to_number(context)?;
+    let y = args[1].to_number(context)?;
+    let width = args[2].to_number(context)?;
+    let height = args[3].to_number(context)?;
+    if !x.is_finite()
+        || !y.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return Ok(JsValue::undefined());
+    }
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let entry = state.canvas_2d_contexts.entry(node_id).or_default();
+        let pixel = canvas_pixel_from_color(&entry.fill_style).unwrap_or(CanvasPixel {
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 255,
+        });
+        entry.last_fill = Some(pixel);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_canvas_context_clear_rect(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = canvas_context_node_id_from_this(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if args.len() < 4 {
+        return Ok(JsValue::undefined());
+    }
+    let width = args[2].to_number(context)?;
+    let height = args[3].to_number(context)?;
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return Ok(JsValue::undefined());
+    }
+    if let Some(host) = context.get_data::<JavaScriptHostData>() {
+        let mut state = host.state.borrow_mut();
+        let entry = state.canvas_2d_contexts.entry(node_id).or_default();
+        entry.last_fill = None;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn js_canvas_context_get_image_data(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = canvas_context_node_id_from_this(this) else {
+        return Ok(JsValue::undefined());
+    };
+    if args.len() < 4 {
+        return Ok(JsValue::undefined());
+    }
+    let width = args[2].to_number(context)?;
+    let height = args[3].to_number(context)?;
+    if !width.is_finite() || !height.is_finite() {
+        return Ok(JsValue::undefined());
+    }
+    let pixel = context
+        .get_data::<JavaScriptHostData>()
+        .and_then(|host| {
+            let mut state = host.state.borrow_mut();
+            let entry = state.canvas_2d_contexts.entry(node_id).or_default();
+            Some(entry.last_fill.unwrap_or(CanvasPixel {
+                red: 0,
+                green: 0,
+                blue: 0,
+                alpha: 0,
+            }))
+        })
+        .unwrap_or(CanvasPixel {
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 0,
+        });
+    let data = JsArray::from_iter(
+        [
+            JsValue::new(pixel.red as i32),
+            JsValue::new(pixel.green as i32),
+            JsValue::new(pixel.blue as i32),
+            JsValue::new(pixel.alpha as i32),
+        ],
+        context,
+    );
+    let image_data = ObjectInitializer::new(context)
+        .property(js_string!("data"), data, Attribute::all())
+        .property(js_string!("width"), width.round() as i32, Attribute::all())
+        .property(js_string!("height"), height.round() as i32, Attribute::all())
+        .build();
+    Ok(JsValue::from(image_data))
+}
+
+fn js_canvas_context_get_canvas(
+    this: &JsValue,
+    _: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(node_id) = canvas_context_node_id_from_this(this) else {
+        return Ok(JsValue::undefined());
+    };
+    Ok(JsValue::from(build_dom_node_object(context, node_id)))
 }
 
 fn js_value_to_dom_node_id(value: &JsValue, context: &mut Context) -> JsResult<usize> {
@@ -9366,6 +10320,21 @@ fn js_document_create_element(
     let node_id = context
         .get_data::<JavaScriptHostData>()
         .map(|host| host.state.borrow_mut().dom.create_element(&tag_name))
+        .unwrap_or(0);
+    let mut object = build_dom_node_object(context, node_id);
+    upgrade_dom_node_object_prototype(context, node_id, &mut object);
+    Ok(JsValue::from(object))
+}
+
+fn js_document_create_element_ns(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let local_name = js_value_to_string(args.get(1).unwrap_or(&JsValue::undefined()), context)?;
+    let node_id = context
+        .get_data::<JavaScriptHostData>()
+        .map(|host| host.state.borrow_mut().dom.create_element(&local_name))
         .unwrap_or(0);
     let mut object = build_dom_node_object(context, node_id);
     upgrade_dom_node_object_prototype(context, node_id, &mut object);
@@ -12153,6 +13122,9 @@ fn flush_resize_and_intersection_observers(context: &mut Context) {
             .ok()
             .map(|value| value.to_boolean())
             .unwrap_or(false);
+        if delivered {
+            js_trace("observer flush delivered");
+        }
         if !delivered {
             break;
         }
@@ -12717,6 +13689,16 @@ mod tests {
     }
 
     #[test]
+    fn supports_canvas_2d_context_color_sampling() {
+        let processed = process_document_scripts(
+            "<html><body><script>var canvas = document.createElementNS('http://www.w3.org/1999/xhtml', 'canvas'); var ctx = canvas.getContext('2d'); canvas.width = canvas.height = 1; ctx.fillStyle = 'rgba(1, 2, 3, 0.5)'; ctx.fillRect(0, 0, 1, 1); var data = ctx.getImageData(0, 0, 1, 1).data; document.body.setAttribute('data-canvas', [canvas instanceof HTMLCanvasElement, typeof ctx.fillRect, data[0], data[1], data[2], data[3]].join('|'));</script></body></html>",
+            &Url::parse("https://example.com/start").unwrap(),
+        );
+
+        assert!(processed.html.contains("data-canvas=\"true|function|1|2|3|128\""));
+    }
+
+    #[test]
     fn updates_location_hash_without_full_navigation() {
         let processed = process_document_scripts(
             "<script>location.hash = '#frag'; document.title = location.href + '|' + location.hash;</script>",
@@ -13216,6 +14198,21 @@ mod tests {
     }
 
     #[test]
+    fn supports_document_implementation_and_create_element_ns() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"app\"></div><script>var inert = document.implementation.createHTMLDocument('inert'); var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('data-x', '1'); document.getElementById('app').appendChild(svg); document.body.setAttribute('data-impl', [typeof document.createTreeWalker, typeof document.createNodeIterator, typeof document.implementation.createHTMLDocument, inert === document, svg.tagName, svg.getAttribute('data-x')].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-impl=\"function|function|function|true|SVG|1\"")
+        );
+        assert!(processed.html.contains("<svg data-x=\"1\"></svg>"));
+    }
+
+    #[test]
     fn supports_inline_style_mutations() {
         let processed = process_document_scripts(
             "<html><body><div id=\"app\" style=\"color: #ff0000\"></div><script>var app = document.getElementById('app'); app.style.display = 'none'; app.style.backgroundColor = '#123456'; app.style.setProperty('margin-top', '8px'); app.style.fontStyle = 'italic'; app.style.textDecoration = 'underline'; app.style.textTransform = 'uppercase'; app.style.textIndent = '10px'; app.style.letterSpacing = '2px'; app.style.maxWidth = '120px'; app.style.minHeight = '24px'; app.style.borderWidth = '2px'; app.style.borderColor = '#abcdef'; app.style.borderStyle = 'solid'; app.style.removeProperty('display');</script></body></html>",
@@ -13618,6 +14615,38 @@ mod tests {
         assert!(processed.html.contains("data-fragment=\"true\""));
         assert!(processed.html.contains("data-query=\"true\""));
         assert!(processed.html.contains("data-host=\"true\""));
+    }
+
+    #[test]
+    fn serializes_shadow_dom_composed_tree_with_slots_for_rendering() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"host\"><span slot=\"title\">Hello</span><b>World</b></div><script>var host = document.getElementById('host'); var shadow = host.attachShadow({ mode: 'open' }); shadow.innerHTML = '<section><h1><slot name=\"title\"></slot></h1><p><slot></slot></p></section>';</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("<div id=\"host\"><section><h1><span slot=\"title\">Hello</span></h1><p><b>World</b></p></section></div>"),
+            "{}",
+            processed.html
+        );
+    }
+
+    #[test]
+    fn supports_window_instanceof_window_for_webcomponents_bootstrap() {
+        let processed = process_document_scripts(
+            "<html><body><script>document.body.setAttribute('data-window', [window instanceof Window, Object.getPrototypeOf(window) === Window.prototype, typeof Window.prototype.addEventListener, typeof Window.prototype.removeEventListener, typeof Window.prototype.dispatchEvent].join('|'));</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(
+            processed
+                .html
+                .contains("data-window=\"true|true|function|function|function\""),
+            "{}",
+            processed.html
+        );
     }
 
     #[test]
