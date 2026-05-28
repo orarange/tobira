@@ -117,7 +117,7 @@ Exit condition:
 - `cargo build` passes with `boa` still active
 - the engine module compiles but is not wired into runtime behavior
 
-### Phase 1 - Lexer & Parser
+### Phase 1 - Lexer & Parser (complete)
 
 Goal: JavaScript source -> AST.
 
@@ -125,7 +125,24 @@ Goal: JavaScript source -> AST.
 - parser: expressions, statements, functions, classes, destructuring, scripts/modules as needed
 - validate with parse corpora and round-trip/snapshot tests
 
-Exit: the YouTube main bundle parses successfully.
+Completed in this phase:
+
+- added `src/engine/ast.rs` as the compiler-facing AST surface, keeping `SourceType`, strict-mode state, and statement-level wrappers aligned with the future bytecode compiler's needs
+- added `src/engine/lexer.rs` as a custom lexer with ES2020-oriented token coverage, source locations, regex-vs-division goal switching, template literal chunking, and ASI-relevant line-terminator tracking
+- added `src/engine/parser.rs` as the parser entry point, using a single-pass parse flow and converting the result into the Phase 2-facing AST surface
+- covered the parser with regression tests for expressions, calls/member access, destructured params, classes with `extends` and private fields, async/generator syntax, destructuring forms, template literals, optional chaining, nullish coalescing, and module syntax
+- added a multi-kilobyte synthetic bundle-style regression plus an ignored manual test path that reads a full bundle from `TOBIRA_YOUTUBE_KEVLAR_BASE_PATH`
+- manually verified that a full YouTube `kevlar_base` bundle (about `9.7` MB) parses end-to-end successfully
+
+Not done in this phase:
+
+- the bytecode compiler and VM remain Phase 2 work
+- the new parser is intentionally not wired into `src/js.rs` or the existing `boa` runtime yet
+- no AST lowering or execution pipeline exists beyond parsing
+
+Exit: complete. The YouTube main bundle parses successfully via the manual bundle-path test flow.
+
+Note: the ignored full-bundle parser test currently benefits from running with a larger stack, for example `RUST_MIN_STACK=67108864`, when invoked manually.
 
 ### Phase 2 - Bytecode Compiler & VM Core
 

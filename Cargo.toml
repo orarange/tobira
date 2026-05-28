@@ -5,8 +5,11 @@ edition = "2024"
 
 [dependencies]
 arboard = "3.6.1"
+boa_ast = "0.21.1"
 boa_engine = "0.21.1"
 boa_gc = "0.21.1"
+boa_interner = "0.21.1"
+boa_parser = "0.21.1"
 brotli = "8.0.2"
 encoding_rs = "0.8.35"
 flate2 = "1.1.5"

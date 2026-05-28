@@ -2734,8 +2734,11 @@ name = "tobira"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "boa_ast",
  "boa_engine",
  "boa_gc",
+ "boa_interner",
+ "boa_parser",
  "brotli",
  "encoding_rs",
  "flate2",

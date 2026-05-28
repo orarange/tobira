@@ -34,12 +34,17 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - run Codex implementation from the dedicated `codex/js-engine` worktree (`browser-js-engine`)
   - Codex is the primary implementation owner for this worktree and may touch both CSS and JS when needed
 - Verification status:
-- `cargo test`: `207` passing tests on `2026-05-28`
+- `cargo test`: `218` passing tests and `1` ignored manual large-bundle parser test on `2026-05-28`
 - `cargo build`: success on `2026-05-28`
 - Strategic direction:
   - `ENGINE_ROADMAP.md` now tracks the `boa` replacement plan separately from `JS_ROADMAP.md`.
   - Phase 0 is complete on `codex/js-engine`: the new engine module compiles as dead code, the parser decision is locked to custom-by-default, and the async/event-loop design exists as a review draft before Phase 5 implementation.
+  - Phase 1 is now complete on `codex/js-engine`: `src/engine/` has a compiler-facing AST facade, a custom lexer, and a parser entry point that can parse the YouTube `kevlar_base` bundle end-to-end without touching the runtime integration path yet.
 - Current implementation highlights:
+  - the new `src/engine/` parser front-end is in place and intentionally isolated from `src/js.rs` / the `boa` runtime:
+    - `ast.rs` exposes the Phase 2-facing AST surface
+    - `lexer.rs` handles ES2020-oriented tokenization, template literal pieces, regex goal switching, and ASI-relevant line tracking
+    - `parser.rs` accepts script/module mode and produces the AST surface used by the next compiler phase
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
   - CSS engine with broader selector and expression support than the original README says
@@ -138,6 +143,12 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   Custom chrome, address bar state, input handling, hover/click navigation, rendering integration.
 - `src/js.rs`
   Sandboxed JS execution policy plus the mutable DOM bridge used during script execution.
+- `src/engine/ast.rs`
+  Compiler-facing AST surface for the new engine parser pipeline.
+- `src/engine/lexer.rs`
+  Custom JS lexer with source locations, template literal support, and regex/disambiguation handling.
+- `src/engine/parser.rs`
+  JS parser entry point for the new engine, currently kept separate from the runtime path.
 - `src/html.rs`
   Hand-rolled HTML parser. Now preserves raw text for `script` / `style` / `title` / `textarea`, which matters for JS and CSS correctness.
 - `src/http.rs`
@@ -190,6 +201,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - CSS Phase 6 items remain: `transform: scale/rotate` rendering, `animation`/`@keyframes`, `transition`, `filter: blur()` rendering, `grid-template-areas`, RTL text.
 - JS support still needs storage/cookies, richer history/back-forward, and more DOM depth for app-shell sites.
 - text node `characterData` mutation notifications and `splitText(...)` are now in place for common DOM edit flows.
+- The engine replacement track is now through Phase 1; the next engine milestone is Phase 2 bytecode compiler / VM work, and the new parser is still intentionally not connected to `src/js.rs`.
 
 ## Useful Commands
 
@@ -209,6 +221,14 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-28 - Codex (JS engine Phase 1 lexer/parser)
+
+- Added `src/engine/ast.rs`, `src/engine/lexer.rs`, and `src/engine/parser.rs`, then wired them through `src/engine/mod.rs` without touching `src/js.rs`.
+- Kept the AST surface compiler-facing for Phase 2, while using a dedicated lexer and a parser entry point that supports script/module mode, strict-mode tracking, regex disambiguation, template literals, destructuring, classes, async/generator syntax, module syntax, and other ES2020-oriented bundle features.
+- Added parser regression coverage for the required syntax slices plus a multi-kilobyte synthetic bundle fragment, and added an ignored manual test path for parsing a full external bundle from `TOBIRA_YOUTUBE_KEVLAR_BASE_PATH`.
+- Verification: `cargo check`, `cargo test` (`218` passed, `1` ignored), and `cargo build` all succeeded on `2026-05-28`.
+- Manual large-bundle verification: a full YouTube `kevlar_base` bundle (about `9.7` MB) parsed successfully end-to-end via the ignored bundle test path; using `RUST_MIN_STACK=67108864` is currently recommended for that manual run.
 
 ### 2026-05-28 - Codex (JS engine Phase 0 scaffolding)
 
