@@ -1886,7 +1886,9 @@ impl DomState {
                     let host_children = node.children.clone();
                     if let Some(shadow_root) = self.node(shadow_root_id) {
                         for child_id in &shadow_root.children {
-                            html.push_str(&self.serialize_composed_node(*child_id, Some(&host_children)));
+                            html.push_str(
+                                &self.serialize_composed_node(*child_id, Some(&host_children)),
+                            );
                         }
                     }
                 } else {
@@ -1908,9 +1910,7 @@ impl DomState {
     }
 
     fn assigned_nodes_for_slot(&self, slot_node_id: usize, host_children: &[usize]) -> Vec<usize> {
-        let slot_name = self
-            .get_attribute(slot_node_id, "name")
-            .unwrap_or_default();
+        let slot_name = self.get_attribute(slot_node_id, "name").unwrap_or_default();
         let mut assigned = Vec::new();
         for child_id in host_children {
             let Some(child) = self.node(*child_id) else {
@@ -1923,7 +1923,8 @@ impl DomState {
                     }
                 }
                 DomNodeKind::Element(element) => {
-                    let child_slot_name = element.attributes.get("slot").cloned().unwrap_or_default();
+                    let child_slot_name =
+                        element.attributes.get("slot").cloned().unwrap_or_default();
                     if child_slot_name == slot_name
                         || (slot_name.is_empty() && child_slot_name.is_empty())
                     {
@@ -5390,6 +5391,71 @@ fn custom_element_prototype_object(
         .map(|object| object.clone())
 }
 
+fn custom_element_observed_attributes(context: &mut Context, tag_name: &str) -> Vec<String> {
+    let Some(constructor) = custom_element_constructor_object(context, tag_name) else {
+        return Vec::new();
+    };
+    let Ok(observed) = constructor.get(js_string!("observedAttributes"), context) else {
+        return Vec::new();
+    };
+    let Some(observed_object) = observed.as_object() else {
+        return Vec::new();
+    };
+    let Ok(length) = observed_object
+        .get(js_string!("length"), context)
+        .and_then(|value| value.to_length(context))
+    else {
+        return Vec::new();
+    };
+    let mut attributes = Vec::new();
+    for index in 0..length as usize {
+        let Ok(value) = observed_object.get(js_string!(index.to_string()), context) else {
+            continue;
+        };
+        let Ok(name) = js_value_to_string(&value, context) else {
+            continue;
+        };
+        let normalized = name.trim().to_ascii_lowercase();
+        if normalized.is_empty() || attributes.contains(&normalized) {
+            continue;
+        }
+        attributes.push(normalized);
+    }
+    attributes
+}
+
+fn call_custom_element_callback(
+    context: &mut Context,
+    node_id: usize,
+    element_object: &boa_engine::object::JsObject,
+    callback_name: &str,
+    args: &[JsValue],
+) {
+    let callback = element_object.get(js_string!(callback_name), context).ok();
+    let Some(callback) = callback else {
+        return;
+    };
+    if callback
+        .as_object()
+        .and_then(|object| JsFunction::from_object(object.clone()))
+        .is_none()
+    {
+        return;
+    }
+
+    let result = call_js_callback_with_this(
+        &callback,
+        &JsValue::from(element_object.clone()),
+        args,
+        context,
+    );
+    if let Err(error) = result {
+        js_trace(format!(
+            "custom element {callback_name} error node_id={node_id}: {error}"
+        ));
+    }
+}
+
 fn call_custom_element_connected_callback(
     context: &mut Context,
     node_id: usize,
@@ -5407,45 +5473,7 @@ fn call_custom_element_connected_callback(
     if !should_call {
         return;
     }
-
-    let callback = element_object
-        .get(js_string!("connectedCallback"), context)
-        .ok();
-    let Some(callback) = callback else {
-        if let Some(host) = context.get_data::<JavaScriptHostData>() {
-            host.state
-                .borrow_mut()
-                .dom
-                .mark_custom_element_connected_callback_called(node_id);
-        }
-        return;
-    };
-
-    if callback
-        .as_object()
-        .and_then(|object| JsFunction::from_object(object.clone()))
-        .is_none()
-    {
-        if let Some(host) = context.get_data::<JavaScriptHostData>() {
-            host.state
-                .borrow_mut()
-                .dom
-                .mark_custom_element_connected_callback_called(node_id);
-        }
-        return;
-    }
-
-    let result = call_js_callback_with_this(
-        &callback,
-        &JsValue::from(element_object.clone()),
-        &[],
-        context,
-    );
-    if let Err(error) = result {
-        js_trace(format!(
-            "custom element connectedCallback error node_id={node_id}: {error}"
-        ));
-    }
+    call_custom_element_callback(context, node_id, element_object, "connectedCallback", &[]);
     if let Some(host) = context.get_data::<JavaScriptHostData>() {
         host.state
             .borrow_mut()
@@ -5454,37 +5482,89 @@ fn call_custom_element_connected_callback(
     }
 }
 
+fn call_custom_element_attribute_changed_callback(
+    context: &mut Context,
+    node_id: usize,
+    attribute_name: &str,
+    old_value: Option<String>,
+    new_value: Option<String>,
+) {
+    if old_value == new_value {
+        return;
+    }
+    let Some((tag_name, upgraded)) = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        let state = host.state.borrow();
+        let Some(element) = state.dom.element(node_id) else {
+            return None;
+        };
+        Some((
+            element.tag_name.clone(),
+            state.dom.custom_element_upgraded(node_id),
+        ))
+    }) else {
+        return;
+    };
+    if !upgraded {
+        return;
+    }
+    let observed = custom_element_observed_attributes(context, &tag_name);
+    if !observed
+        .iter()
+        .any(|observed_name| observed_name == attribute_name)
+    {
+        return;
+    }
+    let element_object = build_dom_node_object(context, node_id);
+    let args = [
+        JsValue::from(js_string!(attribute_name)),
+        old_value
+            .map(|value| JsValue::from(js_string!(value)))
+            .unwrap_or_else(JsValue::null),
+        new_value
+            .map(|value| JsValue::from(js_string!(value)))
+            .unwrap_or_else(JsValue::null),
+    ];
+    call_custom_element_callback(
+        context,
+        node_id,
+        &element_object,
+        "attributeChangedCallback",
+        &args,
+    );
+}
+
 fn upgrade_dom_node_object_prototype(
     context: &mut Context,
     node_id: usize,
     object: &mut boa_engine::object::JsObject,
 ) {
-    let (is_document, is_shadow_root, is_text_node, is_canvas_node, tag_name, custom_upgraded) = context
-        .get_data::<JavaScriptHostData>()
-        .map(|host| {
-            let state = host.state.borrow();
-            let is_document = state.dom.is_document_node(node_id);
-            let is_shadow_root = state.dom.is_shadow_root(node_id);
-            let is_text_node = matches!(
-                state.dom.node(node_id).map(|node| &node.kind),
-                Some(DomNodeKind::Text(_))
-            );
-            let tag_name = state
-                .dom
-                .element(node_id)
-                .map(|element| element.tag_name.clone());
-            let is_canvas_node = tag_name.as_deref() == Some("canvas");
-            let custom_upgraded = state.dom.custom_element_upgraded(node_id);
-            (
-                is_document,
-                is_shadow_root,
-                is_text_node,
-                is_canvas_node,
-                tag_name,
-                custom_upgraded,
-            )
-        })
-        .unwrap_or((false, false, false, false, None, false));
+    let (is_document, is_shadow_root, is_text_node, is_canvas_node, tag_name, custom_upgraded) =
+        context
+            .get_data::<JavaScriptHostData>()
+            .map(|host| {
+                let state = host.state.borrow();
+                let is_document = state.dom.is_document_node(node_id);
+                let is_shadow_root = state.dom.is_shadow_root(node_id);
+                let is_text_node = matches!(
+                    state.dom.node(node_id).map(|node| &node.kind),
+                    Some(DomNodeKind::Text(_))
+                );
+                let tag_name = state
+                    .dom
+                    .element(node_id)
+                    .map(|element| element.tag_name.clone());
+                let is_canvas_node = tag_name.as_deref() == Some("canvas");
+                let custom_upgraded = state.dom.custom_element_upgraded(node_id);
+                (
+                    is_document,
+                    is_shadow_root,
+                    is_text_node,
+                    is_canvas_node,
+                    tag_name,
+                    custom_upgraded,
+                )
+            })
+            .unwrap_or((false, false, false, false, None, false));
 
     if is_document {
         if let Some(prototype) = global_constructor_prototype(context, "Document") {
@@ -5530,6 +5610,23 @@ fn upgrade_dom_node_object_prototype(
                     .borrow_mut()
                     .dom
                     .mark_custom_element_upgraded(node_id);
+                let observed_attributes = {
+                    let state = host.state.borrow();
+                    state
+                        .dom
+                        .element(node_id)
+                        .map(|element| element.attributes.clone())
+                        .unwrap_or_default()
+                };
+                for (attribute_name, value) in observed_attributes {
+                    call_custom_element_attribute_changed_callback(
+                        context,
+                        node_id,
+                        &attribute_name,
+                        None,
+                        Some(value),
+                    );
+                }
             }
             call_custom_element_connected_callback(context, node_id, object);
             return;
@@ -6302,8 +6399,8 @@ fn canvas_pixel_from_color(input: &str) -> Option<CanvasPixel> {
             let red = parts[0].trim().parse::<u8>().ok()?;
             let green = parts[1].trim().parse::<u8>().ok()?;
             let blue = parts[2].trim().parse::<u8>().ok()?;
-            let alpha = (parts[3].trim().parse::<f32>().ok()?.clamp(0.0, 1.0) * 255.0).round()
-                as u8;
+            let alpha =
+                (parts[3].trim().parse::<f32>().ok()?.clamp(0.0, 1.0) * 255.0).round() as u8;
             return Some(CanvasPixel {
                 red,
                 green,
@@ -6340,8 +6437,8 @@ fn canvas_pixel_from_color(input: &str) -> Option<CanvasPixel> {
             let h = parts[0].trim().parse::<f32>().ok()?;
             let s = parts[1].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
             let l = parts[2].trim().trim_end_matches('%').parse::<f32>().ok()? / 100.0;
-            let alpha = (parts[3].trim().parse::<f32>().ok()?.clamp(0.0, 1.0) * 255.0).round()
-                as u8;
+            let alpha =
+                (parts[3].trim().parse::<f32>().ok()?.clamp(0.0, 1.0) * 255.0).round() as u8;
             let (red, green, blue) = canvas_hsl_to_rgb(h, s, l);
             return Some(CanvasPixel {
                 red,
@@ -6391,8 +6488,8 @@ fn ensure_canvas_node_methods(context: &mut Context, node_id: usize, object: &mu
         })
         .unwrap_or(false);
     if is_canvas_node {
-        let get_context = NativeFunction::from_fn_ptr(js_dom_canvas_get_context)
-            .to_js_function(context.realm());
+        let get_context =
+            NativeFunction::from_fn_ptr(js_dom_canvas_get_context).to_js_function(context.realm());
         let _ = object.set(js_string!("getContext"), get_context, true, context);
     }
 }
@@ -6741,41 +6838,42 @@ fn build_canvas_rendering_context_object(
         return cached;
     }
 
-    let fill_style_getter =
-        NativeFunction::from_fn_ptr(js_canvas_context_get_fill_style).to_js_function(context.realm());
-    let fill_style_setter =
-        NativeFunction::from_fn_ptr(js_canvas_context_set_fill_style).to_js_function(context.realm());
+    let fill_style_getter = NativeFunction::from_fn_ptr(js_canvas_context_get_fill_style)
+        .to_js_function(context.realm());
+    let fill_style_setter = NativeFunction::from_fn_ptr(js_canvas_context_set_fill_style)
+        .to_js_function(context.realm());
     let canvas_getter =
         NativeFunction::from_fn_ptr(js_canvas_context_get_canvas).to_js_function(context.realm());
-    let object = ObjectInitializer::with_native_data(CanvasRenderingContext2DHandle { node_id }, context)
-        .function(
-            NativeFunction::from_fn_ptr(js_canvas_context_fill_rect),
-            js_string!("fillRect"),
-            4,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_canvas_context_clear_rect),
-            js_string!("clearRect"),
-            4,
-        )
-        .function(
-            NativeFunction::from_fn_ptr(js_canvas_context_get_image_data),
-            js_string!("getImageData"),
-            4,
-        )
-        .accessor(
-            js_string!("fillStyle"),
-            Some(fill_style_getter),
-            Some(fill_style_setter),
-            Attribute::all(),
-        )
-        .accessor(
-            js_string!("canvas"),
-            Some(canvas_getter),
-            None,
-            Attribute::all(),
-        )
-        .build();
+    let object =
+        ObjectInitializer::with_native_data(CanvasRenderingContext2DHandle { node_id }, context)
+            .function(
+                NativeFunction::from_fn_ptr(js_canvas_context_fill_rect),
+                js_string!("fillRect"),
+                4,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_canvas_context_clear_rect),
+                js_string!("clearRect"),
+                4,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_canvas_context_get_image_data),
+                js_string!("getImageData"),
+                4,
+            )
+            .accessor(
+                js_string!("fillStyle"),
+                Some(fill_style_getter),
+                Some(fill_style_setter),
+                Attribute::all(),
+            )
+            .accessor(
+                js_string!("canvas"),
+                Some(canvas_getter),
+                None,
+                Attribute::all(),
+            )
+            .build();
 
     if let Some(prototype) = global_constructor_prototype(context, "CanvasRenderingContext2D") {
         object.set_prototype(Some(prototype));
@@ -8955,11 +9053,10 @@ fn js_xhr_send(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRes
     };
 
     let result = match finalize_script_request(request, false) {
-        Ok(request) => resolve_requested_url(
-            &JsValue::from(js_string!(target_url.as_str())),
-            context,
-        )
-            .and_then(|url| fetch_for_script_with_request(&url, &request, context)),
+        Ok(request) => {
+            resolve_requested_url(&JsValue::from(js_string!(target_url.as_str())), context)
+                .and_then(|url| fetch_for_script_with_request(&url, &request, context))
+        }
         Err(error) => Err(error),
     };
 
@@ -9565,7 +9662,9 @@ fn js_dom_canvas_get_context(
     if requested.to_ascii_lowercase() != "2d" {
         return Ok(JsValue::null());
     }
-    Ok(JsValue::from(build_canvas_rendering_context_object(context, node_id)))
+    Ok(JsValue::from(build_canvas_rendering_context_object(
+        context, node_id,
+    )))
 }
 
 fn js_canvas_context_get_fill_style(
@@ -9721,7 +9820,11 @@ fn js_canvas_context_get_image_data(
     let image_data = ObjectInitializer::new(context)
         .property(js_string!("data"), data, Attribute::all())
         .property(js_string!("width"), width.round() as i32, Attribute::all())
-        .property(js_string!("height"), height.round() as i32, Attribute::all())
+        .property(
+            js_string!("height"),
+            height.round() as i32,
+            Attribute::all(),
+        )
         .build();
     Ok(JsValue::from(image_data))
 }
@@ -10792,6 +10895,13 @@ fn js_dom_set_attribute(
             .borrow_mut()
             .dom
             .set_attribute(node_id, &name, &value);
+        call_custom_element_attribute_changed_callback(
+            context,
+            node_id,
+            &name,
+            old_value.clone(),
+            Some(value.clone()),
+        );
         record_dom_attribute_mutation(context, node_id, &name, old_value);
         flush_mutation_observers(context);
     }
@@ -10826,7 +10936,15 @@ fn js_dom_toggle_attribute(
             state.dom.set_attribute(node_id, &name, "");
             true
         };
+        let new_value = if toggled { Some(String::new()) } else { None };
         drop(state);
+        call_custom_element_attribute_changed_callback(
+            context,
+            node_id,
+            &name,
+            old_value.clone(),
+            new_value,
+        );
         record_dom_attribute_mutation(context, node_id, &name, old_value);
         flush_mutation_observers(context);
         toggled
@@ -10851,6 +10969,13 @@ fn js_dom_set_property_attribute(
             .borrow_mut()
             .dom
             .set_attribute(node_id, name, &value);
+        call_custom_element_attribute_changed_callback(
+            context,
+            node_id,
+            name,
+            old_value.clone(),
+            Some(value.clone()),
+        );
         record_dom_attribute_mutation(context, node_id, name, old_value);
         flush_mutation_observers(context);
     }
@@ -10868,6 +10993,13 @@ fn js_dom_remove_attribute(
     {
         let old_value = host.state.borrow().dom.get_attribute(node_id, &name);
         host.state.borrow_mut().dom.remove_attribute(node_id, &name);
+        call_custom_element_attribute_changed_callback(
+            context,
+            node_id,
+            &name,
+            old_value.clone(),
+            None,
+        );
         record_dom_attribute_mutation(context, node_id, &name, old_value);
         flush_mutation_observers(context);
     }
@@ -13701,7 +13833,11 @@ mod tests {
             &Url::parse("https://example.com/start").unwrap(),
         );
 
-        assert!(processed.html.contains("data-canvas=\"true|function|1|2|3|128\""));
+        assert!(
+            processed
+                .html
+                .contains("data-canvas=\"true|function|1|2|3|128\"")
+        );
     }
 
     #[test]
@@ -14608,6 +14744,22 @@ mod tests {
         assert!(processed.html.contains("data-instanceof=\"true\""));
         assert!(processed.html.contains("data-defined=\"true\""));
         assert!(processed.html.contains("data-connected=\"ready\""));
+    }
+
+    #[test]
+    fn supports_custom_elements_attribute_changed_callback() {
+        let processed = process_document_scripts(
+            "<html><body><div id=\"host\"></div><script>var host = document.getElementById('host'); var el = document.createElement('x-card'); el.setAttribute('data-state', 'ready'); host.appendChild(el); class XCard extends HTMLElement { static get observedAttributes() { return ['data-state']; } connectedCallback() { document.body.setAttribute('data-connected', this.getAttribute('data-state')); } attributeChangedCallback(name, oldValue, newValue) { if (oldValue === null) { document.body.setAttribute('data-upgrade', [name, newValue].join('|')); } document.body.setAttribute('data-attr', [name, oldValue === null ? 'null' : oldValue, newValue === null ? 'null' : newValue].join('|')); } } customElements.define('x-card', XCard); el.setAttribute('data-state', 'updated'); el.removeAttribute('data-state');</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+
+        assert!(processed.html.contains("data-connected=\"ready\""));
+        assert!(processed.html.contains("data-upgrade=\"data-state|ready\""));
+        assert!(
+            processed
+                .html
+                .contains("data-attr=\"data-state|updated|null\"")
+        );
     }
 
     #[test]

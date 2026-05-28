@@ -24,9 +24,8 @@ use crate::font::FontContext;
 use crate::image::{DecodedImage, ImageStore};
 use crate::js::{DomEventDispatchResult, DomEventRequest};
 use crate::layout::{
-    DrawCommand, ElementHitbox, FormControlCommand, FormControlKind, LayerCommand,
-    LayoutDocument, TextCommand,
-    layout_styled_document,
+    DrawCommand, ElementHitbox, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument,
+    TextCommand, layout_styled_document,
 };
 use crate::url::Url;
 
@@ -2467,9 +2466,7 @@ impl DocumentView {
                     controls: Vec::new(),
                     element_hitboxes: Vec::new(),
                 },
-                DocumentContent::Loading(loading) => {
-                    layout_loading_document(loading, width, fonts)
-                }
+                DocumentContent::Loading(loading) => layout_loading_document(loading, width, fonts),
                 DocumentContent::Loaded(page) => {
                     layout_styled_document(&page.styled_document, &page.images, width, fonts)
                 }
