@@ -5,6 +5,7 @@ pub enum Opcode {
     LoadNull,
     LoadTrue,
     LoadFalse,
+    LoadThis,
     Pop,
     Dup,
 
@@ -59,9 +60,12 @@ pub enum Opcode {
     MakeObject,
     MakeArray(u16),
     GetProp,
+    GetPropForCall(u16),
     SetProp,
     GetIndex,
+    GetIndexForCall,
     SetIndex,
+    New(u8),
 
     Throw,
     Nop,

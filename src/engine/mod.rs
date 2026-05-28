@@ -33,7 +33,7 @@ pub use host::{
 pub use lexer::{LexError, LexGoal, Lexer, SourceLocation, Token, TokenKind};
 pub use parser::{ParseError, Parser, ParserOptions};
 pub use value::{
-    HostDispatch, HostObjectClass, HostObjectSlot, JsObject, JsProperty, JsPropertyDescriptor,
-    JsString, ObjectKind, PropertyKey, SymbolId, Value,
+    HostDispatch, HostObjectClass, HostObjectSlot, JsObject, JsPropertyDescriptor, JsString,
+    ObjectKind, PropertyKey, SymbolId, Value,
 };
 pub use vm::{CallFrame, Vm, VmError};

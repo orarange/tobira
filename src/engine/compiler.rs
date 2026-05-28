@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use super::ast::{
     ArithmeticOpNode, AssignOpNode, AssignTargetNode, BinaryOpNode, BindingNode, BitwiseOpNode,
     ExpressionNode, ForLoopInitializerNode, FormalParameterListNode, FunctionBodyNode,
-    FunctionDeclaration, LiteralKindNode, LogicalOpNode, Program, RelationalOpNode, StatementNode,
-    TemplateElementNode, UnaryOpNode, UpdateOpNode, UpdateTargetNode, VariableDeclaration,
-    statement_list_item_to_node,
+    FunctionDeclaration, LiteralKindNode, LogicalOpNode, MethodDefinitionKindNode,
+    ObjectMethodDefinitionNode, ObjectPropertyDefinition, Program, PropertyAccessFieldNode,
+    PropertyNameNode, RelationalOpNode, StatementNode, TemplateElementNode, UnaryOpNode,
+    UpdateOpNode, UpdateTargetNode, VariableDeclaration, statement_list_item_to_node,
 };
 use super::chunk::{Chunk, Constant, FunctionProto, Opcode, UpvalueDescriptor};
 
@@ -25,7 +26,7 @@ impl std::fmt::Display for CompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Message(message) => write!(f, "{message}"),
-            Self::Unimplemented(feature) => write!(f, "unimplemented in phase 2: {feature}"),
+            Self::Unimplemented(feature) => write!(f, "unimplemented in phase 3: {feature}"),
         }
     }
 }
@@ -65,6 +66,12 @@ struct LoopContext {
 enum DeclarationContext {
     Statement,
     ForInitializer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PropertyOpKind {
+    Named,
+    Computed,
 }
 
 pub struct Compiler<'a> {
@@ -734,7 +741,7 @@ impl<'a> FunctionCompiler<'a> {
     fn compile_expression(&mut self, expression: &ExpressionNode) -> Result<(), CompileError> {
         match expression {
             ExpressionNode::This(_) => {
-                self.emit(Opcode::LoadUndefined);
+                self.emit(Opcode::LoadThis);
                 Ok(())
             }
             ExpressionNode::Identifier(identifier) => {
@@ -746,8 +753,8 @@ impl<'a> FunctionCompiler<'a> {
             ExpressionNode::RegExpLiteral(_) => {
                 Err(CompileError::Unimplemented("regular expressions"))
             }
-            ExpressionNode::ArrayLiteral(_) => Err(CompileError::Unimplemented("array literals")),
-            ExpressionNode::ObjectLiteral(_) => Err(CompileError::Unimplemented("object literals")),
+            ExpressionNode::ArrayLiteral(array) => self.compile_array_literal(array),
+            ExpressionNode::ObjectLiteral(object) => self.compile_object_literal(object),
             ExpressionNode::Spread(_) => Err(CompileError::Unimplemented("spread expressions")),
             ExpressionNode::FunctionExpression(function) => self.compile_nested_function_value(
                 function
@@ -781,10 +788,10 @@ impl<'a> FunctionCompiler<'a> {
                 Err(CompileError::Unimplemented("class expressions"))
             }
             ExpressionNode::TemplateLiteral(template) => self.compile_template_literal(template),
-            ExpressionNode::PropertyAccess(_) => {
-                Err(CompileError::Unimplemented("property access"))
+            ExpressionNode::PropertyAccess(access) => {
+                self.compile_property_access_expression(access)
             }
-            ExpressionNode::New(_) => Err(CompileError::Unimplemented("new expressions")),
+            ExpressionNode::New(new_expression) => self.compile_new_expression(new_expression),
             ExpressionNode::Call(call) => self.compile_call_expression(call),
             ExpressionNode::SuperCall(_) => Err(CompileError::Unimplemented("super calls")),
             ExpressionNode::ImportCall(_) => Err(CompileError::Unimplemented("import() calls")),
@@ -811,6 +818,151 @@ impl<'a> FunctionCompiler<'a> {
             }
             ExpressionNode::FormalParameterList(_) | ExpressionNode::Debugger => {
                 Err(CompileError::message("invalid expression node"))
+            }
+        }
+    }
+
+    fn compile_array_literal(
+        &mut self,
+        array: &super::ast::ArrayExpression,
+    ) -> Result<(), CompileError> {
+        let mut count = 0usize;
+        for element in array.as_ref() {
+            match element {
+                Some(expression) => self.compile_expression(expression)?,
+                None => {
+                    self.emit(Opcode::LoadUndefined);
+                }
+            }
+            count += 1;
+        }
+        let count = u16::try_from(count)
+            .map_err(|_| CompileError::message("array literal length exceeded u16"))?;
+        self.emit(Opcode::MakeArray(count));
+        Ok(())
+    }
+
+    fn compile_object_literal(
+        &mut self,
+        object: &super::ast::ObjectExpression,
+    ) -> Result<(), CompileError> {
+        self.emit(Opcode::MakeObject);
+        for property in object.properties() {
+            self.emit(Opcode::Dup);
+            match property {
+                ObjectPropertyDefinition::IdentifierReference(identifier) => {
+                    let name = self.identifier_name(identifier);
+                    let constant = self.add_string_constant(name.clone())?;
+                    self.emit(Opcode::LoadConst(constant));
+                    let resolved = self.resolve_binding(&name);
+                    self.emit_load_binding(&name, resolved)?;
+                    self.emit(Opcode::SetProp);
+                }
+                ObjectPropertyDefinition::Property(name, value) => {
+                    self.compile_property_name_value(name)?;
+                    self.compile_expression(value)?;
+                    self.emit(Opcode::SetProp);
+                }
+                ObjectPropertyDefinition::MethodDefinition(method) => {
+                    self.compile_property_name_value(method.name())?;
+                    self.compile_object_method_value(method)?;
+                    self.emit(Opcode::SetProp);
+                }
+                ObjectPropertyDefinition::SpreadObject(_) => {
+                    return Err(CompileError::Unimplemented("object spread properties"));
+                }
+                ObjectPropertyDefinition::CoverInitializedName(identifier, expression) => {
+                    let constant = self.add_string_constant(self.identifier_name(identifier))?;
+                    self.emit(Opcode::LoadConst(constant));
+                    self.compile_expression(expression)?;
+                    self.emit(Opcode::SetProp);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn compile_property_name_value(&mut self, name: &PropertyNameNode) -> Result<(), CompileError> {
+        match name {
+            PropertyNameNode::Literal(identifier) => {
+                let constant = self.add_string_constant(self.identifier_name(identifier))?;
+                self.emit(Opcode::LoadConst(constant));
+            }
+            PropertyNameNode::Computed(expression) => {
+                self.compile_expression(expression)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn property_name_string(&self, name: &PropertyNameNode) -> Option<String> {
+        match name {
+            PropertyNameNode::Literal(identifier) => Some(self.identifier_name(identifier)),
+            PropertyNameNode::Computed(ExpressionNode::Literal(literal)) => match literal.kind() {
+                LiteralKindNode::String(sym) => Some(self.program.resolve_sym(*sym)),
+                LiteralKindNode::Int(value) if *value >= 0 => Some(value.to_string()),
+                LiteralKindNode::Num(value)
+                    if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 =>
+                {
+                    Some((*value as u64).to_string())
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn compile_object_method_value(
+        &mut self,
+        method: &ObjectMethodDefinitionNode,
+    ) -> Result<(), CompileError> {
+        match method.kind() {
+            MethodDefinitionKindNode::Ordinary => {}
+            MethodDefinitionKindNode::Get | MethodDefinitionKindNode::Set => {
+                return Err(CompileError::Unimplemented("object literal accessors"));
+            }
+            MethodDefinitionKindNode::Generator => {
+                return Err(CompileError::Unimplemented("generator object methods"));
+            }
+            MethodDefinitionKindNode::AsyncGenerator | MethodDefinitionKindNode::Async => {
+                return Err(CompileError::Unimplemented("async object methods"));
+            }
+        }
+
+        self.compile_nested_function_value(
+            self.property_name_string(method.name()),
+            method.parameters(),
+            method.body(),
+            method.body().strict(),
+        )
+    }
+
+    fn compile_property_access_expression(
+        &mut self,
+        access: &super::ast::MemberExpression,
+    ) -> Result<(), CompileError> {
+        match access {
+            super::ast::MemberExpression::Simple(access) => {
+                self.compile_expression(access.target())?;
+                match access.field() {
+                    PropertyAccessFieldNode::Const(identifier) => {
+                        let constant =
+                            self.add_string_constant(self.identifier_name(identifier))?;
+                        self.emit(Opcode::LoadConst(constant));
+                        self.emit(Opcode::GetProp);
+                    }
+                    PropertyAccessFieldNode::Expr(expression) => {
+                        self.compile_expression(expression)?;
+                        self.emit(Opcode::GetIndex);
+                    }
+                }
+                Ok(())
+            }
+            super::ast::MemberExpression::Private(_) => {
+                Err(CompileError::Unimplemented("private property access"))
+            }
+            super::ast::MemberExpression::Super(_) => {
+                Err(CompileError::Unimplemented("super property access"))
             }
         }
     }
@@ -895,14 +1047,64 @@ impl<'a> FunctionCompiler<'a> {
         &mut self,
         call: &super::ast::CallExpression,
     ) -> Result<(), CompileError> {
-        self.compile_expression(call.function())?;
-        self.emit(Opcode::LoadUndefined);
+        match call.function() {
+            ExpressionNode::PropertyAccess(access) => {
+                self.compile_property_access_for_call(access)?
+            }
+            other => {
+                self.compile_expression(other)?;
+                self.emit(Opcode::LoadUndefined);
+            }
+        }
         let argc = u8::try_from(call.args().len())
             .map_err(|_| CompileError::message("call argument count exceeded u8"))?;
         for argument in call.args() {
             self.compile_expression(argument)?;
         }
         self.emit(Opcode::Call(argc));
+        Ok(())
+    }
+
+    fn compile_property_access_for_call(
+        &mut self,
+        access: &super::ast::MemberExpression,
+    ) -> Result<(), CompileError> {
+        match access {
+            super::ast::MemberExpression::Simple(access) => {
+                self.compile_expression(access.target())?;
+                match access.field() {
+                    PropertyAccessFieldNode::Const(identifier) => {
+                        let constant =
+                            self.add_string_constant(self.identifier_name(identifier))?;
+                        self.emit(Opcode::GetPropForCall(constant));
+                    }
+                    PropertyAccessFieldNode::Expr(expression) => {
+                        self.compile_expression(expression)?;
+                        self.emit(Opcode::GetIndexForCall);
+                    }
+                }
+                Ok(())
+            }
+            super::ast::MemberExpression::Private(_) => {
+                Err(CompileError::Unimplemented("private method calls"))
+            }
+            super::ast::MemberExpression::Super(_) => {
+                Err(CompileError::Unimplemented("super method calls"))
+            }
+        }
+    }
+
+    fn compile_new_expression(
+        &mut self,
+        new_expression: &super::ast::NewExpression,
+    ) -> Result<(), CompileError> {
+        self.compile_expression(new_expression.constructor())?;
+        let argc = u8::try_from(new_expression.arguments().len())
+            .map_err(|_| CompileError::message("new expression arity exceeded u8"))?;
+        for argument in new_expression.arguments() {
+            self.compile_expression(argument)?;
+        }
+        self.emit(Opcode::New(argc));
         Ok(())
     }
 
@@ -916,8 +1118,8 @@ impl<'a> FunctionCompiler<'a> {
                 let resolved = self.resolve_binding(&name);
                 (name, resolved)
             }
-            AssignTargetNode::Access(_) => {
-                return Err(CompileError::Unimplemented("property assignment"));
+            AssignTargetNode::Access(access) => {
+                return self.compile_property_assignment(access, assign.op(), assign.rhs());
             }
             AssignTargetNode::Pattern(_) => {
                 return Err(CompileError::Unimplemented("destructuring assignment"));
@@ -988,6 +1190,42 @@ impl<'a> FunctionCompiler<'a> {
         Ok(())
     }
 
+    fn compile_property_assignment(
+        &mut self,
+        access: &super::ast::MemberExpression,
+        operator: AssignOpNode,
+        rhs: &ExpressionNode,
+    ) -> Result<(), CompileError> {
+        let obj_temp = self.allocate_hidden_local()?;
+        let key_temp = self.allocate_hidden_local()?;
+        let value_temp = self.allocate_hidden_local()?;
+        let kind = self.compile_property_access_temps(access, obj_temp, key_temp)?;
+
+        if operator == AssignOpNode::Assign {
+            self.compile_expression(rhs)?;
+            self.emit(Opcode::Dup);
+            self.emit(Opcode::SetLocal(value_temp));
+            self.emit(Opcode::GetLocal(obj_temp));
+            self.emit(Opcode::GetLocal(key_temp));
+            self.emit(Opcode::GetLocal(value_temp));
+            self.emit_property_set(kind);
+            return Ok(());
+        }
+
+        self.emit(Opcode::GetLocal(obj_temp));
+        self.emit(Opcode::GetLocal(key_temp));
+        self.emit_property_get(kind);
+        self.compile_expression(rhs)?;
+        self.emit_assignment_operator(operator)?;
+        self.emit(Opcode::Dup);
+        self.emit(Opcode::SetLocal(value_temp));
+        self.emit(Opcode::GetLocal(obj_temp));
+        self.emit(Opcode::GetLocal(key_temp));
+        self.emit(Opcode::GetLocal(value_temp));
+        self.emit_property_set(kind);
+        Ok(())
+    }
+
     fn compile_unary_expression(
         &mut self,
         unary: &super::ast::UnaryExpression,
@@ -1027,8 +1265,8 @@ impl<'a> FunctionCompiler<'a> {
                 let resolved = self.resolve_binding(&name);
                 (name, resolved)
             }
-            UpdateTargetNode::PropertyAccess(_) => {
-                return Err(CompileError::Unimplemented("property update expressions"));
+            UpdateTargetNode::PropertyAccess(access) => {
+                return self.compile_property_update_expression(access, update.op());
             }
         };
 
@@ -1061,6 +1299,97 @@ impl<'a> FunctionCompiler<'a> {
             }
         }
         Ok(())
+    }
+
+    fn compile_property_update_expression(
+        &mut self,
+        access: &super::ast::MemberExpression,
+        operator: UpdateOpNode,
+    ) -> Result<(), CompileError> {
+        let obj_temp = self.allocate_hidden_local()?;
+        let key_temp = self.allocate_hidden_local()?;
+        let old_temp = self.allocate_hidden_local()?;
+        let new_temp = self.allocate_hidden_local()?;
+        let kind = self.compile_property_access_temps(access, obj_temp, key_temp)?;
+        let one = self.add_number_constant(1.0)?;
+
+        self.emit(Opcode::GetLocal(obj_temp));
+        self.emit(Opcode::GetLocal(key_temp));
+        self.emit_property_get(kind);
+        self.emit(Opcode::Dup);
+        self.emit(Opcode::SetLocal(old_temp));
+        self.emit(Opcode::LoadConst(one));
+        match operator {
+            UpdateOpNode::IncrementPre | UpdateOpNode::IncrementPost => {
+                self.emit(Opcode::Add);
+            }
+            UpdateOpNode::DecrementPre | UpdateOpNode::DecrementPost => {
+                self.emit(Opcode::Sub);
+            }
+        }
+        self.emit(Opcode::Dup);
+        self.emit(Opcode::SetLocal(new_temp));
+        self.emit(Opcode::GetLocal(obj_temp));
+        self.emit(Opcode::GetLocal(key_temp));
+        self.emit(Opcode::GetLocal(new_temp));
+        self.emit_property_set(kind);
+
+        match operator {
+            UpdateOpNode::IncrementPre | UpdateOpNode::DecrementPre => {}
+            UpdateOpNode::IncrementPost | UpdateOpNode::DecrementPost => {
+                self.emit(Opcode::Pop);
+                self.emit(Opcode::GetLocal(old_temp));
+            }
+        }
+        Ok(())
+    }
+
+    fn compile_property_access_temps(
+        &mut self,
+        access: &super::ast::MemberExpression,
+        obj_temp: u16,
+        key_temp: u16,
+    ) -> Result<PropertyOpKind, CompileError> {
+        match access {
+            super::ast::MemberExpression::Simple(access) => {
+                self.compile_expression(access.target())?;
+                self.emit(Opcode::SetLocal(obj_temp));
+                match access.field() {
+                    PropertyAccessFieldNode::Const(identifier) => {
+                        let constant =
+                            self.add_string_constant(self.identifier_name(identifier))?;
+                        self.emit(Opcode::LoadConst(constant));
+                        self.emit(Opcode::SetLocal(key_temp));
+                        Ok(PropertyOpKind::Named)
+                    }
+                    PropertyAccessFieldNode::Expr(expression) => {
+                        self.compile_expression(expression)?;
+                        self.emit(Opcode::SetLocal(key_temp));
+                        Ok(PropertyOpKind::Computed)
+                    }
+                }
+            }
+            super::ast::MemberExpression::Private(_) => {
+                Err(CompileError::Unimplemented("private property access"))
+            }
+            super::ast::MemberExpression::Super(_) => {
+                Err(CompileError::Unimplemented("super property access"))
+            }
+        }
+    }
+
+    fn emit_property_get(&mut self, kind: PropertyOpKind) {
+        match kind {
+            PropertyOpKind::Named => self.emit(Opcode::GetProp),
+            PropertyOpKind::Computed => self.emit(Opcode::GetIndex),
+        };
+    }
+
+    fn emit_property_set(&mut self, kind: PropertyOpKind) {
+        match kind {
+            PropertyOpKind::Named => self.emit(Opcode::SetProp),
+            PropertyOpKind::Computed => self.emit(Opcode::SetIndex),
+        };
     }
 
     fn compile_binary_expression(

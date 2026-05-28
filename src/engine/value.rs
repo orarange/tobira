@@ -1,4 +1,5 @@
 use super::heap::GcRef;
+use indexmap::IndexMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SymbolId(pub u32);
@@ -91,28 +92,44 @@ pub enum PropertyKey {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct JsPropertyDescriptor {
-    pub enumerable: bool,
-    pub configurable: bool,
-    pub writable: bool,
-    pub value: Value,
+pub enum JsPropertyDescriptor {
+    Data {
+        value: Value,
+        writable: bool,
+        enumerable: bool,
+        configurable: bool,
+    },
+    Accessor {
+        get: Option<GcRef<JsObject>>,
+        set: Option<GcRef<JsObject>>,
+        enumerable: bool,
+        configurable: bool,
+    },
 }
 
 impl JsPropertyDescriptor {
     pub fn data(value: Value) -> Self {
-        Self {
+        Self::Data {
+            value,
+            writable: true,
             enumerable: true,
             configurable: true,
-            writable: true,
-            value,
         }
     }
-}
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct JsProperty {
-    pub key: PropertyKey,
-    pub descriptor: JsPropertyDescriptor,
+    pub fn data_with_flags(
+        value: Value,
+        writable: bool,
+        enumerable: bool,
+        configurable: bool,
+    ) -> Self {
+        Self::Data {
+            value,
+            writable,
+            enumerable,
+            configurable,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,7 +147,7 @@ pub struct JsObject {
     pub kind: ObjectKind,
     pub prototype: Option<GcRef<JsObject>>,
     pub extensible: bool,
-    pub properties: Vec<JsProperty>,
+    pub properties: IndexMap<PropertyKey, JsPropertyDescriptor>,
 }
 
 impl Default for JsObject {
@@ -139,7 +156,7 @@ impl Default for JsObject {
             kind: ObjectKind::Ordinary,
             prototype: None,
             extensible: true,
-            properties: Vec::new(),
+            properties: IndexMap::new(),
         }
     }
 }

@@ -2745,6 +2745,7 @@ dependencies = [
  "font8x8",
  "fontdue",
  "image",
+ "indexmap",
  "rustls",
  "rustls-platform-verifier",
  "serde_json",
