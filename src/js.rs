@@ -1,7 +1,11 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::mem;
 use std::sync::mpsc::{self, Sender};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -34,6 +38,7 @@ const JS_MAX_NETWORK_REQUESTS: usize = 8;
 const JS_MAX_NETWORK_RESPONSE_BYTES: usize = 256 * 1024;
 const JS_MAX_NETWORK_TOTAL_RESPONSE_BYTES: usize = 512 * 1024;
 const JS_INITIAL_SCRIPT_PROCESSING_BUDGET: Duration = Duration::from_millis(5_000);
+pub(crate) const JS_FETCH_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_VIEWPORT_WIDTH: u32 = 1280;
 const DEFAULT_VIEWPORT_HEIGHT: u32 = 720;
 
@@ -55,6 +60,22 @@ pub struct ProcessedScriptHtml {
     pub navigation_target: Option<String>,
     pub soft_navigation_target: Option<String>,
     pub scroll_y: u32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompletedFetch {
+    id: usize,
+    result: Result<HttpResponse, String>,
+}
+
+struct FetchInflightGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for FetchInflightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -90,6 +111,8 @@ pub struct DomEventDispatchResult {
 #[derive(Debug, Clone)]
 pub struct JavaScriptSession {
     command_tx: Sender<JavaScriptSessionCommand>,
+    fetch_result_queue: Arc<Mutex<VecDeque<CompletedFetch>>>,
+    fetch_inflight_count: Arc<AtomicUsize>,
 }
 
 #[derive(Debug)]
@@ -160,6 +183,14 @@ impl JavaScriptSession {
         }
 
         response_rx.recv().ok()
+    }
+
+    pub(crate) fn has_pending_fetches(&self) -> bool {
+        self.fetch_inflight_count.load(Ordering::SeqCst) > 0
+    }
+
+    pub(crate) fn fetch_result_queue(&self) -> Arc<Mutex<VecDeque<CompletedFetch>>> {
+        self.fetch_result_queue.clone()
     }
 
     pub(crate) fn set_attribute(&self, node_id: usize, name: &str, value: &str) -> bool {
@@ -248,6 +279,11 @@ struct JavaScriptState {
     history_entries: Vec<HistoryEntry>,
     history_index: usize,
     current_script: Option<usize>,
+    pending_fetch_count: usize,
+    next_fetch_id: usize,
+    pending_fetch_resolvers: HashMap<usize, (JsValue, JsValue)>,
+    fetch_result_queue: Arc<Mutex<VecDeque<CompletedFetch>>>,
+    fetch_inflight_count: Arc<AtomicUsize>,
     network_request_count: usize,
     network_response_bytes: usize,
     viewport_width: u32,
@@ -493,6 +529,8 @@ pub fn start_document_script_session(
     ));
     let html_owned = html.to_string();
     let base_url_owned = base_url.clone();
+    let fetch_result_queue = Arc::new(Mutex::new(VecDeque::new()));
+    let fetch_inflight_count = Arc::new(AtomicUsize::new(0));
     let (ready_tx, ready_rx) = mpsc::channel();
     let (command_tx, command_rx) = mpsc::channel();
     let worker = thread::Builder::new()
@@ -501,15 +539,23 @@ pub fn start_document_script_session(
         .spawn({
             let html = html_owned.clone();
             let base_url = base_url_owned.clone();
+            let fetch_result_queue = fetch_result_queue.clone();
+            let fetch_inflight_count = fetch_inflight_count.clone();
             move || {
                 js_trace(format!(
                     "worker start url={} html_bytes={}",
                     base_url,
                     html.len()
                 ));
-                let mut runtime = JavaScriptRuntime::new(&base_url, &html);
+                let mut runtime = JavaScriptRuntime::new_with_shared_state(
+                    &base_url,
+                    &html,
+                    fetch_result_queue,
+                    fetch_inflight_count,
+                );
                 runtime.process_loaded_document();
                 runtime.dispatch_initial_load_events();
+                runtime.wait_for_pending_fetches(JS_FETCH_SETTLE_TIMEOUT);
                 let processed = runtime.snapshot();
                 js_trace(format!(
                     "worker snapshot ready url={} logs={} elapsed={:?}",
@@ -581,7 +627,14 @@ pub fn start_document_script_session(
                     base_url_owned,
                     session_started.elapsed()
                 ));
-                (processed, Some(JavaScriptSession { command_tx }))
+                (
+                    processed,
+                    Some(JavaScriptSession {
+                        command_tx,
+                        fetch_result_queue,
+                        fetch_inflight_count,
+                    }),
+                )
             }
             Err(_) => (
                 process_document_scripts_error(
@@ -616,17 +669,35 @@ fn process_document_scripts_impl(html: &str, base_url: &Url) -> ProcessedScriptH
     let mut runtime = JavaScriptRuntime::new(base_url, html);
     runtime.process_loaded_document();
     runtime.dispatch_initial_load_events();
-    runtime.snapshot()
+    runtime.wait_for_pending_fetches(JS_FETCH_SETTLE_TIMEOUT);
+    let _ = runtime.settle_pending_state();
+    runtime.snapshot_raw()
 }
 
 struct JavaScriptRuntime {
     context: Context,
     executed_bytes: usize,
     host: String,
+    fetch_result_queue: Arc<Mutex<VecDeque<CompletedFetch>>>,
+    fetch_inflight_count: Arc<AtomicUsize>,
 }
 
 impl JavaScriptRuntime {
     fn new(base_url: &Url, html: &str) -> Self {
+        Self::new_with_shared_state(
+            base_url,
+            html,
+            Arc::new(Mutex::new(VecDeque::new())),
+            Arc::new(AtomicUsize::new(0)),
+        )
+    }
+
+    fn new_with_shared_state(
+        base_url: &Url,
+        html: &str,
+        fetch_result_queue: Arc<Mutex<VecDeque<CompletedFetch>>>,
+        fetch_inflight_count: Arc<AtomicUsize>,
+    ) -> Self {
         let mut context = Context::default();
         context
             .runtime_limits_mut()
@@ -649,6 +720,11 @@ impl JavaScriptRuntime {
                 }],
                 history_index: 0,
                 current_script: None,
+                pending_fetch_count: 0,
+                next_fetch_id: 1,
+                pending_fetch_resolvers: HashMap::new(),
+                fetch_result_queue: fetch_result_queue.clone(),
+                fetch_inflight_count: fetch_inflight_count.clone(),
                 network_request_count: 0,
                 network_response_bytes: 0,
                 viewport_width: DEFAULT_VIEWPORT_WIDTH,
@@ -671,6 +747,8 @@ impl JavaScriptRuntime {
             context,
             executed_bytes: 0,
             host: base_url.host.to_ascii_lowercase(),
+            fetch_result_queue,
+            fetch_inflight_count,
         }
     }
 
@@ -744,12 +822,133 @@ impl JavaScriptRuntime {
         executed_scripts > 0
     }
 
-    fn settle_pending_state(&mut self) {
-        self.flush_pending_document_writes();
-        self.process_loaded_document();
-        self.flush_pending_tasks();
-        self.flush_pending_document_writes();
-        self.process_loaded_document();
+    fn has_pending_fetches(&self) -> bool {
+        self.fetch_inflight_count.load(Ordering::SeqCst) > 0
+    }
+
+    fn wait_for_pending_fetches(&mut self, timeout: Duration) {
+        let started = Instant::now();
+        let mut iterations = 0;
+        while self.has_pending_fetches() && started.elapsed() <= timeout {
+            iterations += 1;
+            let progressed = self.settle_pending_state();
+            if !self.has_pending_fetches() {
+                break;
+            }
+            if !progressed || iterations > 2_000 {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        if self.has_pending_fetches() {
+            js_trace(format!(
+                "pending fetch settle timeout url={} inflight={}",
+                self.document_url(),
+                self.fetch_inflight_count.load(Ordering::SeqCst)
+            ));
+        }
+    }
+
+    fn settle_pending_state(&mut self) -> bool {
+        let mut changed = false;
+        changed |= self.settle_document_state();
+        changed |= self.flush_pending_tasks();
+        changed |= self.settle_document_state();
+        changed
+    }
+
+    fn settle_document_state(&mut self) -> bool {
+        let mut changed = false;
+        let mut iterations = 0;
+        loop {
+            iterations += 1;
+            let mut progressed = false;
+            progressed |= self.flush_pending_document_writes();
+            progressed |= self.process_loaded_document();
+            progressed |= self.drain_completed_fetches();
+            if !progressed {
+                break;
+            }
+            changed = true;
+            if iterations >= 8 {
+                js_trace(format!(
+                    "settle loop iteration cap reached url={}",
+                    self.document_url()
+                ));
+                break;
+            }
+        }
+        changed
+    }
+
+    fn drain_completed_fetches(&mut self) -> bool {
+        let completed = {
+            let Some(host) = self.context.get_data::<JavaScriptHostData>() else {
+                return false;
+            };
+            let queue = host.state.borrow().fetch_result_queue.clone();
+            let mut queue = queue.lock().expect("fetch result queue should lock");
+            queue.drain(..).collect::<Vec<_>>()
+        };
+        if completed.is_empty() {
+            return false;
+        }
+
+        let mut handled = false;
+        for completed_fetch in completed {
+            let resolver = {
+                let Some(host) = self.context.get_data::<JavaScriptHostData>() else {
+                    continue;
+                };
+                let mut state = host.state.borrow_mut();
+                if state.pending_fetch_count > 0 {
+                    state.pending_fetch_count -= 1;
+                }
+                state.pending_fetch_resolvers.remove(&completed_fetch.id)
+            };
+            let Some((resolve, reject)) = resolver else {
+                js_trace(format!(
+                    "fetch completion without resolver id={}",
+                    completed_fetch.id
+                ));
+                continue;
+            };
+
+            let result = match completed_fetch.result {
+                Ok(response) => {
+                    let response_len = response.body.len();
+                    record_js_network_response_bytes(response_len, &mut self.context);
+                    let response_object =
+                        JsValue::from(build_fetch_response_object(&mut self.context, response));
+                    call_js_callback_with_this(
+                        &resolve,
+                        &JsValue::undefined(),
+                        &[response_object],
+                        &mut self.context,
+                    )
+                }
+                Err(error) => {
+                    let error = JsNativeError::error()
+                        .with_message(error)
+                        .to_opaque(&mut self.context);
+                    call_js_callback_with_this(
+                        &reject,
+                        &JsValue::undefined(),
+                        &[error.into()],
+                        &mut self.context,
+                    )
+                }
+            };
+
+            if let Err(error) = result {
+                self.push_log(format!("js fetch settle error: {error}"));
+            }
+            if let Err(error) = self.context.run_jobs() {
+                self.push_log(format!("js job error: {error}"));
+            }
+            flush_mutation_observers(&mut self.context);
+            handled = true;
+        }
+        handled
     }
 
     fn queue_pending_task(&self, kind: PendingTaskKind, action: PendingTaskAction) -> usize {
@@ -858,7 +1057,11 @@ impl JavaScriptRuntime {
     }
 
     fn snapshot(&mut self) -> ProcessedScriptHtml {
-        self.settle_pending_state();
+        let _ = self.settle_pending_state();
+        self.snapshot_raw()
+    }
+
+    fn snapshot_raw(&mut self) -> ProcessedScriptHtml {
         flush_mutation_observers(&mut self.context);
         ProcessedScriptHtml {
             html: self.serialize_html(),
@@ -8714,6 +8917,100 @@ fn fetch_for_script_with_request(
     Ok(response)
 }
 
+fn register_async_script_fetch(
+    context: &mut Context,
+    resolvers: boa_engine::builtins::promise::ResolvingFunctions,
+) -> JsResult<usize> {
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        return Err(JsNativeError::error()
+            .with_message("missing JS runtime host state")
+            .into());
+    };
+
+    let mut state = host.state.borrow_mut();
+    let mut fetch_id = state.next_fetch_id;
+    while state.pending_fetch_resolvers.contains_key(&fetch_id) {
+        fetch_id = fetch_id.checked_add(1).unwrap_or(1);
+    }
+    state.next_fetch_id = fetch_id.checked_add(1).unwrap_or(1);
+    state.pending_fetch_count = state.pending_fetch_count.saturating_add(1);
+    state.pending_fetch_resolvers.insert(
+        fetch_id,
+        (
+            JsValue::from(resolvers.resolve),
+            JsValue::from(resolvers.reject),
+        ),
+    );
+    Ok(fetch_id)
+}
+
+fn reject_registered_async_script_fetch(context: &mut Context, fetch_id: usize, message: String) {
+    let resolver = context.get_data::<JavaScriptHostData>().and_then(|host| {
+        let mut state = host.state.borrow_mut();
+        if state.pending_fetch_count > 0 {
+            state.pending_fetch_count -= 1;
+        }
+        state.pending_fetch_resolvers.remove(&fetch_id)
+    });
+    let Some((_, reject)) = resolver else {
+        return;
+    };
+    let error = JsNativeError::error()
+        .with_message(message)
+        .to_opaque(context);
+    let _ = call_js_callback_with_this(&reject, &JsValue::undefined(), &[error.into()], context);
+    if let Err(error) = context.run_jobs() {
+        js_trace(format!("js job error after fetch rejection: {error}"));
+    }
+    flush_mutation_observers(context);
+}
+
+fn spawn_async_script_fetch(
+    fetch_id: usize,
+    current: Url,
+    url: Url,
+    request: ScriptRequestOptions,
+    max_response_bytes: usize,
+    fetch_result_queue: Arc<Mutex<VecDeque<CompletedFetch>>>,
+    fetch_inflight_count: Arc<AtomicUsize>,
+) -> std::result::Result<(), String> {
+    let thread_name = format!("tobira-fetch-{fetch_id}");
+    thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let _inflight_guard = FetchInflightGuard {
+                counter: fetch_inflight_count,
+            };
+            js_trace(format!(
+                "async fetch start id={} url={} method={} body_bytes={}",
+                fetch_id,
+                url,
+                request.method,
+                request.body.as_ref().map_or(0, |body| body.len())
+            ));
+            let http_request = HttpRequestOptions {
+                method: request.method,
+                headers: request.headers,
+                body: request.body,
+            };
+            let result = fetch_with_request_with_limits_same_origin(
+                &url,
+                max_response_bytes,
+                &current,
+                &http_request,
+            )
+            .map_err(|error| error.to_string());
+            if let Ok(mut queue) = fetch_result_queue.lock() {
+                queue.push_back(CompletedFetch {
+                    id: fetch_id,
+                    result,
+                });
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn fetch_signal_is_aborted(value: &JsValue, context: &mut Context) -> JsResult<bool> {
     let Some(object) = value.as_object() else {
         return Ok(false);
@@ -8735,29 +9032,68 @@ fn js_fetch(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<Js
             context,
         )));
     }
-    let url = resolve_requested_url(&request, context);
-    let request_options = script_request_options_from_js(&request, &options, context);
-    if let (Ok(url), Ok(request_options)) = (&url, request_options.as_ref()) {
-        js_trace(format!(
-            "fetch request url={} method={} body_bytes={} headers={}",
-            url,
-            request_options.method,
-            request_options.body.as_ref().map_or(0, |body| body.len()),
-            request_options.headers.len()
-        ));
-    }
-    let promise = match url {
-        Ok(url) => JsPromise::from_result(
-            request_options
-                .and_then(|request_options| {
-                    fetch_for_script_with_request(&url, &request_options, context)
-                })
-                .map(|response| JsValue::from(build_fetch_response_object(context, response)))
-                .map_err(|error| JsNativeError::error().with_message(error.to_string())),
-            context,
-        ),
-        Err(error) => JsPromise::reject(error, context),
+    let url = match resolve_requested_url(&request, context) {
+        Ok(url) => url,
+        Err(error) => return Ok(JsValue::from(JsPromise::reject(error, context))),
     };
+    let request_options = match script_request_options_from_js(&request, &options, context) {
+        Ok(request_options) => request_options,
+        Err(error) => return Ok(JsValue::from(JsPromise::reject(error, context))),
+    };
+    let current = match current_document_url(context) {
+        Some(url) => url,
+        None => {
+            return Ok(JsValue::from(JsPromise::reject(
+                JsNativeError::error().with_message("missing current page origin for JS request"),
+                context,
+            )));
+        }
+    };
+    js_trace(format!(
+        "fetch request url={} method={} body_bytes={} headers={}",
+        url,
+        request_options.method,
+        request_options.body.as_ref().map_or(0, |body| body.len()),
+        request_options.headers.len()
+    ));
+    if let Err(error) =
+        ensure_same_origin_script_url(&current, &url, "cross-origin JS requests are blocked")
+    {
+        return Ok(JsValue::from(JsPromise::reject(error, context)));
+    }
+    let max_response_bytes = match reserve_js_network_budget(context) {
+        Ok(max_response_bytes) => max_response_bytes,
+        Err(error) => return Ok(JsValue::from(JsPromise::reject(error, context))),
+    };
+    let (promise, resolvers) = JsPromise::new_pending(context);
+    let fetch_id = match register_async_script_fetch(context, resolvers) {
+        Ok(fetch_id) => fetch_id,
+        Err(error) => return Ok(JsValue::from(JsPromise::reject(error, context))),
+    };
+    let Some(host) = context.get_data::<JavaScriptHostData>() else {
+        reject_registered_async_script_fetch(
+            context,
+            fetch_id,
+            "missing JS runtime host state".to_string(),
+        );
+        return Ok(JsValue::from(promise));
+    };
+    let fetch_result_queue = host.state.borrow().fetch_result_queue.clone();
+    let fetch_inflight_count = host.state.borrow().fetch_inflight_count.clone();
+    fetch_inflight_count.fetch_add(1, Ordering::SeqCst);
+    if let Err(error) = spawn_async_script_fetch(
+        fetch_id,
+        current,
+        url,
+        request_options,
+        max_response_bytes,
+        fetch_result_queue,
+        fetch_inflight_count.clone(),
+    ) {
+        fetch_inflight_count.fetch_sub(1, Ordering::SeqCst);
+        reject_registered_async_script_fetch(context, fetch_id, error);
+    }
+
     Ok(JsValue::from(promise))
 }
 
@@ -9483,25 +9819,8 @@ fn js_dom_dispatch_event(
         let bubbles = default_event_bubbles(&event_type);
         let cancelable = default_event_cancelable(&event_type);
         (
-            event_type,
-            bubbles,
-            cancelable,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            false,
-            false,
-            false,
-            false,
-            false,
+            event_type, bubbles, cancelable, None, None, None, None, None, None, None, None, None,
+            None, false, false, false, false, false, false,
         )
     };
     let request = DomEventRequest {

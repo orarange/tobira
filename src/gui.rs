@@ -2,6 +2,7 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
 use softbuffer::{Context, Surface};
@@ -22,7 +23,9 @@ use crate::css::{
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
 use crate::image::{DecodedImage, ImageStore};
-use crate::js::{DomEventDispatchResult, DomEventRequest};
+use crate::js::{
+    DomEventDispatchResult, DomEventRequest, JS_FETCH_SETTLE_TIMEOUT, JavaScriptSession,
+};
 use crate::layout::{
     DrawCommand, ElementHitbox, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument,
     TextCommand, layout_styled_document,
@@ -142,6 +145,7 @@ enum BrowserUserEvent {
         render_id: u64,
         result: std::result::Result<RenderedContentFrame, String>,
     },
+    JsSettleRequired,
 }
 
 #[derive(Debug, Clone)]
@@ -1797,7 +1801,29 @@ impl BrowserApp {
         self.sync_input_method();
         self.request_content_render();
         self.request_redraw();
+        self.maybe_spawn_fetch_settle_watcher();
         Some(result)
+    }
+
+    fn maybe_spawn_fetch_settle_watcher(&self) {
+        let Some(session) = self.document.javascript_session() else {
+            return;
+        };
+        if !session.has_pending_fetches() {
+            return;
+        }
+
+        let event_proxy = self.event_proxy.clone();
+        thread::Builder::new()
+            .name("tobira-fetch-settle-watch".to_string())
+            .spawn(move || {
+                let started = Instant::now();
+                while session.has_pending_fetches() && started.elapsed() < JS_FETCH_SETTLE_TIMEOUT {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                let _ = event_proxy.send_event(BrowserUserEvent::JsSettleRequired);
+            })
+            .expect("fetch settle watcher should start");
     }
 
     fn dispatch_focused_page_input_event(
@@ -2206,6 +2232,20 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
             BrowserUserEvent::RenderFinished { render_id, result } => {
                 self.finish_render(render_id, result);
             }
+            BrowserUserEvent::JsSettleRequired => {
+                if self.document.refresh_loaded_page_from_script_session() {
+                    self.scroll_y = self.document.scroll_position();
+                    self.sync_current_history_scroll();
+                    self.sync_window_title();
+                    self.refresh_focused_page_input_from_document();
+                    self.sync_input_method();
+                    self.request_content_render();
+                    self.request_redraw();
+                }
+                if self.document.has_pending_fetches() {
+                    self.maybe_spawn_fetch_settle_watcher();
+                }
+            }
         }
     }
 
@@ -2425,6 +2465,20 @@ impl DocumentView {
             self.layout_cache = None;
         }
         changed
+    }
+
+    fn javascript_session(&self) -> Option<JavaScriptSession> {
+        match &self.content {
+            DocumentContent::Loaded(page) => page.javascript_session(),
+            _ => None,
+        }
+    }
+
+    fn has_pending_fetches(&self) -> bool {
+        match &self.content {
+            DocumentContent::Loaded(page) => page.has_pending_fetches(),
+            _ => false,
+        }
     }
 
     fn feed_layout_hitboxes(&mut self, hitboxes: Vec<ElementHitbox>) -> bool {

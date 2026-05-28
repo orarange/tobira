@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde_json::Value;
@@ -169,6 +171,24 @@ impl BrowserPage {
             self.refresh_from_script_session();
         }
         changed
+    }
+
+    pub(crate) fn javascript_session(&self) -> Option<JavaScriptSession> {
+        self.javascript_session.as_ref().cloned()
+    }
+
+    pub(crate) fn has_pending_fetches(&self) -> bool {
+        self.javascript_session
+            .as_ref()
+            .is_some_and(JavaScriptSession::has_pending_fetches)
+    }
+
+    pub(crate) fn fetch_result_queue(
+        &self,
+    ) -> Option<Arc<Mutex<VecDeque<crate::js::CompletedFetch>>>> {
+        self.javascript_session
+            .as_ref()
+            .map(JavaScriptSession::fetch_result_queue)
     }
 
     pub(crate) fn refresh_from_script_session(&mut self) -> bool {
