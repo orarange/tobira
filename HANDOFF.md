@@ -27,15 +27,18 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 - Date: `2026-05-28`
 - Repo / package name: `tobira`
-- Active Codex branch: `codex/js-event-capture`
+- Active Codex branch: `codex/js-engine`
 - Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
 - Workflow:
   - keep the shared root checkout free for the user / Claude side
-  - run Codex implementation from a separate `codex/js-event-capture` worktree
+  - run Codex implementation from the dedicated `codex/js-engine` worktree (`browser-js-engine`)
   - Codex is the primary implementation owner for this worktree and may touch both CSS and JS when needed
 - Verification status:
 - `cargo test`: `207` passing tests on `2026-05-28`
 - `cargo build`: success on `2026-05-28`
+- Strategic direction:
+  - `ENGINE_ROADMAP.md` now tracks the `boa` replacement plan separately from `JS_ROADMAP.md`.
+  - Phase 0 is complete on `codex/js-engine`: the new engine module compiles as dead code, the parser decision is locked to custom-by-default, and the async/event-loop design exists as a review draft before Phase 5 implementation.
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
   - custom HTML parser and DOM-like tree
@@ -206,6 +209,20 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-28 - Codex (JS engine Phase 0 scaffolding)
+
+- Re-pointed the dedicated `codex/js-engine` worktree onto the current `codex/make-js-engine` tip so Phase 0 starts from the latest 207-test baseline instead of the older branch snapshot.
+- Added a new dead-code `src/engine/` module with `value.rs`, `heap.rs`, `host.rs`, and `mod.rs`, plus `mod engine;` in `src/main.rs`.
+- Folded subagent review feedback into the scaffolding:
+  - `GcRef` / `RawGcRef` now reserve arena identity plus generation so later mark-sweep slot reuse does not require a handle redesign.
+  - root tracking no longer relies on a disconnected per-header root count.
+  - host object slots now reserve dispatch/brand-ish metadata instead of only `class + u64`.
+  - host async delivery now leans on richer `HostEvent` payloads instead of a separate `poll_fetch()`-style pull path.
+  - kept the broad `DomRead` / `DomMutation` command enums on purpose for Phase 0; they are documented in-code as a temporary scaffold so wrapper-local traits can split later without blocking this dead-code landing.
+- Added `ENGINE_ROADMAP.md`, `ENGINE_PARSER_DECISION.md`, and `ENGINE_ASYNC_DESIGN.md`.
+- Updated the async draft after review to avoid overpromising cross-task-source ordering and to reflect rAF / ResizeObserver / IntersectionObserver ordering more carefully.
+- Verification: `cargo fmt --all`, `cargo build`, and `cargo test` all succeeded; test suite stayed at `207` passing.
 
 ### 2026-05-28 - Codex (hover mouse event plumbing)
 
