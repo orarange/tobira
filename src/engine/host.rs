@@ -446,13 +446,6 @@ pub struct FetchRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FetchPoll {
-    Pending,
-    Ready(FetchResponse),
-    Failed(FetchError),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchResponse {
     pub final_url: String,
     pub status: u16,

@@ -311,6 +311,8 @@ impl<T: ArenaItem> Arena<T> {
     }
 
     pub fn allocate(&mut self, value: T) -> GcRef<T> {
+        // Phase 7: freed slots in earlier pages are never reused here; mark-sweep
+        // will need a cross-page free scan or a separate global free list.
         if self.pages.last().is_none_or(ArenaPage::is_full) {
             let next_index = self.pages.len() as u32;
             self.pages
