@@ -145,6 +145,8 @@ struct FunctionCompiler<'a> {
     next_local: u16,
     parameter_count: u16,
     has_rest_param: bool,
+    is_async: bool,
+    is_generator: bool,
     outer: Option<OuterBindings>,
     control_stack: Vec<ControlContext>,
     active_finally_blocks: Vec<super::ast::BlockStatement>,
@@ -177,6 +179,8 @@ impl<'a> FunctionCompiler<'a> {
             next_local: 0,
             parameter_count: 0,
             has_rest_param: false,
+            is_async: false,
+            is_generator: false,
             outer,
             control_stack: Vec::new(),
             active_finally_blocks: Vec::new(),
@@ -190,6 +194,8 @@ impl<'a> FunctionCompiler<'a> {
             arity: self.arity,
             parameter_count: self.parameter_count,
             has_rest_param: self.has_rest_param,
+            is_async: self.is_async,
+            is_generator: self.is_generator,
             code: self.code,
             constants: self.constants,
             upvalue_descriptors: self.upvalues,
@@ -202,7 +208,11 @@ impl<'a> FunctionCompiler<'a> {
 
     fn emit_implicit_return(&mut self) {
         self.emit(Opcode::LoadUndefined);
-        self.emit(Opcode::Return);
+        self.emit(if self.is_async {
+            Opcode::AsyncReturn
+        } else {
+            Opcode::Return
+        });
     }
 
     fn emit(&mut self, opcode: Opcode) -> usize {
@@ -1454,6 +1464,8 @@ impl<'a> FunctionCompiler<'a> {
                 constructor.parameters(),
                 constructor.body(),
                 constructor.body().strict(),
+                false,
+                false,
                 options.clone(),
                 &instance_fields,
             )?
@@ -1573,6 +1585,8 @@ impl<'a> FunctionCompiler<'a> {
             method.parameters(),
             method.body(),
             method.body().strict(),
+            false,
+            false,
             options.clone(),
             &[],
         )?;
@@ -1985,7 +1999,11 @@ impl<'a> FunctionCompiler<'a> {
                 self.emit(Opcode::SetLocal(return_slot));
                 self.emit_active_finally_blocks()?;
                 self.emit(Opcode::GetLocal(return_slot));
-                self.emit(Opcode::Return);
+                self.emit(if self.is_async {
+                    Opcode::AsyncReturn
+                } else {
+                    Opcode::Return
+                });
                 Ok(())
             }
             StatementNode::BreakStatement(_) => {
@@ -2252,9 +2270,6 @@ impl<'a> FunctionCompiler<'a> {
         &mut self,
         declaration: &FunctionDeclaration,
     ) -> Result<(), CompileError> {
-        if declaration.is_async() {
-            return Err(CompileError::Unimplemented("async functions"));
-        }
         if declaration.is_generator() {
             return Err(CompileError::Unimplemented("generator functions"));
         }
@@ -2271,6 +2286,8 @@ impl<'a> FunctionCompiler<'a> {
             declaration.parameters(),
             declaration.body(),
             declaration.body().strict(),
+            declaration.is_async(),
+            declaration.is_generator(),
         )?;
         self.emit(Opcode::MakeClosure(nested_index));
         self.emit_store_binding(&name, resolved)?;
@@ -2283,12 +2300,16 @@ impl<'a> FunctionCompiler<'a> {
         parameters: &FormalParameterListNode,
         body: &FunctionBodyNode,
         is_strict: bool,
+        is_async: bool,
+        is_generator: bool,
     ) -> Result<u16, CompileError> {
         self.compile_nested_function_with_options(
             name,
             parameters,
             body,
             is_strict,
+            is_async,
+            is_generator,
             FunctionCompileOptions::default(),
             &[],
         )
@@ -2300,14 +2321,21 @@ impl<'a> FunctionCompiler<'a> {
         parameters: &FormalParameterListNode,
         body: &FunctionBodyNode,
         is_strict: bool,
+        is_async: bool,
+        is_generator: bool,
         options: FunctionCompileOptions,
         field_initializers: &[&super::ast::ClassFieldDefinitionNode],
     ) -> Result<u16, CompileError> {
+        if is_generator {
+            return Err(CompileError::Unimplemented("generator functions"));
+        }
         let arity = u8::try_from(parameters.length())
             .map_err(|_| CompileError::message("function arity exceeded u8"))?;
         let outer = Some(self.snapshot_outer_bindings());
         let mut child =
             FunctionCompiler::new(self.program, name, arity, is_strict, false, outer, options);
+        child.is_async = is_async;
+        child.is_generator = is_generator;
         child.compile_function_parameters(parameters)?;
         for field in field_initializers {
             child.compile_class_field_initializer(field)?;
@@ -2344,6 +2372,8 @@ impl<'a> FunctionCompiler<'a> {
                 function.parameters(),
                 function.body(),
                 function.body().strict(),
+                false,
+                false,
             ),
             ExpressionNode::ArrowFunction(function) => self.compile_nested_function_value(
                 function
@@ -2352,16 +2382,33 @@ impl<'a> FunctionCompiler<'a> {
                 function.parameters(),
                 function.body(),
                 function.body().strict(),
+                false,
+                false,
             ),
-            ExpressionNode::AsyncArrowFunction(_) => {
-                Err(CompileError::Unimplemented("async arrow functions"))
-            }
+            ExpressionNode::AsyncArrowFunction(function) => self.compile_nested_function_value(
+                function
+                    .name()
+                    .map(|identifier| self.identifier_name(&identifier)),
+                function.parameters(),
+                function.body(),
+                function.body().strict(),
+                true,
+                false,
+            ),
             ExpressionNode::GeneratorExpression(_) => {
                 Err(CompileError::Unimplemented("generator expressions"))
             }
-            ExpressionNode::AsyncFunctionExpression(_) => {
-                Err(CompileError::Unimplemented("async function expressions"))
-            }
+            ExpressionNode::AsyncFunctionExpression(function) => self
+                .compile_nested_function_value(
+                    function
+                        .name()
+                        .map(|identifier| self.identifier_name(&identifier)),
+                    function.parameters(),
+                    function.body(),
+                    function.body().strict(),
+                    true,
+                    false,
+                ),
             ExpressionNode::AsyncGeneratorExpression(_) => {
                 Err(CompileError::Unimplemented("async generator expressions"))
             }
@@ -2392,7 +2439,16 @@ impl<'a> FunctionCompiler<'a> {
             ExpressionNode::Conditional(conditional) => {
                 self.compile_conditional_expression(conditional)
             }
-            ExpressionNode::Await(_) => Err(CompileError::Unimplemented("await expressions")),
+            ExpressionNode::Await(await_expression) => {
+                if !self.is_async {
+                    return Err(CompileError::message(
+                        "await expressions are only valid inside async functions",
+                    ));
+                }
+                self.compile_expression(await_expression.target())?;
+                self.emit(Opcode::Await);
+                Ok(())
+            }
             ExpressionNode::Yield(_) => Err(CompileError::Unimplemented("yield expressions")),
             ExpressionNode::Parenthesized(expression) => {
                 self.compile_expression(expression.expression())
@@ -2524,6 +2580,8 @@ impl<'a> FunctionCompiler<'a> {
             method.parameters(),
             method.body(),
             method.body().strict(),
+            false,
+            false,
         )
     }
 
@@ -2627,8 +2685,17 @@ impl<'a> FunctionCompiler<'a> {
         parameters: &FormalParameterListNode,
         body: &FunctionBodyNode,
         is_strict: bool,
+        is_async: bool,
+        is_generator: bool,
     ) -> Result<(), CompileError> {
-        let index = self.compile_nested_function(name, parameters, body, is_strict)?;
+        let index = self.compile_nested_function(
+            name,
+            parameters,
+            body,
+            is_strict,
+            is_async,
+            is_generator,
+        )?;
         self.emit(Opcode::MakeClosure(index));
         Ok(())
     }

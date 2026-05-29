@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    cmp::Ordering,
+    cmp::{Ordering, Reverse},
     collections::HashMap,
     rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
@@ -9,8 +9,14 @@ use std::{
 use serde_json::Value as JsonValue;
 
 use super::chunk::{Chunk, Constant, FunctionProto, Opcode};
+use super::event_loop::{
+    EventLoop, MicrotaskJob, RafEntry, TaskEntry, TaskSource, TickResult, TimerEntry,
+};
 use super::heap::{GcRef, Heap, RawGcRef};
-use super::value::{JsObject, JsPropertyDescriptor, JsString, ObjectKind, PropertyKey, Value};
+use super::value::{
+    AsyncContext, JsObject, JsPropertyDescriptor, JsString, ObjectKind, PromiseReaction,
+    PromiseState, PropertyKey, Value,
+};
 
 type ValueCell = Rc<RefCell<Value>>;
 
@@ -19,6 +25,23 @@ enum BuiltinId {
     Assert,
     CallSpread,
     ConstructSpread,
+    PromiseConstructor,
+    PromiseResolve,
+    PromiseReject,
+    PromiseAll,
+    PromiseRace,
+    PromiseAllSettled,
+    PromiseAny,
+    PromiseProtoThen,
+    PromiseProtoCatch,
+    PromiseProtoFinally,
+    QueueMicrotask,
+    SetTimeout,
+    ClearTimeout,
+    SetInterval,
+    ClearInterval,
+    RequestAnimationFrame,
+    CancelAnimationFrame,
     ObjectConstructor,
     ObjectCreate,
     ObjectDefineProperty,
@@ -143,6 +166,46 @@ struct RuntimeClosure {
     upvalues: Vec<ValueCell>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromiseCapabilityMode {
+    Resolve,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromiseFinallyMode {
+    Fulfill,
+    Reject,
+}
+
+#[derive(Debug, Clone)]
+struct PromiseAllState {
+    result_promise: GcRef<JsObject>,
+    values: Rc<RefCell<Vec<Option<Value>>>>,
+    remaining: Rc<RefCell<usize>>,
+}
+
+#[derive(Debug, Clone)]
+struct PromiseAllResolveElement {
+    state: PromiseAllState,
+    index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PromiseAllSettledElement {
+    state: PromiseAllState,
+    index: usize,
+    is_reject: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PromiseAnyRejectElement {
+    result_promise: GcRef<JsObject>,
+    errors: Rc<RefCell<Vec<Option<Value>>>>,
+    remaining: Rc<RefCell<usize>>,
+    index: usize,
+}
+
 #[derive(Debug, Clone)]
 struct BoundFunction {
     target: Value,
@@ -155,9 +218,32 @@ enum Callable {
     Builtin(BuiltinId),
     Closure(RuntimeClosure),
     Bound(BoundFunction),
+    PromiseCapability {
+        promise: GcRef<JsObject>,
+        mode: PromiseCapabilityMode,
+    },
+    PromiseFinally {
+        callback: Value,
+        mode: PromiseFinallyMode,
+    },
+    PromiseAllResolveElement(PromiseAllResolveElement),
+    PromiseAllReject {
+        result_promise: GcRef<JsObject>,
+    },
+    PromiseRaceResolve {
+        result_promise: GcRef<JsObject>,
+    },
+    PromiseRaceReject {
+        result_promise: GcRef<JsObject>,
+    },
+    PromiseAllSettledElement(PromiseAllSettledElement),
+    PromiseAnyResolve {
+        result_promise: GcRef<JsObject>,
+    },
+    PromiseAnyRejectElement(PromiseAnyRejectElement),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CallFrame {
     proto: Rc<FunctionProto>,
     ip: usize,
@@ -167,6 +253,7 @@ pub struct CallFrame {
     this_value: Value,
     construct_fallback: Option<Value>,
     pending_exception: Option<Value>,
+    async_outer_promise: Option<GcRef<JsObject>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -209,8 +296,10 @@ pub struct Vm {
     array_prototype: Option<GcRef<JsObject>>,
     string_prototype: Option<GcRef<JsObject>>,
     error_prototype: Option<GcRef<JsObject>>,
+    promise_prototype: Option<GcRef<JsObject>>,
     map_prototype: Option<GcRef<JsObject>>,
     set_prototype: Option<GcRef<JsObject>>,
+    event_loop: EventLoop,
     random_state: u64,
 }
 
@@ -233,8 +322,10 @@ impl Vm {
             array_prototype: None,
             string_prototype: None,
             error_prototype: None,
+            promise_prototype: None,
             map_prototype: None,
             set_prototype: None,
+            event_loop: EventLoop::new(),
             random_state,
         };
         vm.install_globals();
@@ -252,10 +343,57 @@ impl Vm {
         };
         self.push_call_frame(closure, Vec::new(), Value::Undefined, None)?;
         self.run_until_frame_depth(0)?;
+        self.drain_microtasks();
         if self.stack.is_empty() {
             Ok(Value::Undefined)
         } else {
             self.pop_value()
+        }
+    }
+
+    pub fn event_loop_tick(&mut self, now_ms: u64, has_render_opportunity: bool) -> TickResult {
+        self.event_loop.current_time_ms = now_ms;
+        self.enqueue_due_timers(now_ms);
+
+        let mut did_work = false;
+        if let Some(task) = self.event_loop.macrotask_queue.pop_front() {
+            did_work = true;
+            let _ = self.run_task(task);
+            self.drain_microtasks();
+        }
+
+        let mut needs_render = false;
+        if has_render_opportunity && !self.event_loop.raf_callbacks.is_empty() {
+            did_work = true;
+            needs_render = true;
+            let callbacks = self
+                .event_loop
+                .raf_callbacks
+                .drain(..)
+                .map(|(_, entry)| entry)
+                .collect::<Vec<_>>();
+            for entry in callbacks {
+                let _ = self.call_value_sync(
+                    Value::Object(entry.callback),
+                    Value::Undefined,
+                    vec![Value::Number(now_ms as f64)],
+                );
+                self.drain_microtasks();
+            }
+
+            self.event_loop.resize_observer_depth = 0;
+            while self.event_loop.resize_observer_depth <= 10 {
+                break;
+            }
+            self.event_loop.resize_observer_depth = 0;
+        }
+
+        if needs_render {
+            TickResult::NeedsRender
+        } else if did_work {
+            TickResult::DidWork
+        } else {
+            TickResult::Idle
         }
     }
 
@@ -451,6 +589,10 @@ impl Vm {
                     self.stack.push(result);
                 }
             }
+            Opcode::Await => {
+                let awaited = self.pop_value()?;
+                self.suspend_current_async_frame(awaited)?;
+            }
             Opcode::CallSpread(_) | Opcode::Spread | Opcode::GetSuperCtor => {
                 return Err(VmError::Unimplemented("phase 4 opcode"));
             }
@@ -580,6 +722,11 @@ impl Vm {
                     .frames
                     .pop()
                     .ok_or_else(|| VmError::RangeError("return without a frame".to_string()))?;
+                if let Some(outer_promise) = frame.async_outer_promise {
+                    self.stack.truncate(frame.stack_base);
+                    self.resolve_promise_from_resolution(outer_promise, value)?;
+                    return Ok(());
+                }
                 self.stack.truncate(frame.stack_base);
                 if let Some(fallback) = frame.construct_fallback {
                     if !matches!(value, Value::Object(_)) {
@@ -587,6 +734,10 @@ impl Vm {
                     }
                 }
                 self.stack.push(value);
+            }
+            Opcode::AsyncReturn => {
+                let result = self.pop_value()?;
+                self.finish_async_frame_with_result(result)?;
             }
             Opcode::MakeClosure(index) => {
                 let proto = self
@@ -698,6 +849,7 @@ impl Vm {
             prototype: Some(object_prototype),
             ..JsObject::default()
         });
+        let promise_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let map_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let set_prototype = self.allocate_ordinary_object(Some(object_prototype));
 
@@ -706,6 +858,7 @@ impl Vm {
         self.array_prototype = Some(array_prototype);
         self.string_prototype = Some(string_prototype);
         self.error_prototype = Some(error_prototype);
+        self.promise_prototype = Some(promise_prototype);
         self.map_prototype = Some(map_prototype);
         self.set_prototype = Some(set_prototype);
 
@@ -713,10 +866,31 @@ impl Vm {
         self.globals.insert("assert".to_string(), assert_value);
         let call_spread = self.allocate_builtin_value(BuiltinId::CallSpread, false, None);
         let construct_spread = self.allocate_builtin_value(BuiltinId::ConstructSpread, false, None);
+        let queue_microtask = self.allocate_builtin_value(BuiltinId::QueueMicrotask, false, None);
+        let set_timeout = self.allocate_builtin_value(BuiltinId::SetTimeout, false, None);
+        let clear_timeout = self.allocate_builtin_value(BuiltinId::ClearTimeout, false, None);
+        let set_interval = self.allocate_builtin_value(BuiltinId::SetInterval, false, None);
+        let clear_interval = self.allocate_builtin_value(BuiltinId::ClearInterval, false, None);
+        let request_animation_frame =
+            self.allocate_builtin_value(BuiltinId::RequestAnimationFrame, false, None);
+        let cancel_animation_frame =
+            self.allocate_builtin_value(BuiltinId::CancelAnimationFrame, false, None);
         self.globals
             .insert("__callSpread".to_string(), call_spread.clone());
         self.globals
             .insert("__constructSpread".to_string(), construct_spread.clone());
+        self.globals
+            .insert("queueMicrotask".to_string(), queue_microtask);
+        self.globals.insert("setTimeout".to_string(), set_timeout);
+        self.globals
+            .insert("clearTimeout".to_string(), clear_timeout);
+        self.globals.insert("setInterval".to_string(), set_interval);
+        self.globals
+            .insert("clearInterval".to_string(), clear_interval);
+        self.globals
+            .insert("requestAnimationFrame".to_string(), request_animation_frame);
+        self.globals
+            .insert("cancelAnimationFrame".to_string(), cancel_animation_frame);
 
         let object_ctor =
             self.allocate_builtin_value(BuiltinId::ObjectConstructor, true, Some(object_prototype));
@@ -758,6 +932,11 @@ impl Vm {
             self.allocate_builtin_value(BuiltinId::MapConstructor, true, Some(map_prototype));
         let set_ctor =
             self.allocate_builtin_value(BuiltinId::SetConstructor, true, Some(set_prototype));
+        let promise_ctor = self.allocate_callable_value(
+            Callable::Builtin(BuiltinId::PromiseConstructor),
+            true,
+            Some(promise_prototype),
+        );
         let number_ctor = self.allocate_builtin_value(BuiltinId::NumberParseInt, false, None);
         let math_object = self.allocate_ordinary_object(Some(object_prototype));
         let json_object = self.allocate_ordinary_object(Some(object_prototype));
@@ -780,6 +959,8 @@ impl Vm {
             .insert("EvalError".to_string(), eval_error_ctor.clone());
         self.globals.insert("Map".to_string(), map_ctor.clone());
         self.globals.insert("Set".to_string(), set_ctor.clone());
+        self.globals
+            .insert("Promise".to_string(), promise_ctor.clone());
         let number_object = self.create_number_object();
         self.globals.insert("Number".to_string(), number_object);
         self.globals
@@ -803,6 +984,10 @@ impl Vm {
         self.define_builtin_method(function_prototype, "call", BuiltinId::FunctionProtoCall);
         self.define_builtin_method(function_prototype, "apply", BuiltinId::FunctionProtoApply);
         self.define_builtin_method(function_prototype, "bind", BuiltinId::FunctionProtoBind);
+
+        self.define_builtin_method(promise_prototype, "then", BuiltinId::PromiseProtoThen);
+        self.define_builtin_method(promise_prototype, "catch", BuiltinId::PromiseProtoCatch);
+        self.define_builtin_method(promise_prototype, "finally", BuiltinId::PromiseProtoFinally);
 
         self.define_builtin_method(map_prototype, "set", BuiltinId::MapProtoSet);
         self.define_builtin_method(map_prototype, "get", BuiltinId::MapProtoGet);
@@ -935,6 +1120,15 @@ impl Vm {
             self.define_builtin_method(array_ref, "from", BuiltinId::ArrayFrom);
         }
 
+        if let Some(promise_ref) = self.value_object_ref(promise_ctor) {
+            self.define_builtin_method(promise_ref, "resolve", BuiltinId::PromiseResolve);
+            self.define_builtin_method(promise_ref, "reject", BuiltinId::PromiseReject);
+            self.define_builtin_method(promise_ref, "all", BuiltinId::PromiseAll);
+            self.define_builtin_method(promise_ref, "race", BuiltinId::PromiseRace);
+            self.define_builtin_method(promise_ref, "allSettled", BuiltinId::PromiseAllSettled);
+            self.define_builtin_method(promise_ref, "any", BuiltinId::PromiseAny);
+        }
+
         if let Some(number_ref) = self.value_object_ref(self.globals["Number"].clone()) {
             self.define_builtin_method(number_ref, "isNaN", BuiltinId::NumberIsNaN);
             self.define_builtin_method(number_ref, "isFinite", BuiltinId::NumberIsFinite);
@@ -1037,6 +1231,11 @@ impl Vm {
             .expect("error prototype should be installed")
     }
 
+    fn promise_prototype_ref(&self) -> GcRef<JsObject> {
+        self.promise_prototype
+            .expect("promise prototype should be installed")
+    }
+
     fn map_prototype_ref(&self) -> GcRef<JsObject> {
         self.map_prototype
             .expect("map prototype should be installed")
@@ -1080,6 +1279,120 @@ impl Vm {
             );
         }
         Value::Object(object_ref)
+    }
+
+    fn allocate_callable_object(
+        &mut self,
+        callable: Callable,
+        constructable: bool,
+        construct_prototype: Option<GcRef<JsObject>>,
+    ) -> GcRef<JsObject> {
+        let object_ref = self.heap.allocate_object(JsObject {
+            kind: ObjectKind::Function,
+            prototype: Some(self.function_prototype_ref()),
+            ..JsObject::default()
+        });
+        self.callables.insert(object_ref.raw(), callable);
+        if constructable {
+            let prototype = construct_prototype.unwrap_or_else(|| self.object_prototype_ref());
+            self.define_data_property(
+                object_ref,
+                PropertyKey::from("prototype"),
+                Value::Object(prototype),
+                true,
+                false,
+                false,
+            );
+        }
+        object_ref
+    }
+
+    fn allocate_callable_value(
+        &mut self,
+        callable: Callable,
+        constructable: bool,
+        construct_prototype: Option<GcRef<JsObject>>,
+    ) -> Value {
+        Value::Object(self.allocate_callable_object(callable, constructable, construct_prototype))
+    }
+
+    fn allocate_pending_promise_object(&mut self) -> GcRef<JsObject> {
+        self.heap.allocate_object(JsObject {
+            kind: ObjectKind::Promise(Box::new(PromiseState::Pending {
+                fulfill_reactions: Vec::new(),
+                reject_reactions: Vec::new(),
+            })),
+            prototype: Some(self.promise_prototype_ref()),
+            ..JsObject::default()
+        })
+    }
+
+    fn allocate_promise_with_state(&mut self, state: PromiseState) -> GcRef<JsObject> {
+        self.heap.allocate_object(JsObject {
+            kind: ObjectKind::Promise(Box::new(state)),
+            prototype: Some(self.promise_prototype_ref()),
+            ..JsObject::default()
+        })
+    }
+
+    fn allocate_async_resumer(&mut self, context: AsyncContext) -> GcRef<JsObject> {
+        self.heap.allocate_object(JsObject {
+            kind: ObjectKind::AsyncResumer(Box::new(context)),
+            prototype: Some(self.object_prototype_ref()),
+            ..JsObject::default()
+        })
+    }
+
+    fn create_promise_capability_function(
+        &mut self,
+        promise: GcRef<JsObject>,
+        mode: PromiseCapabilityMode,
+    ) -> Value {
+        self.allocate_callable_value(Callable::PromiseCapability { promise, mode }, false, None)
+    }
+
+    fn create_promise_finally_function(
+        &mut self,
+        callback: Value,
+        mode: PromiseFinallyMode,
+    ) -> Value {
+        self.allocate_callable_value(Callable::PromiseFinally { callback, mode }, false, None)
+    }
+
+    fn enqueue_due_timers(&mut self, now_ms: u64) {
+        while let Some(Reverse(entry)) = self.event_loop.timer_heap.peek().cloned() {
+            if entry.due_ms > now_ms {
+                break;
+            }
+            let Reverse(mut entry) = self
+                .event_loop
+                .timer_heap
+                .pop()
+                .expect("peeked timer should still be present");
+            if self.event_loop.cancelled_timers.remove(&entry.id) {
+                continue;
+            }
+            self.event_loop.macrotask_queue.push_back(TaskEntry {
+                source: TaskSource::Timer,
+                callback: entry.callback,
+                args: entry.args.clone(),
+            });
+            if let Some(interval_ms) = entry.interval_ms {
+                let mut next_interval: u64 = interval_ms;
+                if entry.nesting_level > 5 {
+                    next_interval = next_interval.max(4);
+                }
+                entry.due_ms = entry.due_ms.saturating_add(next_interval);
+                entry.nesting_level = entry.nesting_level.saturating_add(1);
+                self.event_loop.timer_heap.push(Reverse(entry));
+            }
+        }
+    }
+
+    fn run_task(&mut self, task: TaskEntry) -> Result<(), VmError> {
+        let _ = task.source;
+        let _ = self.call_value_sync(Value::Object(task.callback), Value::Undefined, task.args)?;
+        Ok(())
     }
 
     fn allocate_function_value(&mut self, closure: RuntimeClosure) -> Value {
@@ -1135,14 +1448,15 @@ impl Vm {
         }
     }
 
-    fn create_error_object(&mut self, name: &str, message: String) -> Value {
+    fn create_named_error_object(&mut self, name: &str, message: impl Into<String>) -> Value {
         let object = self.heap.allocate_object(JsObject {
             kind: ObjectKind::Error,
             prototype: Some(self.error_prototype_ref()),
             ..JsObject::default()
         });
         let name_value = self.make_string_value(name);
-        let message_value = self.make_string_value(&message);
+        let message_text = message.into();
+        let message_value = self.make_string_value(&message_text);
         self.define_data_property(
             object,
             PropertyKey::from("name"),
@@ -1162,6 +1476,14 @@ impl Vm {
         Value::Object(object)
     }
 
+    fn create_error_object(&mut self, name: &str, message: String) -> Value {
+        self.create_named_error_object(name, message)
+    }
+
+    fn is_callable_value(&self, value: &Value) -> bool {
+        matches!(value, Value::Object(object) if self.callables.contains_key(&object.raw()))
+    }
+
     fn wrap_vm_error_as_value(&mut self, error: &VmError) -> Result<Value, VmError> {
         Ok(match error {
             VmError::TypeError(message) => self.create_error_object("TypeError", message.clone()),
@@ -1176,12 +1498,652 @@ impl Vm {
             ),
             VmError::StackOverflow => self.create_error_object(
                 "RangeError",
-                "call stack exceeded the phase 4 limit".to_string(),
+                "call stack exceeded the phase 5 limit".to_string(),
             ),
             VmError::Unimplemented(feature) => {
-                self.create_error_object("Error", format!("unimplemented in phase 4: {feature}"))
+                self.create_error_object("Error", format!("unimplemented in phase 5: {feature}"))
             }
         })
+    }
+
+    fn promise_state(&self, promise: GcRef<JsObject>) -> Result<&PromiseState, VmError> {
+        let object = self
+            .heap
+            .objects()
+            .get(promise)
+            .ok_or_else(|| VmError::ReferenceError("missing promise object".to_string()))?;
+        match &object.kind {
+            ObjectKind::Promise(state) => Ok(state.as_ref()),
+            _ => Err(VmError::TypeError("object is not a Promise".to_string())),
+        }
+    }
+
+    fn promise_state_mut(
+        &mut self,
+        promise: GcRef<JsObject>,
+    ) -> Result<&mut PromiseState, VmError> {
+        let object = self
+            .heap
+            .objects_mut()
+            .get_mut(promise)
+            .ok_or_else(|| VmError::ReferenceError("missing promise object".to_string()))?;
+        match &mut object.kind {
+            ObjectKind::Promise(state) => Ok(state.as_mut()),
+            _ => Err(VmError::TypeError("object is not a Promise".to_string())),
+        }
+    }
+
+    fn is_promise_object(&self, object: GcRef<JsObject>) -> bool {
+        self.heap
+            .objects()
+            .get(object)
+            .map(|data| matches!(data.kind, ObjectKind::Promise(_)))
+            .unwrap_or(false)
+    }
+
+    fn normalize_handler_value(&self, value: Option<&Value>) -> Option<GcRef<JsObject>> {
+        match value {
+            Some(Value::Object(object)) => {
+                let is_callable = self.callables.contains_key(&object.raw());
+                let is_async_resumer = self
+                    .heap
+                    .objects()
+                    .get(*object)
+                    .map(|data| matches!(data.kind, ObjectKind::AsyncResumer(_)))
+                    .unwrap_or(false);
+                if is_callable || is_async_resumer {
+                    Some(*object)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn queue_microtask_job(&mut self, job: MicrotaskJob) {
+        self.event_loop.microtask_queue.push_back(job);
+    }
+
+    fn enqueue_promise_reaction_job(
+        &mut self,
+        handler: Option<GcRef<JsObject>>,
+        result_promise: Option<GcRef<JsObject>>,
+        value: Value,
+        is_reject: bool,
+    ) {
+        self.queue_microtask_job(MicrotaskJob::PromiseReaction {
+            handler,
+            result_promise,
+            value,
+            is_reject,
+        });
+    }
+
+    fn add_promise_reactions(
+        &mut self,
+        promise: GcRef<JsObject>,
+        fulfill_reaction: PromiseReaction,
+        reject_reaction: PromiseReaction,
+    ) -> Result<(), VmError> {
+        enum PromiseSettlement {
+            Fulfilled(Value),
+            Rejected(Value),
+        }
+
+        let settled = match self.promise_state_mut(promise)? {
+            PromiseState::Pending {
+                fulfill_reactions,
+                reject_reactions,
+            } => {
+                fulfill_reactions.push(fulfill_reaction);
+                reject_reactions.push(reject_reaction);
+                return Ok(());
+            }
+            PromiseState::Fulfilled(value) => PromiseSettlement::Fulfilled(value.clone()),
+            PromiseState::Rejected(reason) => PromiseSettlement::Rejected(reason.clone()),
+        };
+
+        match settled {
+            PromiseSettlement::Fulfilled(value) => self.enqueue_promise_reaction_job(
+                fulfill_reaction.handler,
+                fulfill_reaction.result_promise,
+                value,
+                false,
+            ),
+            PromiseSettlement::Rejected(reason) => self.enqueue_promise_reaction_job(
+                reject_reaction.handler,
+                reject_reaction.result_promise,
+                reason,
+                true,
+            ),
+        }
+        Ok(())
+    }
+
+    fn promise_then_internal(
+        &mut self,
+        promise: GcRef<JsObject>,
+        on_fulfilled: Option<GcRef<JsObject>>,
+        on_rejected: Option<GcRef<JsObject>>,
+    ) -> Result<GcRef<JsObject>, VmError> {
+        let result_promise = self.allocate_pending_promise_object();
+        self.add_promise_reactions(
+            promise,
+            PromiseReaction {
+                handler: on_fulfilled,
+                result_promise: Some(result_promise),
+                is_reject_handler: false,
+            },
+            PromiseReaction {
+                handler: on_rejected,
+                result_promise: Some(result_promise),
+                is_reject_handler: true,
+            },
+        )?;
+        Ok(result_promise)
+    }
+
+    fn fulfill_promise_with_value(
+        &mut self,
+        promise: GcRef<JsObject>,
+        value: Value,
+    ) -> Result<(), VmError> {
+        let reactions = {
+            let state = self.promise_state_mut(promise)?;
+            match state {
+                PromiseState::Pending {
+                    fulfill_reactions,
+                    reject_reactions,
+                } => {
+                    let reactions = std::mem::take(fulfill_reactions);
+                    reject_reactions.clear();
+                    *state = PromiseState::Fulfilled(value.clone());
+                    reactions
+                }
+                PromiseState::Fulfilled(_) | PromiseState::Rejected(_) => return Ok(()),
+            }
+        };
+        for reaction in reactions {
+            self.enqueue_promise_reaction_job(
+                reaction.handler,
+                reaction.result_promise,
+                value.clone(),
+                false,
+            );
+        }
+        Ok(())
+    }
+
+    fn reject_promise_with_value(
+        &mut self,
+        promise: GcRef<JsObject>,
+        reason: Value,
+    ) -> Result<(), VmError> {
+        let reactions = {
+            let state = self.promise_state_mut(promise)?;
+            match state {
+                PromiseState::Pending {
+                    fulfill_reactions,
+                    reject_reactions,
+                } => {
+                    fulfill_reactions.clear();
+                    let reactions = std::mem::take(reject_reactions);
+                    *state = PromiseState::Rejected(reason.clone());
+                    reactions
+                }
+                PromiseState::Fulfilled(_) | PromiseState::Rejected(_) => return Ok(()),
+            }
+        };
+        for reaction in reactions {
+            self.enqueue_promise_reaction_job(
+                reaction.handler,
+                reaction.result_promise,
+                reason.clone(),
+                true,
+            );
+        }
+        Ok(())
+    }
+
+    fn resolve_promise_from_resolution(
+        &mut self,
+        promise: GcRef<JsObject>,
+        value: Value,
+    ) -> Result<(), VmError> {
+        if matches!(value, Value::Object(object) if object.raw() == promise.raw()) {
+            let reason = self.create_error_object(
+                "TypeError",
+                "Promise cannot be resolved with itself".to_string(),
+            );
+            return self.reject_promise_with_value(promise, reason);
+        }
+
+        if let Value::Object(object) = value.clone()
+            && self.is_promise_object(object)
+        {
+            match self.promise_state(object)?.clone() {
+                PromiseState::Pending {
+                    fulfill_reactions: _,
+                    reject_reactions: _,
+                } => {
+                    return self.add_promise_reactions(
+                        object,
+                        PromiseReaction {
+                            handler: None,
+                            result_promise: Some(promise),
+                            is_reject_handler: false,
+                        },
+                        PromiseReaction {
+                            handler: None,
+                            result_promise: Some(promise),
+                            is_reject_handler: true,
+                        },
+                    );
+                }
+                PromiseState::Fulfilled(inner) => {
+                    return self.fulfill_promise_with_value(promise, inner);
+                }
+                PromiseState::Rejected(reason) => {
+                    return self.reject_promise_with_value(promise, reason);
+                }
+            }
+        }
+
+        self.fulfill_promise_with_value(promise, value)
+    }
+
+    fn promise_resolve_value(&mut self, value: Value) -> Result<GcRef<JsObject>, VmError> {
+        if let Value::Object(object) = value {
+            if self.is_promise_object(object) {
+                return Ok(object);
+            }
+            let promise = self.allocate_pending_promise_object();
+            self.fulfill_promise_with_value(promise, Value::Object(object))?;
+            return Ok(promise);
+        }
+
+        let promise = self.allocate_pending_promise_object();
+        self.fulfill_promise_with_value(promise, value)?;
+        Ok(promise)
+    }
+
+    fn promise_reject_value(&mut self, reason: Value) -> Result<GcRef<JsObject>, VmError> {
+        let promise = self.allocate_pending_promise_object();
+        self.reject_promise_with_value(promise, reason)?;
+        Ok(promise)
+    }
+
+    fn drain_microtasks(&mut self) {
+        while let Some(job) = self.event_loop.microtask_queue.pop_front() {
+            let _ = self.run_microtask_job(job);
+        }
+    }
+
+    fn run_microtask_job(&mut self, job: MicrotaskJob) -> Result<(), VmError> {
+        match job {
+            MicrotaskJob::PromiseReaction {
+                handler,
+                result_promise,
+                value,
+                is_reject,
+            } => {
+                if let Some(handler_object) = handler {
+                    if self
+                        .heap
+                        .objects()
+                        .get(handler_object)
+                        .map(|data| matches!(data.kind, ObjectKind::AsyncResumer(_)))
+                        .unwrap_or(false)
+                    {
+                        self.resume_async_context(handler_object, value, is_reject)?;
+                        return Ok(());
+                    }
+
+                    let outcome = self.call_value_sync(
+                        Value::Object(handler_object),
+                        Value::Undefined,
+                        vec![value.clone()],
+                    );
+                    if let Some(result_promise) = result_promise {
+                        match outcome {
+                            Ok(result) => {
+                                self.resolve_promise_from_resolution(result_promise, result)?
+                            }
+                            Err(error) => {
+                                let reason = self.wrap_vm_error_as_value(&error)?;
+                                self.reject_promise_with_value(result_promise, reason)?;
+                            }
+                        }
+                    }
+                } else if let Some(result_promise) = result_promise {
+                    if is_reject {
+                        self.reject_promise_with_value(result_promise, value)?;
+                    } else {
+                        self.resolve_promise_from_resolution(result_promise, value)?;
+                    }
+                }
+            }
+            MicrotaskJob::QueueMicrotask(callback) => {
+                let _ = self.call_value_sync(Value::Object(callback), Value::Undefined, Vec::new());
+            }
+            MicrotaskJob::AsyncResume {
+                resumer,
+                value,
+                is_throw,
+            } => {
+                self.resume_async_context(resumer, value, is_throw)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn resume_async_context(
+        &mut self,
+        resumer: GcRef<JsObject>,
+        value: Value,
+        is_throw: bool,
+    ) -> Result<(), VmError> {
+        let context = match self
+            .heap
+            .objects()
+            .get(resumer)
+            .map(|object| object.kind.clone())
+        {
+            Some(ObjectKind::AsyncResumer(context)) => *context,
+            _ => {
+                return Err(VmError::TypeError(
+                    "invalid async resumer continuation".to_string(),
+                ));
+            }
+        };
+        let base_depth = self.frames.len();
+        let mut frame = *context.frame;
+        frame.stack_base = self.stack.len();
+        self.frames.push(frame);
+        self.stack.extend(context.stack_snapshot);
+        if is_throw {
+            self.handle_runtime_error(VmError::Thrown(value))?;
+        } else {
+            self.stack.push(value);
+        }
+        self.run_until_frame_depth(base_depth)?;
+        Ok(())
+    }
+
+    fn suspend_current_async_frame(&mut self, awaited: Value) -> Result<(), VmError> {
+        let awaited_promise = self.promise_resolve_value(awaited)?;
+        let frame = self
+            .frames
+            .pop()
+            .ok_or_else(|| VmError::RangeError("await without an async frame".to_string()))?;
+        let outer_promise = frame.async_outer_promise.ok_or_else(|| {
+            VmError::TypeError("await expressions are only valid in async frames".to_string())
+        })?;
+        let stack_snapshot = self.stack.split_off(frame.stack_base);
+        let context = AsyncContext {
+            frame: Box::new(frame),
+            stack_snapshot,
+            outer_promise,
+        };
+        let fulfill_resumer = self.allocate_async_resumer(context.clone());
+        let reject_resumer = self.allocate_async_resumer(context);
+        self.add_promise_reactions(
+            awaited_promise,
+            PromiseReaction {
+                handler: Some(fulfill_resumer),
+                result_promise: None,
+                is_reject_handler: false,
+            },
+            PromiseReaction {
+                handler: Some(reject_resumer),
+                result_promise: None,
+                is_reject_handler: true,
+            },
+        )
+    }
+
+    fn finish_async_frame_with_result(&mut self, result: Value) -> Result<(), VmError> {
+        let frame = self
+            .frames
+            .pop()
+            .ok_or_else(|| VmError::RangeError("async return without a frame".to_string()))?;
+        let outer_promise = frame.async_outer_promise.ok_or_else(|| {
+            VmError::TypeError("async return without an outer promise".to_string())
+        })?;
+        self.stack.truncate(frame.stack_base);
+        self.resolve_promise_from_resolution(outer_promise, result)
+    }
+
+    fn require_promise_this(
+        &self,
+        this_value: &Value,
+        context: &str,
+    ) -> Result<GcRef<JsObject>, VmError> {
+        let object = self.require_object_ref(this_value, context)?;
+        if !self.is_promise_object(object) {
+            return Err(VmError::TypeError(format!(
+                "{context} called on non-Promise"
+            )));
+        }
+        Ok(object)
+    }
+
+    fn require_callable_object(
+        &self,
+        value: &Value,
+        context: &str,
+    ) -> Result<GcRef<JsObject>, VmError> {
+        match value {
+            Value::Object(object) if self.callables.contains_key(&object.raw()) => Ok(*object),
+            _ => Err(VmError::TypeError(format!(
+                "{context} requires a callable argument"
+            ))),
+        }
+    }
+
+    fn schedule_timer(
+        &mut self,
+        callback: GcRef<JsObject>,
+        delay_ms: i64,
+        interval_ms: Option<u64>,
+        args: Vec<Value>,
+    ) -> u32 {
+        let id = self.event_loop.next_timer_id;
+        self.event_loop.next_timer_id = self.event_loop.next_timer_id.wrapping_add(1);
+        let due_ms = self
+            .event_loop
+            .current_time_ms
+            .saturating_add(delay_ms.max(0) as u64);
+        self.event_loop.timer_heap.push(Reverse(TimerEntry {
+            id,
+            due_ms,
+            interval_ms,
+            callback,
+            args,
+            nesting_level: 0,
+        }));
+        id
+    }
+
+    fn promise_all(&mut self, values: Vec<Value>) -> Result<Value, VmError> {
+        let result_promise = self.allocate_pending_promise_object();
+        if values.is_empty() {
+            let empty = self.make_array_from_values(Vec::new())?;
+            self.resolve_promise_from_resolution(result_promise, empty)?;
+            return Ok(Value::Object(result_promise));
+        }
+
+        let state = PromiseAllState {
+            result_promise,
+            values: Rc::new(RefCell::new(vec![None; values.len()])),
+            remaining: Rc::new(RefCell::new(values.len())),
+        };
+        let reject_handler = self.allocate_callable_object(
+            Callable::PromiseAllReject { result_promise },
+            false,
+            None,
+        );
+        for (index, value) in values.into_iter().enumerate() {
+            let promise = self.promise_resolve_value(value)?;
+            let fulfill_handler = self.allocate_callable_object(
+                Callable::PromiseAllResolveElement(PromiseAllResolveElement {
+                    state: state.clone(),
+                    index,
+                }),
+                false,
+                None,
+            );
+            self.add_promise_reactions(
+                promise,
+                PromiseReaction {
+                    handler: Some(fulfill_handler),
+                    result_promise: None,
+                    is_reject_handler: false,
+                },
+                PromiseReaction {
+                    handler: Some(reject_handler),
+                    result_promise: None,
+                    is_reject_handler: true,
+                },
+            )?;
+        }
+        Ok(Value::Object(result_promise))
+    }
+
+    fn promise_race(&mut self, values: Vec<Value>) -> Result<Value, VmError> {
+        let result_promise = self.allocate_pending_promise_object();
+        for value in values {
+            let promise = self.promise_resolve_value(value)?;
+            let fulfill = self.allocate_callable_object(
+                Callable::PromiseRaceResolve { result_promise },
+                false,
+                None,
+            );
+            let reject = self.allocate_callable_object(
+                Callable::PromiseRaceReject { result_promise },
+                false,
+                None,
+            );
+            self.add_promise_reactions(
+                promise,
+                PromiseReaction {
+                    handler: Some(fulfill),
+                    result_promise: None,
+                    is_reject_handler: false,
+                },
+                PromiseReaction {
+                    handler: Some(reject),
+                    result_promise: None,
+                    is_reject_handler: true,
+                },
+            )?;
+        }
+        Ok(Value::Object(result_promise))
+    }
+
+    fn promise_all_settled(&mut self, values: Vec<Value>) -> Result<Value, VmError> {
+        let result_promise = self.allocate_pending_promise_object();
+        if values.is_empty() {
+            let empty = self.make_array_from_values(Vec::new())?;
+            self.resolve_promise_from_resolution(result_promise, empty)?;
+            return Ok(Value::Object(result_promise));
+        }
+
+        let state = PromiseAllState {
+            result_promise,
+            values: Rc::new(RefCell::new(vec![None; values.len()])),
+            remaining: Rc::new(RefCell::new(values.len())),
+        };
+        for (index, value) in values.into_iter().enumerate() {
+            let promise = self.promise_resolve_value(value)?;
+            let fulfill = self.allocate_callable_object(
+                Callable::PromiseAllSettledElement(PromiseAllSettledElement {
+                    state: state.clone(),
+                    index,
+                    is_reject: false,
+                }),
+                false,
+                None,
+            );
+            let reject = self.allocate_callable_object(
+                Callable::PromiseAllSettledElement(PromiseAllSettledElement {
+                    state: state.clone(),
+                    index,
+                    is_reject: true,
+                }),
+                false,
+                None,
+            );
+            self.add_promise_reactions(
+                promise,
+                PromiseReaction {
+                    handler: Some(fulfill),
+                    result_promise: None,
+                    is_reject_handler: false,
+                },
+                PromiseReaction {
+                    handler: Some(reject),
+                    result_promise: None,
+                    is_reject_handler: true,
+                },
+            )?;
+        }
+        Ok(Value::Object(result_promise))
+    }
+
+    fn promise_any(&mut self, values: Vec<Value>) -> Result<Value, VmError> {
+        let result_promise = self.allocate_pending_promise_object();
+        if values.is_empty() {
+            let error_object =
+                self.create_named_error_object("AggregateError", "All promises were rejected");
+            if let Value::Object(object) = error_object.clone() {
+                let errors_array = self.make_array_from_values(Vec::new())?;
+                self.set_property_on_object(
+                    object,
+                    error_object.clone(),
+                    PropertyKey::from("errors"),
+                    errors_array,
+                )?;
+            }
+            self.reject_promise_with_value(result_promise, error_object)?;
+            return Ok(Value::Object(result_promise));
+        }
+
+        let errors = Rc::new(RefCell::new(vec![None; values.len()]));
+        let remaining = Rc::new(RefCell::new(values.len()));
+        let resolve = self.allocate_callable_object(
+            Callable::PromiseAnyResolve { result_promise },
+            false,
+            None,
+        );
+        for (index, value) in values.into_iter().enumerate() {
+            let promise = self.promise_resolve_value(value)?;
+            let reject = self.allocate_callable_object(
+                Callable::PromiseAnyRejectElement(PromiseAnyRejectElement {
+                    result_promise,
+                    errors: errors.clone(),
+                    remaining: remaining.clone(),
+                    index,
+                }),
+                false,
+                None,
+            );
+            self.add_promise_reactions(
+                promise,
+                PromiseReaction {
+                    handler: Some(resolve),
+                    result_promise: None,
+                    is_reject_handler: false,
+                },
+                PromiseReaction {
+                    handler: Some(reject),
+                    result_promise: None,
+                    is_reject_handler: true,
+                },
+            )?;
+        }
+        Ok(Value::Object(result_promise))
     }
 
     fn push_call_frame(
@@ -1231,6 +2193,7 @@ impl Vm {
             this_value,
             construct_fallback,
             pending_exception: None,
+            async_outer_promise: None,
         });
         Ok(())
     }
@@ -1244,13 +2207,173 @@ impl Vm {
         match self.resolve_callable(&callee)? {
             Callable::Builtin(builtin) => Ok(Some(self.invoke_builtin(builtin, this_value, args)?)),
             Callable::Closure(closure) => {
-                self.push_call_frame(closure, args, this_value, None)?;
-                Ok(None)
+                if closure.proto.is_async {
+                    let outer_promise = self.allocate_pending_promise_object();
+                    self.stack.push(Value::Object(outer_promise));
+                    self.push_call_frame(closure, args, this_value, None)?;
+                    if let Some(frame) = self.frames.last_mut() {
+                        frame.async_outer_promise = Some(outer_promise);
+                    }
+                    Ok(None)
+                } else {
+                    self.push_call_frame(closure, args, this_value, None)?;
+                    Ok(None)
+                }
             }
             Callable::Bound(bound) => {
                 let mut merged_args = bound.bound_args.clone();
                 merged_args.extend(args);
                 self.invoke_callable_value(bound.target, bound.bound_this, merged_args)
+            }
+            Callable::PromiseCapability { promise, mode } => {
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                match mode {
+                    PromiseCapabilityMode::Resolve => {
+                        self.resolve_promise_from_resolution(promise, value)?;
+                    }
+                    PromiseCapabilityMode::Reject => {
+                        self.reject_promise_with_value(promise, value)?;
+                    }
+                }
+                Ok(Some(Value::Undefined))
+            }
+            Callable::PromiseFinally { callback, mode } => {
+                if self.is_callable_value(&callback) {
+                    let _ = self.call_value_sync(callback, Value::Undefined, Vec::new())?;
+                }
+                let original = args.first().cloned().unwrap_or(Value::Undefined);
+                match mode {
+                    PromiseFinallyMode::Fulfill => Ok(Some(original)),
+                    PromiseFinallyMode::Reject => Err(VmError::Thrown(original)),
+                }
+            }
+            Callable::PromiseAllResolveElement(element) => {
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                let mut values = element.state.values.borrow_mut();
+                if values
+                    .get(element.index)
+                    .map(|entry| entry.is_some())
+                    .unwrap_or(false)
+                {
+                    return Ok(Some(Value::Undefined));
+                }
+                values[element.index] = Some(value);
+                drop(values);
+                let mut remaining = element.state.remaining.borrow_mut();
+                *remaining = remaining.saturating_sub(1);
+                if *remaining == 0 {
+                    let values = element
+                        .state
+                        .values
+                        .borrow()
+                        .iter()
+                        .map(|entry| entry.clone().unwrap_or(Value::Undefined))
+                        .collect::<Vec<_>>();
+                    let array = self.make_array_from_values(values)?;
+                    self.resolve_promise_from_resolution(element.state.result_promise, array)?;
+                }
+                Ok(Some(Value::Undefined))
+            }
+            Callable::PromiseAllReject { result_promise }
+            | Callable::PromiseRaceReject { result_promise } => {
+                let reason = args.first().cloned().unwrap_or(Value::Undefined);
+                self.reject_promise_with_value(result_promise, reason)?;
+                Ok(Some(Value::Undefined))
+            }
+            Callable::PromiseRaceResolve { result_promise }
+            | Callable::PromiseAnyResolve { result_promise } => {
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                self.resolve_promise_from_resolution(result_promise, value)?;
+                Ok(Some(Value::Undefined))
+            }
+            Callable::PromiseAllSettledElement(element) => {
+                let settled_value = args.first().cloned().unwrap_or(Value::Undefined);
+                let entry_object = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+                let status = if element.is_reject {
+                    self.make_string_value("rejected")
+                } else {
+                    self.make_string_value("fulfilled")
+                };
+                self.define_data_property(
+                    entry_object,
+                    PropertyKey::from("status"),
+                    status,
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    entry_object,
+                    if element.is_reject {
+                        PropertyKey::from("reason")
+                    } else {
+                        PropertyKey::from("value")
+                    },
+                    settled_value,
+                    true,
+                    true,
+                    true,
+                );
+                let mut values = element.state.values.borrow_mut();
+                if values
+                    .get(element.index)
+                    .map(|entry| entry.is_some())
+                    .unwrap_or(false)
+                {
+                    return Ok(Some(Value::Undefined));
+                }
+                values[element.index] = Some(Value::Object(entry_object));
+                drop(values);
+                let mut remaining = element.state.remaining.borrow_mut();
+                *remaining = remaining.saturating_sub(1);
+                if *remaining == 0 {
+                    let values = element
+                        .state
+                        .values
+                        .borrow()
+                        .iter()
+                        .map(|entry| entry.clone().unwrap_or(Value::Undefined))
+                        .collect::<Vec<_>>();
+                    let array = self.make_array_from_values(values)?;
+                    self.resolve_promise_from_resolution(element.state.result_promise, array)?;
+                }
+                Ok(Some(Value::Undefined))
+            }
+            Callable::PromiseAnyRejectElement(element) => {
+                let reason = args.first().cloned().unwrap_or(Value::Undefined);
+                let mut errors = element.errors.borrow_mut();
+                if errors
+                    .get(element.index)
+                    .map(|entry| entry.is_some())
+                    .unwrap_or(false)
+                {
+                    return Ok(Some(Value::Undefined));
+                }
+                errors[element.index] = Some(reason);
+                drop(errors);
+                let mut remaining = element.remaining.borrow_mut();
+                *remaining = remaining.saturating_sub(1);
+                if *remaining == 0 {
+                    let errors = element
+                        .errors
+                        .borrow()
+                        .iter()
+                        .map(|entry| entry.clone().unwrap_or(Value::Undefined))
+                        .collect::<Vec<_>>();
+                    let error_object = self
+                        .create_named_error_object("AggregateError", "All promises were rejected");
+                    if let Value::Object(object) = error_object.clone() {
+                        let errors_array = self.make_array_from_values(errors)?;
+                        self.set_property_on_object(
+                            object,
+                            error_object.clone(),
+                            PropertyKey::from("errors"),
+                            errors_array,
+                        )?;
+                    }
+                    self.reject_promise_with_value(element.result_promise, error_object)?;
+                }
+                Ok(Some(Value::Undefined))
             }
         }
     }
@@ -1331,6 +2454,15 @@ impl Vm {
                 }
             }
 
+            if let Some(outer_promise) = self.frames[frame_index].async_outer_promise {
+                let frame = self.frames.pop().ok_or_else(|| {
+                    VmError::RangeError("async exception propagation without a frame".to_string())
+                })?;
+                self.stack.truncate(frame.stack_base);
+                self.reject_promise_with_value(outer_promise, thrown)?;
+                return Ok(());
+            }
+
             let frame = self.frames.pop().ok_or_else(|| {
                 VmError::RangeError("exception propagation without a frame".to_string())
             })?;
@@ -1358,6 +2490,11 @@ impl Vm {
                 )?))
             }
             Callable::Closure(closure) => {
+                if closure.proto.is_async || closure.proto.is_generator {
+                    return Err(VmError::TypeError(
+                        "attempted to construct a non-constructor value".to_string(),
+                    ));
+                }
                 let this_value = self.construct_this_value(&constructor)?;
                 self.push_call_frame(closure, args, this_value.clone(), Some(this_value))?;
                 Ok(None)
@@ -1367,6 +2504,17 @@ impl Vm {
                 merged_args.extend(args);
                 self.construct_value(bound.target, merged_args)
             }
+            Callable::PromiseCapability { .. }
+            | Callable::PromiseFinally { .. }
+            | Callable::PromiseAllResolveElement(_)
+            | Callable::PromiseAllReject { .. }
+            | Callable::PromiseRaceResolve { .. }
+            | Callable::PromiseRaceReject { .. }
+            | Callable::PromiseAllSettledElement(_)
+            | Callable::PromiseAnyResolve { .. }
+            | Callable::PromiseAnyRejectElement(_) => Err(VmError::TypeError(
+                "attempted to construct a non-constructor value".to_string(),
+            )),
         }
     }
 
@@ -1375,6 +2523,7 @@ impl Vm {
             builtin,
             BuiltinId::ObjectConstructor
                 | BuiltinId::ArrayConstructor
+                | BuiltinId::PromiseConstructor
                 | BuiltinId::ErrorConstructor
                 | BuiltinId::TypeErrorConstructor
                 | BuiltinId::RangeErrorConstructor
@@ -2293,6 +3442,157 @@ impl Vm {
                     Some(value) => self.array_like_to_vec(value)?,
                 };
                 self.construct_value_sync(constructor, spread_args)
+            }
+            BuiltinId::PromiseConstructor => {
+                let executor = args.first().cloned().unwrap_or(Value::Undefined);
+                let promise = self.allocate_pending_promise_object();
+                let resolve = self
+                    .create_promise_capability_function(promise, PromiseCapabilityMode::Resolve);
+                let reject =
+                    self.create_promise_capability_function(promise, PromiseCapabilityMode::Reject);
+                if !self.is_callable_value(&executor) {
+                    return Err(VmError::TypeError(
+                        "Promise constructor requires a callable executor".to_string(),
+                    ));
+                }
+                match self.call_value_sync(executor, Value::Undefined, vec![resolve, reject]) {
+                    Ok(_) => Ok(Value::Object(promise)),
+                    Err(error) => {
+                        let reason = self.wrap_vm_error_as_value(&error)?;
+                        self.reject_promise_with_value(promise, reason)?;
+                        Ok(Value::Object(promise))
+                    }
+                }
+            }
+            BuiltinId::PromiseResolve => {
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                Ok(Value::Object(self.promise_resolve_value(value)?))
+            }
+            BuiltinId::PromiseReject => {
+                let reason = args.first().cloned().unwrap_or(Value::Undefined);
+                Ok(Value::Object(self.promise_reject_value(reason)?))
+            }
+            BuiltinId::PromiseAll => {
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                let values = self.for_of_values(&iterable)?;
+                self.promise_all(values)
+            }
+            BuiltinId::PromiseRace => {
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                let values = self.for_of_values(&iterable)?;
+                self.promise_race(values)
+            }
+            BuiltinId::PromiseAllSettled => {
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                let values = self.for_of_values(&iterable)?;
+                self.promise_all_settled(values)
+            }
+            BuiltinId::PromiseAny => {
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                let values = self.for_of_values(&iterable)?;
+                self.promise_any(values)
+            }
+            BuiltinId::PromiseProtoThen => {
+                let promise = self.require_promise_this(&this_value, "Promise.prototype.then")?;
+                let on_fulfilled = self.normalize_handler_value(args.first());
+                let on_rejected = self.normalize_handler_value(args.get(1));
+                Ok(Value::Object(self.promise_then_internal(
+                    promise,
+                    on_fulfilled,
+                    on_rejected,
+                )?))
+            }
+            BuiltinId::PromiseProtoCatch => {
+                let promise = self.require_promise_this(&this_value, "Promise.prototype.catch")?;
+                let on_rejected = self.normalize_handler_value(args.first());
+                Ok(Value::Object(self.promise_then_internal(
+                    promise,
+                    None,
+                    on_rejected,
+                )?))
+            }
+            BuiltinId::PromiseProtoFinally => {
+                let promise =
+                    self.require_promise_this(&this_value, "Promise.prototype.finally")?;
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                if !self.is_callable_value(&callback) {
+                    return Ok(Value::Object(
+                        self.promise_then_internal(promise, None, None)?,
+                    ));
+                }
+                let on_fulfilled = self
+                    .create_promise_finally_function(callback.clone(), PromiseFinallyMode::Fulfill);
+                let on_rejected =
+                    self.create_promise_finally_function(callback, PromiseFinallyMode::Reject);
+                Ok(Value::Object(self.promise_then_internal(
+                    promise,
+                    self.value_object_ref(on_fulfilled),
+                    self.value_object_ref(on_rejected),
+                )?))
+            }
+            BuiltinId::QueueMicrotask => {
+                let callback = self.require_callable_object(
+                    args.first().unwrap_or(&Value::Undefined),
+                    "queueMicrotask",
+                )?;
+                self.queue_microtask_job(MicrotaskJob::QueueMicrotask(callback));
+                Ok(Value::Undefined)
+            }
+            BuiltinId::SetTimeout => {
+                let callback = self.require_callable_object(
+                    args.first().unwrap_or(&Value::Undefined),
+                    "setTimeout",
+                )?;
+                let delay_ms = self
+                    .to_number(args.get(1).unwrap_or(&Value::Number(0.0)))
+                    .max(0.0) as i64;
+                let id = self.schedule_timer(
+                    callback,
+                    delay_ms,
+                    None,
+                    args.into_iter().skip(2).collect(),
+                );
+                Ok(Value::Number(id as f64))
+            }
+            BuiltinId::ClearTimeout | BuiltinId::ClearInterval => {
+                if let Some(id_value) = args.first() {
+                    let id = self.to_uint32(id_value);
+                    self.event_loop.cancelled_timers.insert(id);
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::SetInterval => {
+                let callback = self.require_callable_object(
+                    args.first().unwrap_or(&Value::Undefined),
+                    "setInterval",
+                )?;
+                let delay_ms = self
+                    .to_number(args.get(1).unwrap_or(&Value::Number(0.0)))
+                    .max(0.0) as u64;
+                let id = self.schedule_timer(
+                    callback,
+                    delay_ms as i64,
+                    Some(delay_ms),
+                    args.into_iter().skip(2).collect(),
+                );
+                Ok(Value::Number(id as f64))
+            }
+            BuiltinId::RequestAnimationFrame => {
+                let callback = self.require_callable_object(
+                    args.first().unwrap_or(&Value::Undefined),
+                    "requestAnimationFrame",
+                )?;
+                let id = self.event_loop.next_raf_id;
+                self.event_loop.next_raf_id = self.event_loop.next_raf_id.wrapping_add(1);
+                self.event_loop
+                    .raf_callbacks
+                    .insert(id, RafEntry { id, callback });
+                Ok(Value::Number(id as f64))
+            }
+            BuiltinId::CancelAnimationFrame => {
+                let id = self.to_uint32(args.first().unwrap_or(&Value::Undefined));
+                self.event_loop.raf_callbacks.shift_remove(&id);
+                Ok(Value::Undefined)
             }
             BuiltinId::ObjectConstructor => Ok(match args.first() {
                 Some(Value::Object(_)) => args[0].clone(),

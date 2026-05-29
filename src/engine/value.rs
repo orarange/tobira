@@ -133,11 +133,37 @@ impl JsPropertyDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct PromiseReaction {
+    pub handler: Option<GcRef<JsObject>>,
+    pub result_promise: Option<GcRef<JsObject>>,
+    pub is_reject_handler: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PromiseState {
+    Pending {
+        fulfill_reactions: Vec<PromiseReaction>,
+        reject_reactions: Vec<PromiseReaction>,
+    },
+    Fulfilled(Value),
+    Rejected(Value),
+}
+
+#[derive(Debug, Clone)]
+pub struct AsyncContext {
+    pub frame: Box<crate::engine::vm::CallFrame>,
+    pub stack_snapshot: Vec<Value>,
+    pub outer_promise: GcRef<JsObject>,
+}
+
+#[derive(Clone)]
 pub enum ObjectKind {
     Ordinary,
     Array,
     Function,
     Error,
+    Promise(Box<PromiseState>),
+    AsyncResumer(Box<AsyncContext>),
     RegExp {
         source: String,
         flags: String,
@@ -154,6 +180,93 @@ pub enum ObjectKind {
     },
     Host(HostObjectSlot),
     Exotic(&'static str),
+}
+
+impl std::fmt::Debug for ObjectKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ordinary => f.write_str("Ordinary"),
+            Self::Array => f.write_str("Array"),
+            Self::Function => f.write_str("Function"),
+            Self::Error => f.write_str("Error"),
+            Self::Promise(state) => f.debug_tuple("Promise").field(state).finish(),
+            Self::AsyncResumer(_) => f.write_str("AsyncResumer(..)"),
+            Self::RegExp {
+                source,
+                flags,
+                global,
+                last_index,
+            } => f
+                .debug_struct("RegExp")
+                .field("source", source)
+                .field("flags", flags)
+                .field("global", global)
+                .field("last_index", last_index)
+                .finish(),
+            Self::Map(entries) => f.debug_tuple("Map").field(entries).finish(),
+            Self::Set(values) => f.debug_tuple("Set").field(values).finish(),
+            Self::WeakMap(entries) => f.debug_tuple("WeakMap").field(entries).finish(),
+            Self::WeakSet(values) => f.debug_tuple("WeakSet").field(values).finish(),
+            Self::ForOfIterator { values, index } => f
+                .debug_struct("ForOfIterator")
+                .field("values", values)
+                .field("index", index)
+                .finish(),
+            Self::Host(slot) => f.debug_tuple("Host").field(slot).finish(),
+            Self::Exotic(name) => f.debug_tuple("Exotic").field(name).finish(),
+        }
+    }
+}
+
+impl PartialEq for ObjectKind {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Ordinary, Self::Ordinary)
+            | (Self::Array, Self::Array)
+            | (Self::Function, Self::Function)
+            | (Self::Error, Self::Error) => true,
+            (Self::Promise(left), Self::Promise(right)) => left == right,
+            (Self::AsyncResumer(_), Self::AsyncResumer(_)) => true,
+            (
+                Self::RegExp {
+                    source: left_source,
+                    flags: left_flags,
+                    global: left_global,
+                    last_index: left_last_index,
+                },
+                Self::RegExp {
+                    source: right_source,
+                    flags: right_flags,
+                    global: right_global,
+                    last_index: right_last_index,
+                },
+            ) => {
+                left_source == right_source
+                    && left_flags == right_flags
+                    && left_global == right_global
+                    && left_last_index == right_last_index
+            }
+            (Self::Map(left), Self::Map(right)) | (Self::WeakMap(left), Self::WeakMap(right)) => {
+                left == right
+            }
+            (Self::Set(left), Self::Set(right)) | (Self::WeakSet(left), Self::WeakSet(right)) => {
+                left == right
+            }
+            (
+                Self::ForOfIterator {
+                    values: left_values,
+                    index: left_index,
+                },
+                Self::ForOfIterator {
+                    values: right_values,
+                    index: right_index,
+                },
+            ) => left_values == right_values && left_index == right_index,
+            (Self::Host(left), Self::Host(right)) => left == right,
+            (Self::Exotic(left), Self::Exotic(right)) => left == right,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

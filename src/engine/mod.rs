@@ -3,6 +3,7 @@
 pub mod ast;
 pub mod chunk;
 pub mod compiler;
+pub mod event_loop;
 pub mod heap;
 pub mod host;
 pub mod lexer;
@@ -17,6 +18,9 @@ pub use ast::{
 };
 pub use chunk::{Chunk, Constant, FunctionProto, Opcode, UpvalueDescriptor};
 pub use compiler::{CompileError, Compiler, compile};
+pub use event_loop::{
+    EventLoop, MicrotaskJob, RafEntry, TaskEntry, TaskSource, TickResult, TimerEntry,
+};
 pub use heap::{
     Arena, ArenaItem, ArenaPage, GcColor, GcRef, Heap, HeapArena, HeapHeader, RawGcRef, RootHandle,
     RootSet,
@@ -33,7 +37,7 @@ pub use host::{
 pub use lexer::{LexError, LexGoal, Lexer, SourceLocation, Token, TokenKind};
 pub use parser::{ParseError, Parser, ParserOptions};
 pub use value::{
-    HostDispatch, HostObjectClass, HostObjectSlot, JsObject, JsPropertyDescriptor, JsString,
-    ObjectKind, PropertyKey, SymbolId, Value,
+    AsyncContext, HostDispatch, HostObjectClass, HostObjectSlot, JsObject, JsPropertyDescriptor,
+    JsString, ObjectKind, PromiseReaction, PromiseState, PropertyKey, SymbolId, Value,
 };
 pub use vm::{CallFrame, Vm, VmError};
