@@ -5,13 +5,13 @@ edition = "2024"
 
 [dependencies]
 arboard = "3.6.1"
+# boa_engine and boa_gc are removed in Phase 8 (engine replacement)
 boa_engine = "0.21.1"
 boa_gc = "0.21.1"
 brotli = "8.0.2"
 encoding_rs = "0.8.35"
 flate2 = "1.1.5"
 fontdue = "0.9.3"
-font8x8 = "0.3.1"
 image = { version = "0.25.8", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "webp"] }
 rustls = "0.23.35"
 rustls-platform-verifier = "0.6.2"

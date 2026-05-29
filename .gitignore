@@ -1,1 +1,14 @@
 /target
+
+# debug trace logs
+*.log
+*.out.log
+*.err.log
+
+# saved HTML snapshots
+yt-*.html
+youtube-*.html
+
+# downloaded test JS files
+*.min.js
+webcomponents-*.js

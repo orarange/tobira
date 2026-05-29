@@ -2,10 +2,6 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use font8x8::{
-    BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, HIRAGANA_FONTS, LATIN_FONTS, MISC_FONTS,
-    UnicodeFonts,
-};
 use fontdue::{Font, FontSettings};
 use unicode_width::UnicodeWidthChar;
 
@@ -78,10 +74,6 @@ enum GlyphMode {
         xmin: i32,
         ymin: i32,
         bitmap: Vec<u8>,
-    },
-    Bitmap {
-        glyph: [u8; 8],
-        scale: u32,
     },
 }
 
@@ -326,17 +318,16 @@ impl FontContext {
             };
         }
 
-        let scale = ((font_size_px + 7) / 8).max(1);
-        let glyph = lookup_bitmap_glyph(character).unwrap_or_else(|| {
-            lookup_bitmap_glyph('?').unwrap_or([
-                0b00111100, 0b01000010, 0b00000100, 0b00001000, 0b00010000, 0, 0b00010000, 0,
-            ])
-        });
-
         CachedGlyph {
             advance_px: fallback_advance,
             ascent_px,
-            mode: GlyphMode::Bitmap { glyph, scale },
+            mode: GlyphMode::Vector {
+                width: 0,
+                height: 0,
+                xmin: 0,
+                ymin: 0,
+                bitmap: Vec::new(),
+            },
         }
     }
 
@@ -501,9 +492,6 @@ fn draw_cached_glyph(
                 color,
             );
         }
-        GlyphMode::Bitmap { glyph, scale } => {
-            draw_bitmap_fallback(buffer, width, height, x, y, *glyph, *scale, color);
-        }
     }
 }
 
@@ -569,42 +557,6 @@ fn blend_pixel(
     buffer[index] = (red << 16) | (green << 8) | blue;
 }
 
-fn draw_bitmap_fallback(
-    buffer: &mut [u32],
-    width: u32,
-    height: u32,
-    x: i32,
-    y: i32,
-    glyph: [u8; 8],
-    scale: u32,
-    color: Color,
-) {
-    for (row_index, row) in glyph.into_iter().enumerate() {
-        for column in 0..8 {
-            if ((row >> column) & 1) == 0 {
-                continue;
-            }
-
-            let draw_x = x + (column * scale) as i32;
-            let draw_y = y + (row_index as u32 * scale) as i32;
-
-            for offset_y in 0..scale {
-                for offset_x in 0..scale {
-                    blend_pixel(
-                        buffer,
-                        width,
-                        height,
-                        draw_x + offset_x as i32,
-                        draw_y + offset_y as i32,
-                        color,
-                        255,
-                    );
-                }
-            }
-        }
-    }
-}
-
 fn draw_rect(
     buffer: &mut [u32],
     width: u32,
@@ -626,16 +578,6 @@ fn draw_rect(
     }
 }
 
-fn lookup_bitmap_glyph(character: char) -> Option<[u8; 8]> {
-    BASIC_FONTS
-        .get(character)
-        .or_else(|| LATIN_FONTS.get(character))
-        .or_else(|| GREEK_FONTS.get(character))
-        .or_else(|| BOX_FONTS.get(character))
-        .or_else(|| BLOCK_FONTS.get(character))
-        .or_else(|| HIRAGANA_FONTS.get(character))
-        .or_else(|| MISC_FONTS.get(character))
-}
 
 #[cfg(test)]
 mod tests {
