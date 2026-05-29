@@ -14,14 +14,17 @@ use boa_ast::{
     function::{
         ArrowFunction, AsyncArrowFunction, AsyncFunctionDeclaration, AsyncFunctionExpression,
         AsyncGeneratorDeclaration, AsyncGeneratorExpression, ClassDeclaration, ClassElement,
-        ClassExpression, FunctionDeclaration as BoaFunctionDeclaration,
-        FunctionExpression as BoaFunctionExpression, GeneratorDeclaration, GeneratorExpression,
-        PrivateName,
+        ClassElementName, ClassExpression, ClassFieldDefinition, ClassMethodDefinition,
+        FunctionDeclaration as BoaFunctionDeclaration, FunctionExpression as BoaFunctionExpression,
+        GeneratorDeclaration, GeneratorExpression, PrivateName,
     },
     pattern::{ArrayPattern, ObjectPattern, Pattern},
     statement::{
         Block, Case, Catch, If, Labelled, Return, Switch, Throw, Try, With,
-        iteration::{Break, Continue, DoWhileLoop, ForInLoop, ForLoop, ForOfLoop, WhileLoop},
+        iteration::{
+            Break, Continue, DoWhileLoop, ForInLoop, ForLoop, ForOfLoop, IterableLoopInitializer,
+            WhileLoop,
+        },
     },
 };
 use boa_interner::{Interner, Sym};
@@ -55,9 +58,14 @@ pub type JSNewTarget = NewTarget;
 pub type ArrayExpression = ArrayLiteral;
 pub type ObjectExpression = ObjectLiteral;
 pub type MemberExpression = PropertyAccess;
+pub type SuperPropertyAccessNode = boa_ast::expression::access::SuperPropertyAccess;
 pub type OptionalMemberExpression = Optional;
 pub type OptionalCallExpression = Optional;
+pub type OptionalExpression = Optional;
+pub type OptionalOperationNode = boa_ast::expression::OptionalOperation;
+pub type OptionalOperationKindNode = boa_ast::expression::OptionalOperationKind;
 pub type CallExpression = Call;
+pub type SuperCallExpression = boa_ast::expression::SuperCall;
 pub type NewExpression = New;
 pub type UnaryExpression = Unary;
 pub type BinaryExpression = Binary;
@@ -82,6 +90,8 @@ pub type RegexLiteral = RegExpLiteral;
 pub type ArrayPatternNode = ArrayPattern;
 pub type ObjectPatternNode = ObjectPattern;
 pub type PatternNode = Pattern;
+pub type ObjectPatternElementNode = boa_ast::pattern::ObjectPatternElement;
+pub type ArrayPatternElementNode = boa_ast::pattern::ArrayPatternElement;
 pub type AssignTargetNode = boa_ast::expression::operator::assign::AssignTarget;
 pub type UpdateTargetNode = boa_ast::expression::operator::update::UpdateTarget;
 pub type BinaryOpNode = boa_ast::expression::operator::binary::BinaryOp;
@@ -97,13 +107,21 @@ pub type SimplePropertyAccessNode = boa_ast::expression::access::SimplePropertyA
 pub type PropertyNameNode = boa_ast::property::PropertyName;
 pub type MethodDefinitionKindNode = boa_ast::property::MethodDefinitionKind;
 pub type ObjectMethodDefinitionNode = boa_ast::expression::literal::ObjectMethodDefinition;
+pub type ClassDeclarationNode = ClassDeclaration;
+pub type ClassExpressionNode = ClassExpression;
+pub type ClassConstructorExpressionNode = boa_ast::function::FunctionExpression;
 pub type ForLoopInitializerNode = boa_ast::statement::iteration::ForLoopInitializer;
 pub type ForLoopInitializerLexicalNode = boa_ast::statement::iteration::ForLoopInitializerLexical;
 pub type PrivateIdentifier = PrivateName;
 pub type ClassBody = Box<[ClassElement]>;
+pub type ClassElementNode = ClassElement;
+pub type ClassMethodDefinitionNode = ClassMethodDefinition;
+pub type ClassFieldDefinitionNode = ClassFieldDefinition;
+pub type ClassElementNameNode = ClassElementName;
 pub type MethodDefinition = ClassElement;
 pub type PropertyDefinition = ClassElement;
 pub type ObjectPropertyDefinition = boa_ast::expression::literal::PropertyDefinition;
+pub type IterableLoopInitializerNode = IterableLoopInitializer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceType {

@@ -132,12 +132,26 @@ impl JsPropertyDescriptor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ObjectKind {
     Ordinary,
     Array,
     Function,
     Error,
+    RegExp {
+        source: String,
+        flags: String,
+        global: bool,
+        last_index: u32,
+    },
+    Map(Vec<(Value, Value)>),
+    Set(Vec<Value>),
+    WeakMap(Vec<(Value, Value)>),
+    WeakSet(Vec<Value>),
+    ForOfIterator {
+        values: Vec<Value>,
+        index: usize,
+    },
     Host(HostObjectSlot),
     Exotic(&'static str),
 }

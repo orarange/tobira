@@ -17,6 +17,8 @@ type ValueCell = Rc<RefCell<Value>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BuiltinId {
     Assert,
+    CallSpread,
+    ConstructSpread,
     ObjectConstructor,
     ObjectCreate,
     ObjectDefineProperty,
@@ -36,6 +38,13 @@ enum BuiltinId {
     FunctionProtoCall,
     FunctionProtoApply,
     FunctionProtoBind,
+    ErrorConstructor,
+    TypeErrorConstructor,
+    RangeErrorConstructor,
+    ReferenceErrorConstructor,
+    SyntaxErrorConstructor,
+    UriErrorConstructor,
+    EvalErrorConstructor,
     ArrayConstructor,
     ArrayIsArray,
     ArrayFrom,
@@ -109,6 +118,23 @@ enum BuiltinId {
     MathRandom,
     JsonStringify,
     JsonParse,
+    MapConstructor,
+    MapProtoSet,
+    MapProtoGet,
+    MapProtoHas,
+    MapProtoDelete,
+    MapProtoClear,
+    MapProtoForEach,
+    MapProtoEntries,
+    MapProtoKeys,
+    MapProtoValues,
+    SetConstructor,
+    SetProtoAdd,
+    SetProtoHas,
+    SetProtoDelete,
+    SetProtoClear,
+    SetProtoForEach,
+    SetProtoValues,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +166,7 @@ pub struct CallFrame {
     upvalues: Vec<ValueCell>,
     this_value: Value,
     construct_fallback: Option<Value>,
+    pending_exception: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,6 +174,7 @@ pub enum VmError {
     TypeError(String),
     ReferenceError(String),
     RangeError(String),
+    Thrown(Value),
     InfiniteLoop,
     StackOverflow,
     Unimplemented(&'static str),
@@ -158,6 +186,7 @@ impl std::fmt::Display for VmError {
             Self::TypeError(message)
             | Self::ReferenceError(message)
             | Self::RangeError(message) => write!(f, "{message}"),
+            Self::Thrown(value) => write!(f, "uncaught throw: {value:?}"),
             Self::InfiniteLoop => write!(f, "execution exceeded the per-call loop budget"),
             Self::StackOverflow => write!(f, "call stack exceeded the phase 3 limit"),
             Self::Unimplemented(feature) => write!(f, "unimplemented in phase 3: {feature}"),
@@ -179,6 +208,9 @@ pub struct Vm {
     function_prototype: Option<GcRef<JsObject>>,
     array_prototype: Option<GcRef<JsObject>>,
     string_prototype: Option<GcRef<JsObject>>,
+    error_prototype: Option<GcRef<JsObject>>,
+    map_prototype: Option<GcRef<JsObject>>,
+    set_prototype: Option<GcRef<JsObject>>,
     random_state: u64,
 }
 
@@ -200,6 +232,9 @@ impl Vm {
             function_prototype: None,
             array_prototype: None,
             string_prototype: None,
+            error_prototype: None,
+            map_prototype: None,
+            set_prototype: None,
             random_state,
         };
         vm.install_globals();
@@ -237,7 +272,9 @@ impl Vm {
                 frame.ip += 1;
                 opcode
             };
-            self.execute_opcode(opcode)?;
+            if let Err(error) = self.execute_opcode(opcode) {
+                self.handle_runtime_error(error)?;
+            }
         }
         Ok(())
     }
@@ -256,6 +293,11 @@ impl Vm {
                 let value = match constant {
                     Constant::Number(number) => Value::Number(number),
                     Constant::String(text) => self.make_string_value(&text),
+                    Constant::RegExp { .. } => {
+                        return Err(VmError::Unimplemented(
+                            "regexp constants must use MakeRegExp",
+                        ));
+                    }
                 };
                 self.stack.push(value);
             }
@@ -337,6 +379,10 @@ impl Vm {
                 self.stack
                     .push(Value::Number(f64::from(!self.to_int32(&value))));
             }
+            Opcode::ToNumber => {
+                let value = self.pop_value()?;
+                self.stack.push(Value::Number(self.to_number(&value)));
+            }
             Opcode::Typeof => {
                 let value = self.pop_value()?;
                 let type_name = self.typeof_name(&value).to_string();
@@ -351,8 +397,21 @@ impl Vm {
                 let _ = self.pop_value()?;
                 self.stack.push(Value::Bool(true));
             }
-            Opcode::In => return Err(VmError::Unimplemented("in operator")),
-            Opcode::Instanceof => return Err(VmError::Unimplemented("instanceof operator")),
+            Opcode::In => {
+                let object = self.pop_value()?;
+                let key = self.pop_value()?;
+                let key = self.to_property_key(&key)?;
+                let object = self.require_object_ref(&object, "in operator")?;
+                self.stack.push(Value::Bool(
+                    self.lookup_property_descriptor(object, &key).is_some(),
+                ));
+            }
+            Opcode::Instanceof => {
+                let constructor = self.pop_value()?;
+                let value = self.pop_value()?;
+                self.stack
+                    .push(Value::Bool(self.instanceof_value(&value, &constructor)?));
+            }
             Opcode::Jump(offset) => {
                 self.apply_jump(offset)?;
             }
@@ -378,12 +437,141 @@ impl Vm {
                     self.apply_jump(offset)?;
                 }
             }
+            Opcode::JumpIfNullish(offset) => {
+                let value = self.peek_value()?;
+                if matches!(value, Value::Null | Value::Undefined) {
+                    self.apply_jump(offset)?;
+                }
+            }
             Opcode::Call(argc) => {
                 let args = self.pop_args(argc)?;
                 let this_value = self.pop_value()?;
                 let callee = self.pop_value()?;
                 if let Some(result) = self.invoke_callable_value(callee, this_value, args)? {
                     self.stack.push(result);
+                }
+            }
+            Opcode::CallSpread(_) | Opcode::Spread | Opcode::GetSuperCtor => {
+                return Err(VmError::Unimplemented("phase 4 opcode"));
+            }
+            Opcode::MakeRegExp(index) => {
+                let (pattern, flags) = self.constant_regexp(index)?;
+                let source_value = self.make_string_value(&pattern);
+                let flags_value = self.make_string_value(&flags);
+                let object = self.heap.allocate_object(JsObject {
+                    kind: ObjectKind::RegExp {
+                        source: pattern.clone(),
+                        flags: flags.clone(),
+                        global: flags.contains('g'),
+                        last_index: 0,
+                    },
+                    prototype: Some(self.object_prototype_ref()),
+                    ..JsObject::default()
+                });
+                self.define_data_property(
+                    object,
+                    PropertyKey::from("source"),
+                    source_value,
+                    false,
+                    false,
+                    false,
+                );
+                self.define_data_property(
+                    object,
+                    PropertyKey::from("flags"),
+                    flags_value,
+                    false,
+                    false,
+                    false,
+                );
+                self.stack.push(Value::Object(object));
+            }
+            Opcode::CopyDataProperties => {
+                let source = self.pop_value()?;
+                let target = self.pop_value()?;
+                if !matches!(source, Value::Null | Value::Undefined) {
+                    let target_ref = self.require_object_ref(&target, "object spread target")?;
+                    if let Value::Object(source_ref) = source {
+                        let keys = self.object_own_enumerable_keys(source_ref);
+                        for key in keys {
+                            let value =
+                                self.get_property_value(&Value::Object(source_ref), &key)?;
+                            self.set_property_on_object(
+                                target_ref,
+                                Value::Object(target_ref),
+                                key,
+                                value,
+                            )?;
+                        }
+                    }
+                }
+                self.stack.push(target);
+            }
+            Opcode::GetForInKeys => {
+                let value = self.pop_value()?;
+                let object = self.require_object_ref(&value, "for...in target")?;
+                let keys = self.for_in_keys(object);
+                let values = keys
+                    .into_iter()
+                    .map(|key| self.make_string_value(&key))
+                    .collect();
+                let array = self.make_array_from_values(values)?;
+                self.stack.push(array);
+            }
+            Opcode::GetForOfIterator => {
+                let value = self.pop_value()?;
+                let values = self.for_of_values(&value)?;
+                let iterator = self.heap.allocate_object(JsObject {
+                    kind: ObjectKind::ForOfIterator { values, index: 0 },
+                    prototype: Some(self.object_prototype_ref()),
+                    ..JsObject::default()
+                });
+                self.stack.push(Value::Object(iterator));
+            }
+            Opcode::ForOfNext => {
+                let iterator = self.pop_value()?;
+                let iterator_ref = self.require_object_ref(&iterator, "for...of iterator")?;
+                let next = self.for_of_next(iterator_ref)?;
+                let done = next.is_none();
+                self.stack.push(next.unwrap_or(Value::Undefined));
+                self.stack.push(Value::Bool(done));
+            }
+            Opcode::GetProto => {
+                let value = self.pop_value()?;
+                let object = self.require_object_ref(&value, "prototype lookup")?;
+                let proto = self
+                    .heap
+                    .objects()
+                    .get(object)
+                    .and_then(|object| object.prototype)
+                    .map(Value::Object)
+                    .unwrap_or(Value::Null);
+                self.stack.push(proto);
+            }
+            Opcode::SetProtoOf => {
+                let proto = self.pop_value()?;
+                let value = self.pop_value()?;
+                let object = self.require_object_ref(&value, "setPrototypeOf")?;
+                let prototype = match proto {
+                    Value::Null => None,
+                    Value::Object(object) => Some(object),
+                    _ => {
+                        return Err(VmError::TypeError(
+                            "prototype must be an object or null".to_string(),
+                        ));
+                    }
+                };
+                if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
+                    object_data.prototype = prototype;
+                }
+                self.stack.push(Value::Object(object));
+            }
+            Opcode::EnterTry(_) | Opcode::LeaveTry => {}
+            Opcode::EndFinally => {
+                if let Some(frame) = self.frames.last_mut()
+                    && let Some(value) = frame.pending_exception.take()
+                {
+                    return Err(VmError::Thrown(value));
                 }
             }
             Opcode::Return => {
@@ -480,10 +668,7 @@ impl Vm {
             }
             Opcode::Throw => {
                 let thrown = self.pop_value()?;
-                return Err(VmError::TypeError(format!(
-                    "uncaught throw: {}",
-                    self.to_string(&thrown)
-                )));
+                return Err(VmError::Thrown(thrown));
             }
             Opcode::Nop => {}
         }
@@ -508,19 +693,71 @@ impl Vm {
             ..JsObject::default()
         });
         let string_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let error_prototype = self.heap.allocate_object(JsObject {
+            kind: ObjectKind::Error,
+            prototype: Some(object_prototype),
+            ..JsObject::default()
+        });
+        let map_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let set_prototype = self.allocate_ordinary_object(Some(object_prototype));
 
         self.object_prototype = Some(object_prototype);
         self.function_prototype = Some(function_prototype);
         self.array_prototype = Some(array_prototype);
         self.string_prototype = Some(string_prototype);
+        self.error_prototype = Some(error_prototype);
+        self.map_prototype = Some(map_prototype);
+        self.set_prototype = Some(set_prototype);
 
         let assert_value = self.allocate_builtin_value(BuiltinId::Assert, false, None);
         self.globals.insert("assert".to_string(), assert_value);
+        let call_spread = self.allocate_builtin_value(BuiltinId::CallSpread, false, None);
+        let construct_spread = self.allocate_builtin_value(BuiltinId::ConstructSpread, false, None);
+        self.globals
+            .insert("__callSpread".to_string(), call_spread.clone());
+        self.globals
+            .insert("__constructSpread".to_string(), construct_spread.clone());
 
         let object_ctor =
             self.allocate_builtin_value(BuiltinId::ObjectConstructor, true, Some(object_prototype));
         let array_ctor =
             self.allocate_builtin_value(BuiltinId::ArrayConstructor, true, Some(array_prototype));
+        let error_ctor =
+            self.allocate_builtin_value(BuiltinId::ErrorConstructor, true, Some(error_prototype));
+        let type_error_ctor = self.allocate_builtin_value(
+            BuiltinId::TypeErrorConstructor,
+            true,
+            Some(error_prototype),
+        );
+        let range_error_ctor = self.allocate_builtin_value(
+            BuiltinId::RangeErrorConstructor,
+            true,
+            Some(error_prototype),
+        );
+        let reference_error_ctor = self.allocate_builtin_value(
+            BuiltinId::ReferenceErrorConstructor,
+            true,
+            Some(error_prototype),
+        );
+        let syntax_error_ctor = self.allocate_builtin_value(
+            BuiltinId::SyntaxErrorConstructor,
+            true,
+            Some(error_prototype),
+        );
+        let uri_error_ctor = self.allocate_builtin_value(
+            BuiltinId::UriErrorConstructor,
+            true,
+            Some(error_prototype),
+        );
+        let eval_error_ctor = self.allocate_builtin_value(
+            BuiltinId::EvalErrorConstructor,
+            true,
+            Some(error_prototype),
+        );
+        let map_ctor =
+            self.allocate_builtin_value(BuiltinId::MapConstructor, true, Some(map_prototype));
+        let set_ctor =
+            self.allocate_builtin_value(BuiltinId::SetConstructor, true, Some(set_prototype));
         let number_ctor = self.allocate_builtin_value(BuiltinId::NumberParseInt, false, None);
         let math_object = self.allocate_ordinary_object(Some(object_prototype));
         let json_object = self.allocate_ordinary_object(Some(object_prototype));
@@ -528,6 +765,21 @@ impl Vm {
         self.globals
             .insert("Object".to_string(), object_ctor.clone());
         self.globals.insert("Array".to_string(), array_ctor.clone());
+        self.globals.insert("Error".to_string(), error_ctor.clone());
+        self.globals
+            .insert("TypeError".to_string(), type_error_ctor.clone());
+        self.globals
+            .insert("RangeError".to_string(), range_error_ctor.clone());
+        self.globals
+            .insert("ReferenceError".to_string(), reference_error_ctor.clone());
+        self.globals
+            .insert("SyntaxError".to_string(), syntax_error_ctor.clone());
+        self.globals
+            .insert("URIError".to_string(), uri_error_ctor.clone());
+        self.globals
+            .insert("EvalError".to_string(), eval_error_ctor.clone());
+        self.globals.insert("Map".to_string(), map_ctor.clone());
+        self.globals.insert("Set".to_string(), set_ctor.clone());
         let number_object = self.create_number_object();
         self.globals.insert("Number".to_string(), number_object);
         self.globals
@@ -551,6 +803,23 @@ impl Vm {
         self.define_builtin_method(function_prototype, "call", BuiltinId::FunctionProtoCall);
         self.define_builtin_method(function_prototype, "apply", BuiltinId::FunctionProtoApply);
         self.define_builtin_method(function_prototype, "bind", BuiltinId::FunctionProtoBind);
+
+        self.define_builtin_method(map_prototype, "set", BuiltinId::MapProtoSet);
+        self.define_builtin_method(map_prototype, "get", BuiltinId::MapProtoGet);
+        self.define_builtin_method(map_prototype, "has", BuiltinId::MapProtoHas);
+        self.define_builtin_method(map_prototype, "delete", BuiltinId::MapProtoDelete);
+        self.define_builtin_method(map_prototype, "clear", BuiltinId::MapProtoClear);
+        self.define_builtin_method(map_prototype, "forEach", BuiltinId::MapProtoForEach);
+        self.define_builtin_method(map_prototype, "entries", BuiltinId::MapProtoEntries);
+        self.define_builtin_method(map_prototype, "keys", BuiltinId::MapProtoKeys);
+        self.define_builtin_method(map_prototype, "values", BuiltinId::MapProtoValues);
+
+        self.define_builtin_method(set_prototype, "add", BuiltinId::SetProtoAdd);
+        self.define_builtin_method(set_prototype, "has", BuiltinId::SetProtoHas);
+        self.define_builtin_method(set_prototype, "delete", BuiltinId::SetProtoDelete);
+        self.define_builtin_method(set_prototype, "clear", BuiltinId::SetProtoClear);
+        self.define_builtin_method(set_prototype, "forEach", BuiltinId::SetProtoForEach);
+        self.define_builtin_method(set_prototype, "values", BuiltinId::SetProtoValues);
 
         self.define_builtin_method(array_prototype, "push", BuiltinId::ArrayProtoPush);
         self.define_builtin_method(array_prototype, "pop", BuiltinId::ArrayProtoPop);
@@ -763,6 +1032,21 @@ impl Vm {
             .expect("string prototype should be installed")
     }
 
+    fn error_prototype_ref(&self) -> GcRef<JsObject> {
+        self.error_prototype
+            .expect("error prototype should be installed")
+    }
+
+    fn map_prototype_ref(&self) -> GcRef<JsObject> {
+        self.map_prototype
+            .expect("map prototype should be installed")
+    }
+
+    fn set_prototype_ref(&self) -> GcRef<JsObject> {
+        self.set_prototype
+            .expect("set prototype should be installed")
+    }
+
     fn allocate_ordinary_object(&mut self, prototype: Option<GcRef<JsObject>>) -> GcRef<JsObject> {
         self.heap.allocate_object(JsObject {
             kind: ObjectKind::Ordinary,
@@ -851,6 +1135,55 @@ impl Vm {
         }
     }
 
+    fn create_error_object(&mut self, name: &str, message: String) -> Value {
+        let object = self.heap.allocate_object(JsObject {
+            kind: ObjectKind::Error,
+            prototype: Some(self.error_prototype_ref()),
+            ..JsObject::default()
+        });
+        let name_value = self.make_string_value(name);
+        let message_value = self.make_string_value(&message);
+        self.define_data_property(
+            object,
+            PropertyKey::from("name"),
+            name_value,
+            true,
+            false,
+            true,
+        );
+        self.define_data_property(
+            object,
+            PropertyKey::from("message"),
+            message_value,
+            true,
+            false,
+            true,
+        );
+        Value::Object(object)
+    }
+
+    fn wrap_vm_error_as_value(&mut self, error: &VmError) -> Result<Value, VmError> {
+        Ok(match error {
+            VmError::TypeError(message) => self.create_error_object("TypeError", message.clone()),
+            VmError::ReferenceError(message) => {
+                self.create_error_object("ReferenceError", message.clone())
+            }
+            VmError::RangeError(message) => self.create_error_object("RangeError", message.clone()),
+            VmError::Thrown(value) => value.clone(),
+            VmError::InfiniteLoop => self.create_error_object(
+                "Error",
+                "execution exceeded the per-call loop budget".to_string(),
+            ),
+            VmError::StackOverflow => self.create_error_object(
+                "RangeError",
+                "call stack exceeded the phase 4 limit".to_string(),
+            ),
+            VmError::Unimplemented(feature) => {
+                self.create_error_object("Error", format!("unimplemented in phase 4: {feature}"))
+            }
+        })
+    }
+
     fn push_call_frame(
         &mut self,
         closure: RuntimeClosure,
@@ -867,11 +1200,26 @@ impl Vm {
             locals.push(Rc::new(RefCell::new(Value::Undefined)));
         }
 
-        for (index, value) in args.into_iter().enumerate() {
-            if index >= locals.len() {
+        let parameter_count = closure.proto.parameter_count as usize;
+        let normal_parameter_count = if closure.proto.has_rest_param {
+            parameter_count.saturating_sub(1)
+        } else {
+            parameter_count
+        };
+
+        for (index, value) in args.iter().cloned().enumerate() {
+            if index >= normal_parameter_count || index >= locals.len() {
                 break;
             }
             *locals[index].borrow_mut() = value;
+        }
+
+        if closure.proto.has_rest_param && parameter_count != 0 {
+            let rest_values = args.into_iter().skip(normal_parameter_count).collect();
+            let rest_value = self.make_array_from_values(rest_values)?;
+            if let Some(slot) = locals.get(parameter_count - 1) {
+                *slot.borrow_mut() = rest_value;
+            }
         }
 
         self.frames.push(CallFrame {
@@ -882,6 +1230,7 @@ impl Vm {
             upvalues: closure.upvalues,
             this_value,
             construct_fallback,
+            pending_exception: None,
         });
         Ok(())
     }
@@ -920,6 +1269,76 @@ impl Vm {
         self.pop_value()
     }
 
+    fn construct_value_sync(
+        &mut self,
+        constructor: Value,
+        args: Vec<Value>,
+    ) -> Result<Value, VmError> {
+        let base_depth = self.frames.len();
+        if let Some(value) = self.construct_value(constructor, args)? {
+            return Ok(value);
+        }
+        self.run_until_frame_depth(base_depth)?;
+        self.pop_value()
+    }
+
+    fn handle_runtime_error(&mut self, error: VmError) -> Result<(), VmError> {
+        match error {
+            VmError::Thrown(value) => self.handle_thrown_value(value),
+            VmError::TypeError(_) | VmError::ReferenceError(_) | VmError::RangeError(_) => {
+                let wrapped = self.wrap_vm_error_as_value(&error)?;
+                match self.handle_thrown_value(wrapped) {
+                    Ok(()) => Ok(()),
+                    Err(_) => Err(error),
+                }
+            }
+            other => Err(other),
+        }
+    }
+
+    fn handle_thrown_value(&mut self, value: Value) -> Result<(), VmError> {
+        let mut thrown = value;
+        loop {
+            let Some(frame_index) = self.frames.len().checked_sub(1) else {
+                return Err(VmError::TypeError(format!(
+                    "uncaught throw: {}",
+                    self.to_string(&thrown)
+                )));
+            };
+            let ip = self.frames[frame_index].ip.saturating_sub(1) as u32;
+            let handler = self.frames[frame_index]
+                .proto
+                .handlers
+                .iter()
+                .rev()
+                .find(|handler| handler.try_start <= ip && ip < handler.try_end)
+                .cloned();
+            if let Some(handler) = handler {
+                if let Some(slot) = handler.catch_binding {
+                    if let Some(cell) = self.local_cell_in_frame(frame_index, slot) {
+                        *cell.borrow_mut() = thrown.clone();
+                    }
+                }
+                if handler.catch_ip != 0 {
+                    self.frames[frame_index].pending_exception = None;
+                    self.frames[frame_index].ip = handler.catch_ip as usize;
+                    return Ok(());
+                }
+                if handler.finally_ip != 0 {
+                    self.frames[frame_index].pending_exception = Some(thrown.clone());
+                    self.frames[frame_index].ip = handler.finally_ip as usize;
+                    return Ok(());
+                }
+            }
+
+            let frame = self.frames.pop().ok_or_else(|| {
+                VmError::RangeError("exception propagation without a frame".to_string())
+            })?;
+            self.stack.truncate(frame.stack_base);
+            thrown = frame.pending_exception.unwrap_or(thrown);
+        }
+    }
+
     fn construct_value(
         &mut self,
         constructor: Value,
@@ -954,7 +1373,17 @@ impl Vm {
     fn builtin_constructable(&self, builtin: BuiltinId) -> bool {
         matches!(
             builtin,
-            BuiltinId::ObjectConstructor | BuiltinId::ArrayConstructor
+            BuiltinId::ObjectConstructor
+                | BuiltinId::ArrayConstructor
+                | BuiltinId::ErrorConstructor
+                | BuiltinId::TypeErrorConstructor
+                | BuiltinId::RangeErrorConstructor
+                | BuiltinId::ReferenceErrorConstructor
+                | BuiltinId::SyntaxErrorConstructor
+                | BuiltinId::UriErrorConstructor
+                | BuiltinId::EvalErrorConstructor
+                | BuiltinId::MapConstructor
+                | BuiltinId::SetConstructor
         )
     }
 
@@ -1010,8 +1439,20 @@ impl Vm {
             Some(Constant::Number(_)) => Err(VmError::TypeError(format!(
                 "constant {index} was not a string"
             ))),
+            Some(Constant::RegExp { .. }) => Err(VmError::TypeError(format!(
+                "constant {index} was not a string"
+            ))),
             None => Err(VmError::RangeError(format!(
                 "constant index {index} out of range"
+            ))),
+        }
+    }
+
+    fn constant_regexp(&self, index: u16) -> Result<(String, String), VmError> {
+        match self.current_proto()?.constants.get(index as usize) {
+            Some(Constant::RegExp { pattern, flags }) => Ok((pattern.clone(), flags.clone())),
+            _ => Err(VmError::TypeError(format!(
+                "constant {index} was not a regular expression"
             ))),
         }
     }
@@ -1021,6 +1462,13 @@ impl Vm {
             .last()
             .and_then(|frame| frame.locals.get(slot as usize))
             .ok_or_else(|| VmError::RangeError(format!("local slot {slot} out of range")))
+    }
+
+    fn local_cell_in_frame(&self, frame_index: usize, slot: u16) -> Option<ValueCell> {
+        self.frames
+            .get(frame_index)
+            .and_then(|frame| frame.locals.get(slot as usize))
+            .cloned()
     }
 
     fn upvalue_cell(&self, slot: u16) -> Result<&ValueCell, VmError> {
@@ -1692,6 +2140,128 @@ impl Vm {
         Ok(values)
     }
 
+    fn for_in_keys(&self, object: GcRef<JsObject>) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut current = Some(object);
+        while let Some(object_ref) = current {
+            let Some(object_data) = self.heap.objects().get(object_ref) else {
+                break;
+            };
+            for (key, descriptor) in &object_data.properties {
+                let enumerable = matches!(
+                    descriptor,
+                    JsPropertyDescriptor::Data {
+                        enumerable: true,
+                        ..
+                    } | JsPropertyDescriptor::Accessor {
+                        enumerable: true,
+                        ..
+                    }
+                );
+                if !enumerable {
+                    continue;
+                }
+                if let PropertyKey::Symbol(_) = key {
+                    continue;
+                }
+                let text = self.property_key_to_string(key);
+                if !keys.contains(&text) {
+                    keys.push(text);
+                }
+            }
+            current = object_data.prototype;
+        }
+        keys
+    }
+
+    fn for_of_values(&mut self, value: &Value) -> Result<Vec<Value>, VmError> {
+        match value {
+            Value::String(string) => Ok(self
+                .string_text(*string)
+                .chars()
+                .map(|character| self.make_string_value(&character.to_string()))
+                .collect()),
+            Value::Object(object) => {
+                let kind = self
+                    .heap
+                    .objects()
+                    .get(*object)
+                    .map(|object| object.kind.clone())
+                    .unwrap_or(ObjectKind::Ordinary);
+                match kind {
+                    ObjectKind::Array => self.array_like_to_vec(value),
+                    ObjectKind::Map(entries) | ObjectKind::WeakMap(entries) => {
+                        let mut pairs = Vec::with_capacity(entries.len());
+                        for (key, value) in entries {
+                            pairs.push(self.make_array_from_values(vec![key, value])?);
+                        }
+                        Ok(pairs)
+                    }
+                    ObjectKind::Set(values) | ObjectKind::WeakSet(values) => Ok(values),
+                    _ => self.array_like_to_vec(value),
+                }
+            }
+            _ => Err(VmError::TypeError(
+                "value is not iterable in phase 4".to_string(),
+            )),
+        }
+    }
+
+    fn for_of_next(&mut self, iterator: GcRef<JsObject>) -> Result<Option<Value>, VmError> {
+        let Some(object_data) = self.heap.objects_mut().get_mut(iterator) else {
+            return Err(VmError::TypeError("invalid iterator object".to_string()));
+        };
+        match &mut object_data.kind {
+            ObjectKind::ForOfIterator { values, index } => {
+                if *index >= values.len() {
+                    Ok(None)
+                } else {
+                    let value = values[*index].clone();
+                    *index += 1;
+                    Ok(Some(value))
+                }
+            }
+            _ => Err(VmError::TypeError(
+                "object is not a for...of iterator".to_string(),
+            )),
+        }
+    }
+
+    fn instanceof_value(&self, value: &Value, constructor: &Value) -> Result<bool, VmError> {
+        let Value::Object(object) = value else {
+            return Ok(false);
+        };
+        let ctor = self.require_object_ref(constructor, "instanceof right-hand side")?;
+        let prototype =
+            match self.get_own_property_descriptor(ctor, &PropertyKey::from("prototype")) {
+                Some(JsPropertyDescriptor::Data {
+                    value: Value::Object(prototype),
+                    ..
+                }) => prototype,
+                _ => {
+                    return Err(VmError::TypeError(
+                        "constructor.prototype must be an object".to_string(),
+                    ));
+                }
+            };
+        let mut current = self
+            .heap
+            .objects()
+            .get(*object)
+            .and_then(|data| data.prototype);
+        while let Some(current_object) = current {
+            if current_object.raw() == prototype.raw() {
+                return Ok(true);
+            }
+            current = self
+                .heap
+                .objects()
+                .get(current_object)
+                .and_then(|data| data.prototype);
+        }
+        Ok(false)
+    }
+
     fn invoke_builtin(
         &mut self,
         builtin: BuiltinId,
@@ -1706,6 +2276,23 @@ impl Vm {
                 } else {
                     Err(VmError::TypeError("assertion failed".to_string()))
                 }
+            }
+            BuiltinId::CallSpread => {
+                let callee = args.first().cloned().unwrap_or(Value::Undefined);
+                let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let spread_args = match args.get(2) {
+                    Some(Value::Null) | Some(Value::Undefined) | None => Vec::new(),
+                    Some(value) => self.array_like_to_vec(value)?,
+                };
+                self.call_value_sync(callee, this_arg, spread_args)
+            }
+            BuiltinId::ConstructSpread => {
+                let constructor = args.first().cloned().unwrap_or(Value::Undefined);
+                let spread_args = match args.get(1) {
+                    Some(Value::Null) | Some(Value::Undefined) | None => Vec::new(),
+                    Some(value) => self.array_like_to_vec(value)?,
+                };
+                self.construct_value_sync(constructor, spread_args)
             }
             BuiltinId::ObjectConstructor => Ok(match args.first() {
                 Some(Value::Object(_)) => args[0].clone(),
@@ -1908,7 +2495,84 @@ impl Vm {
                     bound_args,
                 }))
             }
+            BuiltinId::ErrorConstructor => Ok(self.create_error_object(
+                "Error",
+                args.first()
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default(),
+            )),
+            BuiltinId::TypeErrorConstructor => Ok(self.create_error_object(
+                "TypeError",
+                args.first()
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default(),
+            )),
+            BuiltinId::RangeErrorConstructor => Ok(self.create_error_object(
+                "RangeError",
+                args.first()
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default(),
+            )),
+            BuiltinId::ReferenceErrorConstructor => Ok(self.create_error_object(
+                "ReferenceError",
+                args.first()
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default(),
+            )),
+            BuiltinId::SyntaxErrorConstructor => Ok(self.create_error_object(
+                "SyntaxError",
+                args.first()
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default(),
+            )),
+            BuiltinId::UriErrorConstructor => Ok(self.create_error_object(
+                "URIError",
+                args.first()
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default(),
+            )),
+            BuiltinId::EvalErrorConstructor => Ok(self.create_error_object(
+                "EvalError",
+                args.first()
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default(),
+            )),
             BuiltinId::ArrayConstructor => self.make_array_from_values(args),
+            BuiltinId::MapConstructor => {
+                let object = self.heap.allocate_object(JsObject {
+                    kind: ObjectKind::Map(Vec::new()),
+                    prototype: Some(self.map_prototype_ref()),
+                    ..JsObject::default()
+                });
+                self.set_collection_size(object, 0);
+                if let Some(iterable) = args.first()
+                    && !matches!(iterable, Value::Null | Value::Undefined)
+                {
+                    for pair in self.for_of_values(iterable)? {
+                        let values = self.array_like_to_vec(&pair)?;
+                        let key = values.first().cloned().unwrap_or(Value::Undefined);
+                        let value = values.get(1).cloned().unwrap_or(Value::Undefined);
+                        self.map_set(object, key, value, false)?;
+                    }
+                }
+                Ok(Value::Object(object))
+            }
+            BuiltinId::SetConstructor => {
+                let object = self.heap.allocate_object(JsObject {
+                    kind: ObjectKind::Set(Vec::new()),
+                    prototype: Some(self.set_prototype_ref()),
+                    ..JsObject::default()
+                });
+                self.set_collection_size(object, 0);
+                if let Some(iterable) = args.first()
+                    && !matches!(iterable, Value::Null | Value::Undefined)
+                {
+                    for value in self.for_of_values(iterable)? {
+                        self.set_add(object, value, false)?;
+                    }
+                }
+                Ok(Value::Object(object))
+            }
             BuiltinId::ArrayIsArray => Ok(Value::Bool(matches!(
                 args.first(),
                 Some(Value::Object(object))
@@ -2399,6 +3063,161 @@ impl Vm {
                     .map_err(|error| VmError::TypeError(error.to_string()))?;
                 self.from_json_value(&json)
             }
+            BuiltinId::MapProtoSet => {
+                let object = self.builtin_object_this(&this_value, "Map.prototype.set")?;
+                let key = args.first().cloned().unwrap_or(Value::Undefined);
+                let value = args.get(1).cloned().unwrap_or(Value::Undefined);
+                self.map_set(object, key, value, false)?;
+                Ok(Value::Object(object))
+            }
+            BuiltinId::MapProtoGet => {
+                let object = self.builtin_object_this(&this_value, "Map.prototype.get")?;
+                Ok(self
+                    .map_get(object, args.first().unwrap_or(&Value::Undefined))?
+                    .unwrap_or(Value::Undefined))
+            }
+            BuiltinId::MapProtoHas => {
+                let object = self.builtin_object_this(&this_value, "Map.prototype.has")?;
+                Ok(Value::Bool(
+                    self.map_get(object, args.first().unwrap_or(&Value::Undefined))?
+                        .is_some(),
+                ))
+            }
+            BuiltinId::MapProtoDelete => {
+                let object = self.builtin_object_this(&this_value, "Map.prototype.delete")?;
+                Ok(Value::Bool(self.map_delete(
+                    object,
+                    args.first().unwrap_or(&Value::Undefined),
+                )?))
+            }
+            BuiltinId::MapProtoClear => {
+                let object = self.builtin_object_this(&this_value, "Map.prototype.clear")?;
+                self.map_clear(object)?;
+                Ok(Value::Undefined)
+            }
+            BuiltinId::MapProtoForEach => {
+                let object = self.builtin_object_this(&this_value, "Map.prototype.forEach")?;
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                let entries = match self
+                    .heap
+                    .objects()
+                    .get(object)
+                    .map(|data| data.kind.clone())
+                {
+                    Some(ObjectKind::Map(entries)) | Some(ObjectKind::WeakMap(entries)) => entries,
+                    _ => Vec::new(),
+                };
+                for (key, value) in entries {
+                    let _ = self.call_value_sync(
+                        callback.clone(),
+                        Value::Undefined,
+                        vec![value, key, Value::Object(object)],
+                    )?;
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::MapProtoEntries => {
+                let object = self.builtin_object_this(&this_value, "Map.prototype.entries")?;
+                let entries = match self
+                    .heap
+                    .objects()
+                    .get(object)
+                    .map(|data| data.kind.clone())
+                {
+                    Some(ObjectKind::Map(entries)) | Some(ObjectKind::WeakMap(entries)) => entries,
+                    _ => Vec::new(),
+                };
+                let mut pairs = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    pairs.push(self.make_array_from_values(vec![key, value])?);
+                }
+                self.make_array_from_values(pairs)
+            }
+            BuiltinId::MapProtoKeys => {
+                let object = self.builtin_object_this(&this_value, "Map.prototype.keys")?;
+                let entries = match self
+                    .heap
+                    .objects()
+                    .get(object)
+                    .map(|data| data.kind.clone())
+                {
+                    Some(ObjectKind::Map(entries)) | Some(ObjectKind::WeakMap(entries)) => entries,
+                    _ => Vec::new(),
+                };
+                self.make_array_from_values(entries.into_iter().map(|(key, _)| key).collect())
+            }
+            BuiltinId::MapProtoValues => {
+                let object = self.builtin_object_this(&this_value, "Map.prototype.values")?;
+                let entries = match self
+                    .heap
+                    .objects()
+                    .get(object)
+                    .map(|data| data.kind.clone())
+                {
+                    Some(ObjectKind::Map(entries)) | Some(ObjectKind::WeakMap(entries)) => entries,
+                    _ => Vec::new(),
+                };
+                self.make_array_from_values(entries.into_iter().map(|(_, value)| value).collect())
+            }
+            BuiltinId::SetProtoAdd => {
+                let object = self.builtin_object_this(&this_value, "Set.prototype.add")?;
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                self.set_add(object, value, false)?;
+                Ok(Value::Object(object))
+            }
+            BuiltinId::SetProtoHas => {
+                let object = self.builtin_object_this(&this_value, "Set.prototype.has")?;
+                Ok(Value::Bool(self.set_has(
+                    object,
+                    args.first().unwrap_or(&Value::Undefined),
+                )?))
+            }
+            BuiltinId::SetProtoDelete => {
+                let object = self.builtin_object_this(&this_value, "Set.prototype.delete")?;
+                Ok(Value::Bool(self.set_delete(
+                    object,
+                    args.first().unwrap_or(&Value::Undefined),
+                )?))
+            }
+            BuiltinId::SetProtoClear => {
+                let object = self.builtin_object_this(&this_value, "Set.prototype.clear")?;
+                self.set_clear(object)?;
+                Ok(Value::Undefined)
+            }
+            BuiltinId::SetProtoForEach => {
+                let object = self.builtin_object_this(&this_value, "Set.prototype.forEach")?;
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                let values = match self
+                    .heap
+                    .objects()
+                    .get(object)
+                    .map(|data| data.kind.clone())
+                {
+                    Some(ObjectKind::Set(values)) | Some(ObjectKind::WeakSet(values)) => values,
+                    _ => Vec::new(),
+                };
+                for value in values {
+                    let _ = self.call_value_sync(
+                        callback.clone(),
+                        Value::Undefined,
+                        vec![value.clone(), value, Value::Object(object)],
+                    )?;
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::SetProtoValues => {
+                let object = self.builtin_object_this(&this_value, "Set.prototype.values")?;
+                let values = match self
+                    .heap
+                    .objects()
+                    .get(object)
+                    .map(|data| data.kind.clone())
+                {
+                    Some(ObjectKind::Set(values)) | Some(ObjectKind::WeakSet(values)) => values,
+                    _ => Vec::new(),
+                };
+                self.make_array_from_values(values)
+            }
         }
     }
 
@@ -2623,6 +3442,210 @@ impl Vm {
             )?;
         }
         self.set_array_length(object, self.array_length(object));
+        Ok(())
+    }
+
+    fn set_collection_size(&mut self, object: GcRef<JsObject>, size: usize) {
+        self.define_data_property(
+            object,
+            PropertyKey::from("size"),
+            Value::Number(size as f64),
+            false,
+            false,
+            true,
+        );
+    }
+
+    fn map_set(
+        &mut self,
+        object: GcRef<JsObject>,
+        key: Value,
+        value: Value,
+        weak: bool,
+    ) -> Result<(), VmError> {
+        let existing_index =
+            self.heap
+                .objects()
+                .get(object)
+                .and_then(|object_data| match &object_data.kind {
+                    ObjectKind::Map(entries) => entries
+                        .iter()
+                        .position(|(existing_key, _)| self.same_value_zero(existing_key, &key)),
+                    ObjectKind::WeakMap(entries) if weak => entries
+                        .iter()
+                        .position(|(existing_key, _)| self.same_value_zero(existing_key, &key)),
+                    _ => None,
+                });
+        let Some(object_data) = self.heap.objects_mut().get_mut(object) else {
+            return Err(VmError::TypeError("invalid Map object".to_string()));
+        };
+        let entries = match &mut object_data.kind {
+            ObjectKind::Map(entries) => entries,
+            ObjectKind::WeakMap(entries) if weak => entries,
+            _ => return Err(VmError::TypeError("object is not a Map".to_string())),
+        };
+        if let Some(index) = existing_index {
+            entries[index].1 = value;
+        } else {
+            entries.push((key, value));
+        }
+        let size = entries.len();
+        let _ = object_data;
+        self.set_collection_size(object, size);
+        Ok(())
+    }
+
+    fn map_get(&self, object: GcRef<JsObject>, key: &Value) -> Result<Option<Value>, VmError> {
+        let Some(object_data) = self.heap.objects().get(object) else {
+            return Err(VmError::TypeError("invalid Map object".to_string()));
+        };
+        let entries = match &object_data.kind {
+            ObjectKind::Map(entries) | ObjectKind::WeakMap(entries) => entries,
+            _ => return Err(VmError::TypeError("object is not a Map".to_string())),
+        };
+        Ok(entries
+            .iter()
+            .find(|(existing_key, _)| self.same_value_zero(existing_key, key))
+            .map(|(_, value)| value.clone()))
+    }
+
+    fn map_delete(&mut self, object: GcRef<JsObject>, key: &Value) -> Result<bool, VmError> {
+        let delete_index =
+            self.heap
+                .objects()
+                .get(object)
+                .and_then(|object_data| match &object_data.kind {
+                    ObjectKind::Map(entries) | ObjectKind::WeakMap(entries) => entries
+                        .iter()
+                        .position(|(existing_key, _)| self.same_value_zero(existing_key, key)),
+                    _ => None,
+                });
+        let Some(object_data) = self.heap.objects_mut().get_mut(object) else {
+            return Err(VmError::TypeError("invalid Map object".to_string()));
+        };
+        let entries = match &mut object_data.kind {
+            ObjectKind::Map(entries) | ObjectKind::WeakMap(entries) => entries,
+            _ => return Err(VmError::TypeError("object is not a Map".to_string())),
+        };
+        let deleted = if let Some(index) = delete_index {
+            entries.remove(index);
+            true
+        } else {
+            false
+        };
+        let size = entries.len();
+        let _ = object_data;
+        self.set_collection_size(object, size);
+        Ok(deleted)
+    }
+
+    fn map_clear(&mut self, object: GcRef<JsObject>) -> Result<(), VmError> {
+        let Some(object_data) = self.heap.objects_mut().get_mut(object) else {
+            return Err(VmError::TypeError("invalid Map object".to_string()));
+        };
+        match &mut object_data.kind {
+            ObjectKind::Map(entries) | ObjectKind::WeakMap(entries) => entries.clear(),
+            _ => return Err(VmError::TypeError("object is not a Map".to_string())),
+        }
+        let _ = object_data;
+        self.set_collection_size(object, 0);
+        Ok(())
+    }
+
+    fn set_add(
+        &mut self,
+        object: GcRef<JsObject>,
+        value: Value,
+        weak: bool,
+    ) -> Result<(), VmError> {
+        let exists = self
+            .heap
+            .objects()
+            .get(object)
+            .and_then(|object_data| match &object_data.kind {
+                ObjectKind::Set(values) => Some(
+                    values
+                        .iter()
+                        .any(|existing| self.same_value_zero(existing, &value)),
+                ),
+                ObjectKind::WeakSet(values) if weak => Some(
+                    values
+                        .iter()
+                        .any(|existing| self.same_value_zero(existing, &value)),
+                ),
+                _ => None,
+            })
+            .unwrap_or(false);
+        let Some(object_data) = self.heap.objects_mut().get_mut(object) else {
+            return Err(VmError::TypeError("invalid Set object".to_string()));
+        };
+        let values = match &mut object_data.kind {
+            ObjectKind::Set(values) => values,
+            ObjectKind::WeakSet(values) if weak => values,
+            _ => return Err(VmError::TypeError("object is not a Set".to_string())),
+        };
+        if !exists {
+            values.push(value);
+        }
+        let size = values.len();
+        let _ = object_data;
+        self.set_collection_size(object, size);
+        Ok(())
+    }
+
+    fn set_has(&self, object: GcRef<JsObject>, value: &Value) -> Result<bool, VmError> {
+        let Some(object_data) = self.heap.objects().get(object) else {
+            return Err(VmError::TypeError("invalid Set object".to_string()));
+        };
+        let values = match &object_data.kind {
+            ObjectKind::Set(values) | ObjectKind::WeakSet(values) => values,
+            _ => return Err(VmError::TypeError("object is not a Set".to_string())),
+        };
+        Ok(values
+            .iter()
+            .any(|existing| self.same_value_zero(existing, value)))
+    }
+
+    fn set_delete(&mut self, object: GcRef<JsObject>, value: &Value) -> Result<bool, VmError> {
+        let delete_index =
+            self.heap
+                .objects()
+                .get(object)
+                .and_then(|object_data| match &object_data.kind {
+                    ObjectKind::Set(values) | ObjectKind::WeakSet(values) => values
+                        .iter()
+                        .position(|existing| self.same_value_zero(existing, value)),
+                    _ => None,
+                });
+        let Some(object_data) = self.heap.objects_mut().get_mut(object) else {
+            return Err(VmError::TypeError("invalid Set object".to_string()));
+        };
+        let values = match &mut object_data.kind {
+            ObjectKind::Set(values) | ObjectKind::WeakSet(values) => values,
+            _ => return Err(VmError::TypeError("object is not a Set".to_string())),
+        };
+        let deleted = if let Some(index) = delete_index {
+            values.remove(index);
+            true
+        } else {
+            false
+        };
+        let size = values.len();
+        let _ = object_data;
+        self.set_collection_size(object, size);
+        Ok(deleted)
+    }
+
+    fn set_clear(&mut self, object: GcRef<JsObject>) -> Result<(), VmError> {
+        let Some(object_data) = self.heap.objects_mut().get_mut(object) else {
+            return Err(VmError::TypeError("invalid Set object".to_string()));
+        };
+        match &mut object_data.kind {
+            ObjectKind::Set(values) | ObjectKind::WeakSet(values) => values.clear(),
+            _ => return Err(VmError::TypeError("object is not a Set".to_string())),
+        }
+        let _ = object_data;
+        self.set_collection_size(object, 0);
         Ok(())
     }
 
@@ -3046,6 +4069,120 @@ mod tests {
             assert(Math.max(1, 2, 3) === 3);
             assert(Math.abs(-5) === 5);
             assert(typeof Math.random() === "number");
+            "#,
+        );
+    }
+
+    #[test]
+    fn phase_4_try_catch_finally_corpus() {
+        run_script(
+            r#"
+            let result = "";
+            try {
+              result += "try";
+              throw new Error("test");
+              result += "never";
+            } catch (e) {
+              result += " catch:" + e.message;
+            } finally {
+              result += " finally";
+            }
+            assert(result === "try catch:test finally");
+            "#,
+        );
+    }
+
+    #[test]
+    fn phase_4_destructuring_corpus() {
+        run_script(
+            r#"
+            const { a, b: renamed, c = 99 } = { a: 1, b: 2 };
+            assert(a === 1);
+            assert(renamed === 2);
+            assert(c === 99);
+
+            const [x, , z, ...rest] = [10, 20, 30, 40, 50];
+            assert(x === 10);
+            assert(z === 30);
+            assert(rest.length === 2);
+            assert(rest[0] === 40);
+            "#,
+        );
+    }
+
+    #[test]
+    fn phase_4_class_and_super_corpus() {
+        run_script(
+            r#"
+            class Animal {
+              constructor(name) { this.name = name; }
+              speak() { return this.name + " makes a noise."; }
+            }
+            class Dog extends Animal {
+              constructor(name) { super(name); }
+              speak() { return super.speak() + " Woof!"; }
+            }
+            const d = new Dog("Rex");
+            assert(d.speak() === "Rex makes a noise. Woof!");
+            assert(d instanceof Dog);
+            assert(d instanceof Animal);
+            "#,
+        );
+    }
+
+    #[test]
+    fn phase_4_map_and_set_corpus() {
+        run_script(
+            r#"
+            const m = new Map();
+            m.set("a", 1);
+            m.set("b", 2);
+            assert(m.get("a") === 1);
+            assert(m.has("b") === true);
+            assert(m.size === 2);
+
+            const s = new Set([1, 2, 3, 2, 1]);
+            assert(s.size === 3);
+            assert(s.has(2) === true);
+            "#,
+        );
+    }
+
+    #[test]
+    fn phase_4_spread_and_rest_corpus() {
+        run_script(
+            r#"
+            function sum(...nums) { return nums.reduce((a, b) => a + b, 0); }
+            assert(sum(1, 2, 3) === 6);
+            "#,
+        );
+        run_script(
+            r#"
+            function sum(...nums) { return nums.reduce((a, b) => a + b, 0); }
+            const parts = [3, 4];
+            assert(sum(1, 2, ...parts) === 10);
+            "#,
+        );
+    }
+
+    #[test]
+    fn phase_4_nullish_optional_and_switch_corpus() {
+        run_script(
+            r#"
+            const x2 = null ?? "default";
+            assert(x2 === "default");
+
+            const obj = { nested: { value: 42 } };
+            assert(obj?.nested?.value === 42);
+            assert(obj?.missing?.value === undefined);
+
+            let sw = "";
+            switch (2) {
+              case 1: sw = "one"; break;
+              case 2: sw = "two"; break;
+              default: sw = "other";
+            }
+            assert(sw === "two");
             "#,
         );
     }
