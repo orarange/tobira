@@ -2772,8 +2772,6 @@ name = "tobira"
 version = "0.1.0"
 dependencies = [
  "arboard",
- "boa_engine",
- "boa_gc",
  "brotli",
  "encoding_rs",
  "flate2",
