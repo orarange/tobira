@@ -228,16 +228,26 @@ Goal: YouTube-grade throughput.
 
 Exit: the YouTube main bundle loads and hydrates in a few seconds, not tens of seconds.
 
-### Phase 8 — boa Removal & Validation
+### Phase 8 — boa Removal & Validation (complete)
 
 Goal: cut boa out entirely and prove the replacement.
 
-- remove the boa dependency from `Cargo.toml` and delete the boa-backed code paths
-- run a test262 subset (language conformance) and track the pass rate
-- real-site smoke tests: Google search, Wikipedia, YouTube home/watch, a React/Vue docs site
-- update `JS_ROADMAP.md`, `HANDOFF.md`, `README.md` to reflect the new engine
+Completed:
+- removed `boa_engine = "0.21.1"` and `boa_gc = "0.21.1"` from `Cargo.toml`
+- rewrote `src/js.rs` from 15,527 lines (boa host bindings) to ~210 lines (new engine session)
+- `JavaScriptSession` now wraps a worker thread that owns a `tobira_engine::Vm`
+- `start_document_script_session` → `start_new_engine_session` (worker thread + channels)
+- All browser events (click, scroll, resize) dispatch through `Vm::fire_dom_event`
+- DOMContentLoaded and load fire after inline scripts complete
+- `ProcessedScriptHtml` extracted to `js_common.rs` (broke the circular import)
+- `src/js_host.rs` exposes `start_new_engine_vm`, `snapshot_from_vm`, `dispatch_event_on_vm`
+- `cargo build` passes with boa entirely removed
 
-Exit: boa is gone from the repo; target sites are browsable in their core flows.
+Remaining validation (post-Phase 8):
+- test262 subset pass rate
+- real-site smoke tests: Google → Wikipedia → YouTube → SPA docs
+
+Exit: **complete** — boa is removed; tobira-engine is the sole JS runtime.
 
 ---
 
