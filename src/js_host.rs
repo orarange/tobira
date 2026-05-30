@@ -16,7 +16,7 @@ use tobira_engine::engine::{
 };
 
 use crate::html::{parse_document, Node};
-use crate::js::ProcessedScriptHtml;
+use crate::js_common::ProcessedScriptHtml;
 use crate::url::Url;
 
 // ---------------------------------------------------------------------------
@@ -1155,111 +1155,99 @@ impl TobirahHost {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Runs document scripts using the new tobira-engine VM.
-/// Returns a `ProcessedScriptHtml` compatible with the existing browser pipeline.
-/// This is a synchronous single-pass implementation (no timers/async in Phase 6 Step 1).
-pub fn run_with_new_engine(html: &str, base_url: &Url) -> ProcessedScriptHtml {
-    let mut dom = DomArena::from_html(html);
+/// Runs document scripts and returns both the initial snapshot AND the live Vm.
+/// Used by `start_new_engine_session` to keep the Vm alive for subsequent event dispatch.
+pub fn start_new_engine_vm(html: &str, base_url: &Url) -> (ProcessedScriptHtml, Vm) {
+    let dom = DomArena::from_html(html);
     let scripts = dom.extract_scripts();
 
     if scripts.is_empty() {
-        return ProcessedScriptHtml {
+        let snapshot = ProcessedScriptHtml {
             html: html.to_string(),
-            title_override: None,
-            console_logs: Vec::new(),
-            navigation_target: None,
-            soft_navigation_target: None,
-            scroll_y: 0,
+            ..Default::default()
         };
+        let vm = Vm::with_host(Heap::new(), Box::new(TobirahHost::new(dom, base_url.clone())));
+        return (snapshot, vm);
     }
 
     let host = TobirahHost::new(dom, base_url.clone());
     let mut vm = Vm::with_host(Heap::new(), Box::new(host));
+    run_scripts_in_vm(&mut vm, &scripts);
 
-    for (_node_id, script) in &scripts {
-        if script.src.is_some() {
-            // External scripts not yet supported in Phase 6 Step 1
-            let now_ms = vm.host_mut().now().monotonic_ms;
-            vm.host_mut()
-                .as_any_mut()
-                .downcast_mut::<TobirahHost>()
-                .unwrap()
-                .console_logs
-                .push(format!("JS: skipping external script (src not supported yet)"));
-            let _ = now_ms;
-            continue;
-        }
-        let source = {
-            let h = vm.host_mut().as_any_mut().downcast_mut::<TobirahHost>().unwrap();
-            script.inline_source.clone()
-        };
-        if source.trim().is_empty() {
-            continue;
-        }
-
-        let program = match Parser::new(&source).parse() {
-            Ok(p) => p,
-            Err(e) => {
-                vm.host_mut()
-                    .as_any_mut()
-                    .downcast_mut::<TobirahHost>()
-                    .unwrap()
-                    .console_logs
-                    .push(format!("JS parse error: {e:?}"));
-                continue;
-            }
-        };
-
-        let chunk = match Compiler::new(&program).compile() {
-            Ok(c) => c,
-            Err(e) => {
-                vm.host_mut()
-                    .as_any_mut()
-                    .downcast_mut::<TobirahHost>()
-                    .unwrap()
-                    .console_logs
-                    .push(format!("JS compile error: {e:?}"));
-                continue;
-            }
-        };
-
-        if let Err(e) = vm.execute(&chunk) {
-            vm.host_mut()
-                .as_any_mut()
-                .downcast_mut::<TobirahHost>()
-                .unwrap()
-                .console_logs
-                .push(format!("JS runtime error: {e:?}"));
-        }
-
-        // Drive microtask queue / due timers after each script
-        let now_ms = vm.host_mut().now().monotonic_ms;
-        vm.event_loop_tick(now_ms, false);
-    }
-
-    // Fire DOMContentLoaded — handle 0 covers both document and window listeners
     let now_ms = vm.host_mut().now().monotonic_ms;
     let _ = vm.fire_dom_event(0, "DOMContentLoaded");
     let _ = vm.fire_dom_event(0, "load");
     vm.event_loop_tick(now_ms, false);
 
-    let host = vm
-        .host_mut()
-        .as_any_mut()
-        .downcast_mut::<TobirahHost>()
-        .unwrap();
+    let snapshot = snapshot_from_vm(&mut vm);
+    (snapshot, vm)
+}
 
+/// Take a snapshot of the current DOM+console state from a live Vm.
+pub fn snapshot_from_vm(vm: &mut Vm) -> ProcessedScriptHtml {
+    let host = vm.host_mut().as_any_mut().downcast_mut::<TobirahHost>().unwrap();
     let title_override = find_title(&host.dom);
-    let html_out = host.dom.serialize_to_html();
-
     ProcessedScriptHtml {
-        html: html_out,
+        html: host.dom.serialize_to_html(),
         title_override,
         console_logs: host.console_logs.clone(),
         navigation_target: host.navigation_target.clone(),
         soft_navigation_target: host.soft_navigation_target.clone(),
         scroll_y: host.scroll_y as u32,
     }
+}
+
+/// Dispatch a DOM event on a live Vm and return the resulting snapshot.
+pub fn dispatch_event_on_vm(vm: &mut Vm, node_handle: u32, event_type: &str) -> ProcessedScriptHtml {
+    let _ = vm.fire_dom_event(node_handle, event_type);
+    let now_ms = vm.host_mut().now().monotonic_ms;
+    vm.event_loop_tick(now_ms, false);
+    snapshot_from_vm(vm)
+}
+
+/// Helper: run all inline scripts in the Vm.
+fn run_scripts_in_vm(vm: &mut Vm, scripts: &[(usize, ScriptEntry)]) {
+    for (_node_id, script) in scripts {
+        if script.src.is_some() {
+            continue;
+        }
+        let source = script.inline_source.clone();
+        if source.trim().is_empty() {
+            continue;
+        }
+        let program = match Parser::new(&source).parse() {
+            Ok(p) => p,
+            Err(e) => {
+                if let Some(host) = vm.host_mut().as_any_mut().downcast_mut::<TobirahHost>() {
+                    host.console_logs.push(format!("JS parse error: {e:?}"));
+                }
+                continue;
+            }
+        };
+        let chunk = match Compiler::new(&program).compile() {
+            Ok(c) => c,
+            Err(e) => {
+                if let Some(host) = vm.host_mut().as_any_mut().downcast_mut::<TobirahHost>() {
+                    host.console_logs.push(format!("JS compile error: {e:?}"));
+                }
+                continue;
+            }
+        };
+        if let Err(e) = vm.execute(&chunk) {
+            if let Some(host) = vm.host_mut().as_any_mut().downcast_mut::<TobirahHost>() {
+                host.console_logs.push(format!("JS runtime error: {e:?}"));
+            }
+        }
+        let now_ms = vm.host_mut().now().monotonic_ms;
+        vm.event_loop_tick(now_ms, false);
+    }
+}
+
+/// Runs document scripts using the new tobira-engine VM (fire-and-forget).
+/// Returns a `ProcessedScriptHtml` compatible with the existing browser pipeline.
+pub fn run_with_new_engine(html: &str, base_url: &Url) -> ProcessedScriptHtml {
+    let (snapshot, _vm) = start_new_engine_vm(html, base_url);
+    snapshot
 }
 
 fn find_title(dom: &DomArena) -> Option<String> {

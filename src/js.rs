@@ -52,15 +52,7 @@ fn js_trace(message: impl AsRef<str>) {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProcessedScriptHtml {
-    pub html: String,
-    pub title_override: Option<String>,
-    pub console_logs: Vec<String>,
-    pub navigation_target: Option<String>,
-    pub soft_navigation_target: Option<String>,
-    pub scroll_y: u32,
-}
+pub use crate::js_common::ProcessedScriptHtml;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompletedFetch {
@@ -108,11 +100,51 @@ pub struct DomEventDispatchResult {
     pub default_prevented: bool,
 }
 
+// ---------------------------------------------------------------------------
+// New-engine session (command enum sent to worker thread owning the Vm)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+enum NewEngineCommand {
+    DispatchEvent {
+        node_handle: u32,
+        event_type: String,
+        response_tx: Sender<ProcessedScriptHtml>,
+    },
+    DispatchGlobalEvent {
+        event_type: String,
+        response_tx: Sender<ProcessedScriptHtml>,
+    },
+    Snapshot {
+        response_tx: Sender<ProcessedScriptHtml>,
+    },
+    SetAttribute {
+        node_id: u32,
+        name: String,
+        value: String,
+    },
+    Shutdown,
+}
+
+// ---------------------------------------------------------------------------
+// JavaScriptSession — wraps either boa or the new engine
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone)]
 pub struct JavaScriptSession {
-    command_tx: Sender<JavaScriptSessionCommand>,
-    fetch_result_queue: Arc<Mutex<VecDeque<CompletedFetch>>>,
-    fetch_inflight_count: Arc<AtomicUsize>,
+    inner: JavaScriptSessionInner,
+}
+
+#[derive(Debug, Clone)]
+enum JavaScriptSessionInner {
+    Boa {
+        command_tx: Sender<JavaScriptSessionCommand>,
+        fetch_result_queue: Arc<Mutex<VecDeque<CompletedFetch>>>,
+        fetch_inflight_count: Arc<AtomicUsize>,
+    },
+    NewEngine {
+        command_tx: Sender<NewEngineCommand>,
+    },
 }
 
 #[derive(Debug)]
@@ -157,113 +189,156 @@ impl JavaScriptSession {
         &self,
         request: DomEventRequest,
     ) -> Option<DomEventDispatchResult> {
-        let (response_tx, response_rx) = mpsc::channel();
-        if self
-            .command_tx
-            .send(JavaScriptSessionCommand::DispatchEvent {
-                request,
-                response_tx,
-            })
-            .is_err()
-        {
-            return None;
+        match &self.inner {
+            JavaScriptSessionInner::Boa { command_tx, .. } => {
+                let (response_tx, response_rx) = mpsc::channel();
+                command_tx.send(JavaScriptSessionCommand::DispatchEvent { request, response_tx }).ok()?;
+                response_rx.recv().ok()
+            }
+            JavaScriptSessionInner::NewEngine { command_tx } => {
+                let (response_tx, response_rx) = mpsc::channel();
+                command_tx.send(NewEngineCommand::DispatchEvent {
+                    node_handle: request.target_node_id as u32,
+                    event_type: request.event_type,
+                    response_tx,
+                }).ok()?;
+                let snapshot = response_rx.recv().ok()?;
+                Some(DomEventDispatchResult { snapshot, default_prevented: false })
+            }
         }
-
-        response_rx.recv().ok()
     }
 
     pub(crate) fn snapshot(&self) -> Option<ProcessedScriptHtml> {
-        let (response_tx, response_rx) = mpsc::channel();
-        if self
-            .command_tx
-            .send(JavaScriptSessionCommand::Snapshot { response_tx })
-            .is_err()
-        {
-            return None;
+        match &self.inner {
+            JavaScriptSessionInner::Boa { command_tx, .. } => {
+                let (response_tx, response_rx) = mpsc::channel();
+                command_tx.send(JavaScriptSessionCommand::Snapshot { response_tx }).ok()?;
+                response_rx.recv().ok()
+            }
+            JavaScriptSessionInner::NewEngine { command_tx } => {
+                let (response_tx, response_rx) = mpsc::channel();
+                command_tx.send(NewEngineCommand::Snapshot { response_tx }).ok()?;
+                response_rx.recv().ok()
+            }
         }
-
-        response_rx.recv().ok()
     }
 
     pub(crate) fn has_pending_fetches(&self) -> bool {
-        self.fetch_inflight_count.load(Ordering::SeqCst) > 0
+        match &self.inner {
+            JavaScriptSessionInner::Boa { fetch_inflight_count, .. } => {
+                fetch_inflight_count.load(Ordering::SeqCst) > 0
+            }
+            JavaScriptSessionInner::NewEngine { .. } => false,
+        }
     }
 
     pub(crate) fn fetch_result_queue(&self) -> Arc<Mutex<VecDeque<CompletedFetch>>> {
-        self.fetch_result_queue.clone()
+        match &self.inner {
+            JavaScriptSessionInner::Boa { fetch_result_queue, .. } => fetch_result_queue.clone(),
+            JavaScriptSessionInner::NewEngine { .. } => Arc::new(Mutex::new(VecDeque::new())),
+        }
     }
 
     pub(crate) fn set_attribute(&self, node_id: usize, name: &str, value: &str) -> bool {
-        self.command_tx
-            .send(JavaScriptSessionCommand::SetAttribute {
-                node_id,
-                name: name.to_string(),
-                value: value.to_string(),
-            })
-            .is_ok()
+        match &self.inner {
+            JavaScriptSessionInner::Boa { command_tx, .. } => command_tx
+                .send(JavaScriptSessionCommand::SetAttribute {
+                    node_id,
+                    name: name.to_string(),
+                    value: value.to_string(),
+                })
+                .is_ok(),
+            JavaScriptSessionInner::NewEngine { command_tx } => command_tx
+                .send(NewEngineCommand::SetAttribute {
+                    node_id: node_id as u32,
+                    name: name.to_string(),
+                    value: value.to_string(),
+                })
+                .is_ok(),
+        }
     }
 
     pub(crate) fn set_layout_hitboxes(&self, hitboxes: Vec<ElementHitbox>) -> bool {
-        self.command_tx
-            .send(JavaScriptSessionCommand::SetLayoutHitboxes { hitboxes })
-            .is_ok()
+        match &self.inner {
+            JavaScriptSessionInner::Boa { command_tx, .. } => command_tx
+                .send(JavaScriptSessionCommand::SetLayoutHitboxes { hitboxes })
+                .is_ok(),
+            JavaScriptSessionInner::NewEngine { .. } => true, // no-op for new engine
+        }
     }
 
     pub(crate) fn set_viewport_size(&self, width: u32, height: u32) -> bool {
-        self.command_tx
-            .send(JavaScriptSessionCommand::SetViewportSize { width, height })
-            .is_ok()
+        match &self.inner {
+            JavaScriptSessionInner::Boa { command_tx, .. } => command_tx
+                .send(JavaScriptSessionCommand::SetViewportSize { width, height })
+                .is_ok(),
+            JavaScriptSessionInner::NewEngine { .. } => true,
+        }
     }
 
     pub(crate) fn set_scroll_position(&self, y: u32) -> bool {
-        self.command_tx
-            .send(JavaScriptSessionCommand::SetScrollPosition { y })
-            .is_ok()
+        match &self.inner {
+            JavaScriptSessionInner::Boa { command_tx, .. } => command_tx
+                .send(JavaScriptSessionCommand::SetScrollPosition { y })
+                .is_ok(),
+            JavaScriptSessionInner::NewEngine { .. } => true,
+        }
     }
 
     pub(crate) fn dispatch_global_event(
         &self,
         event_type: &str,
-        bubbles: bool,
-        cancelable: bool,
+        _bubbles: bool,
+        _cancelable: bool,
     ) -> Option<DomEventDispatchResult> {
-        let (response_tx, response_rx) = mpsc::channel();
-        if self
-            .command_tx
-            .send(JavaScriptSessionCommand::DispatchGlobalEvent {
-                event_type: event_type.to_string(),
-                bubbles,
-                cancelable,
-                response_tx,
-            })
-            .is_err()
-        {
-            return None;
+        match &self.inner {
+            JavaScriptSessionInner::Boa { command_tx, .. } => {
+                let (response_tx, response_rx) = mpsc::channel();
+                command_tx.send(JavaScriptSessionCommand::DispatchGlobalEvent {
+                    event_type: event_type.to_string(),
+                    bubbles: _bubbles,
+                    cancelable: _cancelable,
+                    response_tx,
+                }).ok()?;
+                response_rx.recv().ok()
+            }
+            JavaScriptSessionInner::NewEngine { command_tx } => {
+                let (response_tx, response_rx) = mpsc::channel();
+                command_tx.send(NewEngineCommand::DispatchGlobalEvent {
+                    event_type: event_type.to_string(),
+                    response_tx,
+                }).ok()?;
+                let snapshot = response_rx.recv().ok()?;
+                Some(DomEventDispatchResult { snapshot, default_prevented: false })
+            }
         }
-
-        response_rx.recv().ok()
     }
 
     pub(crate) fn has_global_event_listener(&self, event_type: &str) -> bool {
-        let (response_tx, response_rx) = mpsc::channel();
-        if self
-            .command_tx
-            .send(JavaScriptSessionCommand::HasGlobalEventListener {
-                event_type: event_type.to_string(),
-                response_tx,
-            })
-            .is_err()
-        {
-            return false;
+        match &self.inner {
+            JavaScriptSessionInner::Boa { command_tx, .. } => {
+                let (response_tx, response_rx) = mpsc::channel();
+                if command_tx.send(JavaScriptSessionCommand::HasGlobalEventListener {
+                    event_type: event_type.to_string(),
+                    response_tx,
+                }).is_err() { return false; }
+                response_rx.recv().unwrap_or(false)
+            }
+            JavaScriptSessionInner::NewEngine { .. } => true, // assume yes for new engine
         }
-
-        response_rx.recv().unwrap_or(false)
     }
 }
 
 impl Drop for JavaScriptSession {
     fn drop(&mut self) {
-        let _ = self.command_tx.send(JavaScriptSessionCommand::Shutdown);
+        match &self.inner {
+            JavaScriptSessionInner::Boa { command_tx, .. } => {
+                let _ = command_tx.send(JavaScriptSessionCommand::Shutdown);
+            }
+            JavaScriptSessionInner::NewEngine { command_tx } => {
+                let _ = command_tx.send(NewEngineCommand::Shutdown);
+            }
+        }
     }
 }
 
@@ -521,10 +596,9 @@ pub fn start_document_script_session(
     html: &str,
     base_url: &Url,
 ) -> (ProcessedScriptHtml, Option<JavaScriptSession>) {
-    // New engine gate
+    // New engine gate — use live session so DOM events work after page load
     if std::env::var_os("TOBIRA_NEW_ENGINE").is_some() {
-        let snapshot = crate::js_host::run_with_new_engine(html, base_url);
-        return (snapshot, None);
+        return start_new_engine_session(html, base_url);
     }
     let session_started = Instant::now();
     js_trace(format!(
@@ -635,9 +709,11 @@ pub fn start_document_script_session(
                 (
                     processed,
                     Some(JavaScriptSession {
-                        command_tx,
-                        fetch_result_queue,
-                        fetch_inflight_count,
+                        inner: JavaScriptSessionInner::Boa {
+                            command_tx,
+                            fetch_result_queue,
+                            fetch_inflight_count,
+                        },
                     }),
                 )
             }
@@ -14052,6 +14128,70 @@ fn performance_now_ms() -> f64 {
 
 fn js_value_to_string(value: &JsValue, context: &mut Context) -> JsResult<String> {
     Ok(value.to_string(context)?.to_std_string_escaped())
+}
+
+// ---------------------------------------------------------------------------
+// New-engine session: worker thread owns the Vm, communicates via channel
+// ---------------------------------------------------------------------------
+
+fn start_new_engine_session(
+    html: &str,
+    base_url: &Url,
+) -> (ProcessedScriptHtml, Option<JavaScriptSession>) {
+    let html_owned = html.to_string();
+    let base_url_owned = base_url.clone();
+    let (init_tx, init_rx) = mpsc::channel::<ProcessedScriptHtml>();
+    let (command_tx, command_rx) = mpsc::channel::<NewEngineCommand>();
+
+    thread::Builder::new()
+        .name("tobira-new-engine".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            use crate::js_host::{dispatch_event_on_vm, snapshot_from_vm, start_new_engine_vm};
+            use tobira_engine::engine::{DomMutation, WindowId};
+
+            let (initial_snapshot, mut vm) = start_new_engine_vm(&html_owned, &base_url_owned);
+            let _ = init_tx.send(initial_snapshot);
+
+            for cmd in command_rx {
+                match cmd {
+                    NewEngineCommand::DispatchEvent { node_handle, event_type, response_tx } => {
+                        let snapshot = dispatch_event_on_vm(&mut vm, node_handle, &event_type);
+                        let _ = response_tx.send(snapshot);
+                    }
+                    NewEngineCommand::DispatchGlobalEvent { event_type, response_tx } => {
+                        let snapshot = dispatch_event_on_vm(&mut vm, 0, &event_type);
+                        let _ = response_tx.send(snapshot);
+                    }
+                    NewEngineCommand::Snapshot { response_tx } => {
+                        let snapshot = snapshot_from_vm(&mut vm);
+                        let _ = response_tx.send(snapshot);
+                    }
+                    NewEngineCommand::SetAttribute { node_id, name, value } => {
+                        use tobira_engine::engine::NodeId;
+                        let _ = vm.host_mut().mutate_dom(
+                            DomMutation::SetAttribute {
+                                node: NodeId(node_id),
+                                name,
+                                value,
+                            }
+                        );
+                    }
+                    NewEngineCommand::Shutdown => break,
+                }
+            }
+        })
+        .expect("failed to spawn new-engine worker thread");
+
+    let initial_snapshot = match init_rx.recv() {
+        Ok(s) => s,
+        Err(_) => return (ProcessedScriptHtml { html: html.to_string(), ..Default::default() }, None),
+    };
+
+    let session = JavaScriptSession {
+        inner: JavaScriptSessionInner::NewEngine { command_tx },
+    };
+    (initial_snapshot, Some(session))
 }
 
 #[cfg(test)]

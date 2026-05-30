@@ -1,5 +1,6 @@
 mod browser;
 mod css;
+mod js_common;
 mod error;
 mod font;
 mod gui;
