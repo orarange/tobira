@@ -13,10 +13,13 @@ use super::event_loop::{
     EventLoop, MicrotaskJob, RafEntry, TaskEntry, TaskSource, TickResult, TimerEntry,
 };
 use super::heap::{GcRef, Heap, RawGcRef};
-use super::host::{ConsoleLevel, ConsoleMessage, Host, NoopHost};
+use super::host::{
+    ConsoleLevel, ConsoleMessage, DomMutation, DomRead, DomReadResult, Host, NodeId, NodeKind,
+    NoopHost, SiblingDirection, WindowId,
+};
 use super::value::{
-    AsyncContext, JsObject, JsPropertyDescriptor, JsString, ObjectKind, PromiseReaction,
-    PromiseState, PropertyKey, Value,
+    AsyncContext, HostDispatch, HostObjectClass, HostObjectSlot, JsObject, JsPropertyDescriptor,
+    JsString, ObjectKind, PromiseReaction, PromiseState, PropertyKey, Value,
 };
 
 type ValueCell = Rc<RefCell<Value>>;
@@ -146,6 +149,59 @@ enum BuiltinId {
     ConsoleInfo,
     ConsoleWarn,
     ConsoleError,
+    // DOM Document methods
+    DomDocQuerySelector,
+    DomDocQuerySelectorAll,
+    DomDocGetElementById,
+    DomDocGetElementsByClassName,
+    DomDocGetElementsByTagName,
+    DomDocCreateElement,
+    DomDocCreateTextNode,
+    DomDocCreateFragment,
+    DomDocWrite,
+    // DOM Node/Element methods
+    DomNodeAppendChild,
+    DomNodeInsertBefore,
+    DomNodeRemoveChild,
+    DomNodeReplaceChild,
+    DomNodeCloneNode,
+    DomNodeRemove,
+    DomNodeSetAttribute,
+    DomNodeGetAttribute,
+    DomNodeRemoveAttribute,
+    DomNodeHasAttribute,
+    DomNodeToggleAttribute,
+    DomNodeGetAttributeNames,
+    DomNodeQuerySelector,
+    DomNodeQuerySelectorAll,
+    DomNodeClosest,
+    DomNodeMatches,
+    DomNodeContains,
+    DomNodeGetBoundingClientRect,
+    DomNodeScrollIntoView,
+    DomNodeFocus,
+    DomNodeBlur,
+    DomNodeClick,
+    DomNodeAddEventListener,
+    DomNodeRemoveEventListener,
+    DomNodeDispatchEvent,
+    // classList (TokenList)
+    DomClassListAdd,
+    DomClassListRemove,
+    DomClassListContains,
+    DomClassListToggle,
+    DomClassListReplace,
+    DomClassListItem,
+    DomClassListToString,
+    // style (CSSStyleDeclaration)
+    DomStyleGetProperty,
+    DomStyleSetProperty,
+    DomStyleRemoveProperty,
+    // Window
+    WindowScrollTo,
+    WindowScrollBy,
+    WindowGetComputedStyle,
+    WindowMatchMedia,
     MapConstructor,
     MapProtoSet,
     MapProtoGet,
@@ -985,6 +1041,28 @@ impl Vm {
             .insert("Math".to_string(), Value::Object(math_object));
         self.globals
             .insert("JSON".to_string(), Value::Object(json_object));
+
+        // document and window host objects
+        let document_obj = self.make_host_object(HostObjectSlot {
+            class: HostObjectClass::Document,
+            interface_name: "HTMLDocument",
+            handle: 0,
+            dispatch: HostDispatch::Ordinary,
+            supports_indexed_properties: false,
+            supports_named_properties: false,
+        });
+        let window_obj = self.make_host_object(HostObjectSlot {
+            class: HostObjectClass::Window,
+            interface_name: "Window",
+            handle: 0,
+            dispatch: HostDispatch::Ordinary,
+            supports_indexed_properties: false,
+            supports_named_properties: false,
+        });
+        self.globals.insert("document".to_string(), document_obj.clone());
+        self.globals.insert("window".to_string(), window_obj.clone());
+        self.globals.insert("globalThis".to_string(), window_obj);
+        self.globals.insert("self".to_string(), document_obj); // some libraries use self
 
         // console object
         let console_object = self.allocate_ordinary_object(Some(object_prototype));
@@ -3034,6 +3112,12 @@ impl Vm {
         receiver: &Value,
         key: &PropertyKey,
     ) -> Result<Value, VmError> {
+        // Host objects route through the DOM dispatch table first
+        let kind = self.heap.objects().get(object).map(|o| o.kind.clone());
+        if let Some(ObjectKind::Host(slot)) = kind {
+            return self.get_host_property(slot, key);
+        }
+
         if let Some((_, descriptor)) = self.lookup_property_descriptor(object, key) {
             return match descriptor {
                 JsPropertyDescriptor::Data { value, .. } => Ok(value),
@@ -3088,6 +3172,12 @@ impl Vm {
         key: PropertyKey,
         value: Value,
     ) -> Result<(), VmError> {
+        // Host objects route writes through the DOM dispatch table
+        let kind = self.heap.objects().get(object).map(|o| o.kind.clone());
+        if let Some(ObjectKind::Host(slot)) = kind {
+            return self.set_host_property(slot, key, value);
+        }
+
         if let Some(descriptor) = self.get_own_property_descriptor(object, &key) {
             return match descriptor {
                 JsPropertyDescriptor::Data {
@@ -4556,6 +4646,352 @@ impl Vm {
                 };
                 self.make_array_from_values(values)
             }
+            // ----------------------------------------------------------------
+            // DOM — document-level methods (this = Document host object)
+            // ----------------------------------------------------------------
+            BuiltinId::DomDocQuerySelector => {
+                let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let root_res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
+                let root = match root_res { Ok(DomReadResult::Node(id)) => id, _ => return Ok(Value::Null) };
+                let res = self.host.read_dom(DomRead::QuerySelector { root, selectors: sel });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            BuiltinId::DomDocQuerySelectorAll => {
+                let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let root_res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
+                let root = match root_res { Ok(DomReadResult::Node(id)) => id, _ => return self.make_array_from_values(vec![]) };
+                let res = self.host.read_dom(DomRead::QuerySelectorAll { root, selectors: sel });
+                match res {
+                    Ok(DomReadResult::Nodes(ids)) => {
+                        let items: Vec<Value> = ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
+                        self.make_array_from_values(items)
+                    }
+                    _ => self.make_array_from_values(vec![]),
+                }
+            }
+            BuiltinId::DomDocGetElementById => {
+                let id_str = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let sel = format!("#{id_str}");
+                let root_res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
+                let root = match root_res { Ok(DomReadResult::Node(id)) => id, _ => return Ok(Value::Null) };
+                let res = self.host.read_dom(DomRead::QuerySelector { root, selectors: sel });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            BuiltinId::DomDocGetElementsByClassName => {
+                let cls = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let sel = cls.split_whitespace().map(|c| format!(".{c}")).collect::<Vec<_>>().join("");
+                let root_res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
+                let root = match root_res { Ok(DomReadResult::Node(id)) => id, _ => return self.make_array_from_values(vec![]) };
+                let res = self.host.read_dom(DomRead::QuerySelectorAll { root, selectors: sel });
+                match res {
+                    Ok(DomReadResult::Nodes(ids)) => {
+                        let items: Vec<Value> = ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
+                        self.make_array_from_values(items)
+                    }
+                    _ => self.make_array_from_values(vec![]),
+                }
+            }
+            BuiltinId::DomDocGetElementsByTagName => {
+                let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let root_res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
+                let root = match root_res { Ok(DomReadResult::Node(id)) => id, _ => return self.make_array_from_values(vec![]) };
+                let res = self.host.read_dom(DomRead::QuerySelectorAll { root, selectors: tag });
+                match res {
+                    Ok(DomReadResult::Nodes(ids)) => {
+                        let items: Vec<Value> = ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
+                        self.make_array_from_values(items)
+                    }
+                    _ => self.make_array_from_values(vec![]),
+                }
+            }
+            BuiltinId::DomDocCreateElement => {
+                let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let res = self.host.mutate_dom(DomMutation::CreateElement { window: WindowId(0), local_name: tag });
+                Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+            }
+            BuiltinId::DomDocCreateTextNode => {
+                let text = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let res = self.host.mutate_dom(DomMutation::CreateTextNode { window: WindowId(0), data: text });
+                Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+            }
+            BuiltinId::DomDocCreateFragment => {
+                let res = self.host.mutate_dom(DomMutation::CreateDocumentFragment { window: WindowId(0) });
+                Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+            }
+            BuiltinId::DomDocWrite => {
+                let html = args.iter().map(|v| self.to_string(v)).collect::<Vec<_>>().join("");
+                let _ = self.host.mutate_dom(DomMutation::WriteHtml { window: WindowId(0), html });
+                Ok(Value::Undefined)
+            }
+            // ----------------------------------------------------------------
+            // DOM — node/element methods (this = Node host object)
+            // ----------------------------------------------------------------
+            BuiltinId::DomNodeQuerySelector => {
+                let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let res = self.host.read_dom(DomRead::QuerySelector { root: node_id, selectors: sel });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            BuiltinId::DomNodeQuerySelectorAll => {
+                let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let res = self.host.read_dom(DomRead::QuerySelectorAll { root: node_id, selectors: sel });
+                match res {
+                    Ok(DomReadResult::Nodes(ids)) => {
+                        let items: Vec<Value> = ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
+                        self.make_array_from_values(items)
+                    }
+                    _ => self.make_array_from_values(vec![]),
+                }
+            }
+            BuiltinId::DomNodeAppendChild => {
+                let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let child_ids: Vec<NodeId> = args.iter().filter_map(|v| self.node_id_from_host_val(v)).collect();
+                let _ = self.host.mutate_dom(DomMutation::Append { parent: parent_id, children: child_ids });
+                Ok(args.first().cloned().unwrap_or(Value::Undefined))
+            }
+            BuiltinId::DomNodeInsertBefore => {
+                let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let child_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
+                let ref_id = args.get(1).and_then(|v| self.node_id_from_host_val(v));
+                let _ = self.host.mutate_dom(DomMutation::InsertBefore { parent: parent_id, child: child_id, reference: ref_id });
+                Ok(args.first().cloned().unwrap_or(Value::Undefined))
+            }
+            BuiltinId::DomNodeRemoveChild => {
+                let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let child_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
+                let _ = self.host.mutate_dom(DomMutation::ReplaceChild { parent: parent_id, new_child: child_id, old_child: child_id });
+                Ok(args.first().cloned().unwrap_or(Value::Undefined))
+            }
+            BuiltinId::DomNodeReplaceChild => {
+                let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let new_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
+                let old_id = self.node_id_from_host_val(args.get(1).unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
+                let _ = self.host.mutate_dom(DomMutation::ReplaceChild { parent: parent_id, new_child: new_id, old_child: old_id });
+                Ok(args.first().cloned().unwrap_or(Value::Undefined))
+            }
+            BuiltinId::DomNodeCloneNode => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let deep = args.first().map(|v| self.is_truthy(v)).unwrap_or(false);
+                let res = self.host.mutate_dom(DomMutation::CloneNode { node: node_id, deep });
+                Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+            }
+            BuiltinId::DomNodeRemove => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let _ = self.host.mutate_dom(DomMutation::Remove { node: node_id });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomNodeSetAttribute => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let value = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name, value });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomNodeGetAttribute => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name });
+                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Null })
+            }
+            BuiltinId::DomNodeRemoveAttribute => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let _ = self.host.mutate_dom(DomMutation::RemoveAttribute { node: node_id, name });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomNodeHasAttribute => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name });
+                Ok(Value::Bool(matches!(res, Ok(DomReadResult::String(_)))))
+            }
+            BuiltinId::DomNodeToggleAttribute => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let force = args.get(1).map(|v| self.is_truthy(v));
+                let res = self.host.mutate_dom(DomMutation::ToggleAttribute { node: node_id, name, force });
+                Ok(match res { Ok(super::host::DomMutationResult::Bool(b)) => Value::Bool(b), _ => Value::Bool(false) })
+            }
+            BuiltinId::DomNodeGetAttributeNames => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let res = self.host.read_dom(DomRead::AttributeNames { node: node_id });
+                match res {
+                    Ok(DomReadResult::StringList(names)) => {
+                        let items: Vec<Value> = names.iter().map(|s| self.make_string_value(s)).collect();
+                        self.make_array_from_values(items)
+                    }
+                    _ => self.make_array_from_values(vec![]),
+                }
+            }
+            BuiltinId::DomNodeClosest => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let res = self.host.read_dom(DomRead::Closest { node: node_id, selectors: sel });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            BuiltinId::DomNodeMatches => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let res = self.host.read_dom(DomRead::Matches { node: node_id, selectors: sel });
+                Ok(match res { Ok(DomReadResult::Bool(b)) => Value::Bool(b), _ => Value::Bool(false) })
+            }
+            BuiltinId::DomNodeContains => {
+                let ancestor_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let descendant_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
+                let res = self.host.read_dom(DomRead::Contains { ancestor: ancestor_id, descendant: descendant_id });
+                Ok(match res { Ok(DomReadResult::Bool(b)) => Value::Bool(b), _ => Value::Bool(false) })
+            }
+            BuiltinId::DomNodeGetBoundingClientRect => {
+                let rect_obj = self.allocate_ordinary_object(None);
+                self.define_data_property(rect_obj, PropertyKey::from("x"), Value::Number(0.0), true, true, true);
+                self.define_data_property(rect_obj, PropertyKey::from("y"), Value::Number(0.0), true, true, true);
+                self.define_data_property(rect_obj, PropertyKey::from("width"), Value::Number(0.0), true, true, true);
+                self.define_data_property(rect_obj, PropertyKey::from("height"), Value::Number(0.0), true, true, true);
+                self.define_data_property(rect_obj, PropertyKey::from("top"), Value::Number(0.0), true, true, true);
+                self.define_data_property(rect_obj, PropertyKey::from("right"), Value::Number(0.0), true, true, true);
+                self.define_data_property(rect_obj, PropertyKey::from("bottom"), Value::Number(0.0), true, true, true);
+                self.define_data_property(rect_obj, PropertyKey::from("left"), Value::Number(0.0), true, true, true);
+                Ok(Value::Object(rect_obj))
+            }
+            BuiltinId::DomNodeScrollIntoView | BuiltinId::DomNodeFocus | BuiltinId::DomNodeBlur | BuiltinId::DomNodeClick => {
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomNodeAddEventListener | BuiltinId::DomNodeRemoveEventListener | BuiltinId::DomNodeDispatchEvent => {
+                Ok(Value::Undefined)
+            }
+            // ----------------------------------------------------------------
+            // classList (TokenList) — this = TokenList host object with handle = element NodeId
+            // ----------------------------------------------------------------
+            BuiltinId::DomClassListAdd => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                for arg in args {
+                    let class_to_add = self.to_string(&arg);
+                    let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
+                        Ok(DomReadResult::String(s)) => s,
+                        _ => String::new(),
+                    };
+                    let mut classes: Vec<String> = existing.split_whitespace().map(|s| s.to_string()).collect();
+                    if !classes.iter().any(|c| c == &class_to_add) {
+                        classes.push(class_to_add);
+                        let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "class".to_string(), value: classes.join(" ") });
+                    }
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomClassListRemove => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let names_to_remove: Vec<String> = args.iter().map(|v| self.to_string(v)).collect();
+                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                let filtered: Vec<String> = existing.split_whitespace()
+                    .filter(|c| !names_to_remove.iter().any(|r| r == c))
+                    .map(|c| c.to_string())
+                    .collect();
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "class".to_string(), value: filtered.join(" ") });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomClassListContains => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let class_name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                Ok(Value::Bool(existing.split_whitespace().any(|c| c == class_name)))
+            }
+            BuiltinId::DomClassListToggle => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let class_name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let force = args.get(1).map(|v| self.is_truthy(v));
+                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                let has = existing.split_whitespace().any(|c| c == class_name);
+                let should_add = force.unwrap_or(!has);
+                if should_add {
+                    if !has {
+                        let new_class = if existing.is_empty() { class_name.clone() } else { format!("{existing} {class_name}") };
+                        let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "class".to_string(), value: new_class });
+                    }
+                } else {
+                    let filtered: String = existing.split_whitespace().filter(|c| *c != class_name).collect::<Vec<_>>().join(" ");
+                    let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "class".to_string(), value: filtered });
+                }
+                Ok(Value::Bool(should_add))
+            }
+            BuiltinId::DomClassListReplace => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let old_cls = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let new_cls = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                if existing.split_whitespace().any(|c| c == old_cls) {
+                    let updated: String = existing.split_whitespace()
+                        .map(|c| if c == old_cls { new_cls.as_str() } else { c })
+                        .collect::<Vec<_>>().join(" ");
+                    let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "class".to_string(), value: updated });
+                    Ok(Value::Bool(true))
+                } else {
+                    Ok(Value::Bool(false))
+                }
+            }
+            BuiltinId::DomClassListItem => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let index = args.first().map(|v| self.to_number(v) as usize).unwrap_or(0);
+                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                let item = existing.split_whitespace().nth(index).map(|s| self.make_string_value(s));
+                Ok(item.unwrap_or(Value::Null))
+            }
+            BuiltinId::DomClassListToString => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                Ok(self.make_string_value(&existing))
+            }
+            // style
+            BuiltinId::DomStyleGetProperty => {
+                Ok(self.make_string_value(""))
+            }
+            BuiltinId::DomStyleSetProperty => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let prop = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let val = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "style".to_string() }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                let updated = set_inline_style_prop(&existing, &prop, &val);
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "style".to_string(), value: updated });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomStyleRemoveProperty => {
+                Ok(self.make_string_value(""))
+            }
+            // window
+            BuiltinId::WindowScrollTo | BuiltinId::WindowScrollBy => {
+                let y = args.get(1).map(|v| self.to_number(v)).unwrap_or(0.0);
+                let _ = self.host.mutate_dom(DomMutation::SetWindowScroll { window: WindowId(0), x: 0.0, y });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::WindowGetComputedStyle => {
+                Ok(Value::Object(self.allocate_ordinary_object(None)))
+            }
+            BuiltinId::WindowMatchMedia => {
+                let result_obj = self.allocate_ordinary_object(None);
+                self.define_data_property(result_obj, PropertyKey::from("matches"), Value::Bool(false), true, true, true);
+                Ok(Value::Object(result_obj))
+            }
         }
     }
 
@@ -5245,6 +5681,453 @@ impl Vm {
             }
         }
     }
+
+    // ========================================================================
+    // DOM / Host dispatch helpers
+    // ========================================================================
+
+    fn make_host_object(&mut self, slot: HostObjectSlot) -> Value {
+        let obj = self.heap.allocate_object(JsObject {
+            kind: ObjectKind::Host(slot),
+            ..JsObject::default()
+        });
+        Value::Object(obj)
+    }
+
+    fn make_dom_node_value(&mut self, node_id: NodeId) -> Value {
+        self.make_host_object(HostObjectSlot {
+            class: HostObjectClass::Node,
+            interface_name: "Element",
+            handle: node_id.0 as u64,
+            dispatch: HostDispatch::Node,
+            supports_indexed_properties: false,
+            supports_named_properties: false,
+        })
+    }
+
+    fn node_id_from_host_val(&self, value: &Value) -> Option<NodeId> {
+        if let Value::Object(obj_ref) = value {
+            if let Some(obj) = self.heap.objects().get(*obj_ref) {
+                if let ObjectKind::Host(slot) = &obj.kind {
+                    return Some(NodeId(slot.handle as u32));
+                }
+            }
+        }
+        None
+    }
+
+    fn get_host_property(
+        &mut self,
+        slot: HostObjectSlot,
+        key: &PropertyKey,
+    ) -> Result<Value, VmError> {
+        let name = match key {
+            PropertyKey::String(s) => s.clone(),
+            _ => return Ok(Value::Undefined),
+        };
+        match slot.class {
+            HostObjectClass::Window => self.get_window_property(name),
+            HostObjectClass::Document => self.get_document_property(name),
+            HostObjectClass::Node | HostObjectClass::EventTarget => {
+                self.get_node_property(slot, name)
+            }
+            HostObjectClass::Other("TokenList") => self.get_classlist_property(slot, name),
+            HostObjectClass::Other("CSSStyleDeclaration") => self.get_style_property(name),
+            _ => Ok(Value::Undefined),
+        }
+    }
+
+    fn get_window_property(&mut self, name: String) -> Result<Value, VmError> {
+        match name.as_str() {
+            "document" => Ok(self.make_host_object(HostObjectSlot {
+                class: HostObjectClass::Document,
+                interface_name: "HTMLDocument",
+                handle: 0,
+                dispatch: HostDispatch::Ordinary,
+                supports_indexed_properties: false,
+                supports_named_properties: false,
+            })),
+            "innerWidth" => {
+                let v = self.host.window_metrics(WindowId(0)).map(|m| m.inner_width).unwrap_or(0.0);
+                Ok(Value::Number(v))
+            }
+            "innerHeight" => {
+                let v = self.host.window_metrics(WindowId(0)).map(|m| m.inner_height).unwrap_or(0.0);
+                Ok(Value::Number(v))
+            }
+            "scrollX" | "pageXOffset" => {
+                let v = self.host.window_metrics(WindowId(0)).map(|m| m.scroll_x).unwrap_or(0.0);
+                Ok(Value::Number(v))
+            }
+            "scrollY" | "pageYOffset" => {
+                let v = self.host.window_metrics(WindowId(0)).map(|m| m.scroll_y).unwrap_or(0.0);
+                Ok(Value::Number(v))
+            }
+            "devicePixelRatio" => {
+                let v = self.host.window_metrics(WindowId(0)).map(|m| m.device_pixel_ratio).unwrap_or(1.0);
+                Ok(Value::Number(v))
+            }
+            "location" => self.make_location_object(),
+            "navigator" => {
+                let nav = self.allocate_ordinary_object(None);
+                let ua = self.make_string_value("Tobira/0.1");
+                self.define_data_property(nav, PropertyKey::from("userAgent"), ua, true, true, true);
+                let lang = self.make_string_value("en");
+                self.define_data_property(nav, PropertyKey::from("language"), lang, true, true, true);
+                Ok(Value::Object(nav))
+            }
+            "screen" => {
+                let scr = self.allocate_ordinary_object(None);
+                self.define_data_property(scr, PropertyKey::from("width"), Value::Number(1920.0), true, true, true);
+                self.define_data_property(scr, PropertyKey::from("height"), Value::Number(1080.0), true, true, true);
+                Ok(Value::Object(scr))
+            }
+            "history" => {
+                let hist = self.allocate_ordinary_object(None);
+                self.define_data_property(hist, PropertyKey::from("length"), Value::Number(1.0), true, true, true);
+                Ok(Value::Object(hist))
+            }
+            "scrollTo" | "scroll" => Ok(self.allocate_builtin_value(BuiltinId::WindowScrollTo, false, None)),
+            "scrollBy" => Ok(self.allocate_builtin_value(BuiltinId::WindowScrollBy, false, None)),
+            "getComputedStyle" => Ok(self.allocate_builtin_value(BuiltinId::WindowGetComputedStyle, false, None)),
+            "matchMedia" => Ok(self.allocate_builtin_value(BuiltinId::WindowMatchMedia, false, None)),
+            "addEventListener" | "removeEventListener" => {
+                Ok(self.allocate_builtin_value(BuiltinId::DomNodeAddEventListener, false, None))
+            }
+            _ => Ok(self.globals.get(&name).cloned().unwrap_or(Value::Undefined)),
+        }
+    }
+
+    fn make_location_object(&mut self) -> Result<Value, VmError> {
+        let loc = self.host.location(WindowId(0));
+        let obj = self.allocate_ordinary_object(None);
+        if let Ok(l) = loc {
+            let href = self.make_string_value(&l.href);
+            self.define_data_property(obj, PropertyKey::from("href"), href, true, true, true);
+            let origin = self.make_string_value(&l.origin);
+            self.define_data_property(obj, PropertyKey::from("origin"), origin, true, true, true);
+            let proto = self.make_string_value(&l.protocol);
+            self.define_data_property(obj, PropertyKey::from("protocol"), proto, true, true, true);
+            let host_v = self.make_string_value(&l.host);
+            self.define_data_property(obj, PropertyKey::from("host"), host_v, true, true, true);
+            let hostname = self.make_string_value(&l.hostname);
+            self.define_data_property(obj, PropertyKey::from("hostname"), hostname, true, true, true);
+            let port = self.make_string_value(&l.port);
+            self.define_data_property(obj, PropertyKey::from("port"), port, true, true, true);
+            let pathname = self.make_string_value(&l.pathname);
+            self.define_data_property(obj, PropertyKey::from("pathname"), pathname, true, true, true);
+            let search = self.make_string_value(&l.search);
+            self.define_data_property(obj, PropertyKey::from("search"), search, true, true, true);
+            let hash = self.make_string_value(&l.hash);
+            self.define_data_property(obj, PropertyKey::from("hash"), hash, true, true, true);
+        }
+        Ok(Value::Object(obj))
+    }
+
+    fn get_document_property(&mut self, name: String) -> Result<Value, VmError> {
+        match name.as_str() {
+            "body" => {
+                let res = self.host.read_dom(DomRead::DocumentBody { window: WindowId(0) });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            "head" => {
+                let res = self.host.read_dom(DomRead::DocumentHead { window: WindowId(0) });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            "documentElement" => {
+                let res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            "title" => {
+                let head_res = self.host.read_dom(DomRead::DocumentHead { window: WindowId(0) });
+                match head_res {
+                    Ok(DomReadResult::Node(head_id)) => {
+                        let title_res = self.host.read_dom(DomRead::QuerySelector { root: head_id, selectors: "title".to_string() });
+                        match title_res {
+                            Ok(DomReadResult::Node(title_id)) => {
+                                let text_res = self.host.read_dom(DomRead::TextContent { node: title_id });
+                                Ok(match text_res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
+                            }
+                            _ => Ok(self.make_string_value("")),
+                        }
+                    }
+                    _ => Ok(self.make_string_value("")),
+                }
+            }
+            "nodeType" => Ok(Value::Number(9.0)),
+            "nodeName" => Ok(self.make_string_value("#document")),
+            "readyState" => Ok(self.make_string_value("complete")),
+            "compatMode" => Ok(self.make_string_value("CSS1Compat")),
+            "charset" | "characterSet" => Ok(self.make_string_value("UTF-8")),
+            "location" => self.make_location_object(),
+            "URL" | "documentURI" => {
+                let res = self.host.location(WindowId(0));
+                Ok(match res { Ok(l) => self.make_string_value(&l.href), _ => self.make_string_value("") })
+            }
+            "domain" => {
+                let res = self.host.location(WindowId(0));
+                Ok(match res { Ok(l) => self.make_string_value(&l.hostname), _ => self.make_string_value("") })
+            }
+            "querySelector" => Ok(self.allocate_builtin_value(BuiltinId::DomDocQuerySelector, false, None)),
+            "querySelectorAll" => Ok(self.allocate_builtin_value(BuiltinId::DomDocQuerySelectorAll, false, None)),
+            "getElementById" => Ok(self.allocate_builtin_value(BuiltinId::DomDocGetElementById, false, None)),
+            "getElementsByClassName" => Ok(self.allocate_builtin_value(BuiltinId::DomDocGetElementsByClassName, false, None)),
+            "getElementsByTagName" => Ok(self.allocate_builtin_value(BuiltinId::DomDocGetElementsByTagName, false, None)),
+            "createElement" => Ok(self.allocate_builtin_value(BuiltinId::DomDocCreateElement, false, None)),
+            "createTextNode" => Ok(self.allocate_builtin_value(BuiltinId::DomDocCreateTextNode, false, None)),
+            "createDocumentFragment" => Ok(self.allocate_builtin_value(BuiltinId::DomDocCreateFragment, false, None)),
+            "write" | "writeln" => Ok(self.allocate_builtin_value(BuiltinId::DomDocWrite, false, None)),
+            "addEventListener" | "removeEventListener" => {
+                Ok(self.allocate_builtin_value(BuiltinId::DomNodeAddEventListener, false, None))
+            }
+            _ => Ok(Value::Undefined),
+        }
+    }
+
+    fn get_node_property(&mut self, slot: HostObjectSlot, name: String) -> Result<Value, VmError> {
+        let node_id = NodeId(slot.handle as u32);
+        match name.as_str() {
+            "nodeType" => {
+                let res = self.host.read_dom(DomRead::NodeKind { node: node_id });
+                Ok(match res {
+                    Ok(DomReadResult::Kind(k)) => Value::Number(match k {
+                        NodeKind::Element => 1.0,
+                        NodeKind::Text => 3.0,
+                        NodeKind::Document => 9.0,
+                        _ => 11.0,
+                    }),
+                    _ => Value::Number(1.0),
+                })
+            }
+            "nodeName" | "tagName" => {
+                let res = self.host.read_dom(DomRead::NodeName { node: node_id });
+                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Undefined })
+            }
+            "nodeValue" => {
+                let res = self.host.read_dom(DomRead::NodeValue { node: node_id });
+                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Null })
+            }
+            "textContent" => {
+                let res = self.host.read_dom(DomRead::TextContent { node: node_id });
+                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Null })
+            }
+            "innerHTML" => {
+                let res = self.host.read_dom(DomRead::InnerHtml { node: node_id });
+                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
+            }
+            "id" => {
+                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "id".to_string() });
+                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
+            }
+            "className" => {
+                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() });
+                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
+            }
+            "classList" => Ok(self.make_host_object(HostObjectSlot {
+                class: HostObjectClass::Other("TokenList"),
+                interface_name: "DOMTokenList",
+                handle: slot.handle,
+                dispatch: HostDispatch::TokenList,
+                supports_indexed_properties: false,
+                supports_named_properties: false,
+            })),
+            "style" => Ok(self.make_host_object(HostObjectSlot {
+                class: HostObjectClass::Other("CSSStyleDeclaration"),
+                interface_name: "CSSStyleDeclaration",
+                handle: slot.handle,
+                dispatch: HostDispatch::StyleDeclaration,
+                supports_indexed_properties: false,
+                supports_named_properties: false,
+            })),
+            "parentNode" | "parentElement" => {
+                let res = self.host.read_dom(DomRead::Parent { node: node_id });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            "children" => {
+                let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: true });
+                match res {
+                    Ok(DomReadResult::Nodes(ids)) => {
+                        let items: Vec<Value> = ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
+                        self.make_array_from_values(items)
+                    }
+                    _ => self.make_array_from_values(vec![]),
+                }
+            }
+            "childNodes" => {
+                let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: false });
+                match res {
+                    Ok(DomReadResult::Nodes(ids)) => {
+                        let items: Vec<Value> = ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
+                        self.make_array_from_values(items)
+                    }
+                    _ => self.make_array_from_values(vec![]),
+                }
+            }
+            "childElementCount" => {
+                let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: true });
+                Ok(Value::Number(match res { Ok(DomReadResult::Nodes(ids)) => ids.len() as f64, _ => 0.0 }))
+            }
+            "firstChild" => {
+                let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: false });
+                Ok(match res { Ok(DomReadResult::Nodes(ids)) => ids.first().map(|&id| self.make_dom_node_value(id)).unwrap_or(Value::Null), _ => Value::Null })
+            }
+            "lastChild" => {
+                let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: false });
+                Ok(match res { Ok(DomReadResult::Nodes(ids)) => ids.last().map(|&id| self.make_dom_node_value(id)).unwrap_or(Value::Null), _ => Value::Null })
+            }
+            "firstElementChild" => {
+                let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: true });
+                Ok(match res { Ok(DomReadResult::Nodes(ids)) => ids.first().map(|&id| self.make_dom_node_value(id)).unwrap_or(Value::Null), _ => Value::Null })
+            }
+            "lastElementChild" => {
+                let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: true });
+                Ok(match res { Ok(DomReadResult::Nodes(ids)) => ids.last().map(|&id| self.make_dom_node_value(id)).unwrap_or(Value::Null), _ => Value::Null })
+            }
+            "nextSibling" => {
+                let res = self.host.read_dom(DomRead::Sibling { node: node_id, direction: SiblingDirection::Next, elements_only: false });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            "previousSibling" => {
+                let res = self.host.read_dom(DomRead::Sibling { node: node_id, direction: SiblingDirection::Previous, elements_only: false });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            "nextElementSibling" => {
+                let res = self.host.read_dom(DomRead::Sibling { node: node_id, direction: SiblingDirection::Next, elements_only: true });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            "previousElementSibling" => {
+                let res = self.host.read_dom(DomRead::Sibling { node: node_id, direction: SiblingDirection::Previous, elements_only: true });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            "value" => {
+                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "value".to_string() });
+                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
+            }
+            "hidden" => {
+                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "hidden".to_string() });
+                Ok(Value::Bool(matches!(res, Ok(DomReadResult::String(_)))))
+            }
+            "disabled" => {
+                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "disabled".to_string() });
+                Ok(Value::Bool(matches!(res, Ok(DomReadResult::String(_)))))
+            }
+            "length" => {
+                let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: false });
+                Ok(Value::Number(match res { Ok(DomReadResult::Nodes(ids)) => ids.len() as f64, _ => 0.0 }))
+            }
+            "getAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeGetAttribute, false, None)),
+            "setAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeSetAttribute, false, None)),
+            "removeAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeRemoveAttribute, false, None)),
+            "hasAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeHasAttribute, false, None)),
+            "toggleAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeToggleAttribute, false, None)),
+            "getAttributeNames" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeGetAttributeNames, false, None)),
+            "appendChild" | "append" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeAppendChild, false, None)),
+            "prepend" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeInsertBefore, false, None)),
+            "insertBefore" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeInsertBefore, false, None)),
+            "removeChild" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeRemoveChild, false, None)),
+            "replaceChild" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeReplaceChild, false, None)),
+            "cloneNode" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeCloneNode, false, None)),
+            "remove" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeRemove, false, None)),
+            "querySelector" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeQuerySelector, false, None)),
+            "querySelectorAll" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeQuerySelectorAll, false, None)),
+            "closest" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeClosest, false, None)),
+            "matches" | "webkitMatchesSelector" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeMatches, false, None)),
+            "contains" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeContains, false, None)),
+            "getBoundingClientRect" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeGetBoundingClientRect, false, None)),
+            "scrollIntoView" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeScrollIntoView, false, None)),
+            "focus" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeFocus, false, None)),
+            "blur" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeBlur, false, None)),
+            "click" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeClick, false, None)),
+            "addEventListener" | "removeEventListener" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeAddEventListener, false, None)),
+            "dispatchEvent" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeDispatchEvent, false, None)),
+            _ => Ok(Value::Undefined),
+        }
+    }
+
+    fn get_classlist_property(&mut self, slot: HostObjectSlot, name: String) -> Result<Value, VmError> {
+        let node_id = NodeId(slot.handle as u32);
+        match name.as_str() {
+            "length" => {
+                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() });
+                let cls = match res { Ok(DomReadResult::String(s)) => s, _ => String::new() };
+                Ok(Value::Number(if cls.trim().is_empty() { 0.0 } else { cls.split_whitespace().count() as f64 }))
+            }
+            "value" => {
+                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() });
+                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
+            }
+            "add" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListAdd, false, None)),
+            "remove" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListRemove, false, None)),
+            "contains" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListContains, false, None)),
+            "toggle" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListToggle, false, None)),
+            "replace" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListReplace, false, None)),
+            "item" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListItem, false, None)),
+            "toString" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListToString, false, None)),
+            _ => Ok(Value::Undefined),
+        }
+    }
+
+    fn get_style_property(&mut self, name: String) -> Result<Value, VmError> {
+        match name.as_str() {
+            "getPropertyValue" => Ok(self.allocate_builtin_value(BuiltinId::DomStyleGetProperty, false, None)),
+            "setProperty" => Ok(self.allocate_builtin_value(BuiltinId::DomStyleSetProperty, false, None)),
+            "removeProperty" => Ok(self.allocate_builtin_value(BuiltinId::DomStyleRemoveProperty, false, None)),
+            _ => Ok(self.make_string_value("")),
+        }
+    }
+
+    fn set_host_property(
+        &mut self,
+        slot: HostObjectSlot,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<(), VmError> {
+        let name = match &key { PropertyKey::String(s) => s.clone(), _ => return Ok(()) };
+        match slot.class {
+            HostObjectClass::Node | HostObjectClass::EventTarget => {
+                let node_id = NodeId(slot.handle as u32);
+                match name.as_str() {
+                    "innerHTML" => {
+                        let html = self.to_string(&value);
+                        let _ = self.host.mutate_dom(DomMutation::SetInnerHtml { node: node_id, html });
+                    }
+                    "textContent" | "nodeValue" => {
+                        let text = self.to_string(&value);
+                        let _ = self.host.mutate_dom(DomMutation::SetTextContent { node: node_id, value: text });
+                    }
+                    "id" => { let v = self.to_string(&value); let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "id".to_string(), value: v }); }
+                    "className" => { let v = self.to_string(&value); let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "class".to_string(), value: v }); }
+                    "value" => { let v = self.to_string(&value); let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "value".to_string(), value: v }); }
+                    "href" => { let v = self.to_string(&value); let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "href".to_string(), value: v }); }
+                    "src" => { let v = self.to_string(&value); let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "src".to_string(), value: v }); }
+                    "hidden" => {
+                        let truthy = self.is_truthy(&value);
+                        if truthy { let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "hidden".to_string(), value: String::new() }); }
+                        else { let _ = self.host.mutate_dom(DomMutation::RemoveAttribute { node: node_id, name: "hidden".to_string() }); }
+                    }
+                    "disabled" => {
+                        let truthy = self.is_truthy(&value);
+                        if truthy { let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "disabled".to_string(), value: String::new() }); }
+                        else { let _ = self.host.mutate_dom(DomMutation::RemoveAttribute { node: node_id, name: "disabled".to_string() }); }
+                    }
+                    _ => {}
+                }
+            }
+            HostObjectClass::Other("CSSStyleDeclaration") => {
+                let node_id = NodeId(slot.handle as u32);
+                let css_prop = camel_to_css_prop(&name);
+                let new_val = self.to_string(&value);
+                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "style".to_string() }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                let updated = set_inline_style_prop(&existing, &css_prop, &new_val);
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "style".to_string(), value: updated });
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 impl From<&str> for PropertyKey {
@@ -5524,4 +6407,45 @@ mod tests {
             "#,
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// CSS inline-style helpers (free functions, no VM state needed)
+// ---------------------------------------------------------------------------
+
+fn camel_to_css_prop(camel: &str) -> String {
+    let mut out = String::new();
+    for ch in camel.chars() {
+        if ch.is_uppercase() {
+            out.push('-');
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn set_inline_style_prop(existing: &str, prop: &str, value: &str) -> String {
+    // Parse existing "prop: val; prop2: val2" and replace or append
+    let mut props: Vec<(String, String)> = existing
+        .split(';')
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() { return None; }
+            let mut iter = part.splitn(2, ':');
+            let k = iter.next()?.trim().to_string();
+            let v = iter.next().unwrap_or("").trim().to_string();
+            Some((k, v))
+        })
+        .collect();
+
+    let found = props.iter_mut().find(|(k, _)| k == prop);
+    if let Some(entry) = found {
+        entry.1 = value.to_string();
+    } else if !value.is_empty() {
+        props.push((prop.to_string(), value.to_string()));
+    }
+
+    props.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join("; ")
 }
