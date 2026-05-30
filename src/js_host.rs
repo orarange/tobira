@@ -1237,6 +1237,12 @@ pub fn run_with_new_engine(html: &str, base_url: &Url) -> ProcessedScriptHtml {
         vm.event_loop_tick(now_ms, false);
     }
 
+    // Fire DOMContentLoaded — handle 0 covers both document and window listeners
+    let now_ms = vm.host_mut().now().monotonic_ms;
+    let _ = vm.fire_dom_event(0, "DOMContentLoaded");
+    let _ = vm.fire_dom_event(0, "load");
+    vm.event_loop_tick(now_ms, false);
+
     let host = vm
         .host_mut()
         .as_any_mut()
