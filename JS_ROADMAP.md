@@ -25,7 +25,10 @@ Already working:
 - native GUI typing stays in sync with live DOM `input.value`
 - basic DOM event plumbing for capture + bubbling `click`, `input`, `change`, and `submit`, plus target-only `focus` and `blur`
 - `Promise` job flushing
-- guarded `fetch(...)` and `XMLHttpRequest`
+- guarded `XMLHttpRequest`
+- **async `fetch(...)`**: returns a pending promise immediately, runs HTTP off-thread, and resolves through a completion queue drained during settle; event-handler-triggered fetches re-enter the session via a GUI `JsSettleRequired` watcher instead of blocking the window
+- `MutationObserver` (attributes / childList / characterData), `ResizeObserver`, and `IntersectionObserver` firing from layout / viewport / scroll updates
+- layout hitboxes fed back into the loaded JS session after reflow so observer geometry stays current
 - same-origin request method/body support plus plain-object request headers for `fetch(...)` and `XMLHttpRequest`
 - response header iteration plus XHR `getResponseHeader(...)` / `getAllResponseHeaders()`
 - same-origin navigation checks
@@ -261,35 +264,42 @@ Whenever a phase lands or a new blocker shows up:
 
 ---
 
-## ⚠️ Roadmap Assessment (added 2026-05-16)
+## 🔻 Strategic Pivot (added 2026-05-28): engine replacement
 
-*This section was added after reviewing the current implementation state and checking whether the roadmap above is realistic.*
+This roadmap covers JS *features* on top of **boa**. As of 2026-05-28 the decision is to **replace boa with a custom from-scratch JS engine**, because boa is the main bottleneck for real sites:
+
+- YouTube's ~9.7MB `kevlar_base` main bundle is **silently skipped** at the current `MAX_SCRIPT_SOURCE_BYTES = 2MB` cap, so the app never boots (only the skeleton renders).
+- Even with the cap raised, boa is too slow to run a 10MB bundle in acceptable time.
+
+The engine-replacement effort is tracked in **`ENGINE_ROADMAP.md`** (bytecode VM, custom parser, live event loop). This `JS_ROADMAP.md` remains the reference for the feature surface the new engine must reach — every "Already working" item is a behavior the new engine has to reproduce during its Host-integration phase. boa stays compiling until the new engine reaches "Core Complete."
+
+## ⚠️ Roadmap Assessment (updated 2026-05-28)
+
+*Originally added 2026-05-16; progress table refreshed 2026-05-28.*
 
 ### Progress Summary
 
 | Phase | Status |
 |---|---|
-| Phase 1: Event Plumbing | ✅ Largely complete |
-| Phase 2: DOM Fidelity | 🟡 Partially done |
-| Phase 3: Storage & Cookies | ❌ Not started |
-| Phase 4: Networking | 🟡 Minimal implementation only |
-| Phase 5: Layout Reflow | ❌ Not started — **architectural blocker** |
-| Phase 6: Framework Compat | ❌ Not started |
+| Phase 1: Event Plumbing | ✅ Largely complete (capture/bubble events, keyboard, hover mouse events) |
+| Phase 2: DOM Fidelity | 🟡 Substantial — traversal, mutation observers, fragments, live attributes in; deeper parity open |
+| Phase 3: Storage & Cookies | ✅ Largely complete (localStorage / sessionStorage / cookies, history + scroll restore) |
+| Phase 4: Networking | 🟡 async fetch + XHR in; `Headers`/`Request`/`Response` parity and cross-origin policy still shallow |
+| Phase 5: Layout Reflow | 🟡 Observers + hitbox feedback + layout cache invalidation in; full incremental reflow still partial |
+| Phase 6: Framework Compat | 🔴 Blocked on engine — boa skips large bundles (see Strategic Pivot) |
 | Phase 7: Media & APIs | ❌ Not started |
 
 
 
-### Critical Gap: Phase 5 is Understated
+### Critical Gap (updated 2026-05-28): the engine, not reflow
 
-The single biggest risk to reaching the stated goal (Google / YouTube browsable without synthetic pages) is **Phase 5: Layout Reflow**.
+As of 2026-05-28 the single biggest risk has shifted. Phase 5 reflow has progressed (observer firing, hitbox feedback, viewport/revision-keyed cache invalidation), so it is no longer the top blocker.
 
-The current architecture computes layout **once** at page load and never again. When JS mutates the DOM, the screen does not update. Fixing this requires:
+The top blocker is now the **JS engine itself**: boa silently skips the large app bundles that modern sites ship (YouTube's ~9.7MB main bundle exceeds the 2MB script cap), so the client app never boots regardless of how good reflow is. This is why the project is pivoting to a custom engine — see the Strategic Pivot section above and `ENGINE_ROADMAP.md`.
 
-1. A reactive dependency graph between DOM nodes and layout outputs, **or**
-2. A full re-layout pass triggered by any DOM mutation, **or**
-3. A hybrid: re-layout only the subtree that changed.
+Reflow still has remaining work (full incremental invalidation across more mutation paths), but it should be completed *on the new engine* rather than further hardened against boa. The earlier concern below is kept for context:
 
-None of these are small. Option 2 is the simplest to implement but will be slow on large pages. Option 1 is what real browsers do but takes months to build correctly. This is not a "Tasks: 4 bullet points" problem — it is an **architectural redesign** of the rendering pipeline, and it must be planned before Phase 3 and 4 work is finished, or the project will stall.
+> The original architecture computed layout once at page load and never again. Fixing this fully requires either a reactive DOM→layout dependency graph, a full re-layout pass per mutation, or a hybrid subtree re-layout. The current code uses cache invalidation + observer-driven refresh as a partial solution.
 
 
 

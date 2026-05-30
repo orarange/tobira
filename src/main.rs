@@ -7,6 +7,7 @@ mod html;
 mod http;
 mod image;
 mod js;
+mod js_host;
 mod layout;
 mod render;
 mod site_state;

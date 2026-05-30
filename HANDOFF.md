@@ -29,6 +29,13 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Repo / package name: `tobira`
 - Active Codex branch: `codex/js-event-capture`
 - Active Claude branch: `claude/phase5-css` (PR #49 open — Phase 5 CSS roadmap implementation)
+
+### Strategic Direction (added 2026-05-28)
+
+- **Goal restated:** the long-term target is a Chrome replacement. The near-term target is "practical pages render and operate at Chrome-comparable quality" (news/docs/SPAs/search/forms look right and are interactive).
+- **Engine replacement planned:** boa is now the main bottleneck (YouTube's ~10MB main bundle is silently skipped at the current `MAX_SCRIPT_SOURCE_BYTES = 2MB` limit, and boa is too slow even if raised). The plan is to build a **custom from-scratch JS engine** (bytecode VM, custom parser leaning, live event loop) and remove boa once the new engine's core is complete. This is tracked in the new **`ENGINE_ROADMAP.md`**.
+- **`JS_ROADMAP.md` vs `ENGINE_ROADMAP.md`:** `JS_ROADMAP.md` tracks JS *feature* coverage on the current boa runtime; `ENGINE_ROADMAP.md` tracks the *engine replacement* effort. The engine work happens on a future dedicated branch; boa stays compiling until "Core Complete."
+- **Architecture note for the engine work:** the current "settle to a stable state, then stop" model (`settle_pending_state`) and the snapshot→HTML→re-parse rebuild in `browser.rs` are workarounds for not having a real live runtime. The engine roadmap replaces the settle loop with a persistent event loop (real timers + frame clock); the browser-side rebuild model will need rework during Phase 6 (Host integration).
 - Workflow:
   - keep the shared root checkout free for the user / Claude side
   - run Codex implementation from a separate `codex/js-event-capture` worktree
@@ -96,7 +103,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - dedicated larger-stack worker thread
     - queued host-task plumbing for `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)`
     - Promise job flushing (drained after top-level script eval via `context.run_jobs()`)
-    - lightweight `fetch(...)` with response headers iteration
+    - **async `fetch(...)`**: returns a pending promise immediately, runs HTTP on a background thread, and resolves/rejects via a shared completion queue drained in `settle_pending_state`; the GUI spawns a `JsSettleRequired` watcher so event-handler-triggered fetches do not freeze the window
     - lightweight `XMLHttpRequest` with `getResponseHeader(...)` / `getAllResponseHeaders()`
     - same-origin request bodies plus plain-object request headers for `fetch(...)` and `XMLHttpRequest`
     - loop-iteration runtime budget for runaway scripts
@@ -144,6 +151,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Recent Commit Landmarks
 
+- `cd698bc` async fetch implementation complete (Codex JS/Event capture)
+- `ffc207f` add hover mouse event dispatch support (Codex JS/Event capture)
+- `20f91d9` add custom element attribute lifecycle support (Codex JS/Event capture)
+- `068906c` feed render hitboxes back into loaded JS sessions (Codex JS/Event capture)
+- `e73e879` poll loaded JS sessions during render updates (Codex JS/Event capture)
 - `1616499` mutation notifications and history scroll restoration implementation complete (Codex JS/Event capture)
 - `e2558bf` docs: update HANDOFF + CSS_ROADMAP for Phase 5 completion (Claude Phase 5 CSS)
 - `0e81ade` feat: Phase 5 Batch 6 — filter, ::placeholder/::selection, @supports/@layer, no-op props — PR #49
@@ -206,6 +218,21 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-05-28 - Claude (engine-replacement planning + YouTube debug)
+
+- Reviewed the in-flight `codex/js-event-capture` work (settle-loop convergence, layout hitbox feedback, hover mouse events, async fetch) and confirmed `cargo build` is green with 207 tests passing.
+- Debugged why YouTube still renders only its skeleton: traced `youtube-trace-15.err.log` and found the ~9.7MB `kevlar_base` main bundle is silently skipped (eval "done" in ~108µs) because it exceeds `MAX_SCRIPT_SOURCE_BYTES = 2MB`. Also flagged the conservative network budgets (`JS_MAX_NETWORK_*`) and `JS_LOOP_ITERATION_LIMIT = 100_000` as secondary blockers.
+- Decided the strategic direction: build a **custom from-scratch JS engine** to replace boa rather than just raising limits (boa is too slow for a 10MB bundle even if the cap is raised).
+- Created **`ENGINE_ROADMAP.md`**: bytecode VM from the start, custom parser (recommended), live event loop (not settle-and-stop), per-page heap with mid-session GC required before the Chrome-replacement goal, host-integration phase that ports the existing `js.rs` bindings, boa removed only after "Core Complete."
+- Locked engine decisions with the user: bytecode VM, parser leaning custom (finalize in Phase 0), boa removed after core is complete.
+
+### 2026-05-28 - Codex (async fetch)
+
+- Made `js_fetch` non-blocking: it now returns a pending promise immediately and runs the HTTP request on a background thread, delivering results through a shared `Arc<Mutex<VecDeque<CompletedFetch>>>` queue that `settle_pending_state` drains to resolve/reject the stored promise capabilities.
+- Added a `JsSettleRequired` user event plus a GUI watcher thread so fetches triggered from event handlers re-enter the JS session without freezing the window; the page-load path uses `wait_for_pending_fetches` with a timeout.
+- Fixed a `setTimeout` turn-ordering regression by splitting settle into document-script and task passes; nested-timeout regression tests pass.
+- `cargo test`: 207 passing. `cargo build`: success. Committed as `cd698bc`.
 
 ### 2026-05-28 - Codex (hover mouse event plumbing)
 

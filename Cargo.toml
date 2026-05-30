@@ -8,6 +8,7 @@ arboard = "3.6.1"
 # boa_engine and boa_gc are removed in Phase 8 (engine replacement)
 boa_engine = "0.21.1"
 boa_gc = "0.21.1"
+tobira-engine = { path = "../browser-js-engine" }
 brotli = "8.0.2"
 encoding_rs = "0.8.35"
 flate2 = "1.1.5"
