@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use std::any::Any;
+
 use tobira_engine::engine::{
     Compiler, DomEventRequest, DomEventResult, DomMutation, DomMutationResult, DomRead,
     DomReadResult, DomRect, EventTarget, FetchBody, FetchMode, FetchRequest, FrameId,
@@ -642,6 +644,10 @@ impl TobirahHost {
 }
 
 impl Host for TobirahHost {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
     fn window(&self) -> WindowId {
         WindowId(0)
     }
@@ -1167,23 +1173,38 @@ pub fn run_with_new_engine(html: &str, base_url: &Url) -> ProcessedScriptHtml {
         };
     }
 
-    let mut host = TobirahHost::new(dom, base_url.clone());
-    let mut vm = Vm::new(Heap::new());
+    let host = TobirahHost::new(dom, base_url.clone());
+    let mut vm = Vm::with_host(Heap::new(), Box::new(host));
 
     for (_node_id, script) in &scripts {
         if script.src.is_some() {
             // External scripts not yet supported in Phase 6 Step 1
+            let now_ms = vm.host_mut().now().monotonic_ms;
+            vm.host_mut()
+                .as_any_mut()
+                .downcast_mut::<TobirahHost>()
+                .unwrap()
+                .console_logs
+                .push(format!("JS: skipping external script (src not supported yet)"));
+            let _ = now_ms;
             continue;
         }
-        let source = &script.inline_source;
+        let source = {
+            let h = vm.host_mut().as_any_mut().downcast_mut::<TobirahHost>().unwrap();
+            script.inline_source.clone()
+        };
         if source.trim().is_empty() {
             continue;
         }
 
-        let program = match Parser::new(source).parse() {
+        let program = match Parser::new(&source).parse() {
             Ok(p) => p,
             Err(e) => {
-                host.console_logs
+                vm.host_mut()
+                    .as_any_mut()
+                    .downcast_mut::<TobirahHost>()
+                    .unwrap()
+                    .console_logs
                     .push(format!("JS parse error: {e:?}"));
                 continue;
             }
@@ -1192,23 +1213,35 @@ pub fn run_with_new_engine(html: &str, base_url: &Url) -> ProcessedScriptHtml {
         let chunk = match Compiler::new(&program).compile() {
             Ok(c) => c,
             Err(e) => {
-                host.console_logs
+                vm.host_mut()
+                    .as_any_mut()
+                    .downcast_mut::<TobirahHost>()
+                    .unwrap()
+                    .console_logs
                     .push(format!("JS compile error: {e:?}"));
                 continue;
             }
         };
 
         if let Err(e) = vm.execute(&chunk) {
-            host.console_logs
+            vm.host_mut()
+                .as_any_mut()
+                .downcast_mut::<TobirahHost>()
+                .unwrap()
+                .console_logs
                 .push(format!("JS runtime error: {e:?}"));
         }
 
-        // Drive microtask queue after each script
-        vm.event_loop_tick(
-            host.now().monotonic_ms,
-            false,
-        );
+        // Drive microtask queue / due timers after each script
+        let now_ms = vm.host_mut().now().monotonic_ms;
+        vm.event_loop_tick(now_ms, false);
     }
+
+    let host = vm
+        .host_mut()
+        .as_any_mut()
+        .downcast_mut::<TobirahHost>()
+        .unwrap();
 
     let title_override = find_title(&host.dom);
     let html_out = host.dom.serialize_to_html();
@@ -1216,9 +1249,9 @@ pub fn run_with_new_engine(html: &str, base_url: &Url) -> ProcessedScriptHtml {
     ProcessedScriptHtml {
         html: html_out,
         title_override,
-        console_logs: host.console_logs,
-        navigation_target: host.navigation_target,
-        soft_navigation_target: host.soft_navigation_target,
+        console_logs: host.console_logs.clone(),
+        navigation_target: host.navigation_target.clone(),
+        soft_navigation_target: host.soft_navigation_target.clone(),
         scroll_y: host.scroll_y as u32,
     }
 }
