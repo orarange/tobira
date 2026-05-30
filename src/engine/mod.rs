@@ -27,12 +27,12 @@ pub use heap::{
 };
 pub use host::{
     ConsoleLevel, ConsoleMessage, DomEventRequest, DomEventResult, DomMutation, DomMutationResult,
-    DomRead, DomReadResult, EventTarget, FetchBody, FetchMode, FetchRequest, FrameId,
+    DomRead, DomReadResult, DomRect, EventTarget, FetchBody, FetchMode, FetchRequest, FrameId,
     HistoryAction, HistoryOutcome, Host, HostData, HostError, HostEvent, HostResult,
     HostTimeSnapshot, HttpMethod, LocationSnapshot, NavigationAction, NavigationOutcome,
     NetworkRequestId, NodeId, NodeKind, ObserverId, ObserverKind, ObserverOp, ObserverOptions,
-    ObserverResult, StorageAreaKind, StorageAreaScope, StorageOp, StorageResult, TimerId,
-    TimerKind, TimerRequest, WindowId, WindowMetrics,
+    ObserverResult, ScrollMetrics, SiblingDirection, StorageAreaKind, StorageAreaScope, StorageOp,
+    StorageResult, TimerId, TimerKind, TimerRequest, WindowId, WindowMetrics,
 };
 pub use lexer::{LexError, LexGoal, Lexer, SourceLocation, Token, TokenKind};
 pub use parser::{ParseError, Parser, ParserOptions};

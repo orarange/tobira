@@ -192,7 +192,32 @@ Goal: persistent, spec-shaped asynchronous execution.
 
 Implementation for this phase must follow the written draft in `ENGINE_ASYNC_DESIGN.md` after PM review.
 
-Exit: async ordering matches browsers on nested timeout / Promise / observer / rAF regressions.
+Completed in this phase:
+
+- added `src/engine/event_loop.rs` with `EventLoop`, single-queue `VecDeque<TaskEntry>` with `TaskSource` tags, `BinaryHeap<Reverse<TimerEntry>>` for timer scheduling, `IndexMap<u32, RafEntry>` for rAF registry, `VecDeque<MicrotaskJob>` for microtask queue
+- added `ObjectKind::Promise(Box<PromiseState>)` and `ObjectKind::AsyncResumer(Box<AsyncContext>)` to `value.rs`
+- added `PromiseState`, `PromiseReaction`, `AsyncContext` types
+- added `Await` and `AsyncReturn` opcodes to `chunk.rs`; added `is_async` / `is_generator` flags to `FunctionProto`
+- implemented `Promise` built-in with all static methods (`resolve`, `reject`, `all`, `race`, `allSettled`, `any`) and instance methods (`.then`, `.catch`, `.finally`)
+- implemented `suspend_current_async_frame`: pops frame into `AsyncContext`, attaches `AsyncResumer` reactions to the awaited Promise
+- implemented `resume_async_context`: restores frame with adjusted `stack_base`, runs until frame depth
+- key ordering fix: `PromiseReaction` handlers that are `AsyncResumer` objects are directly resumed inside `run_microtask_job` without enqueuing an extra `AsyncResume` microtask — this makes `async/await` resume order match browser behavior
+- implemented `event_loop_tick(now_ms, has_render_opportunity)`: ingest due timers, run one macrotask, drain microtasks, rAF stage with per-callback microtask checkpoints
+- timer semantics: negative delays clamped to 0, nesting level > 5 clamps interval to ≥ 4 ms, intervals reschedule from `due_ms + interval_ms`, cancelled timers removed before execution
+- registered `queueMicrotask`, `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, `requestAnimationFrame`, `cancelAnimationFrame` as global built-ins
+- all types exported from `src/engine/mod.rs`
+- 18 Phase 5 corpus tests covering Promise static methods, microtask ordering, async/await basics, timer ordering, and async-vs-then ordering regression
+
+Not done in this phase:
+
+- real wall-clock time (browser-codex provides `now_ms` via `event_loop_tick`)
+- real network I/O wiring (stubs; Phase 6)
+- ResizeObserver delivery loop (stub in place; Phase 6)
+- generator syntax (`function*`, `yield`) — not needed for `async/await`
+- `AbortController`, `AbortSignal`
+- ContentThread threading model (Phase 5.5)
+
+Exit: complete. 18 + 232 = 250 tests passed on commit `a29511f`.
 
 ### Phase 6 - Host Integration
 
@@ -246,6 +271,7 @@ Remove `boa` only after all of the following hold:
 | Async ordering bugs | Phase 5 | Write and review the design before coding; diff behavior against real browsers. |
 | Parser schedule slip | Phase 1 | Keep OXC as an explicit fallback if custom parsing stalls. |
 | GC correctness | Phase 2 / 7 | Start with page-scoped allocation, but keep collector hooks in the layout from day one. |
+| `callables` side-table GC | Phase 7 | `Vm.callables: HashMap<RawGcRef, Callable>` is a root set outside the heap arena. When mark-sweep lands: (1) treat every entry as a GC root during marking, (2) remove entries whose `RawGcRef` is freed. Closure upvalue cells (`Rc<RefCell<Value>>`) are also outside the arena — cycles through upvalues will not be collected; assess whether a separate cycle-collector is needed. |
 | Performance ceiling | Phase 7 | Profile large real bundles, not toy benchmarks. |
 | Conformance long tail | Phase 8 | Prioritize failures that block real sites before test262 completeness. |
 

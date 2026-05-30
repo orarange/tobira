@@ -2768,7 +2768,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tobira"
+name = "tobira-engine"
 version = "0.1.0"
 dependencies = [
  "arboard",

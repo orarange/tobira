@@ -1,4 +1,4 @@
-use tobira::engine::{Compiler, Heap, Parser, TickResult, Vm};
+use tobira_engine::engine::{Compiler, Heap, Parser, TickResult, Vm};
 
 fn new_vm() -> Vm {
     Vm::new(Heap::new())
