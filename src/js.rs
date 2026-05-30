@@ -521,6 +521,11 @@ pub fn start_document_script_session(
     html: &str,
     base_url: &Url,
 ) -> (ProcessedScriptHtml, Option<JavaScriptSession>) {
+    // New engine gate
+    if std::env::var_os("TOBIRA_NEW_ENGINE").is_some() {
+        let snapshot = crate::js_host::run_with_new_engine(html, base_url);
+        return (snapshot, None);
+    }
     let session_started = Instant::now();
     js_trace(format!(
         "session start url={} html_bytes={}",
