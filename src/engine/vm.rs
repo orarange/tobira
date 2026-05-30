@@ -13,6 +13,7 @@ use super::event_loop::{
     EventLoop, MicrotaskJob, RafEntry, TaskEntry, TaskSource, TickResult, TimerEntry,
 };
 use super::heap::{GcRef, Heap, RawGcRef};
+use super::host::{ConsoleLevel, ConsoleMessage, Host, NoopHost};
 use super::value::{
     AsyncContext, JsObject, JsPropertyDescriptor, JsString, ObjectKind, PromiseReaction,
     PromiseState, PropertyKey, Value,
@@ -141,6 +142,10 @@ enum BuiltinId {
     MathRandom,
     JsonStringify,
     JsonParse,
+    ConsoleLog,
+    ConsoleInfo,
+    ConsoleWarn,
+    ConsoleError,
     MapConstructor,
     MapProtoSet,
     MapProtoGet,
@@ -301,10 +306,17 @@ pub struct Vm {
     set_prototype: Option<GcRef<JsObject>>,
     event_loop: EventLoop,
     random_state: u64,
+    host: Box<dyn Host>,
 }
 
 impl Vm {
+    /// Create a VM with a no-op host (for tests and scripts that don't need DOM/console).
     pub fn new(heap: Heap) -> Self {
+        Self::with_host(heap, Box::new(NoopHost))
+    }
+
+    /// Create a VM wired to a real host implementation.
+    pub fn with_host(heap: Heap, host: Box<dyn Host>) -> Self {
         let random_state = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos() as u64)
@@ -327,9 +339,15 @@ impl Vm {
             set_prototype: None,
             event_loop: EventLoop::new(),
             random_state,
+            host,
         };
         vm.install_globals();
         vm
+    }
+
+    /// Borrow the host mutably (for reading results after execution).
+    pub fn host_mut(&mut self) -> &mut dyn Host {
+        self.host.as_mut()
     }
 
     pub fn execute(&mut self, chunk: &Chunk) -> Result<Value, VmError> {
@@ -967,6 +985,15 @@ impl Vm {
             .insert("Math".to_string(), Value::Object(math_object));
         self.globals
             .insert("JSON".to_string(), Value::Object(json_object));
+
+        // console object
+        let console_object = self.allocate_ordinary_object(Some(object_prototype));
+        self.define_builtin_method(console_object, "log",   BuiltinId::ConsoleLog);
+        self.define_builtin_method(console_object, "info",  BuiltinId::ConsoleInfo);
+        self.define_builtin_method(console_object, "warn",  BuiltinId::ConsoleWarn);
+        self.define_builtin_method(console_object, "error", BuiltinId::ConsoleError);
+        self.globals
+            .insert("console".to_string(), Value::Object(console_object));
 
         self.define_builtin_method(
             object_prototype,
@@ -4362,6 +4389,17 @@ impl Vm {
                 let json = serde_json::from_str::<JsonValue>(&text)
                     .map_err(|error| VmError::TypeError(error.to_string()))?;
                 self.from_json_value(&json)
+            }
+            BuiltinId::ConsoleLog | BuiltinId::ConsoleInfo | BuiltinId::ConsoleWarn | BuiltinId::ConsoleError => {
+                let level = match builtin {
+                    BuiltinId::ConsoleInfo  => ConsoleLevel::Info,
+                    BuiltinId::ConsoleWarn  => ConsoleLevel::Warn,
+                    BuiltinId::ConsoleError => ConsoleLevel::Error,
+                    _                       => ConsoleLevel::Log,
+                };
+                let parts: Vec<String> = args.iter().map(|v| self.to_string(v)).collect();
+                let _ = self.host.console(ConsoleMessage { level, parts });
+                Ok(Value::Undefined)
             }
             BuiltinId::MapProtoSet => {
                 let object = self.builtin_object_this(&this_value, "Map.prototype.set")?;

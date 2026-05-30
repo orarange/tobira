@@ -1,3 +1,5 @@
+use std::any::Any;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WindowId(pub u32);
 
@@ -587,7 +589,10 @@ pub enum HostEvent {
     },
 }
 
-pub trait Host {
+pub trait Host: Any {
+    /// Downcast helper — every impl should return `self`.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+
     fn window(&self) -> WindowId;
     fn window_metrics(&self, window: WindowId) -> HostResult<WindowMetrics>;
     fn location(&self, window: WindowId) -> HostResult<LocationSnapshot>;
@@ -614,4 +619,72 @@ pub trait Host {
 
     fn now(&self) -> HostTimeSnapshot;
     fn wait_for_host_events(&mut self, max_wait_ms: Option<u64>) -> HostResult<Vec<HostEvent>>;
+}
+
+// ---------------------------------------------------------------------------
+// NoopHost — used by Vm::new() so tests need no changes
+// ---------------------------------------------------------------------------
+
+pub struct NoopHost;
+
+impl Host for NoopHost {
+    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn window(&self) -> WindowId { WindowId(0) }
+    fn window_metrics(&self, _w: WindowId) -> HostResult<WindowMetrics> {
+        Ok(WindowMetrics {
+            inner_width: 0.0,
+            inner_height: 0.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            device_pixel_ratio: 1.0,
+        })
+    }
+    fn location(&self, _w: WindowId) -> HostResult<LocationSnapshot> {
+        Ok(LocationSnapshot {
+            href: String::new(),
+            origin: String::new(),
+            protocol: String::new(),
+            host: String::new(),
+            hostname: String::new(),
+            port: String::new(),
+            pathname: String::new(),
+            search: String::new(),
+            hash: String::new(),
+        })
+    }
+    fn navigate(&mut self, _a: NavigationAction) -> HostResult<NavigationOutcome> {
+        Ok(NavigationOutcome { committed: false, same_document: false })
+    }
+    fn history(&mut self, _a: HistoryAction) -> HostResult<HistoryOutcome> {
+        Ok(HistoryOutcome { href: String::new(), state: None, length: 0, restored_scroll_y: None })
+    }
+    fn read_dom(&self, _r: DomRead) -> HostResult<DomReadResult> { Ok(DomReadResult::None) }
+    fn mutate_dom(&mut self, _m: DomMutation) -> HostResult<DomMutationResult> {
+        Ok(DomMutationResult::None)
+    }
+    fn dispatch_dom_event(&mut self, _r: DomEventRequest) -> HostResult<DomEventResult> {
+        Ok(DomEventResult { default_prevented: false })
+    }
+    fn console(&mut self, message: ConsoleMessage) -> HostResult<()> {
+        eprintln!("[console] {}", message.parts.join(" "));
+        Ok(())
+    }
+    fn schedule_timer(&mut self, _r: TimerRequest) -> HostResult<TimerId> { Ok(TimerId(0)) }
+    fn cancel_timer(&mut self, _id: TimerId) -> HostResult<bool> { Ok(false) }
+    fn request_animation_frame(&mut self, _w: WindowId) -> HostResult<FrameId> { Ok(FrameId(0)) }
+    fn cancel_animation_frame(&mut self, _id: FrameId) -> HostResult<bool> { Ok(false) }
+    fn fetch(&mut self, _r: FetchRequest) -> HostResult<NetworkRequestId> {
+        Err(HostError::Unsupported)
+    }
+    fn abort_fetch(&mut self, _id: NetworkRequestId) -> HostResult<bool> { Ok(false) }
+    fn storage(&mut self, _op: StorageOp) -> HostResult<StorageResult> {
+        Ok(StorageResult::None)
+    }
+    fn observer(&mut self, _op: ObserverOp) -> HostResult<ObserverResult> {
+        Err(HostError::Unsupported)
+    }
+    fn now(&self) -> HostTimeSnapshot { HostTimeSnapshot { monotonic_ms: 0, unix_ms: 0 } }
+    fn wait_for_host_events(&mut self, _ms: Option<u64>) -> HostResult<Vec<HostEvent>> {
+        Ok(Vec::new())
+    }
 }

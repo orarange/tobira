@@ -30,9 +30,10 @@ pub use host::{
     DomRead, DomReadResult, DomRect, EventTarget, FetchBody, FetchMode, FetchRequest, FrameId,
     HistoryAction, HistoryOutcome, Host, HostData, HostError, HostEvent, HostResult,
     HostTimeSnapshot, HttpMethod, LocationSnapshot, NavigationAction, NavigationOutcome,
-    NetworkRequestId, NodeId, NodeKind, ObserverId, ObserverKind, ObserverOp, ObserverOptions,
-    ObserverResult, ScrollMetrics, SiblingDirection, StorageAreaKind, StorageAreaScope, StorageOp,
-    StorageResult, TimerId, TimerKind, TimerRequest, WindowId, WindowMetrics,
+    NetworkRequestId, NodeId, NodeKind, NoopHost, ObserverId, ObserverKind, ObserverOp,
+    ObserverOptions, ObserverResult, ScrollMetrics, SiblingDirection, StorageAreaKind,
+    StorageAreaScope, StorageOp, StorageResult, TimerId, TimerKind, TimerRequest, WindowId,
+    WindowMetrics,
 };
 pub use lexer::{LexError, LexGoal, Lexer, SourceLocation, Token, TokenKind};
 pub use parser::{ParseError, Parser, ParserOptions};
