@@ -42,3 +42,4 @@ pub use value::{
     JsString, ObjectKind, PromiseReaction, PromiseState, PropertyKey, SymbolId, Value,
 };
 pub use vm::{CallFrame, Vm, VmError};
+// fire_dom_event is a method on Vm — accessible directly via Vm::fire_dom_event

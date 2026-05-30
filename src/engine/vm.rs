@@ -363,6 +363,9 @@ pub struct Vm {
     event_loop: EventLoop,
     random_state: u64,
     host: Box<dyn Host>,
+    /// Event listeners stored by (node_handle, event_type) → list of JS function GcRefs.
+    /// Lives in the VM (not the Host) so GcRefs remain valid.
+    event_listeners: HashMap<u32, HashMap<String, Vec<GcRef<JsObject>>>>,
 }
 
 impl Vm {
@@ -396,6 +399,7 @@ impl Vm {
             event_loop: EventLoop::new(),
             random_state,
             host,
+            event_listeners: HashMap::new(),
         };
         vm.install_globals();
         vm
@@ -404,6 +408,38 @@ impl Vm {
     /// Borrow the host mutably (for reading results after execution).
     pub fn host_mut(&mut self) -> &mut dyn Host {
         self.host.as_mut()
+    }
+
+    /// Fire a DOM event on a node handle, invoking all registered JS listeners.
+    /// `node_handle` is the raw u32 from HostObjectSlot.handle (0 = document/window).
+    /// `event_type` is e.g. "DOMContentLoaded", "click", "load".
+    pub fn fire_dom_event(&mut self, node_handle: u32, event_type: &str) -> Result<(), VmError> {
+        // Snapshot listener list to avoid borrow issues during call
+        let listeners: Vec<GcRef<JsObject>> = self
+            .event_listeners
+            .get(&node_handle)
+            .and_then(|m| m.get(event_type))
+            .cloned()
+            .unwrap_or_default();
+
+        if listeners.is_empty() {
+            return Ok(());
+        }
+
+        // Build a minimal event object: { type, target: null, bubbles: false }
+        let event_obj = self.allocate_ordinary_object(None);
+        let type_val = self.make_string_value(event_type);
+        self.define_data_property(event_obj, PropertyKey::from("type"), type_val, true, true, true);
+        self.define_data_property(event_obj, PropertyKey::from("target"), Value::Null, true, true, true);
+        self.define_data_property(event_obj, PropertyKey::from("bubbles"), Value::Bool(false), true, true, true);
+        self.define_data_property(event_obj, PropertyKey::from("cancelable"), Value::Bool(false), true, true, true);
+        let event_val = Value::Object(event_obj);
+
+        for fn_ref in listeners {
+            let _ = self.call_value_sync(Value::Object(fn_ref), Value::Undefined, vec![event_val.clone()]);
+            self.drain_microtasks();
+        }
+        Ok(())
     }
 
     pub fn execute(&mut self, chunk: &Chunk) -> Result<Value, VmError> {
@@ -4857,7 +4893,27 @@ impl Vm {
             BuiltinId::DomNodeScrollIntoView | BuiltinId::DomNodeFocus | BuiltinId::DomNodeBlur | BuiltinId::DomNodeClick => {
                 Ok(Value::Undefined)
             }
-            BuiltinId::DomNodeAddEventListener | BuiltinId::DomNodeRemoveEventListener | BuiltinId::DomNodeDispatchEvent => {
+            BuiltinId::DomNodeAddEventListener => {
+                let node_handle = self.node_id_from_host_val(&this_value)
+                    .map(|id| id.0)
+                    .unwrap_or(0); // 0 = document/window
+                let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let listener = args.get(1).cloned().unwrap_or(Value::Undefined);
+                if let Value::Object(fn_ref) = listener {
+                    self.event_listeners
+                        .entry(node_handle)
+                        .or_default()
+                        .entry(event_type)
+                        .or_default()
+                        .push(fn_ref);
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomNodeRemoveEventListener => {
+                // Stub: silently succeed (GcRef equality would be needed for correct removal)
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomNodeDispatchEvent => {
                 Ok(Value::Undefined)
             }
             // ----------------------------------------------------------------
