@@ -79,6 +79,9 @@ enum NewEngineCommand {
         name: String,
         value: String,
     },
+    SetScrollPosition {
+        y: u32,
+    },
     Shutdown,
 }
 
@@ -133,7 +136,8 @@ impl JavaScriptSession {
         true
     }
 
-    pub(crate) fn set_scroll_position(&self, _y: u32) -> bool {
+    pub(crate) fn set_scroll_position(&self, y: u32) -> bool {
+        let _ = self.command_tx.send(NewEngineCommand::SetScrollPosition { y });
         true
     }
 
@@ -197,7 +201,7 @@ fn start_new_engine_session(
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             use crate::js_host::{dispatch_event_on_vm, snapshot_from_vm, start_new_engine_vm};
-            use tobira_engine::engine::{DomMutation, NodeId};
+            use tobira_engine::engine::{DomMutation, NodeId, WindowId};
 
             let (initial_snapshot, mut vm) = start_new_engine_vm(&html_owned, &base_url_owned);
             let _ = init_tx.send(initial_snapshot);
@@ -221,6 +225,13 @@ fn start_new_engine_session(
                             node: NodeId(node_id),
                             name,
                             value,
+                        });
+                    }
+                    NewEngineCommand::SetScrollPosition { y } => {
+                        let _ = vm.host_mut().mutate_dom(DomMutation::SetWindowScroll {
+                            window: WindowId(0),
+                            x: 0.0,
+                            y: y as f64,
                         });
                     }
                     NewEngineCommand::Shutdown => break,
