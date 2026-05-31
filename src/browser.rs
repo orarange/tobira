@@ -126,6 +126,36 @@ impl BrowserPage {
         );
     }
 
+    /// True when this page has at least one element with a non-empty `animation` list.
+    /// Used by the GUI to decide whether to schedule a per-frame redraw.
+    pub fn has_active_animations(&self) -> bool {
+        fn walk(node: &crate::css::StyledNode) -> bool {
+            match node {
+                crate::css::StyledNode::Element(el) => {
+                    if !el.style.animations.is_empty() {
+                        return true;
+                    }
+                    el.children.iter().any(walk)
+                }
+                crate::css::StyledNode::Text(_) => false,
+            }
+        }
+        walk(&self.styled_document)
+    }
+
+    /// Apply animation interpolation in-place using `now_ms` as the current time and
+    /// `start_ms` as a global animation start anchor. Per-element start-time tracking
+    /// is not yet implemented; this is the MVP that animates everything against the
+    /// same anchor (good enough for infinite loaders / passive UI animations).
+    pub fn apply_animations(&mut self, now_ms: u64, start_ms: u64) {
+        crate::css::apply_animations_to_tree(
+            &mut self.styled_document,
+            &self.main_stylesheet.keyframes,
+            now_ms,
+            start_ms,
+        );
+    }
+
     pub fn set_dom_attribute(&mut self, node_id: Option<usize>, name: &str, value: &str) {
         let Some(node_id) = node_id else {
             return;

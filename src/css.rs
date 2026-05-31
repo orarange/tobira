@@ -100,6 +100,376 @@ pub struct TransitionSpec {
     pub timing_function: TimingFunction,
 }
 
+impl TimingFunction {
+    /// Apply the easing curve to a linear progress value `t` in [0, 1].
+    pub fn apply(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            TimingFunction::Linear => t,
+            // Approximate cubic-bezier(0.25, 0.1, 0.25, 1.0)
+            TimingFunction::Ease => cubic_bezier(t, 0.25, 0.1, 0.25, 1.0),
+            // cubic-bezier(0.42, 0, 1, 1)
+            TimingFunction::EaseIn => cubic_bezier(t, 0.42, 0.0, 1.0, 1.0),
+            // cubic-bezier(0, 0, 0.58, 1)
+            TimingFunction::EaseOut => cubic_bezier(t, 0.0, 0.0, 0.58, 1.0),
+            // cubic-bezier(0.42, 0, 0.58, 1)
+            TimingFunction::EaseInOut => cubic_bezier(t, 0.42, 0.0, 0.58, 1.0),
+            TimingFunction::StepStart => if t > 0.0 { 1.0 } else { 0.0 },
+            TimingFunction::StepEnd => if t >= 1.0 { 1.0 } else { 0.0 },
+        }
+    }
+}
+
+/// Approximate cubic-bezier(P1.x, P1.y, P2.x, P2.y) for t in [0, 1].
+/// Uses Newton's method on the X parameterization to invert, then evaluates Y.
+fn cubic_bezier(t: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    // Solve for parametric u given x(u) = t.
+    let mut u = t;
+    for _ in 0..6 {
+        let xu = 3.0 * (1.0 - u).powi(2) * u * x1
+            + 3.0 * (1.0 - u) * u.powi(2) * x2
+            + u.powi(3);
+        let dxu = 3.0 * (1.0 - u).powi(2) * x1
+            + 6.0 * (1.0 - u) * u * (x2 - x1)
+            + 3.0 * u.powi(2) * (1.0 - x2);
+        let denom = if dxu.abs() < 1e-6 { 1e-6 } else { dxu };
+        u -= (xu - t) / denom;
+        u = u.clamp(0.0, 1.0);
+    }
+    3.0 * (1.0 - u).powi(2) * u * y1
+        + 3.0 * (1.0 - u) * u.powi(2) * y2
+        + u.powi(3)
+}
+
+/// Linear interpolation helper.
+pub fn lerp_u32(a: u32, b: u32, t: f32) -> u32 {
+    let af = a as f32;
+    let bf = b as f32;
+    (af + (bf - af) * t).round().max(0.0) as u32
+}
+
+pub fn lerp_i32(a: i32, b: i32, t: f32) -> i32 {
+    let af = a as f32;
+    let bf = b as f32;
+    (af + (bf - af) * t).round() as i32
+}
+
+/// Interpolate two packed `0xRRGGBB` colors component-wise.
+pub fn lerp_color(a: u32, b: u32, t: f32) -> u32 {
+    let ar = ((a >> 16) & 0xFF) as f32;
+    let ag = ((a >> 8) & 0xFF) as f32;
+    let ab = (a & 0xFF) as f32;
+    let br = ((b >> 16) & 0xFF) as f32;
+    let bg = ((b >> 8) & 0xFF) as f32;
+    let bb = (b & 0xFF) as f32;
+    let r = (ar + (br - ar) * t).round().clamp(0.0, 255.0) as u32;
+    let g = (ag + (bg - ag) * t).round().clamp(0.0, 255.0) as u32;
+    let bl = (ab + (bb - ab) * t).round().clamp(0.0, 255.0) as u32;
+    (r << 16) | (g << 8) | bl
+}
+
+/// Compute progress (0..=1) for an `animation` at the given monotonic time (ms).
+/// Returns None if the animation has not started or has finished and fill-mode forbids it.
+pub fn animation_progress(spec: &AnimationSpec, start_ms: u64, now_ms: u64) -> Option<f32> {
+    let now = now_ms as i64;
+    let start = start_ms as i64 + spec.delay_ms as i64;
+    let elapsed = now - start;
+    if elapsed < 0 {
+        return if matches!(spec.fill_mode, AnimFillMode::Backwards | AnimFillMode::Both) {
+            Some(0.0)
+        } else {
+            None
+        };
+    }
+    let dur = spec.duration_ms.max(1) as i64;
+    let iter = (elapsed / dur) as u32;
+    let infinite = spec.iteration_count == u32::MAX;
+    if !infinite && iter >= spec.iteration_count {
+        return if matches!(spec.fill_mode, AnimFillMode::Forwards | AnimFillMode::Both) {
+            Some(spec.timing_function.apply(1.0))
+        } else {
+            None
+        };
+    }
+    let in_iter = (elapsed % dur) as f32 / dur as f32;
+    // Honor animation-direction (alternate flips on odd iterations).
+    let t_linear = match spec.direction {
+        AnimDirection::Normal => in_iter,
+        AnimDirection::Reverse => 1.0 - in_iter,
+        AnimDirection::Alternate => {
+            if iter % 2 == 0 { in_iter } else { 1.0 - in_iter }
+        }
+        AnimDirection::AlternateReverse => {
+            if iter % 2 == 0 { 1.0 - in_iter } else { in_iter }
+        }
+    };
+    Some(spec.timing_function.apply(t_linear))
+}
+
+/// Walk a styled tree and apply currently-animating values to each element's style
+/// using the provided keyframe rules and the monotonic time (ms). `start_times` maps
+/// element identity (tag_name + node id) → animation start time; the caller is
+/// expected to populate this as animations begin (a future repaint loop responsibility).
+///
+/// MVP: supports `opacity`, `color`, `background-color`, `transform: translateX/Y`,
+/// `transform: scale*`, `transform: rotate` keyframe interpolation.
+pub fn apply_animations_to_tree(
+    node: &mut StyledNode,
+    keyframes: &[KeyframeRule],
+    now_ms: u64,
+    default_start_ms: u64,
+) {
+    fn walk(node: &mut StyledNode, kf: &[KeyframeRule], now: u64, start: u64) {
+        match node {
+            StyledNode::Element(el) => {
+                if !el.style.animations.is_empty() {
+                    apply_animations_to_style(&mut el.style, kf, now, start);
+                }
+                for child in el.children.iter_mut() {
+                    walk(child, kf, now, start);
+                }
+            }
+            StyledNode::Text(_) => {}
+        }
+    }
+    walk(node, keyframes, now_ms, default_start_ms);
+}
+
+/// Apply each `AnimationSpec` on `style` by looking up its `@keyframes` rule and
+/// blending the surrounding keyframe stop declarations into `style` at the current
+/// progress. Later animations win for overlapping properties (CSS cascade order).
+pub fn apply_animations_to_style(
+    style: &mut ComputedStyle,
+    keyframes: &[KeyframeRule],
+    now_ms: u64,
+    start_ms: u64,
+) {
+    let specs = style.animations.clone();
+    for spec in &specs {
+        let progress = match animation_progress(spec, start_ms, now_ms) {
+            Some(p) => p,
+            None => continue,
+        };
+        let rule = match keyframes.iter().find(|r| r.name == spec.name) {
+            Some(r) => r,
+            None => continue,
+        };
+        let (from, to, t) = match find_keyframe_segment(rule, progress) {
+            Some(seg) => seg,
+            None => continue,
+        };
+        blend_keyframe_declarations(style, &from.declarations, &to.declarations, t);
+    }
+}
+
+/// Blend two keyframe declaration sets into `style` at progress `t`.
+fn blend_keyframe_declarations(
+    style: &mut ComputedStyle,
+    from: &[(String, String)],
+    to: &[(String, String)],
+    t: f32,
+) {
+    // Build a lookup of `to` declarations for matching properties.
+    let to_map: std::collections::HashMap<&str, &str> =
+        to.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    for (prop, from_val) in from {
+        let to_val = match to_map.get(prop.as_str()) {
+            Some(v) => *v,
+            None => from_val.as_str(),
+        };
+        match prop.as_str() {
+            "opacity" => {
+                let a = from_val.trim().parse::<f32>().unwrap_or(1.0);
+                let b = to_val.trim().parse::<f32>().unwrap_or(1.0);
+                let v = (a + (b - a) * t).clamp(0.0, 1.0);
+                style.opacity = (v * 255.0).round() as u8;
+                style.effective_opacity = style.opacity;
+            }
+            "color" => {
+                if let (Some(a), Some(b)) = (parse_color(from_val), parse_color(to_val)) {
+                    style.color = lerp_color(a, b, t);
+                }
+            }
+            "background-color" => {
+                if let (Some(a), Some(b)) = (parse_color(from_val), parse_color(to_val)) {
+                    style.background_color = Some(lerp_color(a, b, t));
+                }
+            }
+            "transform" => {
+                // Limited support: parse the same single-function transform on both sides.
+                blend_transform(style, from_val, to_val, t);
+            }
+            _ => {} // unsupported property — silently skip
+        }
+    }
+}
+
+fn blend_transform(style: &mut ComputedStyle, from: &str, to: &str, t: f32) {
+    // Try scale(x, y?) / scaleX / scaleY
+    if let (Some(a), Some(b)) = (extract_scale(from), extract_scale(to)) {
+        // extract_scale returns (sx_millis, sy_millis); blend linearly in millis.
+        let sx_lin = ((a.0 as f32) + ((b.0 as f32) - (a.0 as f32)) * t).round() as u32;
+        let sy_lin = ((a.1 as f32) + ((b.1 as f32) - (a.1 as f32)) * t).round() as u32;
+        style.transform_scale_x = sx_lin;
+        style.transform_scale_y = sy_lin;
+    }
+    // rotate(Ndeg)
+    if let (Some(a), Some(b)) = (extract_rotate_millideg(from), extract_rotate_millideg(to)) {
+        style.transform_rotate_millideg = lerp_i32(a, b, t);
+    }
+    // translate(Xpx, Ypx) — supports only px units
+    if let (Some((ax, ay)), Some((bx, by))) = (extract_translate_px(from), extract_translate_px(to)) {
+        style.transform_translate_x = lerp_i32(ax, bx, t);
+        style.transform_translate_y = lerp_i32(ay, by, t);
+    }
+}
+
+fn extract_scale(s: &str) -> Option<(u32, u32)> {
+    // Returns (sx_millis, sy_millis)
+    let lower = s.to_ascii_lowercase();
+    if let Some(start) = lower.find("scale(") {
+        let after = &lower[start + "scale(".len()..];
+        let close = after.find(')')?;
+        let inside = &after[..close];
+        let parts: Vec<&str> = inside.split(',').collect();
+        let sx = parts.first()?.trim().parse::<f32>().ok()?;
+        let sy = parts.get(1).and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(sx);
+        return Some(((sx * 1000.0) as u32, (sy * 1000.0) as u32));
+    }
+    if let Some(start) = lower.find("scalex(") {
+        let after = &lower[start + "scalex(".len()..];
+        let close = after.find(')')?;
+        let sx = after[..close].trim().parse::<f32>().ok()?;
+        return Some(((sx * 1000.0) as u32, 1000));
+    }
+    if let Some(start) = lower.find("scaley(") {
+        let after = &lower[start + "scaley(".len()..];
+        let close = after.find(')')?;
+        let sy = after[..close].trim().parse::<f32>().ok()?;
+        return Some((1000, (sy * 1000.0) as u32));
+    }
+    None
+}
+
+fn extract_rotate_millideg(s: &str) -> Option<i32> {
+    let lower = s.to_ascii_lowercase();
+    let start = lower.find("rotate(")?;
+    let after = &lower[start + "rotate(".len()..];
+    let close = after.find(')')?;
+    let token = after[..close].trim();
+    let num_str = token.trim_end_matches("deg").trim();
+    let deg = num_str.parse::<f32>().ok()?;
+    Some((deg * 1000.0) as i32)
+}
+
+fn extract_translate_px(s: &str) -> Option<(i32, i32)> {
+    let lower = s.to_ascii_lowercase();
+    let start = lower.find("translate(")?;
+    let after = &lower[start + "translate(".len()..];
+    let close = after.find(')')?;
+    let inside = &after[..close];
+    let parts: Vec<&str> = inside.split(',').collect();
+    let parse_px = |t: &str| -> Option<i32> {
+        let t = t.trim().trim_end_matches("px").trim();
+        t.parse::<f32>().ok().map(|v| v as i32)
+    };
+    let x = parse_px(parts.first()?)?;
+    let y = parts.get(1).and_then(|s| parse_px(s)).unwrap_or(0);
+    Some((x, y))
+}
+
+/// Find the two surrounding keyframe stops around `progress` (0..=1) and the local t.
+/// Returns (from_stop, to_stop, local_t).
+pub fn find_keyframe_segment(rule: &KeyframeRule, progress: f32) -> Option<(&KeyframeStop, &KeyframeStop, f32)> {
+    if rule.stops.is_empty() {
+        return None;
+    }
+    let p = (progress.clamp(0.0, 1.0) * 1000.0) as u32;
+    let mut from = &rule.stops[0];
+    let mut to = &rule.stops[rule.stops.len() - 1];
+    for window in rule.stops.windows(2) {
+        if window[0].position <= p && p <= window[1].position {
+            from = &window[0];
+            to = &window[1];
+            break;
+        }
+    }
+    let span = (to.position as i64 - from.position as i64).max(1);
+    let local = ((p as i64 - from.position as i64) as f32 / span as f32).clamp(0.0, 1.0);
+    Some((from, to, local))
+}
+
+/// Apply currently-running CSS transitions to `current` style, blending each animated
+/// property between the previous and current values per the transition spec. `start_ms`
+/// is when the property change was observed; `now_ms` is the current time. Property
+/// changes prior to the recorded start are considered complete.
+///
+/// MVP scope: opacity, color, background_color, transform translate/scale/rotate.
+pub fn apply_transitions_to_style(
+    current: &mut ComputedStyle,
+    previous: &ComputedStyle,
+    now_ms: u64,
+    start_ms: u64,
+) {
+    let specs = current.transitions.clone();
+    if specs.is_empty() {
+        return;
+    }
+    for spec in &specs {
+        let elapsed = (now_ms as i64) - (start_ms as i64) - (spec.delay_ms as i64);
+        if elapsed < 0 {
+            continue;
+        }
+        let dur = spec.duration_ms.max(1) as i64;
+        let raw_t = ((elapsed as f32) / (dur as f32)).clamp(0.0, 1.0);
+        let t = spec.timing_function.apply(raw_t);
+        let prop = spec.property.as_str();
+        let matches_prop = |name: &str| prop == "all" || prop == name;
+
+        if matches_prop("opacity") && previous.opacity != current.opacity {
+            let v = (previous.opacity as f32)
+                + ((current.opacity as f32) - (previous.opacity as f32)) * t;
+            current.opacity = v.round().clamp(0.0, 255.0) as u8;
+            current.effective_opacity = current.opacity;
+        }
+        if matches_prop("color") && previous.color != current.color {
+            current.color = lerp_color(previous.color, current.color, t);
+        }
+        if matches_prop("background-color")
+            && previous.background_color != current.background_color
+        {
+            if let (Some(a), Some(b)) = (previous.background_color, current.background_color) {
+                current.background_color = Some(lerp_color(a, b, t));
+            }
+        }
+        if matches_prop("transform") {
+            if previous.transform_translate_x != current.transform_translate_x {
+                current.transform_translate_x =
+                    lerp_i32(previous.transform_translate_x, current.transform_translate_x, t);
+            }
+            if previous.transform_translate_y != current.transform_translate_y {
+                current.transform_translate_y =
+                    lerp_i32(previous.transform_translate_y, current.transform_translate_y, t);
+            }
+            if previous.transform_scale_x != current.transform_scale_x {
+                current.transform_scale_x =
+                    lerp_u32(previous.transform_scale_x, current.transform_scale_x, t);
+            }
+            if previous.transform_scale_y != current.transform_scale_y {
+                current.transform_scale_y =
+                    lerp_u32(previous.transform_scale_y, current.transform_scale_y, t);
+            }
+            if previous.transform_rotate_millideg != current.transform_rotate_millideg {
+                current.transform_rotate_millideg = lerp_i32(
+                    previous.transform_rotate_millideg,
+                    current.transform_rotate_millideg,
+                    t,
+                );
+            }
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Stylesheet / Rule types
 // ─────────────────────────────────────────────────────────────────────────────
