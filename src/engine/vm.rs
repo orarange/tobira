@@ -378,6 +378,9 @@ pub struct Vm {
     /// Event listeners stored by (node_handle, event_type) → list of JS function GcRefs.
     /// Lives in the VM (not the Host) so GcRefs remain valid.
     event_listeners: HashMap<u32, HashMap<String, Vec<GcRef<JsObject>>>>,
+    /// Cache for stateless builtin method values (constructable=false, prototype=None).
+    /// Avoids a heap allocation on every DOM property access like element.appendChild.
+    builtin_method_cache: HashMap<u32, Value>,
 }
 
 impl Vm {
@@ -412,6 +415,7 @@ impl Vm {
             random_state,
             host,
             event_listeners: HashMap::new(),
+            builtin_method_cache: HashMap::new(),
         };
         vm.install_globals();
         vm
@@ -593,16 +597,17 @@ impl Vm {
                 *self.upvalue_cell(slot)?.borrow_mut() = value;
             }
             Opcode::GetGlobal(index) => {
-                let name = self.constant_name(index)?;
-                let value = self
-                    .globals
-                    .get(&name)
-                    .cloned()
-                    .ok_or_else(|| VmError::ReferenceError(format!("{name} is not defined")))?;
+                let value = {
+                    let name = self.constant_name(index)?;
+                    self.globals
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| VmError::ReferenceError(format!("{name} is not defined")))?
+                };
                 self.stack.push(value);
             }
             Opcode::SetGlobal(index) => {
-                let name = self.constant_name(index)?;
+                let name = self.constant_name(index)?.to_string();
                 let value = self.pop_value()?;
                 self.globals.insert(name, value);
             }
@@ -920,7 +925,10 @@ impl Vm {
             }
             Opcode::GetPropForCall(index) => {
                 let object = self.pop_value()?;
-                let key = PropertyKey::from(self.constant_name(index)?);
+                let key = {
+                    let name = self.constant_name(index)?;
+                    PropertyKey::from(name)
+                };
                 let callee = self.get_property_value(&object, &key)?;
                 self.stack.push(callee);
                 self.stack.push(object);
@@ -984,19 +992,19 @@ impl Vm {
         self.map_prototype = Some(map_prototype);
         self.set_prototype = Some(set_prototype);
 
-        let assert_value = self.allocate_builtin_value(BuiltinId::Assert, false, None);
+        let assert_value = self.allocate_builtin_method(BuiltinId::Assert);
         self.globals.insert("assert".to_string(), assert_value);
-        let call_spread = self.allocate_builtin_value(BuiltinId::CallSpread, false, None);
-        let construct_spread = self.allocate_builtin_value(BuiltinId::ConstructSpread, false, None);
-        let queue_microtask = self.allocate_builtin_value(BuiltinId::QueueMicrotask, false, None);
-        let set_timeout = self.allocate_builtin_value(BuiltinId::SetTimeout, false, None);
-        let clear_timeout = self.allocate_builtin_value(BuiltinId::ClearTimeout, false, None);
-        let set_interval = self.allocate_builtin_value(BuiltinId::SetInterval, false, None);
-        let clear_interval = self.allocate_builtin_value(BuiltinId::ClearInterval, false, None);
+        let call_spread = self.allocate_builtin_method(BuiltinId::CallSpread);
+        let construct_spread = self.allocate_builtin_method(BuiltinId::ConstructSpread);
+        let queue_microtask = self.allocate_builtin_method(BuiltinId::QueueMicrotask);
+        let set_timeout = self.allocate_builtin_method(BuiltinId::SetTimeout);
+        let clear_timeout = self.allocate_builtin_method(BuiltinId::ClearTimeout);
+        let set_interval = self.allocate_builtin_method(BuiltinId::SetInterval);
+        let clear_interval = self.allocate_builtin_method(BuiltinId::ClearInterval);
         let request_animation_frame =
-            self.allocate_builtin_value(BuiltinId::RequestAnimationFrame, false, None);
+            self.allocate_builtin_method(BuiltinId::RequestAnimationFrame);
         let cancel_animation_frame =
-            self.allocate_builtin_value(BuiltinId::CancelAnimationFrame, false, None);
+            self.allocate_builtin_method(BuiltinId::CancelAnimationFrame);
         self.globals
             .insert("__callSpread".to_string(), call_spread.clone());
         self.globals
@@ -1059,7 +1067,7 @@ impl Vm {
             true,
             Some(promise_prototype),
         );
-        let number_ctor = self.allocate_builtin_value(BuiltinId::NumberParseInt, false, None);
+        let number_ctor = self.allocate_builtin_method(BuiltinId::NumberParseInt);
         let math_object = self.allocate_ordinary_object(Some(object_prototype));
         let json_object = self.allocate_ordinary_object(Some(object_prototype));
 
@@ -1113,14 +1121,14 @@ impl Vm {
         self.globals.insert("self".to_string(), document_obj); // some libraries use self
 
         // Encoding globals
-        let btoa = self.allocate_builtin_value(BuiltinId::Btoa, false, None);
-        let atob = self.allocate_builtin_value(BuiltinId::Atob, false, None);
+        let btoa = self.allocate_builtin_method(BuiltinId::Btoa);
+        let atob = self.allocate_builtin_method(BuiltinId::Atob);
         self.globals.insert("btoa".to_string(), btoa);
         self.globals.insert("atob".to_string(), atob);
 
         // Idle callback globals
-        let request_idle = self.allocate_builtin_value(BuiltinId::RequestIdleCallback, false, None);
-        let cancel_idle = self.allocate_builtin_value(BuiltinId::CancelIdleCallback, false, None);
+        let request_idle = self.allocate_builtin_method(BuiltinId::RequestIdleCallback);
+        let cancel_idle = self.allocate_builtin_method(BuiltinId::CancelIdleCallback);
         self.globals.insert("requestIdleCallback".to_string(), request_idle);
         self.globals.insert("cancelIdleCallback".to_string(), cancel_idle);
 
@@ -1444,6 +1452,19 @@ impl Vm {
             );
         }
         Value::Object(object_ref)
+    }
+
+    /// Cached version of allocate_builtin_value for stateless methods (constructable=false, prototype=None).
+    /// Eliminates the heap allocation on every DOM property access (e.g. element.appendChild).
+    #[inline]
+    fn allocate_builtin_method(&mut self, builtin: BuiltinId) -> Value {
+        let key = builtin as u32;
+        if let Some(v) = self.builtin_method_cache.get(&key) {
+            return v.clone();
+        }
+        let v = self.allocate_builtin_value(builtin, false, None);
+        self.builtin_method_cache.insert(key, v.clone());
+        v
     }
 
     fn allocate_callable_object(
@@ -2009,14 +2030,21 @@ impl Vm {
         value: Value,
         is_throw: bool,
     ) -> Result<(), VmError> {
-        let context = match self
-            .heap
-            .objects()
-            .get(resumer)
-            .map(|object| object.kind.clone())
-        {
-            Some(ObjectKind::AsyncResumer(context)) => *context,
-            _ => {
+        // Extract AsyncContext by swapping the kind to Ordinary — avoids cloning the Box
+        let context = match self.heap.objects_mut().get_mut(resumer) {
+            Some(obj) => {
+                let kind = std::mem::replace(&mut obj.kind, ObjectKind::Ordinary);
+                match kind {
+                    ObjectKind::AsyncResumer(ctx) => *ctx,
+                    other => {
+                        obj.kind = other; // restore if wrong type
+                        return Err(VmError::TypeError(
+                            "invalid async resumer continuation".to_string(),
+                        ));
+                    }
+                }
+            }
+            None => {
                 return Err(VmError::TypeError(
                     "invalid async resumer continuation".to_string(),
                 ));
@@ -2747,9 +2775,9 @@ impl Vm {
             .ok_or_else(|| VmError::RangeError("no current this binding".to_string()))
     }
 
-    fn constant_name(&self, index: u16) -> Result<String, VmError> {
+    fn constant_name(&self, index: u16) -> Result<&str, VmError> {
         match self.current_proto()?.constants.get(index as usize) {
-            Some(Constant::String(value)) => Ok(value.clone()),
+            Some(Constant::String(value)) => Ok(value.as_str()),
             Some(Constant::Number(_)) => Err(VmError::TypeError(format!(
                 "constant {index} was not a string"
             ))),
@@ -3172,9 +3200,12 @@ impl Vm {
         receiver: &Value,
         key: &PropertyKey,
     ) -> Result<Value, VmError> {
-        // Host objects route through the DOM dispatch table first
-        let kind = self.heap.objects().get(object).map(|o| o.kind.clone());
-        if let Some(ObjectKind::Host(slot)) = kind {
+        // Host objects route through the DOM dispatch table first.
+        // Copy only HostObjectSlot (Copy type) to avoid expensive ObjectKind::clone()
+        // which would clone the Vec contents of Map/Set/Promise objects.
+        let host_slot = self.heap.objects().get(object)
+            .and_then(|o| if let ObjectKind::Host(slot) = o.kind { Some(slot) } else { None });
+        if let Some(slot) = host_slot {
             return self.get_host_property(slot, key);
         }
 
@@ -3232,9 +3263,11 @@ impl Vm {
         key: PropertyKey,
         value: Value,
     ) -> Result<(), VmError> {
-        // Host objects route writes through the DOM dispatch table
-        let kind = self.heap.objects().get(object).map(|o| o.kind.clone());
-        if let Some(ObjectKind::Host(slot)) = kind {
+        // Host objects route writes through the DOM dispatch table.
+        // Copy only HostObjectSlot (Copy type) to avoid expensive ObjectKind::clone().
+        let host_slot = self.heap.objects().get(object)
+            .and_then(|o| if let ObjectKind::Host(slot) = o.kind { Some(slot) } else { None });
+        if let Some(slot) = host_slot {
             return self.set_host_property(slot, key, value);
         }
 
@@ -3304,13 +3337,9 @@ impl Vm {
         object: GcRef<JsObject>,
         key: &PropertyKey,
     ) -> Result<(), VmError> {
-        let kind = self
-            .heap
-            .objects()
-            .get(object)
-            .map(|object| object.kind.clone())
-            .unwrap_or(ObjectKind::Ordinary);
-        if kind != ObjectKind::Array {
+        // Cheap discriminant check — no Vec clone needed
+        let is_array = matches!(self.heap.objects().get(object).map(|o| &o.kind), Some(ObjectKind::Array));
+        if !is_array {
             return Ok(());
         }
 
@@ -4586,14 +4615,12 @@ impl Vm {
             BuiltinId::MapProtoForEach => {
                 let object = self.builtin_object_this(&this_value, "Map.prototype.forEach")?;
                 let callback = args.first().cloned().unwrap_or(Value::Undefined);
-                let entries = match self
-                    .heap
-                    .objects()
-                    .get(object)
-                    .map(|data| data.kind.clone())
-                {
-                    Some(ObjectKind::Map(entries)) | Some(ObjectKind::WeakMap(entries)) => entries,
-                    _ => Vec::new(),
+                let entries: Vec<(Value, Value)> = match self.heap.objects().get(object) {
+                    Some(data) => match &data.kind {
+                        ObjectKind::Map(entries) | ObjectKind::WeakMap(entries) => entries.clone(),
+                        _ => Vec::new(),
+                    },
+                    None => Vec::new(),
                 };
                 for (key, value) in entries {
                     let _ = self.call_value_sync(
@@ -4606,14 +4633,12 @@ impl Vm {
             }
             BuiltinId::MapProtoEntries => {
                 let object = self.builtin_object_this(&this_value, "Map.prototype.entries")?;
-                let entries = match self
-                    .heap
-                    .objects()
-                    .get(object)
-                    .map(|data| data.kind.clone())
-                {
-                    Some(ObjectKind::Map(entries)) | Some(ObjectKind::WeakMap(entries)) => entries,
-                    _ => Vec::new(),
+                let entries: Vec<(Value, Value)> = match self.heap.objects().get(object) {
+                    Some(data) => match &data.kind {
+                        ObjectKind::Map(entries) | ObjectKind::WeakMap(entries) => entries.clone(),
+                        _ => Vec::new(),
+                    },
+                    None => Vec::new(),
                 };
                 let mut pairs = Vec::with_capacity(entries.len());
                 for (key, value) in entries {
@@ -4623,29 +4648,29 @@ impl Vm {
             }
             BuiltinId::MapProtoKeys => {
                 let object = self.builtin_object_this(&this_value, "Map.prototype.keys")?;
-                let entries = match self
-                    .heap
-                    .objects()
-                    .get(object)
-                    .map(|data| data.kind.clone())
-                {
-                    Some(ObjectKind::Map(entries)) | Some(ObjectKind::WeakMap(entries)) => entries,
-                    _ => Vec::new(),
+                let keys: Vec<Value> = match self.heap.objects().get(object) {
+                    Some(data) => match &data.kind {
+                        ObjectKind::Map(entries) | ObjectKind::WeakMap(entries) => {
+                            entries.iter().map(|(k, _)| k.clone()).collect()
+                        }
+                        _ => Vec::new(),
+                    },
+                    None => Vec::new(),
                 };
-                self.make_array_from_values(entries.into_iter().map(|(key, _)| key).collect())
+                self.make_array_from_values(keys)
             }
             BuiltinId::MapProtoValues => {
                 let object = self.builtin_object_this(&this_value, "Map.prototype.values")?;
-                let entries = match self
-                    .heap
-                    .objects()
-                    .get(object)
-                    .map(|data| data.kind.clone())
-                {
-                    Some(ObjectKind::Map(entries)) | Some(ObjectKind::WeakMap(entries)) => entries,
-                    _ => Vec::new(),
+                let values: Vec<Value> = match self.heap.objects().get(object) {
+                    Some(data) => match &data.kind {
+                        ObjectKind::Map(entries) | ObjectKind::WeakMap(entries) => {
+                            entries.iter().map(|(_, v)| v.clone()).collect()
+                        }
+                        _ => Vec::new(),
+                    },
+                    None => Vec::new(),
                 };
-                self.make_array_from_values(entries.into_iter().map(|(_, value)| value).collect())
+                self.make_array_from_values(values)
             }
             BuiltinId::SetProtoAdd => {
                 let object = self.builtin_object_this(&this_value, "Set.prototype.add")?;
@@ -4675,14 +4700,12 @@ impl Vm {
             BuiltinId::SetProtoForEach => {
                 let object = self.builtin_object_this(&this_value, "Set.prototype.forEach")?;
                 let callback = args.first().cloned().unwrap_or(Value::Undefined);
-                let values = match self
-                    .heap
-                    .objects()
-                    .get(object)
-                    .map(|data| data.kind.clone())
-                {
-                    Some(ObjectKind::Set(values)) | Some(ObjectKind::WeakSet(values)) => values,
-                    _ => Vec::new(),
+                let values: Vec<Value> = match self.heap.objects().get(object) {
+                    Some(data) => match &data.kind {
+                        ObjectKind::Set(values) | ObjectKind::WeakSet(values) => values.clone(),
+                        _ => Vec::new(),
+                    },
+                    None => Vec::new(),
                 };
                 for value in values {
                     let _ = self.call_value_sync(
@@ -4695,14 +4718,12 @@ impl Vm {
             }
             BuiltinId::SetProtoValues => {
                 let object = self.builtin_object_this(&this_value, "Set.prototype.values")?;
-                let values = match self
-                    .heap
-                    .objects()
-                    .get(object)
-                    .map(|data| data.kind.clone())
-                {
-                    Some(ObjectKind::Set(values)) | Some(ObjectKind::WeakSet(values)) => values,
-                    _ => Vec::new(),
+                let values: Vec<Value> = match self.heap.objects().get(object) {
+                    Some(data) => match &data.kind {
+                        ObjectKind::Set(values) | ObjectKind::WeakSet(values) => values.clone(),
+                        _ => Vec::new(),
+                    },
+                    None => Vec::new(),
                 };
                 self.make_array_from_values(values)
             }
@@ -5947,26 +5968,26 @@ impl Vm {
                 self.define_data_property(hist, PropertyKey::from("length"), Value::Number(1.0), true, true, true);
                 Ok(Value::Object(hist))
             }
-            "scrollTo" | "scroll" => Ok(self.allocate_builtin_value(BuiltinId::WindowScrollTo, false, None)),
-            "scrollBy" => Ok(self.allocate_builtin_value(BuiltinId::WindowScrollBy, false, None)),
-            "getComputedStyle" => Ok(self.allocate_builtin_value(BuiltinId::WindowGetComputedStyle, false, None)),
-            "matchMedia" => Ok(self.allocate_builtin_value(BuiltinId::WindowMatchMedia, false, None)),
+            "scrollTo" | "scroll" => Ok(self.allocate_builtin_method(BuiltinId::WindowScrollTo)),
+            "scrollBy" => Ok(self.allocate_builtin_method(BuiltinId::WindowScrollBy)),
+            "getComputedStyle" => Ok(self.allocate_builtin_method(BuiltinId::WindowGetComputedStyle)),
+            "matchMedia" => Ok(self.allocate_builtin_method(BuiltinId::WindowMatchMedia)),
             "addEventListener" | "removeEventListener" => {
-                Ok(self.allocate_builtin_value(BuiltinId::DomNodeAddEventListener, false, None))
+                Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener))
             }
             "performance" => {
                 let perf = self.allocate_ordinary_object(None);
-                let now_fn = self.allocate_builtin_value(BuiltinId::PerformanceNow, false, None);
+                let now_fn = self.allocate_builtin_method(BuiltinId::PerformanceNow);
                 self.define_data_property(perf, PropertyKey::from("now"), now_fn, true, true, true);
                 let timing = self.allocate_ordinary_object(None);
                 self.define_data_property(timing, PropertyKey::from("navigationStart"), Value::Number(0.0), true, true, true);
                 self.define_data_property(perf, PropertyKey::from("timing"), Value::Object(timing), true, true, true);
                 Ok(Value::Object(perf))
             }
-            "requestIdleCallback" => Ok(self.allocate_builtin_value(BuiltinId::RequestIdleCallback, false, None)),
-            "cancelIdleCallback" => Ok(self.allocate_builtin_value(BuiltinId::CancelIdleCallback, false, None)),
-            "btoa" => Ok(self.allocate_builtin_value(BuiltinId::Btoa, false, None)),
-            "atob" => Ok(self.allocate_builtin_value(BuiltinId::Atob, false, None)),
+            "requestIdleCallback" => Ok(self.allocate_builtin_method(BuiltinId::RequestIdleCallback)),
+            "cancelIdleCallback" => Ok(self.allocate_builtin_method(BuiltinId::CancelIdleCallback)),
+            "btoa" => Ok(self.allocate_builtin_method(BuiltinId::Btoa)),
+            "atob" => Ok(self.allocate_builtin_method(BuiltinId::Atob)),
             "localStorage" => Ok(self.make_storage_object(super::host::StorageAreaKind::Local)),
             "sessionStorage" => Ok(self.make_storage_object(super::host::StorageAreaKind::Session)),
             "getSelection" => {
@@ -5975,7 +5996,7 @@ impl Vm {
                 Ok(Value::Object(null_fn))
             }
             "open" | "close" | "focus" | "blur" | "resizeTo" | "resizeBy" | "moveTo" | "moveBy" => {
-                Ok(self.allocate_builtin_value(BuiltinId::DomNodeAddEventListener, false, None)) // no-op stub
+                Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener)) // no-op stub
             }
             "crypto" => {
                 let crypto = self.allocate_ordinary_object(None);
@@ -6057,17 +6078,17 @@ impl Vm {
                 let res = self.host.location(WindowId(0));
                 Ok(match res { Ok(l) => self.make_string_value(&l.hostname), _ => self.make_string_value("") })
             }
-            "querySelector" => Ok(self.allocate_builtin_value(BuiltinId::DomDocQuerySelector, false, None)),
-            "querySelectorAll" => Ok(self.allocate_builtin_value(BuiltinId::DomDocQuerySelectorAll, false, None)),
-            "getElementById" => Ok(self.allocate_builtin_value(BuiltinId::DomDocGetElementById, false, None)),
-            "getElementsByClassName" => Ok(self.allocate_builtin_value(BuiltinId::DomDocGetElementsByClassName, false, None)),
-            "getElementsByTagName" => Ok(self.allocate_builtin_value(BuiltinId::DomDocGetElementsByTagName, false, None)),
-            "createElement" => Ok(self.allocate_builtin_value(BuiltinId::DomDocCreateElement, false, None)),
-            "createTextNode" => Ok(self.allocate_builtin_value(BuiltinId::DomDocCreateTextNode, false, None)),
-            "createDocumentFragment" => Ok(self.allocate_builtin_value(BuiltinId::DomDocCreateFragment, false, None)),
-            "write" | "writeln" => Ok(self.allocate_builtin_value(BuiltinId::DomDocWrite, false, None)),
+            "querySelector" => Ok(self.allocate_builtin_method(BuiltinId::DomDocQuerySelector)),
+            "querySelectorAll" => Ok(self.allocate_builtin_method(BuiltinId::DomDocQuerySelectorAll)),
+            "getElementById" => Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementById)),
+            "getElementsByClassName" => Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementsByClassName)),
+            "getElementsByTagName" => Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementsByTagName)),
+            "createElement" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateElement)),
+            "createTextNode" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateTextNode)),
+            "createDocumentFragment" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateFragment)),
+            "write" | "writeln" => Ok(self.allocate_builtin_method(BuiltinId::DomDocWrite)),
             "addEventListener" | "removeEventListener" => {
-                Ok(self.allocate_builtin_value(BuiltinId::DomNodeAddEventListener, false, None))
+                Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener))
             }
             // Common document properties
             "cookie" => Ok(self.make_string_value("")),
@@ -6232,31 +6253,31 @@ impl Vm {
                 let res = self.host.location(WindowId(0));
                 Ok(match res { Ok(l) => self.make_string_value(&l.href), _ => self.make_string_value("") })
             }
-            "getAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeGetAttribute, false, None)),
-            "setAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeSetAttribute, false, None)),
-            "removeAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeRemoveAttribute, false, None)),
-            "hasAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeHasAttribute, false, None)),
-            "toggleAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeToggleAttribute, false, None)),
-            "getAttributeNames" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeGetAttributeNames, false, None)),
-            "appendChild" | "append" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeAppendChild, false, None)),
-            "prepend" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeInsertBefore, false, None)),
-            "insertBefore" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeInsertBefore, false, None)),
-            "removeChild" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeRemoveChild, false, None)),
-            "replaceChild" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeReplaceChild, false, None)),
-            "cloneNode" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeCloneNode, false, None)),
-            "remove" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeRemove, false, None)),
-            "querySelector" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeQuerySelector, false, None)),
-            "querySelectorAll" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeQuerySelectorAll, false, None)),
-            "closest" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeClosest, false, None)),
-            "matches" | "webkitMatchesSelector" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeMatches, false, None)),
-            "contains" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeContains, false, None)),
-            "getBoundingClientRect" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeGetBoundingClientRect, false, None)),
-            "scrollIntoView" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeScrollIntoView, false, None)),
-            "focus" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeFocus, false, None)),
-            "blur" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeBlur, false, None)),
-            "click" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeClick, false, None)),
-            "addEventListener" | "removeEventListener" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeAddEventListener, false, None)),
-            "dispatchEvent" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeDispatchEvent, false, None)),
+            "getAttribute" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeGetAttribute)),
+            "setAttribute" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeSetAttribute)),
+            "removeAttribute" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemoveAttribute)),
+            "hasAttribute" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeHasAttribute)),
+            "toggleAttribute" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeToggleAttribute)),
+            "getAttributeNames" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeGetAttributeNames)),
+            "appendChild" | "append" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeAppendChild)),
+            "prepend" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeInsertBefore)),
+            "insertBefore" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeInsertBefore)),
+            "removeChild" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemoveChild)),
+            "replaceChild" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeReplaceChild)),
+            "cloneNode" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeCloneNode)),
+            "remove" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemove)),
+            "querySelector" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeQuerySelector)),
+            "querySelectorAll" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeQuerySelectorAll)),
+            "closest" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeClosest)),
+            "matches" | "webkitMatchesSelector" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeMatches)),
+            "contains" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeContains)),
+            "getBoundingClientRect" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeGetBoundingClientRect)),
+            "scrollIntoView" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeScrollIntoView)),
+            "focus" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeFocus)),
+            "blur" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeBlur)),
+            "click" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeClick)),
+            "addEventListener" | "removeEventListener" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener)),
+            "dispatchEvent" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeDispatchEvent)),
             _ => Ok(Value::Undefined),
         }
     }
@@ -6273,22 +6294,22 @@ impl Vm {
                 let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
             }
-            "add" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListAdd, false, None)),
-            "remove" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListRemove, false, None)),
-            "contains" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListContains, false, None)),
-            "toggle" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListToggle, false, None)),
-            "replace" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListReplace, false, None)),
-            "item" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListItem, false, None)),
-            "toString" => Ok(self.allocate_builtin_value(BuiltinId::DomClassListToString, false, None)),
+            "add" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListAdd)),
+            "remove" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListRemove)),
+            "contains" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListContains)),
+            "toggle" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListToggle)),
+            "replace" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListReplace)),
+            "item" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListItem)),
+            "toString" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListToString)),
             _ => Ok(Value::Undefined),
         }
     }
 
     fn get_style_property(&mut self, name: String) -> Result<Value, VmError> {
         match name.as_str() {
-            "getPropertyValue" => Ok(self.allocate_builtin_value(BuiltinId::DomStyleGetProperty, false, None)),
-            "setProperty" => Ok(self.allocate_builtin_value(BuiltinId::DomStyleSetProperty, false, None)),
-            "removeProperty" => Ok(self.allocate_builtin_value(BuiltinId::DomStyleRemoveProperty, false, None)),
+            "getPropertyValue" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleGetProperty)),
+            "setProperty" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleSetProperty)),
+            "removeProperty" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleRemoveProperty)),
             _ => Ok(self.make_string_value("")),
         }
     }
@@ -6400,11 +6421,11 @@ impl Vm {
                 });
                 Ok(match res { Ok(StorageResult::Len(n)) => Value::Number(n as f64), _ => Value::Number(0.0) })
             }
-            "getItem" => Ok(self.allocate_builtin_value(BuiltinId::StorageGetItem, false, None)),
-            "setItem" => Ok(self.allocate_builtin_value(BuiltinId::StorageSetItem, false, None)),
-            "removeItem" => Ok(self.allocate_builtin_value(BuiltinId::StorageRemoveItem, false, None)),
-            "clear" => Ok(self.allocate_builtin_value(BuiltinId::StorageClear, false, None)),
-            "key" => Ok(self.allocate_builtin_value(BuiltinId::StorageKey, false, None)),
+            "getItem" => Ok(self.allocate_builtin_method(BuiltinId::StorageGetItem)),
+            "setItem" => Ok(self.allocate_builtin_method(BuiltinId::StorageSetItem)),
+            "removeItem" => Ok(self.allocate_builtin_method(BuiltinId::StorageRemoveItem)),
+            "clear" => Ok(self.allocate_builtin_method(BuiltinId::StorageClear)),
+            "key" => Ok(self.allocate_builtin_method(BuiltinId::StorageKey)),
             _ => {
                 // Named property access: storage[key]
                 let res = self.host.storage(StorageOp::Get {
@@ -6426,7 +6447,12 @@ impl From<&str> for PropertyKey {
 
 impl From<String> for PropertyKey {
     fn from(value: String) -> Self {
-        Vm::property_key_from_text(&value)
+        if let Ok(index) = value.parse::<u32>() {
+            if index.to_string() == value {
+                return PropertyKey::Index(index);
+            }
+        }
+        PropertyKey::String(value)
     }
 }
 
