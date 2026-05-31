@@ -197,6 +197,18 @@ enum BuiltinId {
     DomStyleGetProperty,
     DomStyleSetProperty,
     DomStyleRemoveProperty,
+    // performance, idle, encoding
+    PerformanceNow,
+    RequestIdleCallback,
+    CancelIdleCallback,
+    Btoa,
+    Atob,
+    // localStorage / sessionStorage methods
+    StorageGetItem,
+    StorageSetItem,
+    StorageRemoveItem,
+    StorageClear,
+    StorageKey,
     // Window
     WindowScrollTo,
     WindowScrollBy,
@@ -1099,6 +1111,18 @@ impl Vm {
         self.globals.insert("window".to_string(), window_obj.clone());
         self.globals.insert("globalThis".to_string(), window_obj);
         self.globals.insert("self".to_string(), document_obj); // some libraries use self
+
+        // Encoding globals
+        let btoa = self.allocate_builtin_value(BuiltinId::Btoa, false, None);
+        let atob = self.allocate_builtin_value(BuiltinId::Atob, false, None);
+        self.globals.insert("btoa".to_string(), btoa);
+        self.globals.insert("atob".to_string(), atob);
+
+        // Idle callback globals
+        let request_idle = self.allocate_builtin_value(BuiltinId::RequestIdleCallback, false, None);
+        let cancel_idle = self.allocate_builtin_value(BuiltinId::CancelIdleCallback, false, None);
+        self.globals.insert("requestIdleCallback".to_string(), request_idle);
+        self.globals.insert("cancelIdleCallback".to_string(), cancel_idle);
 
         // console object
         let console_object = self.allocate_ordinary_object(Some(object_prototype));
@@ -5034,6 +5058,90 @@ impl Vm {
             BuiltinId::DomStyleRemoveProperty => {
                 Ok(self.make_string_value(""))
             }
+            // performance.now()
+            BuiltinId::PerformanceNow => {
+                let ms = self.host.now().monotonic_ms as f64;
+                Ok(Value::Number(ms))
+            }
+            // requestIdleCallback — run callback synchronously
+            BuiltinId::RequestIdleCallback => {
+                let cb = args.first().cloned().unwrap_or(Value::Undefined);
+                if self.is_callable_value(&cb) {
+                    let deadline = self.allocate_ordinary_object(None);
+                    self.define_data_property(deadline, PropertyKey::from("didTimeout"), Value::Bool(false), true, true, true);
+                    let _ = self.call_value_sync(cb, Value::Undefined, vec![Value::Object(deadline)]);
+                }
+                Ok(Value::Number(0.0))
+            }
+            BuiltinId::CancelIdleCallback => Ok(Value::Undefined),
+            // btoa / atob
+            BuiltinId::Btoa => {
+                let s = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                Ok(self.make_string_value(&base64_encode(s.as_bytes())))
+            }
+            BuiltinId::Atob => {
+                let s = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let decoded = base64_decode(&s).unwrap_or_default();
+                Ok(self.make_string_value(&String::from_utf8_lossy(&decoded)))
+            }
+            // Storage item ops (this = Storage host object with kind encoded in handle)
+            BuiltinId::StorageGetItem => {
+                use super::host::{StorageAreaKind, StorageAreaScope, StorageOp, StorageResult};
+                let key = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let kind = self.storage_kind_from_host_val(&this_value);
+                let res = self.host.storage(StorageOp::Get {
+                    kind,
+                    scope: StorageAreaScope::Window(WindowId(0)),
+                    key,
+                });
+                Ok(match res { Ok(StorageResult::Value(Some(v))) => self.make_string_value(&v), _ => Value::Null })
+            }
+            BuiltinId::StorageSetItem => {
+                use super::host::{StorageAreaScope, StorageOp};
+                let key = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let val = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+                let kind = self.storage_kind_from_host_val(&this_value);
+                let _ = self.host.storage(StorageOp::Set {
+                    kind,
+                    scope: StorageAreaScope::Window(WindowId(0)),
+                    key,
+                    value: val,
+                });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::StorageRemoveItem => {
+                use super::host::{StorageAreaScope, StorageOp};
+                let key = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let kind = self.storage_kind_from_host_val(&this_value);
+                let _ = self.host.storage(StorageOp::Remove {
+                    kind,
+                    scope: StorageAreaScope::Window(WindowId(0)),
+                    key,
+                });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::StorageClear => {
+                use super::host::{StorageAreaScope, StorageOp};
+                let kind = self.storage_kind_from_host_val(&this_value);
+                let _ = self.host.storage(StorageOp::Clear {
+                    kind,
+                    scope: StorageAreaScope::Window(WindowId(0)),
+                });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::StorageKey => {
+                use super::host::{StorageAreaScope, StorageOp, StorageResult};
+                let index = args.first().map(|v| self.to_number(v) as usize).unwrap_or(0);
+                let kind = self.storage_kind_from_host_val(&this_value);
+                let res = self.host.storage(StorageOp::Keys {
+                    kind,
+                    scope: StorageAreaScope::Window(WindowId(0)),
+                });
+                Ok(match res {
+                    Ok(StorageResult::Keys(keys)) => keys.get(index).map(|k| self.make_string_value(k)).unwrap_or(Value::Null),
+                    _ => Value::Null,
+                })
+            }
             // window
             BuiltinId::WindowScrollTo | BuiltinId::WindowScrollBy => {
                 let y = args.get(1).map(|v| self.to_number(v)).unwrap_or(0.0);
@@ -5795,14 +5903,9 @@ impl Vm {
 
     fn get_window_property(&mut self, name: String) -> Result<Value, VmError> {
         match name.as_str() {
-            "document" => Ok(self.make_host_object(HostObjectSlot {
-                class: HostObjectClass::Document,
-                interface_name: "HTMLDocument",
-                handle: 0,
-                dispatch: HostDispatch::Ordinary,
-                supports_indexed_properties: false,
-                supports_named_properties: false,
-            })),
+            // Return the same GcRef as the document global so `window.document === document`
+            "document" => Ok(self.globals.get("document").cloned().unwrap_or(Value::Undefined)),
+            "window" | "self" | "globalThis" => Ok(self.globals.get("window").cloned().unwrap_or(Value::Undefined)),
             "innerWidth" => {
                 let v = self.host.window_metrics(WindowId(0)).map(|m| m.inner_width).unwrap_or(0.0);
                 Ok(Value::Number(v))
@@ -5850,6 +5953,35 @@ impl Vm {
             "addEventListener" | "removeEventListener" => {
                 Ok(self.allocate_builtin_value(BuiltinId::DomNodeAddEventListener, false, None))
             }
+            "performance" => {
+                let perf = self.allocate_ordinary_object(None);
+                let now_fn = self.allocate_builtin_value(BuiltinId::PerformanceNow, false, None);
+                self.define_data_property(perf, PropertyKey::from("now"), now_fn, true, true, true);
+                let timing = self.allocate_ordinary_object(None);
+                self.define_data_property(timing, PropertyKey::from("navigationStart"), Value::Number(0.0), true, true, true);
+                self.define_data_property(perf, PropertyKey::from("timing"), Value::Object(timing), true, true, true);
+                Ok(Value::Object(perf))
+            }
+            "requestIdleCallback" => Ok(self.allocate_builtin_value(BuiltinId::RequestIdleCallback, false, None)),
+            "cancelIdleCallback" => Ok(self.allocate_builtin_value(BuiltinId::CancelIdleCallback, false, None)),
+            "btoa" => Ok(self.allocate_builtin_value(BuiltinId::Btoa, false, None)),
+            "atob" => Ok(self.allocate_builtin_value(BuiltinId::Atob, false, None)),
+            "localStorage" => Ok(self.make_storage_object(super::host::StorageAreaKind::Local)),
+            "sessionStorage" => Ok(self.make_storage_object(super::host::StorageAreaKind::Session)),
+            "getSelection" => {
+                // Return a function that returns null (selection not implemented)
+                let null_fn = self.allocate_ordinary_object(None);
+                Ok(Value::Object(null_fn))
+            }
+            "open" | "close" | "focus" | "blur" | "resizeTo" | "resizeBy" | "moveTo" | "moveBy" => {
+                Ok(self.allocate_builtin_value(BuiltinId::DomNodeAddEventListener, false, None)) // no-op stub
+            }
+            "crypto" => {
+                let crypto = self.allocate_ordinary_object(None);
+                Ok(Value::Object(crypto))
+            }
+            "isSecureContext" => Ok(Value::Bool(false)),
+            "crossOriginIsolated" => Ok(Value::Bool(false)),
             _ => Ok(self.globals.get(&name).cloned().unwrap_or(Value::Undefined)),
         }
     }
@@ -5935,6 +6067,23 @@ impl Vm {
             "write" | "writeln" => Ok(self.allocate_builtin_value(BuiltinId::DomDocWrite, false, None)),
             "addEventListener" | "removeEventListener" => {
                 Ok(self.allocate_builtin_value(BuiltinId::DomNodeAddEventListener, false, None))
+            }
+            // Common document properties
+            "cookie" => Ok(self.make_string_value("")),
+            "referrer" => Ok(self.make_string_value("")),
+            "hidden" => Ok(Value::Bool(false)),
+            "visibilityState" => Ok(self.make_string_value("visible")),
+            "activeElement" => {
+                let res = self.host.read_dom(DomRead::ActiveElement { window: WindowId(0) });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            "createEvent" | "createComment" => {
+                // Return a stub event/comment object
+                Ok(Value::Object(self.allocate_ordinary_object(None)))
+            }
+            "implementation" => {
+                let impl_obj = self.allocate_ordinary_object(None);
+                Ok(Value::Object(impl_obj))
             }
             _ => Ok(Value::Undefined),
         }
@@ -6071,6 +6220,17 @@ impl Vm {
                 let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: false });
                 Ok(Value::Number(match res { Ok(DomReadResult::Nodes(ids)) => ids.len() as f64, _ => 0.0 }))
             }
+            // Geometry / layout properties (all return 0 — layout not wired yet)
+            "offsetWidth" | "offsetHeight" | "offsetLeft" | "offsetTop"
+            | "clientWidth" | "clientHeight" | "clientLeft" | "clientTop"
+            | "scrollWidth" | "scrollHeight" | "scrollLeft" | "scrollTop" => Ok(Value::Number(0.0)),
+            "offsetParent" => Ok(Value::Null),
+            "isConnected" => Ok(Value::Bool(true)),
+            "ownerDocument" => Ok(self.globals.get("document").cloned().unwrap_or(Value::Undefined)),
+            "baseURI" => {
+                let res = self.host.location(WindowId(0));
+                Ok(match res { Ok(l) => self.make_string_value(&l.href), _ => self.make_string_value("") })
+            }
             "getAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeGetAttribute, false, None)),
             "setAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeSetAttribute, false, None)),
             "removeAttribute" => Ok(self.allocate_builtin_value(BuiltinId::DomNodeRemoveAttribute, false, None)),
@@ -6183,6 +6343,45 @@ impl Vm {
             _ => {}
         }
         Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Storage helpers
+    // ----------------------------------------------------------------
+
+    fn make_storage_object(&mut self, kind: super::host::StorageAreaKind) -> Value {
+        let handle: u64 = match kind {
+            super::host::StorageAreaKind::Local => 0,
+            super::host::StorageAreaKind::Session => 1,
+            super::host::StorageAreaKind::Cookie => 2,
+        };
+        let obj = self.heap.allocate_object(JsObject {
+            kind: ObjectKind::Host(HostObjectSlot {
+                class: HostObjectClass::StorageArea,
+                interface_name: "Storage",
+                handle,
+                dispatch: HostDispatch::Ordinary,
+                supports_indexed_properties: false,
+                supports_named_properties: false,
+            }),
+            ..JsObject::default()
+        });
+        Value::Object(obj)
+    }
+
+    fn storage_kind_from_host_val(&self, value: &Value) -> super::host::StorageAreaKind {
+        if let Value::Object(obj_ref) = value {
+            if let Some(obj) = self.heap.objects().get(*obj_ref) {
+                if let ObjectKind::Host(slot) = &obj.kind {
+                    return match slot.handle {
+                        1 => super::host::StorageAreaKind::Session,
+                        2 => super::host::StorageAreaKind::Cookie,
+                        _ => super::host::StorageAreaKind::Local,
+                    };
+                }
+            }
+        }
+        super::host::StorageAreaKind::Local
     }
 }
 
@@ -6465,9 +6664,61 @@ mod tests {
     }
 }
 
+    // ----------------------------------------------------------------
+    // Storage helpers
+    // ----------------------------------------------------------------
+
 // ---------------------------------------------------------------------------
 // CSS inline-style helpers (free functions, no VM state needed)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Base64 helpers (no external dependency)
+// ---------------------------------------------------------------------------
+
+const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let val = (b0 << 16) | (b1 << 8) | b2;
+        out.push(BASE64_CHARS[((val >> 18) & 63) as usize] as char);
+        out.push(BASE64_CHARS[((val >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { BASE64_CHARS[((val >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { BASE64_CHARS[(val & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut table = [255u8; 256];
+    for (i, &c) in BASE64_CHARS.iter().enumerate() {
+        table[c as usize] = i as u8;
+    }
+    let input: Vec<u8> = input.bytes().filter(|&b| b != b'=').collect();
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    for chunk in input.chunks(4) {
+        let get = |i: usize| -> Option<u8> {
+            chunk.get(i).and_then(|&b| {
+                let v = table[b as usize];
+                if v == 255 { None } else { Some(v) }
+            })
+        };
+        let a = get(0)?;
+        let b = get(1)?;
+        out.push((a << 2) | (b >> 4));
+        if let Some(c) = get(2) {
+            out.push((b << 4) | (c >> 2));
+            if let Some(d) = get(3) {
+                out.push((c << 6) | d);
+            }
+        }
+    }
+    Some(out)
+}
 
 fn camel_to_css_prop(camel: &str) -> String {
     let mut out = String::new();
