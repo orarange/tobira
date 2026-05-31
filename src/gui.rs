@@ -4908,6 +4908,106 @@ fn apply_brightness(pixels: &mut [u32], brightness: u32) {
     }
 }
 
+/// Zero out pixels outside the clip-path region. Operates in layer-local space.
+fn apply_clip_path(pixels: &mut Vec<u32>, width: u32, height: u32, clip: &crate::css::ClipPath) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let w = width as i64;
+    let h = height as i64;
+    match clip {
+        crate::css::ClipPath::Circle { radius_permille, cx_permille, cy_permille } => {
+            let cx = (*cx_permille as i64) * w / 1000;
+            let cy = (*cy_permille as i64) * h / 1000;
+            // Radius is permille of min(width, height).
+            let min_dim = w.min(h);
+            let r = (*radius_permille as i64) * min_dim / 1000;
+            let r2 = r * r;
+            for y in 0..height {
+                for x in 0..width {
+                    let dx = x as i64 - cx;
+                    let dy = y as i64 - cy;
+                    if dx * dx + dy * dy > r2 {
+                        let idx = (y * width + x) as usize;
+                        if idx < pixels.len() {
+                            pixels[idx] = 0;
+                        }
+                    }
+                }
+            }
+        }
+        crate::css::ClipPath::Inset { top, right, bottom, left } => {
+            let l = (*left as i64) * w / 1000;
+            let r = w - (*right as i64) * w / 1000;
+            let t = (*top as i64) * h / 1000;
+            let b = h - (*bottom as i64) * h / 1000;
+            for y in 0..height {
+                for x in 0..width {
+                    let xi = x as i64;
+                    let yi = y as i64;
+                    if xi < l || xi >= r || yi < t || yi >= b {
+                        let idx = (y * width + x) as usize;
+                        if idx < pixels.len() {
+                            pixels[idx] = 0;
+                        }
+                    }
+                }
+            }
+        }
+        crate::css::ClipPath::Polygon { points } => {
+            // Convert permille points to pixel coordinates.
+            let poly: Vec<(i64, i64)> = points
+                .iter()
+                .map(|(x, y)| (*x as i64 * w / 1000, *y as i64 * h / 1000))
+                .collect();
+            if poly.len() < 3 {
+                return;
+            }
+            for y in 0..height {
+                for x in 0..width {
+                    if !point_in_polygon(x as i64, y as i64, &poly) {
+                        let idx = (y * width + x) as usize;
+                        if idx < pixels.len() {
+                            pixels[idx] = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Ray-casting point-in-polygon test for clip-path: polygon().
+fn point_in_polygon(px: i64, py: i64, poly: &[(i64, i64)]) -> bool {
+    let n = poly.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = poly[i];
+        let (xj, yj) = poly[j];
+        let crosses = (yi > py) != (yj > py)
+            && {
+                // Avoid divide-by-zero when yj == yi; the (yi > py) != (yj > py) guard already
+                // excludes that case but compute defensively.
+                let denom = yj - yi;
+                if denom == 0 {
+                    false
+                } else {
+                    let x_intersect = xi + (py - yi) * (xj - xi) / denom;
+                    px < x_intersect
+                }
+            };
+        if crosses {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 fn render_layer(
     buffer: &mut [u32],
     buf_width: u32,
@@ -5077,6 +5177,11 @@ fn render_layer(
     // Brightness: applied after blur
     if layer.brightness != 10000 {
         apply_brightness(&mut offscreen, layer.brightness);
+    }
+
+    // Apply CSS clip-path: blank out pixels outside the shape.
+    if let Some(ref clip) = layer.clip_path {
+        apply_clip_path(&mut offscreen, ow, oh, clip);
     }
 
     // Apply CSS transform: scale / rotate if set

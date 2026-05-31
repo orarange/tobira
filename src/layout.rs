@@ -49,6 +49,7 @@ pub struct LayerCommand {
     pub rotate_millideg: i32,  // rotation in millidegrees
     pub origin_x: u32,         // transform-origin X as permille (500=50%)
     pub origin_y: u32,         // transform-origin Y as permille (500=50%)
+    pub clip_path: Option<crate::css::ClipPath>,
     pub commands: Vec<DrawCommand>,
 }
 
@@ -1098,6 +1099,7 @@ fn layout_block_element(
                 rotate_millideg: 0,
                 origin_x: 500,
                 origin_y: 500,
+                clip_path: element.style.clip_path.clone(),
                 commands: sub_context.commands,
             }));
             context.links.extend(sub_context.links);
@@ -1943,6 +1945,7 @@ fn layout_block_element_as_layer(
         rotate_millideg: element.style.transform_rotate_millideg,
         origin_x: element.style.transform_origin_x,
         origin_y: element.style.transform_origin_y,
+        clip_path: element.style.clip_path.clone(),
         commands: sub_context.commands,
     }));
 
@@ -2015,6 +2018,7 @@ fn layout_image_element(
             rotate_millideg: 0,
             origin_x: 500,
             origin_y: 500,
+            clip_path: element.style.clip_path.clone(),
             commands: vec![img_cmd],
         }));
     } else {
@@ -2332,6 +2336,7 @@ fn layout_table_element(
                 rotate_millideg: 0,
                 origin_x: 500,
                 origin_y: 500,
+                clip_path: placement.cell.style.clip_path.clone(),
                 commands: layer_commands,
             }));
             // Links are content-relative; shift by cell position + padding/valign
@@ -2786,6 +2791,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             rotate_millideg: layer.rotate_millideg,
             origin_x: layer.origin_x,
             origin_y: layer.origin_y,
+            clip_path: layer.clip_path.clone(),
             commands: layer.commands.clone(),
         }),
         DrawCommand::Gradient(g) => DrawCommand::Gradient(GradientCommand {

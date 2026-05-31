@@ -668,6 +668,45 @@ pub enum GridAutoFlow {
     ColumnDense,
 }
 
+/// `writing-mode` — direction of inline progression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritingMode {
+    HorizontalTb,   // default: left-to-right top-to-bottom
+    VerticalRl,     // top-to-bottom right-to-left columns
+    VerticalLr,     // top-to-bottom left-to-right columns
+}
+
+impl Default for WritingMode {
+    fn default() -> Self {
+        WritingMode::HorizontalTb
+    }
+}
+
+/// `direction` — base direction for inline text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Ltr,
+    Rtl,
+}
+
+impl Default for Direction {
+    fn default() -> Self {
+        Direction::Ltr
+    }
+}
+
+/// Supported `clip-path` shapes. Coordinates are stored as permille (0–1000)
+/// of the element's content box so values survive Eq/Hash on `ComputedStyle`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipPath {
+    /// `circle(r at cx cy)` — radius and center as permille of min(width, height).
+    Circle { radius_permille: u32, cx_permille: u32, cy_permille: u32 },
+    /// `inset(top right bottom left)` — distances from each edge as permille.
+    Inset { top: u32, right: u32, bottom: u32, left: u32 },
+    /// `polygon((x y), (x y), ...)` — points as (x, y) permille pairs.
+    Polygon { points: Vec<(u32, u32)> },
+}
+
 impl Default for GridAutoFlow {
     fn default() -> Self {
         GridAutoFlow::Row
@@ -772,6 +811,10 @@ pub struct ComputedStyle {
     pub grid_auto_flow: GridAutoFlow,
     /// `scroll-behavior: smooth` — when true, programmatic scroll animates over multiple frames.
     pub scroll_behavior_smooth: bool,
+    /// `clip-path` shape, if any.
+    pub clip_path: Option<ClipPath>,
+    pub writing_mode: WritingMode,
+    pub direction: Direction,
     // Grid container areas
     pub grid_template_areas: Vec<Vec<String>>,
     // Grid item fields
@@ -895,6 +938,9 @@ impl ComputedStyle {
             grid_auto_columns: GridTrackSize::Auto,
             grid_auto_flow: GridAutoFlow::Row,
             scroll_behavior_smooth: false,
+            clip_path: None,
+            writing_mode: WritingMode::HorizontalTb,
+            direction: Direction::Ltr,
             grid_template_areas: Vec::new(),
             grid_column: GridPlacement::default(),
             grid_row: GridPlacement::default(),
@@ -2575,14 +2621,28 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         "scroll-behavior" => {
             style.scroll_behavior_smooth = value.trim().eq_ignore_ascii_case("smooth");
         }
+        "clip-path" => {
+            style.clip_path = parse_clip_path(value.trim());
+        }
+        "writing-mode" => {
+            style.writing_mode = match value.trim().to_ascii_lowercase().as_str() {
+                "vertical-rl" | "tb-rl" => WritingMode::VerticalRl,
+                "vertical-lr" | "tb-lr" => WritingMode::VerticalLr,
+                _ => WritingMode::HorizontalTb,
+            };
+        }
+        "direction" => {
+            style.direction = match value.trim().to_ascii_lowercase().as_str() {
+                "rtl" => Direction::Rtl,
+                _ => Direction::Ltr,
+            };
+        }
         // No-op properties — parsed to prevent warnings, not yet implemented
         "overscroll-behavior"
         | "overscroll-behavior-x"
         | "overscroll-behavior-y"
         | "resize"
-        | "writing-mode"
         | "text-orientation"
-        | "direction"
         | "unicode-bidi"
         | "scroll-snap-type"
         | "scroll-snap-align"
@@ -4758,6 +4818,105 @@ fn extract_url(value: &str) -> Option<String> {
     } else {
         Some(url.to_string())
     }
+}
+
+/// Parse a `clip-path` value: `circle(...)`, `inset(...)`, `polygon(...)`.
+/// All lengths are interpreted as percentages or px and stored as permille (0–1000)
+/// of the element's reference dimension.
+fn parse_clip_path(value: &str) -> Option<ClipPath> {
+    let v = value.trim().to_ascii_lowercase();
+    let inner = |fn_name: &str, src: &str| -> Option<String> {
+        let start = src.find(fn_name)?;
+        let after = &src[start + fn_name.len()..];
+        let open = after.find('(')?;
+        let close = after.rfind(')')?;
+        if close <= open {
+            return None;
+        }
+        Some(after[open + 1..close].to_string())
+    };
+
+    let parse_percent_to_permille = |s: &str| -> u32 {
+        let t = s.trim();
+        if let Some(stripped) = t.strip_suffix('%') {
+            stripped.trim().parse::<f32>().ok().map(|p| (p * 10.0).round().clamp(0.0, 1000.0) as u32)
+                .unwrap_or(0)
+        } else if let Some(stripped) = t.strip_suffix("px") {
+            // Treat px as an absolute fallback by hashing to 0–1000 via 1px=10permille (loose).
+            stripped.trim().parse::<f32>().ok().map(|p| (p * 10.0).clamp(0.0, 1000.0) as u32).unwrap_or(0)
+        } else {
+            t.parse::<f32>().ok().map(|p| (p * 10.0).clamp(0.0, 1000.0) as u32).unwrap_or(0)
+        }
+    };
+
+    if v.starts_with("circle(") {
+        let body = inner("circle", &v)?;
+        // syntax: `circle(R [at X Y])` or `circle()` (default = 50%)
+        let lower = body.to_ascii_lowercase();
+        let (r_part, center_part) = match lower.split_once(" at ") {
+            Some((r, c)) => (r.to_string(), Some(c.to_string())),
+            None => (lower.clone(), None),
+        };
+        let radius = if r_part.trim().is_empty() {
+            500
+        } else {
+            parse_percent_to_permille(r_part.trim())
+        };
+        let (cx, cy) = if let Some(c) = center_part {
+            let parts: Vec<&str> = c.split_whitespace().collect();
+            let cx = parts.first().map(|s| parse_percent_to_permille(s)).unwrap_or(500);
+            let cy = parts.get(1).map(|s| parse_percent_to_permille(s)).unwrap_or(500);
+            (cx, cy)
+        } else {
+            (500, 500)
+        };
+        return Some(ClipPath::Circle { radius_permille: radius, cx_permille: cx, cy_permille: cy });
+    }
+    if v.starts_with("inset(") {
+        let body = inner("inset", &v)?;
+        let parts: Vec<&str> = body.split_whitespace().collect();
+        let (t, r, b, l) = match parts.len() {
+            1 => {
+                let n = parse_percent_to_permille(parts[0]);
+                (n, n, n, n)
+            }
+            2 => {
+                let tb = parse_percent_to_permille(parts[0]);
+                let lr = parse_percent_to_permille(parts[1]);
+                (tb, lr, tb, lr)
+            }
+            3 => {
+                let t = parse_percent_to_permille(parts[0]);
+                let lr = parse_percent_to_permille(parts[1]);
+                let b = parse_percent_to_permille(parts[2]);
+                (t, lr, b, lr)
+            }
+            _ => {
+                let t = parse_percent_to_permille(parts[0]);
+                let r = parse_percent_to_permille(parts[1]);
+                let b = parse_percent_to_permille(parts[2]);
+                let l = parse_percent_to_permille(parts[3]);
+                (t, r, b, l)
+            }
+        };
+        return Some(ClipPath::Inset { top: t, right: r, bottom: b, left: l });
+    }
+    if v.starts_with("polygon(") {
+        let body = inner("polygon", &v)?;
+        let mut points = Vec::new();
+        for pair in body.split(',') {
+            let parts: Vec<&str> = pair.trim().split_whitespace().collect();
+            if parts.len() >= 2 {
+                let x = parse_percent_to_permille(parts[0]);
+                let y = parse_percent_to_permille(parts[1]);
+                points.push((x, y));
+            }
+        }
+        if points.len() >= 3 {
+            return Some(ClipPath::Polygon { points });
+        }
+    }
+    None
 }
 
 /// Parse a `text-shadow` value. Format: offset-x offset-y [blur] color.
