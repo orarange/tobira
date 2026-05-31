@@ -5897,6 +5897,7 @@ impl Vm {
             }
             HostObjectClass::Other("TokenList") => self.get_classlist_property(slot, name),
             HostObjectClass::Other("CSSStyleDeclaration") => self.get_style_property(name),
+            HostObjectClass::StorageArea => self.get_storage_property(slot, name),
             _ => Ok(Value::Undefined),
         }
     }
@@ -6382,6 +6383,38 @@ impl Vm {
             }
         }
         super::host::StorageAreaKind::Local
+    }
+
+    fn get_storage_property(&mut self, slot: HostObjectSlot, name: String) -> Result<Value, VmError> {
+        use super::host::{StorageAreaScope, StorageOp, StorageResult};
+        let kind = match slot.handle {
+            1 => super::host::StorageAreaKind::Session,
+            2 => super::host::StorageAreaKind::Cookie,
+            _ => super::host::StorageAreaKind::Local,
+        };
+        match name.as_str() {
+            "length" => {
+                let res = self.host.storage(StorageOp::Len {
+                    kind,
+                    scope: StorageAreaScope::Window(WindowId(0)),
+                });
+                Ok(match res { Ok(StorageResult::Len(n)) => Value::Number(n as f64), _ => Value::Number(0.0) })
+            }
+            "getItem" => Ok(self.allocate_builtin_value(BuiltinId::StorageGetItem, false, None)),
+            "setItem" => Ok(self.allocate_builtin_value(BuiltinId::StorageSetItem, false, None)),
+            "removeItem" => Ok(self.allocate_builtin_value(BuiltinId::StorageRemoveItem, false, None)),
+            "clear" => Ok(self.allocate_builtin_value(BuiltinId::StorageClear, false, None)),
+            "key" => Ok(self.allocate_builtin_value(BuiltinId::StorageKey, false, None)),
+            _ => {
+                // Named property access: storage[key]
+                let res = self.host.storage(StorageOp::Get {
+                    kind,
+                    scope: StorageAreaScope::Window(WindowId(0)),
+                    key: name,
+                });
+                Ok(match res { Ok(StorageResult::Value(Some(v))) => self.make_string_value(&v), _ => Value::Null })
+            }
+        }
     }
 }
 
