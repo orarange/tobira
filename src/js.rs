@@ -92,7 +92,7 @@ pub struct JavaScriptSession {
 }
 
 impl JavaScriptSession {
-    pub(crate) fn dispatch_event(&self, request: DomEventRequest) -> Option<DomEventDispatchResult> {
+    pub fn dispatch_event(&self, request: DomEventRequest) -> Option<DomEventDispatchResult> {
         let (response_tx, response_rx) = mpsc::channel();
         self.command_tx.send(NewEngineCommand::DispatchEvent {
             node_handle: request.target_node_id as u32,
