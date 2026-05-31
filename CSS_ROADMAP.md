@@ -144,25 +144,39 @@ Branch: `claude/phase5-css` (PR #49)
 | `background-repeat` | ✅ | `Repeat`, `NoRepeat`, `RepeatX`, `RepeatY` (single-tile for now) |
 | `background-position` | ✅ | x/y as 0–100 percent |
 
-### Phase 6 Remaining ❌
+### Phase 6 — Completed in browser-codex merge ✅
+
+The merge of `browser-claude` (feat/outline-text-decoration) plus the
+follow-up Batch 1–4 commits brought the following Phase 6 items in:
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `transform: scale/rotate` rendering | ✅ | Affine transform in software renderer |
+| `position: sticky` scroll tracking | ✅ | StickyCommand + scroll-aware render in gui.rs |
+| `grid-template-areas` | ✅ | Named area placement |
+| `grid-auto-flow` (incl. `dense`) | ✅ | Dense packing restarts slot search from (0,0) |
+| `counter()` / `counters()` | ✅ | CSS counters in pseudo-element content |
+| `background-repeat` tiling | ✅ | Full `repeat-x` / `repeat-y` / `repeat` axes |
+| `text-shadow` with blur | ✅ | Offscreen render + box blur + alpha blit |
+| `::selection` styling | ✅ | `compute_selection_style` → FormControlCommand.selection_bg/fg |
+| `::placeholder` GUI wiring | ✅ | `compute_placeholder_style` → FormControlCommand.placeholder_color/italic |
+| `clip-path` (circle/inset/polygon) | ✅ | `ClipPath` enum + `apply_clip_path` in offscreen pass |
+| `writing-mode` (parse) | 🔧 | Stored on ComputedStyle; vertical layout not applied yet |
+| `direction: rtl` (parse) | 🔧 | Stored on ComputedStyle; full RTL inline reorder not done |
+| `scroll-behavior: smooth` (parse) | 🔧 | Stored on ComputedStyle; animated scroll not driven yet |
+| CSS `animation` / `@keyframes` | 🔧 | Interpolation primitives ready; frame loop integration pending |
+| `transition` interpolation | 🔧 | `apply_transitions_to_style` ready; previous-style snapshot pending |
+
+### Phase 6 — Remaining work ❌
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
-| `transform: scale/rotate` rendering | Medium | Needs affine transform in software renderer |
-| CSS `animation` / `@keyframes` | Low | Requires animation runtime and repaint loop |
-| `transition` interpolation | Low | Requires repaint loop and state diffing |
-| `position: sticky` scroll tracking | Medium | Requires scroll-offset propagation into layout |
-| `grid-template-areas` | Low | Named area placement |
-| `grid-auto-flow` | Low | Dense packing auto-placement |
-| `counter()` / `counters()` | Low | CSS counters for lists |
-| `clip-path` | Low | Shape clipping |
-| `writing-mode` | Low | Vertical text layout |
-| `direction` / `unicode-bidi` | Low | RTL text support |
-| `scroll-behavior: smooth` | Low | Smooth scrolling |
-| `::selection` styling | Low | Highlight selected text with custom color |
-| `::placeholder` GUI wiring | Low | Apply `::placeholder` style to input placeholder text |
-| `background-repeat` tiling | Low | Full tiling (repeat-x/y across element) |
-| `text-shadow` with blur | Low | Blur pass for text shadow (offset-only works now) |
+| Frame-driven animation loop | High | Call `apply_animations` + invalidate cache + `request_redraw` on ~16ms cadence when `has_active_animations` |
+| Per-element animation start tracking | High | Currently every animation is anchored to a single start_ms |
+| Transition previous-style diffing | Medium | Need to snapshot previous ComputedStyle per node and compute start_ms on change |
+| `writing-mode` vertical layout | Low | Rotate text glyphs + flip block/inline axes in layout |
+| `direction: rtl` inline reorder | Low | Needs TextAlign::Start/End and reversed line construction |
+| `scroll-behavior: smooth` animation | Low | Multi-step scroll using the same frame timer as animations |
 
 ---
 
