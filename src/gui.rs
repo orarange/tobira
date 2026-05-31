@@ -17,8 +17,8 @@ use winit::window::{CursorIcon, ResizeDirection, Window};
 
 use crate::browser::{BrowserPage, LoadedDocumentSource, build_page_from_source, load_page_source};
 use crate::css::{
-    Color, CursorKind, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind,
-    GradientKind, InteractiveState, ObjectFit, StyledNode,
+    BackgroundRepeat, Color, CursorKind, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR,
+    FontFamilyKind, GradientKind, InteractiveState, ObjectFit, StyledNode,
 };
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
@@ -4162,6 +4162,9 @@ fn paint_page_control(
                     control.font_size_px,
                     control.font_family,
                 );
+                let placeholder_color = control
+                    .placeholder_color
+                    .unwrap_or(COLOR_CONTROL_PLACEHOLDER);
                 fonts.draw_text(
                     buffer,
                     width,
@@ -4170,9 +4173,9 @@ fn paint_page_control(
                     text_y,
                     &placeholder,
                     control.font_size_px,
-                    COLOR_CONTROL_PLACEHOLDER,
+                    placeholder_color,
                     false,
-                    false,
+                    control.placeholder_italic,
                     false,
                     control.font_family,
                 );
@@ -4199,6 +4202,8 @@ fn paint_page_control(
                         .saturating_add(CONTROL_PADDING_X)
                         .saturating_add(selection_start_x);
                     let selection_width = selection_end_x.saturating_sub(selection_start_x).max(1);
+                    let selection_color =
+                        control.selection_bg.unwrap_or(COLOR_CONTROL_SELECTION);
                     draw_rect(
                         buffer,
                         width,
@@ -4210,7 +4215,7 @@ fn paint_page_control(
                             .height
                             .saturating_sub(CONTROL_PADDING_Y.saturating_mul(2))
                             .max(1),
-                        COLOR_CONTROL_SELECTION,
+                        selection_color,
                     );
                 }
                 fonts.draw_text(
@@ -4460,20 +4465,94 @@ fn render_commands(
                 if let Some(ref shadow) = text.text_shadow {
                     let shadow_x = (text_draw_x as i64 + shadow.offset_x as i64).max(0) as u32;
                     let shadow_y = (text_draw_y as i64 + shadow.offset_y as i64).max(0) as u32;
-                    fonts.draw_text(
-                        buffer,
-                        width,
-                        height,
-                        shadow_x,
-                        shadow_y,
-                        &text.text,
-                        text.font_size_px,
-                        shadow.color,
-                        false,
-                        false,
-                        false,
-                        text.font_family,
-                    );
+                    if shadow.blur == 0 {
+                        // Sharp shadow: draw directly into the main buffer.
+                        fonts.draw_text(
+                            buffer,
+                            width,
+                            height,
+                            shadow_x,
+                            shadow_y,
+                            &text.text,
+                            text.font_size_px,
+                            shadow.color,
+                            false,
+                            false,
+                            false,
+                            text.font_family,
+                        );
+                    } else {
+                        // Blurred shadow: render to offscreen buffer at color, box-blur it,
+                        // then blit with alpha onto the main buffer. Padding the offscreen
+                        // by `blur` on every side prevents the blur kernel from sampling
+                        // outside the rasterized glyph region.
+                        let pad = shadow.blur.min(32);
+                        // Estimate width via line_height heuristics already used in layout;
+                        // use the text command's bounding metrics.
+                        let off_w = text.width.saturating_add(pad * 2).max(1);
+                        let off_h = text.line_height_px.saturating_add(pad * 2).max(1);
+                        let mut offscreen = vec![0u32; (off_w * off_h) as usize];
+                        fonts.draw_text(
+                            &mut offscreen,
+                            off_w,
+                            off_h,
+                            pad,
+                            pad,
+                            &text.text,
+                            text.font_size_px,
+                            shadow.color,
+                            false,
+                            false,
+                            false,
+                            text.font_family,
+                        );
+                        apply_box_blur(&mut offscreen, off_w, off_h, shadow.blur);
+                        // Blit non-zero pixels onto the main buffer with alpha derived
+                        // from the offscreen pixel brightness.
+                        let dest_x = shadow_x.saturating_sub(pad);
+                        let dest_y = shadow_y.saturating_sub(pad);
+                        let shadow_r = ((shadow.color >> 16) & 0xFF) as u32;
+                        let shadow_g = ((shadow.color >> 8) & 0xFF) as u32;
+                        let shadow_b = (shadow.color & 0xFF) as u32;
+                        for oy in 0..off_h {
+                            let dy = dest_y.saturating_add(oy);
+                            if dy >= height {
+                                break;
+                            }
+                            for ox in 0..off_w {
+                                let dx = dest_x.saturating_add(ox);
+                                if dx >= width {
+                                    break;
+                                }
+                                let src = offscreen[(oy * off_w + ox) as usize];
+                                if src == 0 {
+                                    continue;
+                                }
+                                // Approximate alpha from rendered intensity vs shadow color.
+                                let sr = ((src >> 16) & 0xFF) as u32;
+                                let sg = ((src >> 8) & 0xFF) as u32;
+                                let sb = (src & 0xFF) as u32;
+                                let denom =
+                                    shadow_r.max(shadow_g).max(shadow_b).max(1);
+                                let a = (sr.max(sg).max(sb) * 255 / denom).min(255);
+                                if a == 0 {
+                                    continue;
+                                }
+                                let dst_idx = (dy * width + dx) as usize;
+                                if dst_idx >= buffer.len() {
+                                    continue;
+                                }
+                                let bg = buffer[dst_idx];
+                                let br = (bg >> 16) & 0xFF;
+                                let bgg = (bg >> 8) & 0xFF;
+                                let bb = bg & 0xFF;
+                                let out_r = (shadow_r * a + br * (255 - a)) / 255;
+                                let out_g = (shadow_g * a + bgg * (255 - a)) / 255;
+                                let out_b = (shadow_b * a + bb * (255 - a)) / 255;
+                                buffer[dst_idx] = (out_r << 16) | (out_g << 8) | out_b;
+                            }
+                        }
+                    }
                 }
                 fonts.draw_text(
                     buffer,
@@ -4514,6 +4593,7 @@ fn render_commands(
                             image.height,
                             decoded,
                             min_y,
+                            image.tile_repeat,
                         );
                     } else {
                         let sx = offset_x as i32 + image.x as i32;
@@ -5322,6 +5402,7 @@ fn draw_tiled_image(
     draw_height: u32,
     image: &DecodedImage,
     min_y: i32,
+    repeat: BackgroundRepeat,
 ) {
     let tile_w = image.width as i32;
     let tile_h = image.height as i32;
@@ -5329,10 +5410,16 @@ fn draw_tiled_image(
         return;
     }
 
+    let tile_x_axis = matches!(repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX);
+    let tile_y_axis = matches!(repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatY);
+
     let start_x = x.max(0) as u32;
     let start_y = y.max(min_y) as u32;
-    let end_x = (x + draw_width as i32).max(0).min(buf_width as i32) as u32;
-    let end_y = (y + draw_height as i32).max(0).min(buf_height as i32) as u32;
+    // When repeating only on one axis, limit the other axis to a single tile width/height.
+    let x_max_extent = if tile_x_axis { draw_width as i32 } else { tile_w };
+    let y_max_extent = if tile_y_axis { draw_height as i32 } else { tile_h };
+    let end_x = (x + x_max_extent).max(0).min(buf_width as i32) as u32;
+    let end_y = (y + y_max_extent).max(0).min(buf_height as i32) as u32;
 
     for sy in start_y..end_y {
         for sx in start_x..end_x {

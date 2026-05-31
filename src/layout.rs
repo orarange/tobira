@@ -281,6 +281,7 @@ pub struct ImageCommand {
     pub object_position_x: u32,
     pub object_position_y: u32,
     pub tile: bool, // true = background-repeat tile at natural size
+    pub tile_repeat: BackgroundRepeat, // repeat axis when tile=true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,6 +326,12 @@ pub struct FormControlCommand {
     pub text_color: Color,
     pub background_color: Color,
     pub border_color: Color,
+    pub placeholder_color: Option<Color>,
+    pub placeholder_italic: bool,
+    /// Background color for ::selection (text highlight). Falls back to UI default if None.
+    pub selection_bg: Option<Color>,
+    /// Text color for ::selection. Falls back to UI default if None.
+    pub selection_fg: Option<Color>,
 }
 
 /// Scan the document tree for a body/html element with a solid background color.
@@ -516,6 +523,8 @@ struct FormControlSpec {
     disabled: bool,
     masked: bool,
     size_chars: Option<u32>,
+    placeholder_style: Option<ComputedStyle>,
+    selection_style: Option<ComputedStyle>,
 }
 
 impl LineBuilder {
@@ -645,6 +654,8 @@ fn build_form_control_spec(
                     disabled,
                     masked: false,
                     size_chars: None,
+                    placeholder_style: element.placeholder_style.clone(),
+                    selection_style: element.selection_style.clone(),
                 }),
                 "checkbox" | "radio" | "file" | "image" | "reset" => None,
                 "submit" | "button" => Some(FormControlSpec {
@@ -675,6 +686,8 @@ fn build_form_control_spec(
                     disabled,
                     masked: false,
                     size_chars: None,
+                    placeholder_style: element.placeholder_style.clone(),
+                    selection_style: element.selection_style.clone(),
                 }),
                 "password" => Some(FormControlSpec {
                     id: context.allocate_control_id(),
@@ -696,6 +709,8 @@ fn build_form_control_spec(
                         .attributes
                         .get("size")
                         .and_then(|value| value.parse::<u32>().ok()),
+                    placeholder_style: element.placeholder_style.clone(),
+                    selection_style: element.selection_style.clone(),
                 }),
                 _ => Some(FormControlSpec {
                     id: context.allocate_control_id(),
@@ -717,6 +732,8 @@ fn build_form_control_spec(
                         .attributes
                         .get("size")
                         .and_then(|value| value.parse::<u32>().ok()),
+                    placeholder_style: element.placeholder_style.clone(),
+                    selection_style: element.selection_style.clone(),
                 }),
             }
         }
@@ -740,6 +757,8 @@ fn build_form_control_spec(
                 .attributes
                 .get("cols")
                 .and_then(|value| value.parse::<u32>().ok()),
+            placeholder_style: element.placeholder_style.clone(),
+                    selection_style: element.selection_style.clone(),
         }),
         "button" => {
             let button_type = element
@@ -773,6 +792,8 @@ fn build_form_control_spec(
                 disabled,
                 masked: false,
                 size_chars: None,
+                placeholder_style: element.placeholder_style.clone(),
+                    selection_style: element.selection_style.clone(),
             })
         }
         _ => None,
@@ -1267,6 +1288,7 @@ fn layout_block_element(
             object_position_x: element.style.background_position_x,
             object_position_y: element.style.background_position_y,
             tile: bg_img_tile,
+            tile_repeat: element.style.background_repeat,
         }));
         idx
     });
@@ -1824,6 +1846,7 @@ fn layout_block_element_as_layer(
             object_position_x: element.style.background_position_x,
             object_position_y: element.style.background_position_y,
             tile,
+            tile_repeat: element.style.background_repeat,
         }));
     }
 
@@ -1977,6 +2000,7 @@ fn layout_image_element(
             object_position_x: element.style.object_position_x,
             object_position_y: element.style.object_position_y,
             tile: false,
+            tile_repeat: BackgroundRepeat::NoRepeat,
         });
         context.commands.push(DrawCommand::Layer(LayerCommand {
             x: draw_x,
@@ -2004,6 +2028,7 @@ fn layout_image_element(
             object_position_x: element.style.object_position_x,
             object_position_y: element.style.object_position_y,
             tile: false,
+            tile_repeat: BackgroundRepeat::NoRepeat,
         }));
     }
 
@@ -2283,6 +2308,7 @@ fn layout_table_element(
                     object_position_x: placement.cell.style.background_position_x,
                     object_position_y: placement.cell.style.background_position_y,
                     tile,
+                    tile_repeat: placement.cell.style.background_repeat,
                 }));
             }
             // Content commands are (0,0)-relative within the cell; offset by padding/valign
@@ -2352,6 +2378,10 @@ fn layout_table_element(
                     text_color: ctrl.text_color,
                     background_color: ctrl.background_color,
                     border_color: ctrl.border_color,
+                    placeholder_color: ctrl.placeholder_color,
+                    placeholder_italic: ctrl.placeholder_italic,
+                    selection_bg: ctrl.selection_bg,
+                    selection_fg: ctrl.selection_fg,
                 }
             }));
             context
@@ -2412,6 +2442,7 @@ fn layout_table_element(
                     object_position_x: placement.cell.style.background_position_x,
                     object_position_y: placement.cell.style.background_position_y,
                     tile,
+                    tile_repeat: placement.cell.style.background_repeat,
                 }));
             }
             merge_fragment(context, layout, content_x, content_y);
@@ -2687,6 +2718,10 @@ fn merge_fragment(
             text_color: control.text_color,
             background_color: control.background_color,
             border_color: control.border_color,
+            placeholder_color: control.placeholder_color,
+            placeholder_italic: control.placeholder_italic,
+            selection_bg: control.selection_bg,
+            selection_fg: control.selection_fg,
         }));
     context
         .element_hitboxes
@@ -2736,6 +2771,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             object_position_x: image.object_position_x,
             object_position_y: image.object_position_y,
             tile: image.tile,
+            tile_repeat: image.tile_repeat,
         }),
         DrawCommand::Layer(layer) => DrawCommand::Layer(LayerCommand {
             x: layer.x.saturating_add(offset_x),
@@ -3709,6 +3745,19 @@ fn emit_line_impl(
                 0xFFFFFF
             };
             let border_color = if control.disabled { 0xA9AFB8 } else { 0x7F8B9C };
+            let placeholder_color = control
+                .placeholder_style
+                .as_ref()
+                .map(|s| s.color);
+            let placeholder_italic = control
+                .placeholder_style
+                .as_ref()
+                .is_some_and(|s| s.font_style_italic);
+            let selection_bg = control
+                .selection_style
+                .as_ref()
+                .and_then(|s| s.background_color);
+            let selection_fg = control.selection_style.as_ref().map(|s| s.color);
             context.controls.push(FormControlCommand {
                 id: control.id,
                 node_id: control.node_id,
@@ -3733,6 +3782,10 @@ fn emit_line_impl(
                 text_color: span.style.color,
                 background_color,
                 border_color,
+                placeholder_color,
+                placeholder_italic,
+                selection_bg,
+                selection_fg,
             });
 
             cursor_x = cursor_x.saturating_add(span.width);
@@ -4176,6 +4229,10 @@ fn layout_grid_container(
     let mut col_cursor = 0usize;
     let mut row_cursor = 0usize;
     let mut occupied: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let dense = matches!(
+        element.style.grid_auto_flow,
+        crate::css::GridAutoFlow::RowDense | crate::css::GridAutoFlow::ColumnDense
+    );
 
     struct PlacedItem<'a> {
         element: &'a StyledElement,
@@ -4223,8 +4280,10 @@ fn layout_grid_container(
             });
             (c, r)
         } else {
-            let mut c = col_cursor;
-            let mut r = row_cursor;
+            // For `dense`, always restart the search from (0,0) so that earlier holes get
+            // filled. Otherwise advance from the running cursor.
+            let mut c = if dense { 0 } else { col_cursor };
+            let mut r = if dense { 0 } else { row_cursor };
             loop {
                 if c + col_span > n_cols {
                     c = 0;
@@ -4241,11 +4300,13 @@ fn layout_grid_container(
                     r += 1;
                 }
             }
-            col_cursor = c + col_span;
-            row_cursor = r;
-            if col_cursor >= n_cols {
-                col_cursor = 0;
-                row_cursor += 1;
+            if !dense {
+                col_cursor = c + col_span;
+                row_cursor = r;
+                if col_cursor >= n_cols {
+                    col_cursor = 0;
+                    row_cursor += 1;
+                }
             }
             (c, r)
         };

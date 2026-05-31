@@ -659,6 +659,21 @@ impl Default for GridPlacement {
     }
 }
 
+/// `grid-auto-flow` direction and packing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridAutoFlow {
+    Row,
+    Column,
+    RowDense,
+    ColumnDense,
+}
+
+impl Default for GridAutoFlow {
+    fn default() -> Self {
+        GridAutoFlow::Row
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ComputedStyle
 // ─────────────────────────────────────────────────────────────────────────────
@@ -754,6 +769,9 @@ pub struct ComputedStyle {
     pub grid_template_rows: Vec<GridTrackSize>,
     pub grid_auto_rows: GridTrackSize,
     pub grid_auto_columns: GridTrackSize,
+    pub grid_auto_flow: GridAutoFlow,
+    /// `scroll-behavior: smooth` — when true, programmatic scroll animates over multiple frames.
+    pub scroll_behavior_smooth: bool,
     // Grid container areas
     pub grid_template_areas: Vec<Vec<String>>,
     // Grid item fields
@@ -875,6 +893,8 @@ impl ComputedStyle {
             grid_template_rows: Vec::new(),
             grid_auto_rows: GridTrackSize::Auto,
             grid_auto_columns: GridTrackSize::Auto,
+            grid_auto_flow: GridAutoFlow::Row,
+            scroll_behavior_smooth: false,
             grid_template_areas: Vec::new(),
             grid_column: GridPlacement::default(),
             grid_row: GridPlacement::default(),
@@ -983,6 +1003,10 @@ pub struct StyledElement {
     pub attributes: BTreeMap<String, String>,
     pub style: ComputedStyle,
     pub children: Vec<StyledNode>,
+    /// Pre-computed ::placeholder style for `<input>` / `<textarea>`, when any matching rule exists.
+    pub placeholder_style: Option<ComputedStyle>,
+    /// Pre-computed ::selection style for text selection highlights, when any matching rule exists.
+    pub selection_style: Option<ComputedStyle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1401,11 +1425,21 @@ fn build_node(
                 }));
             }
 
+            let placeholder_style = if matches!(element.tag_name.as_str(), "input" | "textarea") {
+                compute_placeholder_style(element, stylesheet, &style, viewport_width)
+            } else {
+                None
+            };
+            let selection_style =
+                compute_selection_style(element, stylesheet, &style, viewport_width);
+
             StyledNode::Element(StyledElement {
                 tag_name: element.tag_name.clone(),
                 attributes: element.attributes.clone(),
                 style,
                 children,
+                placeholder_style,
+                selection_style,
             })
         }
     }
@@ -1527,6 +1561,48 @@ pub fn compute_placeholder_style(
         }
         let host_matches = rule.selectors.iter().any(|sel| {
             sel.pseudo_element.as_ref() == Some(&PseudoElement::Placeholder)
+                && sel.matches(
+                    &identity,
+                    ancestors,
+                    0,
+                    1,
+                    &[],
+                    &InteractiveState::default(),
+                )
+        });
+        if !host_matches {
+            continue;
+        }
+        has_match = true;
+        for decl in &rule.declarations {
+            apply_declaration(&mut pseudo_style, decl, host_style.font_size_px);
+        }
+    }
+    if has_match { Some(pseudo_style) } else { None }
+}
+
+/// Returns a `ComputedStyle` for the `::selection` pseudo-element applied to `element`,
+/// or `None` if no `::selection` rule matches. The returned style is used for highlighting
+/// selected text in inputs/textareas.
+pub fn compute_selection_style(
+    element: &Element,
+    stylesheet: &Stylesheet,
+    host_style: &ComputedStyle,
+    viewport_width: u32,
+) -> Option<ComputedStyle> {
+    let identity = ElementIdentity::from(element);
+    let ancestors: &[AncestorSlot] = &[];
+    let mut pseudo_style = host_style.clone();
+    let mut has_match = false;
+
+    for rule in &stylesheet.rules {
+        if let Some(cond) = &rule.media {
+            if !cond.matches(viewport_width) {
+                continue;
+            }
+        }
+        let host_matches = rule.selectors.iter().any(|sel| {
+            sel.pseudo_element.as_ref() == Some(&PseudoElement::Selection)
                 && sel.matches(
                     &identity,
                     ancestors,
@@ -2387,6 +2463,25 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.grid_auto_columns = parse_grid_track_size(value.trim(), parent_font_size)
                 .unwrap_or(GridTrackSize::Auto);
         }
+        "grid-auto-flow" => {
+            let v = value.trim().to_ascii_lowercase();
+            let mut row = true;
+            let mut dense = false;
+            for token in v.split_whitespace() {
+                match token {
+                    "row" => row = true,
+                    "column" => row = false,
+                    "dense" => dense = true,
+                    _ => {}
+                }
+            }
+            style.grid_auto_flow = match (row, dense) {
+                (true, false) => GridAutoFlow::Row,
+                (true, true) => GridAutoFlow::RowDense,
+                (false, false) => GridAutoFlow::Column,
+                (false, true) => GridAutoFlow::ColumnDense,
+            };
+        }
         "grid-column" => {
             style.grid_column = parse_grid_placement(value);
         }
@@ -2477,9 +2572,11 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.text_shadow = parse_text_shadow(v, parent_font_size);
             }
         }
+        "scroll-behavior" => {
+            style.scroll_behavior_smooth = value.trim().eq_ignore_ascii_case("smooth");
+        }
         // No-op properties — parsed to prevent warnings, not yet implemented
-        "scroll-behavior"
-        | "overscroll-behavior"
+        "overscroll-behavior"
         | "overscroll-behavior-x"
         | "overscroll-behavior-y"
         | "resize"
