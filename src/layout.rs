@@ -1,8 +1,8 @@
-use crate::css::{
-    AlignItems, AlignSelf, BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind,
-    DEFAULT_BACKGROUND_COLOR, Display, FlexDirection, FontFamilyKind, GridTrackSize,
-    JustifyContent, LengthValue, ObjectFit, Overflow, Position, StyledElement, StyledNode,
-    TextAlign, TextTransform, VerticalAlign, WhiteSpaceMode, apply_text_transform,
+﻿use crate::css::{
+    BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
+    FontFamilyKind, GradientKind, GridTrackSize, LengthValue, ObjectFit, Overflow, Position, FlexDirection,
+    AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
+    VerticalAlign, WhiteSpaceMode, WordBreak, apply_text_transform, resolve_content_counters,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
@@ -20,7 +20,7 @@ pub struct GradientCommand {
     pub width: u32,
     pub height: u32,
     pub border_radius: u32,
-    pub angle_deg_x1000: i32,
+    pub kind: GradientKind,
     pub stops: Vec<GradientStop>,
 }
 
@@ -31,6 +31,7 @@ pub enum DrawCommand {
     Image(ImageCommand),
     Layer(LayerCommand),
     Gradient(GradientCommand),
+    Sticky(StickyCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,9 +41,28 @@ pub struct LayerCommand {
     pub width: u32,
     pub height: u32,
     pub opacity: u8,
-    pub blur_px: u32,    // CSS filter: blur() radius; 0 = no blur
-    pub brightness: u32, // CSS filter: brightness() in 1/10000; 10000 = no change
+    pub blur_px: u32,       // CSS filter: blur() radius; 0 = no blur
+    pub brightness: u32,    // CSS filter: brightness() in 1/10000; 10000 = no change
+    // CSS transform fields (applied during composite in gui.rs)
+    pub scale_x: u32,          // millis: 1000=1.0, 0=no scale (treated as 1000)
+    pub scale_y: u32,
+    pub rotate_millideg: i32,  // rotation in millidegrees
+    pub origin_x: u32,         // transform-origin X as permille (500=50%)
+    pub origin_y: u32,         // transform-origin Y as permille (500=50%)
     pub commands: Vec<DrawCommand>,
+}
+
+/// A position:sticky element wrapped in a Layer with scroll-tracking metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StickyCommand {
+    /// Y coordinate of the element in normal flow (content space).
+    pub normal_y: u32,
+    /// The `top: N` value — the element sticks when scrolled past this screen offset.
+    pub sticky_top: u32,
+    /// Bottom of the containing block (for "unstick" boundary). u32::MAX = unbounded.
+    pub container_bottom: u32,
+    /// The layer to render (contains the element's commands, rebased to element-relative coords).
+    pub layer: LayerCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +135,11 @@ fn shift_command(cmd: &mut DrawCommand, dx: u32, dy: u32) {
             g.x = g.x.saturating_add(dx);
             g.y = g.y.saturating_add(dy);
         }
+        DrawCommand::Sticky(s) => {
+            s.layer.x = s.layer.x.saturating_add(dx);
+            s.layer.y = s.layer.y.saturating_add(dy);
+            s.normal_y = s.normal_y.saturating_add(dy);
+        }
     }
 }
 
@@ -139,6 +164,11 @@ fn shift_command_signed(cmd: &mut DrawCommand, dx: i32, dy: i32) {
         DrawCommand::Gradient(g) => {
             g.x = (g.x as i64 + dx as i64).max(0) as u32;
             g.y = (g.y as i64 + dy as i64).max(0) as u32;
+        }
+        DrawCommand::Sticky(s) => {
+            s.layer.x = (s.layer.x as i64 + dx as i64).max(0) as u32;
+            s.layer.y = (s.layer.y as i64 + dy as i64).max(0) as u32;
+            s.normal_y = (s.normal_y as i64 + dy as i64).max(0) as u32;
         }
     }
 }
@@ -234,6 +264,7 @@ pub struct TextCommand {
     pub color: Color,
     pub underline: bool,
     pub line_through: bool,
+    pub text_decoration_color: Option<crate::css::Color>,
     pub bold: bool,
     pub italic: bool,
     pub text_shadow: Option<crate::css::TextShadow>,
@@ -387,6 +418,8 @@ struct LayoutContext {
     containing_block_origin: (u32, u32),
     scroll_y_for_fixed: u32,
     positioned_commands: Vec<(i32, Vec<DrawCommand>)>,
+    /// CSS counter values, updated as elements are laid out in document order.
+    counters: std::collections::HashMap<String, i32>,
 }
 
 impl Default for LayoutContext {
@@ -402,6 +435,7 @@ impl Default for LayoutContext {
             containing_block_origin: (0, 0),
             scroll_y_for_fixed: 0,
             positioned_commands: Vec::new(),
+            counters: std::collections::HashMap::new(),
         }
     }
 }
@@ -811,8 +845,14 @@ fn layout_node(
 ) {
     match node {
         StyledNode::Text(text) => {
+            // Resolve counter() references injected via ::before/::after content.
+            let resolved_text = if text.text.contains("counter(") {
+                resolve_content_counters(&text.text, &context.counters)
+            } else {
+                text.text.clone()
+            };
             let fragments = [InlineFragment::Text {
-                text: text.text.clone(),
+                text: resolved_text,
                 style: text.style.clone(),
                 link_href: None,
                 link_node_id: None,
@@ -840,6 +880,15 @@ fn layout_node(
                     current_form.clone(),
                 );
                 return;
+            }
+
+            // Apply counter-reset and counter-increment before children are processed.
+            for (name, initial) in &element.style.counter_reset {
+                context.counters.insert(name.clone(), *initial);
+            }
+            for (name, delta) in &element.style.counter_increment {
+                let entry = context.counters.entry(name.clone()).or_insert(0);
+                *entry += delta;
             }
 
             match element.style.display {
@@ -1023,6 +1072,11 @@ fn layout_block_element(
                 opacity: element.style.opacity,
                 blur_px: element.style.filter_blur_px,
                 brightness: element.style.filter_brightness,
+                scale_x: 0,
+                scale_y: 0,
+                rotate_millideg: 0,
+                origin_x: 500,
+                origin_y: 500,
                 commands: sub_context.commands,
             }));
             context.links.extend(sub_context.links);
@@ -1130,25 +1184,37 @@ fn layout_block_element(
 
     let saved_bg = context.background_color;
 
-    // box-shadow: push shadow rect before background (so it renders behind it)
-    let shadow_cmd_index = if let Some(ref shadow) = element.style.box_shadow {
-        let blur = shadow.blur;
-        // Expand shadow rect by blur amount in all directions for approximate blur spread
-        let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64).max(0) as u32;
-        let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64).max(0) as u32;
-        let sw = outer_width.saturating_add(blur.saturating_mul(2)).max(1);
-        context.commands.push(DrawCommand::Rect(RectCommand {
-            x: sx,
-            y: sy,
-            width: sw,
-            height: 1,
-            color: shadow.color.unwrap_or(element.style.color),
-            border_radius: element.style.border_radius.saturating_add(blur),
-        }));
-        Some(context.commands.len() - 1)
-    } else {
-        None
-    };
+    // box-shadow: push outer shadow rects before background (so they render behind it).
+    // We collect (cmd_index, blur, spread) for each outer shadow so heights can be
+    // patched after layout completes.
+    let outer_shadow_indices_inline: Vec<(usize, u32, i32)> = element
+        .style
+        .box_shadows
+        .iter()
+        .filter(|s| !s.inset)
+        .map(|shadow| {
+            let blur = shadow.blur;
+            let spread = shadow.spread;
+            let spread_expand = (spread * 2).max(0) as u32;
+            let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64 - spread as i64)
+                .max(0) as u32;
+            let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64 - spread as i64)
+                .max(0) as u32;
+            let sw = outer_width
+                .saturating_add(blur.saturating_mul(2))
+                .saturating_add(spread_expand)
+                .max(1);
+            context.commands.push(DrawCommand::Rect(RectCommand {
+                x: sx,
+                y: sy,
+                width: sw,
+                height: 1,
+                color: shadow.color.unwrap_or(element.style.color),
+                border_radius: element.style.border_radius.saturating_add(blur),
+            }));
+            (context.commands.len() - 1, blur, spread)
+        })
+        .collect();
 
     let background_cmd_index = if let Some(background_color) = element.style.background_color {
         // Use effective_opacity for the actual drawn rect color (correct visual result)
@@ -1283,17 +1349,15 @@ fn layout_block_element(
         }
     }
 
-    if let Some(shadow_idx) = shadow_cmd_index {
-        if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(shadow_idx) {
-            let blur = element
-                .style
-                .box_shadow
-                .as_ref()
-                .map(|s| s.blur)
-                .unwrap_or(0);
-            rect.height = background_height.saturating_add(blur.saturating_mul(2));
+    for (shadow_idx, blur, spread) in &outer_shadow_indices_inline {
+        if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(*shadow_idx) {
+            let spread_expand = (*spread * 2).max(0) as u32;
+            rect.height = background_height
+                .saturating_add(blur.saturating_mul(2))
+                .saturating_add(spread_expand);
         }
     }
+    // Inset shadows are rendered on top of the background (TODO: render as clip-masked overlay).
     if let Some(background_cmd_index) = background_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(background_cmd_index) {
             rect.height = background_height;
@@ -1307,25 +1371,19 @@ fn layout_block_element(
 
     // Emit gradient overlay if background_gradient is set
     if let Some(ref gradient) = element.style.background_gradient {
-        let stops: Vec<GradientStop> = gradient
-            .stops
-            .iter()
-            .map(|(c, p)| GradientStop {
-                color: *c,
-                position: *p,
-            })
-            .collect();
-        context
-            .commands
-            .push(DrawCommand::Gradient(GradientCommand {
-                x: outer_x,
-                y: background_top,
-                width: outer_width.max(1),
-                height: background_height,
-                border_radius: element.style.border_radius,
-                angle_deg_x1000: gradient.angle_deg_x1000,
-                stops,
-            }));
+        let stops: Vec<GradientStop> = gradient.stops.iter().map(|(c, p)| GradientStop {
+            color: *c,
+            position: *p,
+        }).collect();
+        context.commands.push(DrawCommand::Gradient(GradientCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: background_height,
+            border_radius: element.style.border_radius,
+            kind: gradient.kind.clone(),
+            stops,
+        }));
     }
 
     // Restore parent background color after children are rendered
@@ -1524,9 +1582,9 @@ fn clip_commands_to_box(
                     g.height = new_y2.saturating_sub(new_y).max(1);
                     Some(DrawCommand::Gradient(g))
                 }
-            }
-        })
-        .collect();
+            DrawCommand::Sticky(s) => Some(DrawCommand::Sticky(s)),
+        }
+    }).collect();
     commands.extend(clamped);
 }
 
@@ -1553,6 +1611,11 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
             DrawCommand::Gradient(g) => {
                 g.x = g.x.saturating_sub(origin_x);
                 g.y = g.y.saturating_sub(origin_y);
+            }
+            DrawCommand::Sticky(s) => {
+                s.layer.x = s.layer.x.saturating_sub(origin_x);
+                s.layer.y = s.layer.y.saturating_sub(origin_y);
+                s.normal_y = s.normal_y.saturating_sub(origin_y);
             }
         }
     }
@@ -1585,31 +1648,43 @@ fn layout_block_element_as_layer(
         ..LayoutContext::default()
     };
 
-    // box-shadow: push shadow rect before background (so it renders behind it)
-    let shadow_cmd_index = if let Some(ref shadow) = element.style.box_shadow {
-        let blur = shadow.blur;
-        // Clamp shadow origin to the element's own top-left corner.
-        // Without clamping, a shadow with a negative offset or large blur can produce
-        // sx < outer_x or sy < background_top. The subsequent rebase_commands call uses
-        // saturating_sub(outer_x, background_top), which clamps negative offsets to 0 and
-        // corrupts the shadow position. By clamping to the element box we lose shadow that
-        // extends above/left of the element, but avoid rebase corruption.
-        let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64).max(outer_x as i64) as u32; // don't go left of element
-        let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64)
-            .max(background_top as i64) as u32; // don't go above element
-        let sw = outer_width.saturating_add(blur.saturating_mul(2)).max(1);
-        sub_context.commands.push(DrawCommand::Rect(RectCommand {
-            x: sx,
-            y: sy,
-            width: sw,
-            height: 1,
-            color: shadow.color.unwrap_or(element.style.color),
-            border_radius: element.style.border_radius.saturating_add(blur),
-        }));
-        Some(sub_context.commands.len() - 1)
-    } else {
-        None
-    };
+    // box-shadow: push outer shadow rects before background (so they render behind it).
+    // We collect (cmd_index, blur, spread) for each outer shadow so heights can be
+    // patched after layout completes.
+    // Clamp shadow origin to the element's own top-left corner.
+    // Without clamping, a shadow with a negative offset or large blur can produce
+    // sx < outer_x or sy < background_top. The subsequent rebase_commands call uses
+    // saturating_sub(outer_x, background_top), which clamps negative offsets to 0 and
+    // corrupts the shadow position. By clamping to the element box we lose shadow that
+    // extends above/left of the element, but avoid rebase corruption.
+    let outer_shadow_indices: Vec<(usize, u32, i32)> = element
+        .style
+        .box_shadows
+        .iter()
+        .filter(|s| !s.inset)
+        .map(|shadow| {
+            let blur = shadow.blur;
+            let spread = shadow.spread;
+            let spread_expand = (spread * 2).max(0) as u32;
+            let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64 - spread as i64)
+                .max(outer_x as i64) as u32; // don't go left of element
+            let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64 - spread as i64)
+                .max(background_top as i64) as u32; // don't go above element
+            let sw = outer_width
+                .saturating_add(blur.saturating_mul(2))
+                .saturating_add(spread_expand)
+                .max(1);
+            sub_context.commands.push(DrawCommand::Rect(RectCommand {
+                x: sx,
+                y: sy,
+                width: sw,
+                height: 1,
+                color: shadow.color.unwrap_or(element.style.color),
+                border_radius: element.style.border_radius.saturating_add(blur),
+            }));
+            (sub_context.commands.len() - 1, blur, spread)
+        })
+        .collect();
 
     // The element's own background rect goes into the sub-context (raw color, no opacity blend)
     let background_cmd_index = if let Some(background_color) = element.style.background_color {
@@ -1692,17 +1767,15 @@ fn layout_block_element_as_layer(
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     let final_height = cursor_y.saturating_sub(background_top).max(1);
 
-    if let Some(shadow_idx) = shadow_cmd_index {
-        if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(shadow_idx) {
-            let blur = element
-                .style
-                .box_shadow
-                .as_ref()
-                .map(|s| s.blur)
-                .unwrap_or(0);
-            rect.height = final_height.saturating_add(blur.saturating_mul(2));
+    for (shadow_idx, blur, spread) in &outer_shadow_indices {
+        if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(*shadow_idx) {
+            let spread_expand = (*spread * 2).max(0) as u32;
+            rect.height = final_height
+                .saturating_add(blur.saturating_mul(2))
+                .saturating_add(spread_expand);
         }
     }
+    // Inset shadows are rendered on top of the background (TODO: render as clip-masked overlay).
     if let Some(background_cmd_index) = background_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(background_cmd_index) {
             rect.height = final_height;
@@ -1711,25 +1784,19 @@ fn layout_block_element_as_layer(
 
     // Emit gradient overlay if background_gradient is set
     if let Some(ref gradient) = element.style.background_gradient {
-        let stops: Vec<GradientStop> = gradient
-            .stops
-            .iter()
-            .map(|(c, p)| GradientStop {
-                color: *c,
-                position: *p,
-            })
-            .collect();
-        sub_context
-            .commands
-            .push(DrawCommand::Gradient(GradientCommand {
-                x: outer_x,
-                y: background_top,
-                width: outer_width.max(1),
-                height: final_height,
-                border_radius: element.style.border_radius,
-                angle_deg_x1000: gradient.angle_deg_x1000,
-                stops,
-            }));
+        let stops: Vec<GradientStop> = gradient.stops.iter().map(|(c, p)| GradientStop {
+            color: *c,
+            position: *p,
+        }).collect();
+        sub_context.commands.push(DrawCommand::Gradient(GradientCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: final_height,
+            border_radius: element.style.border_radius,
+            kind: gradient.kind.clone(),
+            stops,
+        }));
     }
 
     // Emit background image if background_image_url is set
@@ -1848,6 +1915,11 @@ fn layout_block_element_as_layer(
         opacity: element.style.opacity,
         blur_px: element.style.filter_blur_px,
         brightness: element.style.filter_brightness,
+        scale_x: element.style.transform_scale_x,
+        scale_y: element.style.transform_scale_y,
+        rotate_millideg: element.style.transform_rotate_millideg,
+        origin_x: element.style.transform_origin_x,
+        origin_y: element.style.transform_origin_y,
         commands: sub_context.commands,
     }));
 
@@ -1914,6 +1986,11 @@ fn layout_image_element(
             opacity: element.style.opacity,
             blur_px: element.style.filter_blur_px,
             brightness: element.style.filter_brightness,
+            scale_x: 0,
+            scale_y: 0,
+            rotate_millideg: 0,
+            origin_x: 500,
+            origin_y: 500,
             commands: vec![img_cmd],
         }));
     } else {
@@ -2224,6 +2301,11 @@ fn layout_table_element(
                 opacity: placement.cell.style.opacity,
                 blur_px: placement.cell.style.filter_blur_px,
                 brightness: placement.cell.style.filter_brightness,
+                scale_x: 0,
+                scale_y: 0,
+                rotate_millideg: 0,
+                origin_x: 500,
+                origin_y: 500,
                 commands: layer_commands,
             }));
             // Links are content-relative; shift by cell position + padding/valign
@@ -2639,6 +2721,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             color: text.color,
             underline: text.underline,
             line_through: text.line_through,
+            text_decoration_color: text.text_decoration_color,
             bold: text.bold,
             italic: text.italic,
             text_shadow: text.text_shadow.clone(),
@@ -2662,6 +2745,11 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             opacity: layer.opacity,
             blur_px: layer.blur_px,
             brightness: layer.brightness,
+            scale_x: layer.scale_x,
+            scale_y: layer.scale_y,
+            rotate_millideg: layer.rotate_millideg,
+            origin_x: layer.origin_x,
+            origin_y: layer.origin_y,
             commands: layer.commands.clone(),
         }),
         DrawCommand::Gradient(g) => DrawCommand::Gradient(GradientCommand {
@@ -2670,9 +2758,16 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             width: g.width,
             height: g.height,
             border_radius: g.border_radius,
-            angle_deg_x1000: g.angle_deg_x1000,
+            kind: g.kind.clone(),
             stops: g.stops.clone(),
         }),
+        DrawCommand::Sticky(s) => {
+            let mut ns = s.clone();
+            ns.layer.x = ns.layer.x.saturating_add(offset_x);
+            ns.layer.y = ns.layer.y.saturating_add(offset_y);
+            ns.normal_y = ns.normal_y.saturating_add(offset_y);
+            DrawCommand::Sticky(ns)
+        }
     }
 }
 
@@ -2791,8 +2886,14 @@ fn collect_inline_fragments(
 ) {
     match node {
         StyledNode::Text(text) => {
+            // Resolve counter() references (e.g. injected via ::before/::after pseudo-elements).
+            let resolved = if text.text.contains("counter(") {
+                resolve_content_counters(&text.text, &context.counters)
+            } else {
+                text.text.clone()
+            };
             output.push(InlineFragment::Text {
-                text: text.text.clone(),
+                text: resolved,
                 style: text.style.clone(),
                 link_href: link_href.map(str::to_string),
                 link_node_id,
@@ -3173,6 +3274,36 @@ fn layout_normal_fragments(
                             line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
                             pending_space = true;
                         }
+                    } else if container_style.word_break == WordBreak::BreakAll {
+                        push_break_all_word(
+                            word,
+                            style,
+                            link_href.as_deref(),
+                            *link_node_id,
+                            container_style,
+                            x,
+                            effective_width2,
+                            cursor_y,
+                            context,
+                            &mut line,
+                            fonts,
+                        );
+                        pending_space = true;
+                    } else if container_style.overflow_wrap_break_word {
+                        push_overflow_wrap_word(
+                            word,
+                            style,
+                            link_href.as_deref(),
+                            *link_node_id,
+                            container_style,
+                            x,
+                            effective_width2,
+                            cursor_y,
+                            context,
+                            &mut line,
+                            fonts,
+                        );
+                        pending_space = true;
                     } else {
                         push_wrapped_word(
                             word,
@@ -3446,6 +3577,63 @@ fn push_wrapped_word(
     }
 }
 
+/// Push `word` character-by-character, breaking the line whenever a character
+/// would overflow the available width (implements `word-break: break-all`).
+fn push_break_all_word(
+    word: &str,
+    style: &ComputedStyle,
+    link_href: Option<&str>,
+    link_node_id: Option<usize>,
+    container_style: &ComputedStyle,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    line: &mut LineBuilder,
+    fonts: &mut FontContext,
+) {
+    for ch in word.chars() {
+        let cw = fonts.glyph_advance_px(ch, style.font_size_px, style.font_family);
+        if !line.is_empty() && line.width.saturating_add(cw) > width {
+            emit_line(line, container_style, x, width, cursor_y, context, fonts);
+        }
+        let ch_str = ch.to_string();
+        line.push_span(&ch_str, style, fonts, link_href, link_node_id);
+    }
+}
+
+/// Push `word` with `overflow-wrap: break-word` semantics: if the whole word
+/// fits on a fresh line, start a new line then add it whole; otherwise break
+/// the word character-by-character.
+fn push_overflow_wrap_word(
+    word: &str,
+    style: &ComputedStyle,
+    link_href: Option<&str>,
+    link_node_id: Option<usize>,
+    container_style: &ComputedStyle,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    line: &mut LineBuilder,
+    fonts: &mut FontContext,
+) {
+    let word_width = text_width(style, word, fonts);
+    if word_width <= width {
+        // The word fits on a fresh line — wrap normally (start new line if needed)
+        if !line.is_empty() && line.width.saturating_add(word_width) > width {
+            emit_line(line, container_style, x, width, cursor_y, context, fonts);
+        }
+        line.push_span(word, style, fonts, link_href, link_node_id);
+    } else {
+        // Word is wider than container — break character by character
+        push_break_all_word(
+            word, style, link_href, link_node_id,
+            container_style, x, width, cursor_y, context, line, fonts,
+        );
+    }
+}
+
 fn emit_line_with_indent(
     line: &mut LineBuilder,
     container_style: &ComputedStyle,
@@ -3589,6 +3777,7 @@ fn emit_line_impl(
             color: apply_opacity(span.style.color, context.background_color, span_opacity),
             underline: span.style.underline,
             line_through: span.style.line_through,
+            text_decoration_color: span.style.text_decoration_color,
             bold: span.style.font_weight,
             italic: span.style.font_style_italic,
             text_shadow: span.style.text_shadow.clone(),
@@ -3890,6 +4079,35 @@ fn layout_positioned_element(
 // Grid layout
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Resolve a grid-area name to (col_start, row_start, col_span, row_span).
+/// Returns None if the name is not found in template_areas.
+fn resolve_grid_area_name(
+    name: &str,
+    template_areas: &[Vec<String>],
+) -> Option<(usize, usize, usize, usize)> {
+    let mut min_row = usize::MAX;
+    let mut max_row = 0usize;
+    let mut min_col = usize::MAX;
+    let mut max_col = 0usize;
+    let mut found = false;
+    for (ri, row) in template_areas.iter().enumerate() {
+        for (ci, cell) in row.iter().enumerate() {
+            if cell == name {
+                if ri < min_row { min_row = ri; }
+                if ri > max_row { max_row = ri; }
+                if ci < min_col { min_col = ci; }
+                if ci > max_col { max_col = ci; }
+                found = true;
+            }
+        }
+    }
+    if found && min_row != usize::MAX {
+        Some((min_col, min_row, max_col - min_col + 1, max_row - min_row + 1))
+    } else {
+        None
+    }
+}
+
 fn layout_grid_container(
     element: &StyledElement,
     x: u32,
@@ -3970,13 +4188,21 @@ fn layout_grid_container(
     let mut placed: Vec<PlacedItem> = Vec::new();
 
     for child in &children {
-        let (col_start, col_span) = {
+        // Check for grid-area name resolution from parent's grid-template-areas
+        let area_override = child.style.grid_area_name.as_deref()
+            .and_then(|name| resolve_grid_area_name(name, &element.style.grid_template_areas));
+
+        let (col_start, col_span) = if let Some((ac, _ar, acsz, _arsz)) = area_override {
+            (Some(ac), acsz)
+        } else {
             let p = &child.style.grid_column;
             let span = p.span.unwrap_or(1) as usize;
             let start = p.start.map(|s| (s - 1).max(0) as usize);
             (start, span)
         };
-        let (row_start, row_span) = {
+        let (row_start, row_span) = if let Some((_ac, ar, _acsz, arsz)) = area_override {
+            (Some(ar), arsz)
+        } else {
             let p = &child.style.grid_row;
             let span = p.span.unwrap_or(1) as usize;
             let start = p.start.map(|s| (s - 1).max(0) as usize);
@@ -5342,5 +5568,38 @@ mod tests {
         // (800 - 200) / 2 = 300
         assert_eq!(bg.x, 300, "div should be centered at x=300, got {}", bg.x);
         assert_eq!(bg.width, 200, "div width should be 200px");
+    }
+
+    #[test]
+    fn css_counter_increments_and_renders_in_pseudo_content() {
+        // ol resets "item" to 0; each li increments by 1; ::before shows counter value.
+        let css = r#"
+            ol { counter-reset: item; }
+            li { counter-increment: item; }
+            li::before { content: counter(item); }
+        "#;
+        let html = "<ol><li>First</li><li>Second</li><li>Third</li></ol>";
+        let document = parse_document(html);
+        let stylesheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
+
+        let texts = layout.texts();
+        let rendered: Vec<&str> = texts.iter().map(|t| t.text.as_str()).collect();
+        // The counter values 1, 2, 3 should appear somewhere in the rendered output.
+        let all_text = rendered.join(" ");
+        assert!(
+            all_text.contains('1'),
+            "Expected '1' in rendered text, got: {:?}", rendered
+        );
+        assert!(
+            all_text.contains('2'),
+            "Expected '2' in rendered text, got: {:?}", rendered
+        );
+        assert!(
+            all_text.contains('3'),
+            "Expected '3' in rendered text, got: {:?}", rendered
+        );
     }
 }

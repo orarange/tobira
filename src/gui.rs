@@ -17,8 +17,8 @@ use winit::window::{CursorIcon, ResizeDirection, Window};
 
 use crate::browser::{BrowserPage, LoadedDocumentSource, build_page_from_source, load_page_source};
 use crate::css::{
-    Color, CursorKind, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind, ObjectFit,
-    StyledNode,
+    Color, CursorKind, DEFAULT_BACKGROUND_COLOR, DEFAULT_TEXT_COLOR, FontFamilyKind,
+    GradientKind, InteractiveState, ObjectFit, StyledNode,
 };
 use crate::error::{BrowserError, Result};
 use crate::font::FontContext;
@@ -28,7 +28,7 @@ use crate::js::{
 };
 use crate::layout::{
     DrawCommand, ElementHitbox, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument,
-    TextCommand, layout_styled_document,
+    StickyCommand, TextCommand, layout_styled_document,
 };
 use crate::url::Url;
 
@@ -2711,6 +2711,7 @@ fn layout_error_document(
             color,
             underline: false,
             line_through: false,
+            text_decoration_color: None,
             bold: scale >= 3,
             italic: false,
             text_shadow: None,
@@ -4536,17 +4537,27 @@ fn render_commands(
             }
             DrawCommand::Layer(layer) => {
                 render_layer(
-                    buffer,
-                    width,
-                    height,
-                    offset_x,
-                    offset_y,
-                    scroll_y,
-                    layer,
-                    page_images,
-                    fonts,
-                    scratch,
-                    depth,
+                    buffer, width, height, offset_x, offset_y, scroll_y, layer,
+                    None,
+                    page_images, fonts, scratch, depth,
+                );
+            }
+            DrawCommand::Sticky(sticky) => {
+                let container_max_y = if sticky.container_bottom == u32::MAX {
+                    u32::MAX
+                } else {
+                    sticky.container_bottom.saturating_sub(sticky.layer.height)
+                };
+                let effective_y = scroll_y
+                    .saturating_add(sticky.sticky_top)
+                    .max(sticky.normal_y)
+                    .min(container_max_y);
+
+                render_layer(
+                    buffer, width, height, offset_x, offset_y, scroll_y,
+                    &sticky.layer,
+                    Some(effective_y),
+                    page_images, fonts, scratch, depth,
                 );
             }
             DrawCommand::Gradient(g) => {
@@ -4554,15 +4565,6 @@ fn render_commands(
                 if grad_bottom < scroll_y || g.y > viewport_bottom {
                     continue;
                 }
-                // Convert angle (stored as degrees * 1000) to radians using f64
-                let angle_rad = (g.angle_deg_x1000 as f64 / 1000.0_f64).to_radians();
-                let dx = angle_rad.sin();
-                let dy = angle_rad.cos();
-                let gw = g.width as f64;
-                let gh = g.height as f64;
-                // Project length: length of the gradient vector across the box
-                let proj_len = (dx * gw).abs() + (dy * gh).abs();
-                let proj_len = if proj_len < 0.001 { 1.0 } else { proj_len };
 
                 // border_radius corner check setup
                 let r = g.border_radius.min(g.width / 2).min(g.height / 2) as i64;
@@ -4576,6 +4578,32 @@ fn render_commands(
                 let gy = g.y;
                 let gw_u = g.width;
                 let gh_u = g.height;
+                let gw = g.width as f64;
+                let gh = g.height as f64;
+
+                // For linear gradient: precompute direction
+                let (linear_dx, linear_dy, proj_len) = match &g.kind {
+                    GradientKind::Linear { angle_deg_x1000 } => {
+                        let angle_rad = (*angle_deg_x1000 as f64 / 1000.0_f64).to_radians();
+                        let dx = angle_rad.sin();
+                        let dy = angle_rad.cos();
+                        let pl = (dx * gw).abs() + (dy * gh).abs();
+                        let pl = if pl < 0.001 { 1.0 } else { pl };
+                        (dx, dy, pl)
+                    }
+                    GradientKind::Radial { .. } => (0.0, 0.0, 1.0),
+                };
+
+                // For radial gradient: precompute center and max radius
+                let (radial_cx, radial_cy, radial_max_r) = match &g.kind {
+                    GradientKind::Radial { center_x, center_y } => {
+                        let cx = *center_x as f64 / 1000.0 * gw;
+                        let cy = *center_y as f64 / 1000.0 * gh;
+                        let max_r = gw.hypot(gh).max(1.0);
+                        (cx, cy, max_r)
+                    }
+                    GradientKind::Linear { .. } => (0.0, 0.0, 1.0),
+                };
 
                 let py_start = g.y.max(scroll_y);
                 let py_end = grad_bottom.min(viewport_bottom);
@@ -4620,13 +4648,17 @@ fn render_commands(
                         // Compute gradient t in [0,1]
                         let rel_x = px as f64 - gx as f64;
                         let rel_y = py as f64 - gy as f64;
-                        // Project pixel position onto gradient direction
-                        // t = (dx*(rel_x - cx) + dy*(rel_y - cy) + proj_len/2) / proj_len
-                        // Simpler: use dot product with direction vector, offset so that center of box = 0.5
-                        let dot = dx * rel_x + dy * rel_y;
-                        // Range of dot across box: from 0 to proj_len (approximately)
-                        let t_raw = dot / proj_len;
-                        let t = t_raw.clamp(0.0, 1.0);
+                        let t = match &g.kind {
+                            GradientKind::Linear { .. } => {
+                                let dot = linear_dx * rel_x + linear_dy * rel_y;
+                                (dot / proj_len).clamp(0.0, 1.0)
+                            }
+                            GradientKind::Radial { .. } => {
+                                let dx = rel_x - radial_cx;
+                                let dy = rel_y - radial_cy;
+                                (dx.hypot(dy) / radial_max_r).clamp(0.0, 1.0)
+                            }
+                        };
 
                         // Interpolate color between stops
                         let stops = &g.stops;
@@ -4804,13 +4836,15 @@ fn render_layer(
     offset_y: u32,
     scroll_y: u32,
     layer: &LayerCommand,
+    y_override: Option<u32>,
     page_images: Option<&ImageStore>,
     fonts: &mut FontContext,
     scratch: &mut Vec<Vec<u32>>,
     depth: usize,
 ) {
     // Compute screen-space position using signed arithmetic to handle layers above viewport
-    let layer_screen_y = layer.y as i64 + offset_y as i64 - scroll_y as i64;
+    let layer_y = y_override.unwrap_or(layer.y);
+    let layer_screen_y = layer_y as i64 + offset_y as i64 - scroll_y as i64;
     let layer_screen_x = layer.x as i64 + offset_x as i64;
 
     // Content viewport top/left: the chrome (address bar, etc.) occupies [0, offset_y) rows
@@ -4965,6 +4999,14 @@ fn render_layer(
         apply_brightness(&mut offscreen, layer.brightness);
     }
 
+    // Apply CSS transform: scale / rotate if set
+    let has_scale = (layer.scale_x != 0 && layer.scale_x != 1000)
+        || (layer.scale_y != 0 && layer.scale_y != 1000);
+    let has_rotate = layer.rotate_millideg != 0;
+    if has_scale || has_rotate {
+        apply_affine_transform(&mut offscreen, ow, oh, layer);
+    }
+
     // Blend the visible rows of the offscreen back onto the main buffer with opacity.
     // Visible row r: offscreen row (src_y_start + r) → buffer row (dst_y + r).
     // Read from src_x_start in the offscreen (horizontal clip offset).
@@ -5000,6 +5042,55 @@ fn render_layer(
         offscreen.shrink_to(needed * 2);
     }
     scratch[depth] = offscreen;
+}
+
+/// Apply scale and/or rotate transform to buf (width x height) in-place.
+/// Uses inverse mapping (for each output pixel, compute the source pixel).
+fn apply_affine_transform(buf: &mut [u32], width: u32, height: u32, layer: &LayerCommand) {
+    let w = width as usize;
+    let h = height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    let sx = if layer.scale_x == 0 { 1.0f32 } else { layer.scale_x as f32 / 1000.0 };
+    let sy = if layer.scale_y == 0 { 1.0f32 } else { layer.scale_y as f32 / 1000.0 };
+    let angle_deg = layer.rotate_millideg as f32 / 1000.0;
+    let angle_rad = angle_deg.to_radians();
+    let cos_a = angle_rad.cos();
+    let sin_a = angle_rad.sin();
+
+    // Transform origin in pixels
+    let ox = layer.origin_x as f32 / 1000.0 * width as f32;
+    let oy = layer.origin_y as f32 / 1000.0 * height as f32;
+
+    let mut result = vec![0u32; w * h];
+
+    for dy in 0..h {
+        for dx in 0..w {
+            // Output pixel offset from origin
+            let fx = dx as f32 - ox;
+            let fy = dy as f32 - oy;
+
+            // Inverse rotate (negate angle)
+            let rx = fx * cos_a + fy * sin_a;
+            let ry = -fx * sin_a + fy * cos_a;
+
+            // Inverse scale
+            let src_x = rx / sx + ox;
+            let src_y = ry / sy + oy;
+
+            // Nearest-neighbor sampling with bounds check
+            let ix = src_x.round() as i32;
+            let iy = src_y.round() as i32;
+            if ix >= 0 && iy >= 0 && (ix as usize) < w && (iy as usize) < h {
+                result[dy * w + dx] = buf[iy as usize * w + ix as usize];
+            }
+            // Out-of-bounds pixels stay transparent (0) from vec init
+        }
+    }
+
+    buf.copy_from_slice(&result);
 }
 
 fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {

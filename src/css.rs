@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+﻿use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::html::{Element, Node};
@@ -8,6 +8,97 @@ pub type Color = u32;
 pub const DEFAULT_TEXT_COLOR: Color = 0x1D232E;
 pub const DEFAULT_BACKGROUND_COLOR: Color = 0xFFFDF8;
 pub const DEFAULT_LINK_COLOR: Color = 0x2A5DB0;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Animation / Transition / Keyframe types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single keyframe position with its CSS declarations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyframeStop {
+    /// Position 0–1000 (permille). 0 = "from"/0%, 1000 = "to"/100%
+    pub position: u32,
+    /// The CSS declarations at this keyframe position (property → value pairs)
+    pub declarations: Vec<(String, String)>,
+}
+
+/// A parsed `@keyframes` rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyframeRule {
+    pub name: String,
+    pub stops: Vec<KeyframeStop>,
+}
+
+/// Easing function for both animation and transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimingFunction {
+    Linear,
+    Ease,       // default
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    StepStart,
+    StepEnd,
+}
+
+impl Default for TimingFunction {
+    fn default() -> Self {
+        TimingFunction::Ease
+    }
+}
+
+/// CSS `animation-fill-mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimFillMode {
+    None,
+    Forwards,
+    Backwards,
+    Both,
+}
+
+impl Default for AnimFillMode {
+    fn default() -> Self {
+        AnimFillMode::None
+    }
+}
+
+/// CSS `animation-direction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimDirection {
+    Normal,
+    Reverse,
+    Alternate,
+    AlternateReverse,
+}
+
+impl Default for AnimDirection {
+    fn default() -> Self {
+        AnimDirection::Normal
+    }
+}
+
+/// A fully parsed `animation` layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnimationSpec {
+    pub name: String,
+    pub duration_ms: u32,
+    pub delay_ms: i32,
+    /// 0 = infinite (stored as u32::MAX), default 1
+    pub iteration_count: u32,
+    pub fill_mode: AnimFillMode,
+    pub timing_function: TimingFunction,
+    pub direction: AnimDirection,
+}
+
+/// A fully parsed `transition` layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionSpec {
+    /// CSS property name, or "all"
+    pub property: String,
+    pub duration_ms: u32,
+    pub delay_ms: i32,
+    pub timing_function: TimingFunction,
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Stylesheet / Rule types
@@ -23,6 +114,8 @@ pub struct Stylesheet {
     /// Each entry is `(condition, vars)` and is only applied when the condition matches
     /// the current viewport width at style-computation time.
     pub media_root_vars: Vec<(MediaCondition, BTreeMap<String, String>)>,
+    /// All `@keyframes` rules found in this stylesheet.
+    pub keyframes: Vec<KeyframeRule>,
 }
 
 impl Stylesheet {
@@ -34,6 +127,8 @@ impl Stylesheet {
         self.root_vars = Rc::new(merged);
         // Merge media-conditional root vars
         self.media_root_vars.extend(other.media_root_vars);
+        // Merge keyframes
+        self.keyframes.extend(other.keyframes);
     }
 }
 
@@ -242,6 +337,17 @@ pub enum WhiteSpaceMode {
     NoWrap,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordBreak {
+    Normal,
+    BreakAll,
+    KeepAll,
+}
+
+impl Default for WordBreak {
+    fn default() -> Self { WordBreak::Normal }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontFamilyKind {
     Sans,
@@ -262,14 +368,27 @@ pub struct TextShadow {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LinearGradient
+// GradientKind / CssGradient (shared by linear + radial)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Distinguishes gradient types in the CSS parse layer and draw-command layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinearGradient {
-    pub angle_deg_x1000: i32,
+pub enum GradientKind {
+    /// angle_deg_x1000: degrees × 1000 (e.g. 180_000 = 180°, top-to-bottom).
+    Linear { angle_deg_x1000: i32 },
+    /// center_x / center_y in permille of element dimensions (500 = 50 %).
+    Radial { center_x: u32, center_y: u32 },
+}
+
+/// A gradient value parsed from CSS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CssGradient {
+    pub kind: GradientKind,
     pub stops: Vec<(u32, u32)>, // (color, position 0-1000)
 }
+
+// Keep old name as a type alias for backward compatibility.
+pub type LinearGradient = CssGradient;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BackgroundSize / BackgroundRepeat
@@ -358,7 +477,9 @@ pub struct BoxShadow {
     pub offset_x: i32,
     pub offset_y: i32,
     pub blur: u32,
+    pub spread: i32,
     pub color: Option<u32>,
+    pub inset: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -576,6 +697,10 @@ pub struct ComputedStyle {
     pub border_radius: u32,
     pub outline_width: u32,
     pub outline_color: Option<Color>,
+    /// Space between element border and outline (can be negative)
+    pub outline_offset: i32,
+    /// Whether the outline style is visible (false = none/hidden)
+    pub outline_visible: bool,
     /// line-height in thousandths of em; 0 = "normal"
     pub line_height: u32,
     /// opacity 0–255; 255 = opaque
@@ -596,7 +721,7 @@ pub struct ComputedStyle {
     pub cursor_kind: CursorKind,
     pub pointer_events_none: bool,
     pub text_decoration_color: Option<Color>,
-    pub box_shadow: Option<BoxShadow>,
+    pub box_shadows: Vec<BoxShadow>,
     pub content: Option<String>,
     // Position
     pub position: Position,
@@ -629,13 +754,33 @@ pub struct ComputedStyle {
     pub grid_template_rows: Vec<GridTrackSize>,
     pub grid_auto_rows: GridTrackSize,
     pub grid_auto_columns: GridTrackSize,
+    // Grid container areas
+    pub grid_template_areas: Vec<Vec<String>>,
     // Grid item fields
     pub grid_column: GridPlacement,
     pub grid_row: GridPlacement,
+    pub grid_area_name: Option<String>,
     // Filter effects
-    pub filter_blur_px: u32,    // blur() value in pixels, 0 = no blur
-    pub filter_brightness: u32, // brightness() in percent * 100 (10000 = 100% = no change)
-    pub filter_opacity: u8,     // opacity() as 0-255, 255 = no change
+    pub filter_blur_px: u32,       // blur() value in pixels, 0 = no blur
+    pub filter_brightness: u32,    // brightness() in percent * 100 (10000 = 100% = no change)
+    pub filter_opacity: u8,        // opacity() as 0-255, 255 = no change
+    // CSS transform (integer fixed-point to keep Eq/Hash)
+    pub transform_translate_x: i32,  // pixels (signed)
+    pub transform_translate_y: i32,
+    pub transform_scale_x: u32,      // millis: 1000=1.0, 0=identity
+    pub transform_scale_y: u32,
+    pub transform_rotate_millideg: i32,
+    pub transform_origin_x: u32,     // permille: 500=50%
+    pub transform_origin_y: u32,
+    // Text breaking
+    pub word_break: WordBreak,
+    pub overflow_wrap_break_word: bool,
+    // CSS counters
+    pub counter_reset: Vec<(String, i32)>,      // counter-reset: name value
+    pub counter_increment: Vec<(String, i32)>,  // counter-increment: name value
+    // Animations and transitions (structured, for future repaint loop use)
+    pub animations: Vec<AnimationSpec>,
+    pub transitions: Vec<TransitionSpec>,
 }
 
 impl ComputedStyle {
@@ -678,6 +823,8 @@ impl ComputedStyle {
             border_radius: 0,
             outline_width: 0,
             outline_color: None,
+            outline_offset: 0,
+            outline_visible: true,
             line_height: parent.map(|s| s.line_height).unwrap_or(0),
             opacity: 255,
             effective_opacity: 255,
@@ -698,7 +845,7 @@ impl ComputedStyle {
             cursor_kind: CursorKind::Auto,
             pointer_events_none: false,
             text_decoration_color: None,
-            box_shadow: None,
+            box_shadows: Vec::new(),
             content: None,
             // Position fields
             position: Position::Static,
@@ -728,12 +875,30 @@ impl ComputedStyle {
             grid_template_rows: Vec::new(),
             grid_auto_rows: GridTrackSize::Auto,
             grid_auto_columns: GridTrackSize::Auto,
+            grid_template_areas: Vec::new(),
             grid_column: GridPlacement::default(),
             grid_row: GridPlacement::default(),
+            grid_area_name: None,
             // Filter effects
             filter_blur_px: 0,
             filter_brightness: 10000,
             filter_opacity: 255,
+            // CSS transform
+            transform_translate_x: 0,
+            transform_translate_y: 0,
+            transform_scale_x: 0,
+            transform_scale_y: 0,
+            transform_rotate_millideg: 0,
+            transform_origin_x: 500,
+            transform_origin_y: 500,
+            word_break: WordBreak::Normal,
+            overflow_wrap_break_word: false,
+            // CSS counters
+            counter_reset: vec![],
+            counter_increment: vec![],
+            // Animations / transitions
+            animations: vec![],
+            transitions: vec![],
         };
 
         match tag_name {
@@ -902,6 +1067,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut root_vars = BTreeMap::new();
     let mut media_root_vars: Vec<(MediaCondition, BTreeMap<String, String>)> = Vec::new();
+    let mut keyframes: Vec<KeyframeRule> = Vec::new();
     let source = strip_comments(input);
     let mut cursor = 0;
 
@@ -953,6 +1119,15 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                     rule.media = Some(media_cond.clone());
                     rules.push(rule);
                 }
+            } else if at_lower.starts_with("@keyframes") {
+                // Extract animation name — everything after "@keyframes " before the block
+                let name_part = selector_text["@keyframes".len()..].trim();
+                // Strip vendor prefix if present (e.g. @-webkit-keyframes)
+                let anim_name = name_part.trim_matches(|c: char| c == '"' || c == '\'').to_string();
+                if !anim_name.is_empty() {
+                    let stops = parse_keyframe_stops(block_text);
+                    keyframes.push(KeyframeRule { name: anim_name, stops });
+                }
             } else if at_lower.starts_with("@supports") || at_lower.starts_with("@layer") {
                 // @supports: treat condition as always-true (optimistic: assume all features supported)
                 // @layer: ignore layer name, parse rules as regular rules (no cascade layering)
@@ -968,6 +1143,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                     media_root_vars.push((inner_cond, inner_map));
                 }
                 rules.extend(inner_stylesheet.rules);
+                keyframes.extend(inner_stylesheet.keyframes);
             }
             // other at-rules are skipped
             continue;
@@ -1012,11 +1188,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         }
     }
 
-    Stylesheet {
-        rules,
-        root_vars: Rc::new(root_vars),
-        media_root_vars,
-    }
+    Stylesheet { rules, root_vars: Rc::new(root_vars), media_root_vars, keyframes }
 }
 
 fn parse_media_condition(query: &str) -> MediaCondition {
@@ -1624,9 +1796,12 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         }
         "background" => {
             let v = value.trim();
-            if v.to_ascii_lowercase().contains("linear-gradient(") {
+            let vl = v.to_ascii_lowercase();
+            if vl.contains("radial-gradient(") {
+                style.background_gradient = parse_radial_gradient(v);
+            } else if vl.contains("linear-gradient(") {
                 style.background_gradient = parse_linear_gradient(v);
-            } else if v.to_ascii_lowercase().starts_with("url(") {
+            } else if vl.starts_with("url(") {
                 style.background_image_url = extract_url(v);
             } else {
                 style.background_color = parse_color(v);
@@ -1641,6 +1816,8 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if vl == "none" {
                 style.background_gradient = None;
                 style.background_image_url = None;
+            } else if vl.contains("radial-gradient(") {
+                style.background_gradient = parse_radial_gradient(v);
             } else if vl.contains("linear-gradient(") {
                 style.background_gradient = parse_linear_gradient(v);
             } else if vl.starts_with("url(") {
@@ -1771,6 +1948,8 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "text-decoration" => {
+            // Shorthand: may contain line keywords, color, style.
+            // e.g. "underline", "underline line-through", "underline red", "none"
             let v = value.trim().to_ascii_lowercase();
             if v.contains("none") {
                 style.underline = false;
@@ -1782,10 +1961,37 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 if v.contains("line-through") {
                     style.line_through = true;
                 }
+                // Extract color token (any non-keyword token that parses as color)
+                for token in v.split_whitespace() {
+                    if !matches!(token, "underline" | "overline" | "line-through" | "blink"
+                        | "solid" | "dashed" | "dotted" | "double" | "wavy" | "none") {
+                        if let Some(c) = parse_color(token) {
+                            style.text_decoration_color = Some(c);
+                        }
+                    }
+                }
+            }
+        }
+        "text-decoration-line" => {
+            let v = value.trim().to_ascii_lowercase();
+            if v.contains("none") {
+                style.underline = false;
+                style.line_through = false;
+            } else {
+                for token in v.split_whitespace() {
+                    match token {
+                        "underline" => style.underline = true,
+                        "line-through" => style.line_through = true,
+                        _ => {}
+                    }
+                }
             }
         }
         "text-decoration-color" => {
             style.text_decoration_color = parse_color(value);
+        }
+        "text-decoration-thickness" | "text-underline-offset" => {
+            // Parsed but not yet applied; stored as no-op for future use
         }
         "text-transform" => {
             style.text_transform = parse_text_transform(value);
@@ -1805,6 +2011,16 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if let Some(ws) = parse_white_space(value) {
                 style.white_space = ws;
             }
+        }
+        "word-break" => {
+            match value.trim() {
+                "break-all" => style.word_break = WordBreak::BreakAll,
+                "keep-all"  => style.word_break = WordBreak::KeepAll,
+                _           => style.word_break = WordBreak::Normal,
+            }
+        }
+        "overflow-wrap" | "word-wrap" => {
+            style.overflow_wrap_break_word = value.trim() == "break-word";
         }
         "margin" => {
             parse_margin_shorthand(style, value, parent_font_size);
@@ -1936,6 +2152,15 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         "outline-color" => {
             style.outline_color = parse_color(value);
         }
+        "outline-offset" => {
+            if let Some(px) = parse_signed_length(value, parent_font_size) {
+                style.outline_offset = px;
+            }
+        }
+        "outline-style" => {
+            let v = value.trim().to_ascii_lowercase();
+            style.outline_visible = !matches!(v.as_str(), "none" | "hidden");
+        }
         "line-height" => {
             style.line_height = parse_line_height(value, parent_font_size);
         }
@@ -1983,12 +2208,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "box-shadow" => {
-            let v = value.trim().to_ascii_lowercase();
-            if v == "none" {
-                style.box_shadow = None;
-            } else {
-                style.box_shadow = parse_box_shadow(value);
-            }
+            style.box_shadows = parse_box_shadows(value);
         }
         "cursor" => {
             style.cursor_kind = match value.trim().to_ascii_lowercase().as_str() {
@@ -2199,6 +2419,13 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 }
             }
         }
+        "grid-template-areas" => {
+            style.grid_template_areas = parse_grid_template_areas(value);
+        }
+        "grid-area" => {
+            let v = value.trim();
+            if !v.contains('/') { style.grid_area_name = Some(v.to_string()); }
+        }
         "grid-template" | "grid" => {
             // Simplified: skip complex shorthand
         }
@@ -2307,8 +2534,81 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 _ => {}
             }
         }
+        "transform" => {
+            parse_transform_into(value, style);
+        }
+        "transform-origin" => {
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            if let Some(x) = parts.first() {
+                style.transform_origin_x = parse_pct_permille(x, 500);
+            }
+            if let Some(y) = parts.get(1) {
+                style.transform_origin_y = parse_pct_permille(y, 500);
+            }
+        }
+        "counter-reset" => {
+            style.counter_reset = parse_counter_list(value, 0);
+        }
+        "counter-increment" => {
+            style.counter_increment = parse_counter_list(value, 1);
+        }
         _ => {}
     }
+}
+
+/// Parse a CSS counter list value (for `counter-reset` or `counter-increment`).
+/// Format: `<name> [<integer>]` pairs, e.g. `item 1` or `section 0 chapter`.
+/// `default_val` is used when no integer follows the name (0 for reset, 1 for increment).
+fn parse_counter_list(value: &str, default_val: i32) -> Vec<(String, i32)> {
+    if value.trim().eq_ignore_ascii_case("none") {
+        return vec![];
+    }
+    let mut result = Vec::new();
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    let mut i = 0;
+    while i < tokens.len() {
+        let name = tokens[i].to_string();
+        i += 1;
+        let val = if i < tokens.len() {
+            if let Ok(n) = tokens[i].parse::<i32>() {
+                i += 1;
+                n
+            } else {
+                default_val
+            }
+        } else {
+            default_val
+        };
+        if !name.is_empty() {
+            result.push((name, val));
+        }
+    }
+    result
+}
+
+/// Resolve `counter(name)` and `counter(name, style)` references in a content string.
+/// Replaces each `counter(...)` call with the current integer value from `counters`.
+pub fn resolve_content_counters(content: &str, counters: &std::collections::HashMap<String, i32>) -> String {
+    let mut result = String::new();
+    let mut s = content;
+    while let Some(pos) = s.find("counter(") {
+        result.push_str(&s[..pos]);
+        let after = &s[pos + "counter(".len()..];
+        if let Some(end) = after.find(')') {
+            let args = &after[..end];
+            // Take the first arg (counter name), ignore optional style arg
+            let name = args.split(',').next().unwrap_or("").trim();
+            let val = counters.get(name).copied().unwrap_or(0);
+            result.push_str(&val.to_string());
+            s = &after[end + 1..];
+        } else {
+            // Unbalanced paren — emit literally and stop
+            result.push_str("counter(");
+            s = after;
+        }
+    }
+    result.push_str(s);
+    result
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3231,6 +3531,29 @@ fn parse_grid_line(s: &str) -> Option<i32> {
     s.parse::<i32>().ok()
 }
 
+
+/// Parse a grid-template-areas value like "header header" "sidebar main".
+/// Returns a Vec of rows, each row being a Vec of column area names.
+/// Both single-quoted and double-quoted strings are supported.
+fn parse_grid_template_areas(value: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' || c == '\'' {
+            let quote = c;
+            let mut row_str = String::new();
+            for ch in chars.by_ref() {
+                if ch == quote { break; }
+                row_str.push(ch);
+            }
+            let cells: Vec<String> = row_str.split_whitespace().map(|s| s.to_string()).collect();
+            if !cells.is_empty() { rows.push(cells); }
+        }
+    }
+    rows
+}
+
+
 fn parse_font_weight(input: &str) -> Option<bool> {
     let value = input.trim().to_ascii_lowercase();
     match value.as_str() {
@@ -3305,11 +3628,23 @@ fn parse_list_style_type(input: &str) -> ListStyleType {
     ListStyleType::Disc
 }
 
-fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
+fn parse_box_shadows(value: &str) -> Vec<BoxShadow> {
+    if value.trim().to_ascii_lowercase() == "none" {
+        return Vec::new();
+    }
+    // Split on commas at the top level (avoiding rgba(r,g,b,a) inner commas).
+    split_at_top_level(value, ',')
+        .into_iter()
+        .filter_map(|s| parse_single_box_shadow(s.trim()))
+        .collect()
+}
+
+fn parse_single_box_shadow(value: &str) -> Option<BoxShadow> {
     let v = value.trim();
-    if v.to_ascii_lowercase() == "none" {
+    if v.is_empty() || v.to_ascii_lowercase() == "none" {
         return None;
     }
+
     // Split tokens at spaces (top-level only, respecting parentheses for rgb()/rgba() colors).
     // Note: only ASCII space is used as separator; tabs and other whitespace between
     // tokens are not treated as delimiters. This is an approximation that covers
@@ -3321,13 +3656,15 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Inset shadows are not yet supported; return None so they are silently skipped
-    // rather than being incorrectly drawn as outer shadows.
-    if tokens.iter().any(|t| t.to_ascii_lowercase() == "inset") {
-        return None;
-    }
+    // Check for 'inset' keyword anywhere in the token list.
+    let inset = tokens.iter().any(|t| t.to_ascii_lowercase() == "inset");
 
-    let tokens: Vec<&str> = tokens.iter().map(|s| s.as_str()).collect();
+    // Filter out the 'inset' keyword, leaving only lengths and color tokens.
+    let tokens: Vec<&str> = tokens
+        .iter()
+        .filter(|t| t.to_ascii_lowercase() != "inset")
+        .map(|s| s.as_str())
+        .collect();
 
     if tokens.len() < 2 {
         return None;
@@ -3336,6 +3673,7 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
     let mut offset_x: i32 = 0;
     let mut offset_y: i32 = 0;
     let mut blur: u32 = 0;
+    let mut spread: i32 = 0;
     let mut color: Option<u32> = None;
     let mut length_count = 0;
 
@@ -3348,6 +3686,7 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
                 0 => offset_x = val,
                 1 => offset_y = val,
                 2 => blur = val.max(0) as u32,
+                3 => spread = val,
                 _ => {}
             }
             length_count += 1;
@@ -3364,7 +3703,9 @@ fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
         offset_x,
         offset_y,
         blur,
+        spread,
         color,
+        inset,
     })
 }
 
@@ -3470,18 +3811,26 @@ fn parse_outline_shorthand(style: &mut ComputedStyle, value: &str, parent_font_s
     let v = value.trim().to_ascii_lowercase();
     if v == "none" {
         style.outline_width = 0;
+        style.outline_visible = false;
         return;
     }
     for token in v.split_whitespace() {
-        if matches!(token, "solid" | "dashed" | "dotted" | "none") {
-            continue;
-        }
-        if let Some(px) = parse_length(token, parent_font_size) {
-            style.outline_width = px;
-            continue;
-        }
-        if let Some(color) = parse_color(token) {
-            style.outline_color = Some(color);
+        match token {
+            "none" | "hidden" => {
+                style.outline_width = 0;
+                style.outline_visible = false;
+            }
+            "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset" | "auto" => {
+                // style keyword — outline is visible
+                style.outline_visible = true;
+            }
+            _ => {
+                if let Some(px) = parse_length(token, parent_font_size) {
+                    style.outline_width = px;
+                } else if let Some(color) = parse_color(token) {
+                    style.outline_color = Some(color);
+                }
+            }
         }
     }
 }
@@ -4363,8 +4712,56 @@ fn parse_text_shadow(value: &str, parent_font_size: u32) -> Option<TextShadow> {
     }
 }
 
+/// Parse the interior of a `@keyframes` block into a list of `KeyframeStop`s.
+fn parse_keyframe_stops(block: &str) -> Vec<KeyframeStop> {
+    let mut stops = Vec::new();
+    // Find each "selector { declarations }" pair inside the block
+    let mut rest = block.trim();
+    while !rest.is_empty() {
+        // Find the selector part (everything before '{')
+        let brace = match rest.find('{') {
+            Some(i) => i,
+            None => break,
+        };
+        let sel = rest[..brace].trim();
+        rest = &rest[brace + 1..];
+        // Find matching closing brace
+        let close = match rest.find('}') {
+            Some(i) => i,
+            None => break,
+        };
+        let decls_str = rest[..close].trim();
+        rest = rest[close + 1..].trim();
+
+        // Parse position(s): "from", "to", "0%", "50%", "0%, 100%"
+        let positions: Vec<u32> = sel.split(',').filter_map(|s| {
+            let s = s.trim();
+            if s == "from" || s == "0%" { Some(0) }
+            else if s == "to" || s == "100%" { Some(1000) }
+            else if let Some(pct) = s.strip_suffix('%') {
+                pct.trim().parse::<f32>().ok().map(|v| (v * 10.0) as u32)
+            } else { None }
+        }).collect();
+
+        // Parse declarations as raw (property, value) pairs
+        let declarations: Vec<(String, String)> = decls_str.split(';')
+            .filter_map(|d| {
+                let d = d.trim();
+                if d.is_empty() { return None; }
+                let colon = d.find(':')?;
+                Some((d[..colon].trim().to_string(), d[colon+1..].trim().to_string()))
+            })
+            .collect();
+
+        for pos in positions {
+            stops.push(KeyframeStop { position: pos, declarations: declarations.clone() });
+        }
+    }
+    stops
+}
+
 /// Parse a `linear-gradient(...)` value.
-fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
+fn parse_linear_gradient(value: &str) -> Option<CssGradient> {
     // Find the linear-gradient(...) part
     let lower = value.to_ascii_lowercase();
     let start = lower.find("linear-gradient(")?;
@@ -4519,10 +4916,193 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
         })
         .collect();
 
-    Some(LinearGradient {
-        angle_deg_x1000,
-        stops,
-    })
+    Some(CssGradient { kind: GradientKind::Linear { angle_deg_x1000 }, stops })
+}
+
+/// Parse a `radial-gradient(...)` value → CssGradient with GradientKind::Radial.
+fn parse_radial_gradient(value: &str) -> Option<CssGradient> {
+    let lower = value.to_ascii_lowercase();
+    let start = lower.find("radial-gradient(")?;
+    let after = &value[start + "radial-gradient(".len()..];
+    let mut depth = 1u32;
+    let mut end = 0;
+    for (i, ch) in after.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => { depth -= 1; if depth == 0 { end = i; break; } }
+            _ => {}
+        }
+    }
+    let inner = &after[..end];
+
+    // Split args respecting parens
+    let args: Vec<String> = split_at_top_level(inner, ',');
+
+    // Parse optional shape/center ("circle at 30% 70%", "ellipse at center")
+    let mut stop_start = 0usize;
+    let mut center_x = 500u32;
+    let mut center_y = 500u32;
+
+    if let Some(first) = args.first() {
+        let fl = first.to_ascii_lowercase();
+        if fl.contains("circle") || fl.contains("ellipse") || fl.contains(" at ") || fl.trim().starts_with("at ") {
+            stop_start = 1;
+            if let Some(at_pos) = fl.find(" at ") {
+                let pos_str = &first[at_pos + 4..];
+                let parts: Vec<&str> = pos_str.split_whitespace().collect();
+                if let Some(x) = parts.first() { center_x = parse_pct_permille(x, 500); }
+                if let Some(y) = parts.get(1) { center_y = parse_pct_permille(y, 500); }
+            }
+        } else {
+            // Heuristic: if it doesn't look like a color stop, treat as shape spec
+            let trimmed = fl.trim();
+            if !trimmed.starts_with('#') && !trimmed.starts_with("rgb") && trimmed.parse::<f32>().is_err() {
+                // Check if it's a known color keyword
+                let looks_like_color = parse_color(trimmed).is_some();
+                if !looks_like_color {
+                    stop_start = 1;
+                }
+            }
+        }
+    }
+
+    // Parse color stops
+    let stop_args = &args[stop_start..];
+    if stop_args.is_empty() { return None; }
+
+    let mut raw_stops: Vec<(u32, Option<u32>)> = Vec::new();
+    for arg in stop_args {
+        let arg_trimmed = arg.trim();
+        let parts: Vec<String> = split_at_top_level(arg_trimmed, ' ')
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.is_empty() { continue; }
+
+        let last = parts.last().unwrap();
+        let last_is_position = last.ends_with('%') || last.ends_with("px");
+        let (color_str, pos_str) = if last_is_position && parts.len() >= 2 {
+            let c = parts[..parts.len() - 1].join(" ");
+            (c, Some(last.clone()))
+        } else {
+            (parts.join(" "), None)
+        };
+
+        if let Some(c) = parse_color(color_str.trim()) {
+            let pos = pos_str.and_then(|p| {
+                let p = p.trim();
+                if p.ends_with('%') {
+                    p[..p.len()-1].parse::<f64>().ok().map(|v| (v * 10.0).round() as u32)
+                } else {
+                    None
+                }
+            });
+            raw_stops.push((c, pos));
+        }
+    }
+
+    if raw_stops.is_empty() { return None; }
+
+    let count = raw_stops.len();
+    let stops: Vec<(u32, u32)> = raw_stops.into_iter().enumerate().map(|(i, (c, p))| {
+        let pos = p.unwrap_or_else(|| {
+            if count == 1 { 0 } else { (1000 * i / (count - 1)) as u32 }
+        });
+        (c, pos)
+    }).collect();
+
+    Some(CssGradient { kind: GradientKind::Radial { center_x, center_y }, stops })
+}
+
+/// Accumulate CSS transform functions into ComputedStyle fields.
+fn parse_transform_into(value: &str, style: &mut ComputedStyle) {
+    let v = value.trim();
+    if v.eq_ignore_ascii_case("none") { return; }
+    let mut rest = v;
+    while let Some(paren) = rest.find('(') {
+        let func = rest[..paren].trim().to_ascii_lowercase();
+        let after = &rest[paren + 1..];
+        let close = after.find(')').unwrap_or(after.len());
+        let args = &after[..close];
+        rest = if close + 1 < after.len() { &after[close + 1..] } else { "" };
+
+        match func.as_str() {
+            "translate" => {
+                let parts: Vec<&str> = args.split(',').collect();
+                style.transform_translate_x = parse_transform_length(parts.first().unwrap_or(&"0"));
+                style.transform_translate_y = parse_transform_length(parts.get(1).unwrap_or(&"0"));
+            }
+            "translatex" => {
+                style.transform_translate_x = parse_transform_length(args);
+            }
+            "translatey" => {
+                style.transform_translate_y = parse_transform_length(args);
+            }
+            "scale" => {
+                let parts: Vec<&str> = args.split(',').collect();
+                let sx = parse_transform_scale(parts.first().unwrap_or(&"1"));
+                let sy = parts.get(1).map(|s| parse_transform_scale(s)).unwrap_or(sx);
+                style.transform_scale_x = sx;
+                style.transform_scale_y = sy;
+            }
+            "scalex" => { style.transform_scale_x = parse_transform_scale(args); }
+            "scaley" => { style.transform_scale_y = parse_transform_scale(args); }
+            "rotate" => {
+                style.transform_rotate_millideg = parse_transform_angle_millideg(args);
+            }
+            _ => {} // skew, matrix, etc. — no-op
+        }
+    }
+}
+
+fn parse_transform_length(s: &str) -> i32 {
+    let s = s.trim();
+    if s.ends_with("px") {
+        s[..s.len() - 2].trim().parse::<f32>().unwrap_or(0.0) as i32
+    } else if s.ends_with('%') {
+        0 // percent translate not supported in fixed-pixel layout
+    } else {
+        s.parse::<f32>().unwrap_or(0.0) as i32
+    }
+}
+
+fn parse_transform_scale(s: &str) -> u32 {
+    let v = s.trim().parse::<f32>().unwrap_or(1.0);
+    (v * 1000.0).round() as u32
+}
+
+fn parse_transform_angle_millideg(s: &str) -> i32 {
+    let s = s.trim();
+    if s.ends_with("deg") {
+        let v = s[..s.len() - 3].trim().parse::<f32>().unwrap_or(0.0);
+        (v * 1000.0).round() as i32
+    } else if s.ends_with("rad") {
+        let v = s[..s.len() - 3].trim().parse::<f32>().unwrap_or(0.0);
+        (v.to_degrees() * 1000.0).round() as i32
+    } else if s.ends_with("turn") {
+        let v = s[..s.len() - 4].trim().parse::<f32>().unwrap_or(0.0);
+        (v * 360.0 * 1000.0).round() as i32
+    } else {
+        s.parse::<f32>().unwrap_or(0.0) as i32
+    }
+}
+
+fn parse_pct_permille(s: &str, default: u32) -> u32 {
+    let s = s.trim();
+    match s {
+        "center" => 500,
+        "left" | "top" => 0,
+        "right" | "bottom" => 1000,
+        _ => {
+            if s.ends_with('%') {
+                let v = s[..s.len() - 1].trim().parse::<f32>().unwrap_or(50.0);
+                (v * 10.0).round() as u32
+            } else {
+                default
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5668,5 +6248,109 @@ mod tests {
         );
         assert!(div.style.margin_left_auto, "margin-left should be auto");
         assert!(div.style.margin_right_auto, "margin-right should be auto");
+    }
+
+    #[test]
+    fn grid_template_areas_parsed() {
+        let html = "<div style=\"display:grid;grid-template-areas:'header header' 'sidebar main' 'footer footer';\"></div>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.grid_template_areas.len(), 3);
+        assert_eq!(div.style.grid_template_areas[0], vec!["header", "header"]);
+        assert_eq!(div.style.grid_template_areas[1], vec!["sidebar", "main"]);
+        assert_eq!(div.style.grid_template_areas[2], vec!["footer", "footer"]);
+    }
+
+    #[test]
+    fn grid_area_name_parsed() {
+        let html = "<div style=\"grid-area: sidebar;\"></div>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.grid_area_name, Some("sidebar".to_string()));
+    }
+
+    // ─── CSS counter tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn counter_reset_parsed_with_value() {
+        let css = "ol { counter-reset: item 0; }";
+        let html = "<ol><li>test</li></ol>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let ol = find_first_element(&styled, "ol").unwrap();
+        assert_eq!(ol.style.counter_reset, vec![("item".to_string(), 0)]);
+    }
+
+    #[test]
+    fn counter_reset_parsed_no_value() {
+        // When no integer follows the name, default is 0
+        let css = "ol { counter-reset: section; }";
+        let html = "<ol></ol>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let ol = find_first_element(&styled, "ol").unwrap();
+        assert_eq!(ol.style.counter_reset, vec![("section".to_string(), 0)]);
+    }
+
+    #[test]
+    fn counter_increment_parsed_default_step() {
+        // counter-increment default step is 1
+        let css = "li { counter-increment: item; }";
+        let html = "<li>test</li>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let li = find_first_element(&styled, "li").unwrap();
+        assert_eq!(li.style.counter_increment, vec![("item".to_string(), 1)]);
+    }
+
+    #[test]
+    fn counter_increment_parsed_with_step() {
+        let css = "li { counter-increment: chapter 2; }";
+        let html = "<li>test</li>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let li = find_first_element(&styled, "li").unwrap();
+        assert_eq!(li.style.counter_increment, vec![("chapter".to_string(), 2)]);
+    }
+
+    #[test]
+    fn counter_reset_none_gives_empty_vec() {
+        let css = "ol { counter-reset: none; }";
+        let html = "<ol></ol>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let ol = find_first_element(&styled, "ol").unwrap();
+        assert_eq!(ol.style.counter_reset, vec![]);
+    }
+
+    #[test]
+    fn resolve_content_counters_replaces_counter_ref() {
+        let mut counters = std::collections::HashMap::new();
+        counters.insert("item".to_string(), 3);
+        let result = super::resolve_content_counters("counter(item). ", &counters);
+        assert_eq!(result, "3. ");
+    }
+
+    #[test]
+    fn resolve_content_counters_unknown_counter_gives_zero() {
+        let counters = std::collections::HashMap::new();
+        let result = super::resolve_content_counters("counter(missing)", &counters);
+        assert_eq!(result, "0");
+    }
+
+    #[test]
+    fn resolve_content_counters_no_counter_unchanged() {
+        let counters = std::collections::HashMap::new();
+        let result = super::resolve_content_counters("plain text", &counters);
+        assert_eq!(result, "plain text");
     }
 }
