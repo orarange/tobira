@@ -3845,6 +3845,9 @@ fn parse_calc(expr: &str, parent_font_size: u32) -> Option<u32> {
     // Pass 1: collapse * and / (higher precedence than + and -)
     let mut i = 0;
     while i < ops.len() {
+        if i + 1 >= values.len() {
+            break; // malformed calc() — guard against index out of bounds
+        }
         match ops[i] {
             '*' => {
                 values[i] *= values[i + 1];
@@ -3861,7 +3864,7 @@ fn parse_calc(expr: &str, parent_font_size: u32) -> Option<u32> {
     }
 
     // Pass 2: evaluate + and -
-    let mut result = values[0];
+    let mut result = *values.first()?;
     for (op, val) in ops.iter().zip(values[1..].iter()) {
         match op {
             '+' => result += val,
