@@ -51,8 +51,8 @@
       animation: hue 3s linear infinite;
     }
 
-    /* One-shot grow on load — exercises a finite animation that should
-       settle and let the frame loop return to idle. */
+    /* One-shot grow on load — exercises a finite animation. `forwards` keeps the
+       final scaled state so the frame loop can settle while the box stays grown. */
     @keyframes grow {
       from { transform: scale(1); }
       to   { transform: scale(2); }
@@ -62,7 +62,7 @@
       height: 60px;
       background: #8e44ad;
       margin: 40px 0;
-      animation: grow 800ms ease-out;
+      animation: grow 800ms ease-out forwards;
     }
   </style>
 </head>

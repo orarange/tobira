@@ -5270,17 +5270,30 @@ fn render_layer(
     let mut offscreen = std::mem::take(&mut scratch[depth]);
     offscreen.resize(needed, 0);
 
+    let has_scale = (layer.scale_x != 0 && layer.scale_x != 1000)
+        || (layer.scale_y != 0 && layer.scale_y != 1000);
+    let has_rotate = layer.rotate_millideg != 0;
+    let has_transform = has_scale || has_rotate;
+
     // Copy backdrop from the main framebuffer into the visible rows of the offscreen.
     // Offscreen row (src_y_start + r) ↔ buffer row (dst_y + r), for r in 0..visible_h.
-    for row in 0..visible_h {
-        let buf_row = dst_y + row;
-        let off_row = src_y_start + row;
-        let buf_start = (buf_row * buf_width + dst_x) as usize;
-        let off_start = (off_row * ow + src_x_start) as usize;
-        let len = visible_w as usize;
-        if buf_start + len <= buffer.len() && off_start + len <= offscreen.len() {
-            offscreen[off_start..off_start + len]
-                .copy_from_slice(&buffer[buf_start..buf_start + len]);
+    //
+    // For transformed layers we skip this: the content is rendered over a transparent
+    // (0) background and composited per-pixel afterward, so the transformed footprint can
+    // grow beyond the element box (scale) and rotated-out corners show the page backdrop
+    // instead of black. (Limitation: pure-black content in a transformed element is
+    // treated as transparent.)
+    if !has_transform {
+        for row in 0..visible_h {
+            let buf_row = dst_y + row;
+            let off_row = src_y_start + row;
+            let buf_start = (buf_row * buf_width + dst_x) as usize;
+            let off_start = (off_row * ow + src_x_start) as usize;
+            let len = visible_w as usize;
+            if buf_start + len <= buffer.len() && off_start + len <= offscreen.len() {
+                offscreen[off_start..off_start + len]
+                    .copy_from_slice(&buffer[buf_start..buf_start + len]);
+            }
         }
     }
 
@@ -5318,37 +5331,54 @@ fn render_layer(
         apply_clip_path(&mut offscreen, ow, oh, clip);
     }
 
-    // Apply CSS transform: scale / rotate if set
-    let has_scale = (layer.scale_x != 0 && layer.scale_x != 1000)
-        || (layer.scale_y != 0 && layer.scale_y != 1000);
-    let has_rotate = layer.rotate_millideg != 0;
-    if has_scale || has_rotate {
-        apply_affine_transform(&mut offscreen, ow, oh, layer);
-    }
-
-    // Blend the visible rows of the offscreen back onto the main buffer with opacity.
-    // Visible row r: offscreen row (src_y_start + r) → buffer row (dst_y + r).
-    // Read from src_x_start in the offscreen (horizontal clip offset).
-    let opacity = layer.opacity as u32;
-    let buf_end = buffer.len();
-    let off_end = offscreen.len();
-    for row in 0..visible_h {
-        let buf_row_start = (dst_y + row) as usize * buf_width as usize + dst_x as usize;
-        let off_row_start = (src_y_start + row) as usize * ow as usize + src_x_start as usize;
-        if buf_row_start + visible_w as usize > buf_end
-            || off_row_start + visible_w as usize > off_end
-        {
-            continue;
-        }
-        for col in 0..visible_w as usize {
-            let src = offscreen[off_row_start + col];
-            let dst_px = buffer[buf_row_start + col];
-            let r = ((src >> 16 & 0xFF) * opacity + (dst_px >> 16 & 0xFF) * (255 - opacity) + 127)
-                / 255;
-            let g =
-                ((src >> 8 & 0xFF) * opacity + (dst_px >> 8 & 0xFF) * (255 - opacity) + 127) / 255;
-            let b = ((src & 0xFF) * opacity + (dst_px & 0xFF) * (255 - opacity) + 127) / 255;
-            buffer[buf_row_start + col] = (r << 16) | (g << 8) | b;
+    if has_transform {
+        // Transform path: composite the content through the transform onto the main buffer,
+        // iterating the transformed bounding box so scale grows the on-screen footprint and
+        // rotation is not clipped to the element box. The element's top-left maps to
+        // (layer_screen_x, layer_screen_y); pixels outside the content sample as transparent.
+        composite_transformed_layer(
+            buffer,
+            buf_width,
+            buf_height,
+            &offscreen,
+            ow,
+            oh,
+            layer_screen_x,
+            layer_screen_y,
+            layer,
+            content_left,
+            content_top,
+        );
+    } else {
+        // Blend the visible rows of the offscreen back onto the main buffer with opacity.
+        // Visible row r: offscreen row (src_y_start + r) → buffer row (dst_y + r).
+        // Read from src_x_start in the offscreen (horizontal clip offset).
+        let opacity = layer.opacity as u32;
+        let buf_end = buffer.len();
+        let off_end = offscreen.len();
+        for row in 0..visible_h {
+            let buf_row_start = (dst_y + row) as usize * buf_width as usize + dst_x as usize;
+            let off_row_start = (src_y_start + row) as usize * ow as usize + src_x_start as usize;
+            if buf_row_start + visible_w as usize > buf_end
+                || off_row_start + visible_w as usize > off_end
+            {
+                continue;
+            }
+            for col in 0..visible_w as usize {
+                let src = offscreen[off_row_start + col];
+                let dst_px = buffer[buf_row_start + col];
+                let r = ((src >> 16 & 0xFF) * opacity
+                    + (dst_px >> 16 & 0xFF) * (255 - opacity)
+                    + 127)
+                    / 255;
+                let g = ((src >> 8 & 0xFF) * opacity
+                    + (dst_px >> 8 & 0xFF) * (255 - opacity)
+                    + 127)
+                    / 255;
+                let b =
+                    ((src & 0xFF) * opacity + (dst_px & 0xFF) * (255 - opacity) + 127) / 255;
+                buffer[buf_row_start + col] = (r << 16) | (g << 8) | b;
+            }
         }
     }
 
@@ -5363,53 +5393,118 @@ fn render_layer(
     scratch[depth] = offscreen;
 }
 
-/// Apply scale and/or rotate transform to buf (width x height) in-place.
-/// Uses inverse mapping (for each output pixel, compute the source pixel).
-fn apply_affine_transform(buf: &mut [u32], width: u32, height: u32, layer: &LayerCommand) {
-    let w = width as usize;
-    let h = height as usize;
-    if w == 0 || h == 0 {
+/// Composite an element-sized content buffer onto the main framebuffer through a CSS
+/// transform (scale + rotate about the transform origin). The output is iterated over the
+/// transformed bounding box, so `scale` grows the on-screen footprint and `rotate` is not
+/// clipped to the element box. Content pixels equal to 0 are treated as transparent and
+/// leave the backdrop intact. `elem_screen_x/y` is where the element's top-left sits on
+/// screen; `clip_left/top` keep the layer out of the chrome area.
+#[allow(clippy::too_many_arguments)]
+fn composite_transformed_layer(
+    buffer: &mut [u32],
+    buf_width: u32,
+    buf_height: u32,
+    content: &[u32],
+    cw: u32,
+    ch: u32,
+    elem_screen_x: i64,
+    elem_screen_y: i64,
+    layer: &LayerCommand,
+    clip_left: i64,
+    clip_top: i64,
+) {
+    if cw == 0 || ch == 0 {
         return;
     }
+    let cwf = cw as f32;
+    let chf = ch as f32;
+    let sx = if layer.scale_x == 0 {
+        1.0f32
+    } else {
+        layer.scale_x as f32 / 1000.0
+    };
+    let sy = if layer.scale_y == 0 {
+        1.0f32
+    } else {
+        layer.scale_y as f32 / 1000.0
+    };
+    let angle = (layer.rotate_millideg as f32 / 1000.0).to_radians();
+    let cos_a = angle.cos();
+    let sin_a = angle.sin();
+    // Transform origin in element-local pixels.
+    let ox = layer.origin_x as f32 / 1000.0 * cwf;
+    let oy = layer.origin_y as f32 / 1000.0 * chf;
 
-    let sx = if layer.scale_x == 0 { 1.0f32 } else { layer.scale_x as f32 / 1000.0 };
-    let sy = if layer.scale_y == 0 { 1.0f32 } else { layer.scale_y as f32 / 1000.0 };
-    let angle_deg = layer.rotate_millideg as f32 / 1000.0;
-    let angle_rad = angle_deg.to_radians();
-    let cos_a = angle_rad.cos();
-    let sin_a = angle_rad.sin();
+    // Forward-map element-local (lx,ly) → output-local (about the origin): scale then rotate.
+    let forward = |lx: f32, ly: f32| -> (f32, f32) {
+        let s_x = (lx - ox) * sx;
+        let s_y = (ly - oy) * sy;
+        let rx = s_x * cos_a - s_y * sin_a;
+        let ry = s_x * sin_a + s_y * cos_a;
+        (rx + ox, ry + oy)
+    };
 
-    // Transform origin in pixels
-    let ox = layer.origin_x as f32 / 1000.0 * width as f32;
-    let oy = layer.origin_y as f32 / 1000.0 * height as f32;
-
-    let mut result = vec![0u32; w * h];
-
-    for dy in 0..h {
-        for dx in 0..w {
-            // Output pixel offset from origin
-            let fx = dx as f32 - ox;
-            let fy = dy as f32 - oy;
-
-            // Inverse rotate (negate angle)
-            let rx = fx * cos_a + fy * sin_a;
-            let ry = -fx * sin_a + fy * cos_a;
-
-            // Inverse scale
-            let src_x = rx / sx + ox;
-            let src_y = ry / sy + oy;
-
-            // Nearest-neighbor sampling with bounds check
-            let ix = src_x.round() as i32;
-            let iy = src_y.round() as i32;
-            if ix >= 0 && iy >= 0 && (ix as usize) < w && (iy as usize) < h {
-                result[dy * w + dx] = buf[iy as usize * w + ix as usize];
-            }
-            // Out-of-bounds pixels stay transparent (0) from vec init
-        }
+    // Output bounding box from the four element corners.
+    let corners = [
+        forward(0.0, 0.0),
+        forward(cwf, 0.0),
+        forward(0.0, chf),
+        forward(cwf, chf),
+    ];
+    let mut min_x = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+    for (x, y) in corners {
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
     }
 
-    buf.copy_from_slice(&result);
+    let opacity = layer.opacity as u32;
+    let inv_sx = if sx.abs() < 1e-4 { 0.0 } else { 1.0 / sx };
+    let inv_sy = if sy.abs() < 1e-4 { 0.0 } else { 1.0 / sy };
+
+    for out_y in (min_y.floor() as i64)..(max_y.ceil() as i64) {
+        let screen_y = elem_screen_y + out_y;
+        if screen_y < clip_top || screen_y >= buf_height as i64 {
+            continue;
+        }
+        for out_x in (min_x.floor() as i64)..(max_x.ceil() as i64) {
+            let screen_x = elem_screen_x + out_x;
+            if screen_x < clip_left || screen_x >= buf_width as i64 {
+                continue;
+            }
+            // Inverse-map output-local → element-local source: undo rotate then scale.
+            let lx = out_x as f32 - ox;
+            let ly = out_y as f32 - oy;
+            let inv_rx = lx * cos_a + ly * sin_a;
+            let inv_ry = -lx * sin_a + ly * cos_a;
+            let src_x = inv_rx * inv_sx + ox;
+            let src_y = inv_ry * inv_sy + oy;
+            let ix = src_x.round() as i64;
+            let iy = src_y.round() as i64;
+            if ix < 0 || iy < 0 || ix >= cw as i64 || iy >= ch as i64 {
+                continue;
+            }
+            let src = content[iy as usize * cw as usize + ix as usize];
+            if src == 0 {
+                continue; // uncovered content → transparent, keep backdrop
+            }
+            let dst_idx = screen_y as usize * buf_width as usize + screen_x as usize;
+            if dst_idx >= buffer.len() {
+                continue;
+            }
+            let dst_px = buffer[dst_idx];
+            let r =
+                ((src >> 16 & 0xFF) * opacity + (dst_px >> 16 & 0xFF) * (255 - opacity) + 127) / 255;
+            let g =
+                ((src >> 8 & 0xFF) * opacity + (dst_px >> 8 & 0xFF) * (255 - opacity) + 127) / 255;
+            let b = ((src & 0xFF) * opacity + (dst_px & 0xFF) * (255 - opacity) + 127) / 255;
+            buffer[dst_idx] = (r << 16) | (g << 8) | b;
+        }
+    }
 }
 
 fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {
@@ -5914,11 +6009,73 @@ fn draw_scaled_image(
 #[cfg(test)]
 mod tests {
     use super::{
-        AddressBarState, build_get_form_submission_url, cursor_index_for_address_x,
-        layout_error_document, looks_like_local_address, max_scroll, parse_address_input,
-        resolve_text_input_value,
+        AddressBarState, build_get_form_submission_url, composite_transformed_layer,
+        cursor_index_for_address_x, layout_error_document, looks_like_local_address, max_scroll,
+        parse_address_input, resolve_text_input_value,
     };
     use crate::font::FontContext;
+    use crate::layout::LayerCommand;
+
+    fn solid_layer(width: u32, height: u32, scale_milli: u32, rotate_millideg: i32) -> LayerCommand {
+        LayerCommand {
+            x: 0,
+            y: 0,
+            width,
+            height,
+            opacity: 255,
+            blur_px: 0,
+            brightness: 10000,
+            scale_x: scale_milli,
+            scale_y: scale_milli,
+            rotate_millideg,
+            origin_x: 500,
+            origin_y: 500,
+            clip_path: None,
+            commands: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn transform_scale_grows_on_screen_footprint() {
+        // 4x4 solid-white content scaled 2x should cover ~8x8 pixels on the buffer,
+        // not stay clamped to the 4x4 element box.
+        let cw = 4u32;
+        let ch = 4u32;
+        let content = vec![0x00FF_FFFFu32 & 0xFF_FFFF; (cw * ch) as usize];
+        let bw = 32u32;
+        let bh = 32u32;
+        let mut buffer = vec![0u32; (bw * bh) as usize];
+        let layer = solid_layer(cw, ch, 2000, 0);
+        // Place the element at (10,10) so the scaled box stays inside the buffer.
+        composite_transformed_layer(&mut buffer, bw, bh, &content, cw, ch, 10, 10, &layer, 0, 0);
+        let painted = buffer.iter().filter(|&&p| p != 0).count();
+        // The 4x4 element box is 16px; scale(2) must grow the footprint well beyond that
+        // (ideal 8x8 = 64px; nearest-neighbor edge rounding trims a few).
+        assert!(
+            painted > 36,
+            "scale(2) of a 4x4 box should paint far more than its 16px box, got {painted}"
+        );
+    }
+
+    #[test]
+    fn transform_rotate_does_not_fill_corners_with_black() {
+        // A rotated solid square must leave the backdrop in the corners (no black fill).
+        let cw = 16u32;
+        let ch = 16u32;
+        let content = vec![0x00FF_FFFFu32 & 0xFF_FFFF; (cw * ch) as usize]; // white
+        let bw = 48u32;
+        let bh = 48u32;
+        let backdrop = 0x0010_2030u32 & 0xFF_FFFF;
+        let mut buffer = vec![backdrop; (bw * bh) as usize];
+        let layer = solid_layer(cw, ch, 1000, 45_000); // 45deg, no scale
+        composite_transformed_layer(&mut buffer, bw, bh, &content, cw, ch, 16, 16, &layer, 0, 0);
+        // No pixel should have become pure black (0): corners keep the backdrop, center is white.
+        let black = buffer.iter().filter(|&&p| p == 0).count();
+        assert_eq!(black, 0, "rotated square must not introduce black corner pixels");
+        // And the rotation must have painted some white pixels.
+        let white = buffer.iter().filter(|&&p| p == 0x00FF_FFFF & 0xFF_FFFF).count();
+        assert!(white > 0, "rotated white square should paint white pixels");
+    }
 
     #[test]
     fn max_scroll_stops_at_zero() {
