@@ -482,11 +482,15 @@ impl BrowserApp {
             self.document.layout_cache = None;
         }
         match &self.document.content {
+            // When the cache is invalidated (hover restyle, the animation/transition frame
+            // loop, etc.) fall back to the last rendered frame's layout rather than an empty
+            // one, so hit-testing (hover/link/cursor) keeps working between renders.
             DocumentContent::Loaded(_) => self
                 .document
                 .layout_cache
                 .clone()
                 .map(|cache| cache.layout)
+                .or_else(|| self.latest_render_frame.as_ref().map(|f| f.layout.clone()))
                 .unwrap_or_else(empty_layout_document),
             _ => {
                 let window_size = self
@@ -1165,24 +1169,34 @@ impl BrowserApp {
         if pos_y < body_top as f64 {
             return None;
         }
-        let _content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
-        let layout = self.current_layout();
         let content_y = (pos_y as u32)
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
         let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
-        // Find the deepest (last) hitbox that contains the cursor
-        layout
-            .element_hitboxes
-            .iter()
-            .rev()
-            .find(|h| {
-                content_x >= h.x
-                    && content_x < h.x + h.width
-                    && content_y >= h.y
-                    && content_y < h.y + h.height
-            })
-            .map(|h| h.node_id)
+
+        let hit = |hitboxes: &[ElementHitbox]| -> Option<usize> {
+            // Find the deepest (last) hitbox that contains the cursor.
+            hitboxes
+                .iter()
+                .rev()
+                .find(|h| {
+                    content_x >= h.x
+                        && content_x < h.x + h.width
+                        && content_y >= h.y
+                        && content_y < h.y + h.height
+                })
+                .map(|h| h.node_id)
+        };
+
+        // Prefer the last rendered frame's hitboxes: they survive the layout-cache
+        // invalidations that hover restyling and the animation frame loop trigger, so a
+        // tiny cursor jitter mid-transition does not momentarily "lose" the hovered element
+        // (which would cancel an in-flight :hover transition).
+        if let Some(frame) = &self.latest_render_frame {
+            return hit(&frame.layout.element_hitboxes);
+        }
+        let layout = self.current_layout();
+        hit(&layout.element_hitboxes)
     }
 
     fn hit_test(

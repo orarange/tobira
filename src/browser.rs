@@ -3257,6 +3257,140 @@ mod tests {
     use crate::js::start_document_script_session;
     use crate::url::Url;
 
+    fn find_styled_by_class<'a>(
+        node: &'a StyledNode,
+        class: &str,
+    ) -> Option<&'a crate::css::StyledElement> {
+        match node {
+            StyledNode::Element(el) => {
+                let has_class = el
+                    .attributes
+                    .get("class")
+                    .map(|c| c.split_whitespace().any(|c| c == class))
+                    .unwrap_or(false);
+                if has_class {
+                    return Some(el);
+                }
+                el.children
+                    .iter()
+                    .find_map(|c| find_styled_by_class(c, class))
+            }
+            StyledNode::Text(_) => None,
+        }
+    }
+
+    #[test]
+    fn loaded_page_emits_hitbox_for_styled_block() {
+        // find_hovered_element relies on element_hitboxes carrying the element's node id;
+        // without it, hover (and therefore :hover + transitions) can never trigger.
+        let html = r#"<html><head><style>
+            .fade { width:220px; height:56px; background:#2a5db0; }
+        </style></head><body><div class="fade">x</div></body></html>"#;
+        let url = Url::parse("https://example.com").unwrap();
+        let page = rebuild_page_from_html(
+            &url,
+            200,
+            "OK".to_string(),
+            Some("text/html".to_string()),
+            html,
+            None,
+            false,
+            0,
+            None,
+        );
+        let fade = find_styled_by_class(&page.styled_document, "fade").expect("fade element");
+        let node_id: usize = fade
+            .attributes
+            .get("data-tobira-node-id")
+            .and_then(|v| v.parse().ok())
+            .expect("node id");
+        let mut fonts = crate::font::FontContext::load();
+        let layout =
+            crate::layout::layout_styled_document(&page.styled_document, &page.images, 1280, &mut fonts);
+        let has_hitbox = layout
+            .element_hitboxes
+            .iter()
+            .any(|h| h.node_id == node_id);
+        assert!(
+            has_hitbox,
+            "the .fade block must emit a hitbox (node {node_id}) so hover can target it; \
+             hitboxes present: {}",
+            layout.element_hitboxes.len()
+        );
+    }
+
+    #[test]
+    fn hover_transition_interpolates_on_relayout() {
+        let html = r#"<html><head><style>
+            .fade { opacity: 1; transition: opacity 400ms linear; }
+            .fade:hover { opacity: 0; }
+        </style></head><body><div class="fade">x</div></body></html>"#;
+        let url = Url::parse("https://example.com").unwrap();
+        let mut page = rebuild_page_from_html(
+            &url,
+            200,
+            "OK".to_string(),
+            Some("text/html".to_string()),
+            html,
+            None,
+            false,
+            0,
+            None,
+        );
+
+        // The page must actually carry a parsed transition, else nothing animates.
+        let fade = find_styled_by_class(&page.styled_document, "fade").expect("fade element");
+        assert!(
+            !fade.style.transitions.is_empty(),
+            "the .fade element must have a parsed `transition`"
+        );
+        assert_eq!(fade.style.opacity, 255, "baseline (no hover) opacity is 1.0");
+        let node_id: usize = fade
+            .attributes
+            .get("data-tobira-node-id")
+            .and_then(|v| v.parse().ok())
+            .expect("element should have a node id");
+
+        // Seed the no-hover baseline.
+        assert!(page.has_transitions(), "page should report transitions");
+        page.advance_transitions(0);
+
+        let interactive = crate::css::InteractiveState {
+            hovered_node_id: Some(node_id),
+            ..Default::default()
+        };
+
+        // Frame at t=0: hover begins. relayout produces the fresh target (opacity 0); the
+        // first advance records the start, so it still shows the baseline (t=0).
+        page.relayout(1280, &interactive);
+        let target = find_styled_by_class(&page.styled_document, "fade").expect("fade element");
+        assert_eq!(
+            target.style.opacity, 0,
+            ":hover should drive the target opacity to 0 after relayout"
+        );
+        page.advance_transitions(0);
+        let start = find_styled_by_class(&page.styled_document, "fade").expect("fade element");
+        assert_eq!(start.style.opacity, 255, "transition starts at the baseline (t=0)");
+
+        // Frame at t=200 (50% of 400ms): the GUI relayouts to the fresh target each frame,
+        // then advances. Opacity should be ~halfway between 255 and 0.
+        page.relayout(1280, &interactive);
+        page.advance_transitions(200);
+        let mid = find_styled_by_class(&page.styled_document, "fade").expect("fade element");
+        assert!(
+            (118..=137).contains(&mid.style.opacity),
+            "opacity halfway through the transition should be ~127, got {}",
+            mid.style.opacity
+        );
+
+        // Frame at t=400 (100%): settles at the hover target (opacity 0).
+        page.relayout(1280, &interactive);
+        let still_active = page.advance_transitions(400);
+        let end = find_styled_by_class(&page.styled_document, "fade").expect("fade element");
+        assert_eq!(end.style.opacity, 0, "transition should reach the target opacity 0");
+        assert!(!still_active, "transition should be finished at t=400");
+    }
+
     #[test]
     fn falls_back_when_document_is_empty() {
         let page = BrowserPage {
