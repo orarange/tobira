@@ -1061,11 +1061,8 @@ fn layout_block_element(
     }
 
     if element.tag_name == "table" {
-        if element.style.opacity < 255
-            || element.style.filter_blur_px > 0
-            || element.style.filter_brightness != 10000
-        {
-            // Table with opacity/filter: render into sub-context and wrap in a LayerCommand
+        if needs_stacking_layer(&element.style) {
+            // Table with opacity/filter/transform: render into sub-context, wrap in a LayerCommand
             let mut sub_context = LayoutContext {
                 background_color: context.background_color,
                 ..LayoutContext::default()
@@ -1185,11 +1182,8 @@ fn layout_block_element(
 
     let background_top = *cursor_y;
 
-    // Detect stacking context: element has opacity < 255 or a filter effect
-    if element.style.opacity < 255
-        || element.style.filter_blur_px > 0
-        || element.style.filter_brightness != 10000
-    {
+    // Detect stacking context: opacity < 255, a filter effect, or a CSS transform.
+    if needs_stacking_layer(&element.style) {
         layout_block_element_as_layer(
             element,
             outer_x,
@@ -1998,11 +1992,8 @@ fn layout_image_element(
         TextAlign::Left => x,
     };
 
-    if element.style.opacity < 255
-        || element.style.filter_blur_px > 0
-        || element.style.filter_brightness != 10000
-    {
-        // Wrap the image in a LayerCommand so opacity/filters are applied correctly
+    if needs_stacking_layer(&element.style) {
+        // Wrap the image in a LayerCommand so opacity/filters/transforms apply correctly
         let img_cmd = DrawCommand::Image(ImageCommand {
             x: 0,
             y: 0,
@@ -2023,11 +2014,11 @@ fn layout_image_element(
             opacity: element.style.opacity,
             blur_px: element.style.filter_blur_px,
             brightness: element.style.filter_brightness,
-            scale_x: 0,
-            scale_y: 0,
-            rotate_millideg: 0,
-            origin_x: 500,
-            origin_y: 500,
+            scale_x: element.style.transform_scale_x,
+            scale_y: element.style.transform_scale_y,
+            rotate_millideg: element.style.transform_rotate_millideg,
+            origin_x: element.style.transform_origin_x,
+            origin_y: element.style.transform_origin_y,
             clip_path: element.style.clip_path.clone(),
             commands: vec![img_cmd],
         }));
@@ -4060,6 +4051,24 @@ fn resolve_length_value(length: LengthValue, available_width: u32) -> u32 {
     }
 }
 
+/// True when the element has a non-identity scale or rotate that the software renderer
+/// applies during layer compositing. (translate is folded into layout position instead,
+/// so it does not by itself require a layer.)
+fn has_render_transform(style: &ComputedStyle) -> bool {
+    let scale_x_active = style.transform_scale_x != 0 && style.transform_scale_x != 1000;
+    let scale_y_active = style.transform_scale_y != 0 && style.transform_scale_y != 1000;
+    scale_x_active || scale_y_active || style.transform_rotate_millideg != 0
+}
+
+/// True when an element must be composited into its own layer so render-time effects —
+/// opacity blending, filters, and CSS transforms — can be applied to it.
+fn needs_stacking_layer(style: &ComputedStyle) -> bool {
+    style.opacity < 255
+        || style.filter_blur_px > 0
+        || style.filter_brightness != 10000
+        || has_render_transform(style)
+}
+
 /// Resolve a block element's border-box height. When an explicit `height` is set it wins
 /// (so fixed-size and empty blocks reserve their box instead of collapsing to content
 /// height); padding/border are added for the default content-box sizing. The result is
@@ -5493,6 +5502,63 @@ mod tests {
             box_rect.height
         );
         assert_eq!(box_rect.width, 80, "explicit width should be honored");
+    }
+
+    #[test]
+    fn transformed_block_is_wrapped_in_layer() {
+        use crate::css::{build_styled_tree, parse_stylesheet};
+        use crate::html::parse_document;
+
+        // A rotate transform with opacity 255 and no filter must still wrap the element
+        // in a layer, otherwise the software renderer never applies the rotation.
+        let html =
+            r#"<div style="width:80px;height:80px;background:#2a5db0;transform:rotate(45deg)"></div>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
+
+        let has_layer = layout
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, DrawCommand::Layer(_)));
+        assert!(
+            has_layer,
+            "a transformed block must be wrapped in a layer for the rotation to render"
+        );
+    }
+
+    #[test]
+    fn scaled_block_is_wrapped_in_layer() {
+        use crate::css::{build_styled_tree, parse_stylesheet};
+        use crate::html::parse_document;
+
+        let html =
+            r#"<div style="width:60px;height:60px;background:#8e44ad;transform:scale(1.5)"></div>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
+
+        let has_layer = layout
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, DrawCommand::Layer(_)));
+        assert!(has_layer, "a scaled block must be wrapped in a layer");
     }
 
     #[test]
