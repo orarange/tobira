@@ -1953,6 +1953,23 @@ fn layout_block_element_as_layer(
         commands: sub_context.commands,
     }));
 
+    // Emit a hitbox for the layered element itself, at its natural (pre-transform) box,
+    // so hover/:hover keeps working for elements that enter the layer path because of a
+    // transform/opacity/filter (e.g. a `:hover { opacity }` transition would otherwise
+    // drop its own hitbox the moment it became semi-transparent).
+    if let Some(node_id) = element_node_id(element) {
+        if final_height > 0 && !element.style.pointer_events_none {
+            context.element_hitboxes.push(ElementHitbox {
+                node_id,
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: final_height,
+                cursor_kind: element.style.cursor_kind,
+            });
+        }
+    }
+
     // Propagate links, controls, and element hitboxes from sub_context to parent
     context.links.extend(sub_context.links);
     context.controls.extend(sub_context.controls);
@@ -5532,6 +5549,33 @@ mod tests {
         assert!(
             has_layer,
             "a transformed block must be wrapped in a layer for the rotation to render"
+        );
+    }
+
+    #[test]
+    fn layered_element_still_emits_hitbox() {
+        use crate::css::{build_styled_tree, parse_stylesheet};
+        use crate::html::parse_document;
+
+        // An element that enters the layer path because of opacity < 1 must still emit a
+        // hitbox, so a `:hover` transition driving opacity does not drop its own hit target
+        // (which would make the transition flicker and revert).
+        let html = r#"<div style="width:80px;height:40px;background:#2a5db0;opacity:0.5" data-tobira-node-id="9">x</div>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
+
+        assert!(
+            layout.element_hitboxes.iter().any(|h| h.node_id == 9),
+            "a layered (opacity < 1) element must still emit a hitbox"
         );
     }
 
