@@ -1357,7 +1357,13 @@ fn layout_block_element(
     }
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
-    let background_height = cursor_y.saturating_sub(background_top).max(1);
+    let content_flow_height = cursor_y.saturating_sub(background_top).max(1);
+    let background_height = resolve_block_box_height(element, content_flow_height);
+    // If the resolved box is taller than its content, push following siblings below the
+    // full box rather than just the content.
+    if background_height > content_flow_height {
+        *cursor_y = background_top.saturating_add(background_height);
+    }
 
     // Emit element hitbox for interactive state (hover/focus) detection
     if let Some(node_id) = element_node_id(element) {
@@ -1789,7 +1795,11 @@ fn layout_block_element_as_layer(
     }
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
-    let final_height = cursor_y.saturating_sub(background_top).max(1);
+    let content_flow_height = cursor_y.saturating_sub(background_top).max(1);
+    let final_height = resolve_block_box_height(element, content_flow_height);
+    if final_height > content_flow_height {
+        *cursor_y = background_top.saturating_add(final_height);
+    }
 
     for (shadow_idx, blur, spread) in &outer_shadow_indices {
         if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(*shadow_idx) {
@@ -4050,6 +4060,39 @@ fn resolve_length_value(length: LengthValue, available_width: u32) -> u32 {
     }
 }
 
+/// Resolve a block element's border-box height. When an explicit `height` is set it wins
+/// (so fixed-size and empty blocks reserve their box instead of collapsing to content
+/// height); padding/border are added for the default content-box sizing. The result is
+/// clamped by `min-height` / `max-height`. Otherwise the content-flow height is used.
+fn resolve_block_box_height(element: &StyledElement, content_flow_height: u32) -> u32 {
+    let mut box_height = match specified_length(element, element.style.height, "height") {
+        Some(spec) => {
+            let resolved = resolve_length_value(spec, content_flow_height.max(1));
+            if element.style.box_sizing == crate::css::BoxSizing::ContentBox {
+                let border_v = if element.style.border_style_none {
+                    0
+                } else {
+                    element.style.border.top + element.style.border.bottom
+                };
+                resolved
+                    .saturating_add(element.style.padding.top)
+                    .saturating_add(element.style.padding.bottom)
+                    .saturating_add(border_v)
+            } else {
+                resolved
+            }
+        }
+        None => content_flow_height,
+    };
+    if element.style.min_height > 0 {
+        box_height = box_height.max(element.style.min_height);
+    }
+    if let Some(max_h) = element.style.max_height {
+        box_height = box_height.min(max_h);
+    }
+    box_height.max(1)
+}
+
 /// Blend `color` with `background` using `opacity` (255 = fully opaque).
 fn apply_opacity(color: Color, background: Color, opacity: u8) -> Color {
     if opacity == 255 {
@@ -5418,6 +5461,67 @@ mod tests {
         assert!(
             shadow_rect.is_some(),
             "Should have a shadow rect with black color"
+        );
+    }
+
+    #[test]
+    fn empty_block_reserves_explicit_height() {
+        use crate::css::{build_styled_tree, parse_stylesheet};
+        use crate::html::parse_document;
+
+        let html = r#"<div style="width:80px;height:80px;background:#2a5db0"></div>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
+
+        let rects = layout.rects();
+        let box_rect = rects
+            .iter()
+            .find(|r| r.color == 0x2a5db0)
+            .expect("blue background rect should exist for the sized div");
+        assert_eq!(
+            box_rect.height, 80,
+            "an empty div must reserve its explicit 80px height, got {}",
+            box_rect.height
+        );
+        assert_eq!(box_rect.width, 80, "explicit width should be honored");
+    }
+
+    #[test]
+    fn empty_block_honors_min_height() {
+        use crate::css::{build_styled_tree, parse_stylesheet};
+        use crate::html::parse_document;
+
+        let html = r#"<div style="min-height:40px;background:#112233"></div>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
+
+        let rects = layout.rects();
+        let box_rect = rects
+            .iter()
+            .find(|r| r.color == 0x112233)
+            .expect("background rect should exist");
+        assert!(
+            box_rect.height >= 40,
+            "min-height should reserve at least 40px, got {}",
+            box_rect.height
         );
     }
 
