@@ -5553,6 +5553,45 @@ mod tests {
     }
 
     #[test]
+    fn nested_hitbox_child_is_smaller_than_parent() {
+        use crate::css::{build_styled_tree, parse_stylesheet};
+        use crate::html::parse_document;
+
+        // Hover hit-testing picks the smallest containing hitbox (deepest element). This
+        // verifies the child box is strictly smaller than its parent so the selection lands
+        // on the child, not the outer container.
+        let html = r#"<div style="background:#eeeeee" data-tobira-node-id="1"><div style="width:60px;height:24px;background:#2a5db0" data-tobira-node-id="2">x</div></div>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
+
+        let parent = layout
+            .element_hitboxes
+            .iter()
+            .find(|h| h.node_id == 1)
+            .expect("parent hitbox");
+        let child = layout
+            .element_hitboxes
+            .iter()
+            .find(|h| h.node_id == 2)
+            .expect("child hitbox");
+        let parent_area = parent.width as u64 * parent.height as u64;
+        let child_area = child.width as u64 * child.height as u64;
+        assert!(
+            child_area < parent_area,
+            "child area {child_area} should be smaller than parent area {parent_area}"
+        );
+    }
+
+    #[test]
     fn layered_element_still_emits_hitbox() {
         use crate::css::{build_styled_tree, parse_stylesheet};
         use crate::html::parse_document;

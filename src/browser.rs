@@ -103,6 +103,14 @@ impl BrowserPage {
         );
         *self = rebuilt;
         self.scroll_y = snapshot.scroll_y;
+        // The rebuilt page starts with empty transition state. Seed the no-hover baselines
+        // from the freshly built (no-hover) styled tree so the first :hover transition
+        // interpolates from the real pre-hover style instead of snapping. (Without this the
+        // first hover after the initial load-time rebuild records the hover target as the
+        // baseline and never animates.)
+        if self.has_transitions() {
+            self.advance_transitions(0);
+        }
     }
 
     pub(crate) fn layout_revision(&self) -> u64 {
@@ -223,18 +231,18 @@ impl BrowserPage {
                             Some(base) => {
                                 let base = base.clone();
                                 let start = *starts.entry(key.clone()).or_insert(now);
-                                crate::css::apply_transitions_to_style(
-                                    &mut el.style,
-                                    &base,
-                                    now,
-                                    start,
-                                );
                                 let max_dur = target
                                     .transitions
                                     .iter()
                                     .map(|t| t.delay_ms.max(0) as u64 + t.duration_ms as u64)
                                     .max()
                                     .unwrap_or(0);
+                                crate::css::apply_transitions_to_style(
+                                    &mut el.style,
+                                    &base,
+                                    now,
+                                    start,
+                                );
                                 if now.saturating_sub(start) >= max_dur {
                                     // Transition complete: settle the baseline at the target.
                                     prev.insert(key.clone(), target);

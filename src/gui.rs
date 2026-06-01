@@ -1175,16 +1175,19 @@ impl BrowserApp {
         let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
 
         let hit = |hitboxes: &[ElementHitbox]| -> Option<usize> {
-            // Find the deepest (last) hitbox that contains the cursor.
+            // Pick the smallest hitbox that contains the cursor — i.e. the most deeply
+            // nested element. (Hitboxes are emitted post-order, parent after children, so
+            // taking the last match would wrongly return the outermost ancestor, e.g. the
+            // <body>, and CSS :hover would target that instead of the actual element.)
             hitboxes
                 .iter()
-                .rev()
-                .find(|h| {
+                .filter(|h| {
                     content_x >= h.x
                         && content_x < h.x + h.width
                         && content_y >= h.y
                         && content_y < h.y + h.height
                 })
+                .min_by_key(|h| h.width as u64 * h.height as u64)
                 .map(|h| h.node_id)
         };
 
