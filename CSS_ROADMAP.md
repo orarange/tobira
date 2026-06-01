@@ -165,14 +165,18 @@ follow-up Batch 1–4 commits brought the following Phase 6 items in:
 | `direction: rtl` (parse) | 🔧 | Stored on ComputedStyle; full RTL inline reorder not done |
 | `scroll-behavior: smooth` (parse) | 🔧 | Stored on ComputedStyle; animated scroll not driven yet |
 | CSS `animation` / `@keyframes` | ✅ | `animation:` shorthand + longhands parse into `AnimationSpec`s; `about_to_wait` drives ~16ms frames; opacity / color / background-color / transform interpolated. Demo: `demo/animation-demo.html` |
-| `transition` interpolation | 🔧 | `transition:` parses into `TransitionSpec`s and `apply_transitions_to_style` is ready, but not yet driven — needs the previous-style snapshot + `transition_starts` (groundwork fields exist on `BrowserPage`) |
+| `transition` interpolation | ✅ | `transition:` parses into `TransitionSpec`s; `advance_transitions` interpolates baseline→target (keyed by `data-tobira-node-id`) and the frame loop relayouts to the fresh target each frame. Demo: `demo/transition-demo.html` |
+| CSS `:hover` restyling | ✅ | `update_hover` rebuilds the styled tree with the live `hovered_node_id` so `:hover {}` rules apply (was previously never wired into the GUI) |
+| `file://` URLs / local paths | ✅ | `tobira demo/page.html` loads local files (url.rs + http.rs + main.rs) |
 
 ### Phase 6 — Remaining work ❌
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
-| Transition driving | High | Snapshot previous `ComputedStyle` per element, record `transition_starts` on change, call `apply_transitions_to_style` from the frame loop. Groundwork fields (`previous_styles`, `transition_starts`) already on `BrowserPage` |
+| Transition interruption reversal | Medium | A transition interrupted before it settles currently snaps; should reverse from the mid value (track in-flight displayed value as the new baseline) |
+| Per-frame relayout cost | Medium | While a transition runs, `build_styled_tree` runs on the main thread each frame; fine for typical pages, heavy for huge DOMs. Cache a base tree + clone, or move relayout to a worker |
 | Per-element animation start tracking | Medium | Animations are anchored to one page-level epoch (`animation_epoch`); `animation_starts` map is groundwork for per-element delays/restarts |
+| `:focus` / `:active` restyling | Low | Same wiring as `:hover` but for focus/active `InteractiveState` fields |
 | `writing-mode` vertical layout | Low | Rotate text glyphs + flip block/inline axes in layout |
 | `direction: rtl` inline reorder | Low | Needs TextAlign::Start/End and reversed line construction |
 | `scroll-behavior: smooth` animation | Low | Multi-step scroll reusing the animation frame timer; `smooth_scroll` field is groundwork |
