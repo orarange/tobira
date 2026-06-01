@@ -213,43 +213,64 @@ pub fn animation_progress(spec: &AnimationSpec, start_ms: u64, now_ms: u64) -> O
 ///
 /// MVP: supports `opacity`, `color`, `background-color`, `transform: translateX/Y`,
 /// `transform: scale*`, `transform: rotate` keyframe interpolation.
+/// Apply animations across a styled tree. Returns `true` if any animation is still
+/// progressing (i.e. the caller should schedule another frame); `false` once every
+/// animation has finished, so the frame loop can return to idle.
 pub fn apply_animations_to_tree(
     node: &mut StyledNode,
     keyframes: &[KeyframeRule],
     now_ms: u64,
     default_start_ms: u64,
-) {
-    fn walk(node: &mut StyledNode, kf: &[KeyframeRule], now: u64, start: u64) {
+) -> bool {
+    fn walk(node: &mut StyledNode, kf: &[KeyframeRule], now: u64, start: u64) -> bool {
+        let mut still_active = false;
         match node {
             StyledNode::Element(el) => {
                 if !el.style.animations.is_empty() {
-                    apply_animations_to_style(&mut el.style, kf, now, start);
+                    still_active |= apply_animations_to_style(&mut el.style, kf, now, start);
                 }
                 for child in el.children.iter_mut() {
-                    walk(child, kf, now, start);
+                    still_active |= walk(child, kf, now, start);
                 }
             }
             StyledNode::Text(_) => {}
         }
+        still_active
     }
-    walk(node, keyframes, now_ms, default_start_ms);
+    walk(node, keyframes, now_ms, default_start_ms)
+}
+
+/// True while the animation has not yet reached its final iteration. Infinite
+/// animations are always active; finite ones stop once their total run-time elapses.
+pub fn animation_is_active(spec: &AnimationSpec, start_ms: u64, now_ms: u64) -> bool {
+    if spec.iteration_count == u32::MAX {
+        return true;
+    }
+    let start = start_ms as i64 + spec.delay_ms as i64;
+    let total = spec.duration_ms as i64 * spec.iteration_count.max(1) as i64;
+    (now_ms as i64) < start + total
 }
 
 /// Apply each `AnimationSpec` on `style` by looking up its `@keyframes` rule and
 /// blending the surrounding keyframe stop declarations into `style` at the current
 /// progress. Later animations win for overlapping properties (CSS cascade order).
+/// Returns `true` if at least one animation on this element is still progressing.
 pub fn apply_animations_to_style(
     style: &mut ComputedStyle,
     keyframes: &[KeyframeRule],
     now_ms: u64,
     start_ms: u64,
-) {
+) -> bool {
     let specs = style.animations.clone();
+    let mut still_active = false;
     for spec in &specs {
         let progress = match animation_progress(spec, start_ms, now_ms) {
             Some(p) => p,
             None => continue,
         };
+        if animation_is_active(spec, start_ms, now_ms) {
+            still_active = true;
+        }
         let rule = match keyframes.iter().find(|r| r.name == spec.name) {
             Some(r) => r,
             None => continue,
@@ -260,6 +281,7 @@ pub fn apply_animations_to_style(
         };
         blend_keyframe_declarations(style, &from.declarations, &to.declarations, t);
     }
+    still_active
 }
 
 /// Blend two keyframe declaration sets into `style` at progress `t`.
@@ -3007,6 +3029,113 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 _ => Direction::Ltr,
             };
         }
+        "animation" => {
+            style.animations = parse_animation_shorthand(value);
+        }
+        "animation-name" => {
+            // Longhand: set/extend names, keeping other fields at defaults.
+            let names: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
+            if style.animations.len() != names.len() {
+                style.animations = names
+                    .iter()
+                    .map(|n| AnimationSpec {
+                        name: n.to_string(),
+                        duration_ms: 0,
+                        delay_ms: 0,
+                        iteration_count: 1,
+                        fill_mode: AnimFillMode::None,
+                        timing_function: TimingFunction::Ease,
+                        direction: AnimDirection::Normal,
+                    })
+                    .collect();
+            } else {
+                for (spec, n) in style.animations.iter_mut().zip(names) {
+                    spec.name = n.to_string();
+                }
+            }
+        }
+        "animation-duration" => {
+            apply_animation_longhand(&mut style.animations, value, |spec, tok| {
+                if let Some(ms) = parse_time_to_ms(tok) {
+                    spec.duration_ms = ms;
+                }
+            });
+        }
+        "animation-delay" => {
+            apply_animation_longhand(&mut style.animations, value, |spec, tok| {
+                if let Some(ms) = parse_time_to_ms(tok) {
+                    spec.delay_ms = ms as i32;
+                }
+            });
+        }
+        "animation-iteration-count" => {
+            apply_animation_longhand(&mut style.animations, value, |spec, tok| {
+                spec.iteration_count = parse_iteration_count(tok);
+            });
+        }
+        "animation-timing-function" => {
+            apply_animation_longhand(&mut style.animations, value, |spec, tok| {
+                if let Some(tf) = parse_timing_function(tok) {
+                    spec.timing_function = tf;
+                }
+            });
+        }
+        "animation-direction" => {
+            apply_animation_longhand(&mut style.animations, value, |spec, tok| {
+                if let Some(d) = parse_anim_direction(tok) {
+                    spec.direction = d;
+                }
+            });
+        }
+        "animation-fill-mode" => {
+            apply_animation_longhand(&mut style.animations, value, |spec, tok| {
+                if let Some(f) = parse_fill_mode(tok) {
+                    spec.fill_mode = f;
+                }
+            });
+        }
+        "transition" => {
+            style.transitions = parse_transition_shorthand(value);
+        }
+        "transition-property" => {
+            let props: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
+            if style.transitions.len() != props.len() {
+                style.transitions = props
+                    .iter()
+                    .map(|p| TransitionSpec {
+                        property: p.to_string(),
+                        duration_ms: 0,
+                        delay_ms: 0,
+                        timing_function: TimingFunction::Ease,
+                    })
+                    .collect();
+            } else {
+                for (spec, p) in style.transitions.iter_mut().zip(props) {
+                    spec.property = p.to_string();
+                }
+            }
+        }
+        "transition-duration" => {
+            apply_transition_longhand(&mut style.transitions, value, |spec, tok| {
+                if let Some(ms) = parse_time_to_ms(tok) {
+                    spec.duration_ms = ms;
+                }
+            });
+        }
+        "transition-delay" => {
+            apply_transition_longhand(&mut style.transitions, value, |spec, tok| {
+                if let Some(ms) = parse_time_to_ms(tok) {
+                    spec.delay_ms = ms as i32;
+                }
+            });
+        }
+        "transition-timing-function" => {
+            apply_transition_longhand(&mut style.transitions, value, |spec, tok| {
+                if let Some(tf) = parse_timing_function(tok) {
+                    spec.timing_function = tf;
+                }
+            });
+        }
         // No-op properties — parsed to prevent warnings, not yet implemented
         "overscroll-behavior"
         | "overscroll-behavior-x"
@@ -5193,6 +5322,217 @@ fn extract_url(value: &str) -> Option<String> {
 /// Parse a `clip-path` value: `circle(...)`, `inset(...)`, `polygon(...)`.
 /// All lengths are interpreted as percentages or px and stored as permille (0–1000)
 /// of the element's reference dimension.
+/// Parse a CSS `<time>` token (`1s`, `300ms`, `0.5s`, `0`) to milliseconds.
+fn parse_time_to_ms(token: &str) -> Option<u32> {
+    let t = token.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(stripped) = t.strip_suffix("ms") {
+        stripped.trim().parse::<f32>().ok().map(|v| v.max(0.0) as u32)
+    } else if let Some(stripped) = t.strip_suffix('s') {
+        stripped
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| (v.max(0.0) * 1000.0) as u32)
+    } else {
+        // Unit-less: accept only "0".
+        t.parse::<f32>().ok().filter(|v| *v == 0.0).map(|_| 0)
+    }
+}
+
+fn parse_timing_function(token: &str) -> Option<TimingFunction> {
+    match token.trim().to_ascii_lowercase().as_str() {
+        "linear" => Some(TimingFunction::Linear),
+        "ease" => Some(TimingFunction::Ease),
+        "ease-in" => Some(TimingFunction::EaseIn),
+        "ease-out" => Some(TimingFunction::EaseOut),
+        "ease-in-out" => Some(TimingFunction::EaseInOut),
+        "step-start" => Some(TimingFunction::StepStart),
+        "step-end" => Some(TimingFunction::StepEnd),
+        _ => None,
+    }
+}
+
+fn parse_anim_direction(token: &str) -> Option<AnimDirection> {
+    match token.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some(AnimDirection::Normal),
+        "reverse" => Some(AnimDirection::Reverse),
+        "alternate" => Some(AnimDirection::Alternate),
+        "alternate-reverse" => Some(AnimDirection::AlternateReverse),
+        _ => None,
+    }
+}
+
+fn parse_fill_mode(token: &str) -> Option<AnimFillMode> {
+    match token.trim().to_ascii_lowercase().as_str() {
+        "none" => Some(AnimFillMode::None),
+        "forwards" => Some(AnimFillMode::Forwards),
+        "backwards" => Some(AnimFillMode::Backwards),
+        "both" => Some(AnimFillMode::Both),
+        _ => None,
+    }
+}
+
+fn parse_iteration_count(token: &str) -> u32 {
+    let t = token.trim().to_ascii_lowercase();
+    if t == "infinite" {
+        u32::MAX
+    } else {
+        t.parse::<f32>().ok().map(|v| v.max(0.0) as u32).unwrap_or(1)
+    }
+}
+
+/// Apply a per-token setter to each transition spec, cycling tokens to specs
+/// (CSS repeats the list when there are fewer values than transitions).
+fn apply_transition_longhand(
+    transitions: &mut [TransitionSpec],
+    value: &str,
+    setter: impl Fn(&mut TransitionSpec, &str),
+) {
+    let tokens: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
+    if tokens.is_empty() || transitions.is_empty() {
+        return;
+    }
+    for (i, spec) in transitions.iter_mut().enumerate() {
+        setter(spec, tokens[i % tokens.len()]);
+    }
+}
+
+/// Apply a per-token setter to each animation spec, cycling tokens to specs.
+fn apply_animation_longhand(
+    animations: &mut [AnimationSpec],
+    value: &str,
+    setter: impl Fn(&mut AnimationSpec, &str),
+) {
+    let tokens: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
+    if tokens.is_empty() || animations.is_empty() {
+        return;
+    }
+    for (i, spec) in animations.iter_mut().enumerate() {
+        setter(spec, tokens[i % tokens.len()]);
+    }
+}
+
+/// Parse the `animation` shorthand (comma-separated list of layers). Per layer the
+/// grammar is order-flexible: the first `<time>` is duration, the second is delay;
+/// `infinite` or a number is the iteration-count; recognized keywords set the timing
+/// function / direction / fill-mode; the leftover identifier is the `@keyframes` name.
+fn parse_animation_shorthand(value: &str) -> Vec<AnimationSpec> {
+    let mut specs = Vec::new();
+    for layer in value.split(',') {
+        let layer = layer.trim();
+        if layer.is_empty() {
+            continue;
+        }
+        let mut spec = AnimationSpec {
+            name: String::new(),
+            duration_ms: 0,
+            delay_ms: 0,
+            iteration_count: 1,
+            fill_mode: AnimFillMode::None,
+            timing_function: TimingFunction::Ease,
+            direction: AnimDirection::Normal,
+        };
+        let mut seen_time = false;
+        let mut seen_iter = false;
+        for token in layer.split_whitespace() {
+            let lower = token.to_ascii_lowercase();
+            // Time tokens (end in s/ms): first = duration, second = delay.
+            if (lower.ends_with("ms") || lower.ends_with('s'))
+                && parse_time_to_ms(token).is_some()
+            {
+                let ms = parse_time_to_ms(token).unwrap();
+                if !seen_time {
+                    spec.duration_ms = ms;
+                    seen_time = true;
+                } else {
+                    spec.delay_ms = ms as i32;
+                }
+                continue;
+            }
+            if lower == "infinite" {
+                spec.iteration_count = u32::MAX;
+                seen_iter = true;
+                continue;
+            }
+            if !seen_iter && lower.parse::<f32>().is_ok() {
+                spec.iteration_count = parse_iteration_count(&lower);
+                seen_iter = true;
+                continue;
+            }
+            if let Some(tf) = parse_timing_function(&lower) {
+                spec.timing_function = tf;
+                continue;
+            }
+            if let Some(d) = parse_anim_direction(&lower) {
+                spec.direction = d;
+                continue;
+            }
+            if let Some(f) = parse_fill_mode(&lower) {
+                spec.fill_mode = f;
+                continue;
+            }
+            // Anything else is treated as the keyframes name (last one wins).
+            if lower != "none" {
+                spec.name = token.to_string();
+            }
+        }
+        if !spec.name.is_empty() {
+            specs.push(spec);
+        }
+    }
+    specs
+}
+
+/// Parse the `transition` shorthand (comma-separated list). Per layer: the first
+/// identifier is the property (default `all`), the first `<time>` is duration, the
+/// second is delay, and a recognized keyword is the timing function.
+fn parse_transition_shorthand(value: &str) -> Vec<TransitionSpec> {
+    let mut specs = Vec::new();
+    for layer in value.split(',') {
+        let layer = layer.trim();
+        if layer.is_empty() {
+            continue;
+        }
+        let mut spec = TransitionSpec {
+            property: "all".to_string(),
+            duration_ms: 0,
+            delay_ms: 0,
+            timing_function: TimingFunction::Ease,
+        };
+        let mut seen_time = false;
+        let mut seen_prop = false;
+        for token in layer.split_whitespace() {
+            let lower = token.to_ascii_lowercase();
+            if (lower.ends_with("ms") || lower.ends_with('s'))
+                && parse_time_to_ms(token).is_some()
+            {
+                let ms = parse_time_to_ms(token).unwrap();
+                if !seen_time {
+                    spec.duration_ms = ms;
+                    seen_time = true;
+                } else {
+                    spec.delay_ms = ms as i32;
+                }
+                continue;
+            }
+            if let Some(tf) = parse_timing_function(&lower) {
+                spec.timing_function = tf;
+                continue;
+            }
+            // First non-time, non-timing token is the property name.
+            if !seen_prop {
+                spec.property = lower;
+                seen_prop = true;
+            }
+        }
+        specs.push(spec);
+    }
+    specs
+}
+
 fn parse_clip_path(value: &str) -> Option<ClipPath> {
     let v = value.trim().to_ascii_lowercase();
     let inner = |fn_name: &str, src: &str| -> Option<String> {
@@ -6978,5 +7318,115 @@ mod tests {
         let counters = std::collections::HashMap::new();
         let result = super::resolve_content_counters("plain text", &counters);
         assert_eq!(result, "plain text");
+    }
+
+    // ─── CSS animation / transition parsing + interpolation ──────────────────
+
+    #[test]
+    fn animation_shorthand_parses_name_duration_timing_iteration() {
+        let specs = super::parse_animation_shorthand("spin 1s linear infinite");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "spin");
+        assert_eq!(specs[0].duration_ms, 1000);
+        assert_eq!(specs[0].timing_function, super::TimingFunction::Linear);
+        assert_eq!(specs[0].iteration_count, u32::MAX);
+    }
+
+    #[test]
+    fn animation_shorthand_duration_then_delay() {
+        let specs = super::parse_animation_shorthand("fade 200ms 50ms ease-in 3");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "fade");
+        assert_eq!(specs[0].duration_ms, 200);
+        assert_eq!(specs[0].delay_ms, 50);
+        assert_eq!(specs[0].iteration_count, 3);
+        assert_eq!(specs[0].timing_function, super::TimingFunction::EaseIn);
+    }
+
+    #[test]
+    fn animation_shorthand_handles_two_layers() {
+        let specs = super::parse_animation_shorthand("spin 1s linear, fade 2s ease");
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].name, "spin");
+        assert_eq!(specs[1].name, "fade");
+        assert_eq!(specs[1].duration_ms, 2000);
+    }
+
+    #[test]
+    fn transition_shorthand_parses_property_duration_timing() {
+        let specs = super::parse_transition_shorthand("opacity 300ms ease-in-out");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].property, "opacity");
+        assert_eq!(specs[0].duration_ms, 300);
+        assert_eq!(specs[0].timing_function, super::TimingFunction::EaseInOut);
+    }
+
+    #[test]
+    fn parse_time_handles_s_ms_and_zero() {
+        assert_eq!(super::parse_time_to_ms("1s"), Some(1000));
+        assert_eq!(super::parse_time_to_ms("250ms"), Some(250));
+        assert_eq!(super::parse_time_to_ms("0.5s"), Some(500));
+        assert_eq!(super::parse_time_to_ms("0"), Some(0));
+        assert_eq!(super::parse_time_to_ms("abc"), None);
+    }
+
+    #[test]
+    fn animation_property_populates_style_animations() {
+        let css = ".box { animation: spin 1s linear infinite; }";
+        let html = "<div class=\"box\">x</div>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled =
+            build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.animations.len(), 1);
+        assert_eq!(div.style.animations[0].name, "spin");
+    }
+
+    #[test]
+    fn animation_interpolates_opacity_midway() {
+        let css = "@keyframes fade { from { opacity: 0; } to { opacity: 1; } } \
+                   .box { animation: fade 1000ms linear; }";
+        let html = "<div class=\"box\">x</div>";
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let mut styled =
+            build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        // Advance to the 50% mark (500ms into a 1000ms linear animation).
+        let active = super::apply_animations_to_tree(&mut styled, &sheet.keyframes, 500, 0);
+        assert!(active, "a finite animation mid-flight should still be active");
+        let div = find_first_element(&styled, "div").unwrap();
+        // opacity 0→1 at 50% ≈ 0.5 → ~127/255.
+        assert!(
+            (118..=137).contains(&div.style.opacity),
+            "opacity at 50% should be ~127, got {}",
+            div.style.opacity
+        );
+    }
+
+    #[test]
+    fn infinite_animation_reports_active_after_many_iterations() {
+        let css = "@keyframes spin { from { opacity: 1; } to { opacity: 0; } } \
+                   .box { animation: spin 100ms linear infinite; }";
+        let doc = parse_document("<div class=\"box\">x</div>");
+        let sheet = parse_stylesheet(css);
+        let mut styled =
+            build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        // 10 seconds in: an infinite animation must still be active.
+        let active = super::apply_animations_to_tree(&mut styled, &sheet.keyframes, 10_000, 0);
+        assert!(active, "infinite animation should always be active");
+    }
+
+    #[test]
+    fn finite_animation_reports_inactive_after_end() {
+        let css = "@keyframes fade { from { opacity: 0; } to { opacity: 1; } } \
+                   .box { animation: fade 100ms linear; }";
+        let doc = parse_document("<div class=\"box\">x</div>");
+        let sheet = parse_stylesheet(css);
+        let mut styled =
+            build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        // Well past the single 100ms iteration.
+        let active = super::apply_animations_to_tree(&mut styled, &sheet.keyframes, 5_000, 0);
+        assert!(!active, "finite animation should be inactive after it ends");
     }
 }

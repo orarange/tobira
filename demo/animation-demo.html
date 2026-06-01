@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CSS Animation Demo</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #f4f6fb;
+      padding: 24px;
+    }
+    h1 { color: #1f3a5f; }
+
+    /* Infinite rotating square — exercises transform: rotate keyframes. */
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+    .spinner {
+      width: 80px;
+      height: 80px;
+      background: #2a5db0;
+      margin: 24px 0;
+      animation: spin 1500ms linear infinite;
+    }
+
+    /* Infinite pulsing badge — exercises opacity keyframes. */
+    @keyframes pulse {
+      0%   { opacity: 1.0; }
+      50%  { opacity: 0.2; }
+      100% { opacity: 1.0; }
+    }
+    .pulse {
+      width: 160px;
+      height: 40px;
+      background: #c0392b;
+      color: #ffffff;
+      animation: pulse 1200ms ease-in-out infinite;
+    }
+
+    /* Infinite color cycle — exercises background-color keyframes. */
+    @keyframes hue {
+      0%   { background-color: #e74c3c; }
+      33%  { background-color: #27ae60; }
+      66%  { background-color: #2980b9; }
+      100% { background-color: #e74c3c; }
+    }
+    .hue {
+      width: 200px;
+      height: 50px;
+      animation: hue 3s linear infinite;
+    }
+
+    /* One-shot grow on load — exercises a finite animation that should
+       settle and let the frame loop return to idle. */
+    @keyframes grow {
+      from { transform: scale(1); }
+      to   { transform: scale(2); }
+    }
+    .grow {
+      width: 60px;
+      height: 60px;
+      background: #8e44ad;
+      margin: 40px 0;
+      animation: grow 800ms ease-out;
+    }
+  </style>
+</head>
+<body>
+  <h1>CSS Animation Demo</h1>
+  <p>Rotating square (infinite, linear):</p>
+  <div class="spinner"></div>
+
+  <p>Pulsing badge (infinite, ease-in-out):</p>
+  <div class="pulse">fading</div>
+
+  <p>Color cycle (infinite, linear):</p>
+  <div class="hue"></div>
+
+  <p>One-shot grow on load (finite — loop should idle after ~0.8s):</p>
+  <div class="grow"></div>
+</body>
+</html>

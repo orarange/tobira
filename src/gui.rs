@@ -55,6 +55,8 @@ const TITLE_FONT_SIZE: u32 = 14;
 const TITLE_META_GAP: u32 = 18;
 const HEADER_BORDER_HEIGHT: u32 = 4;
 const RESIZE_BORDER: u32 = 6;
+/// Target interval between CSS-animation frames (~60fps).
+const FRAME_INTERVAL_MS: u64 = 16;
 
 const COLOR_WINDOW_BACKGROUND: Color = 0xE7E0D4;
 const COLOR_HEADER: Color = 0x1F3A5F;
@@ -127,6 +129,10 @@ struct BrowserApp {
     /// scratch[depth] holds the pixel buffer used by the layer at that nesting depth.
     /// Buffers are reused across frames; no per-frame allocation after the first paint.
     scratch: Vec<Vec<u32>>,
+    /// Anchor for CSS animation timing. Set the first frame an active animation is
+    /// detected; cleared once all animations finish so the loop returns to idle.
+    /// `now_ms` passed to the engine is `animation_epoch.elapsed()` in milliseconds.
+    animation_epoch: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +327,7 @@ impl BrowserApp {
             next_navigation_id: 1,
             next_render_id: 1,
             scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
+            animation_epoch: None,
         };
 
         if let Some(url) = initial_load_url {
@@ -634,6 +641,14 @@ impl BrowserApp {
                 let restore_scroll = pending.restore_scroll;
                 let page = build_page_from_source(source, false);
                 let final_url = page.url.clone();
+                // Start the animation clock for this page if it declares any animations.
+                // Anchoring here (rather than in about_to_wait) means a finished animation
+                // is not restarted by unrelated idle wake-ups; only a new navigation resets it.
+                self.animation_epoch = if page.has_active_animations() {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
                 self.document = DocumentView::from_page(page);
                 self.current_url = Some(final_url.clone());
                 self.address_bar.set_text(final_url.to_string());
@@ -2249,6 +2264,43 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
         }
     }
 
+    /// Called by winit when the event queue drains. Drives CSS animations: while an
+    /// animation epoch is anchored (set at page load), advance the interpolated styles
+    /// every ~16ms and re-render. When all animations finish, drop back to idle (`Wait`).
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(epoch) = self.animation_epoch else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        };
+        let now_ms = epoch.elapsed().as_millis() as u64;
+        let still_active = self
+            .document
+            .loaded_page_mut()
+            .map(|page| page.apply_animations(now_ms, 0))
+            .unwrap_or(false);
+
+        if still_active {
+            // Only enqueue a fresh render when the worker is idle, so a slow renderer
+            // throttles the effective frame rate instead of letting requests pile up.
+            if self.pending_render_id.is_none() {
+                self.document.layout_cache = None;
+                self.request_content_render();
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(FRAME_INTERVAL_MS),
+            ));
+        } else {
+            // All animations have finished. Force a final render (even if one is in
+            // flight — the stale result is dropped by the pending-id check) so the
+            // settled values are shown, then idle until the next real event. Clearing
+            // the epoch prevents idle wake-ups (mouse moves, etc.) from restarting it.
+            self.document.layout_cache = None;
+            self.request_content_render();
+            self.animation_epoch = None;
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -2451,6 +2503,15 @@ impl DocumentView {
                 styled_document: page.styled_document.clone(),
                 images: page.images.clone(),
             }),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the loaded page, if the document currently holds one.
+    /// Used by the animation frame loop to advance interpolated styles in place.
+    fn loaded_page_mut(&mut self) -> Option<&mut BrowserPage> {
+        match &mut self.content {
+            DocumentContent::Loaded(page) => Some(page),
             _ => None,
         }
     }

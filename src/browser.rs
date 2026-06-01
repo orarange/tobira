@@ -48,6 +48,16 @@ pub struct BrowserPage {
     pub javascript_session: Option<JavaScriptSession>,
     layout_revision: u64,
     scroll_y: u32,
+    /// Per-element animation start times.
+    /// Key = stable element path (parent indices joined by "/"); value = monotonic ms.
+    pub animation_starts: std::collections::HashMap<String, u64>,
+    /// Per-element previous ComputedStyle, used to drive `transition` interpolation.
+    /// Updated each time `relayout` produces a fresh styled tree.
+    pub previous_styles: std::collections::HashMap<String, crate::css::ComputedStyle>,
+    /// When each transition started for an element+property. Key = "path|property".
+    pub transition_starts: std::collections::HashMap<String, u64>,
+    /// Smooth-scroll animation in flight: (target_y, start_y, start_ms, duration_ms).
+    pub smooth_scroll: Option<(u32, u32, u64, u32)>,
 }
 
 impl BrowserPage {
@@ -144,16 +154,18 @@ impl BrowserPage {
     }
 
     /// Apply animation interpolation in-place using `now_ms` as the current time and
-    /// `start_ms` as a global animation start anchor. Per-element start-time tracking
-    /// is not yet implemented; this is the MVP that animates everything against the
-    /// same anchor (good enough for infinite loaders / passive UI animations).
-    pub fn apply_animations(&mut self, now_ms: u64, start_ms: u64) {
+    /// `start_ms` as a global animation start anchor. Returns `true` while at least one
+    /// animation is still progressing, so the GUI knows whether to schedule another
+    /// frame. Per-element start tracking (`animation_starts`) is groundwork for a later
+    /// step; this MVP anchors every animation to the same `start_ms` (good enough for
+    /// infinite loaders / passive UI animations).
+    pub fn apply_animations(&mut self, now_ms: u64, start_ms: u64) -> bool {
         crate::css::apply_animations_to_tree(
             &mut self.styled_document,
             &self.main_stylesheet.keyframes,
             now_ms,
             start_ms,
-        );
+        )
     }
 
     pub fn set_dom_attribute(&mut self, node_id: Option<usize>, name: &str, value: &str) {
@@ -432,6 +444,10 @@ fn rebuild_page_from_document(
         javascript_session,
         layout_revision,
         scroll_y: 0,
+        animation_starts: std::collections::HashMap::new(),
+        previous_styles: std::collections::HashMap::new(),
+        transition_starts: std::collections::HashMap::new(),
+        smooth_scroll: None,
     }
 }
 
@@ -3277,6 +3293,10 @@ mod tests {
             javascript_session: None,
             layout_revision: 0,
             scroll_y: 0,
+            animation_starts: std::collections::HashMap::new(),
+            previous_styles: std::collections::HashMap::new(),
+            transition_starts: std::collections::HashMap::new(),
+            smooth_scroll: None,
         };
 
         assert_eq!(page.body_text(), "[empty document]");
@@ -3299,6 +3319,10 @@ mod tests {
             javascript_session: None,
             layout_revision: 0,
             scroll_y: 0,
+            animation_starts: std::collections::HashMap::new(),
+            previous_styles: std::collections::HashMap::new(),
+            transition_starts: std::collections::HashMap::new(),
+            smooth_scroll: None,
         };
 
         let output = page.to_cli_output();
@@ -3466,6 +3490,10 @@ mod tests {
             javascript_session: None,
             layout_revision: 0,
             scroll_y: 0,
+            animation_starts: std::collections::HashMap::new(),
+            previous_styles: std::collections::HashMap::new(),
+            transition_starts: std::collections::HashMap::new(),
+            smooth_scroll: None,
         };
         let snapshot = crate::js::ProcessedScriptHtml {
             html: "<html><body>Updated</body></html>".to_string(),
