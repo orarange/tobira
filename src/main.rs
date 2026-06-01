@@ -16,7 +16,7 @@ mod text;
 mod url;
 
 use browser::load_page_for_cli;
-use error::Result;
+use error::{BrowserError, Result};
 use url::Url;
 
 fn main() {
@@ -49,18 +49,43 @@ fn run() -> Result<()> {
             print_usage(&program);
             return Ok(());
         };
-        let url = Url::parse(&raw_url)?;
+        let url = parse_target(&raw_url)?;
         let page = load_page_for_cli(&url)?;
         println!("{}", page.to_cli_output().trim_end());
     } else {
         let initial_url = match raw_url {
-            Some(raw_url) => Some(Url::parse(&raw_url)?),
+            Some(raw_url) => Some(parse_target(&raw_url)?),
             None => None,
         };
         gui::run(initial_url)?;
     }
 
     Ok(())
+}
+
+/// Parse a command-line target. A value with a scheme (`http://`, `file://`, …) is
+/// parsed as-is; anything else is treated as a local filesystem path and converted
+/// to an absolute `file://` URL so `tobira demo/page.html` works.
+fn parse_target(raw: &str) -> Result<Url> {
+    if raw.contains("://") {
+        return Url::parse(raw);
+    }
+    let absolute = std::fs::canonicalize(raw)
+        .map_err(|error| BrowserError::message(format!("cannot open '{raw}': {error}")))?;
+    Url::parse(&path_to_file_url(&absolute))
+}
+
+/// Build a `file://` URL from an absolute path, normalizing separators and stripping
+/// the Windows verbatim (`\\?\`) prefix that `canonicalize` adds.
+fn path_to_file_url(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    let slashed = text.replace('\\', "/");
+    if slashed.starts_with('/') {
+        format!("file://{slashed}")
+    } else {
+        format!("file:///{slashed}")
+    }
 }
 
 fn print_usage(program: &str) {

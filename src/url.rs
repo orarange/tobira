@@ -17,9 +17,28 @@ impl Url {
             .split_once("://")
             .ok_or_else(|| BrowserError::message("URL must include a scheme such as http://"))?;
 
+        if scheme == "file" {
+            // file://[host]/path — the host is conventionally empty or "localhost".
+            // Everything from the first slash onward is the filesystem path; on Windows
+            // it looks like `/C:/Users/...`. No port, no default-host requirement.
+            let split_index = remainder.find('/').unwrap_or(remainder.len());
+            let host = remainder[..split_index].to_string();
+            let path = if split_index < remainder.len() {
+                remainder[split_index..].to_string()
+            } else {
+                "/".to_string()
+            };
+            return Ok(Self {
+                scheme: "file".to_string(),
+                host,
+                port: 0,
+                path: normalize_path(&path),
+            });
+        }
+
         if scheme != "http" && scheme != "https" {
             return Err(BrowserError::message(format!(
-                "unsupported scheme: {scheme} (only http:// and https:// are supported)"
+                "unsupported scheme: {scheme} (only http://, https://, and file:// are supported)"
             )));
         }
 
@@ -114,6 +133,9 @@ impl Url {
 
 impl fmt::Display for Url {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.scheme == "file" {
+            return write!(f, "file://{}{}", self.host, self.path);
+        }
         if (self.scheme == "http" && self.port == 80)
             || (self.scheme == "https" && self.port == 443)
         {
@@ -248,5 +270,33 @@ mod tests {
         let url = Url::parse("https://Example.com:443/path?query#frag").unwrap();
 
         assert_eq!(url.origin(), "https://example.com");
+    }
+
+    #[test]
+    fn parses_windows_file_url() {
+        let url = Url::parse("file:///C:/Users/me/demo/page.html").unwrap();
+
+        assert_eq!(url.scheme, "file");
+        assert_eq!(url.host, "");
+        assert_eq!(url.path, "/C:/Users/me/demo/page.html");
+        assert_eq!(url.to_string(), "file:///C:/Users/me/demo/page.html");
+    }
+
+    #[test]
+    fn parses_unix_file_url() {
+        let url = Url::parse("file:///home/me/page.html").unwrap();
+
+        assert_eq!(url.scheme, "file");
+        assert_eq!(url.path, "/home/me/page.html");
+        assert_eq!(url.to_string(), "file:///home/me/page.html");
+    }
+
+    #[test]
+    fn resolves_relative_path_against_file_url() {
+        let base = Url::parse("file:///home/me/demo/page.html").unwrap();
+        let next = base.resolve("styles.css").unwrap();
+
+        assert_eq!(next.scheme, "file");
+        assert_eq!(next.to_string(), "file:///home/me/demo/styles.css");
     }
 }

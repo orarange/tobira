@@ -46,6 +46,65 @@ pub fn fetch(url: &Url) -> Result<HttpResponse> {
     fetch_inner(url, 0, None, None, HttpRequestOptions::default())
 }
 
+/// Read a `file://` URL from the local filesystem and present it as an HTTP-like
+/// response so the rest of the load pipeline is unchanged.
+fn read_file_url(url: &Url) -> Result<HttpResponse> {
+    let fs_path = file_url_to_fs_path(url);
+    let body = std::fs::read(&fs_path).map_err(|error| {
+        BrowserError::message(format!("cannot read {}: {error}", fs_path.display()))
+    })?;
+    let mut headers = HashMap::new();
+    headers.insert(
+        "content-type".to_string(),
+        guess_content_type(&fs_path).to_string(),
+    );
+    Ok(HttpResponse {
+        final_url: url.clone(),
+        status_code: 200,
+        reason_phrase: "OK".to_string(),
+        headers,
+        set_cookie_headers: Vec::new(),
+        body,
+    })
+}
+
+/// Convert a `file://` URL path to a filesystem path. On Windows the URL path
+/// looks like `/C:/Users/...`; the leading slash before the drive letter is dropped.
+fn file_url_to_fs_path(url: &Url) -> std::path::PathBuf {
+    let mut path = url.path.clone();
+    if let Some(idx) = path.find(['?', '#']) {
+        path.truncate(idx);
+    }
+    if cfg!(windows) {
+        let bytes = path.as_bytes();
+        // `/C:/...` -> `C:/...`
+        if path.len() >= 3 && bytes[0] == b'/' && bytes[2] == b':' {
+            path = path[1..].to_string();
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
+fn guess_content_type(path: &std::path::Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("html") | Some("htm") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("txt") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
 pub fn fetch_with_limits(url: &Url, max_body_bytes: usize) -> Result<HttpResponse> {
     fetch_inner(
         url,
@@ -86,6 +145,10 @@ fn fetch_inner(
     same_origin: Option<&Url>,
     request: HttpRequestOptions,
 ) -> Result<HttpResponse> {
+    if url.scheme == "file" {
+        return read_file_url(url);
+    }
+
     if redirect_count > MAX_REDIRECTS {
         return Err(BrowserError::message("too many redirects"));
     }
