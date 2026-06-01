@@ -1737,6 +1737,15 @@ fn build_node(
             let mut style = parent_style
                 .cloned()
                 .unwrap_or_else(|| ComputedStyle::for_element("body", None));
+            // Box decorations (background, shadow, border) are NOT inherited in CSS, so a
+            // text node must not carry its parent's. Otherwise a background rect is painted
+            // behind the text using the parent's color — which desyncs from the parent's own
+            // background while that background is mid-transition (the text node is not itself
+            // interpolated), showing a mismatched patch behind the glyphs.
+            style.background_color = None;
+            style.background_gradient = None;
+            style.background_image_url = None;
+            style.box_shadows = vec![];
             // If the parent is a block stacking context (opacity < 255, non-inline), the
             // LayerCommand handles compositing at the parent's opacity. The text node's
             // effective_opacity should be 255 inside the layer to avoid double application.
