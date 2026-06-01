@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CSS Transition Demo</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #f4f6fb;
+      padding: 24px;
+    }
+    h1 { color: #1f3a5f; }
+    p { color: #44506a; }
+
+    /* Hover to fade — opacity transition. */
+    .fade {
+      width: 220px;
+      height: 56px;
+      background: #2a5db0;
+      color: #ffffff;
+      opacity: 1;
+      transition: opacity 400ms ease-in-out;
+    }
+    .fade:hover {
+      opacity: 0.25;
+    }
+
+    /* Hover to recolor — background-color transition via `all`. */
+    .recolor {
+      width: 220px;
+      height: 56px;
+      background: #27ae60;
+      color: #ffffff;
+      transition: all 500ms linear;
+    }
+    .recolor:hover {
+      background: #c0392b;
+    }
+
+    /* Hover to grow — transform: scale transition. */
+    .grow {
+      width: 120px;
+      height: 120px;
+      background: #8e44ad;
+      transform: scale(1);
+      transition: transform 300ms ease-out;
+    }
+    .grow:hover {
+      transform: scale(1.4);
+    }
+  </style>
+</head>
+<body>
+  <h1>CSS Transition Demo</h1>
+  <p>Hover each box to see the property transition over time.</p>
+
+  <p>Fade (opacity, 400ms ease-in-out):</p>
+  <div class="fade">hover me</div>
+
+  <p>Recolor (background, 500ms linear):</p>
+  <div class="recolor">hover me</div>
+
+  <p>Grow (transform: scale, 300ms ease-out):</p>
+  <div class="grow"></div>
+</body>
+</html>

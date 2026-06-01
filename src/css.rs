@@ -7429,4 +7429,58 @@ mod tests {
         let active = super::apply_animations_to_tree(&mut styled, &sheet.keyframes, 5_000, 0);
         assert!(!active, "finite animation should be inactive after it ends");
     }
+
+    #[test]
+    fn transition_interpolates_opacity_halfway() {
+        let doc = parse_document(
+            "<div style=\"opacity: 1; transition: opacity 1000ms linear;\">x</div>",
+        );
+        let sheet = parse_stylesheet("");
+        let styled =
+            build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.transitions.len(), 1);
+        assert_eq!(div.style.transitions[0].property, "opacity");
+        assert_eq!(div.style.transitions[0].duration_ms, 1000);
+
+        // Came from opacity 0, target is opacity 1; at 500ms (50%, linear) → ~127.
+        let target = div.style.clone();
+        let mut previous = target.clone();
+        previous.opacity = 0;
+        let mut current = target.clone();
+        super::apply_transitions_to_style(&mut current, &previous, 500, 0);
+        assert!(
+            (118..=137).contains(&current.opacity),
+            "opacity at 50% should be ~127, got {}",
+            current.opacity
+        );
+    }
+
+    #[test]
+    fn transition_all_interpolates_background_color() {
+        let doc = parse_document(
+            "<div style=\"background: #000000; transition: all 200ms linear;\">x</div>",
+        );
+        let sheet = parse_stylesheet("");
+        let styled =
+            build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        let mut previous = div.style.clone();
+        previous.background_color = Some(0x000000);
+        let mut current = div.style.clone();
+        current.background_color = Some(0xFFFFFF);
+        // 50% between black and white ≈ mid-gray on each channel (~127).
+        super::apply_transitions_to_style(&mut current, &previous, 100, 0);
+        let c = current.background_color.unwrap();
+        let r = (c >> 16) & 0xFF;
+        assert!((118..=137).contains(&r), "red channel mid should be ~127, got {r}");
+    }
+
+    #[test]
+    fn transition_shorthand_defaults_property_to_all() {
+        let specs = super::parse_transition_shorthand("0.3s ease");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].property, "all");
+        assert_eq!(specs[0].duration_ms, 300);
+    }
 }

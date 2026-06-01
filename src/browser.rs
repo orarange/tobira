@@ -168,6 +168,94 @@ impl BrowserPage {
         )
     }
 
+    /// True when any element in the current styled tree declares a `transition`.
+    /// The GUI uses this to decide whether a relayout (e.g. on hover) needs the
+    /// per-frame transition driver.
+    pub fn has_transitions(&self) -> bool {
+        fn walk(node: &crate::css::StyledNode) -> bool {
+            match node {
+                crate::css::StyledNode::Element(el) => {
+                    !el.style.transitions.is_empty() || el.children.iter().any(walk)
+                }
+                crate::css::StyledNode::Text(_) => false,
+            }
+        }
+        walk(&self.styled_document)
+    }
+
+    /// Drive CSS transitions for the current frame. The styled tree is expected to hold
+    /// fresh *target* styles (rebuilt via `relayout`); this interpolates each transitioning
+    /// element from its stored baseline (`previous_styles`) toward the target over the
+    /// transition's duration. Elements are keyed by their stable `data-tobira-node-id` so
+    /// state survives relayouts. Returns `true` while any transition is still in flight.
+    ///
+    /// Seed baselines once (e.g. right after a page loads) by calling this with the
+    /// no-hover styled tree so the first state change transitions instead of snapping.
+    pub fn advance_transitions(&mut self, now_ms: u64) -> bool {
+        let Self {
+            styled_document,
+            previous_styles,
+            transition_starts,
+            ..
+        } = self;
+
+        fn walk(
+            node: &mut crate::css::StyledNode,
+            prev: &mut std::collections::HashMap<String, crate::css::ComputedStyle>,
+            starts: &mut std::collections::HashMap<String, u64>,
+            now: u64,
+        ) -> bool {
+            let mut active = false;
+            if let crate::css::StyledNode::Element(el) = node {
+                if !el.style.transitions.is_empty() {
+                    if let Some(key) = el.attributes.get("data-tobira-node-id").cloned() {
+                        let target = el.style.clone();
+                        match prev.get(&key) {
+                            // First sight: record the baseline, do not transition.
+                            None => {
+                                prev.insert(key, target);
+                            }
+                            // Settled: target matches baseline, clear any stale start.
+                            Some(base) if *base == target => {
+                                starts.remove(&key);
+                            }
+                            // A property changed: interpolate baseline → target over time.
+                            Some(base) => {
+                                let base = base.clone();
+                                let start = *starts.entry(key.clone()).or_insert(now);
+                                crate::css::apply_transitions_to_style(
+                                    &mut el.style,
+                                    &base,
+                                    now,
+                                    start,
+                                );
+                                let max_dur = target
+                                    .transitions
+                                    .iter()
+                                    .map(|t| t.delay_ms.max(0) as u64 + t.duration_ms as u64)
+                                    .max()
+                                    .unwrap_or(0);
+                                if now.saturating_sub(start) >= max_dur {
+                                    // Transition complete: settle the baseline at the target.
+                                    prev.insert(key.clone(), target);
+                                    starts.remove(&key);
+                                } else {
+                                    active = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                for child in el.children.iter_mut() {
+                    active |= walk(child, prev, starts, now);
+                }
+            }
+            active
+        }
+
+        walk(styled_document, previous_styles, transition_starts, now_ms)
+    }
+
     pub fn set_dom_attribute(&mut self, node_id: Option<usize>, name: &str, value: &str) {
         let Some(node_id) = node_id else {
             return;

@@ -530,6 +530,46 @@ impl BrowserApp {
         });
     }
 
+    /// The InteractiveState matching the current hover, for CSS `:hover` restyling.
+    fn current_interactive_state(&self) -> InteractiveState {
+        InteractiveState {
+            hovered_node_id: self.hovered_element_node_id,
+            focused_node_id: None,
+            active_node_ids: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Content width available for page layout at the given window size.
+    fn content_width_for(window_size: PhysicalSize<u32>) -> u32 {
+        window_size.width.saturating_sub(FRAME_PADDING).max(1)
+    }
+
+    /// Rebuild the loaded page's styled tree for the current hover state so CSS `:hover`
+    /// applies immediately. If the page declares transitions, also arm the frame clock
+    /// and kick the transition driver so the restyle animates from the pre-hover baseline.
+    fn restyle_for_hover(&mut self, window_size: PhysicalSize<u32>) {
+        let content_width = Self::content_width_for(window_size);
+        let interactive = self.current_interactive_state();
+        let has_trans = self
+            .document
+            .loaded_page()
+            .map(|page| page.has_transitions())
+            .unwrap_or(false);
+        if has_trans {
+            // Establish (or reuse) the frame clock so transition start times are
+            // consistent with the animation timeline, then start the transition now.
+            let epoch = *self.animation_epoch.get_or_insert_with(Instant::now);
+            let now_ms = epoch.elapsed().as_millis() as u64;
+            if let Some(page) = self.document.loaded_page_mut() {
+                page.relayout(content_width, &interactive);
+                page.advance_transitions(now_ms);
+            }
+        } else if let Some(page) = self.document.loaded_page_mut() {
+            page.relayout(content_width, &interactive);
+        }
+        self.document.layout_cache = None;
+    }
+
     fn finish_render(
         &mut self,
         render_id: u64,
@@ -644,6 +684,12 @@ impl BrowserApp {
                 // Start the animation clock for this page if it declares any animations.
                 // Anchoring here (rather than in about_to_wait) means a finished animation
                 // is not restarted by unrelated idle wake-ups; only a new navigation resets it.
+                let mut page = page;
+                // Seed transition baselines with the no-hover styled tree so the first
+                // hover/state change transitions instead of snapping.
+                if page.has_transitions() {
+                    page.advance_transitions(0);
+                }
                 self.animation_epoch = if page.has_active_animations() {
                     Some(Instant::now())
                 } else {
@@ -1040,6 +1086,8 @@ impl BrowserApp {
                 previous_hovered_element,
                 hovered_element,
             );
+            // Rebuild the styled tree so CSS `:hover` applies, starting any transitions.
+            self.restyle_for_hover(window_size);
             self.request_content_render();
         }
 
@@ -2273,11 +2321,28 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
             return;
         };
         let now_ms = epoch.elapsed().as_millis() as u64;
-        let still_active = self
-            .document
-            .loaded_page_mut()
-            .map(|page| page.apply_animations(now_ms, 0))
-            .unwrap_or(false);
+        let content_width = self
+            .window
+            .as_ref()
+            .map(|window| Self::content_width_for(window.inner_size()))
+            .unwrap_or(WINDOW_WIDTH);
+        let interactive = self.current_interactive_state();
+
+        let still_active = if let Some(page) = self.document.loaded_page_mut() {
+            // Transitions interpolate baseline → target, so the tree must be rebuilt to
+            // the fresh target (with current hover) each frame. Animations overwrite their
+            // properties with absolute keyframe values, so they layer on top afterward.
+            let trans_active = if page.has_transitions() {
+                page.relayout(content_width, &interactive);
+                page.advance_transitions(now_ms)
+            } else {
+                false
+            };
+            let anim_active = page.apply_animations(now_ms, 0);
+            trans_active || anim_active
+        } else {
+            false
+        };
 
         if still_active {
             // Only enqueue a fresh render when the worker is idle, so a slow renderer
@@ -2511,6 +2576,14 @@ impl DocumentView {
     /// Used by the animation frame loop to advance interpolated styles in place.
     fn loaded_page_mut(&mut self) -> Option<&mut BrowserPage> {
         match &mut self.content {
+            DocumentContent::Loaded(page) => Some(page),
+            _ => None,
+        }
+    }
+
+    /// Shared access to the loaded page, if any.
+    fn loaded_page(&self) -> Option<&BrowserPage> {
+        match &self.content {
             DocumentContent::Loaded(page) => Some(page),
             _ => None,
         }
