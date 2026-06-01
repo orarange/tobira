@@ -164,19 +164,18 @@ follow-up Batch 1–4 commits brought the following Phase 6 items in:
 | `writing-mode` (parse) | 🔧 | Stored on ComputedStyle; vertical layout not applied yet |
 | `direction: rtl` (parse) | 🔧 | Stored on ComputedStyle; full RTL inline reorder not done |
 | `scroll-behavior: smooth` (parse) | 🔧 | Stored on ComputedStyle; animated scroll not driven yet |
-| CSS `animation` / `@keyframes` | 🔧 | Interpolation primitives ready; frame loop integration pending |
-| `transition` interpolation | 🔧 | `apply_transitions_to_style` ready; previous-style snapshot pending |
+| CSS `animation` / `@keyframes` | ✅ | `animation:` shorthand + longhands parse into `AnimationSpec`s; `about_to_wait` drives ~16ms frames; opacity / color / background-color / transform interpolated. Demo: `demo/animation-demo.html` |
+| `transition` interpolation | 🔧 | `transition:` parses into `TransitionSpec`s and `apply_transitions_to_style` is ready, but not yet driven — needs the previous-style snapshot + `transition_starts` (groundwork fields exist on `BrowserPage`) |
 
 ### Phase 6 — Remaining work ❌
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
-| Frame-driven animation loop | High | Call `apply_animations` + invalidate cache + `request_redraw` on ~16ms cadence when `has_active_animations` |
-| Per-element animation start tracking | High | Currently every animation is anchored to a single start_ms |
-| Transition previous-style diffing | Medium | Need to snapshot previous ComputedStyle per node and compute start_ms on change |
+| Transition driving | High | Snapshot previous `ComputedStyle` per element, record `transition_starts` on change, call `apply_transitions_to_style` from the frame loop. Groundwork fields (`previous_styles`, `transition_starts`) already on `BrowserPage` |
+| Per-element animation start tracking | Medium | Animations are anchored to one page-level epoch (`animation_epoch`); `animation_starts` map is groundwork for per-element delays/restarts |
 | `writing-mode` vertical layout | Low | Rotate text glyphs + flip block/inline axes in layout |
 | `direction: rtl` inline reorder | Low | Needs TextAlign::Start/End and reversed line construction |
-| `scroll-behavior: smooth` animation | Low | Multi-step scroll using the same frame timer as animations |
+| `scroll-behavior: smooth` animation | Low | Multi-step scroll reusing the animation frame timer; `smooth_scroll` field is groundwork |
 
 ---
 
