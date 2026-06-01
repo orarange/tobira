@@ -534,6 +534,35 @@ impl BrowserApp {
         });
     }
 
+    /// Render the current page content synchronously into `latest_render_frame` (no worker
+    /// round-trip). Used by the animation frame loop so each frame is produced and presented
+    /// with minimal latency.
+    fn render_frame_synchronously(&mut self) {
+        let Some(page) = self.document.render_snapshot() else {
+            return;
+        };
+        let window_size = self
+            .window
+            .as_ref()
+            .map(|window| window.inner_size())
+            .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+        let request = RenderRequest {
+            id: 0,
+            viewport_width: window_size.width,
+            page,
+            focused_page_input: self.focused_page_input.clone(),
+            hovered_target: self.hovered_target,
+        };
+        if let Ok(frame) = render_content_frame(request, &mut self.fonts) {
+            self.document.layout_cache = Some(CachedLayout {
+                width: frame.content_width,
+                revision: self.document.layout_revision(),
+                layout: frame.layout.clone(),
+            });
+            self.latest_render_frame = Some(frame);
+        }
+    }
+
     /// The InteractiveState matching the current hover, for CSS `:hover` restyling.
     fn current_interactive_state(&self) -> InteractiveState {
         InteractiveState {
@@ -2361,23 +2390,20 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
             false
         };
 
+        // Render animation frames synchronously on this thread and present immediately.
+        // The async worker path adds a full page clone + EventLoopProxy wake-up per frame,
+        // whose latency caps the effective frame rate; rendering inline keeps animations
+        // smooth (~60fps) for typical pages.
+        self.render_frame_synchronously();
+        let _ = self.draw();
+
         if still_active {
-            // Only enqueue a fresh render when the worker is idle, so a slow renderer
-            // throttles the effective frame rate instead of letting requests pile up.
-            if self.pending_render_id.is_none() {
-                self.document.layout_cache = None;
-                self.request_content_render();
-            }
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(FRAME_INTERVAL_MS),
             ));
         } else {
-            // All animations have finished. Force a final render (even if one is in
-            // flight — the stale result is dropped by the pending-id check) so the
-            // settled values are shown, then idle until the next real event. Clearing
-            // the epoch prevents idle wake-ups (mouse moves, etc.) from restarting it.
-            self.document.layout_cache = None;
-            self.request_content_render();
+            // All animations have finished; the final frame is already presented above.
+            // Clearing the epoch prevents idle wake-ups (mouse moves, etc.) from restarting it.
             self.animation_epoch = None;
             event_loop.set_control_flow(ControlFlow::Wait);
         }
