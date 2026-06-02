@@ -19,7 +19,7 @@ use super::host::{
 };
 use super::value::{
     AsyncContext, HostDispatch, HostObjectClass, HostObjectSlot, JsObject, JsPropertyDescriptor,
-    JsString, ObjectKind, PromiseReaction, PromiseState, PropertyKey, Value,
+    JsString, ObjectKind, PromiseReaction, PromiseState, PropertyKey, SymbolId, Value,
 };
 
 type ValueCell = Rc<RefCell<Value>>;
@@ -283,6 +283,22 @@ enum BuiltinId {
     StringProtoMatch,
     StringProtoMatchAll,
     StringProtoSearch,
+    SymbolConstructor,
+    SymbolProtoToString,
+    DateConstructor,
+    DateNow,
+    DateProtoGetTime,
+    DateProtoGetFullYear,
+    DateProtoGetMonth,
+    DateProtoGetDate,
+    DateProtoGetDay,
+    DateProtoGetHours,
+    DateProtoGetMinutes,
+    DateProtoGetSeconds,
+    DateProtoGetMilliseconds,
+    DateProtoToISOString,
+    DateProtoToString,
+    DateProtoValueOf,
 }
 
 #[derive(Debug, Clone)]
@@ -746,6 +762,41 @@ fn compile_js_regex(source: &str, flags: &str) -> Result<regex::Regex, VmError> 
         .map_err(|error| VmError::TypeError(format!("invalid regular expression: {error}")))
 }
 
+// --- Proleptic Gregorian calendar math (Howard Hinnant's algorithms) --------
+
+/// Days since 1970-01-01 for a given civil date. `m` is 1..=12.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Civil date (year, month 1..=12, day) from days since 1970-01-01.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Euclidean modulo so day-of-week/time fields are correct for negative epochs.
+fn floor_div(a: i64, b: i64) -> i64 {
+    (a as f64 / b as f64).floor() as i64
+}
+
+fn floor_mod(a: i64, b: i64) -> i64 {
+    ((a % b) + b) % b
+}
+
 fn is_uri_unreserved(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')')
 }
@@ -803,6 +854,7 @@ pub struct Vm {
     number_prototype: Option<GcRef<JsObject>>,
     boolean_prototype: Option<GcRef<JsObject>>,
     regexp_prototype: Option<GcRef<JsObject>>,
+    date_prototype: Option<GcRef<JsObject>>,
     error_prototype: Option<GcRef<JsObject>>,
     promise_prototype: Option<GcRef<JsObject>>,
     map_prototype: Option<GcRef<JsObject>>,
@@ -816,7 +868,17 @@ pub struct Vm {
     /// Cache for stateless builtin method values (constructable=false, prototype=None).
     /// Avoids a heap allocation on every DOM property access like element.appendChild.
     builtin_method_cache: HashMap<u32, Value>,
+    /// Next id handed out by `Symbol()`. Ids below `FIRST_USER_SYMBOL` are
+    /// reserved for well-known symbols (e.g. Symbol.iterator).
+    next_symbol_id: u32,
+    /// Optional descriptions for created symbols (for Symbol.prototype.toString).
+    symbol_descriptions: HashMap<u32, String>,
 }
+
+/// Well-known symbol id for `Symbol.iterator`.
+const SYMBOL_ITERATOR_ID: u32 = 1;
+/// First id available to user-created `Symbol(...)` values.
+const FIRST_USER_SYMBOL: u32 = 16;
 
 impl Vm {
     /// Create a VM with a no-op host (for tests and scripts that don't need DOM/console).
@@ -845,6 +907,7 @@ impl Vm {
             number_prototype: None,
             boolean_prototype: None,
             regexp_prototype: None,
+            date_prototype: None,
             error_prototype: None,
             promise_prototype: None,
             map_prototype: None,
@@ -854,6 +917,8 @@ impl Vm {
             host,
             event_listeners: HashMap::new(),
             builtin_method_cache: HashMap::new(),
+            next_symbol_id: FIRST_USER_SYMBOL,
+            symbol_descriptions: HashMap::new(),
         };
         vm.install_globals();
         vm
@@ -1416,6 +1481,7 @@ impl Vm {
         let number_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let boolean_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let regexp_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let date_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let error_prototype = self.heap.allocate_object(JsObject {
             kind: ObjectKind::Error,
             prototype: Some(object_prototype),
@@ -1432,6 +1498,7 @@ impl Vm {
         self.number_prototype = Some(number_prototype);
         self.boolean_prototype = Some(boolean_prototype);
         self.regexp_prototype = Some(regexp_prototype);
+        self.date_prototype = Some(date_prototype);
         self.error_prototype = Some(error_prototype);
         self.promise_prototype = Some(promise_prototype);
         self.map_prototype = Some(map_prototype);
@@ -1523,6 +1590,10 @@ impl Vm {
         );
         let regexp_ctor =
             self.allocate_builtin_value(BuiltinId::RegExpConstructor, true, Some(regexp_prototype));
+        // Symbol is callable but not constructable.
+        let symbol_ctor = self.allocate_builtin_value(BuiltinId::SymbolConstructor, false, None);
+        let date_ctor =
+            self.allocate_builtin_value(BuiltinId::DateConstructor, true, Some(date_prototype));
         let math_object = self.allocate_ordinary_object(Some(object_prototype));
         let json_object = self.allocate_ordinary_object(Some(object_prototype));
 
@@ -1552,6 +1623,9 @@ impl Vm {
             .insert("Boolean".to_string(), boolean_ctor.clone());
         self.globals
             .insert("RegExp".to_string(), regexp_ctor.clone());
+        self.globals
+            .insert("Symbol".to_string(), symbol_ctor.clone());
+        self.globals.insert("Date".to_string(), date_ctor.clone());
         self.globals
             .insert("Math".to_string(), Value::Object(math_object));
         self.globals
@@ -1753,6 +1827,24 @@ impl Vm {
         self.define_builtin_method(regexp_prototype, "exec", BuiltinId::RegExpProtoExec);
         self.define_builtin_method(regexp_prototype, "toString", BuiltinId::RegExpProtoToString);
 
+        for (name, builtin) in [
+            ("getTime", BuiltinId::DateProtoGetTime),
+            ("valueOf", BuiltinId::DateProtoValueOf),
+            ("getFullYear", BuiltinId::DateProtoGetFullYear),
+            ("getMonth", BuiltinId::DateProtoGetMonth),
+            ("getDate", BuiltinId::DateProtoGetDate),
+            ("getDay", BuiltinId::DateProtoGetDay),
+            ("getHours", BuiltinId::DateProtoGetHours),
+            ("getMinutes", BuiltinId::DateProtoGetMinutes),
+            ("getSeconds", BuiltinId::DateProtoGetSeconds),
+            ("getMilliseconds", BuiltinId::DateProtoGetMilliseconds),
+            ("toISOString", BuiltinId::DateProtoToISOString),
+            ("toJSON", BuiltinId::DateProtoToISOString),
+            ("toString", BuiltinId::DateProtoToString),
+        ] {
+            self.define_builtin_method(date_prototype, name, builtin);
+        }
+
         self.define_builtin_method(string_prototype, "match", BuiltinId::StringProtoMatch);
         self.define_builtin_method(string_prototype, "matchAll", BuiltinId::StringProtoMatchAll);
         self.define_builtin_method(string_prototype, "search", BuiltinId::StringProtoSearch);
@@ -1880,6 +1972,24 @@ impl Vm {
             );
         }
 
+        if let Some(symbol_ref) = self.value_object_ref(symbol_ctor) {
+            // Well-known symbols exposed as static properties of Symbol.
+            for (name, id) in [("iterator", SYMBOL_ITERATOR_ID), ("asyncIterator", 2)] {
+                self.define_data_property(
+                    symbol_ref,
+                    PropertyKey::from(name),
+                    Value::Symbol(SymbolId(id)),
+                    false,
+                    false,
+                    false,
+                );
+            }
+        }
+
+        if let Some(date_ref) = self.value_object_ref(date_ctor) {
+            self.define_builtin_method(date_ref, "now", BuiltinId::DateNow);
+        }
+
         self.define_builtin_method(math_object, "floor", BuiltinId::MathFloor);
         self.define_builtin_method(math_object, "ceil", BuiltinId::MathCeil);
         self.define_builtin_method(math_object, "round", BuiltinId::MathRound);
@@ -1961,6 +2071,82 @@ impl Vm {
     fn regexp_prototype_ref(&self) -> GcRef<JsObject> {
         self.regexp_prototype
             .expect("regexp prototype should be installed")
+    }
+
+    fn date_prototype_ref(&self) -> GcRef<JsObject> {
+        self.date_prototype
+            .expect("date prototype should be installed")
+    }
+
+    /// Allocate a fresh unique Symbol value, recording its description.
+    fn allocate_symbol(&mut self, description: Option<String>) -> Value {
+        let id = self.next_symbol_id;
+        self.next_symbol_id = self.next_symbol_id.saturating_add(1);
+        if let Some(description) = description {
+            self.symbol_descriptions.insert(id, description);
+        }
+        Value::Symbol(SymbolId(id))
+    }
+
+    /// Current wall-clock time in milliseconds since the Unix epoch.
+    fn current_time_ms(&self) -> f64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as f64)
+            .unwrap_or(0.0)
+    }
+
+    /// Allocate a Date object storing its time value in a hidden property.
+    fn make_date_object(&mut self, time_ms: f64) -> Value {
+        let object = self.allocate_ordinary_object(Some(self.date_prototype_ref()));
+        self.define_data_property(
+            object,
+            PropertyKey::from("__time__"),
+            Value::Number(time_ms),
+            true,
+            false,
+            false,
+        );
+        Value::Object(object)
+    }
+
+    /// Read the millisecond time value stored on a Date object.
+    fn date_time_value(&mut self, this_value: &Value) -> Result<f64, VmError> {
+        let value = self.get_property_value(this_value, &PropertyKey::from("__time__"))?;
+        Ok(self.to_number(&value))
+    }
+
+    /// Decompose an epoch-ms value into (year, month0, day, hours, minutes,
+    /// seconds, millis, weekday). Returns None for NaN.
+    fn date_components(time_ms: f64) -> Option<(i64, i64, i64, i64, i64, i64, i64, i64)> {
+        if !time_ms.is_finite() {
+            return None;
+        }
+        let ms = time_ms as i64;
+        let days = floor_div(ms, 86_400_000);
+        let mut rem = floor_mod(ms, 86_400_000);
+        let millis = rem % 1000;
+        rem /= 1000;
+        let seconds = rem % 60;
+        rem /= 60;
+        let minutes = rem % 60;
+        rem /= 60;
+        let hours = rem % 24;
+        let (year, month, day) = civil_from_days(days);
+        let weekday = floor_mod(days + 4, 7); // 1970-01-01 was a Thursday
+        Some((year, month - 1, day, hours, minutes, seconds, millis, weekday))
+    }
+
+    /// Return one decomposed Date field by index (0=year .. 7=weekday).
+    fn date_component(&mut self, this_value: &Value, index: usize) -> Result<Value, VmError> {
+        let time = self.date_time_value(this_value)?;
+        Ok(match Self::date_components(time) {
+            Some(c) => {
+                let fields = [c.0, c.1, c.2, c.3, c.4, c.5, c.6, c.7];
+                Value::Number(fields.get(index).copied().unwrap_or(0) as f64)
+            }
+            None => Value::Number(f64::NAN),
+        })
     }
 
     /// Allocate a RegExp object with `source`/`flags`/`global`/`lastIndex`
@@ -3576,6 +3762,7 @@ impl Vm {
                 | BuiltinId::NumberConstructor
                 | BuiltinId::StringConstructor
                 | BuiltinId::BooleanConstructor
+                | BuiltinId::DateConstructor
         )
     }
 
@@ -4460,13 +4647,53 @@ impl Vm {
                     }
                     ObjectKind::Set(values) | ObjectKind::WeakSet(values) => Ok(values),
                     ObjectKind::ForOfIterator { values, index } => Ok(values[index.min(values.len())..].to_vec()),
-                    _ => self.array_like_to_vec(value),
+                    _ => {
+                        // Custom iterable: drain via its Symbol.iterator method.
+                        if let Some(values) = self.iterate_via_symbol_iterator(value)? {
+                            return Ok(values);
+                        }
+                        self.array_like_to_vec(value)
+                    }
                 }
             }
             _ => Err(VmError::TypeError(
                 "value is not iterable in phase 4".to_string(),
             )),
         }
+    }
+
+    /// If `value` has a callable `Symbol.iterator`, invoke the iteration
+    /// protocol (get iterator, repeatedly call `next()` until `done`) and return
+    /// the collected values. Returns None if there is no Symbol.iterator method.
+    fn iterate_via_symbol_iterator(
+        &mut self,
+        value: &Value,
+    ) -> Result<Option<Vec<Value>>, VmError> {
+        let iterator_key = PropertyKey::Symbol(SymbolId(SYMBOL_ITERATOR_ID));
+        let iterator_fn = self.get_property_value(value, &iterator_key)?;
+        if !self.is_callable_value(&iterator_fn) {
+            return Ok(None);
+        }
+        let iterator = self.call_value_sync(iterator_fn, value.clone(), Vec::new())?;
+        let next_fn = self.get_property_value(&iterator, &PropertyKey::from("next"))?;
+        if !self.is_callable_value(&next_fn) {
+            return Err(VmError::TypeError(
+                "iterator.next is not a function".to_string(),
+            ));
+        }
+        let mut values = Vec::new();
+        // Cap iterations to avoid an unbounded loop on a misbehaving iterator.
+        for _ in 0..1_000_000 {
+            let result =
+                self.call_value_sync(next_fn.clone(), iterator.clone(), Vec::new())?;
+            let done = self.get_property_value(&result, &PropertyKey::from("done"))?;
+            if self.is_truthy(&done) {
+                break;
+            }
+            let item = self.get_property_value(&result, &PropertyKey::from("value"))?;
+            values.push(item);
+        }
+        Ok(Some(values))
     }
 
     fn for_of_next(&mut self, iterator: GcRef<JsObject>) -> Result<Option<Value>, VmError> {
@@ -5682,6 +5909,76 @@ impl Vm {
                     results.push(self.build_match_result(&regex, caps, &text)?);
                 }
                 Ok(self.make_for_of_iterator(results))
+            }
+            BuiltinId::SymbolConstructor => {
+                let description = match args.first() {
+                    Some(Value::Undefined) | None => None,
+                    Some(value) => Some(self.to_string(value)),
+                };
+                Ok(self.allocate_symbol(description))
+            }
+            BuiltinId::SymbolProtoToString => {
+                let description = match &this_value {
+                    Value::Symbol(SymbolId(id)) => {
+                        self.symbol_descriptions.get(id).cloned().unwrap_or_default()
+                    }
+                    _ => String::new(),
+                };
+                Ok(self.make_string_value(&format!("Symbol({description})")))
+            }
+            BuiltinId::DateNow => Ok(Value::Number(self.current_time_ms())),
+            BuiltinId::DateConstructor => {
+                let time = match args.len() {
+                    0 => self.current_time_ms(),
+                    1 => match &args[0] {
+                        // String date parsing is not supported yet.
+                        Value::String(_) => f64::NAN,
+                        other => self.to_number(other),
+                    },
+                    _ => {
+                        let year = self.number_arg(&args, 0) as i64;
+                        let month = self.number_arg(&args, 1) as i64;
+                        let day = if args.len() > 2 { self.number_arg(&args, 2) as i64 } else { 1 };
+                        let hours = if args.len() > 3 { self.number_arg(&args, 3) as i64 } else { 0 };
+                        let minutes =
+                            if args.len() > 4 { self.number_arg(&args, 4) as i64 } else { 0 };
+                        let seconds =
+                            if args.len() > 5 { self.number_arg(&args, 5) as i64 } else { 0 };
+                        let millis =
+                            if args.len() > 6 { self.number_arg(&args, 6) as i64 } else { 0 };
+                        let days = days_from_civil(year, month + 1, day);
+                        (days * 86_400_000
+                            + hours * 3_600_000
+                            + minutes * 60_000
+                            + seconds * 1000
+                            + millis) as f64
+                    }
+                };
+                Ok(self.make_date_object(time))
+            }
+            BuiltinId::DateProtoGetTime | BuiltinId::DateProtoValueOf => {
+                Ok(Value::Number(self.date_time_value(&this_value)?))
+            }
+            BuiltinId::DateProtoGetFullYear => self.date_component(&this_value, 0),
+            BuiltinId::DateProtoGetMonth => self.date_component(&this_value, 1),
+            BuiltinId::DateProtoGetDate => self.date_component(&this_value, 2),
+            BuiltinId::DateProtoGetHours => self.date_component(&this_value, 3),
+            BuiltinId::DateProtoGetMinutes => self.date_component(&this_value, 4),
+            BuiltinId::DateProtoGetSeconds => self.date_component(&this_value, 5),
+            BuiltinId::DateProtoGetMilliseconds => self.date_component(&this_value, 6),
+            BuiltinId::DateProtoGetDay => self.date_component(&this_value, 7),
+            BuiltinId::DateProtoToISOString | BuiltinId::DateProtoToString => {
+                let time = self.date_time_value(&this_value)?;
+                match Self::date_components(time) {
+                    Some((year, month0, day, hours, minutes, seconds, millis, _)) => {
+                        let iso = format!(
+                            "{year:04}-{:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{millis:03}Z",
+                            month0 + 1
+                        );
+                        Ok(self.make_string_value(&iso))
+                    }
+                    None => Ok(self.make_string_value("Invalid Date")),
+                }
             }
             BuiltinId::StringProtoCharAt => {
                 let text = self.builtin_string_this(&this_value)?;
