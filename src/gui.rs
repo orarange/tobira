@@ -145,6 +145,9 @@ struct BrowserApp {
     /// Coalesces ticks: the ticker only posts a new `AnimationTick` when the previous one has
     /// been processed, so a momentarily-busy main thread cannot accumulate a backlog of ticks.
     tick_pending: Arc<AtomicBool>,
+    /// Frames presented since `fps_since`, for the optional TOBIRA_FPS counter.
+    fps_frames: u32,
+    fps_since: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -349,6 +352,8 @@ impl BrowserApp {
             last_frame_at: None,
             ticker_running: Arc::new(AtomicBool::new(false)),
             tick_pending: Arc::new(AtomicBool::new(false)),
+            fps_frames: 0,
+            fps_since: None,
         };
 
         if let Some(url) = initial_load_url {
@@ -580,6 +585,9 @@ impl BrowserApp {
         if self.ticker_running.swap(true, Ordering::SeqCst) {
             return; // a ticker is already running
         }
+        // Read the display refresh rate once at the start of the burst (the monitor may not
+        // have been known at window creation).
+        self.refresh_frame_interval();
         let proxy = self.event_proxy.clone();
         let running = self.ticker_running.clone();
         let pending = self.tick_pending.clone();
@@ -613,6 +621,23 @@ impl BrowserApp {
             return;
         };
 
+        // One render in flight at a time: if the worker is still busy, do nothing — it will
+        // be re-driven from finish_render the moment it completes (pipelining), so the worker
+        // never idles waiting for the next tick.
+        if self.pending_render_id.is_some() {
+            return;
+        }
+        // Cap the render rate at the display refresh: skip if the previous frame was sent less
+        // than one interval ago. (When the worker is slower than the display this never trips,
+        // so we run as fast as the worker can; when faster, we hold at the display rate.)
+        let now = Instant::now();
+        if let Some(last) = self.last_frame_at {
+            if now.duration_since(last) < self.frame_interval {
+                return;
+            }
+        }
+        self.last_frame_at = Some(now);
+
         let now_ms = epoch.elapsed().as_millis() as u64;
         let content_width = self
             .window
@@ -634,20 +659,13 @@ impl BrowserApp {
             false
         };
 
-        // Render off the main thread. Only enqueue when the worker is idle so requests do
-        // not pile up; the next tick will enqueue the latest state once it finishes.
-        if self.pending_render_id.is_none() {
-            self.document.layout_cache = None;
-            self.request_content_render();
-        }
+        self.document.layout_cache = None;
+        self.request_content_render();
 
         if !still_active {
             self.animation_epoch = None;
             self.last_frame_at = None;
             self.ticker_running.store(false, Ordering::SeqCst);
-            // Make sure the settled final frame is rendered even if a request was in flight.
-            self.document.layout_cache = None;
-            self.request_content_render();
         }
     }
 
@@ -747,6 +765,13 @@ impl BrowserApp {
                 }
                 self.render_feedback_passes = 0;
                 self.present_or_request_redraw();
+                // Pipeline: with the worker now idle, immediately advance and enqueue the next
+                // animation frame instead of waiting for the next tick, so the worker stays
+                // continuously busy (the display-rate cap in drive_animation_frame prevents
+                // over-rendering).
+                if self.animation_epoch.is_some() {
+                    self.drive_animation_frame();
+                }
             }
             Err(error) => {
                 self.document.status_line = format!("Status: render failed ({error})");
@@ -911,8 +936,24 @@ impl BrowserApp {
     fn present_or_request_redraw(&mut self) {
         if self.animation_epoch.is_some() {
             let _ = self.draw();
+            self.count_fps();
         } else {
             self.request_redraw();
+        }
+    }
+
+    /// Optional frame-rate readout: set TOBIRA_FPS=1 to log presented frames/sec.
+    fn count_fps(&mut self) {
+        if std::env::var("TOBIRA_FPS").is_err() {
+            return;
+        }
+        self.fps_frames += 1;
+        let now = Instant::now();
+        let since = *self.fps_since.get_or_insert(now);
+        if now.duration_since(since) >= Duration::from_secs(1) {
+            eprintln!("[fps] {} frames/s", self.fps_frames);
+            self.fps_frames = 0;
+            self.fps_since = Some(now);
         }
     }
 
@@ -2491,13 +2532,6 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
     /// `WaitUntil` timer, provides the cadence.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.animation_epoch.is_some() {
-            // At the start of an animation burst, re-read the display refresh rate (the
-            // monitor may not have been known at window creation) before spawning the ticker;
-            // last_frame_at doubles as the "burst started" marker.
-            if self.last_frame_at.is_none() {
-                self.refresh_frame_interval();
-                self.last_frame_at = Some(Instant::now());
-            }
             self.ensure_animation_ticker();
             self.drive_animation_frame();
         }
