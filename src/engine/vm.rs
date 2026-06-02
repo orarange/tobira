@@ -18,8 +18,9 @@ use super::host::{
     NoopHost, SiblingDirection, WindowId,
 };
 use super::value::{
-    AsyncContext, HostDispatch, HostObjectClass, HostObjectSlot, JsObject, JsPropertyDescriptor,
-    JsString, ObjectKind, PromiseReaction, PromiseState, PropertyKey, SymbolId, Value,
+    AsyncContext, GeneratorState, HostDispatch, HostObjectClass, HostObjectSlot, JsObject,
+    JsPropertyDescriptor, JsString, ObjectKind, PromiseReaction, PromiseState, PropertyKey,
+    SymbolId, Value,
 };
 
 type ValueCell = Rc<RefCell<Value>>;
@@ -300,6 +301,9 @@ enum BuiltinId {
     DateProtoToISOString,
     DateProtoToString,
     DateProtoValueOf,
+    GeneratorProtoNext,
+    GeneratorProtoReturn,
+    GeneratorProtoIterator,
 }
 
 #[derive(Debug, Clone)]
@@ -396,6 +400,8 @@ pub struct CallFrame {
     construct_fallback: Option<Value>,
     pending_exception: Option<Value>,
     async_outer_promise: Option<GcRef<JsObject>>,
+    /// The generator object that owns this frame, if it is a generator body.
+    generator: Option<GcRef<JsObject>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -856,6 +862,7 @@ pub struct Vm {
     boolean_prototype: Option<GcRef<JsObject>>,
     regexp_prototype: Option<GcRef<JsObject>>,
     date_prototype: Option<GcRef<JsObject>>,
+    generator_prototype: Option<GcRef<JsObject>>,
     error_prototype: Option<GcRef<JsObject>>,
     promise_prototype: Option<GcRef<JsObject>>,
     map_prototype: Option<GcRef<JsObject>>,
@@ -874,6 +881,15 @@ pub struct Vm {
     next_symbol_id: u32,
     /// Optional descriptions for created symbols (for Symbol.prototype.toString).
     symbol_descriptions: HashMap<u32, String>,
+    /// Result of the most recent generator step, set by Yield/Return and read by
+    /// `Generator.prototype.next`.
+    generator_outcome: Option<GeneratorOutcome>,
+}
+
+/// How a generator step ended.
+enum GeneratorOutcome {
+    Yielded(Value),
+    Returned(Value),
 }
 
 /// Well-known symbol id for `Symbol.iterator`.
@@ -909,6 +925,7 @@ impl Vm {
             boolean_prototype: None,
             regexp_prototype: None,
             date_prototype: None,
+            generator_prototype: None,
             error_prototype: None,
             promise_prototype: None,
             map_prototype: None,
@@ -920,6 +937,7 @@ impl Vm {
             builtin_method_cache: HashMap::new(),
             next_symbol_id: FIRST_USER_SYMBOL,
             symbol_descriptions: HashMap::new(),
+            generator_outcome: None,
         };
         vm.install_globals();
         vm
@@ -1364,6 +1382,13 @@ impl Vm {
                     .frames
                     .pop()
                     .ok_or_else(|| VmError::RangeError("return without a frame".to_string()))?;
+                if let Some(generator) = frame.generator {
+                    // A generator body returning marks the generator complete.
+                    self.stack.truncate(frame.stack_base);
+                    self.set_generator_state(generator, GeneratorState::Completed);
+                    self.generator_outcome = Some(GeneratorOutcome::Returned(value));
+                    return Ok(());
+                }
                 if let Some(outer_promise) = frame.async_outer_promise {
                     self.stack.truncate(frame.stack_base);
                     self.resolve_promise_from_resolution(outer_promise, value)?;
@@ -1380,6 +1405,26 @@ impl Vm {
             Opcode::AsyncReturn => {
                 let result = self.pop_value()?;
                 self.finish_async_frame_with_result(result)?;
+            }
+            Opcode::Yield => {
+                let value = self.pop_value()?;
+                let frame = self
+                    .frames
+                    .pop()
+                    .ok_or_else(|| VmError::RangeError("yield without a frame".to_string()))?;
+                let generator = frame.generator.ok_or_else(|| {
+                    VmError::TypeError("yield is only valid inside a generator".to_string())
+                })?;
+                let stack = self.stack.split_off(frame.stack_base);
+                self.set_generator_state(
+                    generator,
+                    GeneratorState::Suspended {
+                        frame: Box::new(frame),
+                        stack,
+                        started: true,
+                    },
+                );
+                self.generator_outcome = Some(GeneratorOutcome::Yielded(value));
             }
             Opcode::MakeClosure(index) => {
                 let proto = self
@@ -1493,6 +1538,7 @@ impl Vm {
         let boolean_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let regexp_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let date_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let generator_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let error_prototype = self.heap.allocate_object(JsObject {
             kind: ObjectKind::Error,
             prototype: Some(object_prototype),
@@ -1510,6 +1556,7 @@ impl Vm {
         self.boolean_prototype = Some(boolean_prototype);
         self.regexp_prototype = Some(regexp_prototype);
         self.date_prototype = Some(date_prototype);
+        self.generator_prototype = Some(generator_prototype);
         self.error_prototype = Some(error_prototype);
         self.promise_prototype = Some(promise_prototype);
         self.map_prototype = Some(map_prototype);
@@ -1856,6 +1903,19 @@ impl Vm {
             self.define_builtin_method(date_prototype, name, builtin);
         }
 
+        self.define_builtin_method(generator_prototype, "next", BuiltinId::GeneratorProtoNext);
+        self.define_builtin_method(generator_prototype, "return", BuiltinId::GeneratorProtoReturn);
+        // A generator is its own iterator.
+        let generator_iterator = self.allocate_builtin_method(BuiltinId::GeneratorProtoIterator);
+        self.define_data_property(
+            generator_prototype,
+            PropertyKey::Symbol(SymbolId(SYMBOL_ITERATOR_ID)),
+            generator_iterator,
+            true,
+            false,
+            true,
+        );
+
         self.define_builtin_method(string_prototype, "match", BuiltinId::StringProtoMatch);
         self.define_builtin_method(string_prototype, "matchAll", BuiltinId::StringProtoMatchAll);
         self.define_builtin_method(string_prototype, "search", BuiltinId::StringProtoSearch);
@@ -2088,6 +2148,93 @@ impl Vm {
     fn date_prototype_ref(&self) -> GcRef<JsObject> {
         self.date_prototype
             .expect("date prototype should be installed")
+    }
+
+    fn generator_prototype_ref(&self) -> GcRef<JsObject> {
+        self.generator_prototype
+            .expect("generator prototype should be installed")
+    }
+
+    fn set_generator_state(&mut self, generator: GcRef<JsObject>, state: GeneratorState) {
+        if let Some(object) = self.heap.objects_mut().get_mut(generator) {
+            object.kind = ObjectKind::Generator(Box::new(state));
+        }
+    }
+
+    /// Remove and return a generator's state (leaving it Ordinary temporarily).
+    fn take_generator_state(&mut self, generator: GcRef<JsObject>) -> Option<GeneratorState> {
+        match self.heap.objects_mut().get_mut(generator) {
+            Some(object) => {
+                let kind = std::mem::replace(&mut object.kind, ObjectKind::Ordinary);
+                match kind {
+                    ObjectKind::Generator(state) => Some(*state),
+                    other => {
+                        object.kind = other;
+                        None
+                    }
+                }
+            }
+            None => None,
+        }
+    }
+
+    /// Build an `{ value, done }` iterator-result object.
+    fn make_iter_result(&mut self, value: Value, done: bool) -> Result<Value, VmError> {
+        let object = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+        self.define_data_property(object, PropertyKey::from("value"), value, true, true, true);
+        self.define_data_property(
+            object,
+            PropertyKey::from("done"),
+            Value::Bool(done),
+            true,
+            true,
+            true,
+        );
+        Ok(Value::Object(object))
+    }
+
+    /// Resume (or start) a generator and run until its next yield or completion.
+    fn generator_resume(
+        &mut self,
+        generator: GcRef<JsObject>,
+        sent: Value,
+    ) -> Result<Value, VmError> {
+        match self.take_generator_state(generator) {
+            None => Err(VmError::TypeError(
+                "next called on a non-generator".to_string(),
+            )),
+            Some(GeneratorState::Completed) => {
+                self.set_generator_state(generator, GeneratorState::Completed);
+                self.make_iter_result(Value::Undefined, true)
+            }
+            Some(GeneratorState::Running) => {
+                self.set_generator_state(generator, GeneratorState::Running);
+                Err(VmError::TypeError("generator is already running".to_string()))
+            }
+            Some(GeneratorState::Suspended {
+                frame,
+                stack,
+                started,
+            }) => {
+                self.set_generator_state(generator, GeneratorState::Running);
+                let base_depth = self.frames.len();
+                let mut frame = *frame;
+                frame.stack_base = self.stack.len();
+                self.frames.push(frame);
+                self.stack.extend(stack);
+                if started {
+                    // The sent value becomes the result of the paused `yield`.
+                    self.stack.push(sent);
+                }
+                self.generator_outcome = None;
+                self.run_until_frame_depth(base_depth)?;
+                match self.generator_outcome.take() {
+                    Some(GeneratorOutcome::Yielded(value)) => self.make_iter_result(value, false),
+                    Some(GeneratorOutcome::Returned(value)) => self.make_iter_result(value, true),
+                    None => self.make_iter_result(Value::Undefined, true),
+                }
+            }
+        }
     }
 
     /// Allocate a fresh unique Symbol value, recording its description.
@@ -3393,7 +3540,20 @@ impl Vm {
         if self.frames.len() >= 1024 {
             return Err(VmError::StackOverflow);
         }
+        let frame = self.make_call_frame(closure, args, this_value, construct_fallback)?;
+        self.frames.push(frame);
+        Ok(())
+    }
 
+    /// Build (but do not push) a call frame with arguments bound. Used both by
+    /// `push_call_frame` and by generator construction (which stores the frame).
+    fn make_call_frame(
+        &mut self,
+        closure: RuntimeClosure,
+        args: Vec<Value>,
+        this_value: Value,
+        construct_fallback: Option<Value>,
+    ) -> Result<CallFrame, VmError> {
         let mut locals = Vec::with_capacity(closure.proto.local_count as usize);
         for _ in 0..closure.proto.local_count {
             locals.push(Rc::new(RefCell::new(Value::Undefined)));
@@ -3421,7 +3581,7 @@ impl Vm {
             }
         }
 
-        self.frames.push(CallFrame {
+        Ok(CallFrame {
             proto: closure.proto,
             ip: 0,
             stack_base: self.stack.len(),
@@ -3431,8 +3591,8 @@ impl Vm {
             construct_fallback,
             pending_exception: None,
             async_outer_promise: None,
-        });
-        Ok(())
+            generator: None,
+        })
     }
 
     fn invoke_callable_value(
@@ -3444,7 +3604,23 @@ impl Vm {
         match self.resolve_callable(&callee)? {
             Callable::Builtin(builtin) => Ok(Some(self.invoke_builtin(builtin, this_value, args)?)),
             Callable::Closure(closure) => {
-                if closure.proto.is_async {
+                if closure.proto.is_generator {
+                    // Calling a generator function does not run the body; it
+                    // returns a generator object suspended at the start.
+                    let generator = self.allocate_ordinary_object(Some(self.generator_prototype_ref()));
+                    let mut frame =
+                        self.make_call_frame(closure, args, this_value, None)?;
+                    frame.generator = Some(generator);
+                    self.set_generator_state(
+                        generator,
+                        GeneratorState::Suspended {
+                            frame: Box::new(frame),
+                            stack: Vec::new(),
+                            started: false,
+                        },
+                    );
+                    Ok(Some(Value::Object(generator)))
+                } else if closure.proto.is_async {
                     let outer_promise = self.allocate_pending_promise_object();
                     self.stack.push(Value::Object(outer_promise));
                     self.push_call_frame(closure, args, this_value, None)?;
@@ -6027,6 +6203,19 @@ impl Vm {
                     None => Ok(self.make_string_value("Invalid Date")),
                 }
             }
+            BuiltinId::GeneratorProtoNext => {
+                let generator = self.require_object_ref(&this_value, "Generator.prototype.next")?;
+                let sent = args.first().cloned().unwrap_or(Value::Undefined);
+                self.generator_resume(generator, sent)
+            }
+            BuiltinId::GeneratorProtoReturn => {
+                let generator =
+                    self.require_object_ref(&this_value, "Generator.prototype.return")?;
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                self.set_generator_state(generator, GeneratorState::Completed);
+                self.make_iter_result(value, true)
+            }
+            BuiltinId::GeneratorProtoIterator => Ok(this_value),
             BuiltinId::StringProtoCharAt => {
                 let text = self.builtin_string_this(&this_value)?;
                 let index = args

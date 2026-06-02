@@ -69,6 +69,9 @@ pub enum Opcode {
     Call(u8),
     CallSpread(u8),
     Return,
+    /// Suspend the current generator: pop the yielded value, save the frame, and
+    /// return control to the `.next()` caller. On resume the sent value is pushed.
+    Yield,
     Await,
     AsyncReturn,
     MakeClosure(u16),

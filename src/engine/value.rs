@@ -156,6 +156,21 @@ pub struct AsyncContext {
     pub outer_promise: GcRef<JsObject>,
 }
 
+/// Execution state of a generator object.
+#[derive(Debug, Clone)]
+pub enum GeneratorState {
+    /// Paused, either at the start (ip 0, `started` false) or at a `yield`.
+    Suspended {
+        frame: Box<crate::engine::vm::CallFrame>,
+        stack: Vec<Value>,
+        started: bool,
+    },
+    /// Currently executing (guards against re-entrant `next`).
+    Running,
+    /// Finished (returned or threw).
+    Completed,
+}
+
 #[derive(Clone)]
 pub enum ObjectKind {
     Ordinary,
@@ -164,6 +179,7 @@ pub enum ObjectKind {
     Error,
     Promise(Box<PromiseState>),
     AsyncResumer(Box<AsyncContext>),
+    Generator(Box<GeneratorState>),
     RegExp {
         source: String,
         flags: String,
@@ -191,6 +207,7 @@ impl std::fmt::Debug for ObjectKind {
             Self::Error => f.write_str("Error"),
             Self::Promise(state) => f.debug_tuple("Promise").field(state).finish(),
             Self::AsyncResumer(_) => f.write_str("AsyncResumer(..)"),
+            Self::Generator(_) => f.write_str("Generator(..)"),
             Self::RegExp {
                 source,
                 flags,

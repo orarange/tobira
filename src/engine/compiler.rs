@@ -2492,8 +2492,8 @@ impl<'a> FunctionCompiler<'a> {
         &mut self,
         declaration: &FunctionDeclaration,
     ) -> Result<(), CompileError> {
-        if declaration.is_generator() {
-            return Err(CompileError::Unimplemented("generator functions"));
+        if declaration.is_generator() && declaration.is_async() {
+            return Err(CompileError::Unimplemented("async generator functions"));
         }
 
         let name = self.identifier_name(&declaration.name());
@@ -2554,8 +2554,8 @@ impl<'a> FunctionCompiler<'a> {
         field_initializers: &[&super::ast::ClassFieldDefinitionNode],
         private_field_initializers: &[&boa_ast::function::PrivateFieldDefinition],
     ) -> Result<u16, CompileError> {
-        if is_generator {
-            return Err(CompileError::Unimplemented("generator functions"));
+        if is_generator && is_async {
+            return Err(CompileError::Unimplemented("async generator functions"));
         }
         let arity = u8::try_from(parameters.length())
             .map_err(|_| CompileError::message("function arity exceeded u8"))?;
@@ -2636,9 +2636,17 @@ impl<'a> FunctionCompiler<'a> {
                 false,
                 true,
             ),
-            ExpressionNode::GeneratorExpression(_) => {
-                Err(CompileError::Unimplemented("generator expressions"))
-            }
+            ExpressionNode::GeneratorExpression(function) => self.compile_nested_function_value(
+                function
+                    .name()
+                    .map(|identifier| self.identifier_name(&identifier)),
+                function.parameters(),
+                function.body(),
+                function.body().strict(),
+                false,
+                true,
+                false,
+            ),
             ExpressionNode::AsyncFunctionExpression(function) => self
                 .compile_nested_function_value(
                     function
@@ -2689,7 +2697,7 @@ impl<'a> FunctionCompiler<'a> {
                 self.emit(Opcode::Await);
                 Ok(())
             }
-            ExpressionNode::Yield(_) => Err(CompileError::Unimplemented("yield expressions")),
+            ExpressionNode::Yield(yield_expression) => self.compile_yield(yield_expression),
             ExpressionNode::Parenthesized(expression) => {
                 self.compile_expression(expression.expression())
             }
@@ -2926,6 +2934,49 @@ impl<'a> FunctionCompiler<'a> {
                 self.emit(Opcode::LoadUndefined);
             }
         }
+        Ok(())
+    }
+
+    fn compile_yield(
+        &mut self,
+        yield_expression: &boa_ast::expression::Yield,
+    ) -> Result<(), CompileError> {
+        if yield_expression.delegate() {
+            return self.compile_yield_delegate(yield_expression);
+        }
+        match yield_expression.target() {
+            Some(target) => self.compile_expression(target)?,
+            None => {
+                self.emit(Opcode::LoadUndefined);
+            }
+        };
+        self.emit(Opcode::Yield);
+        Ok(())
+    }
+
+    /// `yield* iterable`: drive the iterable, yielding each value in turn.
+    fn compile_yield_delegate(
+        &mut self,
+        yield_expression: &boa_ast::expression::Yield,
+    ) -> Result<(), CompileError> {
+        let target = yield_expression
+            .target()
+            .ok_or_else(|| CompileError::message("yield* requires an operand"))?;
+        let iter_slot = self.allocate_hidden_local()?;
+        self.compile_expression(target)?;
+        self.emit(Opcode::GetForOfIterator);
+        self.emit(Opcode::SetLocal(iter_slot));
+        let loop_start = self.code.len();
+        self.emit(Opcode::GetLocal(iter_slot));
+        self.emit(Opcode::ForOfNext); // -> [value, done]
+        let exit = self.emit_jump(Opcode::JumpIfTruePop(0)); // pop done; if done jump out
+        self.emit(Opcode::Yield); // yields value; on resume leaves the sent value
+        self.emit(Opcode::Pop); // discard the sent value
+        self.emit_back_jump(loop_start)?;
+        let end = self.code.len();
+        self.patch_jump(exit, end)?;
+        self.emit(Opcode::Pop); // drop the leftover (undefined) value
+        self.emit(Opcode::LoadUndefined); // value of the yield* expression
         Ok(())
     }
 
