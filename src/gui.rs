@@ -55,8 +55,6 @@ const TITLE_FONT_SIZE: u32 = 14;
 const TITLE_META_GAP: u32 = 18;
 const HEADER_BORDER_HEIGHT: u32 = 4;
 const RESIZE_BORDER: u32 = 6;
-/// Target interval between CSS-animation frames (~60fps).
-const FRAME_INTERVAL_MS: u64 = 16;
 
 const COLOR_WINDOW_BACKGROUND: Color = 0xE7E0D4;
 const COLOR_HEADER: Color = 0x1F3A5F;
@@ -133,6 +131,12 @@ struct BrowserApp {
     /// detected; cleared once all animations finish so the loop returns to idle.
     /// `now_ms` passed to the engine is `animation_epoch.elapsed()` in milliseconds.
     animation_epoch: Option<Instant>,
+    /// Target interval between animation frames, derived from the display refresh rate
+    /// (e.g. ~5.5ms on a 180Hz monitor). Falls back to 60fps until a monitor is known.
+    frame_interval: Duration,
+    /// When the last animation frame was presented, for pacing the frame loop independently
+    /// of input events (so animations stay smooth while the cursor is moving).
+    last_frame_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +332,8 @@ impl BrowserApp {
             next_render_id: 1,
             scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
             animation_epoch: None,
+            frame_interval: Duration::from_micros(16_667), // 60fps default until monitor known
+            last_frame_at: None,
         };
 
         if let Some(url) = initial_load_url {
@@ -532,6 +538,22 @@ impl BrowserApp {
             focused_page_input: self.focused_page_input.clone(),
             hovered_target: self.hovered_target,
         });
+    }
+
+    /// Update the animation frame interval from the current monitor's refresh rate, so
+    /// animations run at the display rate (e.g. 180fps on a 180Hz panel) rather than a
+    /// fixed 60fps. Falls back to 60fps when the rate is unknown.
+    fn refresh_frame_interval(&mut self) {
+        let millihertz = self
+            .window
+            .as_ref()
+            .and_then(|window| window.current_monitor())
+            .and_then(|monitor| monitor.refresh_rate_millihertz());
+        self.frame_interval = match millihertz {
+            // interval = 1 / rate; millihertz is Hz*1000, so period = 1e9 ns * 1000 / mHz.
+            Some(mhz) if mhz > 0 => Duration::from_nanos(1_000_000_000_000u64 / mhz as u64),
+            _ => Duration::from_micros(16_667),
+        };
     }
 
     /// Render the current page content synchronously into `latest_render_frame` (no worker
@@ -2324,6 +2346,7 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
 
         self.surface = Some(surface);
         self.window = Some(window);
+        self.refresh_frame_interval();
         self.sync_viewport_size();
         self.sync_window_title();
         self.sync_input_method();
@@ -2358,14 +2381,35 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
         }
     }
 
-    /// Called by winit when the event queue drains. Drives CSS animations: while an
-    /// animation epoch is anchored (set at page load), advance the interpolated styles
-    /// every ~16ms and re-render. When all animations finish, drop back to idle (`Wait`).
+    /// Called by winit whenever the event queue drains (including after every input event
+    /// and when a WaitUntil deadline elapses). Drives CSS animations at the display refresh
+    /// rate. Frame timing is gated on `last_frame_at` + `frame_interval` rather than on how
+    /// often this fires, so animations stay smooth and correctly paced regardless of input
+    /// activity (e.g. while the cursor is moving). When all animations finish it idles.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(epoch) = self.animation_epoch else {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
         };
+
+        // At the start of an animation burst, re-read the display refresh rate (the monitor
+        // may not have been known when the window was first created).
+        if self.last_frame_at.is_none() {
+            self.refresh_frame_interval();
+        }
+
+        // Pace to the display: if it isn't time for the next frame yet, sleep until it is.
+        // Input events that wake us early just re-arm the timer without rendering.
+        let now = Instant::now();
+        if let Some(last) = self.last_frame_at {
+            let next = last + self.frame_interval;
+            if now < next {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+                return;
+            }
+        }
+        self.last_frame_at = Some(now);
+
         let now_ms = epoch.elapsed().as_millis() as u64;
         let content_width = self
             .window
@@ -2390,21 +2434,19 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
             false
         };
 
-        // Render animation frames synchronously on this thread and present immediately.
-        // The async worker path adds a full page clone + EventLoopProxy wake-up per frame,
-        // whose latency caps the effective frame rate; rendering inline keeps animations
-        // smooth (~60fps) for typical pages.
+        // Render the frame synchronously and present immediately — the async worker path
+        // adds a full page clone + EventLoopProxy wake-up per frame whose latency caps the
+        // frame rate. Inline rendering keeps the loop at the display rate.
         self.render_frame_synchronously();
         let _ = self.draw();
 
         if still_active {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + Duration::from_millis(FRAME_INTERVAL_MS),
-            ));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
         } else {
             // All animations have finished; the final frame is already presented above.
             // Clearing the epoch prevents idle wake-ups (mouse moves, etc.) from restarting it.
             self.animation_epoch = None;
+            self.last_frame_at = None;
             event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
