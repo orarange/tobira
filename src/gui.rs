@@ -227,10 +227,15 @@ fn start_render_worker(event_proxy: EventLoopProxy<BrowserUserEvent>) -> Sender<
         .name("tobira-render".to_string())
         .spawn(move || {
             let mut fonts = FontContext::load();
+            let trace = std::env::var("TOBIRA_FPS").is_ok();
             while let Ok(request) = request_rx.recv() {
                 let render_id = request.id;
+                let t0 = Instant::now();
                 let result =
                     render_content_frame(request, &mut fonts).map_err(|error| error.to_string());
+                if trace {
+                    eprintln!("[time] worker render = {:?}", t0.elapsed());
+                }
                 let _ =
                     event_proxy.send_event(BrowserUserEvent::RenderFinished { render_id, result });
             }
@@ -935,7 +940,12 @@ impl BrowserApp {
     /// animation would freeze as the cursor moves even though the worker keeps rendering.
     fn present_or_request_redraw(&mut self) {
         if self.animation_epoch.is_some() {
+            let trace = std::env::var("TOBIRA_FPS").is_ok();
+            let t0 = Instant::now();
             let _ = self.draw();
+            if trace {
+                eprintln!("[time] draw = {:?}", t0.elapsed());
+            }
             self.count_fps();
         } else {
             self.request_redraw();
@@ -2734,7 +2744,12 @@ impl DocumentView {
     }
 
     fn render_snapshot(&mut self) -> Option<RenderPageSnapshot> {
+        let trace = std::env::var("TOBIRA_FPS").is_ok();
+        let t0 = Instant::now();
         self.refresh_loaded_page_from_script_session();
+        if trace {
+            eprintln!("[time] snapshot refresh = {:?}", t0.elapsed());
+        }
         match &self.content {
             DocumentContent::Loaded(page) => Some(RenderPageSnapshot {
                 styled_document: page.styled_document.clone(),
