@@ -2336,6 +2336,17 @@ impl<'a> FunctionCompiler<'a> {
             }
         }
 
+        // For `for (let …)` loops, capture the slots of the loop variables so
+        // each iteration can be given a fresh binding (per-iteration semantics).
+        let loop_slots: Vec<u16> = if uses_lexical_init {
+            self.scopes
+                .last()
+                .map(|scope| scope.bindings.values().map(|binding| binding.slot).collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         let condition_start = self.code.len();
         let exit_jump = if let Some(condition) = statement.condition() {
             self.compile_expression(condition)?;
@@ -2352,6 +2363,13 @@ impl<'a> FunctionCompiler<'a> {
         let loop_context = self.control_stack.pop().expect("loop context should exist");
         for jump in loop_context.continue_jumps {
             self.patch_jump(jump, increment_start)?;
+        }
+
+        // Per-iteration binding: copy each loop variable into a fresh cell before
+        // running the increment, so closures captured in the just-finished body
+        // keep the value they saw.
+        for &slot in &loop_slots {
+            self.emit(Opcode::FreshenLocal(slot));
         }
 
         if let Some(final_expression) = statement.final_expr() {

@@ -11,6 +11,10 @@ pub enum Opcode {
 
     GetLocal(u16),
     SetLocal(u16),
+    /// Replace a local's storage cell with a fresh one holding a copy of the
+    /// current value. Used to give `for (let …)` loops a per-iteration binding so
+    /// closures created in different iterations capture distinct variables.
+    FreshenLocal(u16),
 
     GetUpvalue(u16),
     SetUpvalue(u16),

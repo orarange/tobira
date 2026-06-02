@@ -1091,6 +1091,16 @@ impl Vm {
                 let value = self.pop_value()?;
                 *self.local_cell(slot)?.borrow_mut() = value;
             }
+            Opcode::FreshenLocal(slot) => {
+                let value = self.local_cell(slot)?.borrow().clone();
+                let frame = self
+                    .frames
+                    .last_mut()
+                    .ok_or_else(|| VmError::RangeError("no active frame".to_string()))?;
+                if let Some(cell) = frame.locals.get_mut(slot as usize) {
+                    *cell = Rc::new(RefCell::new(value));
+                }
+            }
             Opcode::GetUpvalue(slot) => {
                 let value = self.upvalue_cell(slot)?.borrow().clone();
                 self.stack.push(value);
@@ -3805,6 +3815,16 @@ impl Vm {
             .ok_or_else(|| VmError::RangeError("no current function prototype".to_string()))
     }
 
+    /// Whether the currently executing function is in strict mode. Assignments
+    /// that fail (non-writable property, non-extensible object) throw in strict
+    /// mode but are silent no-ops in sloppy mode.
+    fn in_strict_mode(&self) -> bool {
+        self.frames
+            .last()
+            .map(|frame| frame.proto.is_strict)
+            .unwrap_or(false)
+    }
+
     fn current_this(&self) -> Result<&Value, VmError> {
         self.frames
             .last()
@@ -4320,10 +4340,17 @@ impl Vm {
             return match descriptor {
                 JsPropertyDescriptor::Data {
                     writable: false, ..
-                } => Err(VmError::TypeError(format!(
-                    "property {} is not writable",
-                    self.property_key_to_string(&key)
-                ))),
+                } => {
+                    if self.in_strict_mode() {
+                        Err(VmError::TypeError(format!(
+                            "property {} is not writable",
+                            self.property_key_to_string(&key)
+                        )))
+                    } else {
+                        // Sloppy mode: assignment to a read-only property is ignored.
+                        Ok(())
+                    }
+                }
                 JsPropertyDescriptor::Data {
                     enumerable,
                     configurable,
@@ -4369,7 +4396,11 @@ impl Vm {
             .map(|object_data| object_data.extensible)
             .unwrap_or(false);
         if !extensible {
-            return Err(VmError::TypeError("object is not extensible".to_string()));
+            if self.in_strict_mode() {
+                return Err(VmError::TypeError("object is not extensible".to_string()));
+            }
+            // Sloppy mode: adding a property to a non-extensible object is ignored.
+            return Ok(());
         }
 
         self.define_data_property(object, key.clone(), value, true, true, true);
