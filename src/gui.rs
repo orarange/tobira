@@ -738,15 +738,15 @@ impl BrowserApp {
                         self.render_feedback_passes += 1;
                         self.document.layout_cache = None;
                         self.request_content_render();
-                        self.request_redraw();
+                        self.present_or_request_redraw();
                         return;
                     }
                     self.render_feedback_passes = 0;
-                    self.request_redraw();
+                    self.present_or_request_redraw();
                     return;
                 }
                 self.render_feedback_passes = 0;
-                self.request_redraw();
+                self.present_or_request_redraw();
             }
             Err(error) => {
                 self.document.status_line = format!("Status: render failed ({error})");
@@ -901,6 +901,18 @@ impl BrowserApp {
     fn request_redraw(&self) {
         if let Some(window) = &self.window {
             window.request_redraw();
+        }
+    }
+
+    /// Present the latest rendered frame. While an animation is running, paint and present
+    /// immediately instead of requesting a redraw: a redraw request is serviced via WM_PAINT,
+    /// which Windows starves while the message queue is flooded with input — so the on-screen
+    /// animation would freeze as the cursor moves even though the worker keeps rendering.
+    fn present_or_request_redraw(&mut self) {
+        if self.animation_epoch.is_some() {
+            let _ = self.draw();
+        } else {
+            self.request_redraw();
         }
     }
 
