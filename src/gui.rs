@@ -142,6 +142,9 @@ struct BrowserApp {
     /// Set true while an animation ticker thread is running; the thread posts `AnimationTick`
     /// events at the frame interval and exits when this clears.
     ticker_running: Arc<AtomicBool>,
+    /// Coalesces ticks: the ticker only posts a new `AnimationTick` when the previous one has
+    /// been processed, so a momentarily-busy main thread cannot accumulate a backlog of ticks.
+    tick_pending: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +348,7 @@ impl BrowserApp {
             frame_interval: Duration::from_micros(16_667), // 60fps default until monitor known
             last_frame_at: None,
             ticker_running: Arc::new(AtomicBool::new(false)),
+            tick_pending: Arc::new(AtomicBool::new(false)),
         };
 
         if let Some(url) = initial_load_url {
@@ -567,35 +571,6 @@ impl BrowserApp {
         };
     }
 
-    /// Render the current page content synchronously into `latest_render_frame` (no worker
-    /// round-trip). Used by the animation frame loop so each frame is produced and presented
-    /// with minimal latency.
-    fn render_frame_synchronously(&mut self) {
-        let Some(page) = self.document.render_snapshot() else {
-            return;
-        };
-        let window_size = self
-            .window
-            .as_ref()
-            .map(|window| window.inner_size())
-            .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
-        let request = RenderRequest {
-            id: 0,
-            viewport_width: window_size.width,
-            page,
-            focused_page_input: self.focused_page_input.clone(),
-            hovered_target: self.hovered_target,
-        };
-        if let Ok(frame) = render_content_frame(request, &mut self.fonts) {
-            self.document.layout_cache = Some(CachedLayout {
-                width: frame.content_width,
-                revision: self.document.layout_revision(),
-                layout: frame.layout.clone(),
-            });
-            self.latest_render_frame = Some(frame);
-        }
-    }
-
     /// Spawn the animation ticker thread if one is not already running. It posts
     /// `AnimationTick` events at the frame interval, which drive `drive_animation_frame`.
     /// Posted events are delivered even while the OS message queue is busy with input, so
@@ -607,39 +582,36 @@ impl BrowserApp {
         }
         let proxy = self.event_proxy.clone();
         let running = self.ticker_running.clone();
+        let pending = self.tick_pending.clone();
         let interval = self.frame_interval.max(Duration::from_micros(1000));
         thread::Builder::new()
             .name("tobira-anim-tick".to_string())
             .spawn(move || {
                 while running.load(Ordering::SeqCst) {
                     thread::sleep(interval);
-                    if proxy.send_event(BrowserUserEvent::AnimationTick).is_err() {
-                        break; // event loop has shut down
+                    // Only post when the previous tick has been consumed, so a busy main
+                    // thread never accumulates a backlog of AnimationTick events.
+                    if !pending.swap(true, Ordering::SeqCst) {
+                        if proxy.send_event(BrowserUserEvent::AnimationTick).is_err() {
+                            break; // event loop has shut down
+                        }
                     }
                 }
             })
             .ok();
     }
 
-    /// Advance and present one animation frame. Called from both the ticker (`AnimationTick`)
-    /// and `about_to_wait`. A light time-gate drops ticks that bunch up so the effective rate
-    /// stays near the display rate. Clears the epoch and stops the ticker once everything has
-    /// settled.
+    /// Advance one animation frame and hand the new styled tree to the render worker.
+    /// Called from the ticker (`AnimationTick`) and `about_to_wait`. The *advance* (cheap:
+    /// interpolation, plus a relayout only for transitions) runs on the main thread; the
+    /// heavy paint runs on the worker, so a high frame rate does not stall the UI. The render
+    /// request is throttled to one in flight: the animation clock keeps advancing every tick
+    /// regardless, so frames carry correct interpolated values even when some are dropped.
     fn drive_animation_frame(&mut self) {
         let Some(epoch) = self.animation_epoch else {
             self.ticker_running.store(false, Ordering::SeqCst);
             return;
         };
-
-        // Drop a tick if the previous frame was very recent (timer jitter / about_to_wait and
-        // a tick coinciding), so we don't render faster than the display.
-        let now = Instant::now();
-        if let Some(last) = self.last_frame_at {
-            if now.duration_since(last) < self.frame_interval.mul_f32(0.5) {
-                return;
-            }
-        }
-        self.last_frame_at = Some(now);
 
         let now_ms = epoch.elapsed().as_millis() as u64;
         let content_width = self
@@ -662,13 +634,20 @@ impl BrowserApp {
             false
         };
 
-        self.render_frame_synchronously();
-        let _ = self.draw();
+        // Render off the main thread. Only enqueue when the worker is idle so requests do
+        // not pile up; the next tick will enqueue the latest state once it finishes.
+        if self.pending_render_id.is_none() {
+            self.document.layout_cache = None;
+            self.request_content_render();
+        }
 
         if !still_active {
             self.animation_epoch = None;
             self.last_frame_at = None;
             self.ticker_running.store(false, Ordering::SeqCst);
+            // Make sure the settled final frame is rendered even if a request was in flight.
+            self.document.layout_cache = None;
+            self.request_content_render();
         }
     }
 
@@ -2487,6 +2466,7 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
                 }
             }
             BrowserUserEvent::AnimationTick => {
+                self.tick_pending.store(false, Ordering::SeqCst);
                 self.drive_animation_frame();
             }
         }
@@ -2499,10 +2479,12 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
     /// `WaitUntil` timer, provides the cadence.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.animation_epoch.is_some() {
-            // Re-read the display refresh rate at the start of a burst (the monitor may not
-            // have been known when the window was created) before spawning the ticker.
+            // At the start of an animation burst, re-read the display refresh rate (the
+            // monitor may not have been known at window creation) before spawning the ticker;
+            // last_frame_at doubles as the "burst started" marker.
             if self.last_frame_at.is_none() {
                 self.refresh_frame_interval();
+                self.last_frame_at = Some(Instant::now());
             }
             self.ensure_animation_ticker();
             self.drive_animation_frame();
