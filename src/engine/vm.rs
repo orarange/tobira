@@ -250,6 +250,7 @@ enum BuiltinId {
     StringConstructor,
     StringFromCharCode,
     StringFromCodePoint,
+    StringRaw,
     NumberConstructor,
     NumberProtoToFixed,
     NumberProtoToString,
@@ -1980,6 +1981,7 @@ impl Vm {
                 "fromCodePoint",
                 BuiltinId::StringFromCodePoint,
             );
+            self.define_builtin_method(string_ref, "raw", BuiltinId::StringRaw);
         }
 
         if let Some(symbol_ref) = self.value_object_ref(symbol_ctor) {
@@ -5661,6 +5663,20 @@ impl Vm {
                     }
                 }
                 Ok(self.make_string_value(&text))
+            }
+            BuiltinId::StringRaw => {
+                let strings = args.first().cloned().unwrap_or(Value::Undefined);
+                let raw = self.get_property_value(&strings, &PropertyKey::from("raw"))?;
+                let raw_parts = self.array_like_to_vec(&raw)?;
+                let mut out = String::new();
+                for (index, part) in raw_parts.iter().enumerate() {
+                    out.push_str(&self.to_string(part));
+                    // Interleave the substitution that follows this part, if any.
+                    if let Some(substitution) = args.get(index + 1) {
+                        out.push_str(&self.to_string(substitution));
+                    }
+                }
+                Ok(self.make_string_value(&out))
             }
             BuiltinId::NumberConstructor => {
                 let number = match args.first() {

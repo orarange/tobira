@@ -2612,9 +2612,7 @@ impl<'a> FunctionCompiler<'a> {
             ExpressionNode::SuperCall(call) => self.compile_super_call(call),
             ExpressionNode::ImportCall(_) => Err(CompileError::Unimplemented("import() calls")),
             ExpressionNode::Optional(optional) => self.compile_optional_expression(optional),
-            ExpressionNode::TaggedTemplate(_) => {
-                Err(CompileError::Unimplemented("tagged template literals"))
-            }
+            ExpressionNode::TaggedTemplate(template) => self.compile_tagged_template(template),
             ExpressionNode::NewTarget(_) => Err(CompileError::Unimplemented("new.target")),
             ExpressionNode::ImportMeta(_) => Err(CompileError::Unimplemented("import.meta")),
             ExpressionNode::Assign(assign) => self.compile_assignment_expression(assign),
@@ -2865,6 +2863,57 @@ impl<'a> FunctionCompiler<'a> {
                 self.emit(Opcode::LoadUndefined);
             }
         }
+        Ok(())
+    }
+
+    fn compile_tagged_template(
+        &mut self,
+        template: &super::ast::TaggedTemplateExpression,
+    ) -> Result<(), CompileError> {
+        // tag(strings, ...substitutions) where `strings` is the cooked array
+        // carrying a `.raw` array of the raw segments.
+        self.compile_expression(template.tag())?;
+        self.emit(Opcode::LoadUndefined); // `this` for the tag call
+
+        // Build the cooked strings array (None = invalid escape → undefined).
+        let cookeds = template.cookeds();
+        for cooked in cookeds {
+            match cooked {
+                Some(sym) => {
+                    let index = self.add_string_constant(self.program.resolve_sym(*sym))?;
+                    self.emit(Opcode::LoadConst(index));
+                }
+                None => {
+                    self.emit(Opcode::LoadUndefined);
+                }
+            }
+        }
+        let cooked_count = u16::try_from(cookeds.len())
+            .map_err(|_| CompileError::message("template segment count exceeded u16"))?;
+        self.emit(Opcode::MakeArray(cooked_count));
+
+        // strings.raw = [ ...raw segments ]
+        self.emit(Opcode::Dup);
+        let raw_key = self.add_string_constant("raw")?;
+        self.emit(Opcode::LoadConst(raw_key));
+        let raws = template.raws();
+        for raw in raws {
+            let index = self.add_string_constant(self.program.resolve_sym(*raw))?;
+            self.emit(Opcode::LoadConst(index));
+        }
+        let raw_count = u16::try_from(raws.len())
+            .map_err(|_| CompileError::message("template segment count exceeded u16"))?;
+        self.emit(Opcode::MakeArray(raw_count));
+        self.emit(Opcode::SetProp);
+
+        // Substitution expressions.
+        let exprs = template.exprs();
+        for expr in exprs {
+            self.compile_expression(expr)?;
+        }
+        let argc = u8::try_from(1 + exprs.len())
+            .map_err(|_| CompileError::message("tagged template argument count exceeded u8"))?;
+        self.emit(Opcode::Call(argc));
         Ok(())
     }
 
