@@ -276,6 +276,13 @@ enum BuiltinId {
     DecodeUriComponent,
     EncodeUri,
     DecodeUri,
+    RegExpConstructor,
+    RegExpProtoTest,
+    RegExpProtoExec,
+    RegExpProtoToString,
+    StringProtoMatch,
+    StringProtoMatchAll,
+    StringProtoSearch,
 }
 
 #[derive(Debug, Clone)]
@@ -603,6 +610,142 @@ fn json_to_pretty_string(value: &JsonValue, indent: &str, depth: usize) -> Strin
     }
 }
 
+/// Translate JS named capture groups `(?<name>...)` into the Rust regex crate's
+/// `(?P<name>...)` syntax, leaving lookbehind `(?<=` / `(?<!` untouched.
+fn translate_regex_named_groups(source: &str) -> String {
+    let mut out = String::with_capacity(source.len() + 8);
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            out.push(c);
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        if c == '(' && chars.peek() == Some(&'?') {
+            let mut lookahead = chars.clone();
+            lookahead.next(); // '?'
+            if lookahead.peek() == Some(&'<') {
+                lookahead.next(); // '<'
+                let after = lookahead.peek().copied();
+                if after != Some('=') && after != Some('!') {
+                    out.push_str("(?P<");
+                    chars.next(); // '?'
+                    chars.next(); // '<'
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Expand a regex replacement template: `$$`→`$`, `$&`→whole match, `` $` ``→
+/// prefix, `$'`→suffix, `$<name>`→named group, `$1`..`$99`→numbered group.
+fn expand_replacement(template: &str, caps: &regex::Captures, full_text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('$') => {
+                out.push('$');
+                chars.next();
+            }
+            Some('&') => {
+                out.push_str(caps.get(0).map(|m| m.as_str()).unwrap_or(""));
+                chars.next();
+            }
+            Some('`') => {
+                let start = caps.get(0).map(|m| m.start()).unwrap_or(0);
+                out.push_str(&full_text[..start]);
+                chars.next();
+            }
+            Some('\'') => {
+                let end = caps.get(0).map(|m| m.end()).unwrap_or(0);
+                out.push_str(&full_text[end..]);
+                chars.next();
+            }
+            Some('<') => {
+                chars.next();
+                let mut name = String::new();
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if nc == '>' {
+                        break;
+                    }
+                    name.push(nc);
+                }
+                out.push_str(caps.name(&name).map(|m| m.as_str()).unwrap_or(""));
+            }
+            Some(d) if d.is_ascii_digit() => {
+                chars.next();
+                let mut num = d.to_digit(10).unwrap() as usize;
+                if let Some(&d2) = chars.peek() {
+                    if d2.is_ascii_digit() {
+                        let two = num * 10 + d2.to_digit(10).unwrap() as usize;
+                        if two < caps.len() {
+                            num = two;
+                            chars.next();
+                        }
+                    }
+                }
+                if num >= 1 && num < caps.len() {
+                    out.push_str(caps.get(num).map(|m| m.as_str()).unwrap_or(""));
+                } else {
+                    out.push('$');
+                    out.push(d);
+                }
+            }
+            _ => out.push('$'),
+        }
+    }
+    out
+}
+
+/// Expand a plain-string replacement template (only `$&` and `$$` are special).
+fn expand_string_replacement(template: &str, matched: &str) -> String {
+    let mut out = String::new();
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '$' {
+            match chars.peek().copied() {
+                Some('$') => {
+                    out.push('$');
+                    chars.next();
+                }
+                Some('&') => {
+                    out.push_str(matched);
+                    chars.next();
+                }
+                _ => out.push('$'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Compile a JS regex source + flag string into a Rust `regex::Regex`. Flags
+/// `g`/`y` are handled at the call site (global iteration / sticky), not here.
+fn compile_js_regex(source: &str, flags: &str) -> Result<regex::Regex, VmError> {
+    let translated = translate_regex_named_groups(source);
+    let mut builder = regex::RegexBuilder::new(&translated);
+    builder.case_insensitive(flags.contains('i'));
+    builder.multi_line(flags.contains('m'));
+    builder.dot_matches_new_line(flags.contains('s'));
+    builder.swap_greed(false);
+    builder
+        .build()
+        .map_err(|error| VmError::TypeError(format!("invalid regular expression: {error}")))
+}
+
 fn is_uri_unreserved(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')')
 }
@@ -659,6 +802,7 @@ pub struct Vm {
     string_prototype: Option<GcRef<JsObject>>,
     number_prototype: Option<GcRef<JsObject>>,
     boolean_prototype: Option<GcRef<JsObject>>,
+    regexp_prototype: Option<GcRef<JsObject>>,
     error_prototype: Option<GcRef<JsObject>>,
     promise_prototype: Option<GcRef<JsObject>>,
     map_prototype: Option<GcRef<JsObject>>,
@@ -700,6 +844,7 @@ impl Vm {
             string_prototype: None,
             number_prototype: None,
             boolean_prototype: None,
+            regexp_prototype: None,
             error_prototype: None,
             promise_prototype: None,
             map_prototype: None,
@@ -1028,35 +1173,8 @@ impl Vm {
             }
             Opcode::MakeRegExp(index) => {
                 let (pattern, flags) = self.constant_regexp(index)?;
-                let source_value = self.make_string_value(&pattern);
-                let flags_value = self.make_string_value(&flags);
-                let object = self.heap.allocate_object(JsObject {
-                    kind: ObjectKind::RegExp {
-                        source: pattern.clone(),
-                        flags: flags.clone(),
-                        global: flags.contains('g'),
-                        last_index: 0,
-                    },
-                    prototype: Some(self.object_prototype_ref()),
-                    ..JsObject::default()
-                });
-                self.define_data_property(
-                    object,
-                    PropertyKey::from("source"),
-                    source_value,
-                    false,
-                    false,
-                    false,
-                );
-                self.define_data_property(
-                    object,
-                    PropertyKey::from("flags"),
-                    flags_value,
-                    false,
-                    false,
-                    false,
-                );
-                self.stack.push(Value::Object(object));
+                let object = self.make_regexp_object(&pattern, &flags);
+                self.stack.push(object);
             }
             Opcode::CopyDataProperties => {
                 let source = self.pop_value()?;
@@ -1279,6 +1397,7 @@ impl Vm {
         let string_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let number_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let boolean_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let regexp_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let error_prototype = self.heap.allocate_object(JsObject {
             kind: ObjectKind::Error,
             prototype: Some(object_prototype),
@@ -1294,6 +1413,7 @@ impl Vm {
         self.string_prototype = Some(string_prototype);
         self.number_prototype = Some(number_prototype);
         self.boolean_prototype = Some(boolean_prototype);
+        self.regexp_prototype = Some(regexp_prototype);
         self.error_prototype = Some(error_prototype);
         self.promise_prototype = Some(promise_prototype);
         self.map_prototype = Some(map_prototype);
@@ -1383,6 +1503,8 @@ impl Vm {
             true,
             Some(boolean_prototype),
         );
+        let regexp_ctor =
+            self.allocate_builtin_value(BuiltinId::RegExpConstructor, true, Some(regexp_prototype));
         let math_object = self.allocate_ordinary_object(Some(object_prototype));
         let json_object = self.allocate_ordinary_object(Some(object_prototype));
 
@@ -1410,6 +1532,8 @@ impl Vm {
         self.globals.insert("String".to_string(), string_ctor.clone());
         self.globals
             .insert("Boolean".to_string(), boolean_ctor.clone());
+        self.globals
+            .insert("RegExp".to_string(), regexp_ctor.clone());
         self.globals
             .insert("Math".to_string(), Value::Object(math_object));
         self.globals
@@ -1606,6 +1730,14 @@ impl Vm {
 
         self.define_builtin_method(boolean_prototype, "toString", BuiltinId::BooleanProtoToString);
         self.define_builtin_method(boolean_prototype, "valueOf", BuiltinId::BooleanProtoValueOf);
+
+        self.define_builtin_method(regexp_prototype, "test", BuiltinId::RegExpProtoTest);
+        self.define_builtin_method(regexp_prototype, "exec", BuiltinId::RegExpProtoExec);
+        self.define_builtin_method(regexp_prototype, "toString", BuiltinId::RegExpProtoToString);
+
+        self.define_builtin_method(string_prototype, "match", BuiltinId::StringProtoMatch);
+        self.define_builtin_method(string_prototype, "matchAll", BuiltinId::StringProtoMatchAll);
+        self.define_builtin_method(string_prototype, "search", BuiltinId::StringProtoSearch);
 
         if let Some(object_ref) = self.value_object_ref(object_ctor) {
             self.define_builtin_method(object_ref, "create", BuiltinId::ObjectCreate);
@@ -1806,6 +1938,273 @@ impl Vm {
     fn boolean_prototype_ref(&self) -> GcRef<JsObject> {
         self.boolean_prototype
             .expect("boolean prototype should be installed")
+    }
+
+    fn regexp_prototype_ref(&self) -> GcRef<JsObject> {
+        self.regexp_prototype
+            .expect("regexp prototype should be installed")
+    }
+
+    /// Allocate a RegExp object with `source`/`flags`/`global`/`lastIndex`
+    /// properties and the RegExp prototype.
+    fn make_regexp_object(&mut self, pattern: &str, flags: &str) -> Value {
+        let source_value = self.make_string_value(pattern);
+        let flags_value = self.make_string_value(flags);
+        let object = self.heap.allocate_object(JsObject {
+            kind: ObjectKind::RegExp {
+                source: pattern.to_string(),
+                flags: flags.to_string(),
+                global: flags.contains('g'),
+                last_index: 0,
+            },
+            prototype: Some(self.regexp_prototype_ref()),
+            ..JsObject::default()
+        });
+        for (name, value) in [("source", source_value), ("flags", flags_value)] {
+            self.define_data_property(object, PropertyKey::from(name), value, false, false, false);
+        }
+        for (name, value) in [
+            ("global", Value::Bool(flags.contains('g'))),
+            ("ignoreCase", Value::Bool(flags.contains('i'))),
+            ("multiline", Value::Bool(flags.contains('m'))),
+        ] {
+            self.define_data_property(object, PropertyKey::from(name), value, false, false, false);
+        }
+        self.define_data_property(
+            object,
+            PropertyKey::from("lastIndex"),
+            Value::Number(0.0),
+            true,
+            false,
+            false,
+        );
+        Value::Object(object)
+    }
+
+    /// Extract (source, flags) if `value` is a RegExp object.
+    fn regexp_source_flags(&self, value: &Value) -> Option<(String, String)> {
+        if let Value::Object(object) = value {
+            if let Some(JsObject {
+                kind: ObjectKind::RegExp { source, flags, .. },
+                ..
+            }) = self.heap.objects().get(*object)
+            {
+                return Some((source.clone(), flags.clone()));
+            }
+        }
+        None
+    }
+
+    /// Interpret a String.prototype.{match,replace,split,…} argument as a regex:
+    /// a RegExp value keeps its source/flags; any other value is coerced to a
+    /// string and used as a literal pattern (matching `new RegExp(str)`).
+    fn coerce_regex_arg(&mut self, value: Option<&Value>) -> Result<(String, String), VmError> {
+        match value {
+            Some(value) if self.regexp_source_flags(value).is_some() => {
+                Ok(self.regexp_source_flags(value).unwrap())
+            }
+            Some(value) => Ok((self.to_string(value), String::new())),
+            None => Ok((String::new(), String::new())),
+        }
+    }
+
+    /// Implements `String.prototype.replace`/`replaceAll` for a RegExp pattern,
+    /// supporting both string templates (`$&`, `$1`, `$<name>`, `$$`) and a
+    /// replacer function called with (match, ...groups, offset, string).
+    fn regex_replace(
+        &mut self,
+        text: &str,
+        regex: &regex::Regex,
+        replacement: &Value,
+        global: bool,
+    ) -> Result<Value, VmError> {
+        let is_fn = self.is_callable_value(replacement);
+        let template = if is_fn {
+            String::new()
+        } else {
+            self.to_string(replacement)
+        };
+        let caps_list: Vec<regex::Captures> = if global {
+            regex.captures_iter(text).collect()
+        } else {
+            regex.captures(text).into_iter().collect()
+        };
+        let mut result = String::new();
+        let mut last_end = 0;
+        for caps in &caps_list {
+            let full = match caps.get(0) {
+                Some(m) => m,
+                None => continue,
+            };
+            result.push_str(&text[last_end..full.start()]);
+            if is_fn {
+                let mut call_args = Vec::with_capacity(caps.len() + 2);
+                for i in 0..caps.len() {
+                    call_args.push(
+                        caps.get(i)
+                            .map(|g| self.make_string_value(g.as_str()))
+                            .unwrap_or(Value::Undefined),
+                    );
+                }
+                call_args.push(Value::Number(text[..full.start()].chars().count() as f64));
+                call_args.push(self.make_string_value(text));
+                let replaced =
+                    self.call_value_sync(replacement.clone(), Value::Undefined, call_args)?;
+                let replaced = self.to_string(&replaced);
+                result.push_str(&replaced);
+            } else {
+                result.push_str(&expand_replacement(&template, caps, text));
+            }
+            last_end = full.end();
+        }
+        result.push_str(&text[last_end..]);
+        Ok(self.make_string_value(&result))
+    }
+
+    /// Implements `String.prototype.replace`/`replaceAll` for a plain string
+    /// pattern (function replacer or `$&`/`$$` template).
+    fn string_replace(
+        &mut self,
+        text: &str,
+        search: &str,
+        replacement: &Value,
+        all: bool,
+    ) -> Result<Value, VmError> {
+        let is_fn = self.is_callable_value(replacement);
+        if search.is_empty() {
+            // Avoid an infinite loop; approximate by replacing once at the front.
+            let head = if is_fn {
+                let args = vec![
+                    self.make_string_value(""),
+                    Value::Number(0.0),
+                    self.make_string_value(text),
+                ];
+                let replaced =
+                    self.call_value_sync(replacement.clone(), Value::Undefined, args)?;
+                self.to_string(&replaced)
+            } else {
+                expand_string_replacement(&self.to_string(replacement), "")
+            };
+            return Ok(self.make_string_value(&format!("{head}{text}")));
+        }
+        let template = if is_fn {
+            String::new()
+        } else {
+            self.to_string(replacement)
+        };
+        let mut result = String::new();
+        let mut cursor = 0;
+        while let Some(rel) = text[cursor..].find(search) {
+            let start = cursor + rel;
+            result.push_str(&text[cursor..start]);
+            if is_fn {
+                let args = vec![
+                    self.make_string_value(search),
+                    Value::Number(text[..start].chars().count() as f64),
+                    self.make_string_value(text),
+                ];
+                let replaced =
+                    self.call_value_sync(replacement.clone(), Value::Undefined, args)?;
+                let replaced = self.to_string(&replaced);
+                result.push_str(&replaced);
+            } else {
+                result.push_str(&expand_string_replacement(&template, search));
+            }
+            cursor = start + search.len();
+            if !all {
+                break;
+            }
+        }
+        result.push_str(&text[cursor..]);
+        Ok(self.make_string_value(&result))
+    }
+
+    fn regexp_last_index(&self, object: GcRef<JsObject>) -> usize {
+        match self.heap.objects().get(object).map(|o| &o.kind) {
+            Some(ObjectKind::RegExp { last_index, .. }) => *last_index as usize,
+            _ => 0,
+        }
+    }
+
+    fn set_regexp_last_index(&mut self, object: GcRef<JsObject>, value: usize) {
+        if let Some(ObjectKind::RegExp { last_index, .. }) =
+            self.heap.objects_mut().get_mut(object).map(|o| &mut o.kind)
+        {
+            *last_index = value as u32;
+        }
+        self.define_data_property(
+            object,
+            PropertyKey::from("lastIndex"),
+            Value::Number(value as f64),
+            true,
+            false,
+            false,
+        );
+    }
+
+    /// Build a JS match-result array (`[full, ...groups]` with `index`, `input`,
+    /// and `groups`) from a regex capture.
+    fn build_match_result(
+        &mut self,
+        regex: &regex::Regex,
+        caps: &regex::Captures,
+        input: &str,
+    ) -> Result<Value, VmError> {
+        let mut items = Vec::with_capacity(caps.len());
+        for i in 0..caps.len() {
+            match caps.get(i) {
+                Some(m) => items.push(self.make_string_value(m.as_str())),
+                None => items.push(Value::Undefined),
+            }
+        }
+        let array = self.make_array_from_values(items)?;
+        let array_ref = self.require_object_ref(&array, "match result")?;
+        let match_start = caps.get(0).map(|m| m.start()).unwrap_or(0);
+        let char_index = input[..match_start].chars().count();
+        self.define_data_property(
+            array_ref,
+            PropertyKey::from("index"),
+            Value::Number(char_index as f64),
+            true,
+            true,
+            true,
+        );
+        let input_value = self.make_string_value(input);
+        self.define_data_property(
+            array_ref,
+            PropertyKey::from("input"),
+            input_value,
+            true,
+            true,
+            true,
+        );
+        let names: Vec<String> = regex
+            .capture_names()
+            .flatten()
+            .map(|name| name.to_string())
+            .collect();
+        let groups = if names.is_empty() {
+            Value::Undefined
+        } else {
+            let groups = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+            for name in names {
+                let value = caps
+                    .name(&name)
+                    .map(|m| self.make_string_value(m.as_str()))
+                    .unwrap_or(Value::Undefined);
+                self.define_data_property(
+                    groups,
+                    PropertyKey::from(name.as_str()),
+                    value,
+                    true,
+                    true,
+                    true,
+                );
+            }
+            Value::Object(groups)
+        };
+        self.define_data_property(array_ref, PropertyKey::from("groups"), groups, true, true, true);
+        Ok(array)
     }
 
     fn object_prototype_ref(&self) -> GcRef<JsObject> {
@@ -3155,6 +3554,10 @@ impl Vm {
                 | BuiltinId::EvalErrorConstructor
                 | BuiltinId::MapConstructor
                 | BuiltinId::SetConstructor
+                | BuiltinId::RegExpConstructor
+                | BuiltinId::NumberConstructor
+                | BuiltinId::StringConstructor
+                | BuiltinId::BooleanConstructor
         )
     }
 
@@ -5103,6 +5506,134 @@ impl Vm {
                 let int = if number.is_finite() { number as i64 as u32 } else { 0 };
                 Ok(Value::Number(int.leading_zeros() as f64))
             }
+            BuiltinId::RegExpConstructor => {
+                let (source, flags) = match args.first() {
+                    Some(value) if self.regexp_source_flags(value).is_some() => {
+                        let (source, existing_flags) = self.regexp_source_flags(value).unwrap();
+                        let flags = match args.get(1) {
+                            Some(Value::Undefined) | None => existing_flags,
+                            Some(flag_value) => self.to_string(flag_value),
+                        };
+                        (source, flags)
+                    }
+                    Some(value) => {
+                        let source = self.to_string(value);
+                        let flags = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+                        (source, flags)
+                    }
+                    None => (String::new(), String::new()),
+                };
+                // Validate the pattern eagerly so a bad regex throws at construction.
+                compile_js_regex(&source, &flags)?;
+                Ok(self.make_regexp_object(&source, &flags))
+            }
+            BuiltinId::RegExpProtoToString => {
+                let (source, flags) = self
+                    .regexp_source_flags(&this_value)
+                    .ok_or_else(|| VmError::TypeError("Method called on non-RegExp".to_string()))?;
+                Ok(self.make_string_value(&format!("/{source}/{flags}")))
+            }
+            BuiltinId::RegExpProtoTest => {
+                let (source, flags) = self
+                    .regexp_source_flags(&this_value)
+                    .ok_or_else(|| VmError::TypeError("Method called on non-RegExp".to_string()))?;
+                let regex = compile_js_regex(&source, &flags)?;
+                let text = self.string_arg(&args, 0);
+                let sticky_or_global = flags.contains('g') || flags.contains('y');
+                if sticky_or_global {
+                    let object = self.require_object_ref(&this_value, "RegExp.prototype.test")?;
+                    let start = self.regexp_last_index(object).min(text.len());
+                    match regex.find_at(&text, start) {
+                        Some(m) => {
+                            self.set_regexp_last_index(object, m.end());
+                            Ok(Value::Bool(true))
+                        }
+                        None => {
+                            self.set_regexp_last_index(object, 0);
+                            Ok(Value::Bool(false))
+                        }
+                    }
+                } else {
+                    Ok(Value::Bool(regex.is_match(&text)))
+                }
+            }
+            BuiltinId::RegExpProtoExec => {
+                let (source, flags) = self
+                    .regexp_source_flags(&this_value)
+                    .ok_or_else(|| VmError::TypeError("Method called on non-RegExp".to_string()))?;
+                let regex = compile_js_regex(&source, &flags)?;
+                let text = self.string_arg(&args, 0);
+                let sticky_or_global = flags.contains('g') || flags.contains('y');
+                let start = if sticky_or_global {
+                    let object = self.require_object_ref(&this_value, "RegExp.prototype.exec")?;
+                    self.regexp_last_index(object).min(text.len())
+                } else {
+                    0
+                };
+                match regex.captures_at(&text, start) {
+                    Some(caps) => {
+                        if sticky_or_global {
+                            let end = caps.get(0).map(|m| m.end()).unwrap_or(start);
+                            let object =
+                                self.require_object_ref(&this_value, "RegExp.prototype.exec")?;
+                            self.set_regexp_last_index(object, end);
+                        }
+                        self.build_match_result(&regex, &caps, &text)
+                    }
+                    None => {
+                        if sticky_or_global {
+                            let object =
+                                self.require_object_ref(&this_value, "RegExp.prototype.exec")?;
+                            self.set_regexp_last_index(object, 0);
+                        }
+                        Ok(Value::Null)
+                    }
+                }
+            }
+            BuiltinId::StringProtoSearch => {
+                let text = self.builtin_string_this(&this_value)?;
+                let (source, flags) = self.coerce_regex_arg(args.first())?;
+                let regex = compile_js_regex(&source, &flags)?;
+                match regex.find(&text) {
+                    Some(m) => Ok(Value::Number(text[..m.start()].chars().count() as f64)),
+                    None => Ok(Value::Number(-1.0)),
+                }
+            }
+            BuiltinId::StringProtoMatch => {
+                let text = self.builtin_string_this(&this_value)?;
+                let (source, flags) = self.coerce_regex_arg(args.first())?;
+                let regex = compile_js_regex(&source, &flags)?;
+                if flags.contains('g') {
+                    let matches: Vec<Value> = regex
+                        .find_iter(&text)
+                        .map(|m| m.as_str().to_string())
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|s| self.make_string_value(&s))
+                        .collect();
+                    if matches.is_empty() {
+                        Ok(Value::Null)
+                    } else {
+                        self.make_array_from_values(matches)
+                    }
+                } else {
+                    match regex.captures(&text) {
+                        Some(caps) => self.build_match_result(&regex, &caps, &text),
+                        None => Ok(Value::Null),
+                    }
+                }
+            }
+            BuiltinId::StringProtoMatchAll => {
+                let text = self.builtin_string_this(&this_value)?;
+                let (source, flags) = self.coerce_regex_arg(args.first())?;
+                let regex = compile_js_regex(&source, &flags)?;
+                let captures: Vec<regex::Captures> = regex.captures_iter(&text).collect();
+                let mut results = Vec::with_capacity(captures.len());
+                for caps in &captures {
+                    results.push(self.build_match_result(&regex, caps, &text)?);
+                }
+                Ok(self.make_for_of_iterator(results))
+            }
             BuiltinId::StringProtoCharAt => {
                 let text = self.builtin_string_this(&this_value)?;
                 let index = args
@@ -5209,6 +5740,19 @@ impl Vm {
             }
             BuiltinId::StringProtoSplit => {
                 let text = self.builtin_string_this(&this_value)?;
+                // RegExp separator splits via the regex engine.
+                if let Some(value) = args.first() {
+                    if let Some((source, flags)) = self.regexp_source_flags(value) {
+                        let regex = compile_js_regex(&source, &flags)?;
+                        let segments: Vec<String> =
+                            regex.split(&text).map(|s| s.to_string()).collect();
+                        let values = segments
+                            .into_iter()
+                            .map(|s| self.make_string_value(&s))
+                            .collect();
+                        return self.make_array_from_values(values);
+                    }
+                }
                 let separator = args.first().map(|value| self.to_string(value));
                 let values = match separator {
                     Some(separator) if separator.is_empty() => text
@@ -5225,20 +5769,20 @@ impl Vm {
             }
             BuiltinId::StringProtoReplace | BuiltinId::StringProtoReplaceAll => {
                 let text = self.builtin_string_this(&this_value)?;
-                let search = args
-                    .first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default();
-                let replacement = args
-                    .get(1)
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default();
-                let replaced = if builtin == BuiltinId::StringProtoReplace {
-                    text.replacen(&search, &replacement, 1)
-                } else {
-                    text.replace(&search, &replacement)
-                };
-                Ok(self.make_string_value(&replaced))
+                let replace_all = builtin == BuiltinId::StringProtoReplaceAll;
+                let pattern = args.first().cloned().unwrap_or(Value::Undefined);
+                let replacement = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+                // RegExp pattern: replace all when the regex is global (or replaceAll).
+                if let Some((source, flags)) = self.regexp_source_flags(&pattern) {
+                    let regex = compile_js_regex(&source, &flags)?;
+                    let global = replace_all || flags.contains('g');
+                    return self.regex_replace(&text, &regex, &replacement, global);
+                }
+
+                // String pattern.
+                let search = self.to_string(&pattern);
+                self.string_replace(&text, &search, &replacement, replace_all)
             }
             BuiltinId::StringProtoTrim => {
                 let text = self.builtin_string_this(&this_value)?;
