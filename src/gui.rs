@@ -1,6 +1,8 @@
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -137,6 +139,9 @@ struct BrowserApp {
     /// When the last animation frame was presented, for pacing the frame loop independently
     /// of input events (so animations stay smooth while the cursor is moving).
     last_frame_at: Option<Instant>,
+    /// Set true while an animation ticker thread is running; the thread posts `AnimationTick`
+    /// events at the frame interval and exits when this clears.
+    ticker_running: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +161,11 @@ enum BrowserUserEvent {
         result: std::result::Result<RenderedContentFrame, String>,
     },
     JsSettleRequired,
+    /// Posted by the animation ticker thread at the display refresh interval to drive the
+    /// next animation frame. Unlike a `WaitUntil` timer, a posted event is delivered even
+    /// while the message queue is busy with input (so animation keeps running as the cursor
+    /// moves).
+    AnimationTick,
 }
 
 #[derive(Debug, Clone)]
@@ -334,6 +344,7 @@ impl BrowserApp {
             animation_epoch: None,
             frame_interval: Duration::from_micros(16_667), // 60fps default until monitor known
             last_frame_at: None,
+            ticker_running: Arc::new(AtomicBool::new(false)),
         };
 
         if let Some(url) = initial_load_url {
@@ -582,6 +593,82 @@ impl BrowserApp {
                 layout: frame.layout.clone(),
             });
             self.latest_render_frame = Some(frame);
+        }
+    }
+
+    /// Spawn the animation ticker thread if one is not already running. It posts
+    /// `AnimationTick` events at the frame interval, which drive `drive_animation_frame`.
+    /// Posted events are delivered even while the OS message queue is busy with input, so
+    /// animations keep running smoothly while the cursor moves (a `WaitUntil` timer would be
+    /// starved by the input flood and the animation would freeze).
+    fn ensure_animation_ticker(&mut self) {
+        if self.ticker_running.swap(true, Ordering::SeqCst) {
+            return; // a ticker is already running
+        }
+        let proxy = self.event_proxy.clone();
+        let running = self.ticker_running.clone();
+        let interval = self.frame_interval.max(Duration::from_micros(1000));
+        thread::Builder::new()
+            .name("tobira-anim-tick".to_string())
+            .spawn(move || {
+                while running.load(Ordering::SeqCst) {
+                    thread::sleep(interval);
+                    if proxy.send_event(BrowserUserEvent::AnimationTick).is_err() {
+                        break; // event loop has shut down
+                    }
+                }
+            })
+            .ok();
+    }
+
+    /// Advance and present one animation frame. Called from both the ticker (`AnimationTick`)
+    /// and `about_to_wait`. A light time-gate drops ticks that bunch up so the effective rate
+    /// stays near the display rate. Clears the epoch and stops the ticker once everything has
+    /// settled.
+    fn drive_animation_frame(&mut self) {
+        let Some(epoch) = self.animation_epoch else {
+            self.ticker_running.store(false, Ordering::SeqCst);
+            return;
+        };
+
+        // Drop a tick if the previous frame was very recent (timer jitter / about_to_wait and
+        // a tick coinciding), so we don't render faster than the display.
+        let now = Instant::now();
+        if let Some(last) = self.last_frame_at {
+            if now.duration_since(last) < self.frame_interval.mul_f32(0.5) {
+                return;
+            }
+        }
+        self.last_frame_at = Some(now);
+
+        let now_ms = epoch.elapsed().as_millis() as u64;
+        let content_width = self
+            .window
+            .as_ref()
+            .map(|window| Self::content_width_for(window.inner_size()))
+            .unwrap_or(WINDOW_WIDTH);
+        let interactive = self.current_interactive_state();
+
+        let still_active = if let Some(page) = self.document.loaded_page_mut() {
+            let trans_active = if page.has_transitions() {
+                page.relayout(content_width, &interactive);
+                page.advance_transitions(now_ms)
+            } else {
+                false
+            };
+            let anim_active = page.apply_animations(now_ms, 0);
+            trans_active || anim_active
+        } else {
+            false
+        };
+
+        self.render_frame_synchronously();
+        let _ = self.draw();
+
+        if !still_active {
+            self.animation_epoch = None;
+            self.last_frame_at = None;
+            self.ticker_running.store(false, Ordering::SeqCst);
         }
     }
 
@@ -2399,77 +2486,28 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
                     self.maybe_spawn_fetch_settle_watcher();
                 }
             }
+            BrowserUserEvent::AnimationTick => {
+                self.drive_animation_frame();
+            }
         }
     }
 
-    /// Called by winit whenever the event queue drains (including after every input event
-    /// and when a WaitUntil deadline elapses). Drives CSS animations at the display refresh
-    /// rate. Frame timing is gated on `last_frame_at` + `frame_interval` rather than on how
-    /// often this fires, so animations stay smooth and correctly paced regardless of input
-    /// activity (e.g. while the cursor is moving). When all animations finish it idles.
+    /// Called by winit when the event queue drains. While an animation is active it makes
+    /// sure the ticker thread is running (which then drives frames via `AnimationTick`,
+    /// reliably even during input) and renders one frame immediately so the animation starts
+    /// without waiting for the first tick. The control flow stays `Wait`; the ticker, not a
+    /// `WaitUntil` timer, provides the cadence.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(epoch) = self.animation_epoch else {
-            event_loop.set_control_flow(ControlFlow::Wait);
-            return;
-        };
-
-        // At the start of an animation burst, re-read the display refresh rate (the monitor
-        // may not have been known when the window was first created).
-        if self.last_frame_at.is_none() {
-            self.refresh_frame_interval();
-        }
-
-        // Pace to the display: if it isn't time for the next frame yet, sleep until it is.
-        // Input events that wake us early just re-arm the timer without rendering.
-        let now = Instant::now();
-        if let Some(last) = self.last_frame_at {
-            let next = last + self.frame_interval;
-            if now < next {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(next));
-                return;
+        if self.animation_epoch.is_some() {
+            // Re-read the display refresh rate at the start of a burst (the monitor may not
+            // have been known when the window was created) before spawning the ticker.
+            if self.last_frame_at.is_none() {
+                self.refresh_frame_interval();
             }
+            self.ensure_animation_ticker();
+            self.drive_animation_frame();
         }
-        self.last_frame_at = Some(now);
-
-        let now_ms = epoch.elapsed().as_millis() as u64;
-        let content_width = self
-            .window
-            .as_ref()
-            .map(|window| Self::content_width_for(window.inner_size()))
-            .unwrap_or(WINDOW_WIDTH);
-        let interactive = self.current_interactive_state();
-
-        let still_active = if let Some(page) = self.document.loaded_page_mut() {
-            // Transitions interpolate baseline → target, so the tree must be rebuilt to
-            // the fresh target (with current hover) each frame. Animations overwrite their
-            // properties with absolute keyframe values, so they layer on top afterward.
-            let trans_active = if page.has_transitions() {
-                page.relayout(content_width, &interactive);
-                page.advance_transitions(now_ms)
-            } else {
-                false
-            };
-            let anim_active = page.apply_animations(now_ms, 0);
-            trans_active || anim_active
-        } else {
-            false
-        };
-
-        // Render the frame synchronously and present immediately — the async worker path
-        // adds a full page clone + EventLoopProxy wake-up per frame whose latency caps the
-        // frame rate. Inline rendering keeps the loop at the display rate.
-        self.render_frame_synchronously();
-        let _ = self.draw();
-
-        if still_active {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval));
-        } else {
-            // All animations have finished; the final frame is already presented above.
-            // Clearing the epoch prevents idle wake-ups (mouse moves, etc.) from restarting it.
-            self.animation_epoch = None;
-            self.last_frame_at = None;
-            event_loop.set_control_flow(ControlFlow::Wait);
-        }
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
 
     fn window_event(
