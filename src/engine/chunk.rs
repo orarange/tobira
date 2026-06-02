@@ -44,6 +44,8 @@ pub enum Opcode {
     Typeof,
     Void,
     Delete,
+    /// Delete an object property: pops [object, key], pushes a boolean result.
+    DeleteProp,
     In,
     Instanceof,
     ToNumber,

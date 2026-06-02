@@ -558,6 +558,51 @@ fn number_to_precision(number: f64, precision: usize) -> String {
     format!("{number:.decimals$}")
 }
 
+/// JSON.stringify pretty-printer with a custom indent string. serde_json's
+/// pretty formatter is hard-coded to two spaces, so this renders by hand to
+/// honor the third `space` argument.
+fn json_to_pretty_string(value: &JsonValue, indent: &str, depth: usize) -> String {
+    match value {
+        JsonValue::Null => "null".to_string(),
+        JsonValue::Bool(boolean) => boolean.to_string(),
+        JsonValue::Number(number) => number.to_string(),
+        JsonValue::String(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+        }
+        JsonValue::Array(items) => {
+            if items.is_empty() {
+                return "[]".to_string();
+            }
+            let inner = indent.repeat(depth + 1);
+            let outer = indent.repeat(depth);
+            let parts: Vec<String> = items
+                .iter()
+                .map(|item| format!("{inner}{}", json_to_pretty_string(item, indent, depth + 1)))
+                .collect();
+            format!("[\n{}\n{outer}]", parts.join(",\n"))
+        }
+        JsonValue::Object(map) => {
+            if map.is_empty() {
+                return "{}".to_string();
+            }
+            let inner = indent.repeat(depth + 1);
+            let outer = indent.repeat(depth);
+            let parts: Vec<String> = map
+                .iter()
+                .map(|(key, value)| {
+                    let key_json = serde_json::to_string(&JsonValue::String(key.clone()))
+                        .unwrap_or_else(|_| format!("\"{key}\""));
+                    format!(
+                        "{inner}{key_json}: {}",
+                        json_to_pretty_string(value, indent, depth + 1)
+                    )
+                })
+                .collect();
+            format!("{{\n{}\n{outer}}}", parts.join(",\n"))
+        }
+    }
+}
+
 fn is_uri_unreserved(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')')
 }
@@ -909,6 +954,16 @@ impl Vm {
             Opcode::Delete => {
                 let _ = self.pop_value()?;
                 self.stack.push(Value::Bool(true));
+            }
+            Opcode::DeleteProp => {
+                let key = self.pop_value()?;
+                let object = self.pop_value()?;
+                let key = self.to_property_key(&key)?;
+                let result = match object {
+                    Value::Object(object) => self.delete_property(object, &key),
+                    _ => true,
+                };
+                self.stack.push(Value::Bool(result));
             }
             Opcode::In => {
                 let object = self.pop_value()?;
@@ -3750,6 +3805,23 @@ impl Vm {
         Ok(())
     }
 
+    /// Delete an own property, honoring `configurable`. Returns false only when
+    /// the property exists and is non-configurable (matching `delete`).
+    fn delete_property(&mut self, object: GcRef<JsObject>, key: &PropertyKey) -> bool {
+        let configurable = match self.get_own_property_descriptor(object, key) {
+            Some(JsPropertyDescriptor::Data { configurable, .. }) => configurable,
+            Some(JsPropertyDescriptor::Accessor { configurable, .. }) => configurable,
+            None => return true,
+        };
+        if !configurable {
+            return false;
+        }
+        if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
+            object_data.properties.shift_remove(key);
+        }
+        true
+    }
+
     fn array_length(&self, object: GcRef<JsObject>) -> u32 {
         if let Some(JsPropertyDescriptor::Data {
             value: Value::Number(number),
@@ -5308,12 +5380,30 @@ impl Vm {
             BuiltinId::MathRandom => Ok(Value::Number(self.next_random())),
             BuiltinId::JsonStringify => {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
-                match self.to_json_value(&value)? {
-                    Some(json) => Ok(self.make_string_value(
-                        &serde_json::to_string(&json).unwrap_or_else(|_| "null".to_string()),
-                    )),
-                    None => Ok(Value::Undefined),
-                }
+                let json = match self.to_json_value(&value)? {
+                    Some(json) => json,
+                    None => return Ok(Value::Undefined),
+                };
+                // Third argument controls indentation (number of spaces or a string).
+                let indent = match args.get(2) {
+                    Some(Value::Number(n)) if *n >= 1.0 => {
+                        Some(" ".repeat((*n as usize).min(10)))
+                    }
+                    Some(Value::String(s)) => {
+                        let text = self.string_text(*s);
+                        if text.is_empty() {
+                            None
+                        } else {
+                            Some(text.chars().take(10).collect::<String>())
+                        }
+                    }
+                    _ => None,
+                };
+                let output = match indent {
+                    Some(indent) => json_to_pretty_string(&json, &indent, 0),
+                    None => serde_json::to_string(&json).unwrap_or_else(|_| "null".to_string()),
+                };
+                Ok(self.make_string_value(&output))
             }
             BuiltinId::JsonParse => {
                 let text = args
@@ -6601,7 +6691,20 @@ impl Vm {
             Value::Undefined | Value::Symbol(_) => None,
             Value::Null => Some(JsonValue::Null),
             Value::Bool(boolean) => Some(JsonValue::Bool(*boolean)),
-            Value::Number(number) => serde_json::Number::from_f64(*number).map(JsonValue::Number),
+            Value::Number(number) => {
+                if !number.is_finite() {
+                    // NaN and ±Infinity stringify to null per the JSON grammar.
+                    Some(JsonValue::Null)
+                } else if number.fract() == 0.0
+                    && *number >= i64::MIN as f64
+                    && *number <= i64::MAX as f64
+                {
+                    // Preserve integers as integers so they don't serialize as "1.0".
+                    Some(JsonValue::Number(serde_json::Number::from(*number as i64)))
+                } else {
+                    serde_json::Number::from_f64(*number).map(JsonValue::Number)
+                }
+            }
             Value::String(string) => Some(JsonValue::String(self.string_text(*string))),
             Value::Object(object) => {
                 if self.callables.contains_key(&object.raw()) {

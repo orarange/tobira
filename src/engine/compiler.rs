@@ -1080,11 +1080,16 @@ impl<'a> FunctionCompiler<'a> {
     ) -> Result<(), CompileError> {
         self.compile_expression(lhs)?;
         self.emit(Opcode::Dup);
+        // JumpIfNullish *peeks* (does not pop), so the duplicated lhs is still on
+        // the stack in both branches.
         let use_rhs = self.emit_jump(Opcode::JumpIfNullish(0));
+        // Not nullish: drop the duplicate, keep the original lhs as the result.
         self.emit(Opcode::Pop);
         let end = self.emit_jump(Opcode::Jump(0));
         let rhs_start = self.code.len();
         self.patch_jump(use_rhs, rhs_start)?;
+        // Nullish: drop BOTH the duplicate and the original lhs, then evaluate rhs.
+        self.emit(Opcode::Pop);
         self.emit(Opcode::Pop);
         self.compile_expression(rhs)?;
         let end_index = self.code.len();
@@ -3009,6 +3014,11 @@ impl<'a> FunctionCompiler<'a> {
         &mut self,
         unary: &super::ast::UnaryExpression,
     ) -> Result<(), CompileError> {
+        // `delete` must NOT evaluate its operand as a value when it is a property
+        // reference — it needs the object/key in order to remove the property.
+        if matches!(unary.op(), UnaryOpNode::Delete) {
+            return self.compile_delete_expression(unary.target());
+        }
         self.compile_expression(unary.target())?;
         match unary.op() {
             UnaryOpNode::Minus => {
@@ -3026,14 +3036,38 @@ impl<'a> FunctionCompiler<'a> {
             UnaryOpNode::Void => {
                 self.emit(Opcode::Void);
             }
-            UnaryOpNode::Delete => {
-                self.emit(Opcode::Delete);
-            }
+            UnaryOpNode::Delete => unreachable!("delete handled above"),
             UnaryOpNode::Plus => {
                 self.emit(Opcode::ToNumber);
             }
         }
         Ok(())
+    }
+
+    fn compile_delete_expression(
+        &mut self,
+        target: &ExpressionNode,
+    ) -> Result<(), CompileError> {
+        if let ExpressionNode::PropertyAccess(super::ast::MemberExpression::Simple(access)) = target
+        {
+            self.compile_expression(access.target())?;
+            match access.field() {
+                PropertyAccessFieldNode::Const(identifier) => {
+                    let constant = self.add_string_constant(self.identifier_name(identifier))?;
+                    self.emit(Opcode::LoadConst(constant));
+                }
+                PropertyAccessFieldNode::Expr(expression) => {
+                    self.compile_expression(expression)?;
+                }
+            }
+            self.emit(Opcode::DeleteProp);
+            Ok(())
+        } else {
+            // `delete <non-reference>`: evaluate for side effects, discard, yield true.
+            self.compile_expression(target)?;
+            self.emit(Opcode::Delete);
+            Ok(())
+        }
     }
 
     fn compile_update_expression(
