@@ -231,6 +231,51 @@ enum BuiltinId {
     SetProtoClear,
     SetProtoForEach,
     SetProtoValues,
+    // Added in the feature-completeness pass.
+    ArrayProtoSplice,
+    ArrayProtoFlatMap,
+    ArrayProtoFill,
+    ArrayProtoCopyWithin,
+    ArrayProtoAt,
+    ArrayProtoKeys,
+    ArrayProtoValues,
+    ArrayProtoEntries,
+    ArrayProtoReduceRight,
+    ArrayProtoFindLast,
+    ArrayProtoFindLastIndex,
+    ArrayOf,
+    StringProtoAt,
+    StringProtoNormalize,
+    StringProtoConcat,
+    StringConstructor,
+    StringFromCharCode,
+    StringFromCodePoint,
+    NumberConstructor,
+    NumberProtoToFixed,
+    NumberProtoToString,
+    NumberProtoToPrecision,
+    NumberProtoValueOf,
+    BooleanConstructor,
+    BooleanProtoToString,
+    BooleanProtoValueOf,
+    ObjectFromEntries,
+    ObjectGetOwnPropertyNames,
+    ObjectHasOwn,
+    ObjectPreventExtensions,
+    ObjectIsExtensible,
+    ObjectSeal,
+    ObjectIsSealed,
+    MathSign,
+    MathHypot,
+    MathClz32,
+    GlobalParseInt,
+    GlobalParseFloat,
+    GlobalIsNaN,
+    GlobalIsFinite,
+    EncodeUriComponent,
+    DecodeUriComponent,
+    EncodeUri,
+    DecodeUri,
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +401,205 @@ impl std::fmt::Display for VmError {
 
 impl std::error::Error for VmError {}
 
+/// ECMAScript `parseInt(string, radix)`: skip leading whitespace, accept an
+/// optional sign and `0x` prefix, then consume the longest valid digit run.
+fn js_parse_int(text: &str, radix: Option<f64>) -> f64 {
+    let trimmed = text.trim_start();
+    let mut chars = trimmed.chars().peekable();
+    let mut sign = 1.0;
+    match chars.peek() {
+        Some('+') => {
+            chars.next();
+        }
+        Some('-') => {
+            sign = -1.0;
+            chars.next();
+        }
+        _ => {}
+    }
+
+    let mut radix = match radix {
+        Some(r) if r.is_finite() => r as i64,
+        _ => 0,
+    };
+    let rest: String = chars.collect();
+    let mut digits = rest.as_str();
+    if radix == 16 || radix == 0 {
+        if let Some(stripped) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+            digits = stripped;
+            radix = 16;
+        }
+    }
+    if radix == 0 {
+        radix = 10;
+    }
+    if !(2..=36).contains(&radix) {
+        return f64::NAN;
+    }
+
+    let mut value = 0.0_f64;
+    let mut consumed = 0usize;
+    for ch in digits.chars() {
+        let digit = match ch.to_digit(radix as u32) {
+            Some(d) => d,
+            None => break,
+        };
+        value = value * radix as f64 + digit as f64;
+        consumed += 1;
+    }
+    if consumed == 0 {
+        return f64::NAN;
+    }
+    sign * value
+}
+
+/// ECMAScript `parseFloat(string)`: consume the longest leading decimal-float
+/// prefix (including `Infinity`), ignoring trailing junk.
+fn js_parse_float(text: &str) -> f64 {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("Infinity") || trimmed.starts_with("+Infinity") {
+        return f64::INFINITY;
+    }
+    if trimmed.starts_with("-Infinity") {
+        return f64::NEG_INFINITY;
+    }
+    let bytes = trimmed.as_bytes();
+    let mut end = 0usize;
+    let mut seen_dot = false;
+    let mut seen_exp = false;
+    let mut seen_digit = false;
+    while end < bytes.len() {
+        let c = bytes[end];
+        match c {
+            b'+' | b'-' if end == 0 => {}
+            b'+' | b'-' if end > 0 && (bytes[end - 1] == b'e' || bytes[end - 1] == b'E') => {}
+            b'0'..=b'9' => seen_digit = true,
+            b'.' if !seen_dot && !seen_exp => seen_dot = true,
+            b'e' | b'E' if !seen_exp && seen_digit => seen_exp = true,
+            _ => break,
+        }
+        end += 1;
+    }
+    if !seen_digit {
+        return f64::NAN;
+    }
+    trimmed[..end].parse::<f64>().unwrap_or(f64::NAN)
+}
+
+/// Clamp a relative array index (negative counts from the end) into `0..=len`.
+fn relative_index(value: Option<f64>, len: usize) -> usize {
+    match value {
+        None => 0,
+        Some(n) if n.is_nan() => 0,
+        Some(n) if n < 0.0 => (len as f64 + n).max(0.0) as usize,
+        Some(n) => (n as usize).min(len),
+    }
+}
+
+/// Number.prototype.toString(radix) for non-decimal radixes (2..=36).
+fn number_to_radix_string(number: f64, radix: u32) -> String {
+    if number.is_nan() {
+        return "NaN".to_string();
+    }
+    if !number.is_finite() {
+        return if number > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if !(2..=36).contains(&radix) {
+        return number.to_string();
+    }
+    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let negative = number < 0.0;
+    let mut int_part = number.abs().trunc() as u64;
+    let mut frac = number.abs().fract();
+    let mut int_bytes = Vec::new();
+    if int_part == 0 {
+        int_bytes.push(b'0');
+    }
+    while int_part > 0 {
+        int_bytes.push(digits[(int_part % radix as u64) as usize]);
+        int_part /= radix as u64;
+    }
+    int_bytes.reverse();
+    let mut out = String::from_utf8(int_bytes).unwrap_or_default();
+    if frac > 0.0 {
+        out.push('.');
+        let mut count = 0;
+        while frac > 0.0 && count < 20 {
+            frac *= radix as f64;
+            let digit = frac.trunc() as usize;
+            out.push(digits[digit] as char);
+            frac -= digit as f64;
+            count += 1;
+        }
+    }
+    if negative {
+        format!("-{out}")
+    } else {
+        out
+    }
+}
+
+/// Number.prototype.toPrecision(p): format with `p` significant digits.
+fn number_to_precision(number: f64, precision: usize) -> String {
+    if number == 0.0 {
+        return format!("{:.*}", precision.saturating_sub(1), 0.0);
+    }
+    if !number.is_finite() {
+        return if number.is_nan() {
+            "NaN".to_string()
+        } else if number > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        };
+    }
+    let exponent = number.abs().log10().floor() as i32;
+    let decimals = (precision as i32 - 1 - exponent).max(0) as usize;
+    format!("{number:.decimals$}")
+}
+
+fn is_uri_unreserved(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')')
+}
+
+/// `encodeURIComponent` (component=false → also keep `;/?:@&=+$,#` for `encodeURI`).
+fn encode_uri(text: &str, full_uri: bool) -> String {
+    let reserved = b";/?:@&=+$,#";
+    let mut out = String::with_capacity(text.len());
+    for &byte in text.as_bytes() {
+        if is_uri_unreserved(byte) || (full_uri && reserved.contains(&byte)) {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// `decodeURIComponent` / `decodeURI`: undo percent-encoding. Returns `None` on
+/// malformed input.
+fn decode_uri(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = (bytes[i + 1] as char).to_digit(16)?;
+            let lo = (bytes[i + 2] as char).to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
@@ -368,6 +612,8 @@ pub struct Vm {
     function_prototype: Option<GcRef<JsObject>>,
     array_prototype: Option<GcRef<JsObject>>,
     string_prototype: Option<GcRef<JsObject>>,
+    number_prototype: Option<GcRef<JsObject>>,
+    boolean_prototype: Option<GcRef<JsObject>>,
     error_prototype: Option<GcRef<JsObject>>,
     promise_prototype: Option<GcRef<JsObject>>,
     map_prototype: Option<GcRef<JsObject>>,
@@ -407,6 +653,8 @@ impl Vm {
             function_prototype: None,
             array_prototype: None,
             string_prototype: None,
+            number_prototype: None,
+            boolean_prototype: None,
             error_prototype: None,
             promise_prototype: None,
             map_prototype: None,
@@ -974,6 +1222,8 @@ impl Vm {
             ..JsObject::default()
         });
         let string_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let number_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let boolean_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let error_prototype = self.heap.allocate_object(JsObject {
             kind: ObjectKind::Error,
             prototype: Some(object_prototype),
@@ -987,6 +1237,8 @@ impl Vm {
         self.function_prototype = Some(function_prototype);
         self.array_prototype = Some(array_prototype);
         self.string_prototype = Some(string_prototype);
+        self.number_prototype = Some(number_prototype);
+        self.boolean_prototype = Some(boolean_prototype);
         self.error_prototype = Some(error_prototype);
         self.promise_prototype = Some(promise_prototype);
         self.map_prototype = Some(map_prototype);
@@ -1067,7 +1319,15 @@ impl Vm {
             true,
             Some(promise_prototype),
         );
-        let number_ctor = self.allocate_builtin_method(BuiltinId::NumberParseInt);
+        let number_ctor =
+            self.allocate_builtin_value(BuiltinId::NumberConstructor, true, Some(number_prototype));
+        let string_ctor =
+            self.allocate_builtin_value(BuiltinId::StringConstructor, true, Some(string_prototype));
+        let boolean_ctor = self.allocate_builtin_value(
+            BuiltinId::BooleanConstructor,
+            true,
+            Some(boolean_prototype),
+        );
         let math_object = self.allocate_ordinary_object(Some(object_prototype));
         let json_object = self.allocate_ordinary_object(Some(object_prototype));
 
@@ -1091,8 +1351,10 @@ impl Vm {
         self.globals.insert("Set".to_string(), set_ctor.clone());
         self.globals
             .insert("Promise".to_string(), promise_ctor.clone());
-        let number_object = self.create_number_object();
-        self.globals.insert("Number".to_string(), number_object);
+        self.globals.insert("Number".to_string(), number_ctor.clone());
+        self.globals.insert("String".to_string(), string_ctor.clone());
+        self.globals
+            .insert("Boolean".to_string(), boolean_ctor.clone());
         self.globals
             .insert("Math".to_string(), Value::Object(math_object));
         self.globals
@@ -1199,6 +1461,21 @@ impl Vm {
         self.define_builtin_method(array_prototype, "every", BuiltinId::ArrayProtoEvery);
         self.define_builtin_method(array_prototype, "sort", BuiltinId::ArrayProtoSort);
         self.define_builtin_method(array_prototype, "reverse", BuiltinId::ArrayProtoReverse);
+        self.define_builtin_method(array_prototype, "splice", BuiltinId::ArrayProtoSplice);
+        self.define_builtin_method(array_prototype, "flatMap", BuiltinId::ArrayProtoFlatMap);
+        self.define_builtin_method(array_prototype, "fill", BuiltinId::ArrayProtoFill);
+        self.define_builtin_method(array_prototype, "copyWithin", BuiltinId::ArrayProtoCopyWithin);
+        self.define_builtin_method(array_prototype, "at", BuiltinId::ArrayProtoAt);
+        self.define_builtin_method(array_prototype, "keys", BuiltinId::ArrayProtoKeys);
+        self.define_builtin_method(array_prototype, "values", BuiltinId::ArrayProtoValues);
+        self.define_builtin_method(array_prototype, "entries", BuiltinId::ArrayProtoEntries);
+        self.define_builtin_method(array_prototype, "reduceRight", BuiltinId::ArrayProtoReduceRight);
+        self.define_builtin_method(array_prototype, "findLast", BuiltinId::ArrayProtoFindLast);
+        self.define_builtin_method(
+            array_prototype,
+            "findLastIndex",
+            BuiltinId::ArrayProtoFindLastIndex,
+        );
 
         self.define_builtin_method(string_prototype, "charAt", BuiltinId::StringProtoCharAt);
         self.define_builtin_method(
@@ -1257,6 +1534,23 @@ impl Vm {
         self.define_builtin_method(string_prototype, "padStart", BuiltinId::StringProtoPadStart);
         self.define_builtin_method(string_prototype, "padEnd", BuiltinId::StringProtoPadEnd);
         self.define_builtin_method(string_prototype, "repeat", BuiltinId::StringProtoRepeat);
+        self.define_builtin_method(string_prototype, "at", BuiltinId::StringProtoAt);
+        self.define_builtin_method(string_prototype, "normalize", BuiltinId::StringProtoNormalize);
+        self.define_builtin_method(string_prototype, "concat", BuiltinId::StringProtoConcat);
+        self.define_builtin_method(string_prototype, "toString", BuiltinId::StringProtoNormalize);
+        self.define_builtin_method(string_prototype, "valueOf", BuiltinId::StringProtoNormalize);
+
+        self.define_builtin_method(number_prototype, "toFixed", BuiltinId::NumberProtoToFixed);
+        self.define_builtin_method(number_prototype, "toString", BuiltinId::NumberProtoToString);
+        self.define_builtin_method(
+            number_prototype,
+            "toPrecision",
+            BuiltinId::NumberProtoToPrecision,
+        );
+        self.define_builtin_method(number_prototype, "valueOf", BuiltinId::NumberProtoValueOf);
+
+        self.define_builtin_method(boolean_prototype, "toString", BuiltinId::BooleanProtoToString);
+        self.define_builtin_method(boolean_prototype, "valueOf", BuiltinId::BooleanProtoValueOf);
 
         if let Some(object_ref) = self.value_object_ref(object_ctor) {
             self.define_builtin_method(object_ref, "create", BuiltinId::ObjectCreate);
@@ -1286,11 +1580,36 @@ impl Vm {
             );
             self.define_builtin_method(object_ref, "freeze", BuiltinId::ObjectFreeze);
             self.define_builtin_method(object_ref, "isFrozen", BuiltinId::ObjectIsFrozen);
+            self.define_builtin_method(object_ref, "fromEntries", BuiltinId::ObjectFromEntries);
+            self.define_builtin_method(
+                object_ref,
+                "getOwnPropertyNames",
+                BuiltinId::ObjectGetOwnPropertyNames,
+            );
+            self.define_builtin_method(object_ref, "hasOwn", BuiltinId::ObjectHasOwn);
+            self.define_builtin_method(
+                object_ref,
+                "preventExtensions",
+                BuiltinId::ObjectPreventExtensions,
+            );
+            self.define_builtin_method(object_ref, "isExtensible", BuiltinId::ObjectIsExtensible);
+            self.define_builtin_method(object_ref, "seal", BuiltinId::ObjectSeal);
+            self.define_builtin_method(object_ref, "isSealed", BuiltinId::ObjectIsSealed);
+            // Object.prototype as a property of the constructor.
+            self.define_data_property(
+                object_ref,
+                PropertyKey::from("prototype"),
+                Value::Object(object_prototype),
+                false,
+                false,
+                false,
+            );
         }
 
         if let Some(array_ref) = self.value_object_ref(array_ctor) {
             self.define_builtin_method(array_ref, "isArray", BuiltinId::ArrayIsArray);
             self.define_builtin_method(array_ref, "from", BuiltinId::ArrayFrom);
+            self.define_builtin_method(array_ref, "of", BuiltinId::ArrayOf);
         }
 
         if let Some(promise_ref) = self.value_object_ref(promise_ctor) {
@@ -1324,6 +1643,36 @@ impl Vm {
                 false,
                 false,
             );
+            for (name, value) in [
+                ("MAX_VALUE", f64::MAX),
+                ("MIN_VALUE", f64::MIN_POSITIVE),
+                ("EPSILON", f64::EPSILON),
+                ("POSITIVE_INFINITY", f64::INFINITY),
+                ("NEGATIVE_INFINITY", f64::NEG_INFINITY),
+                ("NaN", f64::NAN),
+            ] {
+                self.define_data_property(
+                    number_ref,
+                    PropertyKey::from(name),
+                    Value::Number(value),
+                    false,
+                    false,
+                    false,
+                );
+            }
+        }
+
+        if let Some(string_ref) = self.value_object_ref(string_ctor) {
+            self.define_builtin_method(
+                string_ref,
+                "fromCharCode",
+                BuiltinId::StringFromCharCode,
+            );
+            self.define_builtin_method(
+                string_ref,
+                "fromCodePoint",
+                BuiltinId::StringFromCodePoint,
+            );
         }
 
         self.define_builtin_method(math_object, "floor", BuiltinId::MathFloor);
@@ -1348,6 +1697,9 @@ impl Vm {
         self.define_builtin_method(math_object, "log10", BuiltinId::MathLog10);
         self.define_builtin_method(math_object, "exp", BuiltinId::MathExp);
         self.define_builtin_method(math_object, "random", BuiltinId::MathRandom);
+        self.define_builtin_method(math_object, "sign", BuiltinId::MathSign);
+        self.define_builtin_method(math_object, "hypot", BuiltinId::MathHypot);
+        self.define_builtin_method(math_object, "clz32", BuiltinId::MathClz32);
         self.define_data_property(
             math_object,
             PropertyKey::from("PI"),
@@ -1367,16 +1719,38 @@ impl Vm {
 
         self.define_builtin_method(json_object, "stringify", BuiltinId::JsonStringify);
         self.define_builtin_method(json_object, "parse", BuiltinId::JsonParse);
-        let _ = number_ctor;
+
+        // Global functions.
+        for (name, builtin) in [
+            ("parseInt", BuiltinId::GlobalParseInt),
+            ("parseFloat", BuiltinId::GlobalParseFloat),
+            ("isNaN", BuiltinId::GlobalIsNaN),
+            ("isFinite", BuiltinId::GlobalIsFinite),
+            ("encodeURIComponent", BuiltinId::EncodeUriComponent),
+            ("decodeURIComponent", BuiltinId::DecodeUriComponent),
+            ("encodeURI", BuiltinId::EncodeUri),
+            ("decodeURI", BuiltinId::DecodeUri),
+        ] {
+            let value = self.allocate_builtin_method(builtin);
+            self.globals.insert(name.to_string(), value);
+        }
+
+        // Global value constants.
+        self.globals.insert("NaN".to_string(), Value::Number(f64::NAN));
+        self.globals
+            .insert("Infinity".to_string(), Value::Number(f64::INFINITY));
+        self.globals
+            .insert("undefined".to_string(), Value::Undefined);
     }
 
-    fn create_number_object(&mut self) -> Value {
-        let object_ref = self.heap.allocate_object(JsObject {
-            kind: ObjectKind::Function,
-            prototype: Some(self.function_prototype_ref()),
-            ..JsObject::default()
-        });
-        Value::Object(object_ref)
+    fn number_prototype_ref(&self) -> GcRef<JsObject> {
+        self.number_prototype
+            .expect("number prototype should be installed")
+    }
+
+    fn boolean_prototype_ref(&self) -> GcRef<JsObject> {
+        self.boolean_prototype
+            .expect("boolean prototype should be installed")
     }
 
     fn object_prototype_ref(&self) -> GcRef<JsObject> {
@@ -3187,6 +3561,14 @@ impl Vm {
         match receiver {
             Value::Object(object) => self.get_property_from_chain(*object, receiver, key),
             Value::String(string) => self.get_property_from_string(*string, receiver, key),
+            Value::Number(_) => {
+                let proto = self.number_prototype_ref();
+                self.get_property_from_chain(proto, receiver, key)
+            }
+            Value::Bool(_) => {
+                let proto = self.boolean_prototype_ref();
+                self.get_property_from_chain(proto, receiver, key)
+            }
             Value::Null | Value::Undefined => Err(VmError::TypeError(
                 "cannot read properties of null or undefined".to_string(),
             )),
@@ -3553,6 +3935,7 @@ impl Vm {
                         Ok(pairs)
                     }
                     ObjectKind::Set(values) | ObjectKind::WeakSet(values) => Ok(values),
+                    ObjectKind::ForOfIterator { values, index } => Ok(values[index.min(values.len())..].to_vec()),
                     _ => self.array_like_to_vec(value),
                 }
             }
@@ -4091,16 +4474,39 @@ impl Vm {
             ))),
             BuiltinId::ArrayFrom => {
                 let source = args.first().cloned().unwrap_or(Value::Undefined);
+                let map_fn = args.get(1).cloned();
+                let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
                 let values = match &source {
                     Value::String(string) => self
                         .string_text(*string)
                         .chars()
                         .map(|character| self.make_string_value(&character.to_string()))
                         .collect(),
-                    _ => self.array_like_to_vec(&source)?,
+                    Value::Object(_) => self.for_of_values(&source)?,
+                    Value::Null | Value::Undefined => {
+                        return Err(VmError::TypeError(
+                            "Array.from requires an array-like or iterable object".to_string(),
+                        ));
+                    }
+                    _ => Vec::new(),
+                };
+                let values = match map_fn {
+                    Some(callback) if self.is_callable_value(&callback) => {
+                        let mut mapped = Vec::with_capacity(values.len());
+                        for (index, value) in values.into_iter().enumerate() {
+                            mapped.push(self.call_value_sync(
+                                callback.clone(),
+                                this_arg.clone(),
+                                vec![value, Value::Number(index as f64)],
+                            )?);
+                        }
+                        mapped
+                    }
+                    _ => values,
                 };
                 self.make_array_from_values(values)
             }
+            BuiltinId::ArrayOf => self.make_array_from_values(args),
             BuiltinId::ArrayProtoPush => {
                 let object = self.builtin_object_this(&this_value, "Array.prototype.push")?;
                 let mut length = self.array_length(object);
@@ -4235,22 +4641,14 @@ impl Vm {
             }
             BuiltinId::ArrayProtoFlat => {
                 let values = self.array_like_to_vec(&this_value)?;
-                let mut flattened = Vec::new();
-                for value in values {
-                    match value {
-                        Value::Object(object)
-                            if self
-                                .heap
-                                .objects()
-                                .get(object)
-                                .map(|object| object.kind == ObjectKind::Array)
-                                .unwrap_or(false) =>
-                        {
-                            flattened.extend(self.array_like_to_vec(&Value::Object(object))?);
-                        }
-                        other => flattened.push(other),
+                let depth = match args.first() {
+                    Some(Value::Undefined) | None => 1,
+                    Some(value) => {
+                        let n = self.to_number(value);
+                        if n.is_nan() || n < 0.0 { 0 } else { n as usize }
                     }
-                }
+                };
+                let flattened = self.flatten_values(values, depth)?;
                 self.make_array_from_values(flattened)
             }
             BuiltinId::ArrayProtoSome => self.array_callback_predicate(&this_value, args, true),
@@ -4289,6 +4687,349 @@ impl Vm {
                 values.reverse();
                 self.replace_array_contents(object, values)?;
                 Ok(Value::Object(object))
+            }
+            BuiltinId::ArrayProtoSplice => {
+                let object = self.builtin_object_this(&this_value, "Array.prototype.splice")?;
+                let mut values = self.array_like_to_vec(&this_value)?;
+                let len = values.len();
+                let start = relative_index(args.first().map(|v| self.to_number(v)), len);
+                let delete_count = match args.get(1) {
+                    None => len - start,
+                    Some(value) => {
+                        let n = self.to_number(value);
+                        if n.is_nan() || n < 0.0 { 0 } else { (n as usize).min(len - start) }
+                    }
+                };
+                let removed: Vec<Value> = values.splice(
+                    start..start + delete_count,
+                    args.iter().skip(2).cloned(),
+                ).collect();
+                self.replace_array_contents(object, values)?;
+                self.make_array_from_values(removed)
+            }
+            BuiltinId::ArrayProtoFlatMap => {
+                let mapped = self.array_callback_map(&this_value, args)?;
+                let values = self.array_like_to_vec(&mapped)?;
+                let flattened = self.flatten_values(values, 1)?;
+                self.make_array_from_values(flattened)
+            }
+            BuiltinId::ArrayProtoFill => {
+                let object = self.builtin_object_this(&this_value, "Array.prototype.fill")?;
+                let mut values = self.array_like_to_vec(&this_value)?;
+                let len = values.len();
+                let fill_value = args.first().cloned().unwrap_or(Value::Undefined);
+                let start = relative_index(args.get(1).map(|v| self.to_number(v)), len);
+                let end = match args.get(2) {
+                    None | Some(Value::Undefined) => len,
+                    Some(value) => relative_index(Some(self.to_number(value)), len),
+                };
+                for slot in values.iter_mut().take(end).skip(start) {
+                    *slot = fill_value.clone();
+                }
+                self.replace_array_contents(object, values)?;
+                Ok(Value::Object(object))
+            }
+            BuiltinId::ArrayProtoCopyWithin => {
+                let object = self.builtin_object_this(&this_value, "Array.prototype.copyWithin")?;
+                let mut values = self.array_like_to_vec(&this_value)?;
+                let len = values.len();
+                let target = relative_index(args.first().map(|v| self.to_number(v)), len);
+                let start = relative_index(args.get(1).map(|v| self.to_number(v)), len);
+                let end = match args.get(2) {
+                    None | Some(Value::Undefined) => len,
+                    Some(value) => relative_index(Some(self.to_number(value)), len),
+                };
+                let slice: Vec<Value> = values[start.min(len)..end.min(len).max(start.min(len))].to_vec();
+                for (offset, value) in slice.into_iter().enumerate() {
+                    if target + offset >= len {
+                        break;
+                    }
+                    values[target + offset] = value;
+                }
+                self.replace_array_contents(object, values)?;
+                Ok(Value::Object(object))
+            }
+            BuiltinId::ArrayProtoAt => {
+                let values = self.array_like_to_vec(&this_value)?;
+                let len = values.len() as i64;
+                let mut index = self.number_arg(&args, 0) as i64;
+                if index < 0 {
+                    index += len;
+                }
+                if index < 0 || index >= len {
+                    Ok(Value::Undefined)
+                } else {
+                    Ok(values[index as usize].clone())
+                }
+            }
+            BuiltinId::ArrayProtoKeys => {
+                let values = self.array_like_to_vec(&this_value)?;
+                let keys = (0..values.len()).map(|i| Value::Number(i as f64)).collect();
+                Ok(self.make_for_of_iterator(keys))
+            }
+            BuiltinId::ArrayProtoValues => {
+                let values = self.array_like_to_vec(&this_value)?;
+                Ok(self.make_for_of_iterator(values))
+            }
+            BuiltinId::ArrayProtoEntries => {
+                let values = self.array_like_to_vec(&this_value)?;
+                let mut entries = Vec::with_capacity(values.len());
+                for (index, value) in values.into_iter().enumerate() {
+                    entries.push(self.make_array_from_values(vec![Value::Number(index as f64), value])?);
+                }
+                Ok(self.make_for_of_iterator(entries))
+            }
+            BuiltinId::ArrayProtoReduceRight => {
+                let mut values = self.array_like_to_vec(&this_value)?;
+                values.reverse();
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                if !self.is_callable_value(&callback) {
+                    return Err(VmError::TypeError(
+                        "Array.prototype.reduceRight requires a callback".to_string(),
+                    ));
+                }
+                let len = values.len();
+                let (mut acc, start) = match args.get(1) {
+                    Some(initial) => (initial.clone(), 0),
+                    None => {
+                        if values.is_empty() {
+                            return Err(VmError::TypeError(
+                                "Reduce of empty array with no initial value".to_string(),
+                            ));
+                        }
+                        (values[0].clone(), 1)
+                    }
+                };
+                for i in start..len {
+                    let index_from_right = len - 1 - i;
+                    acc = self.call_value_sync(
+                        callback.clone(),
+                        Value::Undefined,
+                        vec![
+                            acc,
+                            values[i].clone(),
+                            Value::Number(index_from_right as f64),
+                            this_value.clone(),
+                        ],
+                    )?;
+                }
+                Ok(acc)
+            }
+            BuiltinId::ArrayProtoFindLast | BuiltinId::ArrayProtoFindLastIndex => {
+                let return_index = matches!(builtin, BuiltinId::ArrayProtoFindLastIndex);
+                let values = self.array_like_to_vec(&this_value)?;
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                for i in (0..values.len()).rev() {
+                    let matched = self.call_value_sync(
+                        callback.clone(),
+                        Value::Undefined,
+                        vec![values[i].clone(), Value::Number(i as f64), this_value.clone()],
+                    )?;
+                    if self.is_truthy(&matched) {
+                        return Ok(if return_index {
+                            Value::Number(i as f64)
+                        } else {
+                            values[i].clone()
+                        });
+                    }
+                }
+                Ok(if return_index { Value::Number(-1.0) } else { Value::Undefined })
+            }
+            BuiltinId::StringProtoAt => {
+                let text = self.builtin_string_this(&this_value)?;
+                let chars: Vec<char> = text.chars().collect();
+                let len = chars.len() as i64;
+                let mut index = self.number_arg(&args, 0) as i64;
+                if index < 0 {
+                    index += len;
+                }
+                if index < 0 || index >= len {
+                    Ok(Value::Undefined)
+                } else {
+                    Ok(self.make_string_value(&chars[index as usize].to_string()))
+                }
+            }
+            BuiltinId::StringProtoNormalize => {
+                let text = self.builtin_string_this(&this_value)?;
+                Ok(self.make_string_value(&text))
+            }
+            BuiltinId::StringProtoConcat => {
+                let mut text = self.builtin_string_this(&this_value)?;
+                for value in &args {
+                    text.push_str(&self.to_string(value));
+                }
+                Ok(self.make_string_value(&text))
+            }
+            BuiltinId::StringFromCharCode => {
+                let mut text = String::with_capacity(args.len());
+                for value in &args {
+                    let code = self.to_number(value) as u32 & 0xFFFF;
+                    if let Some(ch) = char::from_u32(code) {
+                        text.push(ch);
+                    }
+                }
+                Ok(self.make_string_value(&text))
+            }
+            BuiltinId::StringFromCodePoint => {
+                let mut text = String::with_capacity(args.len());
+                for value in &args {
+                    let code = self.to_number(value) as u32;
+                    if let Some(ch) = char::from_u32(code) {
+                        text.push(ch);
+                    }
+                }
+                Ok(self.make_string_value(&text))
+            }
+            BuiltinId::NumberConstructor => {
+                let number = match args.first() {
+                    None => 0.0,
+                    Some(value) => self.to_number(value),
+                };
+                Ok(Value::Number(number))
+            }
+            BuiltinId::StringConstructor => {
+                let text = match args.first() {
+                    None => String::new(),
+                    Some(value) => self.to_string(value),
+                };
+                Ok(self.make_string_value(&text))
+            }
+            BuiltinId::BooleanConstructor => {
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                Ok(Value::Bool(self.is_truthy(&value)))
+            }
+            BuiltinId::NumberProtoValueOf => Ok(Value::Number(self.to_number(&this_value))),
+            BuiltinId::NumberProtoToFixed => {
+                let number = self.to_number(&this_value);
+                let digits = self.number_arg(&args, 0);
+                let digits = if digits.is_nan() { 0 } else { (digits as usize).min(100) };
+                Ok(self.make_string_value(&format!("{number:.digits$}")))
+            }
+            BuiltinId::NumberProtoToPrecision => {
+                let number = self.to_number(&this_value);
+                match args.first() {
+                    None | Some(Value::Undefined) => {
+                        Ok(self.make_string_value(&Self::format_number(number)))
+                    }
+                    Some(value) => {
+                        let precision = (self.to_number(value) as usize).clamp(1, 100);
+                        Ok(self.make_string_value(&number_to_precision(number, precision)))
+                    }
+                }
+            }
+            BuiltinId::NumberProtoToString => {
+                let number = self.to_number(&this_value);
+                let radix = match args.first() {
+                    None | Some(Value::Undefined) => 10,
+                    Some(value) => self.to_number(value) as u32,
+                };
+                if radix == 10 {
+                    Ok(self.make_string_value(&Self::format_number(number)))
+                } else {
+                    Ok(self.make_string_value(&number_to_radix_string(number, radix)))
+                }
+            }
+            BuiltinId::BooleanProtoValueOf => Ok(Value::Bool(self.is_truthy(&this_value))),
+            BuiltinId::BooleanProtoToString => {
+                let text = if self.is_truthy(&this_value) { "true" } else { "false" };
+                Ok(self.make_string_value(text))
+            }
+            BuiltinId::ObjectFromEntries => {
+                let iterable = args.first().cloned().unwrap_or(Value::Undefined);
+                let entries = self.for_of_values(&iterable)?;
+                let object = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+                for entry in entries {
+                    let key = self.get_property_value(&entry, &PropertyKey::Index(0))?;
+                    let value = self.get_property_value(&entry, &PropertyKey::Index(1))?;
+                    let key = self.to_property_key(&key)?;
+                    self.set_property_on_object(object, Value::Object(object), key, value)?;
+                }
+                Ok(Value::Object(object))
+            }
+            BuiltinId::ObjectGetOwnPropertyNames => {
+                let object = self.require_object_ref(
+                    args.first().unwrap_or(&Value::Undefined),
+                    "Object.getOwnPropertyNames",
+                )?;
+                let mut names = Vec::new();
+                if let Some(object_data) = self.heap.objects().get(object) {
+                    for key in object_data.properties.keys() {
+                        if let PropertyKey::Symbol(_) = key {
+                            continue;
+                        }
+                        names.push(self.property_key_to_string(key));
+                    }
+                }
+                let values = names.into_iter().map(|name| self.make_string_value(&name)).collect();
+                self.make_array_from_values(values)
+            }
+            BuiltinId::ObjectHasOwn => {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                let object = self.require_object_ref(&target, "Object.hasOwn")?;
+                let key = self.to_property_key(args.get(1).unwrap_or(&Value::Undefined))?;
+                Ok(Value::Bool(
+                    self.get_own_property_descriptor(object, &key).is_some(),
+                ))
+            }
+            BuiltinId::ObjectPreventExtensions => {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                if let Value::Object(object) = &target {
+                    if let Some(object_data) = self.heap.objects_mut().get_mut(*object) {
+                        object_data.extensible = false;
+                    }
+                }
+                Ok(target)
+            }
+            BuiltinId::ObjectIsExtensible => {
+                let extensible = matches!(args.first(), Some(Value::Object(object))
+                    if self.heap.objects().get(*object).map(|o| o.extensible).unwrap_or(false));
+                Ok(Value::Bool(extensible))
+            }
+            BuiltinId::ObjectSeal => {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                if let Value::Object(object) = &target {
+                    if let Some(object_data) = self.heap.objects_mut().get_mut(*object) {
+                        object_data.extensible = false;
+                    }
+                }
+                Ok(target)
+            }
+            BuiltinId::ObjectIsSealed => {
+                let sealed = match args.first() {
+                    Some(Value::Object(object)) => self
+                        .heap
+                        .objects()
+                        .get(*object)
+                        .map(|o| !o.extensible)
+                        .unwrap_or(true),
+                    _ => true,
+                };
+                Ok(Value::Bool(sealed))
+            }
+            BuiltinId::MathSign => {
+                let number = self.number_arg(&args, 0);
+                let result = if number.is_nan() {
+                    f64::NAN
+                } else if number > 0.0 {
+                    1.0
+                } else if number < 0.0 {
+                    -1.0
+                } else {
+                    number // preserves +0 / -0
+                };
+                Ok(Value::Number(result))
+            }
+            BuiltinId::MathHypot => {
+                let sum: f64 = args.iter().map(|value| {
+                    let n = self.to_number(value);
+                    n * n
+                }).sum();
+                Ok(Value::Number(sum.sqrt()))
+            }
+            BuiltinId::MathClz32 => {
+                let number = self.number_arg(&args, 0);
+                let int = if number.is_finite() { number as i64 as u32 } else { 0 };
+                Ok(Value::Number(int.leading_zeros() as f64))
             }
             BuiltinId::StringProtoCharAt => {
                 let text = self.builtin_string_this(&this_value)?;
@@ -4494,28 +5235,42 @@ impl Vm {
                 args.first(),
                 Some(Value::Number(number)) if number.is_finite() && number.fract() == 0.0
             ))),
-            BuiltinId::NumberParseInt => {
+            BuiltinId::NumberParseInt | BuiltinId::GlobalParseInt => {
                 let text = args
                     .first()
                     .map(|value| self.to_string(value))
                     .unwrap_or_default();
-                let radix = args
-                    .get(1)
-                    .map(|value| self.to_number(value) as u32)
-                    .unwrap_or(10);
-                let parsed = i64::from_str_radix(text.trim(), radix)
-                    .map(|value| Value::Number(value as f64))
-                    .unwrap_or(Value::Number(f64::NAN));
-                Ok(parsed)
+                let radix = args.get(1).map(|value| self.to_number(value));
+                Ok(Value::Number(js_parse_int(&text, radix)))
             }
-            BuiltinId::NumberParseFloat => {
+            BuiltinId::NumberParseFloat | BuiltinId::GlobalParseFloat => {
                 let text = args
                     .first()
                     .map(|value| self.to_string(value))
                     .unwrap_or_default();
-                Ok(Value::Number(
-                    text.trim().parse::<f64>().unwrap_or(f64::NAN),
-                ))
+                Ok(Value::Number(js_parse_float(&text)))
+            }
+            BuiltinId::GlobalIsNaN => {
+                let number = self.number_arg(&args, 0);
+                Ok(Value::Bool(number.is_nan()))
+            }
+            BuiltinId::GlobalIsFinite => {
+                let number = self.number_arg(&args, 0);
+                Ok(Value::Bool(number.is_finite()))
+            }
+            BuiltinId::EncodeUriComponent => {
+                let text = self.string_arg(&args, 0);
+                Ok(self.make_string_value(&encode_uri(&text, false)))
+            }
+            BuiltinId::EncodeUri => {
+                let text = self.string_arg(&args, 0);
+                Ok(self.make_string_value(&encode_uri(&text, true)))
+            }
+            BuiltinId::DecodeUriComponent | BuiltinId::DecodeUri => {
+                let text = self.string_arg(&args, 0);
+                let decoded = decode_uri(&text)
+                    .ok_or_else(|| VmError::TypeError("URI malformed".to_string()))?;
+                Ok(self.make_string_value(&decoded))
             }
             BuiltinId::MathFloor => Ok(Value::Number(self.number_arg(&args, 0).floor())),
             BuiltinId::MathCeil => Ok(Value::Number(self.number_arg(&args, 0).ceil())),
@@ -5186,6 +5941,43 @@ impl Vm {
             .unwrap_or(f64::NAN)
     }
 
+    fn string_arg(&self, args: &[Value], index: usize) -> String {
+        args.get(index)
+            .map(|value| self.to_string(value))
+            .unwrap_or_default()
+    }
+
+    /// Allocate a `ForOfIterator` object wrapping the given values. Used by
+    /// Array.prototype.keys/values/entries; iterable via for-of and spread.
+    fn make_for_of_iterator(&mut self, values: Vec<Value>) -> Value {
+        let iterator = self.heap.allocate_object(JsObject {
+            kind: ObjectKind::ForOfIterator { values, index: 0 },
+            prototype: Some(self.object_prototype_ref()),
+            ..JsObject::default()
+        });
+        Value::Object(iterator)
+    }
+
+    /// Recursively flatten array values up to `depth` levels (Array.prototype.flat).
+    fn flatten_values(&mut self, values: Vec<Value>, depth: usize) -> Result<Vec<Value>, VmError> {
+        let mut out = Vec::new();
+        for value in values {
+            let is_array = matches!(
+                value,
+                Value::Object(object)
+                    if self.heap.objects().get(object).map(|o| o.kind == ObjectKind::Array).unwrap_or(false)
+            );
+            if depth > 0 && is_array {
+                let inner = self.array_like_to_vec(&value)?;
+                let flattened = self.flatten_values(inner, depth - 1)?;
+                out.extend(flattened);
+            } else {
+                out.push(value);
+            }
+        }
+        Ok(out)
+    }
+
     fn next_random(&mut self) -> f64 {
         self.random_state = self
             .random_state
@@ -5384,6 +6176,7 @@ impl Vm {
         object: GcRef<JsObject>,
         values: Vec<Value>,
     ) -> Result<(), VmError> {
+        let new_length = values.len() as u32;
         if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
             let keys = object_data.properties.keys().cloned().collect::<Vec<_>>();
             for key in keys {
@@ -5400,7 +6193,9 @@ impl Vm {
                 value,
             )?;
         }
-        self.set_array_length(object, self.array_length(object));
+        // Set the length explicitly: index assignments above only ever grow the
+        // length, so a shrink (e.g. splice removing elements) must be applied here.
+        self.set_array_length(object, new_length);
         Ok(())
     }
 
