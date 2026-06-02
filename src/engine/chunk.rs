@@ -46,6 +46,11 @@ pub enum Opcode {
     Delete,
     /// Delete an object property: pops [object, key], pushes a boolean result.
     DeleteProp,
+    /// Define an accessor getter: pops [object, key, fn]; merges into any
+    /// existing accessor descriptor. Leaves the stack otherwise unchanged.
+    DefineGetter,
+    /// Define an accessor setter: pops [object, key, fn].
+    DefineSetter,
     In,
     Instanceof,
     ToNumber,

@@ -130,6 +130,7 @@ struct ControlContext {
     break_jumps: Vec<usize>,
     continue_jumps: Vec<usize>,
     is_loop: bool,
+    label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +217,8 @@ struct FunctionCompiler<'a> {
     outer: Option<OuterBindings>,
     control_stack: Vec<ControlContext>,
     active_finally_blocks: Vec<super::ast::BlockStatement>,
+    /// Label attached to the next loop to be compiled (from a labeled statement).
+    pending_label: Option<String>,
     options: FunctionCompileOptions,
 }
 
@@ -249,6 +252,7 @@ impl<'a> FunctionCompiler<'a> {
             outer,
             control_stack: Vec::new(),
             active_finally_blocks: Vec::new(),
+            pending_label: None,
             options,
         }
     }
@@ -545,15 +549,6 @@ impl<'a> FunctionCompiler<'a> {
             if parameter.is_rest_param() {
                 self.has_rest_param = true;
             }
-            if let Some(_initializer) = parameter.init() {
-                let name = match parameter.variable().binding() {
-                    BindingNode::Identifier(identifier) => self.identifier_name(identifier),
-                    BindingNode::Pattern(_) => "<pattern>".to_string(),
-                };
-                return Err(CompileError::message(format!(
-                    "default parameter initializers are not supported yet: {name} = ..."
-                )));
-            }
         }
 
         let mut pending = Vec::new();
@@ -570,23 +565,37 @@ impl<'a> FunctionCompiler<'a> {
                         },
                         DeclarationContext::Statement,
                     )?;
-                    match resolved {
-                        ResolvedBinding::Local(slot) if slot == raw_slot => {}
+                    let binding_slot = match resolved {
+                        ResolvedBinding::Local(slot) if slot == raw_slot => Some(slot),
                         ResolvedBinding::Local(slot) => {
                             self.emit(Opcode::GetLocal(raw_slot));
                             self.emit(Opcode::SetLocal(slot));
+                            Some(slot)
                         }
                         _ => {
                             self.emit(Opcode::GetLocal(raw_slot));
                             self.emit_store_binding(&name, resolved)?;
+                            None
                         }
+                    };
+                    // Default value: applied left-to-right after binding so a
+                    // later default can reference an earlier parameter.
+                    if let Some(initializer) = parameter.init() {
+                        let slot = binding_slot.unwrap_or(raw_slot);
+                        self.apply_param_default(slot, initializer)?;
                     }
                 }
-                BindingNode::Pattern(pattern) => pending.push(PendingPatternInit {
-                    pattern: pattern.clone(),
-                    slot: raw_slot,
-                    storage: BindingStorage::Let,
-                }),
+                BindingNode::Pattern(pattern) => {
+                    // Apply the default to the raw argument slot before destructuring.
+                    if let Some(initializer) = parameter.init() {
+                        self.apply_param_default(raw_slot, initializer)?;
+                    }
+                    pending.push(PendingPatternInit {
+                        pattern: pattern.clone(),
+                        slot: raw_slot,
+                        storage: BindingStorage::Let,
+                    });
+                }
             }
         }
 
@@ -599,6 +608,24 @@ impl<'a> FunctionCompiler<'a> {
             )?;
         }
 
+        Ok(())
+    }
+
+    /// Emit `if (slot === undefined) slot = <initializer>` for a default
+    /// parameter value.
+    fn apply_param_default(
+        &mut self,
+        slot: u16,
+        initializer: &ExpressionNode,
+    ) -> Result<(), CompileError> {
+        self.emit(Opcode::GetLocal(slot));
+        self.emit(Opcode::LoadUndefined);
+        self.emit(Opcode::StrictEq);
+        let skip = self.emit_jump(Opcode::JumpIfFalsePop(0));
+        self.compile_expression(initializer)?;
+        self.emit(Opcode::SetLocal(slot));
+        let target = self.code.len();
+        self.patch_jump(skip, target)?;
         Ok(())
     }
 
@@ -1157,11 +1184,7 @@ impl<'a> FunctionCompiler<'a> {
         }
 
         let to_end = self.emit_jump(Opcode::Jump(0));
-        self.control_stack.push(ControlContext {
-            break_jumps: Vec::new(),
-            continue_jumps: Vec::new(),
-            is_loop: false,
-        });
+        self.push_control_context(false);
 
         for (index, case) in statement.cases().iter().enumerate() {
             case_starts[index] = self.code.len();
@@ -1223,11 +1246,7 @@ impl<'a> FunctionCompiler<'a> {
         self.emit(Opcode::GetIndex);
         self.emit(Opcode::SetLocal(value_slot));
         self.compile_iterable_initializer_store(statement.initializer(), value_slot)?;
-        self.control_stack.push(ControlContext {
-            break_jumps: Vec::new(),
-            continue_jumps: Vec::new(),
-            is_loop: true,
-        });
+        self.push_control_context(true);
         let body = super::ast::statement_to_node(statement.body().clone());
         self.compile_statement(&body)?;
         let increment_start = self.code.len();
@@ -1276,11 +1295,7 @@ impl<'a> FunctionCompiler<'a> {
         self.emit(Opcode::GetLocal(done_slot));
         let exit_jump = self.emit_jump(Opcode::JumpIfTruePop(0));
         self.compile_iterable_initializer_store(statement.initializer(), value_slot)?;
-        self.control_stack.push(ControlContext {
-            break_jumps: Vec::new(),
-            continue_jumps: Vec::new(),
-            is_loop: true,
-        });
+        self.push_control_context(true);
         let body = super::ast::statement_to_node(statement.body().clone());
         self.compile_statement(&body)?;
         let increment_start = self.code.len();
@@ -2087,31 +2102,41 @@ impl<'a> FunctionCompiler<'a> {
                 });
                 Ok(())
             }
-            StatementNode::BreakStatement(_) => {
+            StatementNode::BreakStatement(break_statement) => {
                 self.emit_active_finally_blocks()?;
                 let jump = self.emit_jump(Opcode::Jump(0));
-                let context =
-                    self.control_stack.iter_mut().rev().next().ok_or_else(|| {
-                        CompileError::message("break used outside a loop or switch")
-                    })?;
+                let label = break_statement
+                    .label()
+                    .map(|sym| self.program.resolve_sym(sym));
+                let context = match &label {
+                    Some(name) => self
+                        .control_stack
+                        .iter_mut()
+                        .rev()
+                        .find(|context| context.label.as_deref() == Some(name.as_str())),
+                    None => self.control_stack.iter_mut().next_back(),
+                }
+                .ok_or_else(|| CompileError::message("break used outside a loop or switch"))?;
                 context.break_jumps.push(jump);
                 Ok(())
             }
-            StatementNode::ContinueStatement(_) => {
+            StatementNode::ContinueStatement(continue_statement) => {
                 self.emit_active_finally_blocks()?;
                 let jump = self.emit_jump(Opcode::Jump(0));
-                let loop_context = self
-                    .control_stack
-                    .iter_mut()
-                    .rev()
-                    .find(|context| context.is_loop)
-                    .ok_or_else(|| CompileError::message("continue used outside a loop"))?;
+                let label = continue_statement
+                    .label()
+                    .map(|sym| self.program.resolve_sym(sym));
+                let loop_context = match &label {
+                    Some(name) => self.control_stack.iter_mut().rev().find(|context| {
+                        context.is_loop && context.label.as_deref() == Some(name.as_str())
+                    }),
+                    None => self.control_stack.iter_mut().rev().find(|context| context.is_loop),
+                }
+                .ok_or_else(|| CompileError::message("continue used outside a loop"))?;
                 loop_context.continue_jumps.push(jump);
                 Ok(())
             }
-            StatementNode::LabeledStatement(_) => {
-                Err(CompileError::Unimplemented("labeled statements"))
-            }
+            StatementNode::LabeledStatement(labeled) => self.compile_labeled_statement(labeled),
             StatementNode::ExpressionStatement(expression) => {
                 self.compile_expression(expression)?;
                 self.emit(Opcode::Pop);
@@ -2167,6 +2192,67 @@ impl<'a> FunctionCompiler<'a> {
         Ok(())
     }
 
+    fn compile_labeled_statement(
+        &mut self,
+        labeled: &super::ast::LabeledStatement,
+    ) -> Result<(), CompileError> {
+        let name = self.program.resolve_sym(labeled.label());
+        let item = match labeled.item() {
+            boa_ast::statement::LabelledItem::Statement(statement) => {
+                super::ast::statement_to_node(statement.clone())
+            }
+            boa_ast::statement::LabelledItem::FunctionDeclaration(_) => {
+                // Labeled function declarations are vanishingly rare in practice.
+                return Err(CompileError::Unimplemented("labeled function declaration"));
+            }
+        };
+        let is_loop = matches!(
+            item,
+            StatementNode::WhileStatement(_)
+                | StatementNode::DoWhileStatement(_)
+                | StatementNode::ForStatement(_)
+                | StatementNode::ForInStatement(_)
+                | StatementNode::ForOfStatement(_)
+        );
+        if is_loop {
+            // The loop's control context picks up this label so that
+            // `break label` / `continue label` resolve to it.
+            self.pending_label = Some(name);
+            self.compile_statement(&item)?;
+            self.pending_label = None;
+        } else {
+            // Labeled non-loop statement: only `break label` is valid.
+            self.control_stack.push(ControlContext {
+                break_jumps: Vec::new(),
+                continue_jumps: Vec::new(),
+                is_loop: false,
+                label: Some(name),
+            });
+            self.compile_statement(&item)?;
+            let context = self
+                .control_stack
+                .pop()
+                .expect("labeled control context should exist");
+            let end = self.code.len();
+            for jump in context.break_jumps {
+                self.patch_jump(jump, end)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Push a control context for a loop or switch, attaching any pending label
+    /// from an enclosing labeled statement.
+    fn push_control_context(&mut self, is_loop: bool) {
+        let label = self.pending_label.take();
+        self.control_stack.push(ControlContext {
+            break_jumps: Vec::new(),
+            continue_jumps: Vec::new(),
+            is_loop,
+            label,
+        });
+    }
+
     fn compile_while_statement(
         &mut self,
         statement: &super::ast::WhileStatement,
@@ -2174,11 +2260,7 @@ impl<'a> FunctionCompiler<'a> {
         let loop_start = self.code.len();
         self.compile_expression(statement.condition())?;
         let exit_jump = self.emit_jump(Opcode::JumpIfFalsePop(0));
-        self.control_stack.push(ControlContext {
-            break_jumps: Vec::new(),
-            continue_jumps: Vec::new(),
-            is_loop: true,
-        });
+        self.push_control_context(true);
         let body = super::ast::statement_to_node(statement.body().clone());
         self.compile_statement(&body)?;
         let loop_context = self.control_stack.pop().expect("loop context should exist");
@@ -2199,11 +2281,7 @@ impl<'a> FunctionCompiler<'a> {
         statement: &super::ast::DoWhileStatement,
     ) -> Result<(), CompileError> {
         let loop_start = self.code.len();
-        self.control_stack.push(ControlContext {
-            break_jumps: Vec::new(),
-            continue_jumps: Vec::new(),
-            is_loop: true,
-        });
+        self.push_control_context(true);
         let body = super::ast::statement_to_node(statement.body().clone());
         self.compile_statement(&body)?;
         let condition_start = self.code.len();
@@ -2266,11 +2344,7 @@ impl<'a> FunctionCompiler<'a> {
             None
         };
 
-        self.control_stack.push(ControlContext {
-            break_jumps: Vec::new(),
-            continue_jumps: Vec::new(),
-            is_loop: true,
-        });
+        self.push_control_context(true);
         let body = super::ast::statement_to_node(statement.body().clone());
         self.compile_statement(&body)?;
 
@@ -2605,9 +2679,23 @@ impl<'a> FunctionCompiler<'a> {
                     self.emit(Opcode::SetProp);
                 }
                 ObjectPropertyDefinition::MethodDefinition(method) => {
-                    self.compile_property_name_value(method.name())?;
-                    self.compile_object_method_value(method)?;
-                    self.emit(Opcode::SetProp);
+                    match method.kind() {
+                        MethodDefinitionKindNode::Get => {
+                            self.compile_property_name_value(method.name())?;
+                            self.compile_object_accessor_value(method)?;
+                            self.emit(Opcode::DefineGetter);
+                        }
+                        MethodDefinitionKindNode::Set => {
+                            self.compile_property_name_value(method.name())?;
+                            self.compile_object_accessor_value(method)?;
+                            self.emit(Opcode::DefineSetter);
+                        }
+                        _ => {
+                            self.compile_property_name_value(method.name())?;
+                            self.compile_object_method_value(method)?;
+                            self.emit(Opcode::SetProp);
+                        }
+                    }
                 }
                 ObjectPropertyDefinition::SpreadObject(expression) => {
                     self.compile_expression(expression)?;
@@ -2671,6 +2759,23 @@ impl<'a> FunctionCompiler<'a> {
             }
         }
 
+        self.compile_nested_function_value(
+            self.property_name_string(method.name()),
+            method.parameters(),
+            method.body(),
+            method.body().strict(),
+            false,
+            false,
+            false,
+        )
+    }
+
+    /// Compile a getter/setter function for an object-literal accessor. Unlike
+    /// `compile_object_method_value`, it does not reject the Get/Set kinds.
+    fn compile_object_accessor_value(
+        &mut self,
+        method: &ObjectMethodDefinitionNode,
+    ) -> Result<(), CompileError> {
         self.compile_nested_function_value(
             self.property_name_string(method.name()),
             method.parameters(),

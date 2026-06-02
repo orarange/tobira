@@ -1110,6 +1110,24 @@ impl Vm {
                 };
                 self.stack.push(Value::Bool(result));
             }
+            Opcode::DefineGetter => {
+                let function = self.pop_value()?;
+                let key = self.pop_value()?;
+                let object = self.pop_value()?;
+                let key = self.to_property_key(&key)?;
+                if let (Value::Object(object), Value::Object(function)) = (&object, &function) {
+                    self.define_accessor(*object, key, *function, true);
+                }
+            }
+            Opcode::DefineSetter => {
+                let function = self.pop_value()?;
+                let key = self.pop_value()?;
+                let object = self.pop_value()?;
+                let key = self.to_property_key(&key)?;
+                if let (Value::Object(object), Value::Object(function)) = (&object, &function) {
+                    self.define_accessor(*object, key, *function, false);
+                }
+            }
             Opcode::In => {
                 let object = self.pop_value()?;
                 let key = self.pop_value()?;
@@ -4206,6 +4224,37 @@ impl Vm {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Define (or merge) an accessor property. A getter and setter declared for
+    /// the same key combine into a single accessor descriptor.
+    fn define_accessor(
+        &mut self,
+        object: GcRef<JsObject>,
+        key: PropertyKey,
+        function: GcRef<JsObject>,
+        is_getter: bool,
+    ) {
+        let (mut get, mut set) = match self.get_own_property_descriptor(object, &key) {
+            Some(JsPropertyDescriptor::Accessor { get, set, .. }) => (get, set),
+            _ => (None, None),
+        };
+        if is_getter {
+            get = Some(function);
+        } else {
+            set = Some(function);
+        }
+        if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
+            object_data.properties.insert(
+                key,
+                JsPropertyDescriptor::Accessor {
+                    get,
+                    set,
+                    enumerable: true,
+                    configurable: true,
+                },
+            );
+        }
     }
 
     /// Delete an own property, honoring `configurable`. Returns false only when
