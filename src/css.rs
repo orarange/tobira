@@ -522,6 +522,30 @@ impl Stylesheet {
         // Merge keyframes
         self.keyframes.extend(other.keyframes);
     }
+
+    /// True if any rule uses an interactive pseudo-class (`:hover`, `:focus`, `:active`),
+    /// meaning the styled tree must be rebuilt when the corresponding interactive state
+    /// changes. Pages without such rules can skip the relayout on hover entirely.
+    pub fn has_interactive_selectors(&self) -> bool {
+        self.rules.iter().any(|rule| {
+            rule.selectors.iter().any(|selector| {
+                selector
+                    .parts
+                    .iter()
+                    .any(|part| part.simple.pseudo_classes.iter().any(is_interactive_pseudo))
+            })
+        })
+    }
+}
+
+fn is_interactive_pseudo(pseudo: &PseudoClass) -> bool {
+    match pseudo {
+        PseudoClass::Hover | PseudoClass::Focus | PseudoClass::Active => true,
+        PseudoClass::Not(inner) => inner
+            .iter()
+            .any(|simple| simple.pseudo_classes.iter().any(is_interactive_pseudo)),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7491,5 +7515,17 @@ mod tests {
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].property, "all");
         assert_eq!(specs[0].duration_ms, 300);
+    }
+
+    #[test]
+    fn detects_interactive_selectors() {
+        assert!(parse_stylesheet(".box:hover { color: red; }").has_interactive_selectors());
+        assert!(parse_stylesheet("a:focus { outline: 1px; }").has_interactive_selectors());
+        assert!(parse_stylesheet("button:active { top: 1px; }").has_interactive_selectors());
+        // No interactive pseudo-classes → false, so the GUI can skip the hover relayout.
+        assert!(!parse_stylesheet(".box { color: red; } div p { margin: 0; }")
+            .has_interactive_selectors());
+        assert!(!parse_stylesheet("@keyframes spin { from {} to {} } .s { animation: spin 1s; }")
+            .has_interactive_selectors());
     }
 }

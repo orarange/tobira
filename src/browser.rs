@@ -176,6 +176,14 @@ impl BrowserPage {
         )
     }
 
+    /// True when the page's stylesheet uses an interactive pseudo-class (`:hover`,
+    /// `:focus`, `:active`), so the styled tree must be rebuilt when that state changes.
+    /// Pages without such rules can skip the hover relayout (and avoid resetting any
+    /// in-flight animation as a side effect).
+    pub fn has_interactive_styling(&self) -> bool {
+        self.main_stylesheet.has_interactive_selectors()
+    }
+
     /// True when any element in the current styled tree declares a `transition`.
     /// The GUI uses this to decide whether a relayout (e.g. on hover) needs the
     /// per-frame transition driver.

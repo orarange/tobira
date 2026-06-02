@@ -605,22 +605,38 @@ impl BrowserApp {
     fn restyle_for_hover(&mut self, window_size: PhysicalSize<u32>) {
         let content_width = Self::content_width_for(window_size);
         let interactive = self.current_interactive_state();
-        let has_trans = self
+        let (has_trans, has_hover_rules) = self
             .document
             .loaded_page()
-            .map(|page| page.has_transitions())
-            .unwrap_or(false);
+            .map(|page| (page.has_transitions(), page.has_interactive_styling()))
+            .unwrap_or((false, false));
+        // Pages with no :hover/:focus/:active rules and no transitions have nothing to
+        // restyle on hover. Skipping the relayout there avoids needless per-move work and,
+        // crucially, avoids rebuilding the styled tree — which would reset any in-flight
+        // animation to its initial frame each time the cursor crosses an element.
+        if !has_trans && !has_hover_rules {
+            return;
+        }
         if has_trans {
-            // Establish (or reuse) the frame clock so transition start times are
-            // consistent with the animation timeline, then start the transition now.
-            let epoch = *self.animation_epoch.get_or_insert_with(Instant::now);
-            let now_ms = epoch.elapsed().as_millis() as u64;
-            if let Some(page) = self.document.loaded_page_mut() {
-                page.relayout(content_width, &interactive);
-                page.advance_transitions(now_ms);
-            }
-        } else if let Some(page) = self.document.loaded_page_mut() {
+            // Establish (or reuse) the frame clock so transition start times are consistent
+            // with the animation timeline, then start the transition now.
+            let _ = *self.animation_epoch.get_or_insert_with(Instant::now);
+        }
+        let now_ms = self
+            .animation_epoch
+            .map(|epoch| epoch.elapsed().as_millis() as u64);
+        if let Some(page) = self.document.loaded_page_mut() {
             page.relayout(content_width, &interactive);
+            // relayout() rebuilt the styled tree from scratch, discarding the current
+            // animation/transition frame. Re-apply it at the current time so that a
+            // hover-triggered relayout (e.g. the cursor moving over an animating element)
+            // does not visibly reset the animation to its initial state.
+            if let Some(now_ms) = now_ms {
+                if has_trans {
+                    page.advance_transitions(now_ms);
+                }
+                page.apply_animations(now_ms, 0);
+            }
         }
         self.document.layout_cache = None;
     }
@@ -1143,7 +1159,12 @@ impl BrowserApp {
             );
             // Rebuild the styled tree so CSS `:hover` applies, starting any transitions.
             self.restyle_for_hover(window_size);
-            self.request_content_render();
+            // While an animation/transition is running the frame loop already re-renders
+            // every frame; an extra async render here would just contend with it (and could
+            // briefly present a stale frame). Only request one when idle.
+            if self.animation_epoch.is_none() {
+                self.request_content_render();
+            }
         }
 
         let changed = next != self.hovered_target
