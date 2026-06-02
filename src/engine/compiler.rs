@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use super::ast::{
     ArithmeticOpNode, ArrayPatternElementNode, AssignOpNode, AssignTargetNode, BinaryOpNode,
@@ -53,10 +55,74 @@ struct ScopeFrame {
     bindings: HashMap<String, LocalBinding>,
 }
 
+/// The upvalue list of a single function, shared (via `Rc`) between the live
+/// `FunctionCompiler` and the `OuterBindings` snapshots handed to its nested
+/// functions. Sharing is what makes *transitive* upvalue capture possible: a
+/// grandchild resolving a name from a grandparent can retroactively add an
+/// upvalue to the intermediate parent's real upvalue list.
 #[derive(Debug, Clone, Default)]
+struct UpvalueState {
+    descriptors: Vec<UpvalueDescriptor>,
+    names: HashMap<String, u16>,
+}
+
+impl UpvalueState {
+    fn get_or_create(&mut self, name: &str, descriptor: UpvalueDescriptor) -> u16 {
+        if let Some(index) = self.names.get(name) {
+            return *index;
+        }
+        let index = self.descriptors.len() as u16;
+        self.descriptors.push(descriptor);
+        self.names.insert(name.to_string(), index);
+        index
+    }
+}
+
+/// A view onto an enclosing function used while compiling a nested function.
+/// `scopes` is a snapshot of that function's locals at the moment the nested
+/// function was created (the enclosing function does not add locals while the
+/// nested one compiles). `upvalues` is *shared* with the real enclosing
+/// `FunctionCompiler`, and `parent` chains further out.
+#[derive(Debug, Clone)]
 struct OuterBindings {
     scopes: Vec<HashMap<String, u16>>,
-    upvalues: HashMap<String, u16>,
+    upvalues: Rc<RefCell<UpvalueState>>,
+    parent: Option<Box<OuterBindings>>,
+}
+
+impl OuterBindings {
+    fn lookup_local(&self, name: &str) -> Option<u16> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(slot) = scope.get(name) {
+                return Some(*slot);
+            }
+        }
+        None
+    }
+
+    /// Ensure this enclosing frame has an upvalue capturing `name`, recursing up
+    /// the chain and creating any intermediate upvalues. Returns the upvalue
+    /// index *within this frame*, or `None` if `name` is not found anywhere up
+    /// the chain.
+    fn ensure_upvalue(&self, name: &str) -> Option<u16> {
+        if let Some(index) = self.upvalues.borrow().names.get(name) {
+            return Some(*index);
+        }
+        let parent = self.parent.as_ref()?;
+        if let Some(slot) = parent.lookup_local(name) {
+            let descriptor = UpvalueDescriptor {
+                is_local: true,
+                index: slot,
+            };
+            return Some(self.upvalues.borrow_mut().get_or_create(name, descriptor));
+        }
+        let parent_index = parent.ensure_upvalue(name)?;
+        let descriptor = UpvalueDescriptor {
+            is_local: false,
+            index: parent_index,
+        };
+        Some(self.upvalues.borrow_mut().get_or_create(name, descriptor))
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -119,6 +185,7 @@ impl<'a> Compiler<'a> {
             None,
             FunctionCompileOptions::default(),
         );
+        function.install_this_binding()?;
         function.compile_statements(self.program.body())?;
         function.emit_implicit_return();
         Ok(Chunk::new(function.finish()))
@@ -137,8 +204,7 @@ struct FunctionCompiler<'a> {
     is_top_level: bool,
     code: Vec<Opcode>,
     constants: Vec<Constant>,
-    upvalues: Vec<UpvalueDescriptor>,
-    upvalue_names: HashMap<String, u16>,
+    upvalues: Rc<RefCell<UpvalueState>>,
     nested_functions: Vec<FunctionProto>,
     handlers: Vec<ExceptionHandler>,
     scopes: Vec<ScopeFrame>,
@@ -171,8 +237,7 @@ impl<'a> FunctionCompiler<'a> {
             is_top_level,
             code: Vec::new(),
             constants: Vec::new(),
-            upvalues: Vec::new(),
-            upvalue_names: HashMap::new(),
+            upvalues: Rc::new(RefCell::new(UpvalueState::default())),
             nested_functions: Vec::new(),
             handlers: Vec::new(),
             scopes: vec![ScopeFrame::default()],
@@ -198,7 +263,7 @@ impl<'a> FunctionCompiler<'a> {
             is_generator: self.is_generator,
             code: self.code,
             constants: self.constants,
-            upvalue_descriptors: self.upvalues,
+            upvalue_descriptors: self.upvalues.borrow().descriptors.clone(),
             nested_functions: self.nested_functions,
             handlers: self.handlers,
             local_count: self.next_local,
@@ -332,39 +397,32 @@ impl<'a> FunctionCompiler<'a> {
             }
         }
 
-        if let Some(outer) = &self.outer {
-            for scope in outer.scopes.iter().rev() {
-                if let Some(slot) = scope.get(name) {
-                    let descriptor = UpvalueDescriptor {
-                        is_local: true,
-                        index: *slot,
-                    };
-                    let upvalue = self.get_or_create_upvalue(name, descriptor);
-                    return ResolvedBinding::Upvalue(upvalue);
-                }
-            }
-            if let Some(upvalue) = outer.upvalues.get(name) {
-                let descriptor = UpvalueDescriptor {
-                    is_local: false,
-                    index: *upvalue,
-                };
-                let upvalue = self.get_or_create_upvalue(name, descriptor);
-                return ResolvedBinding::Upvalue(upvalue);
-            }
+        if let Some(index) = self.resolve_upvalue(name) {
+            return ResolvedBinding::Upvalue(index);
         }
 
         ResolvedBinding::Global
     }
 
-    fn get_or_create_upvalue(&mut self, name: &str, descriptor: UpvalueDescriptor) -> u16 {
-        if let Some(index) = self.upvalue_names.get(name) {
-            return *index;
+    /// Resolve `name` as an upvalue of the current function, walking the whole
+    /// enclosing chain and lazily creating intermediate upvalues so that
+    /// transitive captures (e.g. `a => b => c => a + b + c`) work. Returns the
+    /// upvalue index within the current function, or `None` if `name` is global.
+    fn resolve_upvalue(&self, name: &str) -> Option<u16> {
+        let outer = self.outer.as_ref()?;
+        if let Some(slot) = outer.lookup_local(name) {
+            let descriptor = UpvalueDescriptor {
+                is_local: true,
+                index: slot,
+            };
+            return Some(self.upvalues.borrow_mut().get_or_create(name, descriptor));
         }
-
-        let index = self.upvalues.len() as u16;
-        self.upvalues.push(descriptor);
-        self.upvalue_names.insert(name.to_string(), index);
-        index
+        let parent_index = outer.ensure_upvalue(name)?;
+        let descriptor = UpvalueDescriptor {
+            is_local: false,
+            index: parent_index,
+        };
+        Some(self.upvalues.borrow_mut().get_or_create(name, descriptor))
     }
 
     fn snapshot_outer_bindings(&self) -> OuterBindings {
@@ -382,8 +440,23 @@ impl<'a> FunctionCompiler<'a> {
 
         OuterBindings {
             scopes,
-            upvalues: self.upvalue_names.clone(),
+            upvalues: Rc::clone(&self.upvalues),
+            parent: self.outer.clone().map(Box::new),
         }
+    }
+
+    /// Install a hidden local named `this` for non-arrow functions and seed it
+    /// from the call frame's receiver. Arrow functions deliberately skip this so
+    /// that `this` resolves up the scope chain to the nearest enclosing
+    /// non-arrow function (lexical `this`).
+    fn install_this_binding(&mut self) -> Result<(), CompileError> {
+        let slot = self.allocate_hidden_local()?;
+        self.root_scope_mut()
+            .bindings
+            .insert("this".to_string(), LocalBinding { slot });
+        self.emit(Opcode::LoadThis);
+        self.emit(Opcode::SetLocal(slot));
+        Ok(())
     }
 
     fn identifier_name(&self, identifier: &super::ast::IdentifierNode) -> String {
@@ -1466,6 +1539,7 @@ impl<'a> FunctionCompiler<'a> {
                 constructor.body().strict(),
                 false,
                 false,
+                false,
                 options.clone(),
                 &instance_fields,
             )?
@@ -1549,6 +1623,7 @@ impl<'a> FunctionCompiler<'a> {
             child.emit(Opcode::Call(3));
             child.emit(Opcode::Pop);
         }
+        child.install_this_binding()?;
         for field in field_initializers {
             child.compile_class_field_initializer(field)?;
         }
@@ -1585,6 +1660,7 @@ impl<'a> FunctionCompiler<'a> {
             method.parameters(),
             method.body(),
             method.body().strict(),
+            false,
             false,
             false,
             options.clone(),
@@ -2288,6 +2364,7 @@ impl<'a> FunctionCompiler<'a> {
             declaration.body().strict(),
             declaration.is_async(),
             declaration.is_generator(),
+            false,
         )?;
         self.emit(Opcode::MakeClosure(nested_index));
         self.emit_store_binding(&name, resolved)?;
@@ -2302,6 +2379,7 @@ impl<'a> FunctionCompiler<'a> {
         is_strict: bool,
         is_async: bool,
         is_generator: bool,
+        is_arrow: bool,
     ) -> Result<u16, CompileError> {
         self.compile_nested_function_with_options(
             name,
@@ -2310,6 +2388,7 @@ impl<'a> FunctionCompiler<'a> {
             is_strict,
             is_async,
             is_generator,
+            is_arrow,
             FunctionCompileOptions::default(),
             &[],
         )
@@ -2323,6 +2402,7 @@ impl<'a> FunctionCompiler<'a> {
         is_strict: bool,
         is_async: bool,
         is_generator: bool,
+        is_arrow: bool,
         options: FunctionCompileOptions,
         field_initializers: &[&super::ast::ClassFieldDefinitionNode],
     ) -> Result<u16, CompileError> {
@@ -2337,6 +2417,9 @@ impl<'a> FunctionCompiler<'a> {
         child.is_async = is_async;
         child.is_generator = is_generator;
         child.compile_function_parameters(parameters)?;
+        if !is_arrow {
+            child.install_this_binding()?;
+        }
         for field in field_initializers {
             child.compile_class_field_initializer(field)?;
         }
@@ -2352,7 +2435,11 @@ impl<'a> FunctionCompiler<'a> {
     fn compile_expression(&mut self, expression: &ExpressionNode) -> Result<(), CompileError> {
         match expression {
             ExpressionNode::This(_) => {
-                self.emit(Opcode::LoadThis);
+                match self.resolve_binding("this") {
+                    ResolvedBinding::Local(slot) => self.emit(Opcode::GetLocal(slot)),
+                    ResolvedBinding::Upvalue(slot) => self.emit(Opcode::GetUpvalue(slot)),
+                    ResolvedBinding::Global => self.emit(Opcode::LoadThis),
+                };
                 Ok(())
             }
             ExpressionNode::Identifier(identifier) => {
@@ -2374,6 +2461,7 @@ impl<'a> FunctionCompiler<'a> {
                 function.body().strict(),
                 false,
                 false,
+                false,
             ),
             ExpressionNode::ArrowFunction(function) => self.compile_nested_function_value(
                 function
@@ -2384,6 +2472,7 @@ impl<'a> FunctionCompiler<'a> {
                 function.body().strict(),
                 false,
                 false,
+                true,
             ),
             ExpressionNode::AsyncArrowFunction(function) => self.compile_nested_function_value(
                 function
@@ -2394,6 +2483,7 @@ impl<'a> FunctionCompiler<'a> {
                 function.body().strict(),
                 true,
                 false,
+                true,
             ),
             ExpressionNode::GeneratorExpression(_) => {
                 Err(CompileError::Unimplemented("generator expressions"))
@@ -2407,6 +2497,7 @@ impl<'a> FunctionCompiler<'a> {
                     function.body(),
                     function.body().strict(),
                     true,
+                    false,
                     false,
                 ),
             ExpressionNode::AsyncGeneratorExpression(_) => {
@@ -2582,6 +2673,7 @@ impl<'a> FunctionCompiler<'a> {
             method.body().strict(),
             false,
             false,
+            false,
         )
     }
 
@@ -2687,6 +2779,7 @@ impl<'a> FunctionCompiler<'a> {
         is_strict: bool,
         is_async: bool,
         is_generator: bool,
+        is_arrow: bool,
     ) -> Result<(), CompileError> {
         let index = self.compile_nested_function(
             name,
@@ -2695,6 +2788,7 @@ impl<'a> FunctionCompiler<'a> {
             is_strict,
             is_async,
             is_generator,
+            is_arrow,
         )?;
         self.emit(Opcode::MakeClosure(index));
         Ok(())
