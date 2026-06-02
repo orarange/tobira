@@ -1529,6 +1529,13 @@ impl<'a> FunctionCompiler<'a> {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let private_instance_fields = elements
+            .iter()
+            .filter_map(|element| match element {
+                ClassElementNode::PrivateFieldDefinition(field) => Some(field),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
 
         let mut options = FunctionCompileOptions::default();
         let mut super_ctor_slot = None;
@@ -1562,9 +1569,15 @@ impl<'a> FunctionCompiler<'a> {
                 false,
                 options.clone(),
                 &instance_fields,
+                &private_instance_fields,
             )?
         } else {
-            self.compile_synthetic_class_constructor(name.clone(), &options, &instance_fields)?
+            self.compile_synthetic_class_constructor(
+                name.clone(),
+                &options,
+                &instance_fields,
+                &private_instance_fields,
+            )?
         };
 
         self.emit(Opcode::MakeClosure(constructor_index));
@@ -1595,9 +1608,18 @@ impl<'a> FunctionCompiler<'a> {
                     self.compile_static_class_field_initializer(class_slot, field)?;
                 }
                 ClassElementNode::FieldDefinition(_) => {}
-                ClassElementNode::PrivateFieldDefinition(_)
-                | ClassElementNode::PrivateStaticFieldDefinition(_) => {
-                    return Err(CompileError::Unimplemented("private class fields"));
+                // Instance private fields are initialized inside the constructor.
+                ClassElementNode::PrivateFieldDefinition(_) => {}
+                ClassElementNode::PrivateStaticFieldDefinition(field) => {
+                    self.emit(Opcode::GetLocal(class_slot));
+                    let constant = self.add_string_constant(self.private_field_key(field.name()))?;
+                    self.emit(Opcode::LoadConst(constant));
+                    if let Some(initializer) = field.initializer() {
+                        self.compile_expression(initializer)?;
+                    } else {
+                        self.emit(Opcode::LoadUndefined);
+                    }
+                    self.emit(Opcode::SetProp);
                 }
                 ClassElementNode::StaticBlock(_) => {
                     return Err(CompileError::Unimplemented("class static blocks"));
@@ -1614,6 +1636,7 @@ impl<'a> FunctionCompiler<'a> {
         name: Option<String>,
         options: &FunctionCompileOptions,
         field_initializers: &[&super::ast::ClassFieldDefinitionNode],
+        private_field_initializers: &[&boa_ast::function::PrivateFieldDefinition],
     ) -> Result<u16, CompileError> {
         let outer = Some(self.snapshot_outer_bindings());
         let mut child = FunctionCompiler::new(
@@ -1647,6 +1670,9 @@ impl<'a> FunctionCompiler<'a> {
         for field in field_initializers {
             child.compile_class_field_initializer(field)?;
         }
+        for field in private_field_initializers {
+            child.compile_private_field_initializer(field)?;
+        }
         child.emit_implicit_return();
         let index = self.nested_functions.len();
         self.nested_functions.push(child.finish());
@@ -1663,18 +1689,18 @@ impl<'a> FunctionCompiler<'a> {
         if method.is_private() {
             return Err(CompileError::Unimplemented("private class methods"));
         }
-        match method.kind() {
-            MethodDefinitionKindNode::Ordinary => {}
-            MethodDefinitionKindNode::Get | MethodDefinitionKindNode::Set => {
-                return Err(CompileError::Unimplemented("class accessors"));
-            }
+        // None = ordinary method (SetProp); Some(true/false) = getter/setter.
+        let accessor = match method.kind() {
+            MethodDefinitionKindNode::Ordinary => None,
+            MethodDefinitionKindNode::Get => Some(true),
+            MethodDefinitionKindNode::Set => Some(false),
             MethodDefinitionKindNode::Generator => {
                 return Err(CompileError::Unimplemented("generator class methods"));
             }
             MethodDefinitionKindNode::Async | MethodDefinitionKindNode::AsyncGenerator => {
                 return Err(CompileError::Unimplemented("async class methods"));
             }
-        }
+        };
         let nested_index = self.compile_nested_function_with_options(
             Some(self.class_element_name_string(method.name())),
             method.parameters(),
@@ -1684,6 +1710,7 @@ impl<'a> FunctionCompiler<'a> {
             false,
             false,
             options.clone(),
+            &[],
             &[],
         )?;
 
@@ -1697,7 +1724,11 @@ impl<'a> FunctionCompiler<'a> {
         }
         self.compile_class_element_name_value(method.name())?;
         self.emit(Opcode::MakeClosure(nested_index));
-        self.emit(Opcode::SetProp);
+        match accessor {
+            None => self.emit(Opcode::SetProp),
+            Some(true) => self.emit(Opcode::DefineGetter),
+            Some(false) => self.emit(Opcode::DefineSetter),
+        };
         Ok(())
     }
 
@@ -1706,7 +1737,7 @@ impl<'a> FunctionCompiler<'a> {
             ClassElementNameNode::PropertyName(property_name) => self
                 .property_name_string(property_name)
                 .unwrap_or_else(|| "<computed>".to_string()),
-            ClassElementNameNode::PrivateName(_) => "#private".to_string(),
+            ClassElementNameNode::PrivateName(private) => self.private_field_key(private),
         }
     }
 
@@ -1718,8 +1749,10 @@ impl<'a> FunctionCompiler<'a> {
             ClassElementNameNode::PropertyName(property_name) => {
                 self.compile_property_name_value(property_name)
             }
-            ClassElementNameNode::PrivateName(_) => {
-                Err(CompileError::Unimplemented("private class elements"))
+            ClassElementNameNode::PrivateName(private) => {
+                let constant = self.add_string_constant(self.private_field_key(private))?;
+                self.emit(Opcode::LoadConst(constant));
+                Ok(())
             }
         }
     }
@@ -1730,6 +1763,22 @@ impl<'a> FunctionCompiler<'a> {
     ) -> Result<(), CompileError> {
         self.emit(Opcode::LoadThis);
         self.compile_property_name_value(field.name())?;
+        if let Some(initializer) = field.initializer() {
+            self.compile_expression(initializer)?;
+        } else {
+            self.emit(Opcode::LoadUndefined);
+        }
+        self.emit(Opcode::SetProp);
+        Ok(())
+    }
+
+    fn compile_private_field_initializer(
+        &mut self,
+        field: &boa_ast::function::PrivateFieldDefinition,
+    ) -> Result<(), CompileError> {
+        self.emit(Opcode::LoadThis);
+        let constant = self.add_string_constant(self.private_field_key(field.name()))?;
+        self.emit(Opcode::LoadConst(constant));
         if let Some(initializer) = field.initializer() {
             self.compile_expression(initializer)?;
         } else {
@@ -2488,6 +2537,7 @@ impl<'a> FunctionCompiler<'a> {
             is_arrow,
             FunctionCompileOptions::default(),
             &[],
+            &[],
         )
     }
 
@@ -2502,6 +2552,7 @@ impl<'a> FunctionCompiler<'a> {
         is_arrow: bool,
         options: FunctionCompileOptions,
         field_initializers: &[&super::ast::ClassFieldDefinitionNode],
+        private_field_initializers: &[&boa_ast::function::PrivateFieldDefinition],
     ) -> Result<u16, CompileError> {
         if is_generator {
             return Err(CompileError::Unimplemented("generator functions"));
@@ -2519,6 +2570,9 @@ impl<'a> FunctionCompiler<'a> {
         }
         for field in field_initializers {
             child.compile_class_field_initializer(field)?;
+        }
+        for field in private_field_initializers {
+            child.compile_private_field_initializer(field)?;
         }
         child.compile_function_body(body)?;
         child.emit_implicit_return();
@@ -2824,13 +2878,22 @@ impl<'a> FunctionCompiler<'a> {
                 }
                 Ok(())
             }
-            super::ast::MemberExpression::Private(_) => {
-                Err(CompileError::Unimplemented("private property access"))
+            super::ast::MemberExpression::Private(access) => {
+                self.compile_expression(access.target())?;
+                let constant = self.add_string_constant(self.private_field_key(&access.field()))?;
+                self.emit(Opcode::LoadConst(constant));
+                self.emit(Opcode::GetProp);
+                Ok(())
             }
             super::ast::MemberExpression::Super(access) => {
                 self.compile_super_property_access(access)
             }
         }
+    }
+
+    /// Mangle a private name `#x` into the property key string used to store it.
+    fn private_field_key(&self, name: &boa_ast::function::PrivateName) -> String {
+        format!("#{}", self.program.resolve_sym(name.description()))
     }
 
     fn compile_literal(&mut self, literal: &LiteralKindNode) -> Result<(), CompileError> {
@@ -3023,8 +3086,11 @@ impl<'a> FunctionCompiler<'a> {
                 }
                 Ok(())
             }
-            super::ast::MemberExpression::Private(_) => {
-                Err(CompileError::Unimplemented("private method calls"))
+            super::ast::MemberExpression::Private(access) => {
+                self.compile_expression(access.target())?;
+                let constant = self.add_string_constant(self.private_field_key(&access.field()))?;
+                self.emit(Opcode::GetPropForCall(constant));
+                Ok(())
             }
             super::ast::MemberExpression::Super(access) => {
                 self.compile_super_property_for_call(access)
@@ -3356,8 +3422,13 @@ impl<'a> FunctionCompiler<'a> {
                     }
                 }
             }
-            super::ast::MemberExpression::Private(_) => {
-                Err(CompileError::Unimplemented("private property access"))
+            super::ast::MemberExpression::Private(access) => {
+                self.compile_expression(access.target())?;
+                self.emit(Opcode::SetLocal(obj_temp));
+                let constant = self.add_string_constant(self.private_field_key(&access.field()))?;
+                self.emit(Opcode::LoadConst(constant));
+                self.emit(Opcode::SetLocal(key_temp));
+                Ok(PropertyOpKind::Named)
             }
             super::ast::MemberExpression::Super(access) => {
                 self.compile_super_property_access_temps(access, obj_temp, key_temp)
