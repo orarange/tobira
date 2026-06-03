@@ -402,6 +402,9 @@ pub struct CallFrame {
     async_outer_promise: Option<GcRef<JsObject>>,
     /// The generator object that owns this frame, if it is a generator body.
     generator: Option<GcRef<JsObject>>,
+    /// Call arguments retained for the `arguments` object (only when the function
+    /// references it).
+    arguments: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1142,6 +1145,22 @@ impl Vm {
                 let name = self.constant_name(index)?.to_string();
                 let value = self.pop_value()?;
                 self.globals.insert(name, value);
+            }
+            Opcode::GetGlobalOptional(index) => {
+                let value = {
+                    let name = self.constant_name(index)?;
+                    self.globals.get(name).cloned().unwrap_or(Value::Undefined)
+                };
+                self.stack.push(value);
+            }
+            Opcode::LoadArguments => {
+                let args = self
+                    .frames
+                    .last()
+                    .map(|frame| frame.arguments.clone())
+                    .unwrap_or_default();
+                let array = self.make_array_from_values(args)?;
+                self.stack.push(array);
             }
             Opcode::Add => self.binary_add()?,
             Opcode::Sub => self.binary_numeric(|lhs, rhs| lhs - rhs)?,
@@ -3566,6 +3585,13 @@ impl Vm {
             parameter_count
         };
 
+        // Retain the full argument list only when the body uses `arguments`.
+        let arguments = if closure.proto.uses_arguments {
+            args.clone()
+        } else {
+            Vec::new()
+        };
+
         for (index, value) in args.iter().cloned().enumerate() {
             if index >= normal_parameter_count || index >= locals.len() {
                 break;
@@ -3592,6 +3618,7 @@ impl Vm {
             pending_exception: None,
             async_outer_promise: None,
             generator: None,
+            arguments,
         })
     }
 

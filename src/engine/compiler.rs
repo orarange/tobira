@@ -219,6 +219,10 @@ struct FunctionCompiler<'a> {
     active_finally_blocks: Vec<super::ast::BlockStatement>,
     /// Label attached to the next loop to be compiled (from a labeled statement).
     pending_label: Option<String>,
+    /// Whether this is an arrow function (no own `this`/`arguments`).
+    is_arrow: bool,
+    /// Set when the body references the `arguments` object.
+    uses_arguments: bool,
     options: FunctionCompileOptions,
 }
 
@@ -253,6 +257,8 @@ impl<'a> FunctionCompiler<'a> {
             control_stack: Vec::new(),
             active_finally_blocks: Vec::new(),
             pending_label: None,
+            is_arrow: false,
+            uses_arguments: false,
             options,
         }
     }
@@ -272,6 +278,7 @@ impl<'a> FunctionCompiler<'a> {
             handlers: self.handlers,
             local_count: self.next_local,
             is_strict: self.is_strict,
+            uses_arguments: self.uses_arguments,
         }
     }
 
@@ -2104,18 +2111,68 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn compile_statements(&mut self, statements: &[StatementNode]) -> Result<(), CompileError> {
+        // Pre-declare hoistable bindings so that function declarations compiled
+        // ahead of their textual position still resolve the variables they
+        // capture (and so calling a function before its definition works).
+        self.predeclare_hoisted(statements)?;
+        // Hoist function declarations (create the closures up front).
         for statement in statements {
+            if let StatementNode::FunctionDeclaration(declaration) = statement {
+                self.compile_function_declaration_statement(declaration)?;
+            }
+        }
+        for statement in statements {
+            if matches!(statement, StatementNode::FunctionDeclaration(_)) {
+                continue;
+            }
             self.compile_statement(statement)?;
         }
         Ok(())
     }
 
-    fn compile_function_body(&mut self, body: &FunctionBodyNode) -> Result<(), CompileError> {
-        for item in body.statements() {
-            let statement = statement_list_item_to_node(item.clone());
-            self.compile_statement(&statement)?;
+    /// Allocate slots for the function/var/let/const names declared directly in
+    /// this statement list, so hoisted function bodies see them in scope.
+    fn predeclare_hoisted(&mut self, statements: &[StatementNode]) -> Result<(), CompileError> {
+        for statement in statements {
+            match statement {
+                StatementNode::FunctionDeclaration(declaration) => {
+                    if !self.is_top_level {
+                        let name = self.identifier_name(&declaration.name());
+                        self.declare_function_scoped(&name)?;
+                    }
+                }
+                StatementNode::VariableDeclaration(declaration) => {
+                    let storage = if declaration.is_var() {
+                        BindingStorage::Var
+                    } else if declaration.is_const() {
+                        BindingStorage::Const
+                    } else {
+                        BindingStorage::Let
+                    };
+                    for variable in declaration.variables() {
+                        if let BindingNode::Identifier(identifier) = variable.binding() {
+                            let name = self.identifier_name(identifier);
+                            self.resolve_declaration_binding(
+                                &name,
+                                storage,
+                                DeclarationContext::Statement,
+                            )?;
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(())
+    }
+
+    fn compile_function_body(&mut self, body: &FunctionBodyNode) -> Result<(), CompileError> {
+        let statements: Vec<StatementNode> = body
+            .statements()
+            .iter()
+            .map(|item| statement_list_item_to_node(item.clone()))
+            .collect();
+        self.compile_statements(&statements)
     }
 
     fn compile_statement(&mut self, statement: &StatementNode) -> Result<(), CompileError> {
@@ -2575,6 +2632,7 @@ impl<'a> FunctionCompiler<'a> {
             FunctionCompiler::new(self.program, name, arity, is_strict, false, outer, options);
         child.is_async = is_async;
         child.is_generator = is_generator;
+        child.is_arrow = is_arrow;
         child.compile_function_parameters(parameters)?;
         if !is_arrow {
             child.install_this_binding()?;
@@ -2607,6 +2665,16 @@ impl<'a> FunctionCompiler<'a> {
             ExpressionNode::Identifier(identifier) => {
                 let name = self.identifier_name(identifier);
                 let resolved = self.resolve_binding(&name);
+                // `arguments` in a non-arrow function builds the arguments array.
+                if name == "arguments"
+                    && matches!(resolved, ResolvedBinding::Global)
+                    && !self.is_arrow
+                    && !self.is_top_level
+                {
+                    self.uses_arguments = true;
+                    self.emit(Opcode::LoadArguments);
+                    return Ok(());
+                }
                 self.emit_load_binding(&name, resolved)
             }
             ExpressionNode::Literal(literal) => self.compile_literal(literal.kind()),
@@ -3318,6 +3386,20 @@ impl<'a> FunctionCompiler<'a> {
         // reference — it needs the object/key in order to remove the property.
         if matches!(unary.op(), UnaryOpNode::Delete) {
             return self.compile_delete_expression(unary.target());
+        }
+        // `typeof undeclaredName` must yield "undefined" rather than throwing a
+        // ReferenceError (common feature-detection idiom).
+        if matches!(unary.op(), UnaryOpNode::TypeOf) {
+            if let ExpressionNode::Identifier(identifier) = unary.target() {
+                let name = self.identifier_name(identifier);
+                let resolved = self.resolve_binding(&name);
+                if matches!(resolved, ResolvedBinding::Global) && name != "arguments" {
+                    let index = self.add_string_constant(name)?;
+                    self.emit(Opcode::GetGlobalOptional(index));
+                    self.emit(Opcode::Typeof);
+                    return Ok(());
+                }
+            }
         }
         self.compile_expression(unary.target())?;
         match unary.op() {

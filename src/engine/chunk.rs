@@ -21,6 +21,11 @@ pub enum Opcode {
 
     GetGlobal(u16),
     SetGlobal(u16),
+    /// Like GetGlobal but pushes `undefined` instead of throwing when the global
+    /// is absent. Used for `typeof undeclaredName`.
+    GetGlobalOptional(u16),
+    /// Build an `arguments` array from the current frame's call arguments.
+    LoadArguments,
 
     Add,
     Sub,
@@ -139,6 +144,9 @@ pub struct FunctionProto {
     pub handlers: Vec<ExceptionHandler>,
     pub local_count: u16,
     pub is_strict: bool,
+    /// Whether the function body references the `arguments` object (so the VM
+    /// retains the call arguments for it).
+    pub uses_arguments: bool,
 }
 
 impl FunctionProto {
@@ -158,6 +166,7 @@ impl FunctionProto {
             handlers: Vec::new(),
             local_count: 0,
             is_strict,
+            uses_arguments: false,
         }
     }
 }
