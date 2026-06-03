@@ -1704,9 +1704,6 @@ impl<'a> FunctionCompiler<'a> {
         method: &super::ast::ClassMethodDefinitionNode,
         options: &FunctionCompileOptions,
     ) -> Result<(), CompileError> {
-        if method.is_private() {
-            return Err(CompileError::Unimplemented("private class methods"));
-        }
         // accessor: None = ordinary/generator/async method (SetProp);
         // Some(true/false) = getter/setter.
         let (accessor, is_async, is_generator) = match method.kind() {

@@ -325,6 +325,7 @@ enum BuiltinId {
     ReflectDefineProperty,
     ReflectApply,
     ReflectConstruct,
+    StructuredClone,
 }
 
 #[derive(Debug, Clone)]
@@ -2222,6 +2223,10 @@ impl Vm {
             let value = self.allocate_builtin_method(builtin);
             self.globals.insert(name.to_string(), value);
         }
+
+        let structured_clone = self.allocate_builtin_method(BuiltinId::StructuredClone);
+        self.globals
+            .insert("structuredClone".to_string(), structured_clone);
 
         // Global value constants.
         self.globals.insert("NaN".to_string(), Value::Number(f64::NAN));
@@ -6558,6 +6563,10 @@ impl Vm {
                 };
                 self.construct_value_sync(target, arg_list)
             }
+            BuiltinId::StructuredClone => {
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                self.structured_clone(&value, 0)
+            }
             BuiltinId::StringProtoCharAt => {
                 let text = self.builtin_string_this(&this_value)?;
                 let index = args
@@ -7534,6 +7543,80 @@ impl Vm {
             ..JsObject::default()
         });
         Value::Object(iterator)
+    }
+
+    /// Deep clone for `structuredClone` (acyclic data: objects, arrays, Map,
+    /// Set, Date, RegExp; primitives are copied directly).
+    fn structured_clone(&mut self, value: &Value, depth: usize) -> Result<Value, VmError> {
+        if depth > 1000 {
+            return Err(VmError::RangeError(
+                "structuredClone: structure too deep (or cyclic)".to_string(),
+            ));
+        }
+        let Value::Object(object) = value else {
+            return Ok(value.clone());
+        };
+        let object = *object;
+        // Callables cannot be cloned.
+        if self.callables.contains_key(&object.raw()) {
+            return Err(VmError::TypeError(
+                "structuredClone: cannot clone a function".to_string(),
+            ));
+        }
+        let kind = self
+            .heap
+            .objects()
+            .get(object)
+            .map(|o| o.kind.clone())
+            .unwrap_or(ObjectKind::Ordinary);
+        match kind {
+            ObjectKind::Array => {
+                let elements = self.array_like_to_vec(value)?;
+                let mut cloned = Vec::with_capacity(elements.len());
+                for element in &elements {
+                    cloned.push(self.structured_clone(element, depth + 1)?);
+                }
+                self.make_array_from_values(cloned)
+            }
+            ObjectKind::Map(entries) => {
+                let new_map = self.heap.allocate_object(JsObject {
+                    kind: ObjectKind::Map(Vec::new()),
+                    prototype: Some(self.map_prototype_ref()),
+                    ..JsObject::default()
+                });
+                self.set_collection_size(new_map, 0);
+                for (key, value) in entries {
+                    let key = self.structured_clone(&key, depth + 1)?;
+                    let value = self.structured_clone(&value, depth + 1)?;
+                    self.map_set(new_map, key, value, false)?;
+                }
+                Ok(Value::Object(new_map))
+            }
+            ObjectKind::Set(values) => {
+                let new_set = self.heap.allocate_object(JsObject {
+                    kind: ObjectKind::Set(Vec::new()),
+                    prototype: Some(self.set_prototype_ref()),
+                    ..JsObject::default()
+                });
+                self.set_collection_size(new_set, 0);
+                for value in values {
+                    let value = self.structured_clone(&value, depth + 1)?;
+                    self.set_add(new_set, value, false)?;
+                }
+                Ok(Value::Object(new_set))
+            }
+            ObjectKind::RegExp { source, flags, .. } => Ok(self.make_regexp_object(&source, &flags)),
+            _ => {
+                // Plain object: clone own enumerable string/index properties.
+                let new_object = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+                for key in self.object_own_enumerable_keys(object) {
+                    let property = self.get_property_value(&Value::Object(object), &key)?;
+                    let cloned = self.structured_clone(&property, depth + 1)?;
+                    self.set_property_on_object(new_object, Value::Object(new_object), key, cloned)?;
+                }
+                Ok(Value::Object(new_object))
+            }
+        }
     }
 
     /// SameValue: like strict equality but NaN equals NaN and +0 differs from -0.
