@@ -304,6 +304,27 @@ enum BuiltinId {
     GeneratorProtoNext,
     GeneratorProtoReturn,
     GeneratorProtoIterator,
+    ArrayProtoToSorted,
+    ArrayProtoToReversed,
+    ArrayProtoWith,
+    StringProtoLocaleCompare,
+    ObjectGetOwnPropertyDescriptors,
+    ObjectDefineProperties,
+    ObjectIs,
+    NumberProtoToLocaleString,
+    SymbolFor,
+    SymbolKeyFor,
+    WeakMapConstructor,
+    WeakSetConstructor,
+    ReflectGet,
+    ReflectSet,
+    ReflectHas,
+    ReflectDeleteProperty,
+    ReflectOwnKeys,
+    ReflectGetPrototypeOf,
+    ReflectDefineProperty,
+    ReflectApply,
+    ReflectConstruct,
 }
 
 #[derive(Debug, Clone)]
@@ -884,6 +905,8 @@ pub struct Vm {
     next_symbol_id: u32,
     /// Optional descriptions for created symbols (for Symbol.prototype.toString).
     symbol_descriptions: HashMap<u32, String>,
+    /// Global registry for `Symbol.for(key)` / `Symbol.keyFor(sym)`.
+    symbol_registry: HashMap<String, u32>,
     /// Result of the most recent generator step, set by Yield/Return and read by
     /// `Generator.prototype.next`.
     generator_outcome: Option<GeneratorOutcome>,
@@ -940,6 +963,7 @@ impl Vm {
             builtin_method_cache: HashMap::new(),
             next_symbol_id: FIRST_USER_SYMBOL,
             symbol_descriptions: HashMap::new(),
+            symbol_registry: HashMap::new(),
             generator_outcome: None,
         };
         vm.install_globals();
@@ -1651,6 +1675,10 @@ impl Vm {
             self.allocate_builtin_value(BuiltinId::MapConstructor, true, Some(map_prototype));
         let set_ctor =
             self.allocate_builtin_value(BuiltinId::SetConstructor, true, Some(set_prototype));
+        let weak_map_ctor =
+            self.allocate_builtin_value(BuiltinId::WeakMapConstructor, true, Some(map_prototype));
+        let weak_set_ctor =
+            self.allocate_builtin_value(BuiltinId::WeakSetConstructor, true, Some(set_prototype));
         let promise_ctor = self.allocate_callable_value(
             Callable::Builtin(BuiltinId::PromiseConstructor),
             true,
@@ -1692,6 +1720,10 @@ impl Vm {
             .insert("EvalError".to_string(), eval_error_ctor.clone());
         self.globals.insert("Map".to_string(), map_ctor.clone());
         self.globals.insert("Set".to_string(), set_ctor.clone());
+        self.globals
+            .insert("WeakMap".to_string(), weak_map_ctor.clone());
+        self.globals
+            .insert("WeakSet".to_string(), weak_set_ctor.clone());
         self.globals
             .insert("Promise".to_string(), promise_ctor.clone());
         self.globals.insert("Number".to_string(), number_ctor.clone());
@@ -1824,6 +1856,9 @@ impl Vm {
             "findLastIndex",
             BuiltinId::ArrayProtoFindLastIndex,
         );
+        self.define_builtin_method(array_prototype, "toSorted", BuiltinId::ArrayProtoToSorted);
+        self.define_builtin_method(array_prototype, "toReversed", BuiltinId::ArrayProtoToReversed);
+        self.define_builtin_method(array_prototype, "with", BuiltinId::ArrayProtoWith);
 
         self.define_builtin_method(string_prototype, "charAt", BuiltinId::StringProtoCharAt);
         self.define_builtin_method(
@@ -1884,6 +1919,11 @@ impl Vm {
         self.define_builtin_method(string_prototype, "repeat", BuiltinId::StringProtoRepeat);
         self.define_builtin_method(string_prototype, "at", BuiltinId::StringProtoAt);
         self.define_builtin_method(string_prototype, "normalize", BuiltinId::StringProtoNormalize);
+        self.define_builtin_method(
+            string_prototype,
+            "localeCompare",
+            BuiltinId::StringProtoLocaleCompare,
+        );
         self.define_builtin_method(string_prototype, "concat", BuiltinId::StringProtoConcat);
         self.define_builtin_method(string_prototype, "toString", BuiltinId::StringProtoNormalize);
         self.define_builtin_method(string_prototype, "valueOf", BuiltinId::StringProtoNormalize);
@@ -1896,6 +1936,11 @@ impl Vm {
             BuiltinId::NumberProtoToPrecision,
         );
         self.define_builtin_method(number_prototype, "valueOf", BuiltinId::NumberProtoValueOf);
+        self.define_builtin_method(
+            number_prototype,
+            "toLocaleString",
+            BuiltinId::NumberProtoToLocaleString,
+        );
 
         self.define_builtin_method(boolean_prototype, "toString", BuiltinId::BooleanProtoToString);
         self.define_builtin_method(boolean_prototype, "valueOf", BuiltinId::BooleanProtoValueOf);
@@ -1974,6 +2019,17 @@ impl Vm {
                 BuiltinId::ObjectGetOwnPropertyNames,
             );
             self.define_builtin_method(object_ref, "hasOwn", BuiltinId::ObjectHasOwn);
+            self.define_builtin_method(
+                object_ref,
+                "getOwnPropertyDescriptors",
+                BuiltinId::ObjectGetOwnPropertyDescriptors,
+            );
+            self.define_builtin_method(
+                object_ref,
+                "defineProperties",
+                BuiltinId::ObjectDefineProperties,
+            );
+            self.define_builtin_method(object_ref, "is", BuiltinId::ObjectIs);
             self.define_builtin_method(
                 object_ref,
                 "preventExtensions",
@@ -2065,7 +2121,13 @@ impl Vm {
 
         if let Some(symbol_ref) = self.value_object_ref(symbol_ctor) {
             // Well-known symbols exposed as static properties of Symbol.
-            for (name, id) in [("iterator", SYMBOL_ITERATOR_ID), ("asyncIterator", 2)] {
+            for (name, id) in [
+                ("iterator", SYMBOL_ITERATOR_ID),
+                ("asyncIterator", 2),
+                ("hasInstance", 3),
+                ("toPrimitive", 4),
+                ("toStringTag", 5),
+            ] {
                 self.define_data_property(
                     symbol_ref,
                     PropertyKey::from(name),
@@ -2075,7 +2137,27 @@ impl Vm {
                     false,
                 );
             }
+            self.define_builtin_method(symbol_ref, "for", BuiltinId::SymbolFor);
+            self.define_builtin_method(symbol_ref, "keyFor", BuiltinId::SymbolKeyFor);
         }
+
+        // Reflect namespace object.
+        let reflect_object = self.allocate_ordinary_object(Some(object_prototype));
+        for (name, builtin) in [
+            ("get", BuiltinId::ReflectGet),
+            ("set", BuiltinId::ReflectSet),
+            ("has", BuiltinId::ReflectHas),
+            ("deleteProperty", BuiltinId::ReflectDeleteProperty),
+            ("ownKeys", BuiltinId::ReflectOwnKeys),
+            ("getPrototypeOf", BuiltinId::ReflectGetPrototypeOf),
+            ("defineProperty", BuiltinId::ReflectDefineProperty),
+            ("apply", BuiltinId::ReflectApply),
+            ("construct", BuiltinId::ReflectConstruct),
+        ] {
+            self.define_builtin_method(reflect_object, name, builtin);
+        }
+        self.globals
+            .insert("Reflect".to_string(), Value::Object(reflect_object));
 
         if let Some(date_ref) = self.value_object_ref(date_ctor) {
             self.define_builtin_method(date_ref, "now", BuiltinId::DateNow);
@@ -2792,6 +2874,8 @@ impl Vm {
     }
 
     fn allocate_function_value(&mut self, closure: RuntimeClosure) -> Value {
+        let arity = closure.proto.arity;
+        let name = closure.proto.name.clone().unwrap_or_default();
         let object_ref = self.heap.allocate_object(JsObject {
             kind: ObjectKind::Function,
             prototype: Some(self.function_prototype_ref()),
@@ -2807,6 +2891,23 @@ impl Vm {
             true,
             false,
             false,
+        );
+        let name_value = self.make_string_value(&name);
+        self.define_data_property(
+            object_ref,
+            PropertyKey::from("length"),
+            Value::Number(arity as f64),
+            false,
+            false,
+            true,
+        );
+        self.define_data_property(
+            object_ref,
+            PropertyKey::from("name"),
+            name_value,
+            false,
+            false,
+            true,
         );
         Value::Object(object_ref)
     }
@@ -3973,6 +4074,8 @@ impl Vm {
                 | BuiltinId::EvalErrorConstructor
                 | BuiltinId::MapConstructor
                 | BuiltinId::SetConstructor
+                | BuiltinId::WeakMapConstructor
+                | BuiltinId::WeakSetConstructor
                 | BuiltinId::RegExpConstructor
                 | BuiltinId::NumberConstructor
                 | BuiltinId::StringConstructor
@@ -4456,6 +4559,20 @@ impl Vm {
             Value::Bool(_) => {
                 let proto = self.boolean_prototype_ref();
                 self.get_property_from_chain(proto, receiver, key)
+            }
+            Value::Symbol(SymbolId(id)) => {
+                if let PropertyKey::String(name) = key {
+                    if name == "description" {
+                        let description = self.symbol_descriptions.get(id).cloned();
+                        return Ok(description
+                            .map(|d| self.make_string_value(&d))
+                            .unwrap_or(Value::Undefined));
+                    }
+                    if name == "toString" || name == "valueOf" {
+                        return Ok(self.allocate_builtin_method(BuiltinId::SymbolProtoToString));
+                    }
+                }
+                Ok(Value::Undefined)
             }
             Value::Null | Value::Undefined => Err(VmError::TypeError(
                 "cannot read properties of null or undefined".to_string(),
@@ -5413,8 +5530,22 @@ impl Vm {
                     .map(|value| self.to_string(value))
                     .unwrap_or_default(),
             )),
-            BuiltinId::ArrayConstructor => self.make_array_from_values(args),
-            BuiltinId::MapConstructor => {
+            BuiltinId::ArrayConstructor => {
+                // `Array(n)` with a single non-negative integer creates an array
+                // of that length; otherwise the args become the elements.
+                if let [Value::Number(n)] = args.as_slice() {
+                    let n = *n;
+                    if n >= 0.0 && n.fract() == 0.0 && n <= u32::MAX as f64 {
+                        let array = self.make_array_from_values(Vec::new())?;
+                        if let Value::Object(object) = &array {
+                            self.set_array_length(*object, n as u32);
+                        }
+                        return Ok(array);
+                    }
+                }
+                self.make_array_from_values(args)
+            }
+            BuiltinId::MapConstructor | BuiltinId::WeakMapConstructor => {
                 let object = self.heap.allocate_object(JsObject {
                     kind: ObjectKind::Map(Vec::new()),
                     prototype: Some(self.map_prototype_ref()),
@@ -5433,7 +5564,7 @@ impl Vm {
                 }
                 Ok(Value::Object(object))
             }
-            BuiltinId::SetConstructor => {
+            BuiltinId::SetConstructor | BuiltinId::WeakSetConstructor => {
                 let object = self.heap.allocate_object(JsObject {
                     kind: ObjectKind::Set(Vec::new()),
                     prototype: Some(self.set_prototype_ref()),
@@ -5643,28 +5774,7 @@ impl Vm {
             BuiltinId::ArrayProtoSort => {
                 let object = self.builtin_object_this(&this_value, "Array.prototype.sort")?;
                 let mut values = self.array_like_to_vec(&this_value)?;
-                if let Some(compare_fn) = args.first() {
-                    if !matches!(compare_fn, Value::Undefined) {
-                        let compare_fn = compare_fn.clone();
-                        let len = values.len();
-                        for i in 0..len {
-                            for j in i + 1..len {
-                                let result = self.call_value_sync(
-                                    compare_fn.clone(),
-                                    Value::Undefined,
-                                    vec![values[i].clone(), values[j].clone()],
-                                )?;
-                                if self.to_number(&result) > 0.0 {
-                                    values.swap(i, j);
-                                }
-                            }
-                        }
-                    } else {
-                        values.sort_by_key(|value| self.to_string(value));
-                    }
-                } else {
-                    values.sort_by_key(|value| self.to_string(value));
-                }
+                self.sort_values(&mut values, args.first())?;
                 self.replace_array_contents(object, values)?;
                 Ok(Value::Object(object))
             }
@@ -6243,6 +6353,211 @@ impl Vm {
                 self.make_iter_result(value, true)
             }
             BuiltinId::GeneratorProtoIterator => Ok(this_value),
+            BuiltinId::ArrayProtoToSorted => {
+                let mut values = self.array_like_to_vec(&this_value)?;
+                self.sort_values(&mut values, args.first())?;
+                self.make_array_from_values(values)
+            }
+            BuiltinId::ArrayProtoToReversed => {
+                let mut values = self.array_like_to_vec(&this_value)?;
+                values.reverse();
+                self.make_array_from_values(values)
+            }
+            BuiltinId::ArrayProtoWith => {
+                let mut values = self.array_like_to_vec(&this_value)?;
+                let len = values.len() as i64;
+                let mut index = self.number_arg(&args, 0) as i64;
+                if index < 0 {
+                    index += len;
+                }
+                if index < 0 || index >= len {
+                    return Err(VmError::RangeError("Invalid index".to_string()));
+                }
+                values[index as usize] = args.get(1).cloned().unwrap_or(Value::Undefined);
+                self.make_array_from_values(values)
+            }
+            BuiltinId::StringProtoLocaleCompare => {
+                let text = self.builtin_string_this(&this_value)?;
+                let other = self.string_arg(&args, 0);
+                let result = match text.cmp(&other) {
+                    std::cmp::Ordering::Less => -1.0,
+                    std::cmp::Ordering::Equal => 0.0,
+                    std::cmp::Ordering::Greater => 1.0,
+                };
+                Ok(Value::Number(result))
+            }
+            BuiltinId::ObjectIs => {
+                let a = args.first().cloned().unwrap_or(Value::Undefined);
+                let b = args.get(1).cloned().unwrap_or(Value::Undefined);
+                Ok(Value::Bool(self.same_value(&a, &b)))
+            }
+            BuiltinId::ObjectGetOwnPropertyDescriptors => {
+                let object = self.require_object_ref(
+                    args.first().unwrap_or(&Value::Undefined),
+                    "Object.getOwnPropertyDescriptors",
+                )?;
+                let result = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+                let keys: Vec<PropertyKey> = self
+                    .heap
+                    .objects()
+                    .get(object)
+                    .map(|o| o.properties.keys().cloned().collect())
+                    .unwrap_or_default();
+                for key in keys {
+                    if let Some(descriptor) = self.get_own_property_descriptor(object, &key) {
+                        let descriptor_value = self.property_descriptor_to_value(descriptor)?;
+                        self.set_property_on_object(
+                            result,
+                            Value::Object(result),
+                            key,
+                            descriptor_value,
+                        )?;
+                    }
+                }
+                Ok(Value::Object(result))
+            }
+            BuiltinId::ObjectDefineProperties => {
+                let object = self.require_object_ref(
+                    args.first().unwrap_or(&Value::Undefined),
+                    "Object.defineProperties",
+                )?;
+                if let Some(Value::Object(props)) = args.get(1) {
+                    let props = *props;
+                    for key in self.object_own_enumerable_keys(props) {
+                        let descriptor_value =
+                            self.get_property_value(&Value::Object(props), &key)?;
+                        let descriptor = self.value_to_property_descriptor(&descriptor_value)?;
+                        if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
+                            object_data.properties.insert(key.clone(), descriptor);
+                        }
+                        self.update_array_length_for_key(object, &key)?;
+                    }
+                }
+                Ok(Value::Object(object))
+            }
+            BuiltinId::NumberProtoToLocaleString => {
+                let number = self.to_number(&this_value);
+                Ok(self.make_string_value(&Self::format_number(number)))
+            }
+            BuiltinId::SymbolFor => {
+                let key = self.string_arg(&args, 0);
+                let id = match self.symbol_registry.get(&key) {
+                    Some(id) => *id,
+                    None => {
+                        let id = self.next_symbol_id;
+                        self.next_symbol_id = self.next_symbol_id.saturating_add(1);
+                        self.symbol_registry.insert(key.clone(), id);
+                        self.symbol_descriptions.insert(id, key);
+                        id
+                    }
+                };
+                Ok(Value::Symbol(SymbolId(id)))
+            }
+            BuiltinId::SymbolKeyFor => {
+                let found = match args.first() {
+                    Some(Value::Symbol(SymbolId(id))) => self
+                        .symbol_registry
+                        .iter()
+                        .find(|(_, registered)| *registered == id)
+                        .map(|(key, _)| key.clone()),
+                    _ => None,
+                };
+                match found {
+                    Some(key) => Ok(self.make_string_value(&key)),
+                    None => Ok(Value::Undefined),
+                }
+            }
+            BuiltinId::ReflectGet => {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                let key = self.to_property_key(args.get(1).unwrap_or(&Value::Undefined))?;
+                self.get_property_value(&target, &key)
+            }
+            BuiltinId::ReflectSet => {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                let key = self.to_property_key(args.get(1).unwrap_or(&Value::Undefined))?;
+                let value = args.get(2).cloned().unwrap_or(Value::Undefined);
+                self.set_property_value(&target, key, value)?;
+                Ok(Value::Bool(true))
+            }
+            BuiltinId::ReflectHas => {
+                let target =
+                    self.require_object_ref(args.first().unwrap_or(&Value::Undefined), "Reflect.has")?;
+                let key = self.to_property_key(args.get(1).unwrap_or(&Value::Undefined))?;
+                Ok(Value::Bool(
+                    self.lookup_property_descriptor(target, &key).is_some(),
+                ))
+            }
+            BuiltinId::ReflectDeleteProperty => {
+                let target = self.require_object_ref(
+                    args.first().unwrap_or(&Value::Undefined),
+                    "Reflect.deleteProperty",
+                )?;
+                let key = self.to_property_key(args.get(1).unwrap_or(&Value::Undefined))?;
+                Ok(Value::Bool(self.delete_property(target, &key)))
+            }
+            BuiltinId::ReflectOwnKeys => {
+                let target = self.require_object_ref(
+                    args.first().unwrap_or(&Value::Undefined),
+                    "Reflect.ownKeys",
+                )?;
+                let keys: Vec<PropertyKey> = self
+                    .heap
+                    .objects()
+                    .get(target)
+                    .map(|o| o.properties.keys().cloned().collect())
+                    .unwrap_or_default();
+                let values = keys
+                    .into_iter()
+                    .filter(|key| !matches!(key, PropertyKey::Symbol(_)))
+                    .map(|key| self.make_string_value(&self.property_key_to_string(&key)))
+                    .collect();
+                self.make_array_from_values(values)
+            }
+            BuiltinId::ReflectGetPrototypeOf => {
+                let target = self.require_object_ref(
+                    args.first().unwrap_or(&Value::Undefined),
+                    "Reflect.getPrototypeOf",
+                )?;
+                match self.heap.objects().get(target).and_then(|o| o.prototype) {
+                    Some(prototype) => Ok(Value::Object(prototype)),
+                    None => Ok(Value::Null),
+                }
+            }
+            BuiltinId::ReflectDefineProperty => {
+                let object = self.require_object_ref(
+                    args.first().unwrap_or(&Value::Undefined),
+                    "Reflect.defineProperty",
+                )?;
+                let name = self.to_property_key(args.get(1).unwrap_or(&Value::Undefined))?;
+                let descriptor =
+                    self.value_to_property_descriptor(args.get(2).unwrap_or(&Value::Undefined))?;
+                if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
+                    object_data.properties.insert(name.clone(), descriptor);
+                }
+                self.update_array_length_for_key(object, &name)?;
+                Ok(Value::Bool(true))
+            }
+            BuiltinId::ReflectApply => {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let arg_list = match args.get(2) {
+                    Some(value) if !matches!(value, Value::Null | Value::Undefined) => {
+                        self.array_like_to_vec(value)?
+                    }
+                    _ => Vec::new(),
+                };
+                self.call_value_sync(target, this_arg, arg_list)
+            }
+            BuiltinId::ReflectConstruct => {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                let arg_list = match args.get(1) {
+                    Some(value) if !matches!(value, Value::Null | Value::Undefined) => {
+                        self.array_like_to_vec(value)?
+                    }
+                    _ => Vec::new(),
+                };
+                self.construct_value_sync(target, arg_list)
+            }
             BuiltinId::StringProtoCharAt => {
                 let text = self.builtin_string_this(&this_value)?;
                 let index = args
@@ -7199,6 +7514,60 @@ impl Vm {
             ..JsObject::default()
         });
         Value::Object(iterator)
+    }
+
+    /// SameValue: like strict equality but NaN equals NaN and +0 differs from -0.
+    fn same_value(&self, a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Number(x), Value::Number(y)) => {
+                if x.is_nan() && y.is_nan() {
+                    true
+                } else if *x == 0.0 && *y == 0.0 {
+                    x.is_sign_negative() == y.is_sign_negative()
+                } else {
+                    x == y
+                }
+            }
+            _ => self.strict_equal(a, b),
+        }
+    }
+
+    /// Sort `values` in place (Array.prototype.sort / toSorted). Uses the given
+    /// comparator, or default lexicographic-by-string order.
+    fn sort_values(
+        &mut self,
+        values: &mut [Value],
+        compare_fn: Option<&Value>,
+    ) -> Result<(), VmError> {
+        let comparator = compare_fn
+            .filter(|f| !matches!(f, Value::Undefined))
+            .cloned();
+        if let Some(compare_fn) = comparator {
+            let len = values.len();
+            for i in 0..len {
+                for j in i + 1..len {
+                    let result = self.call_value_sync(
+                        compare_fn.clone(),
+                        Value::Undefined,
+                        vec![values[i].clone(), values[j].clone()],
+                    )?;
+                    if self.to_number(&result) > 0.0 {
+                        values.swap(i, j);
+                    }
+                }
+            }
+        } else {
+            // Default order compares the string form of each element.
+            let mut keyed: Vec<(String, Value)> = values
+                .iter()
+                .map(|value| (self.to_string(value), value.clone()))
+                .collect();
+            keyed.sort_by(|a, b| a.0.cmp(&b.0));
+            for (slot, (_, value)) in values.iter_mut().zip(keyed.into_iter()) {
+                *slot = value;
+            }
+        }
+        Ok(())
     }
 
     /// Recursively flatten array values up to `depth` levels (Array.prototype.flat).
