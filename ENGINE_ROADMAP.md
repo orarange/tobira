@@ -256,6 +256,39 @@ Goal: cut over fully.
 
 Exit: `boa` is gone and target sites are usable in core flows.
 
+### Phase 9 - Language Conformance Hardening (complete)
+
+Goal: close the gap between "boa removed" and "idiomatic real-world JS runs",
+driven by data rather than a feature checklist.
+
+Method: `tests/feature_probe.rs` runs ~130 representative real-world snippets
+(closures, classes, destructuring, iteration, builtins, regex, JSON, dates,
+generators…) and reports which fail. Each round fixes the highest-impact gaps,
+adds hard regression tests, and re-runs the probe. The probe rose from **78/131
+to 131/131**.
+
+Landed in this phase:
+
+- Compiler: transitive upvalue capture + lexical `this` in arrows; default
+  parameters; object-literal and class getters/setters; labeled break/continue;
+  per-iteration `let` bindings in `for` loops; tagged template literals; private
+  class fields (`#x`); generator functions (`yield`, `yield*`, two-way `next`).
+- Runtime library: filled out Array/String/Number/Boolean/Object/Math, global
+  `parseInt`/`isFinite`/`encodeURIComponent`/…, primitive Number/Boolean
+  prototypes, `Symbol` + the iteration protocol, `Date`, and a `RegExp` engine
+  (test/exec/match/replace/split, named groups) on top of the `regex` crate.
+- Semantics: nullish-coalescing stack fix, a real `delete`, JSON integer/indent
+  formatting with key-order preservation, sloppy vs strict frozen-write behavior.
+
+Known not-yet-done (tracked for the next conformance round): async generators,
+generator object/class methods, `Proxy`/`Reflect`, `BigInt`, typed arrays,
+`structuredClone`, `String`/`Date` parsing edge cases, and full microtask-pumped
+async ergonomics. RegExp lookbehind/backreferences are unsupported (the `regex`
+crate lacks them) and surface as a thrown error.
+
+Next: continue the data-driven loop with a tier-2 probe, then return to Phase 7
+performance work on large real bundles.
+
 ## Core Complete Definition
 
 Remove `boa` only after all of the following hold:

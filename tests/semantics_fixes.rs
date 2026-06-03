@@ -103,3 +103,36 @@ fn json_roundtrip() {
         assert(parsed.a.b.c[0] === 1);
     "#);
 }
+
+#[test]
+fn return_inside_finally_overrides() {
+    run(r#"
+        function f() { try { return 1; } finally { return 2; } }
+        assert(f() === 2);
+    "#);
+}
+
+#[test]
+fn finally_runs_on_normal_return() {
+    run(r#"
+        let ran = false;
+        function f() { try { return 7; } finally { ran = true; } }
+        assert(f() === 7);
+        assert(ran === true);
+    "#);
+}
+
+#[test]
+fn nested_finally_order() {
+    run(r#"
+        const order = [];
+        function f() {
+            try {
+                try { return 'x'; }
+                finally { order.push('inner'); }
+            } finally { order.push('outer'); }
+        }
+        f();
+        assert(order.join(',') === 'inner,outer');
+    "#);
+}

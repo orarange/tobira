@@ -513,11 +513,22 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn emit_active_finally_blocks(&mut self) -> Result<(), CompileError> {
+        // Emit innermost finally first. While emitting finally[i], only the OUTER
+        // finallys (0..i) stay active, so a `return`/`break` inside a finally does
+        // not re-enter that same finally (which would recurse forever) — it only
+        // runs the remaining outer ones.
         let blocks = self.active_finally_blocks.clone();
-        for block in blocks.iter().rev() {
-            self.compile_inline_block(block)?;
+        let saved = std::mem::take(&mut self.active_finally_blocks);
+        let mut result = Ok(());
+        for index in (0..blocks.len()).rev() {
+            self.active_finally_blocks = blocks[0..index].to_vec();
+            if let Err(error) = self.compile_inline_block(&blocks[index]) {
+                result = Err(error);
+                break;
+            }
         }
-        Ok(())
+        self.active_finally_blocks = saved;
+        result
     }
 
     fn compile_inline_block(
