@@ -34,7 +34,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - run Codex implementation from the dedicated `codex/js-engine` worktree (`browser-js-engine`)
   - Codex is the primary implementation owner for this worktree and may touch both CSS and JS when needed
 - Verification status:
-- `cargo test`: `218` passing tests and `1` ignored manual large-bundle parser test on `2026-05-28`
+- `cargo test`: all green across 20 test binaries on `2026-06-03` (engine conformance probes at tier-1 131/131, tier-2 68/78)
+- Earlier baseline: `218` passing tests and `1` ignored manual large-bundle parser test on `2026-05-28`
 - `cargo build`: success on `2026-05-28`
 - Strategic direction:
   - `ENGINE_ROADMAP.md` now tracks the `boa` replacement plan separately from `JS_ROADMAP.md`.
@@ -221,6 +222,34 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-06-03 - Claude (JS engine Phase 9 conformance hardening)
+
+- Drove a data-driven conformance pass on the self-hosted engine using two
+  diagnostic probes of real-world JS patterns:
+  - `tests/feature_probe.rs` (tier 1): **78 -> 131/131**.
+  - `tests/feature_probe2.rs` (tier 2, harder/edge cases): **39 -> 68/78**.
+- Compiler: transitive upvalue capture, lexical `this` in arrows, default
+  parameters, object/class getters-setters, labeled break/continue,
+  per-iteration `let` bindings, tagged templates, private fields + private
+  methods, generators (`yield`/`yield*`/two-way `next`, object/class methods),
+  `typeof undeclared`, the `arguments` object, function/var hoisting, and the
+  `return`-inside-`finally` infinite-recursion fix.
+- Runtime: filled out Array (incl. ES2023 toSorted/toReversed/with)/String/
+  Number/Boolean/Object (descriptors, defineProperties, is)/Math, primitive
+  Number/Boolean prototypes, global parseInt/isFinite/encodeURIComponent/…,
+  `Symbol` + iteration protocol + Symbol.for/keyFor, `Date`, a `RegExp` engine
+  (regex crate), `Reflect`, `WeakMap`/`WeakSet`, `structuredClone`, function
+  length/name, JSON toJSON/replacer/reviver + integer/indent/key-order fixes,
+  nullish-coalescing stack fix, a real `delete`, and sloppy/strict frozen-write.
+- ~22 focused commits, each with hard regression tests (separate from the
+  always-green probes). No regressions in the existing suite.
+- Remaining tier-2 gaps (deferred — large subsystems or niche): `Proxy`,
+  `BigInt`, typed arrays/`ArrayBuffer`, `new.target`, class static blocks,
+  iterable (non-array) destructuring, and ECMAScript exponential number
+  formatting. `RegExp` lookbehind/backreferences are unsupported by the `regex`
+  crate and throw. See `ENGINE_ROADMAP.md` Phase 9 + the probe files.
+- Verification: `cargo test` all green (20 test binaries); `cargo build --lib` ok.
 
 ### 2026-05-28 - Codex (JS engine Phase 1 lexer/parser)
 
