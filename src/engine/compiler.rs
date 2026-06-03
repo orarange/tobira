@@ -2751,7 +2751,10 @@ impl<'a> FunctionCompiler<'a> {
             ExpressionNode::ImportCall(_) => Err(CompileError::Unimplemented("import() calls")),
             ExpressionNode::Optional(optional) => self.compile_optional_expression(optional),
             ExpressionNode::TaggedTemplate(template) => self.compile_tagged_template(template),
-            ExpressionNode::NewTarget(_) => Err(CompileError::Unimplemented("new.target")),
+            ExpressionNode::NewTarget(_) => {
+                self.emit(Opcode::LoadNewTarget);
+                Ok(())
+            }
             ExpressionNode::ImportMeta(_) => Err(CompileError::Unimplemented("import.meta")),
             ExpressionNode::Assign(assign) => self.compile_assignment_expression(assign),
             ExpressionNode::Unary(unary) => self.compile_unary_expression(unary),

@@ -6,6 +6,8 @@ pub enum Opcode {
     LoadTrue,
     LoadFalse,
     LoadThis,
+    /// Push `new.target` for the current frame (the constructor, or undefined).
+    LoadNewTarget,
     Pop,
     Dup,
 

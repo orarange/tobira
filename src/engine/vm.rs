@@ -427,6 +427,8 @@ pub struct CallFrame {
     /// Call arguments retained for the `arguments` object (only when the function
     /// references it).
     arguments: Vec<Value>,
+    /// `new.target` — the constructor when invoked via `new`, else undefined.
+    new_target: Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1121,6 +1123,14 @@ impl Vm {
             Opcode::LoadFalse => self.stack.push(Value::Bool(false)),
             Opcode::LoadThis => {
                 let value = self.current_this()?.clone();
+                self.stack.push(value);
+            }
+            Opcode::LoadNewTarget => {
+                let value = self
+                    .frames
+                    .last()
+                    .map(|frame| frame.new_target.clone())
+                    .unwrap_or(Value::Undefined);
                 self.stack.push(value);
             }
             Opcode::Pop => {
@@ -3725,6 +3735,7 @@ impl Vm {
             async_outer_promise: None,
             generator: None,
             arguments,
+            new_target: Value::Undefined,
         })
     }
 
@@ -4043,6 +4054,9 @@ impl Vm {
                 }
                 let this_value = self.construct_this_value(&constructor)?;
                 self.push_call_frame(closure, args, this_value.clone(), Some(this_value))?;
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.new_target = constructor.clone();
+                }
                 Ok(None)
             }
             Callable::Bound(bound) => {
