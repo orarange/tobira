@@ -326,6 +326,7 @@ enum BuiltinId {
     ReflectApply,
     ReflectConstruct,
     StructuredClone,
+    ProxyConstructor,
 }
 
 #[derive(Debug, Clone)]
@@ -1281,9 +1282,15 @@ impl Vm {
                 let key = self.pop_value()?;
                 let key = self.to_property_key(&key)?;
                 let object = self.require_object_ref(&object, "in operator")?;
-                self.stack.push(Value::Bool(
-                    self.lookup_property_descriptor(object, &key).is_some(),
-                ));
+                let proxy = self.heap.objects().get(object).and_then(|o| match &o.kind {
+                    ObjectKind::Proxy { target, handler } => Some((*target, *handler)),
+                    _ => None,
+                });
+                let present = match proxy {
+                    Some((target, handler)) => self.proxy_has(target, handler, &key)?,
+                    None => self.lookup_property_descriptor(object, &key).is_some(),
+                };
+                self.stack.push(Value::Bool(present));
             }
             Opcode::Instanceof => {
                 let constructor = self.pop_value()?;
@@ -2169,6 +2176,9 @@ impl Vm {
         }
         self.globals
             .insert("Reflect".to_string(), Value::Object(reflect_object));
+
+        let proxy_ctor = self.allocate_builtin_value(BuiltinId::ProxyConstructor, true, None);
+        self.globals.insert("Proxy".to_string(), proxy_ctor);
 
         if let Some(date_ref) = self.value_object_ref(date_ctor) {
             self.define_builtin_method(date_ref, "now", BuiltinId::DateNow);
@@ -4100,6 +4110,7 @@ impl Vm {
                 | BuiltinId::StringConstructor
                 | BuiltinId::BooleanConstructor
                 | BuiltinId::DateConstructor
+                | BuiltinId::ProxyConstructor
         )
     }
 
@@ -4522,6 +4533,79 @@ impl Vm {
         }
     }
 
+    /// Convert a property key into the Value a Proxy/Reflect trap receives.
+    fn property_key_to_value(&mut self, key: &PropertyKey) -> Value {
+        match key {
+            PropertyKey::Symbol(symbol) => Value::Symbol(*symbol),
+            other => {
+                let text = self.property_key_to_string(other);
+                self.make_string_value(&text)
+            }
+        }
+    }
+
+    /// Proxy `get`: invoke the handler's get trap, else forward to the target.
+    fn proxy_get(
+        &mut self,
+        target: GcRef<JsObject>,
+        handler: GcRef<JsObject>,
+        key: &PropertyKey,
+        receiver: &Value,
+    ) -> Result<Value, VmError> {
+        let trap = self.get_property_value(&Value::Object(handler), &PropertyKey::from("get"))?;
+        if self.is_callable_value(&trap) {
+            let key_value = self.property_key_to_value(key);
+            return self.call_value_sync(
+                trap,
+                Value::Object(handler),
+                vec![Value::Object(target), key_value, receiver.clone()],
+            );
+        }
+        self.get_property_value(&Value::Object(target), key)
+    }
+
+    /// Proxy `set`: invoke the handler's set trap, else forward to the target.
+    fn proxy_set(
+        &mut self,
+        target: GcRef<JsObject>,
+        handler: GcRef<JsObject>,
+        key: PropertyKey,
+        value: Value,
+        receiver: Value,
+    ) -> Result<(), VmError> {
+        let trap = self.get_property_value(&Value::Object(handler), &PropertyKey::from("set"))?;
+        if self.is_callable_value(&trap) {
+            let key_value = self.property_key_to_value(&key);
+            self.call_value_sync(
+                trap,
+                Value::Object(handler),
+                vec![Value::Object(target), key_value, value, receiver],
+            )?;
+            return Ok(());
+        }
+        self.set_property_value(&Value::Object(target), key, value)
+    }
+
+    /// Proxy `has` (`in` operator): invoke the handler's has trap, else forward.
+    fn proxy_has(
+        &mut self,
+        target: GcRef<JsObject>,
+        handler: GcRef<JsObject>,
+        key: &PropertyKey,
+    ) -> Result<bool, VmError> {
+        let trap = self.get_property_value(&Value::Object(handler), &PropertyKey::from("has"))?;
+        if self.is_callable_value(&trap) {
+            let key_value = self.property_key_to_value(key);
+            let result = self.call_value_sync(
+                trap,
+                Value::Object(handler),
+                vec![Value::Object(target), key_value],
+            )?;
+            return Ok(self.is_truthy(&result));
+        }
+        Ok(self.lookup_property_descriptor(target, key).is_some())
+    }
+
     fn value_object_ref(&self, value: Value) -> Option<GcRef<JsObject>> {
         match value {
             Value::Object(object) => Some(object),
@@ -4606,6 +4690,15 @@ impl Vm {
         receiver: &Value,
         key: &PropertyKey,
     ) -> Result<Value, VmError> {
+        // Proxy objects route through the handler's `get` trap.
+        let proxy = self.heap.objects().get(object).and_then(|o| match &o.kind {
+            ObjectKind::Proxy { target, handler } => Some((*target, *handler)),
+            _ => None,
+        });
+        if let Some((target, handler)) = proxy {
+            return self.proxy_get(target, handler, key, receiver);
+        }
+
         // Host objects route through the DOM dispatch table first.
         // Copy only HostObjectSlot (Copy type) to avoid expensive ObjectKind::clone()
         // which would clone the Vec contents of Map/Set/Promise objects.
@@ -4669,6 +4762,15 @@ impl Vm {
         key: PropertyKey,
         value: Value,
     ) -> Result<(), VmError> {
+        // Proxy objects route writes through the handler's `set` trap.
+        let proxy = self.heap.objects().get(object).and_then(|o| match &o.kind {
+            ObjectKind::Proxy { target, handler } => Some((*target, *handler)),
+            _ => None,
+        });
+        if let Some((target, handler)) = proxy {
+            return self.proxy_set(target, handler, key, value, receiver);
+        }
+
         // Host objects route writes through the DOM dispatch table.
         // Copy only HostObjectSlot (Copy type) to avoid expensive ObjectKind::clone().
         let host_slot = self.heap.objects().get(object)
@@ -6580,6 +6682,20 @@ impl Vm {
             BuiltinId::StructuredClone => {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
                 self.structured_clone(&value, 0)
+            }
+            BuiltinId::ProxyConstructor => {
+                let target = self
+                    .require_object_ref(args.first().unwrap_or(&Value::Undefined), "Proxy target")?;
+                let handler = self.require_object_ref(
+                    args.get(1).unwrap_or(&Value::Undefined),
+                    "Proxy handler",
+                )?;
+                let proxy = self.heap.allocate_object(JsObject {
+                    kind: ObjectKind::Proxy { target, handler },
+                    prototype: self.heap.objects().get(target).and_then(|o| o.prototype),
+                    ..JsObject::default()
+                });
+                Ok(Value::Object(proxy))
             }
             BuiltinId::StringProtoCharAt => {
                 let text = self.builtin_string_this(&this_value)?;

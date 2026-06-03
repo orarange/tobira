@@ -180,6 +180,10 @@ pub enum ObjectKind {
     Promise(Box<PromiseState>),
     AsyncResumer(Box<AsyncContext>),
     Generator(Box<GeneratorState>),
+    Proxy {
+        target: GcRef<JsObject>,
+        handler: GcRef<JsObject>,
+    },
     RegExp {
         source: String,
         flags: String,
@@ -208,6 +212,7 @@ impl std::fmt::Debug for ObjectKind {
             Self::Promise(state) => f.debug_tuple("Promise").field(state).finish(),
             Self::AsyncResumer(_) => f.write_str("AsyncResumer(..)"),
             Self::Generator(_) => f.write_str("Generator(..)"),
+            Self::Proxy { .. } => f.write_str("Proxy(..)"),
             Self::RegExp {
                 source,
                 flags,
