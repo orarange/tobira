@@ -1707,16 +1707,16 @@ impl<'a> FunctionCompiler<'a> {
         if method.is_private() {
             return Err(CompileError::Unimplemented("private class methods"));
         }
-        // None = ordinary method (SetProp); Some(true/false) = getter/setter.
-        let accessor = match method.kind() {
-            MethodDefinitionKindNode::Ordinary => None,
-            MethodDefinitionKindNode::Get => Some(true),
-            MethodDefinitionKindNode::Set => Some(false),
-            MethodDefinitionKindNode::Generator => {
-                return Err(CompileError::Unimplemented("generator class methods"));
-            }
-            MethodDefinitionKindNode::Async | MethodDefinitionKindNode::AsyncGenerator => {
-                return Err(CompileError::Unimplemented("async class methods"));
+        // accessor: None = ordinary/generator/async method (SetProp);
+        // Some(true/false) = getter/setter.
+        let (accessor, is_async, is_generator) = match method.kind() {
+            MethodDefinitionKindNode::Ordinary => (None, false, false),
+            MethodDefinitionKindNode::Generator => (None, false, true),
+            MethodDefinitionKindNode::Async => (None, true, false),
+            MethodDefinitionKindNode::Get => (Some(true), false, false),
+            MethodDefinitionKindNode::Set => (Some(false), false, false),
+            MethodDefinitionKindNode::AsyncGenerator => {
+                return Err(CompileError::Unimplemented("async generator class methods"));
             }
         };
         let nested_index = self.compile_nested_function_with_options(
@@ -1724,8 +1724,8 @@ impl<'a> FunctionCompiler<'a> {
             method.parameters(),
             method.body(),
             method.body().strict(),
-            false,
-            false,
+            is_async,
+            is_generator,
             false,
             options.clone(),
             &[],
@@ -2903,26 +2903,25 @@ impl<'a> FunctionCompiler<'a> {
         &mut self,
         method: &ObjectMethodDefinitionNode,
     ) -> Result<(), CompileError> {
-        match method.kind() {
-            MethodDefinitionKindNode::Ordinary => {}
+        let (is_async, is_generator) = match method.kind() {
+            MethodDefinitionKindNode::Ordinary => (false, false),
+            MethodDefinitionKindNode::Generator => (false, true),
             MethodDefinitionKindNode::Get | MethodDefinitionKindNode::Set => {
                 return Err(CompileError::Unimplemented("object literal accessors"));
             }
-            MethodDefinitionKindNode::Generator => {
-                return Err(CompileError::Unimplemented("generator object methods"));
+            MethodDefinitionKindNode::Async => (true, false),
+            MethodDefinitionKindNode::AsyncGenerator => {
+                return Err(CompileError::Unimplemented("async generator object methods"));
             }
-            MethodDefinitionKindNode::AsyncGenerator | MethodDefinitionKindNode::Async => {
-                return Err(CompileError::Unimplemented("async object methods"));
-            }
-        }
+        };
 
         self.compile_nested_function_value(
             self.property_name_string(method.name()),
             method.parameters(),
             method.body(),
             method.body().strict(),
-            false,
-            false,
+            is_async,
+            is_generator,
             false,
         )
     }

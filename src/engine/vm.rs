@@ -6848,7 +6848,11 @@ impl Vm {
             BuiltinId::MathRandom => Ok(Value::Number(self.next_random())),
             BuiltinId::JsonStringify => {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
-                let json = match self.to_json_value(&value)? {
+                let replacer = args
+                    .get(1)
+                    .filter(|value| self.is_callable_value(value))
+                    .cloned();
+                let json = match self.to_json_value("", &value, replacer.as_ref())? {
                     Some(json) => json,
                     None => return Ok(Value::Undefined),
                 };
@@ -6880,7 +6884,23 @@ impl Vm {
                     .unwrap_or_default();
                 let json = serde_json::from_str::<JsonValue>(&text)
                     .map_err(|error| VmError::TypeError(error.to_string()))?;
-                self.from_json_value(&json)
+                let parsed = self.from_json_value(&json)?;
+                // Optional reviver: walk the result bottom-up transforming values.
+                match args.get(1).filter(|value| self.is_callable_value(value)) {
+                    Some(reviver) => {
+                        let reviver = reviver.clone();
+                        let holder =
+                            self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+                        self.set_property_on_object(
+                            holder,
+                            Value::Object(holder),
+                            PropertyKey::from(""),
+                            parsed,
+                        )?;
+                        self.internalize_json_property(holder, "", &reviver)
+                    }
+                    None => Ok(parsed),
+                }
             }
             BuiltinId::ConsoleLog | BuiltinId::ConsoleInfo | BuiltinId::ConsoleWarn | BuiltinId::ConsoleError => {
                 let level = match builtin {
@@ -8208,48 +8228,81 @@ impl Vm {
         Ok(Value::Bool(!any))
     }
 
-    fn to_json_value(&mut self, value: &Value) -> Result<Option<JsonValue>, VmError> {
-        Ok(match value {
+    fn to_json_value(
+        &mut self,
+        key: &str,
+        value: &Value,
+        replacer: Option<&Value>,
+    ) -> Result<Option<JsonValue>, VmError> {
+        // Apply a `toJSON` method, then a replacer function, before serializing.
+        let mut value = value.clone();
+        if let Value::Object(_) = &value {
+            let to_json = self.get_property_value(&value, &PropertyKey::from("toJSON"))?;
+            if self.is_callable_value(&to_json) {
+                let key_value = self.make_string_value(key);
+                value = self.call_value_sync(to_json, value.clone(), vec![key_value])?;
+            }
+        }
+        if let Some(replacer) = replacer {
+            if self.is_callable_value(replacer) {
+                let key_value = self.make_string_value(key);
+                value = self.call_value_sync(
+                    replacer.clone(),
+                    Value::Undefined,
+                    vec![key_value, value],
+                )?;
+            }
+        }
+
+        Ok(match &value {
             Value::Undefined | Value::Symbol(_) => None,
             Value::Null => Some(JsonValue::Null),
             Value::Bool(boolean) => Some(JsonValue::Bool(*boolean)),
             Value::Number(number) => {
+                let number = *number;
                 if !number.is_finite() {
                     // NaN and ±Infinity stringify to null per the JSON grammar.
                     Some(JsonValue::Null)
                 } else if number.fract() == 0.0
-                    && *number >= i64::MIN as f64
-                    && *number <= i64::MAX as f64
+                    && number >= i64::MIN as f64
+                    && number <= i64::MAX as f64
                 {
                     // Preserve integers as integers so they don't serialize as "1.0".
-                    Some(JsonValue::Number(serde_json::Number::from(*number as i64)))
+                    Some(JsonValue::Number(serde_json::Number::from(number as i64)))
                 } else {
-                    serde_json::Number::from_f64(*number).map(JsonValue::Number)
+                    serde_json::Number::from_f64(number).map(JsonValue::Number)
                 }
             }
             Value::String(string) => Some(JsonValue::String(self.string_text(*string))),
             Value::Object(object) => {
+                let object = *object;
                 if self.callables.contains_key(&object.raw()) {
                     return Ok(None);
                 }
-                let kind = self
-                    .heap
-                    .objects()
-                    .get(*object)
-                    .map(|object_data| object_data.kind.clone())
-                    .unwrap_or(ObjectKind::Ordinary);
-                if kind == ObjectKind::Array {
-                    let mut items = Vec::new();
-                    for value in self.array_like_to_vec(&Value::Object(*object))? {
-                        items.push(self.to_json_value(&value)?.unwrap_or(JsonValue::Null));
+                let is_array = matches!(
+                    self.heap.objects().get(object).map(|o| &o.kind),
+                    Some(ObjectKind::Array)
+                );
+                if is_array {
+                    let elements = self.array_like_to_vec(&Value::Object(object))?;
+                    let mut items = Vec::with_capacity(elements.len());
+                    for (index, element) in elements.iter().enumerate() {
+                        items.push(
+                            self.to_json_value(&index.to_string(), element, replacer)?
+                                .unwrap_or(JsonValue::Null),
+                        );
                     }
                     Some(JsonValue::Array(items))
                 } else {
                     let mut map = serde_json::Map::new();
-                    for key in self.object_own_enumerable_keys(*object) {
-                        let value = self.get_property_value(&Value::Object(*object), &key)?;
-                        if let Some(json) = self.to_json_value(&value)? {
-                            map.insert(self.property_key_to_string(&key), json);
+                    for property_key in self.object_own_enumerable_keys(object) {
+                        let property_value =
+                            self.get_property_value(&Value::Object(object), &property_key)?;
+                        let key_string = self.property_key_to_string(&property_key);
+                        if let Some(json) =
+                            self.to_json_value(&key_string, &property_value, replacer)?
+                        {
+                            map.insert(key_string, json);
                         }
                     }
                     Some(JsonValue::Object(map))
@@ -8285,6 +8338,60 @@ impl Vm {
                 Ok(Value::Object(object))
             }
         }
+    }
+
+    /// JSON.parse reviver walk (InternalizeJSONProperty): recurse into children
+    /// first, then call `reviver(key, value)`; an `undefined` result deletes the
+    /// property.
+    fn internalize_json_property(
+        &mut self,
+        holder: GcRef<JsObject>,
+        key: &str,
+        reviver: &Value,
+    ) -> Result<Value, VmError> {
+        let value = self.get_property_value(&Value::Object(holder), &PropertyKey::from(key))?;
+        if let Value::Object(object) = &value {
+            let object = *object;
+            let is_array = matches!(
+                self.heap.objects().get(object).map(|o| &o.kind),
+                Some(ObjectKind::Array)
+            );
+            if is_array {
+                let length = self.array_length(object);
+                for index in 0..length {
+                    let element =
+                        self.internalize_json_property(object, &index.to_string(), reviver)?;
+                    if matches!(element, Value::Undefined) {
+                        self.delete_property(object, &PropertyKey::Index(index));
+                    } else {
+                        self.set_property_on_object(
+                            object,
+                            Value::Object(object),
+                            PropertyKey::Index(index),
+                            element,
+                        )?;
+                    }
+                }
+            } else {
+                for property_key in self.object_own_enumerable_keys(object) {
+                    let key_string = self.property_key_to_string(&property_key);
+                    let new_value =
+                        self.internalize_json_property(object, &key_string, reviver)?;
+                    if matches!(new_value, Value::Undefined) {
+                        self.delete_property(object, &property_key);
+                    } else {
+                        self.set_property_on_object(
+                            object,
+                            Value::Object(object),
+                            property_key,
+                            new_value,
+                        )?;
+                    }
+                }
+            }
+        }
+        let key_value = self.make_string_value(key);
+        self.call_value_sync(reviver.clone(), Value::Object(holder), vec![key_value, value])
     }
 
     // ========================================================================
