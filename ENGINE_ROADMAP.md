@@ -280,14 +280,25 @@ Landed in this phase:
 - Semantics: nullish-coalescing stack fix, a real `delete`, JSON integer/indent
   formatting with key-order preservation, sloppy vs strict frozen-write behavior.
 
-Known not-yet-done (tracked for the next conformance round): async generators,
-generator object/class methods, `Proxy`/`Reflect`, `BigInt`, typed arrays,
-`structuredClone`, `String`/`Date` parsing edge cases, and full microtask-pumped
-async ergonomics. RegExp lookbehind/backreferences are unsupported (the `regex`
-crate lacks them) and surface as a thrown error.
+A second probe `tests/feature_probe2.rs` (tier-2, harder/edge cases) drove a
+follow-up round and now sits at **71/78**. That round added: `typeof`
+undeclared, the `arguments` object, function/var hoisting, ES2023 array copy
+methods, function length/name, `Array(n)`, `Object.is`/getOwnPropertyDescriptors/
+defineProperties, `Reflect`, `WeakMap`/`WeakSet`, `Symbol.for`/keyFor/description,
+`structuredClone`, JSON toJSON/replacer/reviver, generator object/class methods,
+private methods, `new.target`, and **`Proxy`** (get/set/has traps), plus the
+`return`-inside-`finally` recursion fix.
 
-Next: continue the data-driven loop with a tier-2 probe, then return to Phase 7
-performance work on large real bundles.
+Known not-yet-done (large subsystems or niche; tracked for a future round):
+`BigInt` (new numeric Value type), typed arrays / `ArrayBuffer`, class static
+blocks (needs the class-name-in-body binding), array-pattern destructuring from
+non-array iterables, ECMAScript exponential number formatting (1e21 -> "1e+21"),
+async generators, and full microtask-pumped async ergonomics. RegExp
+lookbehind/backreferences are unsupported (the `regex` crate lacks them) and
+surface as a thrown error.
+
+Next: tackle `BigInt` + typed arrays as a focused subsystem effort, or return to
+Phase 7 performance work on large real bundles.
 
 ## Core Complete Definition
 

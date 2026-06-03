@@ -228,7 +228,7 @@ git log --oneline -n 20
 - Drove a data-driven conformance pass on the self-hosted engine using two
   diagnostic probes of real-world JS patterns:
   - `tests/feature_probe.rs` (tier 1): **78 -> 131/131**.
-  - `tests/feature_probe2.rs` (tier 2, harder/edge cases): **39 -> 68/78**.
+  - `tests/feature_probe2.rs` (tier 2, harder/edge cases): **39 -> 71/78** (adds Proxy, new.target, Reflect, WeakMap, structuredClone, JSON reviver/replacer, generator/private methods, hoisting, arguments…).
 - Compiler: transitive upvalue capture, lexical `this` in arrows, default
   parameters, object/class getters-setters, labeled break/continue,
   per-iteration `let` bindings, tagged templates, private fields + private
@@ -244,12 +244,16 @@ git log --oneline -n 20
   nullish-coalescing stack fix, a real `delete`, and sloppy/strict frozen-write.
 - ~22 focused commits, each with hard regression tests (separate from the
   always-green probes). No regressions in the existing suite.
-- Remaining tier-2 gaps (deferred — large subsystems or niche): `Proxy`,
-  `BigInt`, typed arrays/`ArrayBuffer`, `new.target`, class static blocks,
-  iterable (non-array) destructuring, and ECMAScript exponential number
-  formatting. `RegExp` lookbehind/backreferences are unsupported by the `regex`
-  crate and throw. See `ENGINE_ROADMAP.md` Phase 9 + the probe files.
-- Verification: `cargo test` all green (20 test binaries); `cargo build --lib` ok.
+- Remaining tier-2 gaps (deferred — large subsystems or niche): `BigInt`,
+  typed arrays/`ArrayBuffer`, class static blocks (needs the class-name-in-body
+  binding), array-pattern destructuring from non-array iterables, and
+  ECMAScript exponential number formatting. `RegExp` lookbehind/backreferences
+  are unsupported by the `regex` crate and throw. See `ENGINE_ROADMAP.md`
+  Phase 9 + the probe files.
+- Note: `target/` lives under OneDrive; a transient `LNK1201` PDB-write error can
+  occur when linking many test binaries at once. If it happens, delete the stale
+  `target/debug/deps/tobira_engine-*.pdb` and re-run.
+- Verification: `cargo test` all green (22 test binaries); `cargo build --lib` ok.
 
 ### 2026-05-28 - Codex (JS engine Phase 1 lexer/parser)
 
