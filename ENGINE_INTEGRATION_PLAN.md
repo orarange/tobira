@@ -80,6 +80,15 @@ builds; the engine ships fully tested but unused by the browser yet. (This is
 the low-risk "engine-as-lib" merge — the safe foundation for everything below.)
 
 ### Stage 1 — `BrowserHost`: implement the `Host` trait for the real browser
+**Status: ✅ landed (PR #53).** `src/engine_host.rs` implements `Host` over an
+arena DOM built from `html::parse_document`, with full `read_dom`/`mutate_dom`
+coverage, a right-to-left selector matcher (lists, compound, descendant/child
+combinators), console capture, location, and HTML (re)serialization. Timers /
+fetch / observers are currently stubbed (Stage 3). Note a deviation from the
+original sketch: the host builds its **own** arena from the document HTML rather
+than sharing the browser's live `html::Node` tree; reconciling the two (so
+interactive mutations reflect back) is part of Stage 2/3.
+
 Create `src/engine_host.rs` (a production `impl Host`) bridging each trait
 method to the browser subsystem the `boa` path already uses:
 
@@ -99,6 +108,15 @@ Reuse the existing boa-side DOM/network/storage backends; only the *binding
 layer* changes (trait calls instead of boa `NativeFunction`s).
 
 ### Stage 2 — Reimplement `JavaScriptSession` on the engine
+**Status: 🚧 in progress.** The flag-gated **initial-render path** is wired:
+`TOBIRA_ENGINE=1` makes `start_document_script_session` parse/compile/execute the
+document's inline scripts on the `Vm` + `BrowserHost` (via
+`engine_host::run_document_scripts`) and return the resulting
+`ProcessedScriptHtml`. `boa` stays the default when the flag is unset.
+Remaining for Stage 2: the **interactive session** — the engine path currently
+returns `None` for the `JavaScriptSession`, so DOM events, timers, and the
+`event_loop_tick`-driven loop are not yet handled on the engine.
+
 Behind the unchanged public API: parse/compile/execute document scripts on the
 `Vm` + `BrowserHost`, drive the event loop from `gui.rs` via `event_loop_tick`,
 and produce the same `ProcessedScriptHtml` snapshots. Gate behind a

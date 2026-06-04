@@ -414,10 +414,47 @@ pub fn process_document_scripts(html: &str, base_url: &Url) -> ProcessedScriptHt
     processed
 }
 
+/// Whether the experimental self-built engine backend is enabled via the
+/// `TOBIRA_ENGINE` environment variable. Any non-empty value other than "0"
+/// turns it on. When enabled, document scripts run on the in-tree
+/// `tobira_engine` VM (via `engine_host`) instead of boa.
+fn engine_backend_enabled() -> bool {
+    std::env::var("TOBIRA_ENGINE")
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false)
+}
+
+/// Run a document's scripts on the self-built engine and adapt the result to
+/// the `ProcessedScriptHtml` shape the browser expects. This is the Stage 2
+/// flag-gated path: it produces the initial post-script snapshot but does not
+/// yet drive an interactive event session (hence the caller returns `None` for
+/// the `JavaScriptSession`).
+fn process_document_scripts_with_engine(html: &str, base_url: &Url) -> ProcessedScriptHtml {
+    let result = crate::engine_host::run_document_scripts(html, &base_url.to_string());
+    let mut console_logs = result.console_logs;
+    if let Some(error) = result.error {
+        console_logs.push(format!("[tobira-engine] uncaught error: {error}"));
+    }
+    ProcessedScriptHtml {
+        html: result.html,
+        title_override: result.title,
+        console_logs,
+        navigation_target: result.navigation_target,
+        soft_navigation_target: None,
+        scroll_y: 0,
+    }
+}
+
 pub fn start_document_script_session(
     html: &str,
     base_url: &Url,
 ) -> (ProcessedScriptHtml, Option<JavaScriptSession>) {
+    if engine_backend_enabled() {
+        // Experimental: run scripts on the self-built engine. No interactive
+        // session yet, so subsequent DOM events are not dispatched.
+        let processed = process_document_scripts_with_engine(html, base_url);
+        return (processed, None);
+    }
     let html_owned = html.to_string();
     let base_url_owned = base_url.clone();
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -11964,8 +12001,8 @@ mod tests {
         DomEventRequest, HttpResponse, JavaScriptRuntime, XmlHttpRequestHandle,
         build_fetch_response_object, build_xml_http_request_object, current_location_url,
         ensure_same_origin_script_url, fetch_for_script, js_value_to_string,
-        process_document_scripts, resolve_requested_url, set_location_href,
-        start_document_script_session,
+        process_document_scripts, process_document_scripts_with_engine, resolve_requested_url,
+        set_location_href, start_document_script_session,
     };
     use crate::url::Url;
 
@@ -11981,6 +12018,52 @@ mod tests {
             !processed.html.contains("document.write"),
             "{}",
             processed.html
+        );
+    }
+
+    // Stage 2: the self-built engine backend adapter. These exercise the
+    // engine path directly (without mutating the TOBIRA_ENGINE env var, which
+    // would race with the parallel boa-backed tests in this binary).
+    #[test]
+    fn engine_backend_runs_dom_mutation_and_console() {
+        let processed = process_document_scripts_with_engine(
+            r#"<html><body><div id="app">old</div><script>
+                document.getElementById('app').textContent = 'new';
+                console.log('ran on engine');
+            </script></body></html>"#,
+            &Url::parse("https://example.com/page").unwrap(),
+        );
+        assert!(
+            processed.html.contains(">new</div>"),
+            "html: {}",
+            processed.html
+        );
+        assert!(!processed.html.contains(">old</div>"));
+        assert_eq!(processed.console_logs, vec!["ran on engine".to_string()]);
+    }
+
+    #[test]
+    fn engine_backend_maps_title_override() {
+        let processed = process_document_scripts_with_engine(
+            "<html><head><title>EngineTitle</title></head><body></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+        assert_eq!(processed.title_override.as_deref(), Some("EngineTitle"));
+    }
+
+    #[test]
+    fn engine_backend_reports_uncaught_error_to_console() {
+        let processed = process_document_scripts_with_engine(
+            "<html><body><script>throw new Error('boom')</script></body></html>",
+            &Url::parse("https://example.com").unwrap(),
+        );
+        assert!(
+            processed
+                .console_logs
+                .iter()
+                .any(|line| line.contains("tobira-engine") && line.contains("boom")),
+            "expected an engine error line, got: {:?}",
+            processed.console_logs
         );
     }
 

@@ -4116,7 +4116,7 @@ impl Vm {
             let Some(frame_index) = self.frames.len().checked_sub(1) else {
                 return Err(VmError::TypeError(format!(
                     "uncaught throw: {}",
-                    self.to_string(&thrown)
+                    self.describe_thrown_value(&thrown)
                 )));
             };
             let ip = self.frames[frame_index].ip.saturating_sub(1) as u32;
@@ -4450,6 +4450,46 @@ impl Vm {
 
     fn to_uint32(&self, value: &Value) -> u32 {
         self.to_number(value) as u32
+    }
+
+    /// Read a data property by walking the prototype chain (immutably).
+    /// Accessor properties are ignored. Used for best-effort introspection
+    /// where running getters is undesirable (e.g. error reporting).
+    fn read_data_property_chain(&self, start: GcRef<JsObject>, key: &PropertyKey) -> Option<Value> {
+        let mut current = Some(start);
+        while let Some(object) = current {
+            let obj = self.heap.objects().get(object)?;
+            if let Some(JsPropertyDescriptor::Data { value, .. }) = obj.properties.get(key) {
+                return Some(value.clone());
+            }
+            current = obj.prototype;
+        }
+        None
+    }
+
+    /// Describe an uncaught thrown value for diagnostics. For Error-like
+    /// objects this yields "Name: message" (matching `Error.prototype.toString`)
+    /// instead of the generic "[object Object]" that `to_string` would produce.
+    fn describe_thrown_value(&self, value: &Value) -> String {
+        if let Value::Object(object) = value
+            && !self.callables.contains_key(&object.raw())
+        {
+            let name = self
+                .read_data_property_chain(*object, &PropertyKey::from("name"))
+                .map(|value| self.to_string(&value))
+                .filter(|text| !text.is_empty());
+            let message = self
+                .read_data_property_chain(*object, &PropertyKey::from("message"))
+                .map(|value| self.to_string(&value))
+                .filter(|text| !text.is_empty());
+            match (name, message) {
+                (Some(name), Some(message)) => return format!("{name}: {message}"),
+                (Some(name), None) => return name,
+                (None, Some(message)) => return message,
+                (None, None) => {}
+            }
+        }
+        self.to_string(value)
     }
 
     fn to_string(&self, value: &Value) -> String {
