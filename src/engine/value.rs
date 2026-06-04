@@ -192,6 +192,8 @@ pub enum ObjectKind {
     },
     Map(Vec<(Value, Value)>),
     Set(Vec<Value>),
+    /// Ordered (name, value) pairs backing a `URLSearchParams`.
+    UrlSearchParams(Vec<(String, String)>),
     WeakMap(Vec<(Value, Value)>),
     WeakSet(Vec<Value>),
     ForOfIterator {
@@ -227,6 +229,9 @@ impl std::fmt::Debug for ObjectKind {
                 .finish(),
             Self::Map(entries) => f.debug_tuple("Map").field(entries).finish(),
             Self::Set(values) => f.debug_tuple("Set").field(values).finish(),
+            Self::UrlSearchParams(pairs) => {
+                f.debug_tuple("UrlSearchParams").field(pairs).finish()
+            }
             Self::WeakMap(entries) => f.debug_tuple("WeakMap").field(entries).finish(),
             Self::WeakSet(values) => f.debug_tuple("WeakSet").field(values).finish(),
             Self::ForOfIterator { values, index } => f
