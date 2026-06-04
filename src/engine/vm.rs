@@ -4358,10 +4358,71 @@ impl Vm {
         if number == 0.0 {
             return "0".to_string();
         }
-        if number.fract() == 0.0 {
+        // Fast path: integers below the 1e21 exponential threshold print plainly
+        // (covers the overwhelmingly common case without the parsing below).
+        if number.fract() == 0.0 && number.abs() < 1e21 {
             return format!("{number:.0}");
         }
-        number.to_string()
+        Self::format_number_general(number)
+    }
+
+    /// ECMAScript `Number::toString` (base 10) for the cases that need it:
+    /// fractional values and magnitudes that switch to exponential notation
+    /// (exponent >= 21 or <= -7). Uses Rust's `{:e}` to obtain the shortest
+    /// round-tripping mantissa/exponent, then reformats per the spec.
+    fn format_number_general(number: f64) -> String {
+        let negative = number < 0.0;
+        let abs = number.abs();
+        // e.g. "1.2345e2", "1e21", "5e-1" — shortest round-trip form.
+        let exp_repr = format!("{abs:e}");
+        let (mantissa, exp_str) = match exp_repr.split_once('e') {
+            Some(parts) => parts,
+            None => return number.to_string(),
+        };
+        let exponent: i32 = match exp_str.parse() {
+            Ok(value) => value,
+            Err(_) => return number.to_string(),
+        };
+        // Significant digits with the decimal point removed (no leading or
+        // trailing zeros, since this is the shortest representation).
+        let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+        let s = if digits.is_empty() { "0" } else { digits.as_str() };
+        let k = s.len() as i32;
+        // value == s x 10^(n-k); equivalently n == exponent + 1.
+        let n = exponent + 1;
+
+        let body = if k <= n && n <= 21 {
+            // Integer: digits followed by (n - k) zeros.
+            let mut out = String::from(s);
+            out.push_str(&"0".repeat((n - k) as usize));
+            out
+        } else if 0 < n && n <= 21 {
+            // Decimal point inside the digit run.
+            let (int_part, frac_part) = s.split_at(n as usize);
+            format!("{int_part}.{frac_part}")
+        } else if -6 < n && n <= 0 {
+            // 0.00..digits with (-n) leading zeros after the point.
+            format!("0.{}{}", "0".repeat((-n) as usize), s)
+        } else if k == 1 {
+            // Single-digit mantissa in exponential form.
+            let e = n - 1;
+            format!("{s}e{}{}", if e >= 0 { "+" } else { "-" }, e.abs())
+        } else {
+            // Multi-digit mantissa in exponential form.
+            let (first, rest) = s.split_at(1);
+            let e = n - 1;
+            format!(
+                "{first}.{rest}e{}{}",
+                if e >= 0 { "+" } else { "-" },
+                e.abs()
+            )
+        };
+
+        if negative {
+            format!("-{body}")
+        } else {
+            body
+        }
     }
 
     fn strict_equal(&self, lhs: &Value, rhs: &Value) -> bool {
