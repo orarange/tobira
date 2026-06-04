@@ -186,6 +186,12 @@ enum BuiltinId {
     DomNodeAddEventListener,
     DomNodeRemoveEventListener,
     DomNodeDispatchEvent,
+    // Event / CustomEvent
+    EventConstructor,
+    CustomEventConstructor,
+    EventPreventDefault,
+    EventStopPropagation,
+    EventStopImmediatePropagation,
     // classList (TokenList)
     DomClassListAdd,
     DomClassListRemove,
@@ -1117,6 +1123,82 @@ impl Vm {
         Ok(())
     }
 
+    /// Read a boolean flag from an Event init options object (e.g. `bubbles`).
+    fn event_option_flag(&mut self, options: &Option<Value>, name: &str) -> bool {
+        match options {
+            Some(opts) => {
+                let value = self
+                    .get_property_value(opts, &PropertyKey::from(name))
+                    .unwrap_or(Value::Undefined);
+                self.is_truthy(&value)
+            }
+            None => false,
+        }
+    }
+
+    /// Build a JS `Event` (or `CustomEvent`) object: standard data properties
+    /// plus the `preventDefault` / `stopPropagation` / `stopImmediatePropagation`
+    /// methods (cached builtins). Used by the constructors and could back
+    /// synthetic event creation.
+    fn make_event_object(
+        &mut self,
+        event_type: &str,
+        options: Option<Value>,
+        is_custom: bool,
+    ) -> Result<Value, VmError> {
+        let bubbles = self.event_option_flag(&options, "bubbles");
+        let cancelable = self.event_option_flag(&options, "cancelable");
+        let composed = self.event_option_flag(&options, "composed");
+        let proto = self.object_prototype_ref();
+        let event = self.allocate_ordinary_object(Some(proto));
+        let type_val = self.make_string_value(event_type);
+        let mut set = |vm: &mut Self, name: &str, value: Value| {
+            vm.define_data_property(event, PropertyKey::from(name), value, true, true, true);
+        };
+        set(self, "type", type_val);
+        set(self, "bubbles", Value::Bool(bubbles));
+        set(self, "cancelable", Value::Bool(cancelable));
+        set(self, "composed", Value::Bool(composed));
+        set(self, "defaultPrevented", Value::Bool(false));
+        set(self, "cancelBubble", Value::Bool(false));
+        set(self, "target", Value::Null);
+        set(self, "currentTarget", Value::Null);
+        set(self, "srcElement", Value::Null);
+        set(self, "eventPhase", Value::Number(0.0));
+        set(self, "timeStamp", Value::Number(0.0));
+        set(self, "isTrusted", Value::Bool(false));
+        if is_custom {
+            let detail = match &options {
+                Some(opts) => self
+                    .get_property_value(opts, &PropertyKey::from("detail"))
+                    .unwrap_or(Value::Null),
+                None => Value::Null,
+            };
+            self.define_data_property(
+                event,
+                PropertyKey::from("detail"),
+                detail,
+                true,
+                true,
+                true,
+            );
+        }
+        let prevent = self.allocate_builtin_method(BuiltinId::EventPreventDefault);
+        self.define_data_property(event, PropertyKey::from("preventDefault"), prevent, true, true, true);
+        let stop = self.allocate_builtin_method(BuiltinId::EventStopPropagation);
+        self.define_data_property(event, PropertyKey::from("stopPropagation"), stop, true, true, true);
+        let stop_immediate = self.allocate_builtin_method(BuiltinId::EventStopImmediatePropagation);
+        self.define_data_property(
+            event,
+            PropertyKey::from("stopImmediatePropagation"),
+            stop_immediate,
+            true,
+            true,
+            true,
+        );
+        Ok(Value::Object(event))
+    }
+
     pub fn execute(&mut self, chunk: &Chunk) -> Result<Value, VmError> {
         self.stack.clear();
         self.frames.clear();
@@ -1944,6 +2026,14 @@ impl Vm {
             self.globals
                 .insert(kind.constructor_name().to_string(), ctor);
         }
+
+        // Event / CustomEvent constructors.
+        let event_ctor = self.allocate_builtin_value(BuiltinId::EventConstructor, true, None);
+        self.globals.insert("Event".to_string(), event_ctor);
+        let custom_event_ctor =
+            self.allocate_builtin_value(BuiltinId::CustomEventConstructor, true, None);
+        self.globals
+            .insert("CustomEvent".to_string(), custom_event_ctor);
 
         self.globals
             .insert("Promise".to_string(), promise_ctor.clone());
@@ -4360,6 +4450,8 @@ impl Vm {
                 | BuiltinId::UrlSearchParamsConstructor
                 | BuiltinId::ArrayBufferConstructor
                 | BuiltinId::TypedArrayConstructor(_)
+                | BuiltinId::EventConstructor
+                | BuiltinId::CustomEventConstructor
         )
     }
 
@@ -6613,6 +6705,65 @@ impl Vm {
             BuiltinId::TypedArrayProtoMap => self.typed_array_map(&this_value, &args),
             BuiltinId::TypedArrayProtoReduce => self.typed_array_reduce(&this_value, &args),
             BuiltinId::TypedArrayProtoReverse => self.typed_array_reverse(&this_value),
+            BuiltinId::EventConstructor => {
+                let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                self.make_event_object(&event_type, args.get(1).cloned(), false)
+            }
+            BuiltinId::CustomEventConstructor => {
+                let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                self.make_event_object(&event_type, args.get(1).cloned(), true)
+            }
+            BuiltinId::EventPreventDefault => {
+                if let Value::Object(event) = &this_value {
+                    let cancelable =
+                        self.get_property_value(&this_value, &PropertyKey::from("cancelable"))?;
+                    if self.is_truthy(&cancelable) {
+                        self.define_data_property(
+                            *event,
+                            PropertyKey::from("defaultPrevented"),
+                            Value::Bool(true),
+                            true,
+                            true,
+                            true,
+                        );
+                    }
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::EventStopPropagation => {
+                if let Value::Object(event) = &this_value {
+                    self.define_data_property(
+                        *event,
+                        PropertyKey::from("cancelBubble"),
+                        Value::Bool(true),
+                        true,
+                        true,
+                        true,
+                    );
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::EventStopImmediatePropagation => {
+                if let Value::Object(event) = &this_value {
+                    self.define_data_property(
+                        *event,
+                        PropertyKey::from("cancelBubble"),
+                        Value::Bool(true),
+                        true,
+                        true,
+                        true,
+                    );
+                    self.define_data_property(
+                        *event,
+                        PropertyKey::from("__stopImmediate"),
+                        Value::Bool(true),
+                        false,
+                        false,
+                        true,
+                    );
+                }
+                Ok(Value::Undefined)
+            }
             BuiltinId::ArrayIsArray => Ok(Value::Bool(matches!(
                 args.first(),
                 Some(Value::Object(object))
@@ -8516,7 +8667,41 @@ impl Vm {
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeDispatchEvent => {
-                Ok(Value::Undefined)
+                let node_handle = self
+                    .node_id_from_host_val(&this_value)
+                    .map(|id| id.0)
+                    .unwrap_or(0); // 0 = document/window
+                let event = args.first().cloned().unwrap_or(Value::Undefined);
+                if let Value::Object(event_ref) = &event {
+                    // Reflect the dispatch target onto the event.
+                    self.define_data_property(*event_ref, PropertyKey::from("target"), this_value.clone(), true, true, true);
+                    self.define_data_property(*event_ref, PropertyKey::from("currentTarget"), this_value.clone(), true, true, true);
+                    self.define_data_property(*event_ref, PropertyKey::from("srcElement"), this_value.clone(), true, true, true);
+                }
+                let type_value = self.get_property_value(&event, &PropertyKey::from("type"))?;
+                let event_type = self.to_string(&type_value);
+                let listeners: Vec<GcRef<JsObject>> = self
+                    .event_listeners
+                    .get(&node_handle)
+                    .and_then(|m| m.get(&event_type))
+                    .cloned()
+                    .unwrap_or_default();
+                for listener in listeners {
+                    self.call_value_sync(Value::Object(listener), this_value.clone(), vec![event.clone()])?;
+                    self.drain_microtasks();
+                    let stop_immediate = self
+                        .get_property_value(&event, &PropertyKey::from("__stopImmediate"))
+                        .unwrap_or(Value::Undefined);
+                    if self.is_truthy(&stop_immediate) {
+                        break;
+                    }
+                }
+                // dispatchEvent returns false iff a cancelable event had
+                // preventDefault() called, true otherwise.
+                let default_prevented = self
+                    .get_property_value(&event, &PropertyKey::from("defaultPrevented"))
+                    .unwrap_or(Value::Bool(false));
+                Ok(Value::Bool(!self.is_truthy(&default_prevented)))
             }
             // ----------------------------------------------------------------
             // classList (TokenList) — this = TokenList host object with handle = element NodeId
