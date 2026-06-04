@@ -113,9 +113,20 @@ layer* changes (trait calls instead of boa `NativeFunction`s).
 document's inline scripts on the `Vm` + `BrowserHost` (via
 `engine_host::run_document_scripts`) and return the resulting
 `ProcessedScriptHtml`. `boa` stays the default when the flag is unset.
-Remaining for Stage 2: the **interactive session** — the engine path currently
-returns `None` for the `JavaScriptSession`, so DOM events, timers, and the
-`event_loop_tick`-driven loop are not yet handled on the engine.
+
+The initial path now also **settles async deferred work** before snapshotting:
+after the inline scripts run, `Vm::run_due_jobs` drains Promise microtasks and
+fires zero-delay timers (`setTimeout(fn, 0)`) to quiescence *without advancing
+virtual time*, so deferred first-render patterns reflect in the snapshot.
+Genuinely delayed timers stay pending (they belong to the persistent session).
+
+Remaining for Stage 2: the **persistent interactive session** — the engine path
+still returns `None` for the `JavaScriptSession`, so DOM events over time, RAF
+animation loops, and delayed/interval timers are not yet driven. The main
+blocker is **node-identity reconciliation**: `BrowserHost` builds its own arena
+DOM, while the browser dispatches events by `target_node_id` from the re-parsed
+serialized HTML — the two numbering schemes must be unified before
+`dispatch_dom_event` can target the right node.
 
 Behind the unchanged public API: parse/compile/execute document scripts on the
 `Vm` + `BrowserHost`, drive the event loop from `gui.rs` via `event_loop_tick`,

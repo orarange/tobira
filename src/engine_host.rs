@@ -1095,6 +1095,13 @@ pub fn run_document_scripts(html: &str, url: &str) -> EngineRunResult {
         }
     }
 
+    // Settle deferred work — Promise microtasks and zero-delay timers
+    // (`setTimeout(fn, 0)`) — so async initial rendering reflects in the
+    // snapshot. Virtual time is not advanced, so genuinely delayed timers stay
+    // pending; the bound guards against zero-delay timers that reschedule
+    // themselves.
+    vm.run_due_jobs(10_000);
+
     let host = vm
         .host_mut()
         .as_any_mut()
@@ -1121,6 +1128,67 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.console_logs, vec!["hello 3".to_string()]);
+    }
+
+    #[test]
+    fn settimeout_zero_settles_before_snapshot() {
+        let result = run_document_scripts(
+            r#"<html><body><div id="x">a</div><script>
+                setTimeout(() => { document.getElementById('x').textContent = 'b'; }, 0);
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert!(result.html.contains(">b</div>"), "html: {}", result.html);
+    }
+
+    #[test]
+    fn promise_then_settles_before_snapshot() {
+        let result = run_document_scripts(
+            r#"<html><body><div id="x">a</div><script>
+                Promise.resolve().then(() => {
+                    document.getElementById('x').textContent = 'c';
+                });
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert!(result.html.contains(">c</div>"), "html: {}", result.html);
+    }
+
+    #[test]
+    fn nested_zero_delay_timers_cascade() {
+        let result = run_document_scripts(
+            r#"<html><body><div id="x">0</div><script>
+                setTimeout(() => {
+                    setTimeout(() => {
+                        document.getElementById('x').textContent = 'done';
+                    }, 0);
+                }, 0);
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert!(result.html.contains(">done</div>"), "html: {}", result.html);
+    }
+
+    #[test]
+    fn delayed_timer_stays_pending_in_initial_snapshot() {
+        let result = run_document_scripts(
+            r#"<html><body><div id="x">initial</div><script>
+                setTimeout(() => {
+                    document.getElementById('x').textContent = 'late';
+                }, 5000);
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert!(
+            result.html.contains(">initial</div>"),
+            "html: {}",
+            result.html
+        );
+        assert!(!result.html.contains(">late</div>"));
     }
 
     #[test]
