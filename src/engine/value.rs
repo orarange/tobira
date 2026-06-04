@@ -171,6 +171,126 @@ pub enum GeneratorState {
     Completed,
 }
 
+/// The element type of a typed-array view (and which `TypedArray` subclass it
+/// is). Carries the byte width plus the per-element read/coerce-write logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypedArrayKind {
+    Int8,
+    Uint8,
+    Uint8Clamped,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Float32,
+    Float64,
+}
+
+impl TypedArrayKind {
+    pub fn bytes_per_element(self) -> usize {
+        match self {
+            Self::Int8 | Self::Uint8 | Self::Uint8Clamped => 1,
+            Self::Int16 | Self::Uint16 => 2,
+            Self::Int32 | Self::Uint32 | Self::Float32 => 4,
+            Self::Float64 => 8,
+        }
+    }
+
+    pub fn constructor_name(self) -> &'static str {
+        match self {
+            Self::Int8 => "Int8Array",
+            Self::Uint8 => "Uint8Array",
+            Self::Uint8Clamped => "Uint8ClampedArray",
+            Self::Int16 => "Int16Array",
+            Self::Uint16 => "Uint16Array",
+            Self::Int32 => "Int32Array",
+            Self::Uint32 => "Uint32Array",
+            Self::Float32 => "Float32Array",
+            Self::Float64 => "Float64Array",
+        }
+    }
+
+    /// Read the element starting at `byte_index`, returned as the JS numeric
+    /// (f64) value. An out-of-range index reads as 0.
+    pub fn read_element(self, bytes: &[u8], byte_index: usize) -> f64 {
+        let size = self.bytes_per_element();
+        let Some(slice) = bytes.get(byte_index..byte_index + size) else {
+            return 0.0;
+        };
+        match self {
+            Self::Int8 => i8::from_le_bytes([slice[0]]) as f64,
+            Self::Uint8 | Self::Uint8Clamped => slice[0] as f64,
+            Self::Int16 => i16::from_le_bytes([slice[0], slice[1]]) as f64,
+            Self::Uint16 => u16::from_le_bytes([slice[0], slice[1]]) as f64,
+            Self::Int32 => i32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64,
+            Self::Uint32 => u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64,
+            Self::Float32 => f32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as f64,
+            Self::Float64 => f64::from_le_bytes([
+                slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
+            ]),
+        }
+    }
+
+    /// Coerce `value` per the element type and write it starting at
+    /// `byte_index`. An out-of-range index is a no-op.
+    pub fn coerce_and_write(self, bytes: &mut [u8], byte_index: usize, value: f64) {
+        let size = self.bytes_per_element();
+        if byte_index + size > bytes.len() {
+            return;
+        }
+        let target = &mut bytes[byte_index..byte_index + size];
+        match self {
+            Self::Int8 => target.copy_from_slice(&(to_int32(value) as i8).to_le_bytes()),
+            Self::Uint8 => target.copy_from_slice(&(to_int32(value) as u8).to_le_bytes()),
+            Self::Uint8Clamped => target.copy_from_slice(&[clamp_to_u8(value)]),
+            Self::Int16 => target.copy_from_slice(&(to_int32(value) as i16).to_le_bytes()),
+            Self::Uint16 => target.copy_from_slice(&(to_int32(value) as u16).to_le_bytes()),
+            Self::Int32 => target.copy_from_slice(&to_int32(value).to_le_bytes()),
+            Self::Uint32 => target.copy_from_slice(&(to_int32(value) as u32).to_le_bytes()),
+            Self::Float32 => target.copy_from_slice(&(value as f32).to_le_bytes()),
+            Self::Float64 => target.copy_from_slice(&value.to_le_bytes()),
+        }
+    }
+}
+
+/// ECMAScript `ToInt32`: truncate toward zero, then reduce modulo 2^32 into the
+/// signed 32-bit range. NaN and the infinities map to 0. Narrower integer
+/// element types derive from this via Rust's wrapping `as` casts.
+fn to_int32(value: f64) -> i32 {
+    if !value.is_finite() || value == 0.0 {
+        return 0;
+    }
+    let modulo = value.trunc().rem_euclid(4_294_967_296.0);
+    if modulo >= 2_147_483_648.0 {
+        (modulo - 4_294_967_296.0) as i32
+    } else {
+        modulo as i32
+    }
+}
+
+/// `Uint8ClampedArray` write conversion: clamp to [0, 255] with round-half-to-
+/// even, NaN to 0.
+fn clamp_to_u8(value: f64) -> u8 {
+    if value.is_nan() || value <= 0.0 {
+        return 0;
+    }
+    if value >= 255.0 {
+        return 255;
+    }
+    let floor = value.floor();
+    let diff = value - floor;
+    let rounded = if diff < 0.5 {
+        floor
+    } else if diff > 0.5 {
+        floor + 1.0
+    } else if (floor as i64) % 2 == 0 {
+        floor
+    } else {
+        floor + 1.0
+    };
+    rounded as u8
+}
+
 #[derive(Clone)]
 pub enum ObjectKind {
     Ordinary,
@@ -194,6 +314,16 @@ pub enum ObjectKind {
     Set(Vec<Value>),
     /// Ordered (name, value) pairs backing a `URLSearchParams`.
     UrlSearchParams(Vec<(String, String)>),
+    /// Raw byte backing store for an `ArrayBuffer`.
+    ArrayBuffer(Vec<u8>),
+    /// A typed-array view over an `ArrayBuffer` object (`buffer`), interpreting
+    /// `length` elements of type `kind` starting at `byte_offset`.
+    TypedArray {
+        buffer: GcRef<JsObject>,
+        kind: TypedArrayKind,
+        byte_offset: usize,
+        length: usize,
+    },
     WeakMap(Vec<(Value, Value)>),
     WeakSet(Vec<Value>),
     ForOfIterator {
@@ -232,6 +362,20 @@ impl std::fmt::Debug for ObjectKind {
             Self::UrlSearchParams(pairs) => {
                 f.debug_tuple("UrlSearchParams").field(pairs).finish()
             }
+            Self::ArrayBuffer(bytes) => {
+                f.debug_tuple("ArrayBuffer").field(&bytes.len()).finish()
+            }
+            Self::TypedArray {
+                kind,
+                byte_offset,
+                length,
+                ..
+            } => f
+                .debug_struct("TypedArray")
+                .field("kind", kind)
+                .field("byte_offset", byte_offset)
+                .field("length", length)
+                .finish(),
             Self::WeakMap(entries) => f.debug_tuple("WeakMap").field(entries).finish(),
             Self::WeakSet(values) => f.debug_tuple("WeakSet").field(values).finish(),
             Self::ForOfIterator { values, index } => f
