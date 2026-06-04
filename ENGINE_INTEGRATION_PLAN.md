@@ -120,13 +120,22 @@ fires zero-delay timers (`setTimeout(fn, 0)`) to quiescence *without advancing
 virtual time*, so deferred first-render patterns reflect in the snapshot.
 Genuinely delayed timers stay pending (they belong to the persistent session).
 
-Remaining for Stage 2: the **persistent interactive session** — the engine path
-still returns `None` for the `JavaScriptSession`, so DOM events over time, RAF
-animation loops, and delayed/interval timers are not yet driven. The main
-blocker is **node-identity reconciliation**: `BrowserHost` builds its own arena
-DOM, while the browser dispatches events by `target_node_id` from the re-parsed
-serialized HTML — the two numbering schemes must be unified before
-`dispatch_dom_event` can target the right node.
+The **persistent interactive session** is now wired too: `start_document_script_session`'s
+engine branch spawns a worker thread that owns an `engine_host::EngineSession`
+(`Vm` + `BrowserHost`) and services the same `JavaScriptSessionCommand` protocol
+the boa worker does — `DispatchEvent`, `DispatchGlobalEvent`, `Snapshot`,
+`SetAttribute` — returning a real `JavaScriptSession`, so `browser.rs`/`gui.rs`
+need **no changes**. **Node-identity is reconciled**: `BrowserHost::handle_for_node_id`
+reproduces `browser.rs::annotate_node_ids` numbering exactly (verified by tests
+over the real serialize→parse→annotate pipeline), so a click dispatched by
+`target_node_id` lands on the right engine node, runs its listeners, mutates the
+DOM, and the next snapshot reflects it.
+
+Remaining for Stage 2: `preventDefault` is not yet surfaced back through
+`dispatch_event` (returns `default_prevented = false`); RAF animation loops and
+delayed/interval timers over time are not yet pumped (only zero-delay settling
+at each event); scroll/viewport commands are no-ops on the engine host. And the
+real-browser GUI click path still needs human verification under `TOBIRA_ENGINE=1`.
 
 Behind the unchanged public API: parse/compile/execute document scripts on the
 `Vm` + `BrowserHost`, drive the event loop from `gui.rs` via `event_loop_tick`,

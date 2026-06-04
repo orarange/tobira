@@ -429,8 +429,9 @@ fn engine_backend_enabled() -> bool {
 /// flag-gated path: it produces the initial post-script snapshot but does not
 /// yet drive an interactive event session (hence the caller returns `None` for
 /// the `JavaScriptSession`).
-fn process_document_scripts_with_engine(html: &str, base_url: &Url) -> ProcessedScriptHtml {
-    let result = crate::engine_host::run_document_scripts(html, &base_url.to_string());
+/// Adapt an engine `EngineRunResult` into the browser's `ProcessedScriptHtml`,
+/// surfacing any uncaught engine error as a console line.
+fn engine_result_to_processed(result: crate::engine_host::EngineRunResult) -> ProcessedScriptHtml {
     let mut console_logs = result.console_logs;
     if let Some(error) = result.error {
         console_logs.push(format!("[tobira-engine] uncaught error: {error}"));
@@ -445,15 +446,101 @@ fn process_document_scripts_with_engine(html: &str, base_url: &Url) -> Processed
     }
 }
 
+fn process_document_scripts_with_engine(html: &str, base_url: &Url) -> ProcessedScriptHtml {
+    engine_result_to_processed(crate::engine_host::run_document_scripts(
+        html,
+        &base_url.to_string(),
+    ))
+}
+
+/// Start an interactive document-script session on the self-built engine
+/// (the `TOBIRA_ENGINE` path). Spawns a worker thread that owns the `Vm` +
+/// `BrowserHost` (the `Vm` is not `Send`, so it is created inside the thread)
+/// and services the same `JavaScriptSessionCommand` protocol the boa worker
+/// does, so the returned `JavaScriptSession` is a drop-in for callers.
+fn start_engine_script_session(
+    html: &str,
+    base_url: &Url,
+) -> (ProcessedScriptHtml, Option<JavaScriptSession>) {
+    let html_owned = html.to_string();
+    let url_str = base_url.to_string();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (command_tx, command_rx) = mpsc::channel();
+    let worker = thread::Builder::new()
+        .name("tobira-engine-js".to_string())
+        .stack_size(JS_THREAD_STACK_BYTES)
+        .spawn(move || {
+            let (mut session, initial) =
+                crate::engine_host::EngineSession::start(&html_owned, &url_str);
+            let _ = ready_tx.send(engine_result_to_processed(initial));
+            while let Ok(command) = command_rx.recv() {
+                match command {
+                    JavaScriptSessionCommand::DispatchEvent {
+                        request,
+                        response_tx,
+                    } => {
+                        let result =
+                            session.dispatch_event(request.target_node_id, &request.event_type);
+                        let _ = response_tx.send(DomEventDispatchResult {
+                            snapshot: engine_result_to_processed(result),
+                            default_prevented: false,
+                        });
+                    }
+                    JavaScriptSessionCommand::DispatchGlobalEvent {
+                        event_type,
+                        response_tx,
+                        ..
+                    } => {
+                        let result = session.dispatch_global_event(&event_type);
+                        let _ = response_tx.send(DomEventDispatchResult {
+                            snapshot: engine_result_to_processed(result),
+                            default_prevented: false,
+                        });
+                    }
+                    JavaScriptSessionCommand::SetAttribute {
+                        node_id,
+                        name,
+                        value,
+                    } => {
+                        session.set_attribute(node_id, &name, &value);
+                    }
+                    JavaScriptSessionCommand::Snapshot { response_tx } => {
+                        let _ = response_tx.send(engine_result_to_processed(session.snapshot()));
+                    }
+                    // Scroll/viewport not yet modeled on the engine host.
+                    JavaScriptSessionCommand::SetScrollPosition { .. }
+                    | JavaScriptSessionCommand::SetViewportSize { .. } => {}
+                    JavaScriptSessionCommand::Shutdown => break,
+                }
+            }
+        });
+    match worker {
+        Ok(_) => match ready_rx.recv() {
+            Ok(processed) => (processed, Some(JavaScriptSession { command_tx })),
+            Err(_) => (
+                process_document_scripts_error(
+                    html.to_string(),
+                    "engine error: worker failed to initialize".to_string(),
+                ),
+                None,
+            ),
+        },
+        Err(_) => (
+            process_document_scripts_error(
+                html.to_string(),
+                "engine error: failed to start worker".to_string(),
+            ),
+            None,
+        ),
+    }
+}
+
 pub fn start_document_script_session(
     html: &str,
     base_url: &Url,
 ) -> (ProcessedScriptHtml, Option<JavaScriptSession>) {
     if engine_backend_enabled() {
-        // Experimental: run scripts on the self-built engine. No interactive
-        // session yet, so subsequent DOM events are not dispatched.
-        let processed = process_document_scripts_with_engine(html, base_url);
-        return (processed, None);
+        return start_engine_script_session(html, base_url);
     }
     let html_owned = html.to_string();
     let base_url_owned = base_url.clone();
@@ -12002,7 +12089,7 @@ mod tests {
         build_fetch_response_object, build_xml_http_request_object, current_location_url,
         ensure_same_origin_script_url, fetch_for_script, js_value_to_string,
         process_document_scripts, process_document_scripts_with_engine, resolve_requested_url,
-        set_location_href, start_document_script_session,
+        set_location_href, start_document_script_session, start_engine_script_session,
     };
     use crate::url::Url;
 
@@ -12064,6 +12151,62 @@ mod tests {
                 .any(|line| line.contains("tobira-engine") && line.contains("boom")),
             "expected an engine error line, got: {:?}",
             processed.console_logs
+        );
+    }
+
+    #[test]
+    fn engine_session_click_through_javascript_session_api() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::{Node, parse_document};
+
+        fn find_btn(node: &Node) -> Option<usize> {
+            if let Node::Element(el) = node {
+                if el.attributes.get("id").map(String::as_str) == Some("btn") {
+                    return el
+                        .attributes
+                        .get("data-tobira-node-id")
+                        .and_then(|s| s.parse().ok());
+                }
+                for child in &el.children {
+                    if let Some(found) = find_btn(child) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+
+        // Drive the engine path directly (no TOBIRA_ENGINE env mutation, which
+        // would race the parallel boa tests).
+        let html = r#"<html><body>
+            <button id="btn">go</button>
+            <div id="out">idle</div>
+            <script>
+                document.getElementById('btn').addEventListener('click', () => {
+                    document.getElementById('out').textContent = 'clicked';
+                });
+            </script>
+        </body></html>"#;
+        let (initial, session) =
+            start_engine_script_session(html, &Url::parse("http://localhost/").unwrap());
+        let session = session.expect("engine session present");
+        assert!(initial.html.contains(">idle</div>"));
+
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let btn_id = find_btn(&tree).expect("button node id");
+
+        let result = session
+            .dispatch_event(DomEventRequest {
+                target_node_id: btn_id,
+                event_type: "click".to_string(),
+                ..Default::default()
+            })
+            .expect("dispatch result");
+        assert!(
+            result.snapshot.html.contains(">clicked</div>"),
+            "expected click via the session API to mutate the DOM, got: {}",
+            result.snapshot.html
         );
     }
 

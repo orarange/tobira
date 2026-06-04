@@ -1110,50 +1110,109 @@ pub struct EngineRunResult {
 /// This is the engine-backed counterpart of the boa path in `js.rs`, used behind
 /// the `TOBIRA_ENGINE` flag while parity is built up.
 pub fn run_document_scripts(html: &str, url: &str) -> EngineRunResult {
-    let host = BrowserHost::from_html(html, url);
-    let scripts = host.inline_scripts();
-    let mut vm = Vm::with_host(Heap::new(), Box::new(host));
+    EngineSession::start(html, url).1
+}
 
-    let mut error = None;
-    for script in &scripts {
-        match Parser::new(script).parse() {
-            Ok(program) => match Compiler::new(&program).compile() {
-                Ok(chunk) => {
-                    if let Err(e) = vm.execute(&chunk) {
-                        error = Some(format!("{e:?}"));
+/// A persistent engine-backed runtime over a `BrowserHost`. It keeps the `Vm`
+/// alive after the initial document scripts run, so the browser can dispatch
+/// DOM events (clicks, input, …) and request fresh snapshots over time. This is
+/// what backs the engine path's interactive `JavaScriptSession`.
+pub struct EngineSession {
+    vm: Vm,
+}
+
+impl EngineSession {
+    /// Build the runtime, run the document's inline scripts, settle async
+    /// deferred work, and return the runtime plus the initial snapshot.
+    pub fn start(html: &str, url: &str) -> (Self, EngineRunResult) {
+        let host = BrowserHost::from_html(html, url);
+        let scripts = host.inline_scripts();
+        let mut vm = Vm::with_host(Heap::new(), Box::new(host));
+
+        let mut error = None;
+        for script in &scripts {
+            match Parser::new(script).parse() {
+                Ok(program) => match Compiler::new(&program).compile() {
+                    Ok(chunk) => {
+                        if let Err(e) = vm.execute(&chunk) {
+                            error = Some(format!("{e:?}"));
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error = Some(format!("compile: {e:?}"));
                         break;
                     }
-                }
+                },
                 Err(e) => {
-                    error = Some(format!("compile: {e:?}"));
+                    error = Some(format!("parse: {e:?}"));
                     break;
                 }
-            },
-            Err(e) => {
-                error = Some(format!("parse: {e:?}"));
-                break;
             }
+        }
+
+        // Settle deferred work (Promise microtasks + zero-delay timers) so async
+        // initial rendering reflects in the snapshot.
+        vm.run_due_jobs(10_000);
+
+        let mut session = Self { vm };
+        let snapshot = session.snapshot_with_error(error);
+        (session, snapshot)
+    }
+
+    fn host(&mut self) -> &mut BrowserHost {
+        self.vm
+            .host_mut()
+            .as_any_mut()
+            .downcast_mut::<BrowserHost>()
+            .expect("host is a BrowserHost")
+    }
+
+    fn snapshot_with_error(&mut self, error: Option<String>) -> EngineRunResult {
+        let host = self.host();
+        EngineRunResult {
+            html: host.serialize_document(),
+            console_logs: host.take_console(),
+            title: host.title(),
+            navigation_target: host.navigation_target(),
+            error,
         }
     }
 
-    // Settle deferred work — Promise microtasks and zero-delay timers
-    // (`setTimeout(fn, 0)`) — so async initial rendering reflects in the
-    // snapshot. Virtual time is not advanced, so genuinely delayed timers stay
-    // pending; the bound guards against zero-delay timers that reschedule
-    // themselves.
-    vm.run_due_jobs(10_000);
+    /// Current DOM snapshot. Console output captured since the last snapshot is
+    /// drained into the result.
+    pub fn snapshot(&mut self) -> EngineRunResult {
+        self.snapshot_with_error(None)
+    }
 
-    let host = vm
-        .host_mut()
-        .as_any_mut()
-        .downcast_mut::<BrowserHost>()
-        .expect("host is a BrowserHost");
-    EngineRunResult {
-        html: host.serialize_document(),
-        console_logs: host.take_console(),
-        title: host.title(),
-        navigation_target: host.navigation_target(),
-        error,
+    /// Dispatch a DOM event to the node identified by the browser's
+    /// `data-tobira-node-id` (`target_node_id`), settle deferred work, and
+    /// return a fresh snapshot. Unknown node ids are a no-op (still snapshots).
+    pub fn dispatch_event(&mut self, node_id: usize, event_type: &str) -> EngineRunResult {
+        let handle = self.host().handle_for_node_id(node_id).map(|h| h as u32);
+        if let Some(handle) = handle {
+            let _ = self.vm.fire_dom_event(handle, event_type);
+            self.vm.run_due_jobs(10_000);
+        }
+        self.snapshot()
+    }
+
+    /// Dispatch a global (window/document) event — engine node handle 0.
+    pub fn dispatch_global_event(&mut self, event_type: &str) -> EngineRunResult {
+        let _ = self.vm.fire_dom_event(0, event_type);
+        self.vm.run_due_jobs(10_000);
+        self.snapshot()
+    }
+
+    /// Set an attribute on the node identified by the browser's node id.
+    pub fn set_attribute(&mut self, node_id: usize, name: &str, value: &str) {
+        if let Some(handle) = self.host().handle_for_node_id(node_id) {
+            let _ = self.host().mutate_dom(DomMutation::SetAttribute {
+                node: NodeId(handle as u32),
+                name: name.to_string(),
+                value: value.to_string(),
+            });
+        }
     }
 }
 
@@ -1411,6 +1470,101 @@ mod tests {
             </ul></body></html>"#,
             8,
         );
+    }
+
+    /// Find the `data-tobira-node-id` of the first element with `attr == value`
+    /// in an annotated tree (reproduces how the browser identifies a clicked
+    /// node).
+    fn find_node_id_by_attr(node: &crate::html::Node, attr: &str, value: &str) -> Option<usize> {
+        if let crate::html::Node::Element(el) = node {
+            if el.attributes.get(attr).map(String::as_str) == Some(value) {
+                return el
+                    .attributes
+                    .get("data-tobira-node-id")
+                    .and_then(|id| id.parse().ok());
+            }
+            for child in &el.children {
+                if let Some(found) = find_node_id_by_attr(child, attr, value) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn engine_session_dispatches_click_by_node_id() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body>
+            <button id="btn">go</button>
+            <div id="out">idle</div>
+            <script>
+                document.getElementById('btn').addEventListener('click', () => {
+                    document.getElementById('out').textContent = 'clicked';
+                });
+            </script>
+        </body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "error: {:?}", initial.error);
+        assert!(initial.html.contains(">idle</div>"));
+
+        // Identify the button the way the browser does (annotate the snapshot).
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let btn_id = find_node_id_by_attr(&tree, "id", "btn").expect("button node id");
+
+        // A click dispatched by that node id must reach the listener.
+        let result = session.dispatch_event(btn_id, "click");
+        assert!(
+            result.html.contains(">clicked</div>"),
+            "expected click to mutate the DOM, html: {}",
+            result.html
+        );
+    }
+
+    #[test]
+    fn engine_session_snapshot_reflects_later_event() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body>
+            <button id="btn">go</button>
+            <ul id="log"></ul>
+            <script>
+                document.getElementById('btn').addEventListener('click', () => {
+                    const li = document.createElement('li');
+                    li.textContent = 'hit';
+                    document.getElementById('log').appendChild(li);
+                });
+            </script>
+        </body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let btn_id = find_node_id_by_attr(&tree, "id", "btn").expect("button node id");
+
+        // Two clicks should append two <li>; a plain snapshot reflects state.
+        session.dispatch_event(btn_id, "click");
+        let result = session.dispatch_event(btn_id, "click");
+        assert_eq!(
+            result.html.matches("<li>hit</li>").count(),
+            2,
+            "html: {}",
+            result.html
+        );
+        let snap = session.snapshot();
+        assert_eq!(snap.html.matches("<li>hit</li>").count(), 2);
+    }
+
+    #[test]
+    fn engine_session_unknown_node_id_is_safe() {
+        let html = r#"<html><body><div id="x">ok</div></body></html>"#;
+        let (mut session, _) = EngineSession::start(html, "http://localhost/");
+        let result = session.dispatch_event(99999, "click");
+        assert!(result.error.is_none());
+        assert!(result.html.contains(">ok</div>"));
     }
 
     #[test]
