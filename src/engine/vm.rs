@@ -1182,6 +1182,27 @@ impl Vm {
         }
     }
 
+    /// Run already-due timers (zero-delay `setTimeout`/`setInterval`) and any
+    /// queued microtasks to quiescence WITHOUT advancing virtual time, so that
+    /// Promise chains and `setTimeout(fn, 0)`-style deferred work settle before
+    /// a snapshot. Timers with a real delay stay pending (they only fire once
+    /// virtual time is advanced via `event_loop_tick`). `requestAnimationFrame`
+    /// callbacks are not run here. Bounded by `max_steps` to guard against
+    /// zero-delay timers that reschedule themselves; returns the number of
+    /// macrotasks executed.
+    pub fn run_due_jobs(&mut self, max_steps: usize) -> usize {
+        self.drain_microtasks();
+        let now = self.event_loop.current_time_ms;
+        let mut steps = 0;
+        while steps < max_steps {
+            if matches!(self.event_loop_tick(now, false), TickResult::Idle) {
+                break;
+            }
+            steps += 1;
+        }
+        steps
+    }
+
     fn run_until_frame_depth(&mut self, target_depth: usize) -> Result<(), VmError> {
         while self.frames.len() > target_depth {
             let opcode = {
