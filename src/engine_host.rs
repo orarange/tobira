@@ -1192,6 +1192,98 @@ mod tests {
     }
 
     #[test]
+    fn add_event_listener_and_dispatch_event() {
+        let result = run_document_scripts(
+            r#"<html><body><button id="btn">go</button><script>
+                const btn = document.getElementById('btn');
+                btn.addEventListener('click', (e) => {
+                    console.log('fired:' + e.type);
+                });
+                const ret = btn.dispatchEvent(new Event('click'));
+                console.log('returned:' + ret);
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(
+            result.console_logs,
+            vec!["fired:click".to_string(), "returned:true".to_string()]
+        );
+    }
+
+    #[test]
+    fn dispatch_event_drives_dom_mutation() {
+        let result = run_document_scripts(
+            r#"<html><body>
+                <button id="btn">go</button>
+                <div id="out">idle</div>
+                <script>
+                    const btn = document.getElementById('btn');
+                    const out = document.getElementById('out');
+                    btn.addEventListener('click', () => { out.textContent = 'clicked'; });
+                    btn.dispatchEvent(new Event('click'));
+                </script>
+            </body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert!(
+            result.html.contains(">clicked</div>"),
+            "html: {}",
+            result.html
+        );
+    }
+
+    #[test]
+    fn dispatch_event_returns_false_when_default_prevented() {
+        let result = run_document_scripts(
+            r#"<html><body><button id="btn">go</button><script>
+                const btn = document.getElementById('btn');
+                btn.addEventListener('click', (e) => { e.preventDefault(); });
+                const ret = btn.dispatchEvent(new Event('click', { cancelable: true }));
+                console.log('ret:' + ret);
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.console_logs, vec!["ret:false".to_string()]);
+    }
+
+    #[test]
+    fn stop_immediate_propagation_halts_remaining_listeners() {
+        let result = run_document_scripts(
+            r#"<html><body><button id="btn">go</button><script>
+                const btn = document.getElementById('btn');
+                btn.addEventListener('click', (e) => {
+                    console.log('first');
+                    e.stopImmediatePropagation();
+                });
+                btn.addEventListener('click', () => { console.log('second'); });
+                btn.dispatchEvent(new Event('click'));
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.console_logs, vec!["first".to_string()]);
+    }
+
+    #[test]
+    fn custom_event_detail_reaches_listener() {
+        let result = run_document_scripts(
+            r#"<html><body><div id="x"></div><script>
+                const x = document.getElementById('x');
+                x.addEventListener('ping', (e) => {
+                    console.log('detail=' + e.detail.value);
+                });
+                x.dispatchEvent(new CustomEvent('ping', { detail: { value: 42 } }));
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.console_logs, vec!["detail=42".to_string()]);
+    }
+
+    #[test]
     fn dom_query_and_text_mutation() {
         let result = run_document_scripts(
             r#"<html><body>
