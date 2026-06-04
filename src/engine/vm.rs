@@ -20,7 +20,7 @@ use super::host::{
 use super::value::{
     AsyncContext, GeneratorState, HostDispatch, HostObjectClass, HostObjectSlot, JsObject,
     JsPropertyDescriptor, JsString, ObjectKind, PromiseReaction, PromiseState, PropertyKey,
-    SymbolId, Value,
+    SymbolId, TypedArrayKind, Value,
 };
 
 type ValueCell = Rc<RefCell<Value>>;
@@ -232,6 +232,23 @@ enum BuiltinId {
     SetProtoClear,
     SetProtoForEach,
     SetProtoValues,
+    // ArrayBuffer + typed arrays.
+    ArrayBufferConstructor,
+    ArrayBufferProtoSlice,
+    TypedArrayConstructor(TypedArrayKind),
+    TypedArrayFrom(TypedArrayKind),
+    TypedArrayOf(TypedArrayKind),
+    TypedArrayProtoSet,
+    TypedArrayProtoSubarray,
+    TypedArrayProtoSlice,
+    TypedArrayProtoFill,
+    TypedArrayProtoJoin,
+    TypedArrayProtoIndexOf,
+    TypedArrayProtoIncludes,
+    TypedArrayProtoForEach,
+    TypedArrayProtoMap,
+    TypedArrayProtoReduce,
+    TypedArrayProtoReverse,
     // Added in the feature-completeness pass.
     ArrayProtoSplice,
     ArrayProtoFlatMap,
@@ -979,6 +996,8 @@ pub struct Vm {
     promise_prototype: Option<GcRef<JsObject>>,
     map_prototype: Option<GcRef<JsObject>>,
     set_prototype: Option<GcRef<JsObject>>,
+    array_buffer_prototype: Option<GcRef<JsObject>>,
+    typed_array_prototype: Option<GcRef<JsObject>>,
     event_loop: EventLoop,
     random_state: u64,
     host: Box<dyn Host>,
@@ -987,7 +1006,7 @@ pub struct Vm {
     event_listeners: HashMap<u32, HashMap<String, Vec<GcRef<JsObject>>>>,
     /// Cache for stateless builtin method values (constructable=false, prototype=None).
     /// Avoids a heap allocation on every DOM property access like element.appendChild.
-    builtin_method_cache: HashMap<u32, Value>,
+    builtin_method_cache: HashMap<BuiltinId, Value>,
     /// Next id handed out by `Symbol()`. Ids below `FIRST_USER_SYMBOL` are
     /// reserved for well-known symbols (e.g. Symbol.iterator).
     next_symbol_id: u32,
@@ -1045,6 +1064,8 @@ impl Vm {
             promise_prototype: None,
             map_prototype: None,
             set_prototype: None,
+            array_buffer_prototype: None,
+            typed_array_prototype: None,
             event_loop: EventLoop::new(),
             random_state,
             host,
@@ -1697,6 +1718,8 @@ impl Vm {
         let promise_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let map_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let set_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let array_buffer_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let typed_array_prototype = self.allocate_ordinary_object(Some(object_prototype));
 
         self.object_prototype = Some(object_prototype);
         self.function_prototype = Some(function_prototype);
@@ -1712,6 +1735,8 @@ impl Vm {
         self.promise_prototype = Some(promise_prototype);
         self.map_prototype = Some(map_prototype);
         self.set_prototype = Some(set_prototype);
+        self.array_buffer_prototype = Some(array_buffer_prototype);
+        self.typed_array_prototype = Some(typed_array_prototype);
 
         let assert_value = self.allocate_builtin_method(BuiltinId::Assert);
         self.globals.insert("assert".to_string(), assert_value);
@@ -1832,6 +1857,94 @@ impl Vm {
             .insert("WeakMap".to_string(), weak_map_ctor.clone());
         self.globals
             .insert("WeakSet".to_string(), weak_set_ctor.clone());
+
+        // ArrayBuffer + typed arrays.
+        let array_buffer_ctor = self.allocate_builtin_value(
+            BuiltinId::ArrayBufferConstructor,
+            true,
+            Some(array_buffer_prototype),
+        );
+        self.globals
+            .insert("ArrayBuffer".to_string(), array_buffer_ctor);
+        self.define_builtin_method(
+            array_buffer_prototype,
+            "slice",
+            BuiltinId::ArrayBufferProtoSlice,
+        );
+        // Shared %TypedArray%.prototype methods (each reads its element kind
+        // from `this`). length/byteLength/byteOffset/buffer/BYTES_PER_ELEMENT
+        // and indexed access are handled directly in the get/set hooks.
+        self.define_builtin_method(typed_array_prototype, "set", BuiltinId::TypedArrayProtoSet);
+        self.define_builtin_method(
+            typed_array_prototype,
+            "subarray",
+            BuiltinId::TypedArrayProtoSubarray,
+        );
+        self.define_builtin_method(
+            typed_array_prototype,
+            "slice",
+            BuiltinId::TypedArrayProtoSlice,
+        );
+        self.define_builtin_method(typed_array_prototype, "fill", BuiltinId::TypedArrayProtoFill);
+        self.define_builtin_method(typed_array_prototype, "join", BuiltinId::TypedArrayProtoJoin);
+        self.define_builtin_method(
+            typed_array_prototype,
+            "indexOf",
+            BuiltinId::TypedArrayProtoIndexOf,
+        );
+        self.define_builtin_method(
+            typed_array_prototype,
+            "includes",
+            BuiltinId::TypedArrayProtoIncludes,
+        );
+        self.define_builtin_method(
+            typed_array_prototype,
+            "forEach",
+            BuiltinId::TypedArrayProtoForEach,
+        );
+        self.define_builtin_method(typed_array_prototype, "map", BuiltinId::TypedArrayProtoMap);
+        self.define_builtin_method(
+            typed_array_prototype,
+            "reduce",
+            BuiltinId::TypedArrayProtoReduce,
+        );
+        self.define_builtin_method(
+            typed_array_prototype,
+            "reverse",
+            BuiltinId::TypedArrayProtoReverse,
+        );
+        for kind in [
+            TypedArrayKind::Int8,
+            TypedArrayKind::Uint8,
+            TypedArrayKind::Uint8Clamped,
+            TypedArrayKind::Int16,
+            TypedArrayKind::Uint16,
+            TypedArrayKind::Int32,
+            TypedArrayKind::Uint32,
+            TypedArrayKind::Float32,
+            TypedArrayKind::Float64,
+        ] {
+            let ctor = self.allocate_builtin_value(
+                BuiltinId::TypedArrayConstructor(kind),
+                true,
+                Some(typed_array_prototype),
+            );
+            if let Some(ctor_ref) = self.value_object_ref(ctor.clone()) {
+                self.define_builtin_method(ctor_ref, "from", BuiltinId::TypedArrayFrom(kind));
+                self.define_builtin_method(ctor_ref, "of", BuiltinId::TypedArrayOf(kind));
+                self.define_data_property(
+                    ctor_ref,
+                    PropertyKey::from("BYTES_PER_ELEMENT"),
+                    Value::Number(kind.bytes_per_element() as f64),
+                    false,
+                    false,
+                    false,
+                );
+            }
+            self.globals
+                .insert(kind.constructor_name().to_string(), ctor);
+        }
+
         self.globals
             .insert("Promise".to_string(), promise_ctor.clone());
         self.globals.insert("Number".to_string(), number_ctor.clone());
@@ -2860,6 +2973,16 @@ impl Vm {
             .expect("set prototype should be installed")
     }
 
+    fn array_buffer_prototype_ref(&self) -> GcRef<JsObject> {
+        self.array_buffer_prototype
+            .expect("ArrayBuffer prototype should be installed")
+    }
+
+    fn typed_array_prototype_ref(&self) -> GcRef<JsObject> {
+        self.typed_array_prototype
+            .expect("TypedArray prototype should be installed")
+    }
+
     fn allocate_ordinary_object(&mut self, prototype: Option<GcRef<JsObject>>) -> GcRef<JsObject> {
         self.heap.allocate_object(JsObject {
             kind: ObjectKind::Ordinary,
@@ -2899,12 +3022,11 @@ impl Vm {
     /// Eliminates the heap allocation on every DOM property access (e.g. element.appendChild).
     #[inline]
     fn allocate_builtin_method(&mut self, builtin: BuiltinId) -> Value {
-        let key = builtin as u32;
-        if let Some(v) = self.builtin_method_cache.get(&key) {
+        if let Some(v) = self.builtin_method_cache.get(&builtin) {
             return v.clone();
         }
         let v = self.allocate_builtin_value(builtin, false, None);
-        self.builtin_method_cache.insert(key, v.clone());
+        self.builtin_method_cache.insert(builtin, v.clone());
         v
     }
 
@@ -4236,6 +4358,8 @@ impl Vm {
                 | BuiltinId::DateConstructor
                 | BuiltinId::ProxyConstructor
                 | BuiltinId::UrlSearchParamsConstructor
+                | BuiltinId::ArrayBufferConstructor
+                | BuiltinId::TypedArrayConstructor(_)
         )
     }
 
@@ -4894,6 +5018,12 @@ impl Vm {
             return self.get_host_property(slot, key);
         }
 
+        // ArrayBuffer / typed-array computed properties and indexed element
+        // reads (method names fall through to the prototype chain below).
+        if let Some(value) = self.typed_array_get_property(object, key) {
+            return Ok(value);
+        }
+
         if let Some((_, descriptor)) = self.lookup_property_descriptor(object, key) {
             return match descriptor {
                 JsPropertyDescriptor::Data { value, .. } => Ok(value),
@@ -4963,6 +5093,17 @@ impl Vm {
             .and_then(|o| if let ObjectKind::Host(slot) = o.kind { Some(slot) } else { None });
         if let Some(slot) = host_slot {
             return self.set_host_property(slot, key, value);
+        }
+
+        // Typed-array indexed writes go straight to the backing buffer (an
+        // out-of-range index is silently ignored, per spec).
+        if let PropertyKey::Index(index) = &key
+            && self.typed_array_info(&Value::Object(object)).is_some()
+        {
+            let index = *index as usize;
+            let number = self.to_number(&value);
+            self.typed_array_write_element(&Value::Object(object), index, number)?;
+            return Ok(());
         }
 
         if let Some(descriptor) = self.get_own_property_descriptor(object, &key) {
@@ -5282,6 +5423,511 @@ impl Vm {
         keys
     }
 
+    // ---- ArrayBuffer + typed arrays -------------------------------------
+
+    fn make_array_buffer(&mut self, byte_length: usize) -> Value {
+        let object = self.heap.allocate_object(JsObject {
+            kind: ObjectKind::ArrayBuffer(vec![0u8; byte_length]),
+            prototype: Some(self.array_buffer_prototype_ref()),
+            ..JsObject::default()
+        });
+        Value::Object(object)
+    }
+
+    fn make_typed_array(
+        &mut self,
+        kind: TypedArrayKind,
+        buffer: Value,
+        byte_offset: usize,
+        length: usize,
+    ) -> Result<Value, VmError> {
+        let buffer = self.require_object_ref(&buffer, "typed array buffer")?;
+        let object = self.heap.allocate_object(JsObject {
+            kind: ObjectKind::TypedArray {
+                buffer,
+                kind,
+                byte_offset,
+                length,
+            },
+            prototype: Some(self.typed_array_prototype_ref()),
+            ..JsObject::default()
+        });
+        Ok(Value::Object(object))
+    }
+
+    fn is_array_buffer(&self, object: GcRef<JsObject>) -> bool {
+        matches!(
+            self.heap.objects().get(object).map(|o| &o.kind),
+            Some(ObjectKind::ArrayBuffer(_))
+        )
+    }
+
+    fn array_buffer_len(&self, buffer: GcRef<JsObject>) -> usize {
+        match self.heap.objects().get(buffer).map(|o| &o.kind) {
+            Some(ObjectKind::ArrayBuffer(bytes)) => bytes.len(),
+            _ => 0,
+        }
+    }
+
+    /// Read a typed-array view's metadata (buffer, kind, byte offset, element
+    /// length). None if `value` is not a typed array.
+    fn typed_array_info(
+        &self,
+        value: &Value,
+    ) -> Option<(GcRef<JsObject>, TypedArrayKind, usize, usize)> {
+        let Value::Object(object) = value else {
+            return None;
+        };
+        match self.heap.objects().get(*object)?.kind {
+            ObjectKind::TypedArray {
+                buffer,
+                kind,
+                byte_offset,
+                length,
+            } => Some((buffer, kind, byte_offset, length)),
+            _ => None,
+        }
+    }
+
+    /// Read element `index` of a typed array as an f64; None if out of range or
+    /// not a typed array.
+    fn typed_array_read_element(&self, value: &Value, index: usize) -> Option<f64> {
+        let (buffer, kind, byte_offset, length) = self.typed_array_info(value)?;
+        if index >= length {
+            return None;
+        }
+        let byte_index = byte_offset + index * kind.bytes_per_element();
+        match &self.heap.objects().get(buffer)?.kind {
+            ObjectKind::ArrayBuffer(bytes) => Some(kind.read_element(bytes, byte_index)),
+            _ => None,
+        }
+    }
+
+    /// Coerce and write `number` into element `index` (no-op if out of range).
+    fn typed_array_write_element(
+        &mut self,
+        value: &Value,
+        index: usize,
+        number: f64,
+    ) -> Result<(), VmError> {
+        let Some((buffer, kind, byte_offset, length)) = self.typed_array_info(value) else {
+            return Ok(());
+        };
+        if index >= length {
+            return Ok(());
+        }
+        let byte_index = byte_offset + index * kind.bytes_per_element();
+        if let Some(object) = self.heap.objects_mut().get_mut(buffer)
+            && let ObjectKind::ArrayBuffer(bytes) = &mut object.kind
+        {
+            kind.coerce_and_write(bytes, byte_index, number);
+        }
+        Ok(())
+    }
+
+    /// All elements of a typed array as Number values.
+    fn typed_array_to_values(&self, value: &Value) -> Vec<Value> {
+        let length = self.typed_array_info(value).map(|info| info.3).unwrap_or(0);
+        (0..length)
+            .map(|index| Value::Number(self.typed_array_read_element(value, index).unwrap_or(0.0)))
+            .collect()
+    }
+
+    /// Resolve a `(begin, end)` index pair from up to two relative-index args
+    /// against a collection of `length` items (negative counts from the end).
+    fn typed_array_range(&self, args: &[Value], length: usize) -> (usize, usize) {
+        fn resolve(value: f64, length: usize, default: usize) -> usize {
+            if value.is_nan() {
+                return default;
+            }
+            let truncated = value.trunc();
+            if truncated < 0.0 {
+                (length as f64 + truncated).max(0.0) as usize
+            } else {
+                (truncated as usize).min(length)
+            }
+        }
+        let begin = match args.first() {
+            Some(value) if !matches!(value, Value::Undefined) => {
+                resolve(self.to_number(value), length, 0)
+            }
+            _ => 0,
+        };
+        let end = match args.get(1) {
+            Some(value) if !matches!(value, Value::Undefined) => {
+                resolve(self.to_number(value), length, length)
+            }
+            _ => length,
+        };
+        (begin, end.max(begin))
+    }
+
+    fn construct_array_buffer(&mut self, args: &[Value]) -> Result<Value, VmError> {
+        let length = args.first().map(|value| self.to_number(value)).unwrap_or(0.0);
+        let length = if length.is_finite() && length >= 0.0 {
+            length as usize
+        } else {
+            0
+        };
+        Ok(self.make_array_buffer(length))
+    }
+
+    fn array_buffer_slice(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let Value::Object(object) = this else {
+            return Ok(Value::Undefined);
+        };
+        let length = self.array_buffer_len(*object);
+        let (begin, end) = self.typed_array_range(args, length);
+        let source: Vec<u8> = match self.heap.objects().get(*object).map(|o| &o.kind) {
+            Some(ObjectKind::ArrayBuffer(bytes)) => {
+                bytes.get(begin..end).map(<[u8]>::to_vec).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        let new_buffer = self.make_array_buffer(source.len());
+        if let Value::Object(new_ref) = &new_buffer
+            && let Some(object) = self.heap.objects_mut().get_mut(*new_ref)
+            && let ObjectKind::ArrayBuffer(bytes) = &mut object.kind
+        {
+            bytes.copy_from_slice(&source);
+        }
+        Ok(new_buffer)
+    }
+
+    fn construct_typed_array(
+        &mut self,
+        kind: TypedArrayKind,
+        args: &[Value],
+    ) -> Result<Value, VmError> {
+        let bytes_per_element = kind.bytes_per_element();
+        match args.first().cloned() {
+            // new T(buffer, byteOffset?, length?) — a view over an ArrayBuffer.
+            Some(Value::Object(object)) if self.is_array_buffer(object) => {
+                let buffer_len = self.array_buffer_len(object);
+                let byte_offset = args.get(1).map(|value| self.to_number(value)).unwrap_or(0.0);
+                let byte_offset = if byte_offset.is_finite() && byte_offset >= 0.0 {
+                    byte_offset as usize
+                } else {
+                    0
+                };
+                let length = match args.get(2) {
+                    Some(value) if !matches!(value, Value::Undefined) => {
+                        let n = self.to_number(value);
+                        if n.is_finite() && n >= 0.0 { n as usize } else { 0 }
+                    }
+                    _ => buffer_len.saturating_sub(byte_offset) / bytes_per_element,
+                };
+                self.make_typed_array(kind, Value::Object(object), byte_offset, length)
+            }
+            // new T(typedArray | array | iterable) — copy element values.
+            Some(Value::Object(object)) => {
+                let source = Value::Object(object);
+                let values = if self.typed_array_info(&source).is_some() {
+                    self.typed_array_to_values(&source)
+                } else {
+                    self.for_of_values(&source)?
+                };
+                let buffer = self.make_array_buffer(values.len() * bytes_per_element);
+                let view = self.make_typed_array(kind, buffer, 0, values.len())?;
+                for (index, value) in values.into_iter().enumerate() {
+                    let number = self.to_number(&value);
+                    self.typed_array_write_element(&view, index, number)?;
+                }
+                Ok(view)
+            }
+            // new T(length)
+            Some(value) => {
+                let n = self.to_number(&value);
+                let length = if n.is_finite() && n >= 0.0 { n as usize } else { 0 };
+                let buffer = self.make_array_buffer(length * bytes_per_element);
+                self.make_typed_array(kind, buffer, 0, length)
+            }
+            // new T()
+            None => {
+                let buffer = self.make_array_buffer(0);
+                self.make_typed_array(kind, buffer, 0, 0)
+            }
+        }
+    }
+
+    fn typed_array_from(
+        &mut self,
+        kind: TypedArrayKind,
+        args: &[Value],
+    ) -> Result<Value, VmError> {
+        let source = args.first().cloned().unwrap_or(Value::Undefined);
+        let map_fn = args.get(1).cloned();
+        let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+        let mut values = match &source {
+            Value::String(string) => self
+                .string_text(*string)
+                .chars()
+                .map(|character| self.make_string_value(&character.to_string()))
+                .collect(),
+            Value::Object(_) if self.typed_array_info(&source).is_some() => {
+                self.typed_array_to_values(&source)
+            }
+            Value::Object(_) => self.for_of_values(&source)?,
+            Value::Null | Value::Undefined => {
+                return Err(VmError::TypeError(
+                    "TypedArray.from requires an array-like or iterable object".to_string(),
+                ));
+            }
+            _ => Vec::new(),
+        };
+        if let Some(callback) = map_fn.filter(|callback| self.is_callable_value(callback)) {
+            let mut mapped = Vec::with_capacity(values.len());
+            for (index, value) in values.into_iter().enumerate() {
+                mapped.push(self.call_value_sync(
+                    callback.clone(),
+                    this_arg.clone(),
+                    vec![value, Value::Number(index as f64)],
+                )?);
+            }
+            values = mapped;
+        }
+        let buffer = self.make_array_buffer(values.len() * kind.bytes_per_element());
+        let view = self.make_typed_array(kind, buffer, 0, values.len())?;
+        for (index, value) in values.into_iter().enumerate() {
+            let number = self.to_number(&value);
+            self.typed_array_write_element(&view, index, number)?;
+        }
+        Ok(view)
+    }
+
+    fn typed_array_proto_set(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let source = args.first().cloned().unwrap_or(Value::Undefined);
+        let offset = args.get(1).map(|value| self.to_number(value)).unwrap_or(0.0);
+        let offset = if offset.is_finite() && offset >= 0.0 {
+            offset as usize
+        } else {
+            0
+        };
+        let values = match &source {
+            Value::Object(_) if self.typed_array_info(&source).is_some() => {
+                self.typed_array_to_values(&source)
+            }
+            Value::Object(_) => self.array_like_to_vec(&source)?,
+            _ => Vec::new(),
+        };
+        for (index, value) in values.into_iter().enumerate() {
+            let number = self.to_number(&value);
+            self.typed_array_write_element(this, offset + index, number)?;
+        }
+        Ok(Value::Undefined)
+    }
+
+    fn typed_array_subarray(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let Some((buffer, kind, byte_offset, length)) = self.typed_array_info(this) else {
+            return Ok(Value::Undefined);
+        };
+        let (begin, end) = self.typed_array_range(args, length);
+        let new_offset = byte_offset + begin * kind.bytes_per_element();
+        self.make_typed_array(kind, Value::Object(buffer), new_offset, end - begin)
+    }
+
+    fn typed_array_slice(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let Some((_, kind, _, length)) = self.typed_array_info(this) else {
+            return Ok(Value::Undefined);
+        };
+        let (begin, end) = self.typed_array_range(args, length);
+        let new_length = end - begin;
+        let buffer = self.make_array_buffer(new_length * kind.bytes_per_element());
+        let view = self.make_typed_array(kind, buffer, 0, new_length)?;
+        for index in 0..new_length {
+            if let Some(number) = self.typed_array_read_element(this, begin + index) {
+                self.typed_array_write_element(&view, index, number)?;
+            }
+        }
+        Ok(view)
+    }
+
+    fn typed_array_fill(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let Some((_, _, _, length)) = self.typed_array_info(this) else {
+            return Ok(this.clone());
+        };
+        let number = args.first().map(|value| self.to_number(value)).unwrap_or(f64::NAN);
+        let rest = if args.len() > 1 { &args[1..] } else { &[] };
+        let (start, end) = self.typed_array_range(rest, length);
+        for index in start..end {
+            self.typed_array_write_element(this, index, number)?;
+        }
+        Ok(this.clone())
+    }
+
+    fn typed_array_join(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let separator = match args.first() {
+            Some(value) if !matches!(value, Value::Undefined) => self.to_string(value),
+            _ => ",".to_string(),
+        };
+        let values = self.typed_array_to_values(this);
+        let parts: Vec<String> = values.iter().map(|value| self.to_string(value)).collect();
+        Ok(self.make_string_value(&parts.join(&separator)))
+    }
+
+    fn typed_array_index_of(
+        &mut self,
+        this: &Value,
+        args: &[Value],
+        includes: bool,
+    ) -> Result<Value, VmError> {
+        let not_found = if includes {
+            Value::Bool(false)
+        } else {
+            Value::Number(-1.0)
+        };
+        let target = args.first().map(|value| self.to_number(value)).unwrap_or(f64::NAN);
+        let Some((_, _, _, length)) = self.typed_array_info(this) else {
+            return Ok(not_found);
+        };
+        let from = args.get(1).map(|value| self.to_number(value)).unwrap_or(0.0);
+        let start = if from.is_finite() && from < 0.0 {
+            (length as f64 + from).max(0.0) as usize
+        } else if from.is_finite() {
+            (from as usize).min(length)
+        } else {
+            0
+        };
+        for index in start..length {
+            let Some(element) = self.typed_array_read_element(this, index) else {
+                continue;
+            };
+            let hit = element == target || (includes && element.is_nan() && target.is_nan());
+            if hit {
+                return Ok(if includes {
+                    Value::Bool(true)
+                } else {
+                    Value::Number(index as f64)
+                });
+            }
+        }
+        Ok(not_found)
+    }
+
+    fn typed_array_for_each(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let callback = args.first().cloned().unwrap_or(Value::Undefined);
+        let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+        let Some((_, _, _, length)) = self.typed_array_info(this) else {
+            return Ok(Value::Undefined);
+        };
+        for index in 0..length {
+            let element = self.typed_array_read_element(this, index).unwrap_or(0.0);
+            self.call_value_sync(
+                callback.clone(),
+                this_arg.clone(),
+                vec![Value::Number(element), Value::Number(index as f64), this.clone()],
+            )?;
+        }
+        Ok(Value::Undefined)
+    }
+
+    fn typed_array_map(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let callback = args.first().cloned().unwrap_or(Value::Undefined);
+        let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+        let Some((_, kind, _, length)) = self.typed_array_info(this) else {
+            return Ok(Value::Undefined);
+        };
+        let buffer = self.make_array_buffer(length * kind.bytes_per_element());
+        let view = self.make_typed_array(kind, buffer, 0, length)?;
+        for index in 0..length {
+            let element = self.typed_array_read_element(this, index).unwrap_or(0.0);
+            let mapped = self.call_value_sync(
+                callback.clone(),
+                this_arg.clone(),
+                vec![Value::Number(element), Value::Number(index as f64), this.clone()],
+            )?;
+            let number = self.to_number(&mapped);
+            self.typed_array_write_element(&view, index, number)?;
+        }
+        Ok(view)
+    }
+
+    fn typed_array_reduce(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let callback = args.first().cloned().unwrap_or(Value::Undefined);
+        let Some((_, _, _, length)) = self.typed_array_info(this) else {
+            return Ok(Value::Undefined);
+        };
+        let mut index = 0;
+        let mut accumulator = if args.len() > 1 {
+            args[1].clone()
+        } else {
+            if length == 0 {
+                return Err(VmError::TypeError(
+                    "Reduce of empty typed array with no initial value".to_string(),
+                ));
+            }
+            index = 1;
+            Value::Number(self.typed_array_read_element(this, 0).unwrap_or(0.0))
+        };
+        while index < length {
+            let element = self.typed_array_read_element(this, index).unwrap_or(0.0);
+            accumulator = self.call_value_sync(
+                callback.clone(),
+                Value::Undefined,
+                vec![
+                    accumulator,
+                    Value::Number(element),
+                    Value::Number(index as f64),
+                    this.clone(),
+                ],
+            )?;
+            index += 1;
+        }
+        Ok(accumulator)
+    }
+
+    fn typed_array_reverse(&mut self, this: &Value) -> Result<Value, VmError> {
+        let Some((_, _, _, length)) = self.typed_array_info(this) else {
+            return Ok(this.clone());
+        };
+        for index in 0..length / 2 {
+            let mirror = length - 1 - index;
+            let left = self.typed_array_read_element(this, index).unwrap_or(0.0);
+            let right = self.typed_array_read_element(this, mirror).unwrap_or(0.0);
+            self.typed_array_write_element(this, index, right)?;
+            self.typed_array_write_element(this, mirror, left)?;
+        }
+        Ok(this.clone())
+    }
+
+    /// Special-cased property reads for ArrayBuffer / typed-array objects (the
+    /// computed `length`/`byteLength`/`buffer` accessors and integer-indexed
+    /// element reads). Returns None to fall through to the ordinary chain.
+    fn typed_array_get_property(
+        &mut self,
+        object: GcRef<JsObject>,
+        key: &PropertyKey,
+    ) -> Option<Value> {
+        let value = Value::Object(object);
+        // ArrayBuffer.byteLength.
+        if self.is_array_buffer(object) {
+            if let PropertyKey::String(name) = key
+                && name == "byteLength"
+            {
+                return Some(Value::Number(self.array_buffer_len(object) as f64));
+            }
+            return None;
+        }
+        let (buffer, kind, byte_offset, length) = self.typed_array_info(&value)?;
+        match key {
+            PropertyKey::Index(index) => {
+                Some(match self.typed_array_read_element(&value, *index as usize) {
+                    Some(number) => Value::Number(number),
+                    None => Value::Undefined,
+                })
+            }
+            PropertyKey::String(name) => match name.as_str() {
+                "length" => Some(Value::Number(length as f64)),
+                "byteLength" => Some(Value::Number((length * kind.bytes_per_element()) as f64)),
+                "byteOffset" => Some(Value::Number(byte_offset as f64)),
+                "BYTES_PER_ELEMENT" => Some(Value::Number(kind.bytes_per_element() as f64)),
+                "buffer" => Some(Value::Object(buffer)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn for_of_values(&mut self, value: &Value) -> Result<Vec<Value>, VmError> {
         match value {
             Value::String(string) => Ok(self
@@ -5306,6 +5952,7 @@ impl Vm {
                         Ok(pairs)
                     }
                     ObjectKind::Set(values) | ObjectKind::WeakSet(values) => Ok(values),
+                    ObjectKind::TypedArray { .. } => Ok(self.typed_array_to_values(value)),
                     ObjectKind::UrlSearchParams(pairs) => {
                         let mut entries = Vec::with_capacity(pairs.len());
                         for (name, value) in pairs {
@@ -5898,6 +6545,34 @@ impl Vm {
                 }
                 Ok(Value::Object(object))
             }
+            BuiltinId::ArrayBufferConstructor => self.construct_array_buffer(&args),
+            BuiltinId::ArrayBufferProtoSlice => self.array_buffer_slice(&this_value, &args),
+            BuiltinId::TypedArrayConstructor(kind) => self.construct_typed_array(kind, &args),
+            BuiltinId::TypedArrayFrom(kind) => self.typed_array_from(kind, &args),
+            BuiltinId::TypedArrayOf(kind) => {
+                let buffer = self.make_array_buffer(args.len() * kind.bytes_per_element());
+                let view = self.make_typed_array(kind, buffer, 0, args.len())?;
+                for (index, value) in args.iter().enumerate() {
+                    let number = self.to_number(value);
+                    self.typed_array_write_element(&view, index, number)?;
+                }
+                Ok(view)
+            }
+            BuiltinId::TypedArrayProtoSet => self.typed_array_proto_set(&this_value, &args),
+            BuiltinId::TypedArrayProtoSubarray => self.typed_array_subarray(&this_value, &args),
+            BuiltinId::TypedArrayProtoSlice => self.typed_array_slice(&this_value, &args),
+            BuiltinId::TypedArrayProtoFill => self.typed_array_fill(&this_value, &args),
+            BuiltinId::TypedArrayProtoJoin => self.typed_array_join(&this_value, &args),
+            BuiltinId::TypedArrayProtoIndexOf => {
+                self.typed_array_index_of(&this_value, &args, false)
+            }
+            BuiltinId::TypedArrayProtoIncludes => {
+                self.typed_array_index_of(&this_value, &args, true)
+            }
+            BuiltinId::TypedArrayProtoForEach => self.typed_array_for_each(&this_value, &args),
+            BuiltinId::TypedArrayProtoMap => self.typed_array_map(&this_value, &args),
+            BuiltinId::TypedArrayProtoReduce => self.typed_array_reduce(&this_value, &args),
+            BuiltinId::TypedArrayProtoReverse => self.typed_array_reverse(&this_value),
             BuiltinId::ArrayIsArray => Ok(Value::Bool(matches!(
                 args.first(),
                 Some(Value::Object(object))
