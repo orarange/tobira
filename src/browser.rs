@@ -374,7 +374,7 @@ fn load_document_source_with_script_navigation(
     })
 }
 
-fn annotate_node_ids(document: &mut Node) {
+pub(crate) fn annotate_node_ids(document: &mut Node) {
     fn walk(node: &mut Node, next_id: &mut usize) {
         if let Node::Element(element) = node {
             element

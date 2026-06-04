@@ -252,6 +252,47 @@ impl BrowserHost {
         self.serialize_node(self.document)
     }
 
+    /// Map a browser `data-tobira-node-id` to this arena's node index.
+    ///
+    /// `browser.rs::annotate_node_ids` numbers the parsed document with a
+    /// 1-based pre-order walk over `Node::Element`s, where the parsed root (the
+    /// synthetic `document` element) is id 1 and its element descendants follow.
+    /// Our arena's `Document` node plays the role of that root, so we count the
+    /// `Document` node and every `Element` in the same pre-order. This is the
+    /// bridge that lets the browser dispatch an event by `target_node_id` and
+    /// have it land on the right engine node.
+    pub fn handle_for_node_id(&self, target_id: usize) -> Option<usize> {
+        if target_id == 0 {
+            return None;
+        }
+        let mut counter = 0usize;
+        self.find_by_tobira_id(self.document, target_id, &mut counter)
+    }
+
+    fn find_by_tobira_id(
+        &self,
+        idx: usize,
+        target: usize,
+        counter: &mut usize,
+    ) -> Option<usize> {
+        if matches!(
+            self.nodes[idx].kind,
+            DomNodeKind::Document | DomNodeKind::Element(_)
+        ) {
+            *counter += 1;
+            if *counter == target {
+                return Some(idx);
+            }
+        }
+        for i in 0..self.nodes[idx].children.len() {
+            let child = self.nodes[idx].children[i];
+            if let Some(found) = self.find_by_tobira_id(child, target, counter) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
     /// Drain captured console output.
     pub fn take_console(&mut self) -> Vec<String> {
         std::mem::take(&mut self.console)
@@ -1281,6 +1322,95 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.console_logs, vec!["detail=42".to_string()]);
+    }
+
+    /// Assert that `BrowserHost::handle_for_node_id` reproduces the browser's
+    /// real `annotate_node_ids` numbering over the actual snapshot pipeline
+    /// (serialize -> parse -> annotate). Every annotated element's
+    /// `data-tobira-node-id` must map back to an arena node with the same tag
+    /// (and id attribute, when present).
+    fn assert_node_id_alignment(html: &str, min_checks: usize) {
+        use crate::browser::annotate_node_ids;
+        use crate::html::{Node, parse_document};
+
+        let host = BrowserHost::from_html(html, "http://localhost/");
+        let serialized = host.serialize_document();
+        let mut tree = parse_document(&serialized);
+        annotate_node_ids(&mut tree);
+
+        fn check(node: &Node, host: &BrowserHost, checked: &mut usize) {
+            if let Node::Element(el) = node {
+                if let Some(id_str) = el.attributes.get("data-tobira-node-id") {
+                    let id: usize = id_str.parse().expect("numeric tobira id");
+                    let handle = host
+                        .handle_for_node_id(id)
+                        .unwrap_or_else(|| panic!("no handle for tobira id {id}"));
+                    let arena = &host.nodes[handle];
+                    if el.tag_name == "document" {
+                        assert!(
+                            matches!(arena.kind, DomNodeKind::Document),
+                            "tobira id {id} should map to the Document node"
+                        );
+                    } else {
+                        assert_eq!(
+                            arena.tag_name(),
+                            Some(el.tag_name.to_lowercase().as_str()),
+                            "tobira id {id}: tag mismatch"
+                        );
+                        if let Some(want) = el.attributes.get("id") {
+                            assert_eq!(
+                                arena.attrs.get("id"),
+                                Some(want),
+                                "tobira id {id}: id-attribute mismatch"
+                            );
+                        }
+                    }
+                    *checked += 1;
+                }
+                for child in &el.children {
+                    check(child, host, checked);
+                }
+            }
+        }
+        let mut checked = 0;
+        check(&tree, &host, &mut checked);
+        assert!(
+            checked >= min_checks,
+            "expected at least {min_checks} elements checked, got {checked}"
+        );
+    }
+
+    #[test]
+    fn node_id_mapping_full_document() {
+        assert_node_id_alignment(
+            r#"<html><head><title>T</title></head><body>
+                <div id="a"><p id="b">x</p><span id="c">y</span></div>
+                <button id="d">go</button>
+            </body></html>"#,
+            6,
+        );
+    }
+
+    #[test]
+    fn node_id_mapping_with_synthesized_skeleton() {
+        // No explicit <html>/<head>/<body>; BrowserHost synthesizes them and
+        // the alignment must still hold.
+        assert_node_id_alignment(
+            r#"<div id="root"><span id="inner">hi</span><a id="link">go</a></div>"#,
+            4,
+        );
+    }
+
+    #[test]
+    fn node_id_mapping_deeply_nested() {
+        assert_node_id_alignment(
+            r#"<html><body><ul id="list">
+                <li id="one"><a id="la">1</a></li>
+                <li id="two"><a id="lb">2</a></li>
+                <li id="three"><a id="lc">3</a></li>
+            </ul></body></html>"#,
+            8,
+        );
     }
 
     #[test]
