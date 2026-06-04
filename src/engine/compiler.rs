@@ -745,6 +745,21 @@ impl<'a> FunctionCompiler<'a> {
         storage: BindingStorage,
         context: DeclarationContext,
     ) -> Result<(), CompileError> {
+        // Normalize the source to a real array via `Array.from` so that array
+        // destructuring follows the iterator protocol and works on any iterable
+        // (Set, Map, string, generators, custom iterables), not just arrays.
+        // The existing index-based extraction below then operates on the
+        // materialized array. `Array.from` is lenient on non-iterables (it
+        // yields an empty array), which preserves the prior behavior for
+        // array-likes and primitives.
+        let array_slot = self.allocate_hidden_local()?;
+        let array_name = self.add_string_constant("Array")?;
+        let from_name = self.add_string_constant("from")?;
+        self.emit(Opcode::GetGlobal(array_name));
+        self.emit(Opcode::GetPropForCall(from_name));
+        self.emit(Opcode::GetLocal(source_slot));
+        self.emit(Opcode::Call(1));
+        self.emit(Opcode::SetLocal(array_slot));
         for (index, element) in pattern.bindings().iter().enumerate() {
             match element {
                 ArrayPatternElementNode::Elision => {}
@@ -752,7 +767,7 @@ impl<'a> FunctionCompiler<'a> {
                     ident,
                     default_init,
                 } => {
-                    let value_slot = self.extract_array_index_to_slot(source_slot, index as u32)?;
+                    let value_slot = self.extract_array_index_to_slot(array_slot, index as u32)?;
                     let value_slot =
                         self.apply_default_initializer_slot(value_slot, default_init.as_ref())?;
                     let temp_binding = BindingNode::Identifier(*ident);
@@ -762,7 +777,7 @@ impl<'a> FunctionCompiler<'a> {
                     access,
                     default_init,
                 } => {
-                    let value_slot = self.extract_array_index_to_slot(source_slot, index as u32)?;
+                    let value_slot = self.extract_array_index_to_slot(array_slot, index as u32)?;
                     let value_slot =
                         self.apply_default_initializer_slot(value_slot, default_init.as_ref())?;
                     self.assign_member_from_slot(access, value_slot)?;
@@ -771,22 +786,22 @@ impl<'a> FunctionCompiler<'a> {
                     pattern,
                     default_init,
                 } => {
-                    let value_slot = self.extract_array_index_to_slot(source_slot, index as u32)?;
+                    let value_slot = self.extract_array_index_to_slot(array_slot, index as u32)?;
                     let value_slot =
                         self.apply_default_initializer_slot(value_slot, default_init.as_ref())?;
                     self.compile_pattern_store(pattern, value_slot, storage, context)?;
                 }
                 ArrayPatternElementNode::SingleNameRest { ident } => {
-                    let rest_slot = self.slice_array_slot(source_slot, index as u32)?;
+                    let rest_slot = self.slice_array_slot(array_slot, index as u32)?;
                     let temp_binding = BindingNode::Identifier(*ident);
                     self.compile_binding_store(&temp_binding, rest_slot, storage, context)?;
                 }
                 ArrayPatternElementNode::PropertyAccessRest { access } => {
-                    let rest_slot = self.slice_array_slot(source_slot, index as u32)?;
+                    let rest_slot = self.slice_array_slot(array_slot, index as u32)?;
                     self.assign_member_from_slot(access, rest_slot)?;
                 }
                 ArrayPatternElementNode::PatternRest { pattern } => {
-                    let rest_slot = self.slice_array_slot(source_slot, index as u32)?;
+                    let rest_slot = self.slice_array_slot(array_slot, index as u32)?;
                     self.compile_pattern_store(pattern, rest_slot, storage, context)?;
                 }
             }
@@ -1617,6 +1632,18 @@ impl<'a> FunctionCompiler<'a> {
             self.emit(Opcode::Pop);
         }
 
+        // Establish the class's inner name binding (an immutable binding scoped
+        // to the class body) so static blocks and static field initializers can
+        // refer to the class by name (e.g. `A`) while it is being defined,
+        // before the outer declaration binding is stored.
+        let class_body_scope = name.is_some();
+        if let Some(class_name) = &name {
+            self.push_scope();
+            let name_slot = self.declare_named_hidden_local(class_name.clone())?;
+            self.emit(Opcode::GetLocal(class_slot));
+            self.emit(Opcode::SetLocal(name_slot));
+        }
+
         for element in elements {
             match element {
                 ClassElementNode::MethodDefinition(method) => {
@@ -1639,10 +1666,24 @@ impl<'a> FunctionCompiler<'a> {
                     }
                     self.emit(Opcode::SetProp);
                 }
-                ClassElementNode::StaticBlock(_) => {
-                    return Err(CompileError::Unimplemented("class static blocks"));
+                ClassElementNode::StaticBlock(block) => {
+                    // A static block runs once at class-definition time, in
+                    // source order with the static fields. Compile its body
+                    // inline in a fresh lexical scope. The class is in scope by
+                    // name (e.g. `A`) via the inner name binding established
+                    // above. (Note: `this` resolves to the enclosing `this`
+                    // rather than the class, matching the static-field
+                    // initializers above; rebinding `this` to the class is a
+                    // future refinement.)
+                    self.push_scope();
+                    self.compile_function_body(block.statements())?;
+                    self.pop_scope();
                 }
             }
+        }
+
+        if class_body_scope {
+            self.pop_scope();
         }
 
         self.emit(Opcode::GetLocal(class_slot));
