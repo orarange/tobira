@@ -1253,12 +1253,15 @@ impl Vm {
                 *self.upvalue_cell(slot)?.borrow_mut() = value;
             }
             Opcode::GetGlobal(index) => {
-                let value = {
-                    let name = self.constant_name(index)?;
-                    self.globals
-                        .get(name)
-                        .cloned()
-                        .ok_or_else(|| VmError::ReferenceError(format!("{name} is not defined")))?
+                let name = self.constant_name(index)?.to_string();
+                let value = if let Some(existing) = self.globals.get(&name).cloned() {
+                    existing
+                } else if Self::is_window_global(&name) {
+                    // In a browser the global object IS the window, so a bare
+                    // reference like `location` resolves to `window.location`.
+                    self.get_window_property(name)?
+                } else {
+                    return Err(VmError::ReferenceError(format!("{name} is not defined")));
                 };
                 self.stack.push(value);
             }
@@ -8996,6 +8999,45 @@ impl Vm {
             HostObjectClass::StorageArea => self.get_storage_property(slot, name),
             _ => Ok(Value::Undefined),
         }
+    }
+
+    /// Names that resolve as bare globals by virtue of the window being the
+    /// global object (e.g. `location`, `navigator`, `localStorage`). A bare
+    /// identifier not in `self.globals` falls back to `get_window_property`
+    /// only for these; anything else is a genuine ReferenceError.
+    fn is_window_global(name: &str) -> bool {
+        matches!(
+            name,
+            "location"
+                | "navigator"
+                | "screen"
+                | "history"
+                | "performance"
+                | "localStorage"
+                | "sessionStorage"
+                | "innerWidth"
+                | "innerHeight"
+                | "scrollX"
+                | "scrollY"
+                | "pageXOffset"
+                | "pageYOffset"
+                | "devicePixelRatio"
+                | "btoa"
+                | "atob"
+                | "requestIdleCallback"
+                | "cancelIdleCallback"
+                | "getComputedStyle"
+                | "matchMedia"
+                | "scrollTo"
+                | "scroll"
+                | "scrollBy"
+                | "getSelection"
+                | "crypto"
+                | "isSecureContext"
+                | "crossOriginIsolated"
+                | "addEventListener"
+                | "removeEventListener"
+        )
     }
 
     fn get_window_property(&mut self, name: String) -> Result<Value, VmError> {
