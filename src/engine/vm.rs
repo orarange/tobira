@@ -327,6 +327,19 @@ enum BuiltinId {
     ReflectConstruct,
     StructuredClone,
     ProxyConstructor,
+    UrlSearchParamsConstructor,
+    UspGet,
+    UspGetAll,
+    UspHas,
+    UspSet,
+    UspAppend,
+    UspDelete,
+    UspToString,
+    UspForEach,
+    UspEntries,
+    UspKeys,
+    UspValues,
+    UspSort,
 }
 
 #[derive(Debug, Clone)]
@@ -832,6 +845,76 @@ fn floor_mod(a: i64, b: i64) -> i64 {
     ((a % b) + b) % b
 }
 
+/// `application/x-www-form-urlencoded` decode: `+` → space, `%XX` → byte.
+fn form_urldecode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                match (hi, lo) {
+                    (Some(h), Some(l)) => {
+                        out.push((h * 16 + l) as u8);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `application/x-www-form-urlencoded` encode: space → `+`, keep `*-._` and
+/// alphanumerics, percent-encode the rest.
+fn form_urlencode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for &byte in input.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
+                out.push(byte as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                out.push('%');
+                out.push_str(&format!("{byte:02X}"));
+            }
+        }
+    }
+    out
+}
+
+/// Parse a `URLSearchParams` init query string into (name, value) pairs.
+fn parse_query_string(input: &str) -> Vec<(String, String)> {
+    let input = input.strip_prefix('?').unwrap_or(input);
+    let mut pairs = Vec::new();
+    for part in input.split('&') {
+        if part.is_empty() {
+            continue;
+        }
+        let (name, value) = match part.split_once('=') {
+            Some((name, value)) => (name, value),
+            None => (part, ""),
+        };
+        pairs.push((form_urldecode(name), form_urldecode(value)));
+    }
+    pairs
+}
+
 fn is_uri_unreserved(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')')
 }
@@ -891,6 +974,7 @@ pub struct Vm {
     regexp_prototype: Option<GcRef<JsObject>>,
     date_prototype: Option<GcRef<JsObject>>,
     generator_prototype: Option<GcRef<JsObject>>,
+    url_search_params_prototype: Option<GcRef<JsObject>>,
     error_prototype: Option<GcRef<JsObject>>,
     promise_prototype: Option<GcRef<JsObject>>,
     map_prototype: Option<GcRef<JsObject>>,
@@ -956,6 +1040,7 @@ impl Vm {
             regexp_prototype: None,
             date_prototype: None,
             generator_prototype: None,
+            url_search_params_prototype: None,
             error_prototype: None,
             promise_prototype: None,
             map_prototype: None,
@@ -1600,6 +1685,7 @@ impl Vm {
         let regexp_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let date_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let generator_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let url_search_params_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let error_prototype = self.heap.allocate_object(JsObject {
             kind: ObjectKind::Error,
             prototype: Some(object_prototype),
@@ -1618,6 +1704,7 @@ impl Vm {
         self.regexp_prototype = Some(regexp_prototype);
         self.date_prototype = Some(date_prototype);
         self.generator_prototype = Some(generator_prototype);
+        self.url_search_params_prototype = Some(url_search_params_prototype);
         self.error_prototype = Some(error_prototype);
         self.promise_prototype = Some(promise_prototype);
         self.map_prototype = Some(map_prototype);
@@ -1998,6 +2085,32 @@ impl Vm {
             true,
         );
 
+        for (name, builtin) in [
+            ("get", BuiltinId::UspGet),
+            ("getAll", BuiltinId::UspGetAll),
+            ("has", BuiltinId::UspHas),
+            ("set", BuiltinId::UspSet),
+            ("append", BuiltinId::UspAppend),
+            ("delete", BuiltinId::UspDelete),
+            ("toString", BuiltinId::UspToString),
+            ("forEach", BuiltinId::UspForEach),
+            ("entries", BuiltinId::UspEntries),
+            ("keys", BuiltinId::UspKeys),
+            ("values", BuiltinId::UspValues),
+            ("sort", BuiltinId::UspSort),
+        ] {
+            self.define_builtin_method(url_search_params_prototype, name, builtin);
+        }
+        let usp_iterator = self.allocate_builtin_method(BuiltinId::UspEntries);
+        self.define_data_property(
+            url_search_params_prototype,
+            PropertyKey::Symbol(SymbolId(SYMBOL_ITERATOR_ID)),
+            usp_iterator,
+            true,
+            false,
+            true,
+        );
+
         self.define_builtin_method(string_prototype, "match", BuiltinId::StringProtoMatch);
         self.define_builtin_method(string_prototype, "matchAll", BuiltinId::StringProtoMatchAll);
         self.define_builtin_method(string_prototype, "search", BuiltinId::StringProtoSearch);
@@ -2179,6 +2292,14 @@ impl Vm {
 
         let proxy_ctor = self.allocate_builtin_value(BuiltinId::ProxyConstructor, true, None);
         self.globals.insert("Proxy".to_string(), proxy_ctor);
+
+        let usp_ctor = self.allocate_builtin_value(
+            BuiltinId::UrlSearchParamsConstructor,
+            true,
+            Some(url_search_params_prototype),
+        );
+        self.globals
+            .insert("URLSearchParams".to_string(), usp_ctor);
 
         if let Some(date_ref) = self.value_object_ref(date_ctor) {
             self.define_builtin_method(date_ref, "now", BuiltinId::DateNow);
@@ -4111,6 +4232,7 @@ impl Vm {
                 | BuiltinId::BooleanConstructor
                 | BuiltinId::DateConstructor
                 | BuiltinId::ProxyConstructor
+                | BuiltinId::UrlSearchParamsConstructor
         )
     }
 
@@ -5120,6 +5242,17 @@ impl Vm {
                         Ok(pairs)
                     }
                     ObjectKind::Set(values) | ObjectKind::WeakSet(values) => Ok(values),
+                    ObjectKind::UrlSearchParams(pairs) => {
+                        let mut entries = Vec::with_capacity(pairs.len());
+                        for (name, value) in pairs {
+                            let name_value = self.make_string_value(&name);
+                            let value_value = self.make_string_value(&value);
+                            entries.push(
+                                self.make_array_from_values(vec![name_value, value_value])?,
+                            );
+                        }
+                        Ok(entries)
+                    }
                     ObjectKind::ForOfIterator { values, index } => Ok(values[index.min(values.len())..].to_vec()),
                     _ => {
                         // Custom iterable: drain via its Symbol.iterator method.
@@ -6683,6 +6816,179 @@ impl Vm {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
                 self.structured_clone(&value, 0)
             }
+            BuiltinId::UrlSearchParamsConstructor => {
+                let pairs = match args.first() {
+                    None | Some(Value::Undefined) | Some(Value::Null) => Vec::new(),
+                    Some(Value::String(string)) => parse_query_string(&self.string_text(*string)),
+                    Some(value @ Value::Object(object)) => {
+                        let object = *object;
+                        let kind_is_usp = matches!(
+                            self.heap.objects().get(object).map(|o| &o.kind),
+                            Some(ObjectKind::UrlSearchParams(_))
+                        );
+                        let is_array = matches!(
+                            self.heap.objects().get(object).map(|o| &o.kind),
+                            Some(ObjectKind::Array)
+                        );
+                        if kind_is_usp {
+                            self.usp_pairs(value)?
+                        } else if is_array {
+                            // Sequence of [name, value] pairs.
+                            let entries = self.for_of_values(value)?;
+                            let mut pairs = Vec::with_capacity(entries.len());
+                            for entry in entries {
+                                let name =
+                                    self.get_property_value(&entry, &PropertyKey::Index(0))?;
+                                let val =
+                                    self.get_property_value(&entry, &PropertyKey::Index(1))?;
+                                pairs.push((self.to_string(&name), self.to_string(&val)));
+                            }
+                            pairs
+                        } else {
+                            // Record of name -> value.
+                            let mut pairs = Vec::new();
+                            for key in self.object_own_enumerable_keys(object) {
+                                let val = self.get_property_value(value, &key)?;
+                                pairs.push((
+                                    self.property_key_to_string(&key),
+                                    self.to_string(&val),
+                                ));
+                            }
+                            pairs
+                        }
+                    }
+                    Some(other) => parse_query_string(&self.to_string(other)),
+                };
+                let object = self.heap.allocate_object(JsObject {
+                    kind: ObjectKind::UrlSearchParams(pairs),
+                    prototype: Some(self.url_search_params_prototype_ref()),
+                    ..JsObject::default()
+                });
+                Ok(Value::Object(object))
+            }
+            BuiltinId::UspGet => {
+                let pairs = self.usp_pairs(&this_value)?;
+                let name = self.string_arg(&args, 0);
+                match pairs.iter().find(|(k, _)| *k == name) {
+                    Some((_, value)) => Ok(self.make_string_value(value)),
+                    None => Ok(Value::Null),
+                }
+            }
+            BuiltinId::UspGetAll => {
+                let pairs = self.usp_pairs(&this_value)?;
+                let name = self.string_arg(&args, 0);
+                let values: Vec<String> = pairs
+                    .into_iter()
+                    .filter(|(k, _)| *k == name)
+                    .map(|(_, v)| v)
+                    .collect();
+                let values = values
+                    .into_iter()
+                    .map(|v| self.make_string_value(&v))
+                    .collect();
+                self.make_array_from_values(values)
+            }
+            BuiltinId::UspHas => {
+                let pairs = self.usp_pairs(&this_value)?;
+                let name = self.string_arg(&args, 0);
+                Ok(Value::Bool(pairs.iter().any(|(k, _)| *k == name)))
+            }
+            BuiltinId::UspSet => {
+                let mut pairs = self.usp_pairs(&this_value)?;
+                let name = self.string_arg(&args, 0);
+                let value = self.string_arg(&args, 1);
+                if pairs.iter().any(|(k, _)| *k == name) {
+                    let mut replaced = false;
+                    pairs.retain_mut(|(k, v)| {
+                        if *k == name {
+                            if replaced {
+                                false
+                            } else {
+                                *v = value.clone();
+                                replaced = true;
+                                true
+                            }
+                        } else {
+                            true
+                        }
+                    });
+                } else {
+                    pairs.push((name, value));
+                }
+                self.usp_set_pairs(&this_value, pairs);
+                Ok(Value::Undefined)
+            }
+            BuiltinId::UspAppend => {
+                let mut pairs = self.usp_pairs(&this_value)?;
+                let name = self.string_arg(&args, 0);
+                let value = self.string_arg(&args, 1);
+                pairs.push((name, value));
+                self.usp_set_pairs(&this_value, pairs);
+                Ok(Value::Undefined)
+            }
+            BuiltinId::UspDelete => {
+                let mut pairs = self.usp_pairs(&this_value)?;
+                let name = self.string_arg(&args, 0);
+                pairs.retain(|(k, _)| *k != name);
+                self.usp_set_pairs(&this_value, pairs);
+                Ok(Value::Undefined)
+            }
+            BuiltinId::UspToString => {
+                let pairs = self.usp_pairs(&this_value)?;
+                let encoded = pairs
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", form_urlencode(k), form_urlencode(v)))
+                    .collect::<Vec<_>>()
+                    .join("&");
+                Ok(self.make_string_value(&encoded))
+            }
+            BuiltinId::UspForEach => {
+                let pairs = self.usp_pairs(&this_value)?;
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                for (name, value) in pairs {
+                    let name_value = self.make_string_value(&name);
+                    let value_value = self.make_string_value(&value);
+                    self.call_value_sync(
+                        callback.clone(),
+                        this_arg.clone(),
+                        vec![value_value, name_value, this_value.clone()],
+                    )?;
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::UspEntries => {
+                let pairs = self.usp_pairs(&this_value)?;
+                let mut entries = Vec::with_capacity(pairs.len());
+                for (name, value) in pairs {
+                    let name_value = self.make_string_value(&name);
+                    let value_value = self.make_string_value(&value);
+                    entries.push(self.make_array_from_values(vec![name_value, value_value])?);
+                }
+                Ok(self.make_for_of_iterator(entries))
+            }
+            BuiltinId::UspKeys => {
+                let pairs = self.usp_pairs(&this_value)?;
+                let keys = pairs
+                    .into_iter()
+                    .map(|(k, _)| self.make_string_value(&k))
+                    .collect();
+                Ok(self.make_for_of_iterator(keys))
+            }
+            BuiltinId::UspValues => {
+                let pairs = self.usp_pairs(&this_value)?;
+                let values = pairs
+                    .into_iter()
+                    .map(|(_, v)| self.make_string_value(&v))
+                    .collect();
+                Ok(self.make_for_of_iterator(values))
+            }
+            BuiltinId::UspSort => {
+                let mut pairs = self.usp_pairs(&this_value)?;
+                pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                self.usp_set_pairs(&this_value, pairs);
+                Ok(Value::Undefined)
+            }
             BuiltinId::ProxyConstructor => {
                 let target = self
                     .require_object_ref(args.first().unwrap_or(&Value::Undefined), "Proxy target")?;
@@ -7662,6 +7968,35 @@ impl Vm {
         args.get(index)
             .map(|value| self.to_string(value))
             .unwrap_or_default()
+    }
+
+    fn url_search_params_prototype_ref(&self) -> GcRef<JsObject> {
+        self.url_search_params_prototype
+            .expect("URLSearchParams prototype should be installed")
+    }
+
+    /// Read the (name, value) pairs of a URLSearchParams `this`.
+    fn usp_pairs(&self, this_value: &Value) -> Result<Vec<(String, String)>, VmError> {
+        if let Value::Object(object) = this_value {
+            if let Some(JsObject {
+                kind: ObjectKind::UrlSearchParams(pairs),
+                ..
+            }) = self.heap.objects().get(*object)
+            {
+                return Ok(pairs.clone());
+            }
+        }
+        Err(VmError::TypeError(
+            "method called on a non-URLSearchParams object".to_string(),
+        ))
+    }
+
+    fn usp_set_pairs(&mut self, this_value: &Value, pairs: Vec<(String, String)>) {
+        if let Value::Object(object) = this_value {
+            if let Some(data) = self.heap.objects_mut().get_mut(*object) {
+                data.kind = ObjectKind::UrlSearchParams(pairs);
+            }
+        }
     }
 
     /// Allocate a `ForOfIterator` object wrapping the given values. Used by
