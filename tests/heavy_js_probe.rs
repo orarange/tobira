@@ -301,6 +301,170 @@ fn probes() -> Vec<(&'static str, &'static str, &'static str)> {
             assert(tree.children.length === 2 && tree.children[0].tag === 'span');
             assert(tree.children[0].children[0] === 'hi');
         "#),
+
+        // ===== Batch 2: deeper language / stdlib coverage =====
+
+        // --- Array stdlib (immutable update patterns React uses) ---
+        ("array2", "slice-concat-spread", r#"
+            const a = [1,2,3]; const b = a.slice(0,2).concat([9]);
+            assert(b.join(',') === '1,2,9'); assert(a.join(',') === '1,2,3');
+            const c = [...a.slice(1), ...[7,8]]; assert(c.join(',') === '2,3,7,8');
+        "#),
+        ("array2", "splice", r#"
+            const a = [1,2,3,4]; const removed = a.splice(1,2,'x');
+            assert(a.join(',') === '1,x,4'); assert(removed.join(',') === '2,3');
+        "#),
+        ("array2", "reduce-no-init", r#"
+            assert([1,2,3,4].reduce((a,b)=>a+b) === 10);
+            assert([5].reduce((a,b)=>a+b) === 5);
+        "#),
+        ("array2", "indexOf-lastIndexOf-some-every", r#"
+            const a = [1,2,3,2];
+            assert(a.indexOf(2) === 1 && a.lastIndexOf(2) === 3);
+            assert(a.some(x=>x>2) && !a.every(x=>x>1));
+        "#),
+        ("array2", "fill-copyWithin-from-set", r#"
+            assert([1,2,3].fill(0,1).join(',') === '1,0,0');
+            assert(Array.from(new Set([1,1,2,3])).join(',') === '1,2,3');
+        "#),
+        ("array2", "sort-stable-objects", r#"
+            const a = [{k:2,i:0},{k:1,i:1},{k:2,i:2},{k:1,i:3}];
+            a.sort((x,y)=>x.k-y.k);
+            assert(a.map(o=>o.i).join(',') === '1,3,0,2');
+        "#),
+
+        // --- String stdlib ---
+        ("string2", "split-slice-trim", r#"
+            assert('a,b,c'.split(',').length === 3);
+            assert('  hi  '.trim() === 'hi');
+            assert('hello'.slice(1,3) === 'el');
+            assert('hello'.substring(1,3) === 'el');
+        "#),
+        ("string2", "replace-fn", r#"
+            assert('a1b2'.replace(/(\d)/g, (m,d)=>'['+d+']') === 'a[1]b[2]');
+        "#),
+        ("string2", "startsWith-endsWith-includes", r#"
+            assert('hello'.startsWith('he') && 'hello'.endsWith('lo') && 'hello'.includes('ell'));
+        "#),
+        ("string2", "template-nested", r#"
+            const x = 2; assert(`a${`b${x}c`}d` === 'ab2cd');
+        "#),
+
+        // --- Number / Math ---
+        ("number2", "toFixed-toString-radix", r#"
+            assert((3.14159).toFixed(2) === '3.14');
+            assert((255).toString(16) === 'ff');
+            assert(parseInt('0xff', 16) === 255);
+            assert(parseFloat('3.14abc') === 3.14);
+        "#),
+        ("number2", "math-spread", r#"
+            assert(Math.max(...[3,1,4,1,5]) === 5);
+            assert(Math.min(...[3,1,4]) === 1);
+            assert(Math.round(2.5) === 3 && Math.floor(2.9) === 2 && Math.ceil(2.1) === 3);
+        "#),
+
+        // --- Control flow ---
+        ("control", "labeled-break", r#"
+            let hits = 0;
+            outer: for(let i=0;i<3;i++){ for(let j=0;j<3;j++){ if(j===1) continue outer; hits++; } }
+            assert(hits === 3);
+        "#),
+        ("control", "try-finally-return", r#"
+            function f(){ try { return 1; } finally { /* runs but doesn't override */ } }
+            assert(f() === 1);
+            function g(){ try { throw 'e'; } catch(e){ return 'caught'; } finally {} }
+            assert(g() === 'caught');
+        "#),
+        ("control", "switch-fallthrough", r#"
+            function f(x){ let r=''; switch(x){ case 1: r+='a'; case 2: r+='b'; break; default: r+='d'; } return r; }
+            assert(f(1) === 'ab' && f(2) === 'b' && f(9) === 'd');
+        "#),
+
+        // --- Classes (deeper) ---
+        ("class2", "getter-setter-accessor", r#"
+            class Temp { #c=0; get celsius(){ return this.#c; } set celsius(v){ this.#c=v; } get f(){ return this.#c*9/5+32; } }
+            const t = new Temp(); t.celsius = 100; assert(t.f === 212);
+        "#),
+        ("class2", "static-private-method", r#"
+            class C { static #count=0; static inc(){ return ++C.#count; } #secret(){ return 42; } reveal(){ return this.#secret(); } }
+            assert(C.inc() === 1 && C.inc() === 2);
+            assert(new C().reveal() === 42);
+        "#),
+        ("class2", "super-property", r#"
+            class A { name(){ return 'A'; } }
+            class B extends A { name(){ return super.name() + 'B'; } }
+            assert(new B().name() === 'AB');
+        "#),
+        ("class2", "instanceof-hasInstance", r#"
+            class Even { static [Symbol.hasInstance](n){ return n % 2 === 0; } }
+            assert(4 instanceof Even); assert(!(3 instanceof Even));
+        "#),
+
+        // --- Iteration protocols ---
+        ("iter", "generator-delegate", r#"
+            function* inner(){ yield 1; yield 2; }
+            function* outer(){ yield 0; yield* inner(); yield 3; }
+            assert([...outer()].join(',') === '0,1,2,3');
+        "#),
+        ("iter", "destructure-from-map", r#"
+            const m = new Map([['a',1],['b',2]]);
+            const out = [];
+            for(const [k,v] of m){ out.push(k+v); }
+            assert(out.join(',') === 'a1,b2');
+        "#),
+        ("iter", "spread-set-map-into-array", r#"
+            assert([...new Set([1,2,3])].join(',') === '1,2,3');
+            assert([...new Map([['x',1]]).values()].join(',') === '1');
+        "#),
+
+        // --- Object deeper ---
+        ("object2", "enumerable-false-keys", r#"
+            const o = {}; Object.defineProperty(o,'hidden',{value:1,enumerable:false});
+            o.shown = 2;
+            assert(Object.keys(o).join(',') === 'shown');
+            assert(o.hidden === 1);
+        "#),
+        ("object2", "spread-omit-pattern", r#"
+            const { a, ...rest } = { a:1, b:2, c:3 };
+            assert(a === 1 && rest.b === 2 && rest.c === 3 && rest.a === undefined);
+        "#),
+        ("object2", "computed-method-shorthand", r#"
+            const key = 'run'; const o = { [key](){ return 'ok'; }, val: 1 };
+            assert(o.run() === 'ok');
+        "#),
+        ("object2", "json-stringify-indent", r#"
+            assert(JSON.stringify({a:1},null,2) === '{\n  "a": 1\n}');
+        "#),
+
+        // --- RegExp ---
+        ("regex", "named-groups", r#"
+            const m = /(?<y>\d{4})-(?<m>\d{2})/.exec('2024-06');
+            assert(m.groups.y === '2024' && m.groups.m === '06');
+        "#),
+        ("regex", "test-sticky-global", r#"
+            assert(/\d+/.test('abc123'));
+            const re = /\d/g; let n=0; while(re.exec('a1b2c3')) n++;
+            assert(n === 3);
+        "#),
+
+        // --- A mini "React-like" component (pure logic, no DOM) ---
+        ("framework", "mini-component-render", r#"
+            function createElement(type, props, ...children){
+                return { type, props: { ...props, children: children.flat() } };
+            }
+            function renderToString(node){
+                if(typeof node === 'string' || typeof node === 'number') return String(node);
+                const { type, props } = node;
+                const attrs = Object.entries(props).filter(([k])=>k!=='children')
+                    .map(([k,v])=>` ${k}="${v}"`).join('');
+                const inner = props.children.map(renderToString).join('');
+                return `<${type}${attrs}>${inner}</${type}>`;
+            }
+            function App({name}){ return createElement('div',{class:'app'},
+                createElement('h1',null,'Hello ', name), createElement('p',null,'count: ', 3)); }
+            const out = renderToString(App({name:'World'}));
+            assert(out === '<div class="app"><h1>Hello World</h1><p>count: 3</p></div>');
+        "#),
     ]
 }
 

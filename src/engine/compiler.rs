@@ -691,6 +691,20 @@ impl<'a> FunctionCompiler<'a> {
         storage: BindingStorage,
         context: DeclarationContext,
     ) -> Result<(), CompileError> {
+        // Static names destructured by non-rest elements; a trailing `...rest`
+        // must exclude these. Computed keys can't be excluded statically (rare).
+        let rest_exclude: Vec<String> = pattern
+            .bindings()
+            .iter()
+            .filter_map(|property| match property {
+                ObjectPatternElementNode::SingleName { name, .. }
+                | ObjectPatternElementNode::Pattern { name, .. }
+                | ObjectPatternElementNode::AssignmentPropertyAccess { name, .. } => {
+                    self.property_name_string(name)
+                }
+                _ => None,
+            })
+            .collect();
         for property in pattern.bindings() {
             match property {
                 ObjectPatternElementNode::SingleName {
@@ -725,12 +739,12 @@ impl<'a> FunctionCompiler<'a> {
                     self.assign_member_from_slot(access, value_slot)?;
                 }
                 ObjectPatternElementNode::RestProperty { ident } => {
-                    let rest_slot = self.copy_slot_to_object(source_slot)?;
+                    let rest_slot = self.copy_slot_to_object(source_slot, &rest_exclude)?;
                     let temp_binding = BindingNode::Identifier(*ident);
                     self.compile_binding_store(&temp_binding, rest_slot, storage, context)?;
                 }
                 ObjectPatternElementNode::AssignmentRestPropertyAccess { access } => {
-                    let rest_slot = self.copy_slot_to_object(source_slot)?;
+                    let rest_slot = self.copy_slot_to_object(source_slot, &rest_exclude)?;
                     self.assign_member_from_slot(access, rest_slot)?;
                 }
             }
@@ -887,15 +901,31 @@ impl<'a> FunctionCompiler<'a> {
         Ok(())
     }
 
-    fn copy_slot_to_object(&mut self, source_slot: u16) -> Result<u16, CompileError> {
+    /// Build the object for an object-rest pattern (`const { a, ...rest } = src`):
+    /// shallow-copy `src`'s own enumerable properties into a fresh object, then
+    /// delete the keys that were already destructured before the rest (`exclude`),
+    /// so `rest` holds only the remaining properties.
+    fn copy_slot_to_object(
+        &mut self,
+        source_slot: u16,
+        exclude: &[String],
+    ) -> Result<u16, CompileError> {
         let slot = self.allocate_hidden_local()?;
         self.emit(Opcode::MakeObject);
         self.emit(Opcode::SetLocal(slot));
         self.emit(Opcode::GetLocal(slot));
         self.emit(Opcode::GetLocal(source_slot));
         self.emit(Opcode::CopyDataProperties);
-        self.emit(Opcode::GetLocal(slot));
-        self.emit(Opcode::SetLocal(slot));
+        // CopyDataProperties pushes the target back; we keep it in `slot`, so drop
+        // the stack copy to stay balanced.
+        self.emit(Opcode::Pop);
+        for key in exclude {
+            let constant = self.add_string_constant(key.clone())?;
+            self.emit(Opcode::GetLocal(slot));
+            self.emit(Opcode::LoadConst(constant));
+            self.emit(Opcode::DeleteProp);
+            self.emit(Opcode::Pop); // discard the delete result boolean
+        }
         Ok(slot)
     }
 
@@ -2898,6 +2928,12 @@ impl<'a> FunctionCompiler<'a> {
                 ObjectPropertyDefinition::SpreadObject(expression) => {
                     self.compile_expression(expression)?;
                     self.emit(Opcode::CopyDataProperties);
+                    // Each property arm is entered with a `Dup` of the object on
+                    // the stack and is expected to consume it. `SetProp` does, but
+                    // `CopyDataProperties` pops the target and pushes it back, so
+                    // the dup survives — drop it, or it leaks and corrupts the
+                    // stack for later properties (esp. nested object spreads).
+                    self.emit(Opcode::Pop);
                 }
                 ObjectPropertyDefinition::CoverInitializedName(identifier, expression) => {
                     let constant = self.add_string_constant(self.identifier_name(identifier))?;
