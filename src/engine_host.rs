@@ -17,7 +17,8 @@ use std::collections::BTreeMap;
 use tobira_engine::engine::{
     Compiler, ConsoleMessage, DomEventInit, DomEventRequest, DomEventResult, DomMutation,
     DomMutationResult,
-    DomRead, DomReadResult, DomRect, FetchRequest, FrameId, Heap, HistoryAction, HistoryOutcome,
+    DomRead, DomReadResult, DomRect, FetchRequest, FetchResponse, FrameId, Heap, HistoryAction,
+    HistoryOutcome,
     Host, HostError, HostEvent, HostResult, HostTimeSnapshot, LocationSnapshot, NavigationAction,
     NavigationOutcome, NetworkRequestId, NodeId, NodeKind, ObserverOp, ObserverResult, Parser,
     ScrollMetrics, SiblingDirection, StorageOp, StorageResult, TimerId, TimerRequest, Vm, WindowId,
@@ -1087,6 +1088,27 @@ impl Host for BrowserHost {
     }
     fn fetch(&mut self, _request: FetchRequest) -> HostResult<NetworkRequestId> {
         Err(HostError::Unsupported)
+    }
+    fn fetch_sync(&mut self, request: FetchRequest) -> HostResult<FetchResponse> {
+        // Resolve the (possibly relative) URL against the document URL, then
+        // perform the request with the browser's own HTTP client.
+        let resolved = Url::parse(&self.location.href)
+            .and_then(|base| base.resolve(&request.url))
+            .or_else(|_| Url::parse(&request.url))
+            .map_err(|_| HostError::Network)?;
+        let response = crate::http::fetch(&resolved).map_err(|_| HostError::Network)?;
+        let headers = response
+            .headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        Ok(FetchResponse {
+            final_url: response.final_url.to_string(),
+            status: response.status_code,
+            status_text: response.reason_phrase.clone(),
+            headers,
+            body: response.body,
+        })
     }
     fn abort_fetch(&mut self, _id: NetworkRequestId) -> HostResult<bool> {
         Ok(false)

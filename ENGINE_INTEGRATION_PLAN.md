@@ -163,10 +163,17 @@ gaps from a scan of `vm.rs` vs `js.rs`:
   are missing in `vm.rs`.)
 - **Observers**: `MutationObserver`, `ResizeObserver`, `IntersectionObserver`
   JS classes (Host `observer` op exists; JS classes missing).
-- **Networking JS**: `fetch(...)` global + `Response`/`Headers`/`Request`,
-  `XMLHttpRequest`. (Host `fetch` exists; JS surface missing.)
-- **Misc**: `URLSearchParams`, richer `crypto`, event constructors (`Event`,
-  `CustomEvent`, `KeyboardEvent`, `MouseEvent`, …), `AbortController`/`AbortSignal`,
+- **Networking JS**: `fetch(...)` global + `Response`/`Headers` ✅ **done**
+  (synchronous via `Host::fetch_sync`; returns a resolved `Promise<Response>`
+  with `ok`/`status`/`statusText`/`url`/`headers.get()`/`text()`/`json()`;
+  `BrowserHost` performs the real HTTP via `http.rs`, resolving relative URLs
+  against the document URL). Still missing: streaming/abort, `Request` class,
+  and **`XMLHttpRequest`**. Note the current fetch blocks the worker for the
+  request (no async host-event loop yet).
+- **Event constructors** ✅ **done**: `Event` / `CustomEvent` (#58); keyboard/
+  pointer/input event detail on dispatched events (#60). Still missing:
+  `KeyboardEvent`/`MouseEvent` *constructors*, `AbortController`/`AbortSignal`.
+- **Misc**: `URLSearchParams` ✅ (#52), richer `crypto`,
   `history.state`/`popstate`/`hashchange`, `MutationObserver` records.
 - Audit the full `js.rs` DOM/node binding list against `vm.rs`'s `BuiltinId`
   DOM set and close any remaining method gaps.

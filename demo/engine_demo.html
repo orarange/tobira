@@ -101,6 +101,12 @@
     <p id="key-info" class="hint">最後に押したキー: （まだ）</p>
   </section>
 
+  <section>
+    <h2>5c. fetch — click でローカル JSON を取得</h2>
+    <button id="fetch-btn">data.json を fetch</button>
+    <p id="fetch-result">（まだ取得していません）</p>
+  </section>
+
   <section style="height: 1200px;">
     <h2>6. スクロール確認用の縦長エリア</h2>
     <p class="hint">
@@ -180,6 +186,25 @@
     document.getElementById('bottom').addEventListener('click', () => {
       bottomN += 1;
       document.getElementById('bottom-count').textContent = String(bottomN);
+    });
+
+    // --- 5c. fetch（click でローカル JSON 取得）---
+    document.getElementById('fetch-btn').addEventListener('click', () => {
+      const result = document.getElementById('fetch-result');
+      result.textContent = '取得中…';
+      fetch('data.json')
+        .then((r) => {
+          if (!r.ok) throw new Error('status ' + r.status);
+          return r.json();
+        })
+        .then((d) => {
+          result.innerHTML =
+            '<span class="ok-text">✅ ' + d.message +
+            ' — ' + d.items.join(' / ') + '（' + d.count + '件）</span>';
+        })
+        .catch((e) => {
+          result.textContent = '❌ fetch 失敗: ' + e;
+        });
     });
 
     // --- 5b. 入力（input イベント + input.value + keydown のキー）---

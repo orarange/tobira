@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 
 use tobira_engine::engine::{
     Compiler, DomEventRequest, DomEventResult, DomMutation, DomMutationResult, DomRead,
-    DomReadResult, FetchRequest, FrameId, HistoryAction, HistoryOutcome, Host, HostError,
+    DomReadResult, FetchRequest, FetchResponse, FrameId, HistoryAction, HistoryOutcome, Host,
+    HostError,
     HostEvent, HostResult, HostTimeSnapshot, LocationSnapshot, NavigationAction,
     NavigationOutcome, NetworkRequestId, NodeId, NodeKind, ObserverOp, ObserverResult, Parser,
     StorageOp, StorageResult, TimerId, TimerRequest, Vm, Heap, WindowId, WindowMetrics,
@@ -588,6 +589,16 @@ impl Host for TestDom {
     fn request_animation_frame(&mut self, _w: WindowId) -> HostResult<FrameId> { Ok(FrameId(0)) }
     fn cancel_animation_frame(&mut self, _id: FrameId) -> HostResult<bool> { Ok(false) }
     fn fetch(&mut self, _r: FetchRequest) -> HostResult<NetworkRequestId> { Err(HostError::Unsupported) }
+    fn fetch_sync(&mut self, request: FetchRequest) -> HostResult<FetchResponse> {
+        // Canned response for tests: echoes the URL + a small JSON body.
+        Ok(FetchResponse {
+            final_url: request.url.clone(),
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: br#"{"message":"hello","n":42}"#.to_vec(),
+        })
+    }
     fn abort_fetch(&mut self, _id: NetworkRequestId) -> HostResult<bool> { Ok(false) }
     fn storage(&mut self, _op: StorageOp) -> HostResult<StorageResult> { Ok(StorageResult::None) }
     fn observer(&mut self, _op: ObserverOp) -> HostResult<ObserverResult> { Err(HostError::Unsupported) }
@@ -616,6 +627,80 @@ fn dom(vm: &mut Vm) -> &mut TestDom {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[test]
+fn fetch_resolves_with_response_text_and_json() {
+    let mut vm = make_vm();
+    // The fetch chains settle through the microtask queue, which `execute`
+    // drains; results are stashed on globals and asserted synchronously after.
+    run(
+        &mut vm,
+        r#"
+        var __status = 0; var __ok = false; var __ctype = '';
+        var __text = ''; var __msg = ''; var __n = 0;
+        fetch('http://example.test/data').then(function (r) {
+            __status = r.status;
+            __ok = r.ok;
+            __ctype = r.headers.get('Content-Type');
+            return r.text();
+        }).then(function (t) { __text = t; });
+        fetch('http://example.test/data').then(function (r) {
+            return r.json();
+        }).then(function (d) { __msg = d.message; __n = d.n; });
+    "#,
+    );
+    run(
+        &mut vm,
+        r#"
+        assert(__status === 200);
+        assert(__ok === true);
+        assert(__ctype === 'application/json');
+        assert(__text === '{"message":"hello","n":42}');
+        assert(__msg === 'hello');
+        assert(__n === 42);
+    "#,
+    );
+}
+
+#[test]
+fn fetch_rejects_when_host_has_no_network() {
+    // NoopHost uses the default fetch_sync (Unsupported) -> the promise rejects.
+    let mut vm = Vm::new(Heap::new());
+    run(
+        &mut vm,
+        r#"
+        var __rejected = false; var __isTypeError = false;
+        fetch('http://example.test/').then(
+            function () {},
+            function (e) { __rejected = true; __isTypeError = (e instanceof TypeError); }
+        );
+    "#,
+    );
+    run(
+        &mut vm,
+        r#"
+        assert(__rejected === true);
+        assert(__isTypeError === true);
+    "#,
+    );
+}
+
+#[test]
+fn fetch_with_await() {
+    let mut vm = make_vm();
+    run(
+        &mut vm,
+        r#"
+        var __awaited = '';
+        (async function () {
+            const r = await fetch('http://example.test/data');
+            const d = await r.json();
+            __awaited = d.message + '!' + d.n;
+        })();
+    "#,
+    );
+    run(&mut vm, r#"assert(__awaited === 'hello!42');"#);
+}
 
 /// 1. document.createElement returns a non-null value.
 #[test]
