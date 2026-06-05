@@ -112,6 +112,7 @@ enum BuiltinId {
     ArrayProtoFind,
     ArrayProtoFindIndex,
     ArrayProtoIndexOf,
+    ArrayProtoLastIndexOf,
     ArrayProtoIncludes,
     ArrayProtoJoin,
     ArrayProtoSlice,
@@ -1088,6 +1089,8 @@ const SYMBOL_ITERATOR_ID: u32 = 1;
 /// Well-known symbol id for `Symbol.toPrimitive` (see the registration table in
 /// the global setup: iterator=1, asyncIterator=2, hasInstance=3, toPrimitive=4).
 const SYMBOL_TO_PRIMITIVE_ID: u32 = 4;
+/// Well-known symbol id for `Symbol.hasInstance` (custom `instanceof`).
+const SYMBOL_HAS_INSTANCE_ID: u32 = 3;
 /// First id available to user-created `Symbol(...)` values.
 const FIRST_USER_SYMBOL: u32 = 16;
 
@@ -1722,8 +1725,23 @@ impl Vm {
             Opcode::Instanceof => {
                 let constructor = self.pop_value()?;
                 let value = self.pop_value()?;
-                self.stack
-                    .push(Value::Bool(self.instanceof_value(&value, &constructor)?));
+                // A custom `Symbol.hasInstance` on the RHS overrides the default
+                // prototype-chain check (e.g. `n instanceof Even`).
+                let has_instance = if matches!(constructor, Value::Object(_)) {
+                    self.get_property_value(
+                        &constructor,
+                        &PropertyKey::Symbol(SymbolId(SYMBOL_HAS_INSTANCE_ID)),
+                    )?
+                } else {
+                    Value::Undefined
+                };
+                let result = if self.is_callable_value(&has_instance) {
+                    let r = self.call_value_sync(has_instance, constructor.clone(), vec![value])?;
+                    self.is_truthy(&r)
+                } else {
+                    self.instanceof_value(&value, &constructor)?
+                };
+                self.stack.push(Value::Bool(result));
             }
             Opcode::Jump(offset) => {
                 self.apply_jump(offset)?;
@@ -2385,6 +2403,11 @@ impl Vm {
         self.define_builtin_method(array_prototype, "find", BuiltinId::ArrayProtoFind);
         self.define_builtin_method(array_prototype, "findIndex", BuiltinId::ArrayProtoFindIndex);
         self.define_builtin_method(array_prototype, "indexOf", BuiltinId::ArrayProtoIndexOf);
+        self.define_builtin_method(
+            array_prototype,
+            "lastIndexOf",
+            BuiltinId::ArrayProtoLastIndexOf,
+        );
         self.define_builtin_method(array_prototype, "includes", BuiltinId::ArrayProtoIncludes);
         self.define_builtin_method(array_prototype, "join", BuiltinId::ArrayProtoJoin);
         // Array.prototype.toString delegates to join(',') — so `'' + [1,2,3]`,
@@ -7422,6 +7445,20 @@ impl Vm {
                     .unwrap_or(-1.0);
                 Ok(Value::Number(index))
             }
+            BuiltinId::ArrayProtoLastIndexOf => {
+                let values = self.array_like_to_vec(&this_value)?;
+                let needle = args.first().cloned().unwrap_or(Value::Undefined);
+                let index = values
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, value)| {
+                        self.strict_equal(value, &needle).then_some(index)
+                    })
+                    .map(|index| index as f64)
+                    .unwrap_or(-1.0);
+                Ok(Value::Number(index))
+            }
             BuiltinId::ArrayProtoIncludes => {
                 let values = self.array_like_to_vec(&this_value)?;
                 let needle = args.first().cloned().unwrap_or(Value::Undefined);
@@ -9603,16 +9640,22 @@ impl Vm {
             .filter(|f| !matches!(f, Value::Undefined))
             .cloned();
         if let Some(compare_fn) = comparator {
+            // Stable insertion sort: equal elements (comparator <= 0) never swap,
+            // so their relative order is preserved (required since ES2019).
             let len = values.len();
-            for i in 0..len {
-                for j in i + 1..len {
+            for i in 1..len {
+                let mut j = i;
+                while j > 0 {
                     let result = self.call_value_sync(
                         compare_fn.clone(),
                         Value::Undefined,
-                        vec![values[i].clone(), values[j].clone()],
+                        vec![values[j - 1].clone(), values[j].clone()],
                     )?;
                     if self.to_number(&result) > 0.0 {
-                        values.swap(i, j);
+                        values.swap(j - 1, j);
+                        j -= 1;
+                    } else {
+                        break;
                     }
                 }
             }
