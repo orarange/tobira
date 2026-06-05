@@ -49,6 +49,19 @@ impl BrowserPage {
     }
 
     pub fn apply_script_snapshot(&mut self, snapshot: ProcessedScriptHtml) {
+        // Fast path: the scripts didn't change the DOM (e.g. a scroll/resize
+        // event whose listeners — if any — mutated nothing). Skip the expensive
+        // full re-parse/re-layout rebuild and just update the scroll offset.
+        // Without this, rapid scroll events each trigger a full page rebuild,
+        // which on the engine path starves the main thread and intermittently
+        // drops clicks.
+        if snapshot.html == self.html_source
+            && snapshot.navigation_target.is_none()
+            && snapshot.soft_navigation_target.is_none()
+        {
+            self.scroll_y = snapshot.scroll_y;
+            return;
+        }
         let include_rendered_output = self.rendered.is_some();
         let javascript_session = self.javascript_session.take();
         let layout_revision = self
@@ -3314,6 +3327,45 @@ mod tests {
         assert_eq!(page.layout_revision(), 1);
         assert_ne!(page.html_source, initial_html);
         assert!(page.html_source.contains("data-test=\"updated\""));
+    }
+
+    #[test]
+    fn apply_script_snapshot_skips_rebuild_when_html_unchanged() {
+        // A scroll/resize event produces a snapshot with the same HTML; that
+        // must NOT trigger a full rebuild (which would starve the main thread on
+        // rapid scroll), only update the scroll offset.
+        let html = "<html><body><p>hi</p></body></html>";
+        let url = Url::parse("https://example.com").unwrap();
+        let (processed, session) = start_document_script_session(html, &url);
+        let mut page = rebuild_page_from_html(
+            &url,
+            200,
+            "OK".to_string(),
+            Some("text/html".to_string()),
+            &processed.html,
+            processed.title_override.clone(),
+            true,
+            0,
+            session,
+        );
+        let baseline_revision = page.layout_revision();
+
+        let snapshot = crate::js::ProcessedScriptHtml {
+            html: page.html_source.clone(),
+            title_override: None,
+            console_logs: Vec::new(),
+            navigation_target: None,
+            soft_navigation_target: None,
+            scroll_y: 320,
+        };
+        page.apply_script_snapshot(snapshot);
+
+        assert_eq!(
+            page.layout_revision(),
+            baseline_revision,
+            "unchanged HTML must not rebuild the page"
+        );
+        assert_eq!(page.scroll_y(), 320);
     }
 
     #[test]
