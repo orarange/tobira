@@ -14,8 +14,9 @@ use super::event_loop::{
 };
 use super::heap::{GcRef, Heap, RawGcRef};
 use super::host::{
-    ConsoleLevel, ConsoleMessage, DomMutation, DomRead, DomReadResult, Host, NodeId, NodeKind,
-    NoopHost, SiblingDirection, WindowId,
+    ConsoleLevel, ConsoleMessage, DomMutation, DomRead, DomReadResult, FetchBody, FetchMode,
+    FetchRequest, FetchResponse, Host, HttpMethod, NodeId, NodeKind, NoopHost, SiblingDirection,
+    WindowId,
 };
 use super::value::{
     AsyncContext, GeneratorState, HostDispatch, HostObjectClass, HostObjectSlot, JsObject,
@@ -215,6 +216,11 @@ enum BuiltinId {
     EventPreventDefault,
     EventStopPropagation,
     EventStopImmediatePropagation,
+    // fetch / Response / Headers
+    Fetch,
+    ResponseText,
+    ResponseJson,
+    HeadersGet,
     // classList (TokenList)
     DomClassListAdd,
     DomClassListRemove,
@@ -2719,6 +2725,9 @@ impl Vm {
         let structured_clone = self.allocate_builtin_method(BuiltinId::StructuredClone);
         self.globals
             .insert("structuredClone".to_string(), structured_clone);
+
+        let fetch = self.allocate_builtin_method(BuiltinId::Fetch);
+        self.globals.insert("fetch".to_string(), fetch);
 
         // Global value constants.
         self.globals.insert("NaN".to_string(), Value::Number(f64::NAN));
@@ -6205,6 +6214,195 @@ impl Vm {
         }
     }
 
+    // ---- fetch / Response / Headers -------------------------------------
+
+    /// `fetch(input, init?)` — performs the request synchronously via the host
+    /// and returns an already-resolved `Promise<Response>` (rejected on a
+    /// network error). Synchronous for now; the body is materialised eagerly,
+    /// so `fetch(u).then(r => r.text())` settles through the microtask queue.
+    fn builtin_fetch(&mut self, args: &[Value]) -> Result<Value, VmError> {
+        let input = args.first().cloned().unwrap_or(Value::Undefined);
+        let url = match &input {
+            Value::String(string) => self.string_text(*string),
+            Value::Object(_) => {
+                let u = self
+                    .get_property_value(&input, &PropertyKey::from("url"))
+                    .unwrap_or(Value::Undefined);
+                self.to_string(&u)
+            }
+            other => self.to_string(other),
+        };
+        let init = args.get(1).cloned();
+        let (method, headers, body) = self.read_fetch_init(&init);
+        let request = FetchRequest {
+            window: WindowId(0),
+            url: url.clone(),
+            method,
+            headers,
+            body,
+            mode: FetchMode::Cors,
+            keepalive: false,
+        };
+        match self.host.fetch_sync(request) {
+            Ok(response) => {
+                let response = self.build_response_object(&url, response);
+                let promise = self.promise_resolve_value(response)?;
+                Ok(Value::Object(promise))
+            }
+            Err(_) => {
+                let err = self.create_error_object("TypeError", format!("Failed to fetch: {url}"));
+                let promise = self.promise_reject_value(err)?;
+                Ok(Value::Object(promise))
+            }
+        }
+    }
+
+    fn read_fetch_init(
+        &mut self,
+        init: &Option<Value>,
+    ) -> (HttpMethod, Vec<(String, String)>, FetchBody) {
+        let mut method = HttpMethod::Get;
+        let mut headers = Vec::new();
+        let mut body = FetchBody::Empty;
+        if let Some(init @ Value::Object(init_ref)) = init {
+            let method_val = self
+                .get_property_value(init, &PropertyKey::from("method"))
+                .unwrap_or(Value::Undefined);
+            if !matches!(method_val, Value::Undefined) {
+                method = match self.to_string(&method_val).to_uppercase().as_str() {
+                    "POST" => HttpMethod::Post,
+                    "PUT" => HttpMethod::Put,
+                    "PATCH" => HttpMethod::Patch,
+                    "DELETE" => HttpMethod::Delete,
+                    "HEAD" => HttpMethod::Head,
+                    "OPTIONS" => HttpMethod::Options,
+                    _ => HttpMethod::Get,
+                };
+            }
+            let body_val = self
+                .get_property_value(init, &PropertyKey::from("body"))
+                .unwrap_or(Value::Undefined);
+            if !matches!(body_val, Value::Undefined | Value::Null) {
+                body = FetchBody::Utf8(self.to_string(&body_val));
+            }
+            let headers_val = self
+                .get_property_value(init, &PropertyKey::from("headers"))
+                .unwrap_or(Value::Undefined);
+            if let Value::Object(headers_ref) = headers_val {
+                for key in self.object_own_enumerable_keys(headers_ref) {
+                    if let PropertyKey::String(name) = &key {
+                        let value = self
+                            .get_property_value(&Value::Object(headers_ref), &key)
+                            .unwrap_or(Value::Undefined);
+                        headers.push((name.clone(), self.to_string(&value)));
+                    }
+                }
+            }
+            let _ = init_ref;
+        }
+        (method, headers, body)
+    }
+
+    fn build_response_object(&mut self, url: &str, response: FetchResponse) -> Value {
+        let proto = self.object_prototype_ref();
+        let object = self.allocate_ordinary_object(Some(proto));
+        let ok = (200..300).contains(&response.status);
+        let final_url = if response.final_url.is_empty() {
+            url.to_string()
+        } else {
+            response.final_url.clone()
+        };
+        let redirected = final_url != url;
+        let status_text = self.make_string_value(&response.status_text);
+        let url_value = self.make_string_value(&final_url);
+        let body_text = String::from_utf8_lossy(&response.body).into_owned();
+        let body_value = self.make_string_value(&body_text);
+        let headers = self.build_headers_object(&response.headers);
+        let text_method = self.allocate_builtin_method(BuiltinId::ResponseText);
+        let json_method = self.allocate_builtin_method(BuiltinId::ResponseJson);
+        let mut set = |vm: &mut Self, name: &str, value: Value| {
+            vm.define_data_property(object, PropertyKey::from(name), value, true, true, true);
+        };
+        set(self, "ok", Value::Bool(ok));
+        set(self, "status", Value::Number(response.status as f64));
+        set(self, "statusText", status_text);
+        set(self, "url", url_value);
+        set(self, "redirected", Value::Bool(redirected));
+        set(self, "bodyUsed", Value::Bool(false));
+        set(self, "headers", headers);
+        set(self, "text", text_method);
+        set(self, "json", json_method);
+        // Body kept as a non-enumerable string for text()/json().
+        self.define_data_property(
+            object,
+            PropertyKey::from("__body"),
+            body_value,
+            false,
+            false,
+            false,
+        );
+        Value::Object(object)
+    }
+
+    fn build_headers_object(&mut self, headers: &[(String, String)]) -> Value {
+        let proto = self.object_prototype_ref();
+        let object = self.allocate_ordinary_object(Some(proto));
+        for (name, value) in headers {
+            let value = self.make_string_value(value);
+            self.define_data_property(
+                object,
+                PropertyKey::from(name.to_lowercase().as_str()),
+                value,
+                false,
+                false,
+                true,
+            );
+        }
+        let get_method = self.allocate_builtin_method(BuiltinId::HeadersGet);
+        self.define_data_property(object, PropertyKey::from("get"), get_method, true, true, true);
+        Value::Object(object)
+    }
+
+    fn headers_get(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let name = args
+            .first()
+            .map(|value| self.to_string(value))
+            .unwrap_or_default()
+            .to_lowercase();
+        let value = self.get_property_value(this, &PropertyKey::from(name.as_str()))?;
+        Ok(if matches!(value, Value::Undefined) {
+            Value::Null
+        } else {
+            value
+        })
+    }
+
+    fn response_text(&mut self, this: &Value) -> Result<Value, VmError> {
+        let body = self
+            .get_property_value(this, &PropertyKey::from("__body"))
+            .unwrap_or(Value::Undefined);
+        let text = self.to_string(&body);
+        let value = self.make_string_value(&text);
+        Ok(Value::Object(self.promise_resolve_value(value)?))
+    }
+
+    fn response_json(&mut self, this: &Value) -> Result<Value, VmError> {
+        let body = self
+            .get_property_value(this, &PropertyKey::from("__body"))
+            .unwrap_or(Value::Undefined);
+        let text = self.to_string(&body);
+        match serde_json::from_str::<JsonValue>(&text) {
+            Ok(json) => {
+                let parsed = self.from_json_value(&json)?;
+                Ok(Value::Object(self.promise_resolve_value(parsed)?))
+            }
+            Err(error) => {
+                let err = self.create_error_object("SyntaxError", error.to_string());
+                Ok(Value::Object(self.promise_reject_value(err)?))
+            }
+        }
+    }
+
     fn for_of_values(&mut self, value: &Value) -> Result<Vec<Value>, VmError> {
         match value {
             Value::String(string) => Ok(self
@@ -6909,6 +7107,10 @@ impl Vm {
                 }
                 Ok(Value::Undefined)
             }
+            BuiltinId::Fetch => self.builtin_fetch(&args),
+            BuiltinId::ResponseText => self.response_text(&this_value),
+            BuiltinId::ResponseJson => self.response_json(&this_value),
+            BuiltinId::HeadersGet => self.headers_get(&this_value, &args),
             BuiltinId::ArrayIsArray => Ok(Value::Bool(matches!(
                 args.first(),
                 Some(Value::Object(object))

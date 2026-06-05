@@ -614,6 +614,16 @@ pub trait Host: Any {
     fn fetch(&mut self, request: FetchRequest) -> HostResult<NetworkRequestId>;
     fn abort_fetch(&mut self, request_id: NetworkRequestId) -> HostResult<bool>;
 
+    /// Perform an HTTP request synchronously and return the response.
+    ///
+    /// This backs the engine's `fetch()` until the async host-event loop
+    /// (`fetch` + `wait_for_host_events`/`NetworkResponse`) is wired. The
+    /// default is unsupported; a real host (e.g. `BrowserHost`) overrides it.
+    fn fetch_sync(&mut self, request: FetchRequest) -> HostResult<FetchResponse> {
+        let _ = request;
+        Err(HostError::Unsupported)
+    }
+
     fn storage(&mut self, operation: StorageOp) -> HostResult<StorageResult>;
     fn observer(&mut self, operation: ObserverOp) -> HostResult<ObserverResult>;
 
