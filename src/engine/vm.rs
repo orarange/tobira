@@ -189,6 +189,9 @@ enum BuiltinId {
     // DOM Node/Element methods
     DomNodeAppendChild,
     DomNodeInsertBefore,
+    DomNodePrepend,
+    DomNodeHasChildNodes,
+    DomCreateElementNs,
     DomNodeRemoveChild,
     DomNodeReplaceChild,
     DomNodeCloneNode,
@@ -1063,6 +1066,13 @@ pub struct Vm {
     /// `drain_microtasks` calls made while delivering don't recurse into another
     /// delivery pass.
     delivering_mutations: bool,
+    /// Interned DOM node wrappers keyed by node handle, so that accessing the
+    /// same node twice (`el.parentNode === parent`, `a.nextSibling === b`)
+    /// returns the SAME object — node identity that frameworks rely on. Also
+    /// lets expando properties set on a node persist across accesses. Safe
+    /// because the heap is append-only within a session and node handles are
+    /// stable (removed nodes keep their arena slot).
+    node_wrappers: HashMap<u32, GcRef<JsObject>>,
     /// Cache for stateless builtin method values (constructable=false, prototype=None).
     /// Avoids a heap allocation on every DOM property access like element.appendChild.
     builtin_method_cache: HashMap<BuiltinId, Value>,
@@ -1136,6 +1146,7 @@ impl Vm {
             event_listeners: HashMap::new(),
             mutation_observers: HashMap::new(),
             delivering_mutations: false,
+            node_wrappers: HashMap::new(),
             builtin_method_cache: HashMap::new(),
             next_symbol_id: FIRST_USER_SYMBOL,
             symbol_descriptions: HashMap::new(),
@@ -9063,6 +9074,14 @@ impl Vm {
                 let res = self.host.mutate_dom(DomMutation::CreateElement { window: WindowId(0), local_name: tag });
                 Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
             }
+            BuiltinId::DomCreateElementNs => {
+                // createElementNS(namespace, qualifiedName): we don't track
+                // namespaces, so create a plain element from the qualified name
+                // (enough for SVG/MathML JS that frameworks emit).
+                let tag = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+                let res = self.host.mutate_dom(DomMutation::CreateElement { window: WindowId(0), local_name: tag });
+                Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+            }
             BuiltinId::DomDocCreateTextNode => {
                 let text = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let res = self.host.mutate_dom(DomMutation::CreateTextNode { window: WindowId(0), data: text });
@@ -9110,6 +9129,22 @@ impl Vm {
                 let ref_id = args.get(1).and_then(|v| self.node_id_from_host_val(v));
                 let _ = self.host.mutate_dom(DomMutation::InsertBefore { parent: parent_id, child: child_id, reference: ref_id });
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
+            }
+            BuiltinId::DomNodePrepend => {
+                let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let child_ids: Vec<NodeId> =
+                    args.iter().filter_map(|v| self.node_id_from_host_val(v)).collect();
+                let _ = self
+                    .host
+                    .mutate_dom(DomMutation::Prepend { parent: parent_id, children: child_ids });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomNodeHasChildNodes => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let res = self
+                    .host
+                    .read_dom(DomRead::Children { node: node_id, elements_only: false });
+                Ok(Value::Bool(matches!(res, Ok(DomReadResult::Nodes(ids)) if !ids.is_empty())))
             }
             BuiltinId::DomNodeRemoveChild => {
                 let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
@@ -10490,14 +10525,23 @@ impl Vm {
     }
 
     fn make_dom_node_value(&mut self, node_id: NodeId) -> Value {
-        self.make_host_object(HostObjectSlot {
+        // Return the interned wrapper so the same node compares `===` equal and
+        // keeps any expando properties across accesses.
+        if let Some(existing) = self.node_wrappers.get(&node_id.0) {
+            return Value::Object(*existing);
+        }
+        let value = self.make_host_object(HostObjectSlot {
             class: HostObjectClass::Node,
             interface_name: "Element",
             handle: node_id.0 as u64,
             dispatch: HostDispatch::Node,
             supports_indexed_properties: false,
             supports_named_properties: false,
-        })
+        });
+        if let Value::Object(object) = value {
+            self.node_wrappers.insert(node_id.0, object);
+        }
+        value
     }
 
     fn node_id_from_host_val(&self, value: &Value) -> Option<NodeId> {
@@ -10527,7 +10571,8 @@ impl Vm {
                 self.get_node_property(slot, name)
             }
             HostObjectClass::Other("TokenList") => self.get_classlist_property(slot, name),
-            HostObjectClass::Other("CSSStyleDeclaration") => self.get_style_property(name),
+            HostObjectClass::Other("CSSStyleDeclaration") => self.get_style_property(slot, name),
+            HostObjectClass::Other("Dataset") => self.get_dataset_property(slot, name),
             HostObjectClass::StorageArea => self.get_storage_property(slot, name),
             HostObjectClass::Observer => self.get_observer_property(name),
             _ => Ok(Value::Undefined),
@@ -11024,6 +11069,7 @@ impl Vm {
             "getElementsByClassName" => Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementsByClassName)),
             "getElementsByTagName" => Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementsByTagName)),
             "createElement" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateElement)),
+            "createElementNS" => Ok(self.allocate_builtin_method(BuiltinId::DomCreateElementNs)),
             "createTextNode" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateTextNode)),
             "createDocumentFragment" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateFragment)),
             "write" | "writeln" => Ok(self.allocate_builtin_method(BuiltinId::DomDocWrite)),
@@ -11105,6 +11151,14 @@ impl Vm {
                 dispatch: HostDispatch::StyleDeclaration,
                 supports_indexed_properties: false,
                 supports_named_properties: false,
+            })),
+            "dataset" => Ok(self.make_host_object(HostObjectSlot {
+                class: HostObjectClass::Other("Dataset"),
+                interface_name: "DOMStringMap",
+                handle: slot.handle,
+                dispatch: HostDispatch::Dataset,
+                supports_indexed_properties: false,
+                supports_named_properties: true,
             })),
             "parentNode" | "parentElement" => {
                 let res = self.host.read_dom(DomRead::Parent { node: node_id });
@@ -11200,8 +11254,9 @@ impl Vm {
             "toggleAttribute" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeToggleAttribute)),
             "getAttributeNames" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeGetAttributeNames)),
             "appendChild" | "append" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeAppendChild)),
-            "prepend" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeInsertBefore)),
+            "prepend" => Ok(self.allocate_builtin_method(BuiltinId::DomNodePrepend)),
             "insertBefore" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeInsertBefore)),
+            "hasChildNodes" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeHasChildNodes)),
             "removeChild" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemoveChild)),
             "replaceChild" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeReplaceChild)),
             "cloneNode" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeCloneNode)),
@@ -11245,13 +11300,51 @@ impl Vm {
         }
     }
 
-    fn get_style_property(&mut self, name: String) -> Result<Value, VmError> {
+    fn get_style_property(
+        &mut self,
+        slot: HostObjectSlot,
+        name: String,
+    ) -> Result<Value, VmError> {
         match name.as_str() {
             "getPropertyValue" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleGetProperty)),
             "setProperty" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleSetProperty)),
             "removeProperty" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleRemoveProperty)),
-            _ => Ok(self.make_string_value("")),
+            _ => {
+                // Read a camelCase CSS property back from the inline style attr
+                // (`el.style.color`), or the whole declaration via `cssText`.
+                let node_id = NodeId(slot.handle as u32);
+                let existing = match self
+                    .host
+                    .read_dom(DomRead::Attribute { node: node_id, name: "style".to_string() })
+                {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                if name == "cssText" {
+                    return Ok(self.make_string_value(&existing));
+                }
+                let css_prop = camel_to_css_prop(&name);
+                let value = get_inline_style_prop(&existing, &css_prop);
+                Ok(self.make_string_value(&value))
+            }
         }
+    }
+
+    /// `el.dataset.fooBar` reads the `data-foo-bar` attribute.
+    fn get_dataset_property(
+        &mut self,
+        slot: HostObjectSlot,
+        name: String,
+    ) -> Result<Value, VmError> {
+        let node_id = NodeId(slot.handle as u32);
+        let attr = format!("data-{}", camel_to_css_prop(&name));
+        let res = self
+            .host
+            .read_dom(DomRead::Attribute { node: node_id, name: attr });
+        Ok(match res {
+            Ok(DomReadResult::String(s)) => self.make_string_value(&s),
+            _ => Value::Undefined,
+        })
     }
 
     fn set_host_property(
@@ -11301,6 +11394,17 @@ impl Vm {
                 };
                 let updated = set_inline_style_prop(&existing, &css_prop, &new_val);
                 let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "style".to_string(), value: updated });
+            }
+            HostObjectClass::Other("Dataset") => {
+                // `el.dataset.fooBar = v` writes the `data-foo-bar` attribute.
+                let node_id = NodeId(slot.handle as u32);
+                let attr = format!("data-{}", camel_to_css_prop(&name));
+                let v = self.to_string(&value);
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                    node: node_id,
+                    name: attr,
+                    value: v,
+                });
             }
             HostObjectClass::Window => {
                 // `globalThis`/`window`/`self` IS the global object, so an expando
@@ -11737,6 +11841,22 @@ fn camel_to_css_prop(camel: &str) -> String {
         }
     }
     out
+}
+
+/// Read one declaration value out of an inline `style` attribute string.
+fn get_inline_style_prop(existing: &str, prop: &str) -> String {
+    existing
+        .split(';')
+        .find_map(|part| {
+            let mut iter = part.splitn(2, ':');
+            let k = iter.next()?.trim();
+            if k.eq_ignore_ascii_case(prop) {
+                Some(iter.next().unwrap_or("").trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
 }
 
 fn set_inline_style_prop(existing: &str, prop: &str, value: &str) -> String {
