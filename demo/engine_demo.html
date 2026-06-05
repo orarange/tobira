@@ -51,6 +51,21 @@
     .box.lit { background: #ffd86b; color: #5a3d00; }
     .hint { color: #666; font-size: 13px; }
     .ok-text { color: #14622a; font-weight: 600; }
+    .track {
+      margin-top: 10px;
+      height: 20px;
+      border-radius: 10px;
+      background: #e6e9f5;
+      overflow: hidden;
+    }
+    .fill {
+      height: 100%;
+      width: 0%;
+      background: #3457d5;
+      border-radius: 10px;
+    }
+    .clock { font-size: 22px; font-weight: 700; color: #2742a8; }
+    .frames { color: #666; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -64,6 +79,23 @@
     DOMイベントが動いています。上のバナーが緑になっていれば、初期スクリプトと
     非同期処理(setTimeout / Promise)が走った証拠です。
   </p>
+
+  <section>
+    <h2>★ 連続タイマー / アニメ — setInterval + requestAnimationFrame</h2>
+    <p class="hint">
+      ボタンを押さなくても勝手に動き続けていれば OK。秒カウンタは
+      <code>setInterval(…, 1000)</code>、伸縮バーは
+      <code>requestAnimationFrame</code> ループで動いてる。
+    </p>
+    <p><span id="clock" class="clock">0 秒経過</span></p>
+    <div class="track"><div id="fill" class="fill"></div></div>
+    <p id="frames" class="frames">rAF フレーム: 0</p>
+    <p>
+      <button id="anim-toggle">アニメ 停止 / 再開</button>
+      <button id="delayed">3秒後にメッセージ</button>
+      <span id="delayed-msg"></span>
+    </p>
+  </section>
 
   <section>
     <h2>1. カウンター — click → textContent</h2>
@@ -126,6 +158,46 @@
     const status = document.getElementById('engine-status');
     status.textContent = '✅ 初期スクリプト実行 OK（エンジン稼働中）';
     status.className = 'banner ok';
+
+    // --- ★ 連続タイマー / アニメ ---
+    // setInterval: 1秒ごとに経過秒を更新（連続タイマーの確認）
+    let secs = 0;
+    setInterval(() => {
+      secs += 1;
+      document.getElementById('clock').textContent = secs + ' 秒経過';
+    }, 1000);
+
+    // requestAnimationFrame: バー幅を sin で 0→100→0 にループさせる
+    const fill = document.getElementById('fill');
+    const framesLabel = document.getElementById('frames');
+    let phase = 0;
+    let frameCount = 0;
+    let running = true;
+    function animate() {
+      if (!running) return;
+      phase += 0.04;
+      const pct = (Math.sin(phase) * 0.5 + 0.5) * 100;
+      fill.style.width = pct.toFixed(1) + '%';
+      frameCount += 1;
+      framesLabel.textContent = 'rAF フレーム: ' + frameCount;
+      requestAnimationFrame(animate);
+    }
+    requestAnimationFrame(animate);
+
+    // 停止 / 再開トグル（rAF ループの start/stop 確認）
+    document.getElementById('anim-toggle').addEventListener('click', () => {
+      running = !running;
+      if (running) requestAnimationFrame(animate);
+    });
+
+    // setTimeout(delay): 3秒後に一度だけ発火
+    document.getElementById('delayed').addEventListener('click', () => {
+      const msg = document.getElementById('delayed-msg');
+      msg.textContent = '⏳ 3秒待ち…';
+      setTimeout(() => {
+        msg.innerHTML = '<span class="ok-text">✅ 3秒後に発火した！</span>';
+      }, 3000);
+    });
 
     // --- 1. カウンター ---
     let n = 0;

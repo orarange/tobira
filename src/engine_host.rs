@@ -1162,6 +1162,9 @@ pub struct EngineRunResult {
     pub error: Option<String>,
     pub scroll_y: u32,
     pub default_prevented: bool,
+    /// Whether the engine still has pending event-loop work (timers / RAF /
+    /// queued tasks) after this operation — the host should keep pumping.
+    pub has_pending_work: bool,
 }
 
 /// Parse `html`, run its inline `<script>`s on the self-built engine against a
@@ -1229,6 +1232,7 @@ impl EngineSession {
     }
 
     fn snapshot_with_error(&mut self, error: Option<String>) -> EngineRunResult {
+        let pending = self.vm.has_pending_event_loop_work();
         let host = self.host();
         EngineRunResult {
             html: host.serialize_document(),
@@ -1238,7 +1242,23 @@ impl EngineSession {
             error,
             scroll_y: host.scroll_y(),
             default_prevented: false,
+            has_pending_work: pending,
         }
+    }
+
+    /// Advance time to `now_ms`, run due timers + a `requestAnimationFrame`
+    /// pass, and return a fresh snapshot (with `has_pending_work` indicating
+    /// whether the host should keep pumping). Drives `setInterval`,
+    /// `setTimeout(fn, delay)`, and animation loops over time.
+    pub fn tick(&mut self, now_ms: u64) -> EngineRunResult {
+        self.vm.pump_event_loop(now_ms, 10_000);
+        self.snapshot()
+    }
+
+    /// Earliest pending timer due time (ms), if any — lets the host schedule a
+    /// wakeup rather than busy-polling.
+    pub fn next_timer_due_ms(&self) -> Option<u64> {
+        self.vm.next_timer_due_ms()
     }
 
     /// Record the window scroll offset (from the browser's scroll handling) so

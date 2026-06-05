@@ -1415,6 +1415,61 @@ impl Vm {
         steps
     }
 
+    /// Whether the event loop has outstanding work (pending timers, RAF
+    /// callbacks, or queued tasks/microtasks). Lets a host decide whether to
+    /// keep pumping `event_loop_tick` over time.
+    pub fn has_pending_event_loop_work(&self) -> bool {
+        !self.event_loop.timer_heap.is_empty()
+            || !self.event_loop.raf_callbacks.is_empty()
+            || !self.event_loop.macrotask_queue.is_empty()
+            || !self.event_loop.microtask_queue.is_empty()
+    }
+
+    /// The earliest pending timer's due time in ms (heap-min), if any. Lets the
+    /// host schedule a wakeup instead of busy-polling.
+    pub fn next_timer_due_ms(&self) -> Option<u64> {
+        self.event_loop.timer_heap.peek().map(|entry| entry.0.due_ms)
+    }
+
+    /// Advance the event loop to `now_ms`: run every timer due by then (plus
+    /// their microtasks), then exactly ONE `requestAnimationFrame` pass for this
+    /// frame. Returns whether any work ran, so the caller can re-render only on
+    /// change.
+    ///
+    /// The two-phase split matters for animation: a `requestAnimationFrame`
+    /// callback that re-registers itself (the normal animation-loop pattern)
+    /// would, if we simply looped `event_loop_tick(.., true)` to quiescence,
+    /// drain-and-rerun rAF `max_steps` times in a single frame — advancing the
+    /// animation thousands of steps at one timestamp. Instead we drain due
+    /// timers first (bounded), then run a single rAF pass; callbacks scheduled
+    /// during that pass are deferred to the next frame, matching the HTML spec.
+    pub fn pump_event_loop(&mut self, now_ms: u64, max_steps: usize) -> bool {
+        let mut did_work = false;
+
+        // Phase 1: run all timers/macrotasks due by `now_ms` and their
+        // microtasks, without touching rAF. Bounded by `max_steps` to guard
+        // against zero-delay timers that reschedule themselves.
+        let mut steps = 0;
+        while steps < max_steps {
+            match self.event_loop_tick(now_ms, false) {
+                TickResult::Idle => break,
+                _ => {
+                    did_work = true;
+                    steps += 1;
+                }
+            }
+        }
+
+        // Phase 2: exactly one requestAnimationFrame pass for this frame.
+        if !self.event_loop.raf_callbacks.is_empty()
+            && !matches!(self.event_loop_tick(now_ms, true), TickResult::Idle)
+        {
+            did_work = true;
+        }
+
+        did_work
+    }
+
     fn run_until_frame_depth(&mut self, target_depth: usize) -> Result<(), VmError> {
         while self.frames.len() > target_depth {
             let opcode = {

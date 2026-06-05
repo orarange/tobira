@@ -344,3 +344,91 @@ fn multiple_awaits_sequential() {
     );
     execute_script(&mut vm, "assert(log.join('') === 'abc');");
 }
+
+// Browser expected: setTimeout(fn, delay) does NOT fire until virtual time has
+// advanced past `delay`; pump_event_loop drives it once time reaches it.
+#[test]
+fn pump_runs_delayed_timeout_only_after_delay() {
+    let mut vm = new_vm();
+    execute_script(
+        &mut vm,
+        r#"
+        let fired = false;
+        setTimeout(() => { fired = true; }, 100);
+        "#,
+    );
+    // Not yet due at t=50ms.
+    vm.pump_event_loop(50, 10_000);
+    execute_script(&mut vm, "assert(fired === false);");
+    // Due by t=100ms.
+    vm.pump_event_loop(100, 10_000);
+    execute_script(&mut vm, "assert(fired === true);");
+}
+
+// Browser expected: setInterval fires once per elapsed period as virtual time
+// advances frame by frame (no missed or duplicated ticks at a steady cadence).
+#[test]
+fn pump_runs_interval_each_period() {
+    let mut vm = new_vm();
+    execute_script(
+        &mut vm,
+        r#"
+        let count = 0;
+        setInterval(() => { count += 1; }, 100);
+        "#,
+    );
+    // Advance in 100ms steps; each pump should fire the interval exactly once.
+    vm.pump_event_loop(100, 10_000);
+    execute_script(&mut vm, "assert(count === 1);");
+    vm.pump_event_loop(200, 10_000);
+    execute_script(&mut vm, "assert(count === 2);");
+    vm.pump_event_loop(300, 10_000);
+    execute_script(&mut vm, "assert(count === 3);");
+}
+
+// Browser expected: a self-rescheduling requestAnimationFrame callback runs
+// EXACTLY ONCE per frame (pump call), not to exhaustion. This guards the
+// two-phase pump: looping rAF to quiescence would advance the animation
+// thousands of steps at a single timestamp.
+#[test]
+fn pump_runs_one_raf_pass_per_frame() {
+    let mut vm = new_vm();
+    execute_script(
+        &mut vm,
+        r#"
+        let frames = 0;
+        function loop() {
+            frames += 1;
+            requestAnimationFrame(loop);
+        }
+        requestAnimationFrame(loop);
+        "#,
+    );
+    execute_script(&mut vm, "assert(frames === 0);");
+    vm.pump_event_loop(16, 10_000);
+    execute_script(&mut vm, "assert(frames === 1);");
+    vm.pump_event_loop(32, 10_000);
+    execute_script(&mut vm, "assert(frames === 2);");
+    vm.pump_event_loop(48, 10_000);
+    execute_script(&mut vm, "assert(frames === 3);");
+}
+
+// Browser expected: once all timers/rAF are gone, the engine reports no pending
+// work so the host can stop ticking and return to an idle wait.
+#[test]
+fn pump_reports_pending_work_until_drained() {
+    let mut vm = new_vm();
+    execute_script(
+        &mut vm,
+        r#"
+        let done = false;
+        setTimeout(() => { done = true; }, 50);
+        "#,
+    );
+    assert!(vm.has_pending_event_loop_work());
+    vm.pump_event_loop(20, 10_000);
+    assert!(vm.has_pending_event_loop_work());
+    vm.pump_event_loop(50, 10_000);
+    execute_script(&mut vm, "assert(done === true);");
+    assert!(!vm.has_pending_event_loop_work());
+}
