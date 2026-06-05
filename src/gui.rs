@@ -2,6 +2,7 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
 use softbuffer::{Context, Surface};
@@ -32,6 +33,13 @@ use crate::url::Url;
 const WINDOW_WIDTH: u32 = 1100;
 const WINDOW_HEIGHT: u32 = 760;
 const FRAME_PADDING: u32 = 18;
+/// Target interval between JS animation ticks (~60 Hz) while the engine has
+/// pending timers / requestAnimationFrame callbacks.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// Upper bound on the virtual-clock delta applied per animation tick. Caps the
+/// time jump after a stall or debugger pause so timers/animations resume
+/// smoothly instead of firing a burst of catch-up frames.
+const MAX_FRAME_DELTA_MS: u64 = 100;
 const CHROME_TOP_PADDING: u32 = 10;
 const CHROME_BOTTOM_PADDING: u32 = 10;
 const CHROME_ROW_GAP: u32 = 10;
@@ -118,6 +126,27 @@ struct BrowserApp {
     hovered_link_node_id: Option<usize>,
     hovered_element_node_id: Option<usize>,
     ime_composing: bool,
+    /// Virtual JS clock (ms) for the active page's event loop. Advances only
+    /// while we are actively pumping timers/animation (in real-time-sized steps),
+    /// and freezes when there is no pending work — so a timer created during a
+    /// click handler measures its delay from "now", not from page load, avoiding
+    /// a catch-up storm. Reset to 0 on each navigation.
+    engine_clock_ms: u64,
+    /// Wall-clock instant of the previous animation tick, used to derive the
+    /// per-frame delta added to `engine_clock_ms`. `None` when not currently
+    /// animating (so the next tick starts a fresh delta of 0).
+    last_tick_instant: Option<Instant>,
+    /// Set when an animation tick changed the page but a render was already in
+    /// flight, so the request was coalesced. `finish_render` re-requests once the
+    /// in-flight render lands, ensuring the final animation frame is painted.
+    content_dirty: bool,
+    /// Whether the current page has been rendered at least once. Durable across
+    /// scrolls/resizes (which transiently null `latest_render_frame`). Lets
+    /// `current_layout` recompute synchronously when the layout cache is empty
+    /// mid-session (e.g. invalidated every animation tick) instead of returning
+    /// an empty layout — without that, `content_height` momentarily reads 0 and
+    /// the scroll clamp snaps the view back to the top while animating.
+    has_rendered_once: bool,
     /// Depth-indexed offscreen buffer pool for layer compositing.
     /// scratch[depth] holds the pixel buffer used by the layer at that nesting depth.
     /// Buffers are reused across frames; no per-frame allocation after the first paint.
@@ -235,6 +264,10 @@ impl BrowserApp {
             hovered_link_node_id: None,
             hovered_element_node_id: None,
             ime_composing: false,
+            engine_clock_ms: 0,
+            last_tick_instant: None,
+            content_dirty: false,
+            has_rendered_once: false,
             scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
         };
 
@@ -389,6 +422,11 @@ impl BrowserApp {
         self.latest_render_frame = None;
         self.clear_page_control_state();
         self.scroll_y = 0;
+        // New page → new JS session whose event-loop clock starts at 0.
+        self.engine_clock_ms = 0;
+        self.last_tick_instant = None;
+        self.content_dirty = false;
+        self.has_rendered_once = false;
         self.scratch.clear();
         self.sync_window_title();
         self.sync_input_method();
@@ -486,12 +524,20 @@ impl BrowserApp {
                     layout: frame.layout.clone(),
                 });
                 self.latest_render_frame = Some(frame);
+                self.has_rendered_once = true;
                 self.sync_current_history_scroll();
                 self.sync_window_title();
                 self.sync_input_method();
                 self.request_redraw();
+                // An animation tick changed the page while this render was in
+                // flight; paint the latest state now that the slot is free.
+                if self.content_dirty {
+                    self.content_dirty = false;
+                    self.request_content_render();
+                }
             }
             Err(error) => {
+                self.content_dirty = false;
                 self.document.status_line = format!("Status: render failed ({error})");
                 self.request_redraw();
             }
@@ -690,11 +736,18 @@ impl BrowserApp {
             .map(|frame| frame.content_height)
             .unwrap_or(layout.content_height);
         let max_scroll_y = max_scroll(viewport_height, content_height);
-        let previous_scroll_y = self.scroll_y;
-        self.scroll_y = self.scroll_y.min(max_scroll_y);
-        if self.scroll_y != previous_scroll_y {
-            let _ = self.document.set_scroll_position(self.scroll_y);
-            self.sync_current_history_scroll();
+        // Only clamp when we have a real content height. A 0 here means the
+        // height is momentarily unknown (e.g. layout cache invalidated by an
+        // animation tick before the next render lands); clamping to it would snap
+        // scroll back to the top. A genuinely empty page already has scroll_y 0,
+        // so skipping the clamp then is harmless.
+        if content_height > 0 {
+            let previous_scroll_y = self.scroll_y;
+            self.scroll_y = self.scroll_y.min(max_scroll_y);
+            if self.scroll_y != previous_scroll_y {
+                let _ = self.document.set_scroll_position(self.scroll_y);
+                self.sync_current_history_scroll();
+            }
         }
 
         let Some(surface) = self.surface.as_mut() else {
@@ -1648,6 +1701,11 @@ impl BrowserApp {
         let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
 
         if let DocumentContent::Loaded(_) = &self.document.content {
+            // Whether we've already rendered this page at least once. Durable
+            // across scrolls (unlike `latest_render_frame`, which scroll handling
+            // nulls). Used to decide what to do when the layout cache is empty
+            // (see the `None` arm).
+            let has_rendered = self.has_rendered_once;
             let revision = self.document.layout_revision();
             match &self.document.layout_cache {
                 // Cache still matches the current DOM + width — reuse it.
@@ -1660,7 +1718,15 @@ impl BrowserApp {
                 // hitboxes pointing at shifted nodes, so clicks after an edit
                 // landed on the wrong element and buttons "stopped working".
                 Some(_) => {}
-                // Not rendered yet — defer to the async render worker.
+                // No cache. If we've never rendered this page, defer to the async
+                // render worker (avoids a synchronous layout before first paint).
+                // But once a frame exists, an empty cache means it was invalidated
+                // mid-session — e.g. an animation tick nulls it every frame. In
+                // that case we MUST recompute synchronously: returning an empty
+                // (height 0) layout here makes `content_height` momentarily 0, so
+                // the scroll clamp in `draw()` snaps scroll_y back to the top while
+                // an animation is running and the user scrolls.
+                None if has_rendered => {}
                 None => return empty_layout_document(),
             }
         }
@@ -1982,6 +2048,58 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
         }
     }
 
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Drive the active page's JS event loop (setInterval / setTimeout(fn,
+        // delay) / requestAnimationFrame) while it has pending work. Idle pages
+        // stay on ControlFlow::Wait so there is no busy-loop.
+        if !self.document.engine_pending() {
+            self.last_tick_instant = None;
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
+        let now = Instant::now();
+        // Pace at ~60 Hz. The loop can wake before the frame interval elapses
+        // (e.g. a completed render posts a user event); in that case wait out the
+        // remainder instead of ticking faster than 60 fps.
+        if let Some(prev) = self.last_tick_instant {
+            let since = now.saturating_duration_since(prev);
+            if since < FRAME_INTERVAL {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(prev + FRAME_INTERVAL));
+                return;
+            }
+        }
+
+        // Advance the virtual clock by the real time elapsed since the last tick,
+        // clamped so a stall can't make timers fire in a catch-up burst. When we
+        // were not animating (`last_tick_instant` is None) the delta is 0, so a
+        // timer created during a click measures its delay from this moment.
+        let delta_ms = self
+            .last_tick_instant
+            .map(|prev| now.saturating_duration_since(prev).as_millis() as u64)
+            .unwrap_or(0)
+            .min(MAX_FRAME_DELTA_MS);
+        self.engine_clock_ms = self.engine_clock_ms.saturating_add(delta_ms);
+        self.last_tick_instant = Some(now);
+
+        if self.document.tick(self.engine_clock_ms) {
+            // Coalesce: at most one render in flight. If one is already pending,
+            // mark dirty so `finish_render` paints the final frame.
+            if self.pending_render_id.is_none() {
+                self.request_content_render();
+            } else {
+                self.content_dirty = true;
+            }
+        }
+
+        if self.document.engine_pending() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(now + FRAME_INTERVAL));
+        } else {
+            self.last_tick_instant = None;
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -2239,6 +2357,30 @@ impl DocumentView {
             self.layout_cache = None;
         }
         scrolled
+    }
+
+    /// Whether the active page's JS engine still has pending event-loop work
+    /// (timers / requestAnimationFrame) and therefore needs to be ticked.
+    fn engine_pending(&self) -> bool {
+        match &self.content {
+            DocumentContent::Loaded(page) => page.engine_pending(),
+            _ => false,
+        }
+    }
+
+    /// Advance the active page's JS clock to `now_ms`, run due timers / one rAF
+    /// pass, and apply the result. Returns whether the page changed (so the
+    /// caller can request a re-render).
+    fn tick(&mut self, now_ms: u64) -> bool {
+        let changed = match &mut self.content {
+            DocumentContent::Loaded(page) => page.tick(now_ms),
+            _ => false,
+        };
+        if changed {
+            self.sync_from_loaded_page();
+            self.layout_cache = None;
+        }
+        changed
     }
 
     fn sync_from_loaded_page(&mut self) {

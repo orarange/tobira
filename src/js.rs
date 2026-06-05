@@ -40,6 +40,11 @@ pub struct ProcessedScriptHtml {
     pub navigation_target: Option<String>,
     pub soft_navigation_target: Option<String>,
     pub scroll_y: u32,
+    /// Whether the JS engine still has pending event-loop work (timers / RAF /
+    /// queued tasks). When true, the GUI keeps ticking the session so
+    /// `setInterval` / `setTimeout(fn, delay)` / animation loops fire over time.
+    /// Always false for the boa backend (it drains synchronously).
+    pub has_pending_work: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -104,6 +109,14 @@ enum JavaScriptSessionCommand {
     Snapshot {
         response_tx: Sender<ProcessedScriptHtml>,
     },
+    /// Advance time and run due timers / RAF. Reply with `Some(snapshot)` only
+    /// when something actually ran this frame (so an idle-but-pending page does
+    /// not pay a full DOM serialize every tick), plus whether more event-loop
+    /// work remains (so the caller keeps pumping).
+    Tick {
+        now_ms: u64,
+        response_tx: Sender<(Option<ProcessedScriptHtml>, bool)>,
+    },
     Shutdown,
 }
 
@@ -132,6 +145,23 @@ impl JavaScriptSession {
         if self
             .command_tx
             .send(JavaScriptSessionCommand::Snapshot { response_tx })
+            .is_err()
+        {
+            return None;
+        }
+
+        response_rx.recv().ok()
+    }
+
+    /// Advance time and run due timers / RAF. The inner `Option` is `Some` only
+    /// when the frame did work (so callers skip re-applying an unchanged
+    /// snapshot); the `bool` reports whether more event-loop work remains. The
+    /// outer `Option` is `None` if the worker is gone.
+    pub(crate) fn tick(&self, now_ms: u64) -> Option<(Option<ProcessedScriptHtml>, bool)> {
+        let (response_tx, response_rx) = mpsc::channel();
+        if self
+            .command_tx
+            .send(JavaScriptSessionCommand::Tick { now_ms, response_tx })
             .is_err()
         {
             return None;
@@ -444,6 +474,7 @@ fn engine_result_to_processed(result: crate::engine_host::EngineRunResult) -> Pr
         navigation_target: result.navigation_target,
         soft_navigation_target: None,
         scroll_y: result.scroll_y,
+        has_pending_work: result.has_pending_work,
     }
 }
 
@@ -535,6 +566,16 @@ fn start_engine_script_session(
                     }
                     JavaScriptSessionCommand::Snapshot { response_tx } => {
                         let _ = response_tx.send(engine_result_to_processed(session.snapshot()));
+                    }
+                    JavaScriptSessionCommand::Tick { now_ms, response_tx } => {
+                        // Only serialize a snapshot when the frame did work; a
+                        // page with a pending interval but nothing due this frame
+                        // shouldn't pay a full DOM serialize every ~16ms.
+                        let did_work = session.pump(now_ms);
+                        let has_more = session.has_pending_work();
+                        let snapshot = did_work
+                            .then(|| engine_result_to_processed(session.snapshot()));
+                        let _ = response_tx.send((snapshot, has_more));
                     }
                     JavaScriptSessionCommand::SetScrollPosition { y } => {
                         session.set_scroll_position(y);
@@ -629,6 +670,15 @@ pub fn start_document_script_session(
                         JavaScriptSessionCommand::Snapshot { response_tx } => {
                             let _ = response_tx.send(runtime.snapshot());
                         }
+                        JavaScriptSessionCommand::Tick {
+                            now_ms: _,
+                            response_tx,
+                        } => {
+                            // The boa runtime drives timers synchronously inside
+                            // each script run, so a tick is always a no-op: no
+                            // snapshot to apply and no further pending work.
+                            let _ = response_tx.send((None, false));
+                        }
                         JavaScriptSessionCommand::Shutdown => break,
                     }
                 }
@@ -664,6 +714,7 @@ fn process_document_scripts_error(html: String, message: String) -> ProcessedScr
         navigation_target: None,
         soft_navigation_target: None,
         scroll_y: 0,
+        has_pending_work: false,
     }
 }
 
@@ -860,6 +911,8 @@ impl JavaScriptRuntime {
             navigation_target: self.navigation_target(),
             soft_navigation_target: self.take_soft_navigation_target(),
             scroll_y: scroll_position(&mut self.context),
+            // boa drains timers/microtasks synchronously per run.
+            has_pending_work: false,
         }
     }
 

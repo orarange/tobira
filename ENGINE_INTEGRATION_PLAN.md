@@ -144,8 +144,15 @@ default action (e.g. a key handler cancelling text insertion). The typed value
 reaches the engine via the existing `set_attribute("value", …)` sync, so
 `input.value` / `event.target.value` are correct inside listeners.
 
-Remaining for Stage 2: RAF animation loops and delayed/interval timers over time
-are not yet pumped continuously (only zero-delay settling at each event/snapshot).
+Continuous timers / animation (done): `gui.rs`'s `about_to_wait` drives the
+active page's event loop while it has pending work, via `Vm::pump_event_loop`
+(all due timers + one rAF pass per frame) behind a `JavaScriptSession::tick`.
+A virtual clock advances only while animating (real-time-sized, clamped) so a
+timer created in a click handler measures its delay from "now" rather than page
+load, and `ControlFlow::WaitUntil(~16ms)` paces it to ~60fps (idle pages stay on
+`ControlFlow::Wait`). No-op frames skip the DOM serialize. This makes
+`setInterval`, `setTimeout(fn, delay)`, and `requestAnimationFrame` animation
+loops fire over time. **Stage 2 is now feature-complete.**
 
 Behind the unchanged public API: parse/compile/execute document scripts on the
 `Vm` + `BrowserHost`, drive the event loop from `gui.rs` via `event_loop_tick`,

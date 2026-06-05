@@ -34,6 +34,10 @@ pub struct BrowserPage {
     pub javascript_session: Option<JavaScriptSession>,
     layout_revision: u64,
     scroll_y: u32,
+    /// Whether the JS engine still has pending event-loop work (timers / RAF).
+    /// Drives the GUI's animation pump: while true, the event loop keeps
+    /// ticking the session so `setInterval` / `setTimeout` / RAF fire over time.
+    engine_pending: bool,
 }
 
 // BrowserPage is moved between threads only through owned message passing:
@@ -60,8 +64,10 @@ impl BrowserPage {
             && snapshot.soft_navigation_target.is_none()
         {
             self.scroll_y = snapshot.scroll_y;
+            self.engine_pending = snapshot.has_pending_work;
             return;
         }
+        let pending = snapshot.has_pending_work;
         let include_rendered_output = self.rendered.is_some();
         let javascript_session = self.javascript_session.take();
         let layout_revision = self
@@ -86,10 +92,45 @@ impl BrowserPage {
         );
         *self = rebuilt;
         self.scroll_y = snapshot.scroll_y;
+        self.engine_pending = pending;
     }
 
     pub(crate) fn layout_revision(&self) -> u64 {
         self.layout_revision
+    }
+
+    /// Whether the JS engine still has pending event-loop work (timers / RAF).
+    /// The GUI checks this to decide whether to keep pumping the session.
+    pub(crate) fn engine_pending(&self) -> bool {
+        self.engine_pending
+    }
+
+    /// Advance JS engine time to `now_ms`, run any due timers / `requestAnimation
+    /// Frame` callbacks, and apply the resulting snapshot. Returns whether the
+    /// page changed (so the caller can request a render). `engine_pending()` is
+    /// updated as a side effect so the caller knows whether to keep ticking.
+    pub fn tick(&mut self, now_ms: u64) -> bool {
+        let Some((maybe_snapshot, has_more)) = self
+            .javascript_session
+            .as_ref()
+            .and_then(|session| session.tick(now_ms))
+        else {
+            // No session (or worker gone): nothing left to pump.
+            self.engine_pending = false;
+            return false;
+        };
+        // The frame was a no-op (pending timer not yet due): no snapshot to
+        // apply, just refresh whether more work remains.
+        let Some(snapshot) = maybe_snapshot else {
+            self.engine_pending = has_more;
+            return false;
+        };
+        let changed = snapshot.html != self.html_source
+            || snapshot.navigation_target.is_some()
+            || snapshot.soft_navigation_target.is_some();
+        // `apply_script_snapshot` updates `engine_pending` from the snapshot.
+        self.apply_script_snapshot(snapshot);
+        changed
     }
 
     pub(crate) fn scroll_y(&self) -> u32 {
@@ -237,6 +278,7 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
         source.javascript_session,
     );
     page.scroll_y = source.processed_html.scroll_y;
+    page.engine_pending = source.processed_html.has_pending_work;
     if let Some(soft_target) = source
         .processed_html
         .soft_navigation_target
@@ -330,6 +372,7 @@ fn rebuild_page_from_document(
         javascript_session,
         layout_revision,
         scroll_y: 0,
+        engine_pending: false,
     }
 }
 
@@ -3129,6 +3172,7 @@ mod tests {
             javascript_session: None,
             layout_revision: 0,
             scroll_y: 0,
+            engine_pending: false,
         };
 
         assert_eq!(page.body_text(), "[empty document]");
@@ -3151,6 +3195,7 @@ mod tests {
             javascript_session: None,
             layout_revision: 0,
             scroll_y: 0,
+            engine_pending: false,
         };
 
         let output = page.to_cli_output();
@@ -3293,6 +3338,7 @@ mod tests {
             javascript_session: None,
             layout_revision: 0,
             scroll_y: 0,
+            engine_pending: false,
         };
         let snapshot = crate::js::ProcessedScriptHtml {
             html: "<html><body>Updated</body></html>".to_string(),
@@ -3301,6 +3347,7 @@ mod tests {
             navigation_target: None,
             soft_navigation_target: None,
             scroll_y: 0,
+            has_pending_work: false,
         };
 
         page.apply_script_snapshot(snapshot);
@@ -3361,6 +3408,7 @@ mod tests {
             navigation_target: None,
             soft_navigation_target: None,
             scroll_y: 320,
+            has_pending_work: false,
         };
         page.apply_script_snapshot(snapshot);
 
