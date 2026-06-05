@@ -102,6 +102,10 @@ pub struct BrowserHost {
     console: Vec<String>,
     location: LocationSnapshot,
     navigation: Option<String>,
+    scroll_x: f64,
+    scroll_y: f64,
+    inner_width: f64,
+    inner_height: f64,
 }
 
 impl BrowserHost {
@@ -117,6 +121,10 @@ impl BrowserHost {
             console: Vec::new(),
             location: location_from_url(url),
             navigation: None,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            inner_width: 1280.0,
+            inner_height: 720.0,
         };
         host.document = host.push(DomNode::document());
         // The parsed root is an "document" element; graft its children under our
@@ -245,6 +253,23 @@ impl BrowserHost {
             }
             DomNodeKind::Document | DomNodeKind::Fragment => self.inner_html(idx),
         }
+    }
+
+    /// Current vertical scroll offset (`window.scrollY`).
+    pub fn scroll_y(&self) -> u32 {
+        self.scroll_y.max(0.0) as u32
+    }
+
+    /// Update the window scroll offset (driven by the browser's scroll input).
+    pub fn set_scroll(&mut self, x: f64, y: f64) {
+        self.scroll_x = x.max(0.0);
+        self.scroll_y = y.max(0.0);
+    }
+
+    /// Update the viewport size (`window.innerWidth` / `innerHeight`).
+    pub fn set_viewport(&mut self, width: f64, height: f64) {
+        self.inner_width = width.max(0.0);
+        self.inner_height = height.max(0.0);
     }
 
     /// Serialize the whole document back to HTML (for the page snapshot).
@@ -620,10 +645,10 @@ impl Host for BrowserHost {
 
     fn window_metrics(&self, _window: WindowId) -> HostResult<WindowMetrics> {
         Ok(WindowMetrics {
-            inner_width: 1280.0,
-            inner_height: 720.0,
-            scroll_x: 0.0,
-            scroll_y: 0.0,
+            inner_width: self.inner_width,
+            inner_height: self.inner_height,
+            scroll_x: self.scroll_x,
+            scroll_y: self.scroll_y,
             device_pixel_ratio: 1.0,
         })
     }
@@ -1102,6 +1127,7 @@ pub struct EngineRunResult {
     pub title: Option<String>,
     pub navigation_target: Option<String>,
     pub error: Option<String>,
+    pub scroll_y: u32,
 }
 
 /// Parse `html`, run its inline `<script>`s on the self-built engine against a
@@ -1176,7 +1202,20 @@ impl EngineSession {
             title: host.title(),
             navigation_target: host.navigation_target(),
             error,
+            scroll_y: host.scroll_y(),
         }
+    }
+
+    /// Record the window scroll offset (from the browser's scroll handling) so
+    /// `window.scrollY` reflects it and snapshots preserve the position instead
+    /// of resetting it to 0.
+    pub fn set_scroll_position(&mut self, y: u32) {
+        self.host().set_scroll(0.0, y as f64);
+    }
+
+    /// Record the viewport size (`window.innerWidth` / `innerHeight`).
+    pub fn set_viewport_size(&mut self, width: u32, height: u32) {
+        self.host().set_viewport(width as f64, height as f64);
     }
 
     /// Current DOM snapshot. Console output captured since the last snapshot is
@@ -1589,6 +1628,38 @@ mod tests {
                 || after.html.contains(">1</span>"),
             "counter did not increment, html: {}",
             after.html
+        );
+    }
+
+    #[test]
+    fn engine_session_preserves_scroll_position() {
+        // Regression: the engine snapshot must report the tracked scroll offset,
+        // not 0, or the browser resets scroll to the top on every event.
+        let html = r#"<html><body><div>tall page</div></body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert_eq!(initial.scroll_y, 0);
+        session.set_scroll_position(500);
+        assert_eq!(session.snapshot().scroll_y, 500);
+        // A dispatched event also preserves it.
+        assert_eq!(session.dispatch_global_event("resize").scroll_y, 500);
+    }
+
+    #[test]
+    fn engine_session_exposes_scroll_to_window_scrolly() {
+        let html = r#"<html><body><p id="out">start</p>
+            <script>
+                window.addEventListener('scroll', () => {
+                    document.getElementById('out').textContent = 'y=' + window.scrollY;
+                });
+            </script></body></html>"#;
+        let (mut session, _) = EngineSession::start(html, "http://localhost/");
+        session.set_scroll_position(250);
+        let result = session.dispatch_global_event("scroll");
+        assert_eq!(result.scroll_y, 250);
+        assert!(
+            result.html.contains(">y=250</p>"),
+            "window.scrollY not reflected, html: {}",
+            result.html
         );
     }
 

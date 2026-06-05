@@ -442,7 +442,7 @@ fn engine_result_to_processed(result: crate::engine_host::EngineRunResult) -> Pr
         console_logs,
         navigation_target: result.navigation_target,
         soft_navigation_target: None,
-        scroll_y: 0,
+        scroll_y: result.scroll_y,
     }
 }
 
@@ -507,9 +507,12 @@ fn start_engine_script_session(
                     JavaScriptSessionCommand::Snapshot { response_tx } => {
                         let _ = response_tx.send(engine_result_to_processed(session.snapshot()));
                     }
-                    // Scroll/viewport not yet modeled on the engine host.
-                    JavaScriptSessionCommand::SetScrollPosition { .. }
-                    | JavaScriptSessionCommand::SetViewportSize { .. } => {}
+                    JavaScriptSessionCommand::SetScrollPosition { y } => {
+                        session.set_scroll_position(y);
+                    }
+                    JavaScriptSessionCommand::SetViewportSize { width, height } => {
+                        session.set_viewport_size(width, height);
+                    }
                     JavaScriptSessionCommand::Shutdown => break,
                 }
             }
