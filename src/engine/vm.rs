@@ -1191,33 +1191,86 @@ impl Vm {
         event_type: &str,
         init: &DomEventInit,
     ) -> Result<bool, VmError> {
-        let listeners: Vec<GcRef<JsObject>> = self
-            .event_listeners
-            .get(&node_handle)
-            .and_then(|m| m.get(event_type))
-            .cloned()
-            .unwrap_or_default();
-        if listeners.is_empty() {
-            return Ok(false);
-        }
         let target = self.make_dom_node_value(NodeId(node_handle));
         let event_obj = self.build_host_event(event_type, &target, init);
         let event_val = Value::Object(event_obj);
-        for fn_ref in listeners {
-            let _ =
-                self.call_value_sync(Value::Object(fn_ref), target.clone(), vec![event_val.clone()]);
-            self.drain_microtasks();
-            let stop = self
-                .get_property_value(&event_val, &PropertyKey::from("__stopImmediate"))
-                .unwrap_or(Value::Undefined);
-            if self.is_truthy(&stop) {
-                break;
-            }
-        }
+        // Real user events propagate target → ancestors too (so event delegation,
+        // e.g. one click listener on a framework's root, fires for child clicks).
+        self.propagate_event(node_handle, &event_val, event_type, init.bubbles)?;
         let default_prevented = self
             .get_property_value(&event_val, &PropertyKey::from("defaultPrevented"))
             .unwrap_or(Value::Bool(false));
         Ok(self.is_truthy(&default_prevented))
+    }
+
+    /// Dispatch `event_val` of type `event_type` to the listeners along the
+    /// propagation path: the target node, then (if `bubbles`) its ancestors,
+    /// updating `currentTarget` per node and honoring `stopPropagation`
+    /// (cancelBubble) / `stopImmediatePropagation`. Shared by the host-driven
+    /// `fire_dom_event_with` and the script-driven `dispatchEvent`.
+    fn propagate_event(
+        &mut self,
+        target_handle: u32,
+        event_val: &Value,
+        event_type: &str,
+        bubbles: bool,
+    ) -> Result<(), VmError> {
+        let Value::Object(event_ref) = event_val else {
+            return Ok(());
+        };
+        let event_ref = *event_ref;
+        let mut path: Vec<u32> = vec![target_handle];
+        if bubbles {
+            let mut current = target_handle;
+            while let Ok(DomReadResult::Node(parent)) =
+                self.host.read_dom(DomRead::Parent { node: NodeId(current) })
+            {
+                path.push(parent.0);
+                current = parent.0;
+                if path.len() > 4096 {
+                    break; // cycle guard
+                }
+            }
+        }
+        'propagate: for node_handle in path {
+            let current_target = self.make_dom_node_value(NodeId(node_handle));
+            self.define_data_property(
+                event_ref,
+                PropertyKey::from("currentTarget"),
+                current_target.clone(),
+                true,
+                true,
+                true,
+            );
+            let listeners: Vec<GcRef<JsObject>> = self
+                .event_listeners
+                .get(&node_handle)
+                .and_then(|m| m.get(event_type))
+                .cloned()
+                .unwrap_or_default();
+            for listener in listeners {
+                // A listener's `this` is the node it is attached to (currentTarget).
+                self.call_value_sync(
+                    Value::Object(listener),
+                    current_target.clone(),
+                    vec![event_val.clone()],
+                )?;
+                self.drain_microtasks();
+                let stop_immediate = self
+                    .get_property_value(event_val, &PropertyKey::from("__stopImmediate"))
+                    .unwrap_or(Value::Undefined);
+                if self.is_truthy(&stop_immediate) {
+                    break 'propagate;
+                }
+            }
+            let cancel = self
+                .get_property_value(event_val, &PropertyKey::from("cancelBubble"))
+                .unwrap_or(Value::Undefined);
+            if self.is_truthy(&cancel) {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Build the Event object delivered to host-event listeners.
@@ -9322,49 +9375,7 @@ impl Vm {
                     .map(|v| self.is_truthy(&v))
                     .unwrap_or(false);
 
-                // Propagation path: the target, then its ancestors (for bubbling).
-                let mut path: Vec<u32> = vec![target_handle];
-                if bubbles {
-                    let mut current = target_handle;
-                    while let Ok(DomReadResult::Node(parent)) =
-                        self.host.read_dom(DomRead::Parent { node: NodeId(current) })
-                    {
-                        path.push(parent.0);
-                        current = parent.0;
-                        if path.len() > 4096 {
-                            break; // cycle guard
-                        }
-                    }
-                }
-
-                'propagate: for node_handle in path {
-                    let current_target = self.make_dom_node_value(NodeId(node_handle));
-                    self.define_data_property(event_ref, PropertyKey::from("currentTarget"), current_target.clone(), true, true, true);
-                    let listeners: Vec<GcRef<JsObject>> = self
-                        .event_listeners
-                        .get(&node_handle)
-                        .and_then(|m| m.get(&event_type))
-                        .cloned()
-                        .unwrap_or_default();
-                    for listener in listeners {
-                        // Per spec, a listener's `this` is the node it's attached to.
-                        self.call_value_sync(Value::Object(listener), current_target.clone(), vec![event.clone()])?;
-                        self.drain_microtasks();
-                        let stop_immediate = self
-                            .get_property_value(&event, &PropertyKey::from("__stopImmediate"))
-                            .unwrap_or(Value::Undefined);
-                        if self.is_truthy(&stop_immediate) {
-                            break 'propagate;
-                        }
-                    }
-                    // stopPropagation() (sets cancelBubble) halts further bubbling.
-                    let cancel = self
-                        .get_property_value(&event, &PropertyKey::from("cancelBubble"))
-                        .unwrap_or(Value::Undefined);
-                    if self.is_truthy(&cancel) {
-                        break;
-                    }
-                }
+                self.propagate_event(target_handle, &event, &event_type, bubbles)?;
 
                 // dispatchEvent returns false iff a cancelable event had
                 // preventDefault() called, true otherwise.

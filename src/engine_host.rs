@@ -2121,6 +2121,101 @@ mod tests {
     }
 
     #[test]
+    fn react_like_app_full_interactive_loop() {
+        // End-to-end: a small "React-like" framework — element factory, component
+        // functions, state, event delegation by bubbling to a root listener, and
+        // re-render on click — driven through the real EngineSession dispatch path
+        // the browser uses. Proves the engine can run framework-style apps.
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body>
+            <div id="root"></div>
+            <div id="status">none</div>
+            <script>
+                function h(tag, props, ...children) {
+                    const el = document.createElement(tag);
+                    const p = props || {};
+                    for (const k of Object.keys(p)) {
+                        if (k === 'onClick') el.addEventListener('click', p[k]);
+                        else if (k === 'className') el.className = p[k];
+                        else el.setAttribute(k, p[k]);
+                    }
+                    for (const child of children.flat()) {
+                        el.appendChild(typeof child === 'object' ? child : document.createTextNode(String(child)));
+                    }
+                    return el;
+                }
+                const state = { count: 0 };
+                const root = document.getElementById('root');
+                function render() {
+                    root.innerHTML = '';
+                    root.appendChild(
+                        h('button', { id: 'inc', onClick: () => { state.count++; render(); } },
+                          'count: ', state.count)
+                    );
+                }
+                // Event delegation: one listener on the persistent root reacts to
+                // clicks bubbling up from the (re-rendered) child button, and writes
+                // to a status node OUTSIDE root so the effect is observable.
+                root.addEventListener('click', (e) => {
+                    if (e.target && e.target.tagName && e.target.tagName.toLowerCase() === 'button') {
+                        document.getElementById('status').textContent =
+                            'target=' + e.target.id + ' current=' + (e.currentTarget && e.currentTarget.id);
+                    }
+                });
+                render();
+            </script>
+        </body></html>"#;
+
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "init error: {:?}", initial.error);
+        assert!(
+            initial.html.contains("count: 0"),
+            "initial render missing, html: {}",
+            initial.html
+        );
+
+        // Click the increment button (found the way the browser locates it).
+        let find_inc = |html: &str| {
+            let mut tree = parse_document(html);
+            annotate_node_ids(&mut tree);
+            find_node_id_by_attr(&tree, "id", "inc").expect("inc button id")
+        };
+
+        let click = DomEventInit {
+            bubbles: true,
+            cancelable: true,
+            ..Default::default()
+        };
+        let inc_id = find_inc(&initial.html);
+        let after1 = session.dispatch_event(inc_id, "click", &click);
+        assert!(after1.error.is_none(), "click1 error: {:?}", after1.error);
+        // The button's own handler incremented + re-rendered.
+        assert!(
+            after1.html.contains("count: 1"),
+            "count did not increment, html: {}",
+            after1.html
+        );
+        // The click bubbled to root's delegated listener: target = the button,
+        // currentTarget = root.
+        assert!(
+            after1.html.contains("target=inc current=root"),
+            "delegated bubble handler did not run, html: {}",
+            after1.html
+        );
+
+        // A second click on the freshly rendered button keeps working.
+        let inc_id2 = find_inc(&after1.html);
+        let after2 = session.dispatch_event(inc_id2, "click", &click);
+        assert!(
+            after2.html.contains("count: 2"),
+            "second click failed, html: {}",
+            after2.html
+        );
+    }
+
+    #[test]
     fn mutation_observer_reports_childlist() {
         // A childList MutationObserver delivers added nodes; the callback runs at
         // the microtask checkpoint (before the initial snapshot).
