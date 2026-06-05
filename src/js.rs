@@ -186,11 +186,12 @@ impl JavaScriptSession {
     }
 }
 
-impl Drop for JavaScriptSession {
-    fn drop(&mut self) {
-        let _ = self.command_tx.send(JavaScriptSessionCommand::Shutdown);
-    }
-}
+// NOTE: deliberately NO `Drop` that sends `Shutdown`. `JavaScriptSession` is
+// `Clone` (e.g. `set_dom_attribute` clones it to dodge a borrow), and a `Drop`
+// that sent `Shutdown` would let any short-lived clone kill the shared worker —
+// which is exactly what broke interaction after focusing an input. The worker
+// already exits cleanly when every sender is dropped (its `recv()` returns
+// `Err` once the page's session goes away), so no explicit shutdown is needed.
 
 #[derive(Debug)]
 struct JavaScriptState {
@@ -479,11 +480,33 @@ fn start_engine_script_session(
                         request,
                         response_tx,
                     } => {
-                        let result =
-                            session.dispatch_event(request.target_node_id, &request.event_type);
+                        let init = tobira_engine::engine::DomEventInit {
+                            bubbles: request.bubbles,
+                            cancelable: request.cancelable,
+                            key: request.key.clone(),
+                            code: request.code.clone(),
+                            data: request.data.clone(),
+                            input_type: request.input_type.clone(),
+                            client_x: request.client_x,
+                            client_y: request.client_y,
+                            button: request.button,
+                            buttons: request.buttons,
+                            alt_key: request.alt_key,
+                            ctrl_key: request.ctrl_key,
+                            shift_key: request.shift_key,
+                            meta_key: request.meta_key,
+                            repeat: request.repeat,
+                            is_composing: request.is_composing,
+                        };
+                        let result = session.dispatch_event(
+                            request.target_node_id,
+                            &request.event_type,
+                            &init,
+                        );
+                        let default_prevented = result.default_prevented;
                         let _ = response_tx.send(DomEventDispatchResult {
                             snapshot: engine_result_to_processed(result),
-                            default_prevented: false,
+                            default_prevented,
                         });
                     }
                     JavaScriptSessionCommand::DispatchGlobalEvent {
@@ -12215,6 +12238,69 @@ mod tests {
         assert!(
             result.snapshot.html.contains(">clicked</div>"),
             "expected click via the session API to mutate the DOM, got: {}",
+            result.snapshot.html
+        );
+    }
+
+    #[test]
+    fn engine_session_survives_dropped_clone() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::{Node, parse_document};
+
+        fn find_btn(node: &Node) -> Option<usize> {
+            if let Node::Element(el) = node {
+                if el.attributes.get("id").map(String::as_str) == Some("btn") {
+                    return el
+                        .attributes
+                        .get("data-tobira-node-id")
+                        .and_then(|s| s.parse().ok());
+                }
+                for child in &el.children {
+                    if let Some(found) = find_btn(child) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+
+        // Regression: `set_dom_attribute` clones the session and the clone is
+        // dropped right after use (focusing an input does this). A `Drop` that
+        // sent `Shutdown` would kill the shared worker — breaking every later
+        // event. Cloning + dropping must leave the worker alive.
+        let html = r#"<html><body>
+            <button id="btn">go</button>
+            <div id="out">idle</div>
+            <script>
+                document.getElementById('btn').addEventListener('click', () => {
+                    document.getElementById('out').textContent = 'clicked';
+                });
+            </script>
+        </body></html>"#;
+        let (initial, session) =
+            start_engine_script_session(html, &Url::parse("http://localhost/").unwrap());
+        let session = session.expect("engine session present");
+
+        // Use and drop a clone, exactly like set_dom_attribute does.
+        {
+            let clone = session.clone();
+            let _ = clone.snapshot();
+        }
+
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let btn_id = find_btn(&tree).expect("button node id");
+
+        let result = session
+            .dispatch_event(DomEventRequest {
+                target_node_id: btn_id,
+                event_type: "click".to_string(),
+                ..Default::default()
+            })
+            .expect("session must still be alive after a clone was dropped");
+        assert!(
+            result.snapshot.html.contains(">clicked</div>"),
+            "click after clone-drop should still work, got: {}",
             result.snapshot.html
         );
     }

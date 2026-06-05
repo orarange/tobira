@@ -15,7 +15,8 @@ use std::any::Any;
 use std::collections::BTreeMap;
 
 use tobira_engine::engine::{
-    Compiler, ConsoleMessage, DomEventRequest, DomEventResult, DomMutation, DomMutationResult,
+    Compiler, ConsoleMessage, DomEventInit, DomEventRequest, DomEventResult, DomMutation,
+    DomMutationResult,
     DomRead, DomReadResult, DomRect, FetchRequest, FrameId, Heap, HistoryAction, HistoryOutcome,
     Host, HostError, HostEvent, HostResult, HostTimeSnapshot, LocationSnapshot, NavigationAction,
     NavigationOutcome, NetworkRequestId, NodeId, NodeKind, ObserverOp, ObserverResult, Parser,
@@ -1138,6 +1139,7 @@ pub struct EngineRunResult {
     pub navigation_target: Option<String>,
     pub error: Option<String>,
     pub scroll_y: u32,
+    pub default_prevented: bool,
 }
 
 /// Parse `html`, run its inline `<script>`s on the self-built engine against a
@@ -1213,6 +1215,7 @@ impl EngineSession {
             navigation_target: host.navigation_target(),
             error,
             scroll_y: host.scroll_y(),
+            default_prevented: false,
         }
     }
 
@@ -1237,13 +1240,24 @@ impl EngineSession {
     /// Dispatch a DOM event to the node identified by the browser's
     /// `data-tobira-node-id` (`target_node_id`), settle deferred work, and
     /// return a fresh snapshot. Unknown node ids are a no-op (still snapshots).
-    pub fn dispatch_event(&mut self, node_id: usize, event_type: &str) -> EngineRunResult {
+    pub fn dispatch_event(
+        &mut self,
+        node_id: usize,
+        event_type: &str,
+        init: &DomEventInit,
+    ) -> EngineRunResult {
         let handle = self.host().handle_for_node_id(node_id).map(|h| h as u32);
+        let mut default_prevented = false;
         if let Some(handle) = handle {
-            let _ = self.vm.fire_dom_event(handle, event_type);
+            default_prevented = self
+                .vm
+                .fire_dom_event_with(handle, event_type, init)
+                .unwrap_or(false);
             self.vm.run_due_jobs(10_000);
         }
-        self.snapshot()
+        let mut snapshot = self.snapshot();
+        snapshot.default_prevented = default_prevented;
+        snapshot
     }
 
     /// Dispatch a global (window/document) event — engine node handle 0.
@@ -1571,7 +1585,7 @@ mod tests {
         let btn_id = find_node_id_by_attr(&tree, "id", "btn").expect("button node id");
 
         // A click dispatched by that node id must reach the listener.
-        let result = session.dispatch_event(btn_id, "click");
+        let result = session.dispatch_event(btn_id, "click", &DomEventInit::default());
         assert!(
             result.html.contains(">clicked</div>"),
             "expected click to mutate the DOM, html: {}",
@@ -1601,8 +1615,8 @@ mod tests {
         let btn_id = find_node_id_by_attr(&tree, "id", "btn").expect("button node id");
 
         // Two clicks should append two <li>; a plain snapshot reflects state.
-        session.dispatch_event(btn_id, "click");
-        let result = session.dispatch_event(btn_id, "click");
+        session.dispatch_event(btn_id, "click", &DomEventInit::default());
+        let result = session.dispatch_event(btn_id, "click", &DomEventInit::default());
         assert_eq!(
             result.html.matches("<li>hit</li>").count(),
             2,
@@ -1638,7 +1652,7 @@ mod tests {
         let mut tree = parse_document(&initial.html);
         annotate_node_ids(&mut tree);
         let inc_id = find_node_id_by_attr(&tree, "id", "inc").expect("counter button id");
-        let after = session.dispatch_event(inc_id, "click");
+        let after = session.dispatch_event(inc_id, "click", &DomEventInit::default());
         assert!(
             after.html.contains(r#"id="count" class="count">1<"#)
                 || after.html.contains(">1</span>"),
@@ -1697,10 +1711,106 @@ mod tests {
     }
 
     #[test]
+    fn engine_session_keyboard_event_carries_key_and_modifiers() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body><input id="f">
+            <p id="out">none</p>
+            <script>
+                document.getElementById('f').addEventListener('keydown', (e) => {
+                    document.getElementById('out').textContent =
+                        'key=' + e.key + ' shift=' + e.shiftKey;
+                });
+            </script></body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let id = find_node_id_by_attr(&tree, "id", "f").expect("input node id");
+
+        let init = DomEventInit {
+            key: Some("a".to_string()),
+            shift_key: true,
+            cancelable: true,
+            bubbles: true,
+            ..DomEventInit::default()
+        };
+        let result = session.dispatch_event(id, "keydown", &init);
+        assert!(
+            result.html.contains(">key=a shift=true</p>"),
+            "event detail not delivered, html: {}",
+            result.html
+        );
+    }
+
+    #[test]
+    fn engine_session_input_value_reflects_set_attribute() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        // The browser syncs the typed value via set_attribute("value", ...)
+        // BEFORE firing the input event; the listener must then see it.
+        let html = r#"<html><body><input id="f">
+            <p id="out">empty</p>
+            <script>
+                const f = document.getElementById('f');
+                f.addEventListener('input', () => {
+                    document.getElementById('out').textContent = 'val=' + f.value;
+                });
+            </script></body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let id = find_node_id_by_attr(&tree, "id", "f").expect("input node id");
+
+        session.set_attribute(id, "value", "hello");
+        let init = DomEventInit {
+            bubbles: true,
+            input_type: Some("insertText".to_string()),
+            data: Some("o".to_string()),
+            ..DomEventInit::default()
+        };
+        let result = session.dispatch_event(id, "input", &init);
+        assert!(
+            result.html.contains(">val=hello</p>"),
+            "input.value not reflected, html: {}",
+            result.html
+        );
+    }
+
+    #[test]
+    fn engine_session_keydown_preventdefault_is_reported() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body><input id="f"><script>
+            document.getElementById('f').addEventListener('keydown', (e) => {
+                e.preventDefault();
+            });
+        </script></body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let id = find_node_id_by_attr(&tree, "id", "f").expect("input node id");
+
+        let init = DomEventInit {
+            key: Some("a".to_string()),
+            cancelable: true,
+            bubbles: true,
+            ..DomEventInit::default()
+        };
+        let result = session.dispatch_event(id, "keydown", &init);
+        assert!(
+            result.default_prevented,
+            "preventDefault() on keydown should be reported back"
+        );
+    }
+
+    #[test]
     fn engine_session_unknown_node_id_is_safe() {
         let html = r#"<html><body><div id="x">ok</div></body></html>"#;
         let (mut session, _) = EngineSession::start(html, "http://localhost/");
-        let result = session.dispatch_event(99999, "click");
+        let result = session.dispatch_event(99999, "click", &DomEventInit::default());
         assert!(result.error.is_none());
         assert!(result.html.contains(">ok</div>"));
     }

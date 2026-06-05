@@ -131,11 +131,21 @@ over the real serialize→parse→annotate pipeline), so a click dispatched by
 `target_node_id` lands on the right engine node, runs its listeners, mutates the
 DOM, and the next snapshot reflects it.
 
-Remaining for Stage 2: `preventDefault` is not yet surfaced back through
-`dispatch_event` (returns `default_prevented = false`); RAF animation loops and
-delayed/interval timers over time are not yet pumped (only zero-delay settling
-at each event); scroll/viewport commands are no-ops on the engine host. And the
-real-browser GUI click path still needs human verification under `TOBIRA_ENGINE=1`.
+**Verified in the GUI** under `TOBIRA_ENGINE=1`: clicks, scrolling, and typing
+all work. Scroll no longer rebuilds the page (listener-free `scroll`/`resize`
+events are skipped) and re-paints at the new offset; the engine tracks the
+scroll/viewport so `window.scrollY`/`innerWidth` are correct.
+
+**Keyboard/pointer/input events** now carry their details: host events build an
+Event object with `target`, `key`, `code`, `data`, `inputType`, modifier flags,
+and pointer coords, plus working `preventDefault`/`stopPropagation`/`stopImmediatePropagation`.
+`dispatch_event` surfaces `default_prevented` so the browser can suppress the
+default action (e.g. a key handler cancelling text insertion). The typed value
+reaches the engine via the existing `set_attribute("value", …)` sync, so
+`input.value` / `event.target.value` are correct inside listeners.
+
+Remaining for Stage 2: RAF animation loops and delayed/interval timers over time
+are not yet pumped continuously (only zero-delay settling at each event/snapshot).
 
 Behind the unchanged public API: parse/compile/execute document scripts on the
 `Vm` + `BrowserHost`, drive the event loop from `gui.rs` via `event_loop_tick`,

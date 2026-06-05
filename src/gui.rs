@@ -1640,19 +1640,31 @@ impl BrowserApp {
     }
 
     fn current_layout(&mut self) -> LayoutDocument {
-        if let DocumentContent::Loaded(_) = &self.document.content {
-            if let Some(cache) = &self.document.layout_cache {
-                return cache.layout.clone();
-            }
-            return empty_layout_document();
-        }
-
         let window_size = self
             .window
             .as_ref()
             .map(|window| window.inner_size())
             .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
         let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
+
+        if let DocumentContent::Loaded(_) = &self.document.content {
+            let revision = self.document.layout_revision();
+            match &self.document.layout_cache {
+                // Cache still matches the current DOM + width — reuse it.
+                Some(cache) if cache.revision == revision && cache.width == content_width => {
+                    return cache.layout.clone();
+                }
+                // Stale cache (the DOM mutated, e.g. typing, or the width
+                // changed): recompute synchronously below so hit-testing uses
+                // the current node ids. Returning the stale cache here left the
+                // hitboxes pointing at shifted nodes, so clicks after an edit
+                // landed on the wrong element and buttons "stopped working".
+                Some(_) => {}
+                // Not rendered yet — defer to the async render worker.
+                None => return empty_layout_document(),
+            }
+        }
+
         self.document.layout(content_width, &mut self.fonts)
     }
 
