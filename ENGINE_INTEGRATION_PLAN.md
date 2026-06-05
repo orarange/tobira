@@ -188,9 +188,42 @@ gaps from a scan of `vm.rs` vs `js.rs`:
   pointer/input event detail on dispatched events (#60). Still missing:
   `KeyboardEvent`/`MouseEvent` *constructors*, `AbortController`/`AbortSignal`.
 - **Misc**: `URLSearchParams` ✅ (#52), `MutationObserver` ✅, richer `crypto`,
-  `history.state`/`popstate`/`hashchange`, arbitrary `window.*` expando writes.
+  `history.state`/`popstate`/`hashchange`.
 - Audit the full `js.rs` DOM/node binding list against `vm.rs`'s `BuiltinId`
   DOM set and close any remaining method gaps.
+
+#### Framework-readiness pass ✅ (heavy-JS / React-class apps, #65–#69)
+
+Empirically driven by two diagnostic harnesses — `tests/heavy_js_probe.rs`
+(82 language/stdlib cases) and `dom_heavy_probe_report` in `engine_host.rs`
+(29 DOM cases via the real `BrowserHost`) — to find and close the gaps that
+broke framework-style code. All probes pass; an end-to-end
+`react_like_app_full_interactive_loop` test runs a small React-style app
+(element factory, state, re-render, event delegation) through the real dispatch
+path.
+
+- **ToPrimitive object coercion** (#65): `Symbol.toPrimitive`/`valueOf`/`toString`
+  routed through `+`, arithmetic, unary `+`/`-`, relational, and template
+  literals; `'' + [1,2,3]` → `"1,2,3"` (Array.prototype.toString). Fixes the
+  pervasive `"[object Object]"` breakage.
+- **`window`/`globalThis` expando writes** (#65): assigning unknown globals
+  creates global bindings (UMD globals, feature flags).
+- **Object/array semantics** (#66): nested object-spread stack bug fixed
+  (`{a, p:{...x}}`), object-rest excludes destructured keys, `Array.sort` is
+  stable (insertion), `instanceof` honors `Symbol.hasInstance`, `lastIndexOf`.
+- **DOM node identity** (#67): node wrappers interned by handle, so
+  `el.parentNode === parent` and expandos persist. Plus `el.style.<camelCase>`
+  reads + `cssText`, `el.dataset`, real `prepend()`, `hasChildNodes()`,
+  `createElementNS`, and a `replaceChild` panic fix.
+- **Events** (#68, #69): `dispatchEvent` AND host-fired (real user) events
+  bubble target→ancestors with `currentTarget`/`target`,
+  `stopPropagation`/`stopImmediatePropagation`; `removeEventListener` works;
+  node expando properties persist. Event delegation (one root listener) now
+  works for real clicks — the model React/most frameworks use.
+
+Still missing for full React parity: `ResizeObserver`/`IntersectionObserver`,
+`XMLHttpRequest`, `customElements`/shadow DOM, `characterData` mutation records,
+and attribute reflection for some IDL props (`checked` etc.).
 
 Track this as a parity checklist; each item is engine-side work mirroring an
 existing `boa` binding (the host backend already exists).
