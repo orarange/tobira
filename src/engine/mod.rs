@@ -41,5 +41,5 @@ pub use value::{
     AsyncContext, HostDispatch, HostObjectClass, HostObjectSlot, JsObject, JsPropertyDescriptor,
     JsString, ObjectKind, PromiseReaction, PromiseState, PropertyKey, SymbolId, Value,
 };
-pub use vm::{CallFrame, Vm, VmError};
+pub use vm::{CallFrame, DomEventInit, Vm, VmError};
 // fire_dom_event is a method on Vm — accessible directly via Vm::fire_dom_event

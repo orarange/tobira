@@ -25,6 +25,29 @@ use super::value::{
 
 type ValueCell = Rc<RefCell<Value>>;
 
+/// Details for a host-dispatched DOM event (a real user interaction, as opposed
+/// to a script's `new Event()`). Lets the host pass keyboard/pointer/input
+/// fields so listeners can read `event.key`, `event.data`, modifiers, etc.
+#[derive(Debug, Clone, Default)]
+pub struct DomEventInit {
+    pub bubbles: bool,
+    pub cancelable: bool,
+    pub key: Option<String>,
+    pub code: Option<String>,
+    pub data: Option<String>,
+    pub input_type: Option<String>,
+    pub client_x: Option<i32>,
+    pub client_y: Option<i32>,
+    pub button: Option<i32>,
+    pub buttons: Option<i32>,
+    pub alt_key: bool,
+    pub ctrl_key: bool,
+    pub shift_key: bool,
+    pub meta_key: bool,
+    pub repeat: bool,
+    pub is_composing: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BuiltinId {
     Assert,
@@ -1105,32 +1128,123 @@ impl Vm {
     }
 
     pub fn fire_dom_event(&mut self, node_handle: u32, event_type: &str) -> Result<(), VmError> {
-        // Snapshot listener list to avoid borrow issues during call
+        self.fire_dom_event_with(node_handle, event_type, &DomEventInit::default())?;
+        Ok(())
+    }
+
+    /// Dispatch a host event (a real user interaction) to the node's listeners,
+    /// delivering an Event object that carries `init`'s details (key/data/
+    /// modifiers, the target, preventDefault/stopPropagation). Returns whether
+    /// `preventDefault()` was called, so the host can suppress the default
+    /// action (e.g. inserting a typed character).
+    pub fn fire_dom_event_with(
+        &mut self,
+        node_handle: u32,
+        event_type: &str,
+        init: &DomEventInit,
+    ) -> Result<bool, VmError> {
         let listeners: Vec<GcRef<JsObject>> = self
             .event_listeners
             .get(&node_handle)
             .and_then(|m| m.get(event_type))
             .cloned()
             .unwrap_or_default();
-
         if listeners.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
-
-        // Build a minimal event object: { type, target: null, bubbles: false }
-        let event_obj = self.allocate_ordinary_object(None);
-        let type_val = self.make_string_value(event_type);
-        self.define_data_property(event_obj, PropertyKey::from("type"), type_val, true, true, true);
-        self.define_data_property(event_obj, PropertyKey::from("target"), Value::Null, true, true, true);
-        self.define_data_property(event_obj, PropertyKey::from("bubbles"), Value::Bool(false), true, true, true);
-        self.define_data_property(event_obj, PropertyKey::from("cancelable"), Value::Bool(false), true, true, true);
+        let target = self.make_dom_node_value(NodeId(node_handle));
+        let event_obj = self.build_host_event(event_type, &target, init);
         let event_val = Value::Object(event_obj);
-
         for fn_ref in listeners {
-            let _ = self.call_value_sync(Value::Object(fn_ref), Value::Undefined, vec![event_val.clone()]);
+            let _ =
+                self.call_value_sync(Value::Object(fn_ref), target.clone(), vec![event_val.clone()]);
             self.drain_microtasks();
+            let stop = self
+                .get_property_value(&event_val, &PropertyKey::from("__stopImmediate"))
+                .unwrap_or(Value::Undefined);
+            if self.is_truthy(&stop) {
+                break;
+            }
         }
-        Ok(())
+        let default_prevented = self
+            .get_property_value(&event_val, &PropertyKey::from("defaultPrevented"))
+            .unwrap_or(Value::Bool(false));
+        Ok(self.is_truthy(&default_prevented))
+    }
+
+    /// Build the Event object delivered to host-event listeners.
+    fn build_host_event(
+        &mut self,
+        event_type: &str,
+        target: &Value,
+        init: &DomEventInit,
+    ) -> GcRef<JsObject> {
+        let proto = self.object_prototype_ref();
+        let event = self.allocate_ordinary_object(Some(proto));
+        let type_val = self.make_string_value(event_type);
+        let mut set = |vm: &mut Self, name: &str, value: Value| {
+            vm.define_data_property(event, PropertyKey::from(name), value, true, true, true);
+        };
+        set(self, "type", type_val);
+        set(self, "target", target.clone());
+        set(self, "currentTarget", target.clone());
+        set(self, "srcElement", target.clone());
+        set(self, "bubbles", Value::Bool(init.bubbles));
+        set(self, "cancelable", Value::Bool(init.cancelable));
+        set(self, "composed", Value::Bool(false));
+        set(self, "defaultPrevented", Value::Bool(false));
+        set(self, "cancelBubble", Value::Bool(false));
+        set(self, "eventPhase", Value::Number(2.0));
+        set(self, "timeStamp", Value::Number(0.0));
+        set(self, "isTrusted", Value::Bool(true));
+        set(self, "altKey", Value::Bool(init.alt_key));
+        set(self, "ctrlKey", Value::Bool(init.ctrl_key));
+        set(self, "shiftKey", Value::Bool(init.shift_key));
+        set(self, "metaKey", Value::Bool(init.meta_key));
+        set(self, "repeat", Value::Bool(init.repeat));
+        set(self, "isComposing", Value::Bool(init.is_composing));
+        for (name, value) in [
+            ("key", &init.key),
+            ("code", &init.code),
+            ("data", &init.data),
+            ("inputType", &init.input_type),
+        ] {
+            if let Some(text) = value {
+                let v = self.make_string_value(text);
+                self.define_data_property(event, PropertyKey::from(name), v, true, true, true);
+            }
+        }
+        for (name, value) in [
+            ("clientX", init.client_x),
+            ("clientY", init.client_y),
+            ("button", init.button),
+            ("buttons", init.buttons),
+        ] {
+            if let Some(number) = value {
+                self.define_data_property(
+                    event,
+                    PropertyKey::from(name),
+                    Value::Number(number as f64),
+                    true,
+                    true,
+                    true,
+                );
+            }
+        }
+        let prevent = self.allocate_builtin_method(BuiltinId::EventPreventDefault);
+        self.define_data_property(event, PropertyKey::from("preventDefault"), prevent, true, true, true);
+        let stop = self.allocate_builtin_method(BuiltinId::EventStopPropagation);
+        self.define_data_property(event, PropertyKey::from("stopPropagation"), stop, true, true, true);
+        let stop_immediate = self.allocate_builtin_method(BuiltinId::EventStopImmediatePropagation);
+        self.define_data_property(
+            event,
+            PropertyKey::from("stopImmediatePropagation"),
+            stop_immediate,
+            true,
+            true,
+            true,
+        );
+        event
     }
 
     /// Read a boolean flag from an Event init options object (e.g. `bubbles`).

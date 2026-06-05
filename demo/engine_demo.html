@@ -94,6 +94,13 @@
     <p id="async-status">読み込み中…</p>
   </section>
 
+  <section>
+    <h2>5b. 入力 — input イベント / input.value / キー</h2>
+    <input id="echo-input" placeholder="ここに入力してみて">
+    <p id="echo">（ここに入力内容が出る）</p>
+    <p id="key-info" class="hint">最後に押したキー: （まだ）</p>
+  </section>
+
   <section style="height: 1200px;">
     <h2>6. スクロール確認用の縦長エリア</h2>
     <p class="hint">
@@ -173,6 +180,17 @@
     document.getElementById('bottom').addEventListener('click', () => {
       bottomN += 1;
       document.getElementById('bottom-count').textContent = String(bottomN);
+    });
+
+    // --- 5b. 入力（input イベント + input.value + keydown のキー）---
+    const echoInput = document.getElementById('echo-input');
+    echoInput.addEventListener('input', () => {
+      document.getElementById('echo').innerHTML =
+        '<span class="ok-text">入力: ' + echoInput.value + '</span>';
+    });
+    echoInput.addEventListener('keydown', (e) => {
+      document.getElementById('key-info').textContent =
+        '最後に押したキー: ' + e.key + (e.shiftKey ? ' (+Shift)' : '');
     });
   </script>
 </body>

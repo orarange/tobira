@@ -479,11 +479,33 @@ fn start_engine_script_session(
                         request,
                         response_tx,
                     } => {
-                        let result =
-                            session.dispatch_event(request.target_node_id, &request.event_type);
+                        let init = tobira_engine::engine::DomEventInit {
+                            bubbles: request.bubbles,
+                            cancelable: request.cancelable,
+                            key: request.key.clone(),
+                            code: request.code.clone(),
+                            data: request.data.clone(),
+                            input_type: request.input_type.clone(),
+                            client_x: request.client_x,
+                            client_y: request.client_y,
+                            button: request.button,
+                            buttons: request.buttons,
+                            alt_key: request.alt_key,
+                            ctrl_key: request.ctrl_key,
+                            shift_key: request.shift_key,
+                            meta_key: request.meta_key,
+                            repeat: request.repeat,
+                            is_composing: request.is_composing,
+                        };
+                        let result = session.dispatch_event(
+                            request.target_node_id,
+                            &request.event_type,
+                            &init,
+                        );
+                        let default_prevented = result.default_prevented;
                         let _ = response_tx.send(DomEventDispatchResult {
                             snapshot: engine_result_to_processed(result),
-                            default_prevented: false,
+                            default_prevented,
                         });
                     }
                     JavaScriptSessionCommand::DispatchGlobalEvent {
