@@ -1559,6 +1559,40 @@ mod tests {
     }
 
     #[test]
+    fn demo_page_runs_on_the_engine() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        // The interactive verification demo must actually work on the engine
+        // (so the user's GUI check only has to confirm the render path).
+        let html = include_str!("../demo/engine_demo.html");
+        let (mut session, initial) = EngineSession::start(html, "http://localhost:8000/");
+        assert!(initial.error.is_none(), "demo error: {:?}", initial.error);
+
+        // Initial script ran (banner flipped) and async settled before snapshot.
+        assert!(
+            initial.html.contains("初期スクリプト実行 OK"),
+            "engine-status banner not updated"
+        );
+        assert!(
+            initial.html.contains("Promise.then"),
+            "async settling did not run before snapshot"
+        );
+
+        // A click on the counter increments it.
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let inc_id = find_node_id_by_attr(&tree, "id", "inc").expect("counter button id");
+        let after = session.dispatch_event(inc_id, "click");
+        assert!(
+            after.html.contains(r#"id="count" class="count">1<"#)
+                || after.html.contains(">1</span>"),
+            "counter did not increment, html: {}",
+            after.html
+        );
+    }
+
+    #[test]
     fn engine_session_unknown_node_id_is_safe() {
         let html = r#"<html><body><div id="x">ok</div></body></html>"#;
         let (mut session, _) = EngineSession::start(html, "http://localhost/");

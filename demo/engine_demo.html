@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>Tobira 自作エンジン デモ</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 720px;
+      margin: 24px auto;
+      padding: 0 16px;
+      color: #1a1a1a;
+      line-height: 1.6;
+    }
+    h1 { font-size: 24px; }
+    h2 { font-size: 17px; margin-top: 0; }
+    .banner {
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-weight: 600;
+      background: #fde2e2;
+      color: #8a1f1f;
+    }
+    .banner.ok { background: #d8f5dd; color: #14622a; }
+    section {
+      border: 1px solid #e2e2e2;
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin: 14px 0;
+    }
+    button {
+      font-size: 15px;
+      padding: 8px 14px;
+      border: 1px solid #3457d5;
+      background: #3457d5;
+      color: #fff;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button:hover { background: #2742a8; }
+    .count { font-size: 22px; font-weight: 700; margin-left: 10px; }
+    ul { margin: 8px 0 0; }
+    .box {
+      margin-top: 10px;
+      padding: 14px;
+      border-radius: 6px;
+      background: #eef1ff;
+      color: #2742a8;
+      transition: background .15s;
+    }
+    .box.lit { background: #ffd86b; color: #5a3d00; }
+    .hint { color: #666; font-size: 13px; }
+    .ok-text { color: #14622a; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Tobira 自作エンジン デモ</h1>
+
+  <p id="engine-status" class="banner">
+    ⛔ スクリプトがまだ実行されていません(エンジン未起動 / フラグOFF)
+  </p>
+  <p class="hint">
+    各ボタンを押して、表示が変われば <code>TOBIRA_ENGINE</code> 経由の
+    DOMイベントが動いています。上のバナーが緑になっていれば、初期スクリプトと
+    非同期処理(setTimeout / Promise)が走った証拠です。
+  </p>
+
+  <section>
+    <h2>1. カウンター — click → textContent</h2>
+    <button id="inc">+1 する</button>
+    <span id="count" class="count">0</span>
+  </section>
+
+  <section>
+    <h2>2. リスト追加 — click → createElement + appendChild</h2>
+    <button id="add">アイテム追加</button>
+    <ul id="list"></ul>
+  </section>
+
+  <section>
+    <h2>3. トグル — click → classList + textContent</h2>
+    <button id="toggle">点灯 / 消灯</button>
+    <div id="box" class="box">消灯中</div>
+  </section>
+
+  <section>
+    <h2>4. CustomEvent — click → dispatchEvent(new CustomEvent)</h2>
+    <button id="fire">CustomEvent を発火</button>
+    <p id="custom">（まだ受信していません）</p>
+  </section>
+
+  <section>
+    <h2>5. 非同期 — 読み込み時に setTimeout / Promise</h2>
+    <p id="async-status">読み込み中…</p>
+  </section>
+
+  <script>
+    // --- 初期スクリプトが走った印 ---
+    const status = document.getElementById('engine-status');
+    status.textContent = '✅ 初期スクリプト実行 OK（エンジン稼働中）';
+    status.className = 'banner ok';
+
+    // --- 1. カウンター ---
+    let n = 0;
+    document.getElementById('inc').addEventListener('click', () => {
+      n += 1;
+      document.getElementById('count').textContent = String(n);
+    });
+
+    // --- 2. リスト追加 ---
+    let items = 0;
+    document.getElementById('add').addEventListener('click', () => {
+      items += 1;
+      const li = document.createElement('li');
+      li.textContent = `アイテム ${items}（クリックで追加された要素）`;
+      document.getElementById('list').appendChild(li);
+    });
+
+    // --- 3. トグル ---
+    let lit = false;
+    document.getElementById('toggle').addEventListener('click', () => {
+      lit = !lit;
+      const box = document.getElementById('box');
+      if (lit) {
+        box.classList.add('lit');
+        box.textContent = '点灯中 💡';
+      } else {
+        box.classList.remove('lit');
+        box.textContent = '消灯中';
+      }
+    });
+
+    // --- 4. CustomEvent（dispatchEvent + detail）---
+    const fire = document.getElementById('fire');
+    fire.addEventListener('pinged', (e) => {
+      document.getElementById('custom').innerHTML =
+        '<span class="ok-text">✅ CustomEvent 受信: ' + e.detail.message + '</span>';
+    });
+    fire.addEventListener('click', () => {
+      fire.dispatchEvent(new CustomEvent('pinged', {
+        detail: { message: 'こんにちは from CustomEvent' }
+      }));
+    });
+
+    // --- 5. 非同期（初期描画前に settle されるはず）---
+    const asyncStatus = document.getElementById('async-status');
+    let parts = [];
+    Promise.resolve().then(() => {
+      parts.push('Promise.then');
+      asyncStatus.innerHTML = '<span class="ok-text">✅ ' + parts.join(' / ') + '</span>';
+    });
+    setTimeout(() => {
+      parts.push('setTimeout(0)');
+      asyncStatus.innerHTML = '<span class="ok-text">✅ ' + parts.join(' / ') + '</span>';
+    }, 0);
+  </script>
+</body>
+</html>
