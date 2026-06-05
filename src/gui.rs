@@ -640,7 +640,14 @@ impl BrowserApp {
             self.scroll_y = self.document.scroll_position();
         }
         self.sync_current_history_scroll();
-        if self.scroll_y != previous_scroll_y {
+        // Re-render whenever the on-screen frame no longer matches the current
+        // scroll offset. A scroll only needs a re-paint at the new offset (same
+        // DOM), not a rebuild. The engine path doesn't rebuild on scroll, so
+        // `scroll_y` can equal `previous_scroll_y` here yet still differ from
+        // what's rendered — relying on that comparison alone left the content
+        // frozen ("scrolls 24px then snaps back").
+        let rendered_scroll = self.latest_render_frame.as_ref().map(|frame| frame.scroll_y);
+        if self.scroll_y != previous_scroll_y || rendered_scroll != Some(self.scroll_y) {
             self.latest_render_frame = None;
             self.request_content_render();
         }

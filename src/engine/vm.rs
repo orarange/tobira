@@ -1094,6 +1094,16 @@ impl Vm {
     /// Fire a DOM event on a node handle, invoking all registered JS listeners.
     /// `node_handle` is the raw u32 from HostObjectSlot.handle (0 = document/window).
     /// `event_type` is e.g. "DOMContentLoaded", "click", "load".
+    /// Whether any listener is registered for `event_type` on the node with the
+    /// given handle (handle 0 = window/document). Lets callers skip dispatching
+    /// no-op events (e.g. `scroll` when nothing listens for it).
+    pub fn has_event_listener(&self, node_handle: u32, event_type: &str) -> bool {
+        self.event_listeners
+            .get(&node_handle)
+            .map(|by_type| by_type.contains_key(event_type))
+            .unwrap_or(false)
+    }
+
     pub fn fire_dom_event(&mut self, node_handle: u32, event_type: &str) -> Result<(), VmError> {
         // Snapshot listener list to avoid borrow issues during call
         let listeners: Vec<GcRef<JsObject>> = self

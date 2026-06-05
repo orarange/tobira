@@ -92,6 +92,11 @@ const VOID_ELEMENTS: &[&str] = &[
     "track", "wbr",
 ];
 
+/// Raw-text elements whose text content must be serialized verbatim (HTML
+/// entities are NOT escaped inside them); escaping would corrupt JS (`=>`
+/// becoming `=&gt;`) and CSS (`a > b` becoming `a &gt; b`).
+const RAW_TEXT_ELEMENTS: &[&str] = &["script", "style"];
+
 /// A `Host` implementation backed by an arena DOM built from parsed HTML.
 pub struct BrowserHost {
     nodes: Vec<DomNode>,
@@ -102,6 +107,10 @@ pub struct BrowserHost {
     console: Vec<String>,
     location: LocationSnapshot,
     navigation: Option<String>,
+    scroll_x: f64,
+    scroll_y: f64,
+    inner_width: f64,
+    inner_height: f64,
 }
 
 impl BrowserHost {
@@ -117,6 +126,10 @@ impl BrowserHost {
             console: Vec::new(),
             location: location_from_url(url),
             navigation: None,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            inner_width: 1280.0,
+            inner_height: 720.0,
         };
         host.document = host.push(DomNode::document());
         // The parsed root is an "document" element; graft its children under our
@@ -239,7 +252,12 @@ impl BrowserHost {
                 if VOID_ELEMENTS.contains(&tag.as_str()) {
                     return out;
                 }
-                out.push_str(&self.inner_html(idx));
+                if RAW_TEXT_ELEMENTS.contains(&tag.as_str()) {
+                    // <script>/<style> content is raw text — emit verbatim.
+                    out.push_str(&self.collect_text(idx));
+                } else {
+                    out.push_str(&self.inner_html(idx));
+                }
                 out.push_str(&format!("</{tag}>"));
                 out
             }
@@ -247,9 +265,67 @@ impl BrowserHost {
         }
     }
 
+    /// Current vertical scroll offset (`window.scrollY`).
+    pub fn scroll_y(&self) -> u32 {
+        self.scroll_y.max(0.0) as u32
+    }
+
+    /// Update the window scroll offset (driven by the browser's scroll input).
+    pub fn set_scroll(&mut self, x: f64, y: f64) {
+        self.scroll_x = x.max(0.0);
+        self.scroll_y = y.max(0.0);
+    }
+
+    /// Update the viewport size (`window.innerWidth` / `innerHeight`).
+    pub fn set_viewport(&mut self, width: f64, height: f64) {
+        self.inner_width = width.max(0.0);
+        self.inner_height = height.max(0.0);
+    }
+
     /// Serialize the whole document back to HTML (for the page snapshot).
     pub fn serialize_document(&self) -> String {
         self.serialize_node(self.document)
+    }
+
+    /// Map a browser `data-tobira-node-id` to this arena's node index.
+    ///
+    /// `browser.rs::annotate_node_ids` numbers the parsed document with a
+    /// 1-based pre-order walk over `Node::Element`s, where the parsed root (the
+    /// synthetic `document` element) is id 1 and its element descendants follow.
+    /// Our arena's `Document` node plays the role of that root, so we count the
+    /// `Document` node and every `Element` in the same pre-order. This is the
+    /// bridge that lets the browser dispatch an event by `target_node_id` and
+    /// have it land on the right engine node.
+    pub fn handle_for_node_id(&self, target_id: usize) -> Option<usize> {
+        if target_id == 0 {
+            return None;
+        }
+        let mut counter = 0usize;
+        self.find_by_tobira_id(self.document, target_id, &mut counter)
+    }
+
+    fn find_by_tobira_id(
+        &self,
+        idx: usize,
+        target: usize,
+        counter: &mut usize,
+    ) -> Option<usize> {
+        if matches!(
+            self.nodes[idx].kind,
+            DomNodeKind::Document | DomNodeKind::Element(_)
+        ) {
+            *counter += 1;
+            if *counter == target {
+                return Some(idx);
+            }
+        }
+        for i in 0..self.nodes[idx].children.len() {
+            let child = self.nodes[idx].children[i];
+            if let Some(found) = self.find_by_tobira_id(child, target, counter) {
+                return Some(found);
+            }
+        }
+        None
     }
 
     /// Drain captured console output.
@@ -579,10 +655,10 @@ impl Host for BrowserHost {
 
     fn window_metrics(&self, _window: WindowId) -> HostResult<WindowMetrics> {
         Ok(WindowMetrics {
-            inner_width: 1280.0,
-            inner_height: 720.0,
-            scroll_x: 0.0,
-            scroll_y: 0.0,
+            inner_width: self.inner_width,
+            inner_height: self.inner_height,
+            scroll_x: self.scroll_x,
+            scroll_y: self.scroll_y,
             device_pixel_ratio: 1.0,
         })
     }
@@ -1061,6 +1137,7 @@ pub struct EngineRunResult {
     pub title: Option<String>,
     pub navigation_target: Option<String>,
     pub error: Option<String>,
+    pub scroll_y: u32,
 }
 
 /// Parse `html`, run its inline `<script>`s on the self-built engine against a
@@ -1069,50 +1146,128 @@ pub struct EngineRunResult {
 /// This is the engine-backed counterpart of the boa path in `js.rs`, used behind
 /// the `TOBIRA_ENGINE` flag while parity is built up.
 pub fn run_document_scripts(html: &str, url: &str) -> EngineRunResult {
-    let host = BrowserHost::from_html(html, url);
-    let scripts = host.inline_scripts();
-    let mut vm = Vm::with_host(Heap::new(), Box::new(host));
+    EngineSession::start(html, url).1
+}
 
-    let mut error = None;
-    for script in &scripts {
-        match Parser::new(script).parse() {
-            Ok(program) => match Compiler::new(&program).compile() {
-                Ok(chunk) => {
-                    if let Err(e) = vm.execute(&chunk) {
-                        error = Some(format!("{e:?}"));
+/// A persistent engine-backed runtime over a `BrowserHost`. It keeps the `Vm`
+/// alive after the initial document scripts run, so the browser can dispatch
+/// DOM events (clicks, input, …) and request fresh snapshots over time. This is
+/// what backs the engine path's interactive `JavaScriptSession`.
+pub struct EngineSession {
+    vm: Vm,
+}
+
+impl EngineSession {
+    /// Build the runtime, run the document's inline scripts, settle async
+    /// deferred work, and return the runtime plus the initial snapshot.
+    pub fn start(html: &str, url: &str) -> (Self, EngineRunResult) {
+        let host = BrowserHost::from_html(html, url);
+        let scripts = host.inline_scripts();
+        let mut vm = Vm::with_host(Heap::new(), Box::new(host));
+
+        let mut error = None;
+        for script in &scripts {
+            match Parser::new(script).parse() {
+                Ok(program) => match Compiler::new(&program).compile() {
+                    Ok(chunk) => {
+                        if let Err(e) = vm.execute(&chunk) {
+                            error = Some(format!("{e:?}"));
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error = Some(format!("compile: {e:?}"));
                         break;
                     }
-                }
+                },
                 Err(e) => {
-                    error = Some(format!("compile: {e:?}"));
+                    error = Some(format!("parse: {e:?}"));
                     break;
                 }
-            },
-            Err(e) => {
-                error = Some(format!("parse: {e:?}"));
-                break;
             }
+        }
+
+        // Settle deferred work (Promise microtasks + zero-delay timers) so async
+        // initial rendering reflects in the snapshot.
+        vm.run_due_jobs(10_000);
+
+        let mut session = Self { vm };
+        let snapshot = session.snapshot_with_error(error);
+        (session, snapshot)
+    }
+
+    fn host(&mut self) -> &mut BrowserHost {
+        self.vm
+            .host_mut()
+            .as_any_mut()
+            .downcast_mut::<BrowserHost>()
+            .expect("host is a BrowserHost")
+    }
+
+    fn snapshot_with_error(&mut self, error: Option<String>) -> EngineRunResult {
+        let host = self.host();
+        EngineRunResult {
+            html: host.serialize_document(),
+            console_logs: host.take_console(),
+            title: host.title(),
+            navigation_target: host.navigation_target(),
+            error,
+            scroll_y: host.scroll_y(),
         }
     }
 
-    // Settle deferred work — Promise microtasks and zero-delay timers
-    // (`setTimeout(fn, 0)`) — so async initial rendering reflects in the
-    // snapshot. Virtual time is not advanced, so genuinely delayed timers stay
-    // pending; the bound guards against zero-delay timers that reschedule
-    // themselves.
-    vm.run_due_jobs(10_000);
+    /// Record the window scroll offset (from the browser's scroll handling) so
+    /// `window.scrollY` reflects it and snapshots preserve the position instead
+    /// of resetting it to 0.
+    pub fn set_scroll_position(&mut self, y: u32) {
+        self.host().set_scroll(0.0, y as f64);
+    }
 
-    let host = vm
-        .host_mut()
-        .as_any_mut()
-        .downcast_mut::<BrowserHost>()
-        .expect("host is a BrowserHost");
-    EngineRunResult {
-        html: host.serialize_document(),
-        console_logs: host.take_console(),
-        title: host.title(),
-        navigation_target: host.navigation_target(),
-        error,
+    /// Record the viewport size (`window.innerWidth` / `innerHeight`).
+    pub fn set_viewport_size(&mut self, width: u32, height: u32) {
+        self.host().set_viewport(width as f64, height as f64);
+    }
+
+    /// Current DOM snapshot. Console output captured since the last snapshot is
+    /// drained into the result.
+    pub fn snapshot(&mut self) -> EngineRunResult {
+        self.snapshot_with_error(None)
+    }
+
+    /// Dispatch a DOM event to the node identified by the browser's
+    /// `data-tobira-node-id` (`target_node_id`), settle deferred work, and
+    /// return a fresh snapshot. Unknown node ids are a no-op (still snapshots).
+    pub fn dispatch_event(&mut self, node_id: usize, event_type: &str) -> EngineRunResult {
+        let handle = self.host().handle_for_node_id(node_id).map(|h| h as u32);
+        if let Some(handle) = handle {
+            let _ = self.vm.fire_dom_event(handle, event_type);
+            self.vm.run_due_jobs(10_000);
+        }
+        self.snapshot()
+    }
+
+    /// Dispatch a global (window/document) event — engine node handle 0.
+    /// Returns `None` when nothing listens for `event_type`, so the caller can
+    /// skip applying a (no-op) snapshot — important for high-frequency events
+    /// like `scroll`, which would otherwise force a relayout on every tick.
+    pub fn dispatch_global_event(&mut self, event_type: &str) -> Option<EngineRunResult> {
+        if !self.vm.has_event_listener(0, event_type) {
+            return None;
+        }
+        let _ = self.vm.fire_dom_event(0, event_type);
+        self.vm.run_due_jobs(10_000);
+        Some(self.snapshot())
+    }
+
+    /// Set an attribute on the node identified by the browser's node id.
+    pub fn set_attribute(&mut self, node_id: usize, name: &str, value: &str) {
+        if let Some(handle) = self.host().handle_for_node_id(node_id) {
+            let _ = self.host().mutate_dom(DomMutation::SetAttribute {
+                node: NodeId(handle as u32),
+                name: name.to_string(),
+                value: value.to_string(),
+            });
+        }
     }
 }
 
@@ -1281,6 +1436,273 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.console_logs, vec!["detail=42".to_string()]);
+    }
+
+    /// Assert that `BrowserHost::handle_for_node_id` reproduces the browser's
+    /// real `annotate_node_ids` numbering over the actual snapshot pipeline
+    /// (serialize -> parse -> annotate). Every annotated element's
+    /// `data-tobira-node-id` must map back to an arena node with the same tag
+    /// (and id attribute, when present).
+    fn assert_node_id_alignment(html: &str, min_checks: usize) {
+        use crate::browser::annotate_node_ids;
+        use crate::html::{Node, parse_document};
+
+        let host = BrowserHost::from_html(html, "http://localhost/");
+        let serialized = host.serialize_document();
+        let mut tree = parse_document(&serialized);
+        annotate_node_ids(&mut tree);
+
+        fn check(node: &Node, host: &BrowserHost, checked: &mut usize) {
+            if let Node::Element(el) = node {
+                if let Some(id_str) = el.attributes.get("data-tobira-node-id") {
+                    let id: usize = id_str.parse().expect("numeric tobira id");
+                    let handle = host
+                        .handle_for_node_id(id)
+                        .unwrap_or_else(|| panic!("no handle for tobira id {id}"));
+                    let arena = &host.nodes[handle];
+                    if el.tag_name == "document" {
+                        assert!(
+                            matches!(arena.kind, DomNodeKind::Document),
+                            "tobira id {id} should map to the Document node"
+                        );
+                    } else {
+                        assert_eq!(
+                            arena.tag_name(),
+                            Some(el.tag_name.to_lowercase().as_str()),
+                            "tobira id {id}: tag mismatch"
+                        );
+                        if let Some(want) = el.attributes.get("id") {
+                            assert_eq!(
+                                arena.attrs.get("id"),
+                                Some(want),
+                                "tobira id {id}: id-attribute mismatch"
+                            );
+                        }
+                    }
+                    *checked += 1;
+                }
+                for child in &el.children {
+                    check(child, host, checked);
+                }
+            }
+        }
+        let mut checked = 0;
+        check(&tree, &host, &mut checked);
+        assert!(
+            checked >= min_checks,
+            "expected at least {min_checks} elements checked, got {checked}"
+        );
+    }
+
+    #[test]
+    fn node_id_mapping_full_document() {
+        assert_node_id_alignment(
+            r#"<html><head><title>T</title></head><body>
+                <div id="a"><p id="b">x</p><span id="c">y</span></div>
+                <button id="d">go</button>
+            </body></html>"#,
+            6,
+        );
+    }
+
+    #[test]
+    fn node_id_mapping_with_synthesized_skeleton() {
+        // No explicit <html>/<head>/<body>; BrowserHost synthesizes them and
+        // the alignment must still hold.
+        assert_node_id_alignment(
+            r#"<div id="root"><span id="inner">hi</span><a id="link">go</a></div>"#,
+            4,
+        );
+    }
+
+    #[test]
+    fn node_id_mapping_deeply_nested() {
+        assert_node_id_alignment(
+            r#"<html><body><ul id="list">
+                <li id="one"><a id="la">1</a></li>
+                <li id="two"><a id="lb">2</a></li>
+                <li id="three"><a id="lc">3</a></li>
+            </ul></body></html>"#,
+            8,
+        );
+    }
+
+    /// Find the `data-tobira-node-id` of the first element with `attr == value`
+    /// in an annotated tree (reproduces how the browser identifies a clicked
+    /// node).
+    fn find_node_id_by_attr(node: &crate::html::Node, attr: &str, value: &str) -> Option<usize> {
+        if let crate::html::Node::Element(el) = node {
+            if el.attributes.get(attr).map(String::as_str) == Some(value) {
+                return el
+                    .attributes
+                    .get("data-tobira-node-id")
+                    .and_then(|id| id.parse().ok());
+            }
+            for child in &el.children {
+                if let Some(found) = find_node_id_by_attr(child, attr, value) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn engine_session_dispatches_click_by_node_id() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body>
+            <button id="btn">go</button>
+            <div id="out">idle</div>
+            <script>
+                document.getElementById('btn').addEventListener('click', () => {
+                    document.getElementById('out').textContent = 'clicked';
+                });
+            </script>
+        </body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "error: {:?}", initial.error);
+        assert!(initial.html.contains(">idle</div>"));
+
+        // Identify the button the way the browser does (annotate the snapshot).
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let btn_id = find_node_id_by_attr(&tree, "id", "btn").expect("button node id");
+
+        // A click dispatched by that node id must reach the listener.
+        let result = session.dispatch_event(btn_id, "click");
+        assert!(
+            result.html.contains(">clicked</div>"),
+            "expected click to mutate the DOM, html: {}",
+            result.html
+        );
+    }
+
+    #[test]
+    fn engine_session_snapshot_reflects_later_event() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body>
+            <button id="btn">go</button>
+            <ul id="log"></ul>
+            <script>
+                document.getElementById('btn').addEventListener('click', () => {
+                    const li = document.createElement('li');
+                    li.textContent = 'hit';
+                    document.getElementById('log').appendChild(li);
+                });
+            </script>
+        </body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let btn_id = find_node_id_by_attr(&tree, "id", "btn").expect("button node id");
+
+        // Two clicks should append two <li>; a plain snapshot reflects state.
+        session.dispatch_event(btn_id, "click");
+        let result = session.dispatch_event(btn_id, "click");
+        assert_eq!(
+            result.html.matches("<li>hit</li>").count(),
+            2,
+            "html: {}",
+            result.html
+        );
+        let snap = session.snapshot();
+        assert_eq!(snap.html.matches("<li>hit</li>").count(), 2);
+    }
+
+    #[test]
+    fn demo_page_runs_on_the_engine() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        // The interactive verification demo must actually work on the engine
+        // (so the user's GUI check only has to confirm the render path).
+        let html = include_str!("../demo/engine_demo.html");
+        let (mut session, initial) = EngineSession::start(html, "http://localhost:8000/");
+        assert!(initial.error.is_none(), "demo error: {:?}", initial.error);
+
+        // Initial script ran (banner flipped) and async settled before snapshot.
+        assert!(
+            initial.html.contains("初期スクリプト実行 OK"),
+            "engine-status banner not updated"
+        );
+        assert!(
+            initial.html.contains("Promise.then"),
+            "async settling did not run before snapshot"
+        );
+
+        // A click on the counter increments it.
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let inc_id = find_node_id_by_attr(&tree, "id", "inc").expect("counter button id");
+        let after = session.dispatch_event(inc_id, "click");
+        assert!(
+            after.html.contains(r#"id="count" class="count">1<"#)
+                || after.html.contains(">1</span>"),
+            "counter did not increment, html: {}",
+            after.html
+        );
+    }
+
+    #[test]
+    fn engine_session_preserves_scroll_position() {
+        // Regression: the engine snapshot must report the tracked scroll offset,
+        // not 0, or the browser resets scroll to the top on every event.
+        let html = r#"<html><body><div>tall page</div></body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert_eq!(initial.scroll_y, 0);
+        session.set_scroll_position(500);
+        assert_eq!(session.snapshot().scroll_y, 500);
+        // No `resize` listener → the global dispatch is a no-op (None), so the
+        // browser won't apply a snapshot or relayout for it.
+        assert!(session.dispatch_global_event("resize").is_none());
+        // Scroll is still preserved.
+        assert_eq!(session.snapshot().scroll_y, 500);
+    }
+
+    #[test]
+    fn engine_session_skips_global_event_without_listener() {
+        // Regression for the scroll/white-screen bug: a global event with no
+        // listener returns None so the browser skips the relayout that was
+        // breaking scrolling and clicks.
+        let html = r#"<html><body><p>no listeners here</p></body></html>"#;
+        let (mut session, _) = EngineSession::start(html, "http://localhost/");
+        assert!(session.dispatch_global_event("scroll").is_none());
+        assert!(session.dispatch_global_event("resize").is_none());
+    }
+
+    #[test]
+    fn engine_session_exposes_scroll_to_window_scrolly() {
+        let html = r#"<html><body><p id="out">start</p>
+            <script>
+                window.addEventListener('scroll', () => {
+                    document.getElementById('out').textContent = 'y=' + window.scrollY;
+                });
+            </script></body></html>"#;
+        let (mut session, _) = EngineSession::start(html, "http://localhost/");
+        session.set_scroll_position(250);
+        // There IS a scroll listener, so the dispatch fires and snapshots.
+        let result = session
+            .dispatch_global_event("scroll")
+            .expect("scroll listener should fire");
+        assert_eq!(result.scroll_y, 250);
+        assert!(
+            result.html.contains(">y=250</p>"),
+            "window.scrollY not reflected, html: {}",
+            result.html
+        );
+    }
+
+    #[test]
+    fn engine_session_unknown_node_id_is_safe() {
+        let html = r#"<html><body><div id="x">ok</div></body></html>"#;
+        let (mut session, _) = EngineSession::start(html, "http://localhost/");
+        let result = session.dispatch_event(99999, "click");
+        assert!(result.error.is_none());
+        assert!(result.html.contains(">ok</div>"));
     }
 
     #[test]
