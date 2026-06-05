@@ -955,6 +955,44 @@ fn layout_node(
     }
 }
 
+/// Honor an explicit CSS `height` (pixel value) as a *minimum* box height.
+///
+/// Block layout otherwise sizes a box purely from its content, so
+/// `<section style="height: 1200px">` with little content collapses to a few
+/// lines. If the element specifies a pixel height taller than the laid-out
+/// content, expand the box so that height is reserved in the normal flow and
+/// advance `cursor_y` to the bottom of the expanded box (so following siblings
+/// and the page's scroll height account for it).
+///
+/// Smaller explicit heights are ignored rather than clipping content — content
+/// is never hidden by this path (real `overflow: hidden` clipping is handled
+/// separately). Percent / min-/max-/fit-content heights are left to the
+/// content-based height because resolving them needs the containing block's
+/// height, which is not threaded through here.
+fn explicit_box_height(
+    style: &ComputedStyle,
+    background_top: u32,
+    content_height: u32,
+    cursor_y: &mut u32,
+) -> u32 {
+    let Some(LengthValue::Pixels(px)) = style.height else {
+        return content_height;
+    };
+    // `height` is the content-box height; this engine's box height also spans the
+    // vertical padding (borders are drawn overlapping it), so add the padding to
+    // arrive at the box height the surrounding code accounts for.
+    let desired = px
+        .saturating_add(style.padding.top)
+        .saturating_add(style.padding.bottom)
+        .max(1);
+    if desired > content_height {
+        *cursor_y = background_top.saturating_add(desired);
+        desired
+    } else {
+        content_height
+    }
+}
+
 fn layout_block_element(
     element: &StyledElement,
     x: u32,
@@ -1214,7 +1252,10 @@ fn layout_block_element(
     }
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
-    let background_height = cursor_y.saturating_sub(background_top).max(1);
+    let content_height = cursor_y.saturating_sub(background_top).max(1);
+    // Honor an explicit CSS pixel `height` (expands a short box; advances cursor_y).
+    let background_height =
+        explicit_box_height(&element.style, background_top, content_height, cursor_y);
 
     // Emit element hitbox for interactive state (hover/focus) detection
     if let Some(node_id) = element_node_id(element) {
@@ -1672,7 +1713,10 @@ fn layout_block_element_as_layer(
     }
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
-    let final_height = cursor_y.saturating_sub(background_top).max(1);
+    let content_height = cursor_y.saturating_sub(background_top).max(1);
+    // Honor an explicit CSS pixel `height` (expands a short box; advances cursor_y).
+    let final_height =
+        explicit_box_height(&element.style, background_top, content_height, cursor_y);
 
     if let Some(shadow_idx) = shadow_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(shadow_idx) {
@@ -4419,6 +4463,46 @@ mod tests {
         assert!(texts.iter().any(|text| text.text.contains("Hello")));
         assert!(texts.iter().all(|text| !text.text.contains("Nope")));
         assert!(texts.iter().any(|text| text.color == 0xFF0000));
+    }
+
+    #[test]
+    fn honors_explicit_pixel_height() {
+        // A block with an explicit pixel height taller than its content should
+        // reserve that height (so the page scrolls), not collapse to content.
+        let document = parse_document("<div style=\"height: 600px;\">x</div>");
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
+        assert!(
+            layout.content_height >= 600,
+            "explicit height should expand the box (content_height = {})",
+            layout.content_height
+        );
+    }
+
+    #[test]
+    fn short_block_without_explicit_height_stays_short() {
+        // Control: identical content with no explicit height stays content-sized,
+        // so the height honoring above is what produced the tall box.
+        let document = parse_document("<div>x</div>");
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
+        assert!(
+            layout.content_height < 200,
+            "a one-line block should stay short (content_height = {})",
+            layout.content_height
+        );
     }
 
     #[test]
