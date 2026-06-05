@@ -1246,13 +1246,19 @@ impl EngineSession {
         }
     }
 
-    /// Advance time to `now_ms`, run due timers + a `requestAnimationFrame`
-    /// pass, and return a fresh snapshot (with `has_pending_work` indicating
-    /// whether the host should keep pumping). Drives `setInterval`,
-    /// `setTimeout(fn, delay)`, and animation loops over time.
-    pub fn tick(&mut self, now_ms: u64) -> EngineRunResult {
-        self.vm.pump_event_loop(now_ms, 10_000);
-        self.snapshot()
+    /// Advance time to `now_ms` and run any due timers + a single
+    /// `requestAnimationFrame` pass. Returns whether anything actually ran, so
+    /// the caller can skip serializing a fresh snapshot when the frame was a
+    /// no-op (a page with a pending interval but nothing due this frame). Drives
+    /// `setInterval`, `setTimeout(fn, delay)`, and animation loops over time.
+    pub fn pump(&mut self, now_ms: u64) -> bool {
+        self.vm.pump_event_loop(now_ms, 10_000)
+    }
+
+    /// Whether the engine still has pending event-loop work (timers / RAF /
+    /// queued tasks). Lets the host decide whether to keep pumping.
+    pub fn has_pending_work(&self) -> bool {
+        self.vm.has_pending_event_loop_work()
     }
 
     /// Earliest pending timer due time (ms), if any — lets the host schedule a

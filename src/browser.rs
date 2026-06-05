@@ -110,7 +110,7 @@ impl BrowserPage {
     /// page changed (so the caller can request a render). `engine_pending()` is
     /// updated as a side effect so the caller knows whether to keep ticking.
     pub fn tick(&mut self, now_ms: u64) -> bool {
-        let Some((snapshot, _has_more)) = self
+        let Some((maybe_snapshot, has_more)) = self
             .javascript_session
             .as_ref()
             .and_then(|session| session.tick(now_ms))
@@ -119,9 +119,16 @@ impl BrowserPage {
             self.engine_pending = false;
             return false;
         };
+        // The frame was a no-op (pending timer not yet due): no snapshot to
+        // apply, just refresh whether more work remains.
+        let Some(snapshot) = maybe_snapshot else {
+            self.engine_pending = has_more;
+            return false;
+        };
         let changed = snapshot.html != self.html_source
             || snapshot.navigation_target.is_some()
             || snapshot.soft_navigation_target.is_some();
+        // `apply_script_snapshot` updates `engine_pending` from the snapshot.
         self.apply_script_snapshot(snapshot);
         changed
     }

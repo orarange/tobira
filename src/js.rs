@@ -109,11 +109,13 @@ enum JavaScriptSessionCommand {
     Snapshot {
         response_tx: Sender<ProcessedScriptHtml>,
     },
-    /// Advance time and run due timers / RAF; reply with a fresh snapshot plus
-    /// whether more event-loop work remains (so the caller keeps pumping).
+    /// Advance time and run due timers / RAF. Reply with `Some(snapshot)` only
+    /// when something actually ran this frame (so an idle-but-pending page does
+    /// not pay a full DOM serialize every tick), plus whether more event-loop
+    /// work remains (so the caller keeps pumping).
     Tick {
         now_ms: u64,
-        response_tx: Sender<(ProcessedScriptHtml, bool)>,
+        response_tx: Sender<(Option<ProcessedScriptHtml>, bool)>,
     },
     Shutdown,
 }
@@ -151,9 +153,11 @@ impl JavaScriptSession {
         response_rx.recv().ok()
     }
 
-    /// Advance time and run due timers / RAF. Returns the fresh snapshot and
-    /// whether more event-loop work remains. `None` if the worker is gone.
-    pub(crate) fn tick(&self, now_ms: u64) -> Option<(ProcessedScriptHtml, bool)> {
+    /// Advance time and run due timers / RAF. The inner `Option` is `Some` only
+    /// when the frame did work (so callers skip re-applying an unchanged
+    /// snapshot); the `bool` reports whether more event-loop work remains. The
+    /// outer `Option` is `None` if the worker is gone.
+    pub(crate) fn tick(&self, now_ms: u64) -> Option<(Option<ProcessedScriptHtml>, bool)> {
         let (response_tx, response_rx) = mpsc::channel();
         if self
             .command_tx
@@ -564,10 +568,14 @@ fn start_engine_script_session(
                         let _ = response_tx.send(engine_result_to_processed(session.snapshot()));
                     }
                     JavaScriptSessionCommand::Tick { now_ms, response_tx } => {
-                        let result = session.tick(now_ms);
-                        let has_more = result.has_pending_work;
-                        let _ =
-                            response_tx.send((engine_result_to_processed(result), has_more));
+                        // Only serialize a snapshot when the frame did work; a
+                        // page with a pending interval but nothing due this frame
+                        // shouldn't pay a full DOM serialize every ~16ms.
+                        let did_work = session.pump(now_ms);
+                        let has_more = session.has_pending_work();
+                        let snapshot = did_work
+                            .then(|| engine_result_to_processed(session.snapshot()));
+                        let _ = response_tx.send((snapshot, has_more));
                     }
                     JavaScriptSessionCommand::SetScrollPosition { y } => {
                         session.set_scroll_position(y);
@@ -667,9 +675,9 @@ pub fn start_document_script_session(
                             response_tx,
                         } => {
                             // The boa runtime drives timers synchronously inside
-                            // each script run, so a tick is a no-op: just report
-                            // the current snapshot and "no more work".
-                            let _ = response_tx.send((runtime.snapshot(), false));
+                            // each script run, so a tick is always a no-op: no
+                            // snapshot to apply and no further pending work.
+                            let _ = response_tx.send((None, false));
                         }
                         JavaScriptSessionCommand::Shutdown => break,
                     }
