@@ -456,6 +456,7 @@ impl BrowserApp {
         let render_id = self.next_render_id;
         self.next_render_id = self.next_render_id.saturating_add(1);
         self.pending_render_id = Some(render_id);
+        eprintln!("[dbg] request_content_render id={render_id}");
         let request = RenderRequest {
             id: render_id,
             content_width,
@@ -473,6 +474,11 @@ impl BrowserApp {
         render_id: u64,
         result: std::result::Result<RenderedContentFrame, String>,
     ) {
+        eprintln!(
+            "[dbg] finish_render id={render_id} pending={:?} -> {}",
+            self.pending_render_id,
+            if self.pending_render_id == Some(render_id) { "APPLY" } else { "ignore" }
+        );
         if self.pending_render_id != Some(render_id) {
             return;
         }
@@ -1362,10 +1368,13 @@ impl BrowserApp {
             .map(|editor| editor.insert_text(text))
             .unwrap_or(false)
         {
+            eprintln!("[dbg] handle_text_input '{text}' -> page input, syncing + input event");
             self.sync_page_input_value();
             self.dispatch_focused_page_input_event("input", true, false);
             self.sync_input_method();
             self.request_redraw();
+        } else {
+            eprintln!("[dbg] handle_text_input '{text}' -> NOT routed to a page input");
         }
     }
 
@@ -1518,7 +1527,18 @@ impl BrowserApp {
         &mut self,
         request: DomEventRequest,
     ) -> Option<DomEventDispatchResult> {
-        let result = self.document.dispatch_dom_event(request)?;
+        let dbg_event = request.event_type.clone();
+        let result = match self.document.dispatch_dom_event(request) {
+            Some(result) => result,
+            None => {
+                eprintln!("[dbg] dispatch '{dbg_event}' -> None (early return, NO render)");
+                return None;
+            }
+        };
+        eprintln!(
+            "[dbg] dispatch '{dbg_event}' -> applied (html {} bytes), requesting render",
+            result.snapshot.html.len()
+        );
 
         if let Some(target_url) = result.snapshot.navigation_target.clone()
             && let Ok(url) = Url::parse(&target_url)

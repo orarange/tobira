@@ -502,6 +502,12 @@ fn start_engine_script_session(
                             &request.event_type,
                             &init,
                         );
+                        eprintln!(
+                            "[dbg-engine] DispatchEvent type={} node={} -> html {} bytes",
+                            request.event_type,
+                            request.target_node_id,
+                            result.html.len()
+                        );
                         let default_prevented = result.default_prevented;
                         let _ = response_tx.send(DomEventDispatchResult {
                             snapshot: engine_result_to_processed(result),
