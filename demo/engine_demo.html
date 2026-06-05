@@ -94,6 +94,20 @@
     <p id="async-status">読み込み中…</p>
   </section>
 
+  <section style="height: 1200px;">
+    <h2>6. スクロール確認用の縦長エリア</h2>
+    <p class="hint">
+      ここを通り過ぎて一番下までスクロールしても、上のボタンや下のボタンが
+      引き続き押せれば OK(スクロールとクリックが両立している)。
+    </p>
+  </section>
+
+  <section>
+    <h2>7. 最下部のボタン — スクロール後のクリック確認</h2>
+    <button id="bottom">下までスクロールして押す</button>
+    <span id="bottom-count" class="count">0</span>
+  </section>
+
   <script>
     // --- 初期スクリプトが走った印 ---
     const status = document.getElementById('engine-status');
@@ -153,6 +167,13 @@
       parts.push('setTimeout(0)');
       asyncStatus.innerHTML = '<span class="ok-text">✅ ' + parts.join(' / ') + '</span>';
     }, 0);
+
+    // --- 7. 最下部ボタン（スクロール後のクリック確認）---
+    let bottomN = 0;
+    document.getElementById('bottom').addEventListener('click', () => {
+      bottomN += 1;
+      document.getElementById('bottom-count').textContent = String(bottomN);
+    });
   </script>
 </body>
 </html>

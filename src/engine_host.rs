@@ -92,6 +92,11 @@ const VOID_ELEMENTS: &[&str] = &[
     "track", "wbr",
 ];
 
+/// Raw-text elements whose text content must be serialized verbatim (HTML
+/// entities are NOT escaped inside them); escaping would corrupt JS (`=>`
+/// becoming `=&gt;`) and CSS (`a > b` becoming `a &gt; b`).
+const RAW_TEXT_ELEMENTS: &[&str] = &["script", "style"];
+
 /// A `Host` implementation backed by an arena DOM built from parsed HTML.
 pub struct BrowserHost {
     nodes: Vec<DomNode>,
@@ -247,7 +252,12 @@ impl BrowserHost {
                 if VOID_ELEMENTS.contains(&tag.as_str()) {
                     return out;
                 }
-                out.push_str(&self.inner_html(idx));
+                if RAW_TEXT_ELEMENTS.contains(&tag.as_str()) {
+                    // <script>/<style> content is raw text — emit verbatim.
+                    out.push_str(&self.collect_text(idx));
+                } else {
+                    out.push_str(&self.inner_html(idx));
+                }
                 out.push_str(&format!("</{tag}>"));
                 out
             }
@@ -1237,10 +1247,16 @@ impl EngineSession {
     }
 
     /// Dispatch a global (window/document) event — engine node handle 0.
-    pub fn dispatch_global_event(&mut self, event_type: &str) -> EngineRunResult {
+    /// Returns `None` when nothing listens for `event_type`, so the caller can
+    /// skip applying a (no-op) snapshot — important for high-frequency events
+    /// like `scroll`, which would otherwise force a relayout on every tick.
+    pub fn dispatch_global_event(&mut self, event_type: &str) -> Option<EngineRunResult> {
+        if !self.vm.has_event_listener(0, event_type) {
+            return None;
+        }
         let _ = self.vm.fire_dom_event(0, event_type);
         self.vm.run_due_jobs(10_000);
-        self.snapshot()
+        Some(self.snapshot())
     }
 
     /// Set an attribute on the node identified by the browser's node id.
@@ -1640,8 +1656,22 @@ mod tests {
         assert_eq!(initial.scroll_y, 0);
         session.set_scroll_position(500);
         assert_eq!(session.snapshot().scroll_y, 500);
-        // A dispatched event also preserves it.
-        assert_eq!(session.dispatch_global_event("resize").scroll_y, 500);
+        // No `resize` listener → the global dispatch is a no-op (None), so the
+        // browser won't apply a snapshot or relayout for it.
+        assert!(session.dispatch_global_event("resize").is_none());
+        // Scroll is still preserved.
+        assert_eq!(session.snapshot().scroll_y, 500);
+    }
+
+    #[test]
+    fn engine_session_skips_global_event_without_listener() {
+        // Regression for the scroll/white-screen bug: a global event with no
+        // listener returns None so the browser skips the relayout that was
+        // breaking scrolling and clicks.
+        let html = r#"<html><body><p>no listeners here</p></body></html>"#;
+        let (mut session, _) = EngineSession::start(html, "http://localhost/");
+        assert!(session.dispatch_global_event("scroll").is_none());
+        assert!(session.dispatch_global_event("resize").is_none());
     }
 
     #[test]
@@ -1654,7 +1684,10 @@ mod tests {
             </script></body></html>"#;
         let (mut session, _) = EngineSession::start(html, "http://localhost/");
         session.set_scroll_position(250);
-        let result = session.dispatch_global_event("scroll");
+        // There IS a scroll listener, so the dispatch fires and snapshots.
+        let result = session
+            .dispatch_global_event("scroll")
+            .expect("scroll listener should fire");
         assert_eq!(result.scroll_y, 250);
         assert!(
             result.html.contains(">y=250</p>"),

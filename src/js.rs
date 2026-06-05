@@ -491,11 +491,17 @@ fn start_engine_script_session(
                         response_tx,
                         ..
                     } => {
-                        let result = session.dispatch_global_event(&event_type);
-                        let _ = response_tx.send(DomEventDispatchResult {
-                            snapshot: engine_result_to_processed(result),
-                            default_prevented: false,
-                        });
+                        // When nothing listens for the event, drop `response_tx`
+                        // without sending: the caller's `recv()` then yields
+                        // `None`, signalling "no-op" so it skips re-applying a
+                        // snapshot (and the relayout that follows). This keeps
+                        // scroll/resize cheap on listener-free pages.
+                        if let Some(result) = session.dispatch_global_event(&event_type) {
+                            let _ = response_tx.send(DomEventDispatchResult {
+                                snapshot: engine_result_to_processed(result),
+                                default_prevented: false,
+                            });
+                        }
                     }
                     JavaScriptSessionCommand::SetAttribute {
                         node_id,

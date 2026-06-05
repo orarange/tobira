@@ -141,6 +141,10 @@ impl BrowserPage {
     }
 
     pub fn set_scroll_position(&mut self, y: u32) -> bool {
+        // Track the offset directly so `scroll_y()` is correct even when the
+        // scroll event doesn't round-trip through a snapshot (e.g. the engine
+        // path skips dispatch when nothing listens for `scroll`).
+        self.scroll_y = y;
         if let Some(session) = &self.javascript_session {
             return session.set_scroll_position(y);
         }
