@@ -1193,15 +1193,22 @@ impl Host for BrowserHost {
                 let parent_idx = parent.0 as usize;
                 let new_idx = new_child.0 as usize;
                 let old_idx = old_child.0 as usize;
-                if !exists(&self.nodes, parent_idx) {
+                if !exists(&self.nodes, parent_idx)
+                    || !exists(&self.nodes, new_idx)
+                    || !exists(&self.nodes, old_idx)
+                {
                     return Err(HostError::InvalidHandle);
                 }
+                // Detach `new` from its current location FIRST — it may already be
+                // a child of this same parent, in which case removing it shifts the
+                // indices, so `pos` must be computed against the post-detach list
+                // (otherwise children[pos] can index out of bounds and panic).
+                self.detach(new_idx);
                 if let Some(pos) = self.nodes[parent_idx]
                     .children
                     .iter()
                     .position(|&c| c == old_idx)
                 {
-                    self.detach(new_idx);
                     self.nodes[new_idx].parent = Some(parent_idx);
                     self.nodes[old_idx].parent = None;
                     self.nodes[parent_idx].children[pos] = new_idx;
@@ -1544,6 +1551,193 @@ impl EngineSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DOM-heavy probe: runs framework-grade DOM snippets through a real
+    /// `BrowserHost` (the engine's production host) and reports which fail. Each
+    /// snippet self-verifies with `assert(...)`, so a wrong result or a missing
+    /// API surfaces as a captured engine error. Diagnostic — always passes.
+    /// Run with: cargo test --bin tobira dom_heavy_probe -- --nocapture
+    #[test]
+    fn dom_heavy_probe_report() {
+        let probes: Vec<(&str, &str)> = vec![
+            ("createElement+append+textContent", r#"
+                const d = document.createElement('div'); d.textContent = 'hi';
+                document.body.appendChild(d);
+                assert(document.body.lastChild.textContent === 'hi');
+            "#),
+            ("setAttribute/getAttribute/has/remove", r#"
+                const e = document.createElement('a');
+                e.setAttribute('href', '/x'); assert(e.getAttribute('href') === '/x');
+                assert(e.hasAttribute('href')); e.removeAttribute('href');
+                assert(!e.hasAttribute('href'));
+            "#),
+            ("classList", r#"
+                const e = document.createElement('div');
+                e.classList.add('a'); e.classList.add('b');
+                assert(e.classList.contains('a') && e.classList.contains('b'));
+                e.classList.toggle('a'); assert(!e.classList.contains('a'));
+                e.classList.remove('b'); assert(e.className.trim() === '');
+            "#),
+            ("className/id properties", r#"
+                const e = document.createElement('div');
+                e.className = 'x y'; e.id = 'foo';
+                assert(e.className === 'x y' && e.id === 'foo');
+                assert(e.getAttribute('class') === 'x y');
+            "#),
+            ("querySelector/All", r#"
+                document.body.innerHTML = '<ul><li class="a">1</li><li class="a">2</li></ul>';
+                assert(document.querySelector('li.a').textContent === '1');
+                assert(document.querySelectorAll('li.a').length === 2);
+            "#),
+            ("getElementById/ByClass/ByTag", r#"
+                document.body.innerHTML = '<div id="m" class="c">x</div><div class="c">y</div>';
+                assert(document.getElementById('m').textContent === 'x');
+                assert(document.getElementsByClassName('c').length === 2);
+                assert(document.getElementsByTagName('div').length === 2);
+            "#),
+            ("insertBefore/removeChild/replaceChild", r#"
+                const p = document.createElement('div');
+                const a = document.createElement('span'); a.textContent='a';
+                const b = document.createElement('span'); b.textContent='b';
+                p.appendChild(a); p.insertBefore(b, a);
+                assert(p.firstChild.textContent === 'b');
+                const c = document.createElement('i'); c.textContent='c';
+                p.replaceChild(c, a); assert(p.lastChild.textContent === 'c');
+                p.removeChild(c); assert(p.childNodes.length === 1);
+            "#),
+            ("traversal: children/parent/sibling", r#"
+                const p = document.createElement('div');
+                const a = document.createElement('span'); const b = document.createElement('b');
+                p.appendChild(a); p.appendChild(b);
+                assert(p.children.length === 2);
+                assert(a.parentNode === p && a.nextSibling === b);
+                assert(b.previousSibling === a);
+                assert(a.parentElement === p);
+            "#),
+            ("nodeType/tagName/nodeName", r#"
+                const e = document.createElement('div');
+                assert(e.nodeType === 1);
+                assert(e.tagName === 'DIV' || e.tagName === 'div');
+                const t = document.createTextNode('x'); assert(t.nodeType === 3);
+            "#),
+            ("style get/set", r#"
+                const e = document.createElement('div');
+                e.style.color = 'red'; e.style.width = '10px';
+                assert(e.style.color === 'red');
+                assert(e.getAttribute('style').indexOf('color') >= 0);
+            "#),
+            ("cloneNode", r#"
+                const e = document.createElement('div'); e.textContent = 'hi'; e.setAttribute('data-x','1');
+                const c = e.cloneNode(true);
+                assert(c.getAttribute('data-x') === '1');
+            "#),
+            ("dataset", r#"
+                const e = document.createElement('div');
+                e.setAttribute('data-user-id', '42');
+                assert(e.dataset.userId === '42');
+            "#),
+            ("createTextNode/nodeValue", r#"
+                const t = document.createTextNode('hello');
+                assert(t.nodeValue === 'hello' || t.textContent === 'hello');
+            "#),
+            ("matches/closest", r#"
+                document.body.innerHTML = '<div class="outer"><p id="t">x</p></div>';
+                const t = document.getElementById('t');
+                assert(t.matches('p'));
+                assert(t.closest('.outer') !== null);
+            "#),
+            ("append/prepend multiple", r#"
+                const p = document.createElement('div');
+                const a = document.createElement('a'); const b = document.createElement('b');
+                p.append(a, b); assert(p.children.length === 2);
+                const c = document.createElement('i'); p.prepend(c);
+                assert(p.firstChild === c);
+            "#),
+            ("addEventListener+dispatchEvent", r#"
+                const e = document.createElement('button');
+                let hits = 0; e.addEventListener('click', () => { hits++; });
+                e.dispatchEvent(new Event('click'));
+                assert(hits === 1);
+            "#),
+            ("innerHTML set+read", r#"
+                const e = document.createElement('div');
+                e.innerHTML = '<span>x</span>';
+                assert(e.children.length === 1 && e.firstChild.tagName.toLowerCase() === 'span');
+            "#),
+            ("remove()", r#"
+                const p = document.createElement('div');
+                const c = document.createElement('span'); p.appendChild(c);
+                c.remove(); assert(p.childNodes.length === 0);
+            "#),
+            ("contains", r#"
+                const p = document.createElement('div');
+                const c = document.createElement('span'); p.appendChild(c);
+                assert(p.contains(c)); assert(!c.contains(p));
+            "#),
+            ("createElementNS (SVG)", r#"
+                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                assert(svg !== null && svg !== undefined);
+            "#),
+            ("documentElement/head/body", r#"
+                assert(document.documentElement !== null);
+                assert(document.head !== null && document.body !== null);
+            "#),
+            ("input value property", r#"
+                const i = document.createElement('input');
+                i.value = 'typed'; assert(i.value === 'typed');
+            "#),
+            ("hasChildNodes/firstElementChild", r#"
+                const p = document.createElement('div');
+                assert(!p.hasChildNodes());
+                p.appendChild(document.createTextNode(' '));
+                p.appendChild(document.createElement('b'));
+                assert(p.hasChildNodes());
+                assert(p.firstElementChild.tagName.toLowerCase() === 'b');
+            "#),
+            ("mini-react render to real DOM", r#"
+                function h(tag, props, ...kids){
+                    const el = document.createElement(tag);
+                    for (const k in props||{}) {
+                        if (k === 'className') el.className = props[k];
+                        else el.setAttribute(k, props[k]);
+                    }
+                    for (const kid of kids.flat()) {
+                        el.appendChild(typeof kid === 'string' ? document.createTextNode(kid) : kid);
+                    }
+                    return el;
+                }
+                const app = h('div', {className:'app'}, h('h1', null, 'Title'), h('p', {id:'c'}, 'count: ', '3'));
+                document.body.appendChild(app);
+                const root = document.querySelector('.app');
+                assert(root !== null);
+                assert(root.querySelector('h1').textContent === 'Title');
+                assert(root.querySelector('#c').textContent === 'count: 3');
+            "#),
+        ];
+
+        let mut failures: Vec<(&str, String)> = Vec::new();
+        for (name, snippet) in &probes {
+            let snippet = snippet.to_string();
+            // Catch panics (a missing/edge-case DOM op crashing the host) so the
+            // probe reports them as failures instead of aborting the whole run.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let html = format!("<html><body><script>{snippet}</script></body></html>");
+                run_document_scripts(&html, "http://localhost/").error
+            }));
+            match outcome {
+                Ok(Some(err)) => failures.push((name, err)),
+                Ok(None) => {}
+                Err(_) => failures.push((name, "PANIC".to_string())),
+            }
+        }
+        let total = probes.len();
+        let passed = total - failures.len();
+        println!("\n=== dom-heavy probe: {passed}/{total} passed ===");
+        for (name, err) in &failures {
+            println!("  [DOM] {name}: {err}");
+        }
+        println!();
+    }
 
     #[test]
     fn console_log_captured() {
