@@ -32,7 +32,7 @@ pub use host::{
     HistoryAction, HistoryOutcome, Host, HostData, HostError, HostEvent, HostResult,
     HostTimeSnapshot, HttpMethod, LocationSnapshot, NavigationAction, NavigationOutcome,
     NetworkRequestId, NodeId, NodeKind, NoopHost, ObserverId, ObserverKind, ObserverOp,
-    ObserverOptions, ObserverResult, ScrollMetrics, SiblingDirection, StorageAreaKind,
+    ObserverOptions, ObserverRecord, ObserverResult, ScrollMetrics, SiblingDirection, StorageAreaKind,
     StorageAreaScope, StorageOp, StorageResult, TimerId, TimerKind, TimerRequest, WindowId,
     WindowMetrics,
 };
