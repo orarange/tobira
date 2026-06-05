@@ -140,6 +140,13 @@ struct BrowserApp {
     /// flight, so the request was coalesced. `finish_render` re-requests once the
     /// in-flight render lands, ensuring the final animation frame is painted.
     content_dirty: bool,
+    /// Whether the current page has been rendered at least once. Durable across
+    /// scrolls/resizes (which transiently null `latest_render_frame`). Lets
+    /// `current_layout` recompute synchronously when the layout cache is empty
+    /// mid-session (e.g. invalidated every animation tick) instead of returning
+    /// an empty layout — without that, `content_height` momentarily reads 0 and
+    /// the scroll clamp snaps the view back to the top while animating.
+    has_rendered_once: bool,
     /// Depth-indexed offscreen buffer pool for layer compositing.
     /// scratch[depth] holds the pixel buffer used by the layer at that nesting depth.
     /// Buffers are reused across frames; no per-frame allocation after the first paint.
@@ -260,6 +267,7 @@ impl BrowserApp {
             engine_clock_ms: 0,
             last_tick_instant: None,
             content_dirty: false,
+            has_rendered_once: false,
             scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
         };
 
@@ -418,6 +426,7 @@ impl BrowserApp {
         self.engine_clock_ms = 0;
         self.last_tick_instant = None;
         self.content_dirty = false;
+        self.has_rendered_once = false;
         self.scratch.clear();
         self.sync_window_title();
         self.sync_input_method();
@@ -515,6 +524,7 @@ impl BrowserApp {
                     layout: frame.layout.clone(),
                 });
                 self.latest_render_frame = Some(frame);
+                self.has_rendered_once = true;
                 self.sync_current_history_scroll();
                 self.sync_window_title();
                 self.sync_input_method();
@@ -726,11 +736,18 @@ impl BrowserApp {
             .map(|frame| frame.content_height)
             .unwrap_or(layout.content_height);
         let max_scroll_y = max_scroll(viewport_height, content_height);
-        let previous_scroll_y = self.scroll_y;
-        self.scroll_y = self.scroll_y.min(max_scroll_y);
-        if self.scroll_y != previous_scroll_y {
-            let _ = self.document.set_scroll_position(self.scroll_y);
-            self.sync_current_history_scroll();
+        // Only clamp when we have a real content height. A 0 here means the
+        // height is momentarily unknown (e.g. layout cache invalidated by an
+        // animation tick before the next render lands); clamping to it would snap
+        // scroll back to the top. A genuinely empty page already has scroll_y 0,
+        // so skipping the clamp then is harmless.
+        if content_height > 0 {
+            let previous_scroll_y = self.scroll_y;
+            self.scroll_y = self.scroll_y.min(max_scroll_y);
+            if self.scroll_y != previous_scroll_y {
+                let _ = self.document.set_scroll_position(self.scroll_y);
+                self.sync_current_history_scroll();
+            }
         }
 
         let Some(surface) = self.surface.as_mut() else {
@@ -1684,6 +1701,11 @@ impl BrowserApp {
         let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
 
         if let DocumentContent::Loaded(_) = &self.document.content {
+            // Whether we've already rendered this page at least once. Durable
+            // across scrolls (unlike `latest_render_frame`, which scroll handling
+            // nulls). Used to decide what to do when the layout cache is empty
+            // (see the `None` arm).
+            let has_rendered = self.has_rendered_once;
             let revision = self.document.layout_revision();
             match &self.document.layout_cache {
                 // Cache still matches the current DOM + width — reuse it.
@@ -1696,7 +1718,15 @@ impl BrowserApp {
                 // hitboxes pointing at shifted nodes, so clicks after an edit
                 // landed on the wrong element and buttons "stopped working".
                 Some(_) => {}
-                // Not rendered yet — defer to the async render worker.
+                // No cache. If we've never rendered this page, defer to the async
+                // render worker (avoids a synchronous layout before first paint).
+                // But once a frame exists, an empty cache means it was invalidated
+                // mid-session — e.g. an animation tick nulls it every frame. In
+                // that case we MUST recompute synchronously: returning an empty
+                // (height 0) layout here makes `content_height` momentarily 0, so
+                // the scroll clamp in `draw()` snaps scroll_y back to the top while
+                // an animation is running and the user scrolls.
+                None if has_rendered => {}
                 None => return empty_layout_document(),
             }
         }
