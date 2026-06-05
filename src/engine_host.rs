@@ -1694,6 +1694,49 @@ mod tests {
                 assert(p.hasChildNodes());
                 assert(p.firstElementChild.tagName.toLowerCase() === 'b');
             "#),
+            ("node expando property", r#"
+                const a = document.createElement('div');
+                a.__myKey = 42; a._data = { n: 1 };
+                document.body.appendChild(a);
+                assert(a.__myKey === 42);
+                assert(document.body.lastChild.__myKey === 42);
+                assert(document.body.lastChild._data.n === 1);
+            "#),
+            ("event bubbling + target", r#"
+                document.body.innerHTML = '<div id="p"><button id="c">x</button></div>';
+                const p = document.getElementById('p');
+                const c = document.getElementById('c');
+                let log = [];
+                p.addEventListener('click', (e) => { log.push('p:' + e.target.id + ':' + e.currentTarget.id); });
+                c.addEventListener('click', () => { log.push('c'); });
+                c.dispatchEvent(new Event('click', { bubbles: true }));
+                assert(log.join(',') === 'c,p:c:p', 'got ' + log.join(','));
+            "#),
+            ("event preventDefault", r#"
+                const b = document.createElement('button');
+                b.addEventListener('click', (e) => { e.preventDefault(); });
+                const ev = new Event('click', { cancelable: true });
+                const notCancelled = b.dispatchEvent(ev);
+                assert(ev.defaultPrevented === true);
+                assert(notCancelled === false);
+            "#),
+            ("removeEventListener", r#"
+                const b = document.createElement('button');
+                let n = 0; const handler = () => { n++; };
+                b.addEventListener('click', handler);
+                b.dispatchEvent(new Event('click'));
+                b.removeEventListener('click', handler);
+                b.dispatchEvent(new Event('click'));
+                assert(n === 1, 'n=' + n);
+            "#),
+            ("stopPropagation", r#"
+                document.body.innerHTML = '<div id="p2"><span id="c2">x</span></div>';
+                let hits = 0;
+                document.getElementById('p2').addEventListener('click', () => { hits++; });
+                document.getElementById('c2').addEventListener('click', (e) => { e.stopPropagation(); });
+                document.getElementById('c2').dispatchEvent(new Event('click', { bubbles: true }));
+                assert(hits === 0, 'hits=' + hits);
+            "#),
             ("mini-react render to real DOM", r#"
                 function h(tag, props, ...kids){
                     const el = document.createElement(tag);

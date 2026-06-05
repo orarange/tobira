@@ -5504,7 +5504,19 @@ impl Vm {
         let host_slot = self.heap.objects().get(object)
             .and_then(|o| if let ObjectKind::Host(slot) = o.kind { Some(slot) } else { None });
         if let Some(slot) = host_slot {
-            return self.get_host_property(slot, key);
+            let value = self.get_host_property(slot, key)?;
+            // Fall back to an own expando property for Node names the DOM doesn't
+            // expose (mirrors the set path above).
+            if matches!(value, Value::Undefined)
+                && matches!(slot.class, HostObjectClass::Node | HostObjectClass::EventTarget)
+            {
+                if let Some(JsPropertyDescriptor::Data { value, .. }) =
+                    self.get_own_property_descriptor(object, key)
+                {
+                    return Ok(value);
+                }
+            }
+            return Ok(value);
         }
 
         // ArrayBuffer / typed-array computed properties and indexed element
@@ -5581,6 +5593,17 @@ impl Vm {
         let host_slot = self.heap.objects().get(object)
             .and_then(|o| if let ObjectKind::Host(slot) = o.kind { Some(slot) } else { None });
         if let Some(slot) = host_slot {
+            // Node expando: a property name the DOM doesn't manage is stored as an
+            // ordinary own property on the (interned) node wrapper, so frameworks
+            // can stash data on nodes (React fiber keys, etc.).
+            if matches!(slot.class, HostObjectClass::Node | HostObjectClass::EventTarget) {
+                if let PropertyKey::String(name) = &key {
+                    if !is_dom_managed_node_property(name) {
+                        self.define_data_property(object, key, value, true, true, true);
+                        return Ok(());
+                    }
+                }
+            }
             return self.set_host_property(slot, key, value);
         }
 
@@ -9263,39 +9286,86 @@ impl Vm {
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeRemoveEventListener => {
-                // Stub: silently succeed (GcRef equality would be needed for correct removal)
+                let node_handle = self
+                    .node_id_from_host_val(&this_value)
+                    .map(|id| id.0)
+                    .unwrap_or(0);
+                let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let listener = args.get(1).cloned().unwrap_or(Value::Undefined);
+                if let Value::Object(fn_ref) = listener {
+                    if let Some(types) = self.event_listeners.get_mut(&node_handle) {
+                        if let Some(list) = types.get_mut(&event_type) {
+                            list.retain(|f| f.raw() != fn_ref.raw());
+                        }
+                    }
+                }
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeDispatchEvent => {
-                let node_handle = self
+                let target_handle = self
                     .node_id_from_host_val(&this_value)
                     .map(|id| id.0)
                     .unwrap_or(0); // 0 = document/window
                 let event = args.first().cloned().unwrap_or(Value::Undefined);
-                if let Value::Object(event_ref) = &event {
-                    // Reflect the dispatch target onto the event.
-                    self.define_data_property(*event_ref, PropertyKey::from("target"), this_value.clone(), true, true, true);
-                    self.define_data_property(*event_ref, PropertyKey::from("currentTarget"), this_value.clone(), true, true, true);
-                    self.define_data_property(*event_ref, PropertyKey::from("srcElement"), this_value.clone(), true, true, true);
-                }
+                let Value::Object(event_ref) = event else {
+                    return Ok(Value::Bool(true));
+                };
+                // `target`/`srcElement` stay the dispatch node for the whole
+                // propagation; `currentTarget` updates per node below.
+                self.define_data_property(event_ref, PropertyKey::from("target"), this_value.clone(), true, true, true);
+                self.define_data_property(event_ref, PropertyKey::from("srcElement"), this_value.clone(), true, true, true);
+                let event = Value::Object(event_ref);
                 let type_value = self.get_property_value(&event, &PropertyKey::from("type"))?;
                 let event_type = self.to_string(&type_value);
-                let listeners: Vec<GcRef<JsObject>> = self
-                    .event_listeners
-                    .get(&node_handle)
-                    .and_then(|m| m.get(&event_type))
-                    .cloned()
-                    .unwrap_or_default();
-                for listener in listeners {
-                    self.call_value_sync(Value::Object(listener), this_value.clone(), vec![event.clone()])?;
-                    self.drain_microtasks();
-                    let stop_immediate = self
-                        .get_property_value(&event, &PropertyKey::from("__stopImmediate"))
+                let bubbles = self
+                    .get_property_value(&event, &PropertyKey::from("bubbles"))
+                    .map(|v| self.is_truthy(&v))
+                    .unwrap_or(false);
+
+                // Propagation path: the target, then its ancestors (for bubbling).
+                let mut path: Vec<u32> = vec![target_handle];
+                if bubbles {
+                    let mut current = target_handle;
+                    while let Ok(DomReadResult::Node(parent)) =
+                        self.host.read_dom(DomRead::Parent { node: NodeId(current) })
+                    {
+                        path.push(parent.0);
+                        current = parent.0;
+                        if path.len() > 4096 {
+                            break; // cycle guard
+                        }
+                    }
+                }
+
+                'propagate: for node_handle in path {
+                    let current_target = self.make_dom_node_value(NodeId(node_handle));
+                    self.define_data_property(event_ref, PropertyKey::from("currentTarget"), current_target.clone(), true, true, true);
+                    let listeners: Vec<GcRef<JsObject>> = self
+                        .event_listeners
+                        .get(&node_handle)
+                        .and_then(|m| m.get(&event_type))
+                        .cloned()
+                        .unwrap_or_default();
+                    for listener in listeners {
+                        // Per spec, a listener's `this` is the node it's attached to.
+                        self.call_value_sync(Value::Object(listener), current_target.clone(), vec![event.clone()])?;
+                        self.drain_microtasks();
+                        let stop_immediate = self
+                            .get_property_value(&event, &PropertyKey::from("__stopImmediate"))
+                            .unwrap_or(Value::Undefined);
+                        if self.is_truthy(&stop_immediate) {
+                            break 'propagate;
+                        }
+                    }
+                    // stopPropagation() (sets cancelBubble) halts further bubbling.
+                    let cancel = self
+                        .get_property_value(&event, &PropertyKey::from("cancelBubble"))
                         .unwrap_or(Value::Undefined);
-                    if self.is_truthy(&stop_immediate) {
+                    if self.is_truthy(&cancel) {
                         break;
                     }
                 }
+
                 // dispatchEvent returns false iff a cancelable event had
                 // preventDefault() called, true otherwise.
                 let default_prevented = self
@@ -11271,7 +11341,8 @@ impl Vm {
             "focus" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeFocus)),
             "blur" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeBlur)),
             "click" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeClick)),
-            "addEventListener" | "removeEventListener" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener)),
+            "addEventListener" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener)),
+            "removeEventListener" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemoveEventListener)),
             "dispatchEvent" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeDispatchEvent)),
             _ => Ok(Value::Undefined),
         }
@@ -11841,6 +11912,25 @@ fn camel_to_css_prop(camel: &str) -> String {
         }
     }
     out
+}
+
+/// Property names that `set_host_property` reflects to the DOM for an element
+/// (so they must NOT be treated as plain expando own-properties). Keep in sync
+/// with the `Node | EventTarget` arm of `set_host_property`.
+fn is_dom_managed_node_property(name: &str) -> bool {
+    matches!(
+        name,
+        "innerHTML"
+            | "textContent"
+            | "nodeValue"
+            | "id"
+            | "className"
+            | "value"
+            | "href"
+            | "src"
+            | "hidden"
+            | "disabled"
+    )
 }
 
 /// Read one declaration value out of an inline `style` attribute string.
