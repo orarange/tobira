@@ -83,8 +83,9 @@ the low-risk "engine-as-lib" merge — the safe foundation for everything below.
 **Status: ✅ landed (PR #53).** `src/engine_host.rs` implements `Host` over an
 arena DOM built from `html::parse_document`, with full `read_dom`/`mutate_dom`
 coverage, a right-to-left selector matcher (lists, compound, descendant/child
-combinators), console capture, location, and HTML (re)serialization. Timers /
-fetch / observers are currently stubbed (Stage 3). Note a deviation from the
+combinators), console capture, location, and HTML (re)serialization. `fetch_sync`
+and `MutationObserver` recording are now implemented; remaining observers
+(`Resize`/`Intersection`) are stubbed (Stage 3). Note a deviation from the
 original sketch: the host builds its **own** arena from the document HTML rather
 than sharing the browser's live `html::Node` tree; reconciling the two (so
 interactive mutations reflect back) is part of Stage 2/3.
@@ -168,8 +169,14 @@ gaps from a scan of `vm.rs` vs `js.rs`:
   `slotchange`, `Event.composedPath()`, shadow-boundary retargeting. (Host enum
   already has `AttachShadow`, `ShadowRoot`, `AssignedNodes`; the *JS bindings*
   are missing in `vm.rs`.)
-- **Observers**: `MutationObserver`, `ResizeObserver`, `IntersectionObserver`
-  JS classes (Host `observer` op exists; JS classes missing).
+- **Observers**: `MutationObserver` ✅ **done** — JS class with
+  `observe(target, init)` / `disconnect()` / `takeRecords()`, `childList` +
+  `attributes` (with `attributeOldValue`) + `subtree`, delivering
+  `MutationRecord`s (`type`/`target`/`addedNodes`/`removedNodes`/`attributeName`
+  /`oldValue`) at the microtask checkpoint. `BrowserHost` records mutations from
+  `mutate_dom`; the VM owns the callbacks and delivers them. Still missing:
+  `ResizeObserver`, `IntersectionObserver` (need layout geometry), and
+  `characterData` records.
 - **Networking JS**: `fetch(...)` global + `Response`/`Headers` ✅ **done**
   (synchronous via `Host::fetch_sync`; returns a resolved `Promise<Response>`
   with `ok`/`status`/`statusText`/`url`/`headers.get()`/`text()`/`json()`;
@@ -180,8 +187,8 @@ gaps from a scan of `vm.rs` vs `js.rs`:
 - **Event constructors** ✅ **done**: `Event` / `CustomEvent` (#58); keyboard/
   pointer/input event detail on dispatched events (#60). Still missing:
   `KeyboardEvent`/`MouseEvent` *constructors*, `AbortController`/`AbortSignal`.
-- **Misc**: `URLSearchParams` ✅ (#52), richer `crypto`,
-  `history.state`/`popstate`/`hashchange`, `MutationObserver` records.
+- **Misc**: `URLSearchParams` ✅ (#52), `MutationObserver` ✅, richer `crypto`,
+  `history.state`/`popstate`/`hashchange`, arbitrary `window.*` expando writes.
 - Audit the full `js.rs` DOM/node binding list against `vm.rs`'s `BuiltinId`
   DOM set and close any remaining method gaps.
 

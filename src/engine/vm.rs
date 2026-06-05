@@ -15,8 +15,9 @@ use super::event_loop::{
 use super::heap::{GcRef, Heap, RawGcRef};
 use super::host::{
     ConsoleLevel, ConsoleMessage, DomMutation, DomRead, DomReadResult, FetchBody, FetchMode,
-    FetchRequest, FetchResponse, Host, HttpMethod, NodeId, NodeKind, NoopHost, SiblingDirection,
-    WindowId,
+    FetchRequest, FetchResponse, Host, HostData, HttpMethod, NodeId, NodeKind, NoopHost,
+    ObserverId, ObserverKind, ObserverOp, ObserverOptions, ObserverRecord, ObserverResult,
+    SiblingDirection, WindowId,
 };
 use super::value::{
     AsyncContext, GeneratorState, HostDispatch, HostObjectClass, HostObjectSlot, JsObject,
@@ -221,6 +222,11 @@ enum BuiltinId {
     ResponseText,
     ResponseJson,
     HeadersGet,
+    // MutationObserver
+    MutationObserverConstructor,
+    MutationObserverObserve,
+    MutationObserverDisconnect,
+    MutationObserverTakeRecords,
     // classList (TokenList)
     DomClassListAdd,
     DomClassListRemove,
@@ -1009,6 +1015,15 @@ fn decode_uri(text: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// A registered `MutationObserver`: its JS callback and the observer instance
+/// object (held so neither is lost and `===` identity is preserved when the
+/// instance is handed back to the callback).
+#[derive(Clone)]
+struct MutationObserverReg {
+    callback: Value,
+    instance: Value,
+}
+
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
@@ -1039,6 +1054,14 @@ pub struct Vm {
     /// Event listeners stored by (node_handle, event_type) → list of JS function GcRefs.
     /// Lives in the VM (not the Host) so GcRefs remain valid.
     event_listeners: HashMap<u32, HashMap<String, Vec<GcRef<JsObject>>>>,
+    /// Live `MutationObserver` instances keyed by `ObserverId.0`: the JS callback
+    /// and the observer object itself (passed back to the callback as `this` and
+    /// its 2nd argument). Lives in the VM so the callback/instance survive.
+    mutation_observers: HashMap<u64, MutationObserverReg>,
+    /// Re-entrancy guard for the mutation-observer delivery checkpoint, so the
+    /// `drain_microtasks` calls made while delivering don't recurse into another
+    /// delivery pass.
+    delivering_mutations: bool,
     /// Cache for stateless builtin method values (constructable=false, prototype=None).
     /// Avoids a heap allocation on every DOM property access like element.appendChild.
     builtin_method_cache: HashMap<BuiltinId, Value>,
@@ -1105,6 +1128,8 @@ impl Vm {
             random_state,
             host,
             event_listeners: HashMap::new(),
+            mutation_observers: HashMap::new(),
+            delivering_mutations: false,
             builtin_method_cache: HashMap::new(),
             next_symbol_id: FIRST_USER_SYMBOL,
             symbol_descriptions: HashMap::new(),
@@ -2240,6 +2265,12 @@ impl Vm {
             self.allocate_builtin_value(BuiltinId::CustomEventConstructor, true, None);
         self.globals
             .insert("CustomEvent".to_string(), custom_event_ctor);
+
+        // MutationObserver constructor.
+        let mutation_observer_ctor =
+            self.allocate_builtin_value(BuiltinId::MutationObserverConstructor, true, None);
+        self.globals
+            .insert("MutationObserver".to_string(), mutation_observer_ctor);
 
         self.globals
             .insert("Promise".to_string(), promise_ctor.clone());
@@ -3845,6 +3876,9 @@ impl Vm {
         while let Some(job) = self.event_loop.microtask_queue.pop_front() {
             let _ = self.run_microtask_job(job);
         }
+        // End of a microtask checkpoint: notify mutation observers (guarded so
+        // the drains it performs don't recurse back here).
+        self.deliver_mutation_records();
     }
 
     fn run_microtask_job(&mut self, job: MicrotaskJob) -> Result<(), VmError> {
@@ -4661,6 +4695,7 @@ impl Vm {
                 | BuiltinId::TypedArrayConstructor(_)
                 | BuiltinId::EventConstructor
                 | BuiltinId::CustomEventConstructor
+                | BuiltinId::MutationObserverConstructor
         )
     }
 
@@ -7166,6 +7201,18 @@ impl Vm {
             BuiltinId::ResponseText => self.response_text(&this_value),
             BuiltinId::ResponseJson => self.response_json(&this_value),
             BuiltinId::HeadersGet => self.headers_get(&this_value, &args),
+            BuiltinId::MutationObserverConstructor => {
+                self.mutation_observer_construct(args.first().cloned())
+            }
+            BuiltinId::MutationObserverObserve => {
+                self.mutation_observer_observe(&this_value, &args)
+            }
+            BuiltinId::MutationObserverDisconnect => {
+                self.mutation_observer_disconnect(&this_value)
+            }
+            BuiltinId::MutationObserverTakeRecords => {
+                self.mutation_observer_take_records(&this_value)
+            }
             BuiltinId::ArrayIsArray => Ok(Value::Bool(matches!(
                 args.first(),
                 Some(Value::Object(object))
@@ -10360,8 +10407,299 @@ impl Vm {
             HostObjectClass::Other("TokenList") => self.get_classlist_property(slot, name),
             HostObjectClass::Other("CSSStyleDeclaration") => self.get_style_property(name),
             HostObjectClass::StorageArea => self.get_storage_property(slot, name),
+            HostObjectClass::Observer => self.get_observer_property(name),
             _ => Ok(Value::Undefined),
         }
+    }
+
+    /// Method lookup on a `MutationObserver` instance (`observe` / `disconnect`
+    /// / `takeRecords`). Each returns a cached builtin method that reads the
+    /// observer id from `this`'s host handle when invoked.
+    fn get_observer_property(&mut self, name: String) -> Result<Value, VmError> {
+        match name.as_str() {
+            "observe" => Ok(self.allocate_builtin_method(BuiltinId::MutationObserverObserve)),
+            "disconnect" => {
+                Ok(self.allocate_builtin_method(BuiltinId::MutationObserverDisconnect))
+            }
+            "takeRecords" => {
+                Ok(self.allocate_builtin_method(BuiltinId::MutationObserverTakeRecords))
+            }
+            _ => Ok(Value::Undefined),
+        }
+    }
+
+    /// The `ObserverId` backing a `MutationObserver` JS instance (its host
+    /// handle), if `this` is one.
+    fn observer_id_from_this(&self, this_value: &Value) -> Option<u64> {
+        if let Value::Object(obj_ref) = this_value {
+            if let Some(obj) = self.heap.objects().get(*obj_ref) {
+                if let ObjectKind::Host(slot) = &obj.kind {
+                    if matches!(slot.class, HostObjectClass::Observer) {
+                        return Some(slot.handle);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// `new MutationObserver(callback)` — create the host-side observer, remember
+    /// the callback + instance, and return the instance host object.
+    fn mutation_observer_construct(&mut self, callback: Option<Value>) -> Result<Value, VmError> {
+        let callback = callback.unwrap_or(Value::Undefined);
+        if !self.is_callable_value(&callback) {
+            return Err(VmError::TypeError(
+                "MutationObserver constructor argument is not callable".to_string(),
+            ));
+        }
+        let id = match self.host.observer(ObserverOp::Create {
+            kind: ObserverKind::Mutation,
+        }) {
+            Ok(ObserverResult::Created(ObserverId(id))) => id,
+            _ => {
+                return Err(VmError::TypeError(
+                    "host does not support MutationObserver".to_string(),
+                ));
+            }
+        };
+        let instance = self.make_host_object(HostObjectSlot {
+            class: HostObjectClass::Observer,
+            interface_name: "MutationObserver",
+            handle: id,
+            dispatch: HostDispatch::Ordinary,
+            supports_indexed_properties: false,
+            supports_named_properties: false,
+        });
+        self.mutation_observers.insert(
+            id,
+            MutationObserverReg {
+                callback,
+                instance: instance.clone(),
+            },
+        );
+        Ok(instance)
+    }
+
+    /// `observer.observe(target, options)`.
+    fn mutation_observer_observe(
+        &mut self,
+        this_value: &Value,
+        args: &[Value],
+    ) -> Result<Value, VmError> {
+        let Some(id) = self.observer_id_from_this(this_value) else {
+            return Err(VmError::TypeError(
+                "observe called on a non-MutationObserver".to_string(),
+            ));
+        };
+        let Some(target) = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined))
+        else {
+            return Err(VmError::TypeError(
+                "MutationObserver.observe requires a node target".to_string(),
+            ));
+        };
+        let options = self.read_observer_options(args.get(1));
+        let _ = self.host.observer(ObserverOp::Observe {
+            observer: ObserverId(id),
+            target,
+            options,
+        });
+        Ok(Value::Undefined)
+    }
+
+    /// `observer.disconnect()`.
+    fn mutation_observer_disconnect(&mut self, this_value: &Value) -> Result<Value, VmError> {
+        if let Some(id) = self.observer_id_from_this(this_value) {
+            let _ = self.host.observer(ObserverOp::Disconnect {
+                observer: ObserverId(id),
+            });
+            self.mutation_observers.remove(&id);
+        }
+        Ok(Value::Undefined)
+    }
+
+    /// `observer.takeRecords()` — drain and return pending records as an array.
+    fn mutation_observer_take_records(&mut self, this_value: &Value) -> Result<Value, VmError> {
+        let Some(id) = self.observer_id_from_this(this_value) else {
+            return self.make_array_from_values(Vec::new());
+        };
+        let records = match self.host.observer(ObserverOp::TakeRecords {
+            observer: ObserverId(id),
+        }) {
+            Ok(ObserverResult::Records(records)) => records,
+            _ => Vec::new(),
+        };
+        self.build_mutation_record_array(records)
+    }
+
+    /// Read a `MutationObserverInit` dictionary into `ObserverOptions`.
+    fn read_observer_options(&mut self, value: Option<&Value>) -> ObserverOptions {
+        let mut opts = ObserverOptions {
+            subtree: false,
+            child_list: false,
+            attributes: false,
+            character_data: false,
+            attribute_old_value: false,
+            character_data_old_value: false,
+            threshold: None,
+            root: None,
+            root_margin: None,
+        };
+        let Some(value) = value else {
+            return opts;
+        };
+        if !matches!(value, Value::Object(_)) {
+            return opts;
+        }
+        opts.subtree = self.observer_init_flag(value, "subtree");
+        opts.child_list = self.observer_init_flag(value, "childList");
+        opts.attributes = self.observer_init_flag(value, "attributes");
+        opts.character_data = self.observer_init_flag(value, "characterData");
+        opts.attribute_old_value = self.observer_init_flag(value, "attributeOldValue");
+        opts.character_data_old_value = self.observer_init_flag(value, "characterDataOldValue");
+        // Per spec, *OldValue implies the corresponding observation is on.
+        if opts.attribute_old_value {
+            opts.attributes = true;
+        }
+        if opts.character_data_old_value {
+            opts.character_data = true;
+        }
+        opts
+    }
+
+    fn observer_init_flag(&mut self, obj: &Value, key: &str) -> bool {
+        match self.get_property_value(obj, &PropertyKey::from(key)) {
+            Ok(v) => self.is_truthy(&v),
+            Err(_) => false,
+        }
+    }
+
+    fn build_mutation_record_array(
+        &mut self,
+        records: Vec<ObserverRecord>,
+    ) -> Result<Value, VmError> {
+        let mut values = Vec::with_capacity(records.len());
+        for record in records {
+            values.push(self.build_mutation_record(record)?);
+        }
+        self.make_array_from_values(values)
+    }
+
+    /// Build a `MutationRecord` JS object from a host record, filling the spec's
+    /// always-present fields (`target`, `type`, `addedNodes`, `removedNodes`,
+    /// `attributeName`, `oldValue`) with sensible defaults when absent.
+    fn build_mutation_record(&mut self, record: ObserverRecord) -> Result<Value, VmError> {
+        let value = self.host_data_to_value(record.payload);
+        let Value::Object(object) = value else {
+            return Ok(value);
+        };
+        let target = self.make_dom_node_value(record.target);
+        self.define_data_property(object, PropertyKey::from("target"), target, true, true, true);
+        // Defaults for fields the payload may omit (e.g. addedNodes on an
+        // attributes record), so reads never yield `undefined`.
+        let empty_added = self.make_array_from_values(Vec::new())?;
+        let empty_removed = self.make_array_from_values(Vec::new())?;
+        self.ensure_default_property(object, "addedNodes", empty_added);
+        self.ensure_default_property(object, "removedNodes", empty_removed);
+        self.ensure_default_property(object, "attributeName", Value::Null);
+        self.ensure_default_property(object, "oldValue", Value::Null);
+        self.ensure_default_property(object, "attributeNamespace", Value::Null);
+        self.ensure_default_property(object, "previousSibling", Value::Null);
+        self.ensure_default_property(object, "nextSibling", Value::Null);
+        Ok(Value::Object(object))
+    }
+
+    fn ensure_default_property(&mut self, object: GcRef<JsObject>, key: &str, default: Value) {
+        let pk = PropertyKey::from(key);
+        if self.get_own_property_descriptor(object, &pk).is_none() {
+            self.define_data_property(object, pk, default, true, true, true);
+        }
+    }
+
+    /// Convert a host `HostData` tree into a JS `Value` (recursively).
+    fn host_data_to_value(&mut self, data: HostData) -> Value {
+        match data {
+            HostData::Null => Value::Null,
+            HostData::Bool(b) => Value::Bool(b),
+            HostData::Number(n) => Value::Number(n),
+            HostData::String(s) => self.make_string_value(&s),
+            HostData::Node(id) => self.make_dom_node_value(id),
+            HostData::Array(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values.push(self.host_data_to_value(item));
+                }
+                self.make_array_from_values(values)
+                    .unwrap_or(Value::Undefined)
+            }
+            HostData::Object(pairs) => {
+                let object = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+                for (key, item) in pairs {
+                    let val = self.host_data_to_value(item);
+                    self.define_data_property(
+                        object,
+                        PropertyKey::from(key.as_str()),
+                        val,
+                        true,
+                        true,
+                        true,
+                    );
+                }
+                Value::Object(object)
+            }
+        }
+    }
+
+    /// Deliver pending mutation records to each observer's callback. Run at the
+    /// end of a microtask checkpoint (the spec's "notify mutation observers").
+    /// Loops until no records remain (callbacks may mutate the DOM and enqueue
+    /// more), bounded to avoid a pathological infinite loop.
+    fn deliver_mutation_records(&mut self) {
+        if self.delivering_mutations || self.mutation_observers.is_empty() {
+            return;
+        }
+        self.delivering_mutations = true;
+        let mut rounds = 0;
+        loop {
+            rounds += 1;
+            if rounds > 1000 {
+                break;
+            }
+            let regs: Vec<(u64, MutationObserverReg)> = self
+                .mutation_observers
+                .iter()
+                .map(|(id, reg)| (*id, reg.clone()))
+                .collect();
+            let mut delivered_any = false;
+            for (id, reg) in regs {
+                // Skip observers disconnected during this checkpoint.
+                if !self.mutation_observers.contains_key(&id) {
+                    continue;
+                }
+                let records = match self.host.observer(ObserverOp::TakeRecords {
+                    observer: ObserverId(id),
+                }) {
+                    Ok(ObserverResult::Records(records)) if !records.is_empty() => records,
+                    _ => continue,
+                };
+                delivered_any = true;
+                let records_array = match self.build_mutation_record_array(records) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                };
+                let _ = self.call_value_sync(
+                    reg.callback.clone(),
+                    reg.instance.clone(),
+                    vec![records_array, reg.instance.clone()],
+                );
+                // Drain microtasks the callback queued (delivery is guarded, so
+                // this won't recurse into another delivery pass).
+                self.drain_microtasks();
+            }
+            if !delivered_any {
+                break;
+            }
+        }
+        self.delivering_mutations = false;
     }
 
     /// Names that resolve as bare globals by virtue of the window being the

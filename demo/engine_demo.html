@@ -98,6 +98,21 @@
   </section>
 
   <section>
+    <h2>★ MutationObserver — DOM変化を監視</h2>
+    <p class="hint">
+      フレームワークが多用する <code>MutationObserver</code>。下のボタンで
+      <code>#mo-box</code> に要素や属性を変えると、監視コールバックが変化を
+      検知してログる(childList / attributes)。
+    </p>
+    <p>
+      <button id="mo-add">子要素を追加</button>
+      <button id="mo-attr">属性を変更</button>
+      <div id="mo-box" style="margin-top:8px; padding:8px; background:#f3f4fb; border-radius:6px;"></div>
+    </p>
+    <p id="mo-log" class="frames">監視ログ: （まだ変化なし）</p>
+  </section>
+
+  <section>
     <h2>1. カウンター — click → textContent</h2>
     <button id="inc">+1 する</button>
     <span id="count" class="count">0</span>
@@ -197,6 +212,34 @@
       setTimeout(() => {
         msg.innerHTML = '<span class="ok-text">✅ 3秒後に発火した！</span>';
       }, 3000);
+    });
+
+    // --- ★ MutationObserver（DOM変化の監視）---
+    let moMutations = 0;
+    let moAdded = 0;
+    let moAttrChanges = 0;
+    const moBox = document.getElementById('mo-box');
+    const moObserver = new MutationObserver((records) => {
+      for (const r of records) {
+        moMutations += 1;
+        if (r.type === 'childList') moAdded += r.addedNodes.length;
+        if (r.type === 'attributes') moAttrChanges += 1;
+      }
+      document.getElementById('mo-log').innerHTML =
+        '<span class="ok-text">監視ログ: ' + moMutations + '件検知' +
+        '（追加ノード ' + moAdded + ' / 属性変更 ' + moAttrChanges + '）</span>';
+    });
+    moObserver.observe(moBox, { childList: true, attributes: true, subtree: true });
+
+    let moItems = 0;
+    document.getElementById('mo-add').addEventListener('click', () => {
+      moItems += 1;
+      const chip = document.createElement('span');
+      chip.textContent = 'item ' + moItems + '  ';
+      moBox.appendChild(chip);
+    });
+    document.getElementById('mo-attr').addEventListener('click', () => {
+      moBox.setAttribute('data-count', String(moItems));
     });
 
     // --- 1. カウンター ---

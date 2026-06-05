@@ -19,8 +19,10 @@ use tobira_engine::engine::{
     DomMutationResult,
     DomRead, DomReadResult, DomRect, FetchRequest, FetchResponse, FrameId, Heap, HistoryAction,
     HistoryOutcome,
-    Host, HostError, HostEvent, HostResult, HostTimeSnapshot, LocationSnapshot, NavigationAction,
-    NavigationOutcome, NetworkRequestId, NodeId, NodeKind, ObserverOp, ObserverResult, Parser,
+    Host, HostData, HostError, HostEvent, HostResult, HostTimeSnapshot, LocationSnapshot,
+    NavigationAction,
+    NavigationOutcome, NetworkRequestId, NodeId, NodeKind, ObserverId, ObserverKind,
+    ObserverOptions, ObserverOp, ObserverRecord, ObserverResult, Parser,
     ScrollMetrics, SiblingDirection, StorageOp, StorageResult, TimerId, TimerRequest, Vm, WindowId,
     WindowMetrics,
 };
@@ -100,6 +102,15 @@ const VOID_ELEMENTS: &[&str] = &[
 const RAW_TEXT_ELEMENTS: &[&str] = &["script", "style"];
 
 /// A `Host` implementation backed by an arena DOM built from parsed HTML.
+/// A live observer registration (currently only `MutationObserver`). `targets`
+/// holds each observed node (arena index) with its options; `pending` holds
+/// records accumulated since the last delivery / `takeRecords`.
+struct ObserverEntry {
+    kind: ObserverKind,
+    targets: Vec<(usize, ObserverOptions)>,
+    pending: Vec<ObserverRecord>,
+}
+
 pub struct BrowserHost {
     nodes: Vec<DomNode>,
     document: usize,
@@ -113,6 +124,9 @@ pub struct BrowserHost {
     scroll_y: f64,
     inner_width: f64,
     inner_height: f64,
+    /// Observer registrations, indexed by `ObserverId.0`. `None` slots are
+    /// disconnected observers (kept so ids stay stable).
+    observers: Vec<Option<ObserverEntry>>,
 }
 
 impl BrowserHost {
@@ -132,6 +146,7 @@ impl BrowserHost {
             scroll_y: 0.0,
             inner_width: 1280.0,
             inner_height: 720.0,
+            observers: Vec::new(),
         };
         host.document = host.push(DomNode::document());
         // The parsed root is an "document" element; graft its children under our
@@ -218,6 +233,133 @@ impl BrowserHost {
         if let Some(parent) = self.nodes[child].parent {
             self.nodes[parent].children.retain(|&c| c != child);
             self.nodes[child].parent = None;
+        }
+    }
+
+    // ── MutationObserver recording ──────────────────────────────────────────
+
+    /// True if `node` is `ancestor` or a descendant of it (walks parent links).
+    fn is_self_or_ancestor(&self, ancestor: usize, node: usize) -> bool {
+        let mut cur = Some(node);
+        while let Some(idx) = cur {
+            if idx == ancestor {
+                return true;
+            }
+            cur = self.nodes.get(idx).and_then(|n| n.parent);
+        }
+        false
+    }
+
+    /// Record an attribute mutation against every observer watching `target_idx`
+    /// (directly or, with `subtree`, as an ancestor) with `attributes` enabled.
+    fn record_attribute_mutation(
+        &mut self,
+        target_idx: usize,
+        name: &str,
+        old_value: Option<String>,
+    ) {
+        if self.observers.is_empty() {
+            return;
+        }
+        let mut hits: Vec<(usize, bool)> = Vec::new();
+        for (oid, slot) in self.observers.iter().enumerate() {
+            let Some(entry) = slot else { continue };
+            if entry.kind != ObserverKind::Mutation {
+                continue;
+            }
+            let mut matched = false;
+            let mut want_old = false;
+            for (obs_target, opts) in &entry.targets {
+                if !opts.attributes {
+                    continue;
+                }
+                let in_scope = *obs_target == target_idx
+                    || (opts.subtree && self.is_self_or_ancestor(*obs_target, target_idx));
+                if in_scope {
+                    matched = true;
+                    want_old |= opts.attribute_old_value;
+                }
+            }
+            if matched {
+                hits.push((oid, want_old));
+            }
+        }
+        for (oid, want_old) in hits {
+            let payload = HostData::Object(vec![
+                ("type".to_string(), HostData::String("attributes".to_string())),
+                (
+                    "attributeName".to_string(),
+                    HostData::String(name.to_string()),
+                ),
+                (
+                    "oldValue".to_string(),
+                    match (want_old, &old_value) {
+                        (true, Some(v)) => HostData::String(v.clone()),
+                        _ => HostData::Null,
+                    },
+                ),
+            ]);
+            if let Some(Some(entry)) = self.observers.get_mut(oid) {
+                entry.pending.push(ObserverRecord {
+                    target: NodeId(target_idx as u32),
+                    kind: ObserverKind::Mutation,
+                    payload,
+                });
+            }
+        }
+    }
+
+    /// Record a childList mutation (added/removed nodes) against every observer
+    /// watching `parent_idx` (directly or, with `subtree`, as an ancestor).
+    fn record_childlist_mutation(&mut self, parent_idx: usize, added: &[usize], removed: &[usize]) {
+        if self.observers.is_empty() || (added.is_empty() && removed.is_empty()) {
+            return;
+        }
+        let mut hits: Vec<usize> = Vec::new();
+        for (oid, slot) in self.observers.iter().enumerate() {
+            let Some(entry) = slot else { continue };
+            if entry.kind != ObserverKind::Mutation {
+                continue;
+            }
+            let matched = entry.targets.iter().any(|(obs_target, opts)| {
+                opts.child_list
+                    && (*obs_target == parent_idx
+                        || (opts.subtree && self.is_self_or_ancestor(*obs_target, parent_idx)))
+            });
+            if matched {
+                hits.push(oid);
+            }
+        }
+        if hits.is_empty() {
+            return;
+        }
+        let added_nodes: Vec<HostData> = added
+            .iter()
+            .map(|i| HostData::Node(NodeId(*i as u32)))
+            .collect();
+        let removed_nodes: Vec<HostData> = removed
+            .iter()
+            .map(|i| HostData::Node(NodeId(*i as u32)))
+            .collect();
+        for oid in hits {
+            let payload = HostData::Object(vec![
+                ("type".to_string(), HostData::String("childList".to_string())),
+                (
+                    "addedNodes".to_string(),
+                    HostData::Array(added_nodes.clone()),
+                ),
+                (
+                    "removedNodes".to_string(),
+                    HostData::Array(removed_nodes.clone()),
+                ),
+            ]);
+            if let Some(Some(entry)) = self.observers.get_mut(oid) {
+                entry.pending.push(ObserverRecord {
+                    target: NodeId(parent_idx as u32),
+                    kind: ObserverKind::Mutation,
+                    payload,
+                });
+            }
         }
     }
 
@@ -902,15 +1044,18 @@ impl Host for BrowserHost {
                 if !exists(&self.nodes, idx) {
                     return Err(HostError::InvalidHandle);
                 }
-                let old: Vec<usize> = self.nodes[idx].children.clone();
-                for child in old {
+                let removed: Vec<usize> = self.nodes[idx].children.clone();
+                for &child in &removed {
                     self.nodes[child].parent = None;
                 }
                 self.nodes[idx].children.clear();
+                let mut added: Vec<usize> = Vec::new();
                 if !value.is_empty() {
                     let text = self.push(DomNode::text(&value));
                     self.attach(idx, text);
+                    added.push(text);
                 }
+                self.record_childlist_mutation(idx, &added, &removed);
                 Ok(DomMutationResult::None)
             }
             DomMutation::SetInnerHtml { node, html } => {
@@ -918,7 +1063,10 @@ impl Host for BrowserHost {
                 if !exists(&self.nodes, idx) {
                     return Err(HostError::InvalidHandle);
                 }
+                let removed: Vec<usize> = self.nodes[idx].children.clone();
                 self.parse_and_set_inner_html(idx, &html);
+                let added: Vec<usize> = self.nodes[idx].children.clone();
+                self.record_childlist_mutation(idx, &added, &removed);
                 Ok(DomMutationResult::None)
             }
             DomMutation::WriteHtml { html, .. } => {
@@ -942,7 +1090,9 @@ impl Host for BrowserHost {
                 if !exists(&self.nodes, idx) {
                     return Err(HostError::InvalidHandle);
                 }
-                self.nodes[idx].attrs.insert(name, value);
+                let old = self.nodes[idx].attrs.get(&name).cloned();
+                self.nodes[idx].attrs.insert(name.clone(), value);
+                self.record_attribute_mutation(idx, &name, old);
                 Ok(DomMutationResult::None)
             }
             DomMutation::RemoveAttribute { node, name } => {
@@ -950,7 +1100,8 @@ impl Host for BrowserHost {
                 if !exists(&self.nodes, idx) {
                     return Err(HostError::InvalidHandle);
                 }
-                self.nodes[idx].attrs.remove(&name);
+                let old = self.nodes[idx].attrs.remove(&name);
+                self.record_attribute_mutation(idx, &name, old);
                 Ok(DomMutationResult::None)
             }
             DomMutation::ToggleAttribute { node, name, force } => {
@@ -959,12 +1110,14 @@ impl Host for BrowserHost {
                     return Err(HostError::InvalidHandle);
                 }
                 let present = self.nodes[idx].attrs.contains_key(&name);
+                let old = self.nodes[idx].attrs.get(&name).cloned();
                 let add = force.unwrap_or(!present);
                 if add {
-                    self.nodes[idx].attrs.entry(name).or_default();
+                    self.nodes[idx].attrs.entry(name.clone()).or_default();
                 } else {
                     self.nodes[idx].attrs.remove(&name);
                 }
+                self.record_attribute_mutation(idx, &name, old);
                 Ok(DomMutationResult::Bool(add))
             }
             DomMutation::Append { parent, children } => {
@@ -972,6 +1125,7 @@ impl Host for BrowserHost {
                 if !exists(&self.nodes, parent_idx) {
                     return Err(HostError::InvalidHandle);
                 }
+                let mut added: Vec<usize> = Vec::new();
                 for child in children {
                     let child_idx = child.0 as usize;
                     if !exists(&self.nodes, child_idx) {
@@ -979,7 +1133,9 @@ impl Host for BrowserHost {
                     }
                     self.detach(child_idx);
                     self.attach(parent_idx, child_idx);
+                    added.push(child_idx);
                 }
+                self.record_childlist_mutation(parent_idx, &added, &[]);
                 Ok(DomMutationResult::None)
             }
             DomMutation::Prepend { parent, children } => {
@@ -988,6 +1144,7 @@ impl Host for BrowserHost {
                     return Err(HostError::InvalidHandle);
                 }
                 let mut pos = 0;
+                let mut added: Vec<usize> = Vec::new();
                 for child in children {
                     let child_idx = child.0 as usize;
                     if !exists(&self.nodes, child_idx) {
@@ -997,7 +1154,9 @@ impl Host for BrowserHost {
                     self.nodes[child_idx].parent = Some(parent_idx);
                     self.nodes[parent_idx].children.insert(pos, child_idx);
                     pos += 1;
+                    added.push(child_idx);
                 }
+                self.record_childlist_mutation(parent_idx, &added, &[]);
                 Ok(DomMutationResult::None)
             }
             DomMutation::InsertBefore {
@@ -1023,6 +1182,7 @@ impl Host for BrowserHost {
                     }
                     None => self.nodes[parent_idx].children.push(child_idx),
                 }
+                self.record_childlist_mutation(parent_idx, &[child_idx], &[]);
                 Ok(DomMutationResult::None)
             }
             DomMutation::ReplaceChild {
@@ -1045,6 +1205,7 @@ impl Host for BrowserHost {
                     self.nodes[new_idx].parent = Some(parent_idx);
                     self.nodes[old_idx].parent = None;
                     self.nodes[parent_idx].children[pos] = new_idx;
+                    self.record_childlist_mutation(parent_idx, &[new_idx], &[old_idx]);
                 }
                 Ok(DomMutationResult::None)
             }
@@ -1053,7 +1214,13 @@ impl Host for BrowserHost {
                 if !exists(&self.nodes, idx) {
                     return Err(HostError::InvalidHandle);
                 }
+                // Capture the parent before detaching so the childList record
+                // (removedNodes) is attributed to the old parent.
+                let old_parent = self.nodes[idx].parent;
                 self.detach(idx);
+                if let Some(parent_idx) = old_parent {
+                    self.record_childlist_mutation(parent_idx, &[], &[idx]);
+                }
                 Ok(DomMutationResult::None)
             }
             DomMutation::SetScrollOffset { .. } | DomMutation::SetWindowScroll { .. } => {
@@ -1116,8 +1283,49 @@ impl Host for BrowserHost {
     fn storage(&mut self, _op: StorageOp) -> HostResult<StorageResult> {
         Ok(StorageResult::None)
     }
-    fn observer(&mut self, _op: ObserverOp) -> HostResult<ObserverResult> {
-        Err(HostError::Unsupported)
+    fn observer(&mut self, op: ObserverOp) -> HostResult<ObserverResult> {
+        match op {
+            ObserverOp::Create { kind } => {
+                let id = self.observers.len() as u64;
+                self.observers.push(Some(ObserverEntry {
+                    kind,
+                    targets: Vec::new(),
+                    pending: Vec::new(),
+                }));
+                Ok(ObserverResult::Created(ObserverId(id)))
+            }
+            ObserverOp::Observe {
+                observer,
+                target,
+                options,
+            } => {
+                let target_idx = target.0 as usize;
+                if target_idx >= self.nodes.len() {
+                    return Err(HostError::InvalidHandle);
+                }
+                if let Some(Some(entry)) = self.observers.get_mut(observer.0 as usize) {
+                    // Per spec, re-observing the same target replaces its options.
+                    entry.targets.retain(|(idx, _)| *idx != target_idx);
+                    entry.targets.push((target_idx, options));
+                    Ok(ObserverResult::None)
+                } else {
+                    Err(HostError::InvalidHandle)
+                }
+            }
+            ObserverOp::Disconnect { observer } => {
+                if let Some(slot) = self.observers.get_mut(observer.0 as usize) {
+                    *slot = None;
+                }
+                Ok(ObserverResult::None)
+            }
+            ObserverOp::TakeRecords { observer } => {
+                if let Some(Some(entry)) = self.observers.get_mut(observer.0 as usize) {
+                    Ok(ObserverResult::Records(std::mem::take(&mut entry.pending)))
+                } else {
+                    Ok(ObserverResult::Records(Vec::new()))
+                }
+            }
+        }
     }
     fn now(&self) -> HostTimeSnapshot {
         let unix_ms = std::time::SystemTime::now()
@@ -1673,6 +1881,111 @@ mod tests {
         );
         let snap = session.snapshot();
         assert_eq!(snap.html.matches("<li>hit</li>").count(), 2);
+    }
+
+    #[test]
+    fn mutation_observer_reports_childlist() {
+        // A childList MutationObserver delivers added nodes; the callback runs at
+        // the microtask checkpoint (before the initial snapshot).
+        let html = r#"<html><body>
+            <div id="target"></div>
+            <div id="out">none</div>
+            <script>
+                const obs = new MutationObserver((records) => {
+                    const r = records[0];
+                    document.getElementById('out').textContent =
+                        'n=' + records.length + ' type=' + r.type +
+                        ' added=' + r.addedNodes.length;
+                });
+                obs.observe(document.getElementById('target'), { childList: true });
+                const el = document.createElement('span');
+                document.getElementById('target').appendChild(el);
+            </script>
+        </body></html>"#;
+        let (_session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "error: {:?}", initial.error);
+        assert!(
+            initial.html.contains(">n=1 type=childList added=1</div>"),
+            "observer callback did not deliver childList record, html: {}",
+            initial.html
+        );
+    }
+
+    #[test]
+    fn mutation_observer_reports_attributes_with_old_value() {
+        let html = r#"<html><body>
+            <div id="target"></div>
+            <div id="out">none</div>
+            <script>
+                const obs = new MutationObserver((records) => {
+                    const r = records[records.length - 1];
+                    document.getElementById('out').textContent =
+                        r.type + ':' + r.attributeName + ':' + r.oldValue;
+                });
+                const t = document.getElementById('target');
+                obs.observe(t, { attributes: true, attributeOldValue: true });
+                t.setAttribute('data-x', 'one');
+                t.setAttribute('data-x', 'two');
+            </script>
+        </body></html>"#;
+        let (_session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "error: {:?}", initial.error);
+        // Last record: data-x changed from 'one' to 'two'.
+        assert!(
+            initial.html.contains(">attributes:data-x:one</div>"),
+            "observer did not report attribute oldValue, html: {}",
+            initial.html
+        );
+    }
+
+    #[test]
+    fn mutation_observer_disconnect_stops_delivery() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body>
+            <button id="btn">go</button>
+            <div id="target"></div>
+            <div id="out">start</div>
+            <script>
+                let hits = 0;
+                const obs = new MutationObserver((records) => {
+                    hits += records.length;
+                    document.getElementById('out').textContent = 'hits=' + hits;
+                });
+                obs.observe(document.getElementById('target'), { childList: true });
+                document.getElementById('btn').addEventListener('click', () => {
+                    obs.disconnect();
+                    document.getElementById('target').appendChild(document.createElement('i'));
+                    document.getElementById('out').textContent = 'after-disconnect';
+                });
+                // First mutation (observed) fires the callback at the checkpoint.
+                document.getElementById('target').appendChild(document.createElement('b'));
+            </script>
+        </body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "error: {:?}", initial.error);
+        assert!(
+            initial.html.contains(">hits=1</div>"),
+            "first observed mutation should deliver, html: {}",
+            initial.html
+        );
+
+        // After disconnect, the mutation in the click handler must NOT fire it.
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let btn_id = find_node_id_by_attr(&tree, "id", "btn").expect("button id");
+        let after = session.dispatch_event(btn_id, "click", &DomEventInit::default());
+        assert!(
+            after.html.contains(">after-disconnect</div>"),
+            "click handler should have run, html: {}",
+            after.html
+        );
+        assert!(
+            !after.html.contains(">hits=2</div>"),
+            "disconnected observer must not deliver further records, html: {}",
+            after.html
+        );
     }
 
     #[test]
