@@ -113,6 +113,17 @@
   </section>
 
   <section>
+    <h2>★ ミニフレームワーク (React風) — 状態 + 再描画 + イベント委譲</h2>
+    <p class="hint">
+      <code>createElement</code> 相当の要素ファクトリ + 状態 + 再描画 + ルート1個での
+      イベント委譲(バブリング)で動く小さなフレームワーク。ボタンは毎回作り直されるが、
+      ルートに付けた1個のリスナがクリックを拾って動き続ければ React 的レンダリングがOK。
+    </p>
+    <div id="fw-root"></div>
+    <p id="fw-status" class="frames">委譲リスナ: （まだ）</p>
+  </section>
+
+  <section>
     <h2>1. カウンター — click → textContent</h2>
     <button id="inc">+1 する</button>
     <span id="count" class="count">0</span>
@@ -241,6 +252,43 @@
     document.getElementById('mo-attr').addEventListener('click', () => {
       moBox.setAttribute('data-count', String(moItems));
     });
+
+    // --- ★ ミニフレームワーク (React風: 状態 + 再描画 + イベント委譲) ---
+    function h(tag, props, ...children) {
+      const el = document.createElement(tag);
+      const p = props || {};
+      for (const k of Object.keys(p)) {
+        if (k === 'onClick') el.addEventListener('click', p[k]);
+        else if (k === 'className') el.className = p[k];
+        else el.setAttribute(k, p[k]);
+      }
+      for (const child of children.flat()) {
+        el.appendChild(typeof child === 'object' ? child : document.createTextNode(String(child)));
+      }
+      return el;
+    }
+    const fwState = { count: 0 };
+    const fwRoot = document.getElementById('fw-root');
+    function fwRender() {
+      fwRoot.innerHTML = '';
+      fwRoot.appendChild(
+        h('div', { className: 'box' },
+          h('button', { id: 'fw-inc', onClick: () => { fwState.count++; fwRender(); } },
+            'フレームワークで描画: ', fwState.count),
+          h('span', { style: 'margin-left:10px;' }, '(ボタンは毎回再生成)')
+        )
+      );
+    }
+    // ルート1個の委譲リスナ:再描画でボタンが作り替わっても効き続ける。
+    fwRoot.addEventListener('click', (e) => {
+      if (e.target && e.target.tagName && e.target.tagName.toLowerCase() === 'button') {
+        document.getElementById('fw-status').textContent =
+          '委譲リスナ: target=' + (e.target.id || '?') +
+          ' / currentTarget=' + (e.currentTarget.id || '?') +
+          ' / 累計クリック=' + fwState.count;
+      }
+    });
+    fwRender();
 
     // --- 1. カウンター ---
     let n = 0;
