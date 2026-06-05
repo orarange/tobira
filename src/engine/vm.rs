@@ -1085,6 +1085,9 @@ enum GeneratorOutcome {
 
 /// Well-known symbol id for `Symbol.iterator`.
 const SYMBOL_ITERATOR_ID: u32 = 1;
+/// Well-known symbol id for `Symbol.toPrimitive` (see the registration table in
+/// the global setup: iterator=1, asyncIterator=2, hasInstance=3, toPrimitive=4).
+const SYMBOL_TO_PRIMITIVE_ID: u32 = 4;
 /// First id available to user-created `Symbol(...)` values.
 const FIRST_USER_SYMBOL: u32 = 16;
 
@@ -1642,7 +1645,8 @@ impl Vm {
             Opcode::UShr => self.binary_unsigned_shift()?,
             Opcode::Neg => {
                 let value = self.pop_value()?;
-                self.stack.push(Value::Number(-self.to_number(&value)));
+                let n = self.to_number_coerced(&value)?;
+                self.stack.push(Value::Number(-n));
             }
             Opcode::Not => {
                 let value = self.pop_value()?;
@@ -1655,7 +1659,8 @@ impl Vm {
             }
             Opcode::ToNumber => {
                 let value = self.pop_value()?;
-                self.stack.push(Value::Number(self.to_number(&value)));
+                let n = self.to_number_coerced(&value)?;
+                self.stack.push(Value::Number(n));
             }
             Opcode::Typeof => {
                 let value = self.pop_value()?;
@@ -2382,6 +2387,10 @@ impl Vm {
         self.define_builtin_method(array_prototype, "indexOf", BuiltinId::ArrayProtoIndexOf);
         self.define_builtin_method(array_prototype, "includes", BuiltinId::ArrayProtoIncludes);
         self.define_builtin_method(array_prototype, "join", BuiltinId::ArrayProtoJoin);
+        // Array.prototype.toString delegates to join(',') — so `'' + [1,2,3]`,
+        // `\`${[1,2]}\``, and String([1,2]) yield "1,2,3" rather than
+        // "[object Object]" (ToPrimitive falls through to toString for arrays).
+        self.define_builtin_method(array_prototype, "toString", BuiltinId::ArrayProtoJoin);
         self.define_builtin_method(array_prototype, "slice", BuiltinId::ArrayProtoSlice);
         self.define_builtin_method(array_prototype, "concat", BuiltinId::ArrayProtoConcat);
         self.define_builtin_method(array_prototype, "flat", BuiltinId::ArrayProtoFlat);
@@ -4970,6 +4979,69 @@ impl Vm {
         }
     }
 
+    /// ECMAScript `ToPrimitive`. `prefer`: `Some(true)` = string hint,
+    /// `Some(false)` = number hint, `None` = default. Honors `Symbol.toPrimitive`,
+    /// then `valueOf`/`toString` in the hint-appropriate order. Non-objects are
+    /// returned unchanged. This is what makes `'' + obj`, `+obj`, `obj * 2`,
+    /// template `${obj}`, and `'' + [1,2,3]` (Array.prototype.toString) work.
+    fn to_primitive(&mut self, value: &Value, prefer: Option<bool>) -> Result<Value, VmError> {
+        if !matches!(value, Value::Object(_)) {
+            return Ok(value.clone());
+        }
+        // 1. Exotic @@toPrimitive, if present and callable.
+        let exotic = self.get_property_value(
+            value,
+            &PropertyKey::Symbol(SymbolId(SYMBOL_TO_PRIMITIVE_ID)),
+        )?;
+        if self.is_callable_value(&exotic) {
+            let hint = match prefer {
+                Some(true) => "string",
+                Some(false) => "number",
+                None => "default",
+            };
+            let hint_val = self.make_string_value(hint);
+            let result = self.call_value_sync(exotic, value.clone(), vec![hint_val])?;
+            if matches!(result, Value::Object(_)) {
+                return Err(VmError::TypeError(
+                    "Symbol.toPrimitive must return a primitive value".to_string(),
+                ));
+            }
+            return Ok(result);
+        }
+        // 2. OrdinaryToPrimitive: try valueOf/toString in hint order.
+        let methods: [&str; 2] = if prefer == Some(true) {
+            ["toString", "valueOf"]
+        } else {
+            ["valueOf", "toString"]
+        };
+        for name in methods {
+            let method = self.get_property_value(value, &PropertyKey::from(name))?;
+            if self.is_callable_value(&method) {
+                let result = self.call_value_sync(method, value.clone(), Vec::new())?;
+                if !matches!(result, Value::Object(_)) {
+                    return Ok(result);
+                }
+            }
+        }
+        Err(VmError::TypeError(
+            "cannot convert object to a primitive value".to_string(),
+        ))
+    }
+
+    /// `ToNumber` that first runs `ToPrimitive` (number hint) so objects with
+    /// `valueOf`/`Symbol.toPrimitive` coerce correctly.
+    fn to_number_coerced(&mut self, value: &Value) -> Result<f64, VmError> {
+        let primitive = self.to_primitive(value, Some(false))?;
+        Ok(self.to_number(&primitive))
+    }
+
+    /// `ToString` that first runs `ToPrimitive` (string hint) so objects with
+    /// `toString`/`Symbol.toPrimitive` (and arrays) coerce correctly.
+    fn to_string_coerced(&mut self, value: &Value) -> Result<String, VmError> {
+        let primitive = self.to_primitive(value, Some(true))?;
+        Ok(self.to_string(&primitive))
+    }
+
     fn format_number(number: f64) -> String {
         if number.is_nan() {
             return "NaN".to_string();
@@ -5093,6 +5165,10 @@ impl Vm {
     fn binary_add(&mut self) -> Result<(), VmError> {
         let rhs = self.pop_value()?;
         let lhs = self.pop_value()?;
+        // ToPrimitive(default) both operands first (objects/arrays → primitives),
+        // then string-concat if either side is now a string, else numeric add.
+        let lhs = self.to_primitive(&lhs, None)?;
+        let rhs = self.to_primitive(&rhs, None)?;
         if matches!(lhs, Value::String(_)) || matches!(rhs, Value::String(_)) {
             let text = format!("{}{}", self.to_string(&lhs), self.to_string(&rhs));
             let string_value = self.make_string_value(&text);
@@ -5110,10 +5186,9 @@ impl Vm {
     {
         let rhs = self.pop_value()?;
         let lhs = self.pop_value()?;
-        self.stack.push(Value::Number(operator(
-            self.to_number(&lhs),
-            self.to_number(&rhs),
-        )));
+        let lhs = self.to_number_coerced(&lhs)?;
+        let rhs = self.to_number_coerced(&rhs)?;
+        self.stack.push(Value::Number(operator(lhs, rhs)));
         Ok(())
     }
 
@@ -5133,6 +5208,10 @@ impl Vm {
     {
         let rhs = self.pop_value()?;
         let lhs = self.pop_value()?;
+        // Relational comparison runs ToPrimitive(number hint) on both sides; if
+        // both come back as strings, compare lexicographically, else numerically.
+        let lhs = self.to_primitive(&lhs, Some(false))?;
+        let rhs = self.to_primitive(&rhs, Some(false))?;
         let result = match (&lhs, &rhs) {
             (Value::String(left), Value::String(right)) => {
                 self.string_text(*left).cmp(&self.string_text(*right))
@@ -11179,6 +11258,13 @@ impl Vm {
                 };
                 let updated = set_inline_style_prop(&existing, &css_prop, &new_val);
                 let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "style".to_string(), value: updated });
+            }
+            HostObjectClass::Window => {
+                // `globalThis`/`window`/`self` IS the global object, so an expando
+                // assignment (`window.X = …`, `globalThis.X = …`) creates/updates
+                // a global binding. Frameworks rely on this (`window.React`,
+                // feature-detection flags, UMD globals, …).
+                self.globals.insert(name, value);
             }
             _ => {}
         }
