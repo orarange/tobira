@@ -847,3 +847,80 @@ fn element_remove() {
     });
     assert!(!has_divs, "div should have been removed from body");
 }
+
+// ---------------------------------------------------------------------------
+// XMLHttpRequest (synchronous under the hood via Host::fetch_sync)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn xhr_basic_get_fires_onload() {
+    let mut vm = make_vm();
+    run(&mut vm, r#"
+        let out = '';
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/data.json');
+        xhr.onload = function () {
+            out = xhr.status + '|' + xhr.readyState + '|' + xhr.responseText;
+        };
+        xhr.send();
+    "#);
+    run(&mut vm, r#"assert(out === '200|4|{"message":"hello","n":42}', 'got: ' + out);"#);
+}
+
+#[test]
+fn xhr_onreadystatechange_at_done() {
+    let mut vm = make_vm();
+    run(&mut vm, r#"
+        let done = false;
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/x');
+        xhr.onreadystatechange = function () {
+            if (xhr.readyState === 4 && xhr.status === 200) done = true;
+        };
+        xhr.send();
+    "#);
+    run(&mut vm, "assert(done === true);");
+}
+
+#[test]
+fn xhr_response_type_json() {
+    let mut vm = make_vm();
+    run(&mut vm, r#"
+        let n = 0; let msg = '';
+        const xhr = new XMLHttpRequest();
+        xhr.responseType = 'json';
+        xhr.open('GET', '/x');
+        xhr.onload = function () { n = xhr.response.n; msg = xhr.response.message; };
+        xhr.send();
+    "#);
+    run(&mut vm, "assert(n === 42 && msg === 'hello');");
+}
+
+#[test]
+fn xhr_get_response_header() {
+    let mut vm = make_vm();
+    run(&mut vm, r#"
+        let ct = '';
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/x');
+        xhr.onload = function () { ct = xhr.getResponseHeader('Content-Type'); };
+        xhr.send();
+    "#);
+    run(&mut vm, "assert(ct === 'application/json', 'got: ' + ct);");
+}
+
+#[test]
+fn xhr_post_with_request_header() {
+    let mut vm = make_vm();
+    // The canned host echoes a fixed body; here we just verify the POST path
+    // runs end to end (open/setRequestHeader/send/onload) without error.
+    run(&mut vm, r#"
+        let ok = false;
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/submit');
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.onload = function () { ok = xhr.status === 200; };
+        xhr.send(JSON.stringify({ a: 1 }));
+    "#);
+    run(&mut vm, "assert(ok === true);");
+}
