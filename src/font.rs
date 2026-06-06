@@ -133,6 +133,47 @@ impl FontContext {
         line_through: bool,
         font_family: FontFamilyKind,
     ) {
+        self.draw_text_i32(
+            buffer,
+            width,
+            height,
+            x as i32,
+            y as i32,
+            text,
+            font_size_px,
+            color,
+            bold,
+            underline,
+            line_through,
+            font_family,
+            i32::MIN,
+        );
+    }
+
+    /// Same as [`draw_text`] but accepts a signed top-y so callers can draw text
+    /// that straddles the top edge of the viewport (negative y). Glyph rows above
+    /// the buffer are clipped by `draw_cached_glyph`/`blend_pixel`. This is required
+    /// for correct scrolling: a line whose top is above the viewport must be drawn
+    /// shifted up (partially clipped), NOT clamped to y=0 — clamping pins the line at
+    /// the top edge so following lines collide with it, producing the "content
+    /// crushed/ghosted toward the top while scrolling" artifact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_i32(
+        &mut self,
+        buffer: &mut [u32],
+        width: u32,
+        height: u32,
+        x: i32,
+        y: i32,
+        text: &str,
+        font_size_px: u32,
+        color: Color,
+        bold: bool,
+        underline: bool,
+        line_through: bool,
+        font_family: FontFamilyKind,
+        clip_top: i32,
+    ) {
         let mut cursor_x = x;
 
         for character in text.chars() {
@@ -141,59 +182,47 @@ impl FontContext {
             }
 
             let glyph = self.cached_glyph(character, font_size_px, font_family);
-            draw_cached_glyph(
-                buffer,
-                width,
-                height,
-                cursor_x as i32,
-                y as i32,
-                glyph,
-                color,
-            );
+            draw_cached_glyph(buffer, width, height, cursor_x, y, glyph, color, clip_top);
 
             if bold {
-                draw_cached_glyph(
-                    buffer,
-                    width,
-                    height,
-                    cursor_x as i32 + 1,
-                    y as i32,
-                    glyph,
-                    color,
-                );
+                draw_cached_glyph(buffer, width, height, cursor_x + 1, y, glyph, color, clip_top);
             }
 
-            cursor_x = cursor_x.saturating_add(glyph.advance_px);
+            cursor_x = cursor_x.saturating_add(glyph.advance_px as i32);
         }
 
         if underline && !text.is_empty() {
             let underline_y = y
-                .saturating_add(font_size_px)
-                .saturating_add((font_size_px / 10).max(1));
-            draw_rect(
-                buffer,
-                width,
-                height,
-                x,
-                underline_y,
-                self.text_width_px(text, font_size_px, font_family),
-                (font_size_px / 12).max(1),
-                color,
-            );
+                .saturating_add(font_size_px as i32)
+                .saturating_add((font_size_px / 10).max(1) as i32);
+            if underline_y >= 0 {
+                draw_rect(
+                    buffer,
+                    width,
+                    height,
+                    x.max(0) as u32,
+                    underline_y as u32,
+                    self.text_width_px(text, font_size_px, font_family),
+                    (font_size_px / 12).max(1),
+                    color,
+                );
+            }
         }
 
         if line_through && !text.is_empty() {
-            let line_through_y = y.saturating_add(font_size_px * 55 / 100);
-            draw_rect(
-                buffer,
-                width,
-                height,
-                x,
-                line_through_y,
-                self.text_width_px(text, font_size_px, font_family),
-                (font_size_px / 12).max(1),
-                color,
-            );
+            let line_through_y = y.saturating_add((font_size_px * 55 / 100) as i32);
+            if line_through_y >= 0 {
+                draw_rect(
+                    buffer,
+                    width,
+                    height,
+                    x.max(0) as u32,
+                    line_through_y as u32,
+                    self.text_width_px(text, font_size_px, font_family),
+                    (font_size_px / 12).max(1),
+                    color,
+                );
+            }
         }
     }
 
@@ -476,6 +505,7 @@ fn draw_cached_glyph(
     y: i32,
     glyph: &CachedGlyph,
     color: Color,
+    clip_top: i32,
 ) {
     match &glyph.mode {
         GlyphMode::Vector {
@@ -499,10 +529,11 @@ fn draw_cached_glyph(
                 *glyph_height,
                 bitmap,
                 color,
+                clip_top,
             );
         }
         GlyphMode::Bitmap { glyph, scale } => {
-            draw_bitmap_fallback(buffer, width, height, x, y, *glyph, *scale, color);
+            draw_bitmap_fallback(buffer, width, height, x, y, *glyph, *scale, color, clip_top);
         }
     }
 }
@@ -517,8 +548,15 @@ fn blend_bitmap(
     glyph_height: u32,
     bitmap: &[u8],
     color: Color,
+    clip_top: i32,
 ) {
     for row in 0..glyph_height {
+        let py = y + row as i32;
+        // Clip rows above the content viewport top so text straddling the top edge
+        // doesn't bleed up into the chrome (address bar) area that was painted first.
+        if py < clip_top {
+            continue;
+        }
         for column in 0..glyph_width {
             let alpha = bitmap[row as usize * glyph_width as usize + column as usize];
             if alpha == 0 {
@@ -530,7 +568,7 @@ fn blend_bitmap(
                 width,
                 height,
                 x + column as i32,
-                y + row as i32,
+                py,
                 color,
                 alpha,
             );
@@ -578,6 +616,7 @@ fn draw_bitmap_fallback(
     glyph: [u8; 8],
     scale: u32,
     color: Color,
+    clip_top: i32,
 ) {
     for (row_index, row) in glyph.into_iter().enumerate() {
         for column in 0..8 {
@@ -589,13 +628,17 @@ fn draw_bitmap_fallback(
             let draw_y = y + (row_index as u32 * scale) as i32;
 
             for offset_y in 0..scale {
+                let py = draw_y + offset_y as i32;
+                if py < clip_top {
+                    continue;
+                }
                 for offset_x in 0..scale {
                     blend_pixel(
                         buffer,
                         width,
                         height,
                         draw_x + offset_x as i32,
-                        draw_y + offset_y as i32,
+                        py,
                         color,
                         255,
                     );

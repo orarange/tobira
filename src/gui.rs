@@ -745,21 +745,6 @@ impl BrowserApp {
             .map(|frame| frame.content_height)
             .unwrap_or(layout.content_height);
         let max_scroll_y = max_scroll(viewport_height, content_height);
-        if std::env::var_os("TOBIRA_DEBUG_SCROLL").is_some() {
-            eprintln!(
-                "[draw] scroll_y={} match={} frame(scroll={:?} cw={:?} ch={:?}) layout_ch={} content_h={} vp_h={} cw={} max_scroll={}",
-                self.scroll_y,
-                frame_matches,
-                self.latest_render_frame.as_ref().map(|f| f.scroll_y),
-                self.latest_render_frame.as_ref().map(|f| f.content_width),
-                self.latest_render_frame.as_ref().map(|f| f.content_height),
-                layout.content_height,
-                content_height,
-                viewport_height,
-                content_width,
-                max_scroll_y,
-            );
-        }
         // Only clamp when we have a real content height. A 0 here means the
         // height is momentarily unknown (e.g. layout cache invalidated by an
         // animation tick before the next render lands); clamping to it would snap
@@ -1713,12 +1698,6 @@ impl BrowserApp {
             }
         }
 
-        if std::env::var_os("TOBIRA_DEBUG_SCROLL").is_some() {
-            eprintln!(
-                "[wheel] prev={} -> scroll_y={} (content_metrics: vp_h={} content_h={})",
-                previous_scroll_y, self.scroll_y, viewport_height, content_height
-            );
-        }
         if self.scroll_y != previous_scroll_y {
             self.sync_scroll_position();
         }
@@ -4313,16 +4292,26 @@ fn render_commands(
                         );
                     }
                 } else {
-                    draw_rect(
-                        buffer,
-                        width,
-                        height,
-                        offset_x.saturating_add(rect.x),
-                        offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
-                        rect.width,
-                        rect.height,
-                        rect.color,
-                    );
+                    // Clip the top when the rect straddles the viewport top edge
+                    // (rect.y < scroll_y). draw_rect takes an unsigned y, so without
+                    // reducing the height here the rect would be drawn at the clamped
+                    // top (offset_y) with its FULL height — i.e. too tall by
+                    // (scroll_y - rect.y) — pushing its bottom down and overlapping
+                    // content below while scrolling. Mirror the border-radius path.
+                    let clipped = scroll_y.saturating_sub(rect.y);
+                    let draw_h = rect.height.saturating_sub(clipped);
+                    if draw_h > 0 {
+                        draw_rect(
+                            buffer,
+                            width,
+                            height,
+                            offset_x.saturating_add(rect.x),
+                            offset_y.saturating_add(rect.y.saturating_sub(scroll_y)),
+                            rect.width,
+                            draw_h,
+                            rect.color,
+                        );
+                    }
                 }
             }
             DrawCommand::Text(text) => {
@@ -4333,12 +4322,20 @@ fn render_commands(
                     continue;
                 }
                 let text_draw_x = offset_x.saturating_add(text.x);
-                let text_draw_y = offset_y.saturating_add(text.y.saturating_sub(scroll_y));
+                // Signed screen-y: a line whose top is above the viewport (text.y <
+                // scroll_y) must be drawn shifted UP (partially clipped), not clamped
+                // to the top edge. Clamping pins the line at offset_y so the lines
+                // below collide with it — the "crushed/ghosted toward the top while
+                // scrolling" bug. clip_top = offset_y keeps glyphs from bleeding up
+                // into the chrome (the chrome is painted before the content).
+                let text_draw_y =
+                    offset_y as i64 + text.y as i64 - scroll_y as i64;
+                let clip_top = offset_y as i32;
                 // Draw text shadow first (behind main text)
                 if let Some(ref shadow) = text.text_shadow {
-                    let shadow_x = (text_draw_x as i64 + shadow.offset_x as i64).max(0) as u32;
-                    let shadow_y = (text_draw_y as i64 + shadow.offset_y as i64).max(0) as u32;
-                    fonts.draw_text(
+                    let shadow_x = (text_draw_x as i64 + shadow.offset_x as i64).max(0) as i32;
+                    let shadow_y = (text_draw_y + shadow.offset_y as i64) as i32;
+                    fonts.draw_text_i32(
                         buffer,
                         width,
                         height,
@@ -4351,14 +4348,15 @@ fn render_commands(
                         false,
                         false,
                         text.font_family,
+                        clip_top,
                     );
                 }
-                fonts.draw_text(
+                fonts.draw_text_i32(
                     buffer,
                     width,
                     height,
-                    text_draw_x,
-                    text_draw_y,
+                    text_draw_x as i32,
+                    text_draw_y as i32,
                     &text.text,
                     text.font_size_px,
                     text.color,
@@ -4366,6 +4364,7 @@ fn render_commands(
                     text.underline,
                     text.line_through,
                     text.font_family,
+                    clip_top,
                 );
             }
             DrawCommand::Image(image) => {
@@ -4829,6 +4828,16 @@ fn render_layer(
     // This gives us an exclusive &mut to `offscreen` while leaving `scratch` free to pass
     // to render_commands for nested layers — no aliasing, no unsafe needed.
     let mut offscreen = std::mem::take(&mut scratch[depth]);
+    // Zero the ENTIRE offscreen before use. The Vec is pooled and reused across
+    // frames (mem::take preserves capacity), and `resize` only zero-fills NEWLY
+    // grown elements — it leaves any pre-existing elements untouched. We only copy
+    // the backdrop into the *visible* rows below, so without this clear the
+    // non-visible rows would retain stale pixels from a previous frame (rendered at
+    // a different scroll position). `apply_affine_transform` (scale/rotate) samples
+    // the WHOLE offscreen, so those stale rows get transformed into the visible area
+    // and show up as ghosting/duplicated content while scrolling. Clearing first
+    // keeps the pooled capacity (no realloc) while guaranteeing a clean slate.
+    offscreen.clear();
     offscreen.resize(needed, 0);
 
     // Copy backdrop from the main framebuffer into the visible rows of the offscreen.
@@ -5674,6 +5683,75 @@ mod tests {
         assert!(
             row <= 4,
             "marker should be at the viewport top at scroll 300, got row {row}"
+        );
+    }
+
+    #[test]
+    fn straddling_band_is_clipped_not_stretched_at_viewport_top() {
+        // Regression: a box whose top is above the viewport (scrolled partway off the
+        // top) must be drawn shifted up and clipped — NOT clamped to the top edge with
+        // its full height. Clamping makes it too tall, so it covers the content that
+        // should appear below it ("crushed/ghosted toward the top" while scrolling).
+        use super::{render_content_frame, HitTarget, RenderPageSnapshot, RenderRequest};
+        use crate::css::{build_styled_tree, parse_stylesheet, InteractiveState};
+        use crate::html::parse_document;
+        use crate::image::ImageStore;
+
+        // marker (#abcdef) at y[300,360); green (#00ff00) directly below at y[360,...).
+        let html = "<div style=\"height:300px;background:#111111\"></div>\
+                    <div style=\"height:60px;background:#abcdef\"></div>\
+                    <div style=\"height:1000px;background:#00ff00\"></div>";
+        let styled = build_styled_tree(
+            &parse_document(html),
+            &parse_stylesheet(""),
+            1280,
+            &InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+
+        // scroll 330: marker spans screen rows [-30, 30) → visible rows 0..30,
+        // green begins at row 30.
+        let frame = render_content_frame(
+            RenderRequest {
+                id: 1,
+                content_width: 400,
+                viewport_height: 200,
+                scroll_y: 330,
+                page: RenderPageSnapshot {
+                    styled_document: styled.clone(),
+                    images: ImageStore::default(),
+                },
+                focused_page_input: None,
+                hovered_target: HitTarget::None,
+            },
+            &mut fonts,
+        )
+        .expect("render");
+
+        let w = frame.content_width as usize;
+        let row_has = |row: u32, color: u32| -> bool {
+            let s = row as usize * w;
+            frame.pixels[s..s + w].iter().any(|&p| p == color)
+        };
+        let first_row = |color: u32| -> Option<u32> {
+            (0..frame.viewport_height).find(|&r| row_has(r, color))
+        };
+
+        let marker = 0x00AB_CDEFu32;
+        let green = 0x0000_FF00u32;
+
+        // Marker is at the very top.
+        assert_eq!(first_row(marker), Some(0), "marker should start at row 0");
+        // Green begins ~row 30 (marker is only 30px tall on screen).
+        let green_top = first_row(green).expect("green band should be visible");
+        assert!(
+            (26..=34).contains(&green_top),
+            "green should begin ~row 30, got {green_top}"
+        );
+        // The marker must NOT have been stretched down over the green band.
+        assert!(
+            !row_has(45, marker),
+            "marker bled past its clipped height into the green band (stretched)"
         );
     }
 
