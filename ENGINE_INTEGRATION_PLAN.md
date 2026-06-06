@@ -174,9 +174,14 @@ gaps from a scan of `vm.rs` vs `js.rs`:
   `attributes` (with `attributeOldValue`) + `subtree`, delivering
   `MutationRecord`s (`type`/`target`/`addedNodes`/`removedNodes`/`attributeName`
   /`oldValue`) at the microtask checkpoint. `BrowserHost` records mutations from
-  `mutate_dom`; the VM owns the callbacks and delivers them. Still missing:
-  `ResizeObserver`, `IntersectionObserver` (need layout geometry), and
-  `characterData` records.
+  `mutate_dom`; the VM owns the callbacks and delivers them.
+  **`IntersectionObserver` ✅ done** (#73): the browser feeds element geometry
+  from layout into the host (`getBoundingClientRect`/`offsetWidth` are now real
+  too); on each geometry/scroll feed the host recomputes target-vs-viewport
+  intersection and the VM delivers entries (`isIntersecting`/`intersectionRatio`
+  /`boundingClientRect`/`rootBounds`) on state change. `observe`/`unobserve`/
+  `disconnect`/`takeRecords` supported (lazy-load / infinite-scroll work). Still
+  missing: `ResizeObserver` and `characterData` mutation records.
 - **Networking JS**: `fetch(...)` global + `Response`/`Headers` ✅ **done**
   (synchronous via `Host::fetch_sync`; returns a resolved `Promise<Response>`
   with `ok`/`status`/`statusText`/`url`/`headers.get()`/`text()`/`json()`;
