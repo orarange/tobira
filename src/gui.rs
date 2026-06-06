@@ -523,6 +523,9 @@ impl BrowserApp {
                     revision: self.document.layout_revision(),
                     layout: frame.layout.clone(),
                 });
+                // Feed element geometry to the JS session so getBoundingClientRect
+                // / offsetWidth etc. return real values (engine path).
+                self.document.feed_geometry(&frame.layout);
                 self.latest_render_frame = Some(frame);
                 self.has_rendered_once = true;
                 self.sync_current_history_scroll();
@@ -2357,6 +2360,21 @@ impl DocumentView {
             self.layout_cache = None;
         }
         scrolled
+    }
+
+    /// Feed element geometry from the latest layout into the page's JS session,
+    /// so `getBoundingClientRect` / `offsetWidth` return real values.
+    fn feed_geometry(&self, layout: &LayoutDocument) {
+        if let DocumentContent::Loaded(page) = &self.content {
+            if page.javascript_session.is_some() {
+                let rects: Vec<(usize, f32, f32, f32, f32)> = layout
+                    .element_hitboxes
+                    .iter()
+                    .map(|h| (h.node_id, h.x as f32, h.y as f32, h.width as f32, h.height as f32))
+                    .collect();
+                page.set_geometry(rects);
+            }
+        }
     }
 
     /// Whether the active page's JS engine still has pending event-loop work

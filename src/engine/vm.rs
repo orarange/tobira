@@ -9538,15 +9538,26 @@ impl Vm {
                 Ok(match res { Ok(DomReadResult::Bool(b)) => Value::Bool(b), _ => Value::Bool(false) })
             }
             BuiltinId::DomNodeGetBoundingClientRect => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let (x, y, w, h) = match self
+                    .host
+                    .read_dom(DomRead::BoundingClientRect { node: node_id })
+                {
+                    Ok(DomReadResult::Rect(r)) => (r.x, r.y, r.width, r.height),
+                    _ => (0.0, 0.0, 0.0, 0.0),
+                };
                 let rect_obj = self.allocate_ordinary_object(None);
-                self.define_data_property(rect_obj, PropertyKey::from("x"), Value::Number(0.0), true, true, true);
-                self.define_data_property(rect_obj, PropertyKey::from("y"), Value::Number(0.0), true, true, true);
-                self.define_data_property(rect_obj, PropertyKey::from("width"), Value::Number(0.0), true, true, true);
-                self.define_data_property(rect_obj, PropertyKey::from("height"), Value::Number(0.0), true, true, true);
-                self.define_data_property(rect_obj, PropertyKey::from("top"), Value::Number(0.0), true, true, true);
-                self.define_data_property(rect_obj, PropertyKey::from("right"), Value::Number(0.0), true, true, true);
-                self.define_data_property(rect_obj, PropertyKey::from("bottom"), Value::Number(0.0), true, true, true);
-                self.define_data_property(rect_obj, PropertyKey::from("left"), Value::Number(0.0), true, true, true);
+                let mut set = |vm: &mut Self, name: &str, value: f64| {
+                    vm.define_data_property(rect_obj, PropertyKey::from(name), Value::Number(value), true, true, true);
+                };
+                set(self, "x", x);
+                set(self, "y", y);
+                set(self, "width", w);
+                set(self, "height", h);
+                set(self, "top", y);
+                set(self, "left", x);
+                set(self, "right", x + w);
+                set(self, "bottom", y + h);
                 Ok(Value::Object(rect_obj))
             }
             BuiltinId::DomNodeScrollIntoView | BuiltinId::DomNodeFocus | BuiltinId::DomNodeBlur | BuiltinId::DomNodeClick => {
@@ -11550,7 +11561,39 @@ impl Vm {
             // Geometry / layout properties (all return 0 — layout not wired yet)
             "offsetWidth" | "offsetHeight" | "offsetLeft" | "offsetTop"
             | "clientWidth" | "clientHeight" | "clientLeft" | "clientTop"
-            | "scrollWidth" | "scrollHeight" | "scrollLeft" | "scrollTop" => Ok(Value::Number(0.0)),
+            | "scrollWidth" | "scrollHeight" => {
+                // Derive box metrics from the laid-out bounding rect. offset/scroll
+                // dimensions ≈ the border-box size; offsetLeft/Top ≈ document
+                // position (we don't track offsetParent-relative coords yet).
+                let (x, y, w, h) = match self
+                    .host
+                    .read_dom(DomRead::BoundingClientRect { node: node_id })
+                {
+                    Ok(DomReadResult::Rect(r)) => (r.x, r.y, r.width, r.height),
+                    _ => (0.0, 0.0, 0.0, 0.0),
+                };
+                let scroll_y = self
+                    .host
+                    .window_metrics(WindowId(0))
+                    .map(|m| m.scroll_y)
+                    .unwrap_or(0.0);
+                let scroll_x = self
+                    .host
+                    .window_metrics(WindowId(0))
+                    .map(|m| m.scroll_x)
+                    .unwrap_or(0.0);
+                let value = match name.as_str() {
+                    "offsetWidth" | "clientWidth" | "scrollWidth" => w,
+                    "offsetHeight" | "clientHeight" | "scrollHeight" => h,
+                    // bounding rect is viewport-relative; add scroll back for the
+                    // document-relative offsetLeft/offsetTop approximation.
+                    "offsetLeft" => x + scroll_x,
+                    "offsetTop" => y + scroll_y,
+                    _ => 0.0,
+                };
+                Ok(Value::Number(value))
+            }
+            "clientLeft" | "clientTop" | "scrollLeft" | "scrollTop" => Ok(Value::Number(0.0)),
             "offsetParent" => Ok(Value::Null),
             "isConnected" => Ok(Value::Bool(true)),
             "ownerDocument" => Ok(self.globals.get("document").cloned().unwrap_or(Value::Undefined)),
