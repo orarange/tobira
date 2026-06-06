@@ -136,6 +136,22 @@
   </section>
 
   <section>
+    <h2>★ IntersectionObserver — スクロールで画面内に入ったら反応</h2>
+    <p class="hint">
+      遅延読み込み・無限スクロールの定番 <code>IntersectionObserver</code>。下の
+      ボックスは下の方にあって、スクロールして画面内に入ると色と文字が変わる
+      (= 監視コールバックが <code>isIntersecting</code> を検知)。
+    </p>
+    <div id="io-status" class="frames">画面内に入った数: 0</div>
+    <div id="io-spacer" style="height: 500px;"></div>
+    <div class="io-target" style="height: 80px; margin: 12px 0; background: #f0f0f0; border-radius: 6px; padding: 12px;">監視ボックス A（まだ画面外）</div>
+    <div style="height: 300px;"></div>
+    <div class="io-target" style="height: 80px; margin: 12px 0; background: #f0f0f0; border-radius: 6px; padding: 12px;">監視ボックス B（まだ画面外）</div>
+    <div style="height: 300px;"></div>
+    <div class="io-target" style="height: 80px; margin: 12px 0; background: #f0f0f0; border-radius: 6px; padding: 12px;">監視ボックス C（まだ画面外）</div>
+  </section>
+
+  <section>
     <h2>1. カウンター — click → textContent</h2>
     <button id="inc">+1 する</button>
     <span id="count" class="count">0</span>
@@ -312,6 +328,24 @@
         ' top=' + Math.round(r.top) + ' left=' + Math.round(r.left) +
         ' (offsetWidth=' + box.offsetWidth + ')</span>';
     });
+
+    // --- ★ IntersectionObserver(スクロールで画面内検知)---
+    let ioSeen = 0;
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (e.isIntersecting) {
+          ioSeen += 1;
+          e.target.style.background = '#d8f5dd';
+          e.target.textContent = '✅ 画面内に入った！ (ratio=' + e.intersectionRatio.toFixed(2) + ')';
+          document.getElementById('io-status').textContent = '画面内に入った数: ' + ioSeen;
+          io.unobserve(e.target);
+        }
+      }
+    });
+    const ioTargets = document.querySelectorAll('.io-target');
+    for (let i = 0; i < ioTargets.length; i++) {
+      io.observe(ioTargets[i]);
+    }
 
     // --- 1. カウンター ---
     let n = 0;

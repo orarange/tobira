@@ -102,13 +102,17 @@ const VOID_ELEMENTS: &[&str] = &[
 const RAW_TEXT_ELEMENTS: &[&str] = &["script", "style"];
 
 /// A `Host` implementation backed by an arena DOM built from parsed HTML.
-/// A live observer registration (currently only `MutationObserver`). `targets`
-/// holds each observed node (arena index) with its options; `pending` holds
-/// records accumulated since the last delivery / `takeRecords`.
+/// A live observer registration (Mutation or Intersection). `targets` holds each
+/// observed node (arena index) with its options; `pending` holds records
+/// accumulated since the last delivery / `takeRecords`.
 struct ObserverEntry {
     kind: ObserverKind,
     targets: Vec<(usize, ObserverOptions)>,
     pending: Vec<ObserverRecord>,
+    /// For IntersectionObserver: last delivered `isIntersecting` per target arena
+    /// index, so a record is only queued when the state changes (and once on
+    /// first observe).
+    intersecting: HashMap<usize, bool>,
 }
 
 pub struct BrowserHost {
@@ -495,6 +499,82 @@ impl BrowserHost {
                     height: h as f64,
                 },
             );
+        }
+        self.compute_intersections();
+    }
+
+    /// Recompute IntersectionObserver state against the current viewport and
+    /// queue a record for every observed target whose `isIntersecting` changed
+    /// (or is being reported for the first time). Called whenever geometry is
+    /// fed (layout/scroll). The VM drains the queued records and fires callbacks.
+    fn compute_intersections(&mut self) {
+        if self.observers.is_empty() {
+            return;
+        }
+        let vp_top = self.scroll_y;
+        let vp_bottom = self.scroll_y + self.inner_height;
+        // (observer index, target idx, is_intersecting, ratio, rect)
+        let mut updates: Vec<(usize, usize, bool, f64, DomRect)> = Vec::new();
+        for (oid, slot) in self.observers.iter().enumerate() {
+            let Some(entry) = slot else { continue };
+            if entry.kind != ObserverKind::Intersection {
+                continue;
+            }
+            for (target_idx, _opts) in &entry.targets {
+                let Some(tid) = self.tobira_id_for_handle(*target_idx) else {
+                    continue;
+                };
+                let Some(rect) = self.geometry.get(&tid) else {
+                    continue;
+                };
+                let top = rect.y;
+                let bottom = rect.y + rect.height;
+                let visible = (bottom.min(vp_bottom) - top.max(vp_top)).max(0.0);
+                let ratio = if rect.height > 0.0 {
+                    (visible / rect.height).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let is_intersecting = ratio > 0.0;
+                if entry.intersecting.get(target_idx).copied() != Some(is_intersecting) {
+                    updates.push((oid, *target_idx, is_intersecting, ratio, rect.clone()));
+                }
+            }
+        }
+        let vp_top_v = self.scroll_y;
+        let vp_h = self.inner_height;
+        let vp_w = self.inner_width;
+        for (oid, target_idx, is_intersecting, ratio, rect) in updates {
+            if let Some(Some(entry)) = self.observers.get_mut(oid) {
+                entry.intersecting.insert(target_idx, is_intersecting);
+                let viewport_rect = |x: f64, y: f64, w: f64, h: f64| {
+                    HostData::Object(vec![
+                        ("x".to_string(), HostData::Number(x)),
+                        ("y".to_string(), HostData::Number(y)),
+                        ("width".to_string(), HostData::Number(w)),
+                        ("height".to_string(), HostData::Number(h)),
+                        ("top".to_string(), HostData::Number(y)),
+                        ("left".to_string(), HostData::Number(x)),
+                        ("right".to_string(), HostData::Number(x + w)),
+                        ("bottom".to_string(), HostData::Number(y + h)),
+                    ])
+                };
+                let bcr = viewport_rect(rect.x, rect.y - vp_top_v, rect.width, rect.height);
+                let root_bounds = viewport_rect(0.0, 0.0, vp_w, vp_h);
+                let payload = HostData::Object(vec![
+                    ("isIntersecting".to_string(), HostData::Bool(is_intersecting)),
+                    ("intersectionRatio".to_string(), HostData::Number(ratio)),
+                    ("boundingClientRect".to_string(), bcr.clone()),
+                    ("intersectionRect".to_string(), bcr),
+                    ("rootBounds".to_string(), root_bounds),
+                    ("time".to_string(), HostData::Number(0.0)),
+                ]);
+                entry.pending.push(ObserverRecord {
+                    target: NodeId(target_idx as u32),
+                    kind: ObserverKind::Intersection,
+                    payload,
+                });
+            }
         }
     }
 
@@ -1367,6 +1447,7 @@ impl Host for BrowserHost {
                     kind,
                     targets: Vec::new(),
                     pending: Vec::new(),
+                    intersecting: HashMap::new(),
                 }));
                 Ok(ObserverResult::Created(ObserverId(id)))
             }
@@ -1387,6 +1468,14 @@ impl Host for BrowserHost {
                 } else {
                     Err(HostError::InvalidHandle)
                 }
+            }
+            ObserverOp::Unobserve { observer, target } => {
+                let target_idx = target.0 as usize;
+                if let Some(Some(entry)) = self.observers.get_mut(observer.0 as usize) {
+                    entry.targets.retain(|(idx, _)| *idx != target_idx);
+                    entry.intersecting.remove(&target_idx);
+                }
+                Ok(ObserverResult::None)
             }
             ObserverOp::Disconnect { observer } => {
                 if let Some(slot) = self.observers.get_mut(observer.0 as usize) {
@@ -1566,8 +1655,12 @@ impl EngineSession {
     /// Feed element geometry from the browser's latest layout so
     /// `getBoundingClientRect` / `offsetWidth` etc. return real values.
     /// `rects` is `(data-tobira-node-id, x, y, width, height)` in document coords.
+    /// Also recomputes IntersectionObserver state and delivers any changes.
     pub fn set_geometry(&mut self, rects: &[(usize, f32, f32, f32, f32)]) {
         self.host().set_geometry(rects);
+        // IntersectionObserver records queued by the geometry update are flushed
+        // to their callbacks here (the host can't call JS itself).
+        self.vm.deliver_observer_records();
     }
 
     /// Current DOM snapshot. Console output captured since the last snapshot is
@@ -2194,6 +2287,61 @@ mod tests {
         );
         let snap = session.snapshot();
         assert_eq!(snap.html.matches("<li>hit</li>").count(), 2);
+    }
+
+    #[test]
+    fn intersection_observer_fires_on_scroll_into_view() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body>
+            <div id="target">x</div>
+            <div id="out">init</div>
+            <script>
+                const log = [];
+                const io = new IntersectionObserver((entries) => {
+                    for (const e of entries) {
+                        log.push(e.isIntersecting ? 'in' : 'out');
+                    }
+                    document.getElementById('out').textContent = log.join(',');
+                });
+                io.observe(document.getElementById('target'));
+            </script>
+        </body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "error: {:?}", initial.error);
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let target_id = find_node_id_by_attr(&tree, "id", "target").expect("target id");
+
+        // Target far below the 720px viewport → first feed reports "out".
+        session.set_geometry(&[(target_id, 0.0, 2000.0, 100.0, 50.0)]);
+        let snap = session.snapshot();
+        assert!(
+            snap.html.contains(">out</div>"),
+            "initial out-of-view not reported, html: {}",
+            snap.html
+        );
+
+        // Scroll so the target enters the viewport → reports "in".
+        session.set_scroll_position(1900);
+        session.set_geometry(&[(target_id, 0.0, 2000.0, 100.0, 50.0)]);
+        let snap = session.snapshot();
+        assert!(
+            snap.html.contains(">out,in</div>"),
+            "scroll-into-view did not fire intersecting, html: {}",
+            snap.html
+        );
+
+        // Scrolling back out reports "out" again (state-change only).
+        session.set_scroll_position(0);
+        session.set_geometry(&[(target_id, 0.0, 2000.0, 100.0, 50.0)]);
+        let snap = session.snapshot();
+        assert!(
+            snap.html.contains(">out,in,out</div>"),
+            "scroll-out did not fire, html: {}",
+            snap.html
+        );
     }
 
     #[test]

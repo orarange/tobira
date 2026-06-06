@@ -531,6 +531,10 @@ pub enum ObserverOp {
         target: NodeId,
         options: ObserverOptions,
     },
+    Unobserve {
+        observer: ObserverId,
+        target: NodeId,
+    },
     Disconnect {
         observer: ObserverId,
     },

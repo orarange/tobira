@@ -231,6 +231,10 @@ enum BuiltinId {
     MutationObserverObserve,
     MutationObserverDisconnect,
     MutationObserverTakeRecords,
+    // IntersectionObserver (observe/disconnect/takeRecords reuse the kind-agnostic
+    // MutationObserver builtins above)
+    IntersectionObserverConstructor,
+    IntersectionObserverUnobserve,
     // XMLHttpRequest
     XhrConstructor,
     XhrOpen,
@@ -2371,6 +2375,12 @@ impl Vm {
         let xhr_ctor = self.allocate_builtin_value(BuiltinId::XhrConstructor, true, None);
         self.globals
             .insert("XMLHttpRequest".to_string(), xhr_ctor);
+
+        // IntersectionObserver constructor.
+        let intersection_observer_ctor =
+            self.allocate_builtin_value(BuiltinId::IntersectionObserverConstructor, true, None);
+        self.globals
+            .insert("IntersectionObserver".to_string(), intersection_observer_ctor);
 
         self.globals
             .insert("Promise".to_string(), promise_ctor.clone());
@@ -4806,6 +4816,7 @@ impl Vm {
                 | BuiltinId::CustomEventConstructor
                 | BuiltinId::MutationObserverConstructor
                 | BuiltinId::XhrConstructor
+                | BuiltinId::IntersectionObserverConstructor
         )
     }
 
@@ -7619,6 +7630,21 @@ impl Vm {
             }
             BuiltinId::MutationObserverTakeRecords => {
                 self.mutation_observer_take_records(&this_value)
+            }
+            BuiltinId::IntersectionObserverConstructor => {
+                self.intersection_observer_construct(args.first().cloned())
+            }
+            BuiltinId::IntersectionObserverUnobserve => {
+                if let (Some(id), Some(target)) = (
+                    self.observer_id_from_this(&this_value),
+                    self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)),
+                ) {
+                    let _ = self.host.observer(ObserverOp::Unobserve {
+                        observer: ObserverId(id),
+                        target,
+                    });
+                }
+                Ok(Value::Undefined)
             }
             BuiltinId::XhrConstructor => self.xhr_construct(),
             BuiltinId::XhrOpen => self.xhr_open(&this_value, &args),
@@ -10913,6 +10939,11 @@ impl Vm {
             "takeRecords" => {
                 Ok(self.allocate_builtin_method(BuiltinId::MutationObserverTakeRecords))
             }
+            // IntersectionObserver-only; observe/disconnect/takeRecords above are
+            // kind-agnostic and shared with MutationObserver.
+            "unobserve" => {
+                Ok(self.allocate_builtin_method(BuiltinId::IntersectionObserverUnobserve))
+            }
             _ => Ok(Value::Undefined),
         }
     }
@@ -10954,6 +10985,48 @@ impl Vm {
         let instance = self.make_host_object(HostObjectSlot {
             class: HostObjectClass::Observer,
             interface_name: "MutationObserver",
+            handle: id,
+            dispatch: HostDispatch::Ordinary,
+            supports_indexed_properties: false,
+            supports_named_properties: false,
+        });
+        self.mutation_observers.insert(
+            id,
+            MutationObserverReg {
+                callback,
+                instance: instance.clone(),
+            },
+        );
+        Ok(instance)
+    }
+
+    /// `new IntersectionObserver(callback, options)` — create the host observer,
+    /// remember callback + instance, return the instance host object. Options
+    /// (root/rootMargin/threshold) are accepted but the current implementation
+    /// reports against the viewport with a >0 ratio threshold.
+    fn intersection_observer_construct(
+        &mut self,
+        callback: Option<Value>,
+    ) -> Result<Value, VmError> {
+        let callback = callback.unwrap_or(Value::Undefined);
+        if !self.is_callable_value(&callback) {
+            return Err(VmError::TypeError(
+                "IntersectionObserver constructor argument is not callable".to_string(),
+            ));
+        }
+        let id = match self.host.observer(ObserverOp::Create {
+            kind: ObserverKind::Intersection,
+        }) {
+            Ok(ObserverResult::Created(ObserverId(id))) => id,
+            _ => {
+                return Err(VmError::TypeError(
+                    "host does not support IntersectionObserver".to_string(),
+                ));
+            }
+        };
+        let instance = self.make_host_object(HostObjectSlot {
+            class: HostObjectClass::Observer,
+            interface_name: "IntersectionObserver",
             handle: id,
             dispatch: HostDispatch::Ordinary,
             supports_indexed_properties: false,
@@ -11077,23 +11150,29 @@ impl Vm {
     /// always-present fields (`target`, `type`, `addedNodes`, `removedNodes`,
     /// `attributeName`, `oldValue`) with sensible defaults when absent.
     fn build_mutation_record(&mut self, record: ObserverRecord) -> Result<Value, VmError> {
+        let kind = record.kind;
+        let target_id = record.target;
         let value = self.host_data_to_value(record.payload);
         let Value::Object(object) = value else {
             return Ok(value);
         };
-        let target = self.make_dom_node_value(record.target);
+        let target = self.make_dom_node_value(target_id);
         self.define_data_property(object, PropertyKey::from("target"), target, true, true, true);
-        // Defaults for fields the payload may omit (e.g. addedNodes on an
-        // attributes record), so reads never yield `undefined`.
-        let empty_added = self.make_array_from_values(Vec::new())?;
-        let empty_removed = self.make_array_from_values(Vec::new())?;
-        self.ensure_default_property(object, "addedNodes", empty_added);
-        self.ensure_default_property(object, "removedNodes", empty_removed);
-        self.ensure_default_property(object, "attributeName", Value::Null);
-        self.ensure_default_property(object, "oldValue", Value::Null);
-        self.ensure_default_property(object, "attributeNamespace", Value::Null);
-        self.ensure_default_property(object, "previousSibling", Value::Null);
-        self.ensure_default_property(object, "nextSibling", Value::Null);
+        if kind == ObserverKind::Mutation {
+            // Defaults for fields the payload may omit (e.g. addedNodes on an
+            // attributes record), so reads never yield `undefined`.
+            let empty_added = self.make_array_from_values(Vec::new())?;
+            let empty_removed = self.make_array_from_values(Vec::new())?;
+            self.ensure_default_property(object, "addedNodes", empty_added);
+            self.ensure_default_property(object, "removedNodes", empty_removed);
+            self.ensure_default_property(object, "attributeName", Value::Null);
+            self.ensure_default_property(object, "oldValue", Value::Null);
+            self.ensure_default_property(object, "attributeNamespace", Value::Null);
+            self.ensure_default_property(object, "previousSibling", Value::Null);
+            self.ensure_default_property(object, "nextSibling", Value::Null);
+        }
+        // Intersection entries carry their full payload (isIntersecting, ratio,
+        // boundingClientRect, …) from the host already.
         Ok(Value::Object(object))
     }
 
@@ -11138,10 +11217,18 @@ impl Vm {
         }
     }
 
-    /// Deliver pending mutation records to each observer's callback. Run at the
-    /// end of a microtask checkpoint (the spec's "notify mutation observers").
-    /// Loops until no records remain (callbacks may mutate the DOM and enqueue
-    /// more), bounded to avoid a pathological infinite loop.
+    /// Public entry point to flush queued observer records (Mutation +
+    /// Intersection) to their callbacks. Called by the host after feeding new
+    /// geometry (IntersectionObserver) and at microtask checkpoints (Mutation).
+    pub fn deliver_observer_records(&mut self) {
+        self.deliver_mutation_records();
+    }
+
+    /// Deliver pending observer records (Mutation + Intersection) to each
+    /// observer's callback. Run at the end of a microtask checkpoint (the spec's
+    /// "notify mutation observers") and after geometry feeds. Loops until no
+    /// records remain (callbacks may mutate the DOM and enqueue more), bounded to
+    /// avoid a pathological infinite loop.
     fn deliver_mutation_records(&mut self) {
         if self.delivering_mutations || self.mutation_observers.is_empty() {
             return;
