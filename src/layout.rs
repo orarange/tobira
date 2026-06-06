@@ -4827,6 +4827,29 @@ mod tests {
     }
 
     #[test]
+    fn inline_code_in_paragraph_does_not_overlap_lines() {
+        // A paragraph mixing text + an inline <code> that wraps to several lines
+        // must place each line below the previous (no overlapping text).
+        let html = r#"<p style="width:300px">Press each button and if the display changes <code>TOBIRA_ENGINE</code> events are flowing through and the banner turns green which proves scripts ran.</p>"#;
+        let l = probe_layout(html, 320);
+        let mut ys: Vec<u32> = l.texts().iter().map(|t| t.y).collect();
+        ys.sort_unstable();
+        ys.dedup();
+        assert!(ys.len() >= 2, "paragraph should wrap to multiple lines, got ys={ys:?}");
+        // Consecutive distinct line tops must differ by at least half a line —
+        // overlapping lines would sit within a few px of each other.
+        let line_h = l.texts().iter().map(|t| t.line_height_px).max().unwrap_or(16);
+        for pair in ys.windows(2) {
+            let gap = pair[1] - pair[0];
+            assert!(
+                gap >= line_h / 2,
+                "lines overlap: gap {gap} < {} (line_h); ys={ys:?}",
+                line_h / 2
+            );
+        }
+    }
+
+    #[test]
     fn hides_display_none_content() {
         let document = parse_document("<div><p>Hello</p><span class=\"hide\">Nope</span></div>");
         let stylesheet = parse_stylesheet(".hide { display: none; } p { color: #ff0000; }");

@@ -806,9 +806,19 @@ impl BrowserApp {
                     frame,
                 );
             }
-        } else if !matches!(self.document.content, DocumentContent::Loaded(_)) {
+        } else {
+            // The async render for the current scroll/size isn't ready yet. Paint
+            // the current layout synchronously so the content area always reflects
+            // the CURRENT scroll position. Otherwise a Loaded page left this area
+            // untouched, so a stale presented buffer (content at the old scroll)
+            // could remain on screen — looking like ghosting / content stuck at
+            // the wrong scroll while scrolling during an animation.
+            let images = match &self.document.content {
+                DocumentContent::Loaded(page) => Some(&page.images),
+                _ => None,
+            };
             paint_layout(
-                None,
+                images,
                 &mut self.fonts,
                 &mut buffer,
                 size.width,
