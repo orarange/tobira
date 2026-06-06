@@ -231,6 +231,14 @@ enum BuiltinId {
     MutationObserverObserve,
     MutationObserverDisconnect,
     MutationObserverTakeRecords,
+    // XMLHttpRequest
+    XhrConstructor,
+    XhrOpen,
+    XhrSetRequestHeader,
+    XhrSend,
+    XhrAbort,
+    XhrGetAllResponseHeaders,
+    XhrGetResponseHeader,
     // classList (TokenList)
     DomClassListAdd,
     DomClassListRemove,
@@ -2358,6 +2366,11 @@ impl Vm {
             self.allocate_builtin_value(BuiltinId::MutationObserverConstructor, true, None);
         self.globals
             .insert("MutationObserver".to_string(), mutation_observer_ctor);
+
+        // XMLHttpRequest constructor.
+        let xhr_ctor = self.allocate_builtin_value(BuiltinId::XhrConstructor, true, None);
+        self.globals
+            .insert("XMLHttpRequest".to_string(), xhr_ctor);
 
         self.globals
             .insert("Promise".to_string(), promise_ctor.clone());
@@ -4792,6 +4805,7 @@ impl Vm {
                 | BuiltinId::EventConstructor
                 | BuiltinId::CustomEventConstructor
                 | BuiltinId::MutationObserverConstructor
+                | BuiltinId::XhrConstructor
         )
     }
 
@@ -6582,6 +6596,210 @@ impl Vm {
         (method, headers, body)
     }
 
+    // ---- XMLHttpRequest (synchronous under the hood via Host::fetch_sync) ----
+
+    fn xhr_construct(&mut self) -> Result<Value, VmError> {
+        let proto = self.object_prototype_ref();
+        let object = self.allocate_ordinary_object(Some(proto));
+        let empty = self.make_string_value("");
+        let mut set = |vm: &mut Self, name: &str, value: Value, enumerable: bool| {
+            vm.define_data_property(object, PropertyKey::from(name), value, true, enumerable, true);
+        };
+        set(self, "readyState", Value::Number(0.0), true);
+        set(self, "status", Value::Number(0.0), true);
+        set(self, "statusText", empty.clone(), true);
+        set(self, "responseText", empty.clone(), true);
+        set(self, "response", empty.clone(), true);
+        set(self, "responseType", empty.clone(), true);
+        set(self, "responseURL", empty.clone(), true);
+        set(self, "timeout", Value::Number(0.0), true);
+        set(self, "withCredentials", Value::Bool(false), true);
+        // Request-header accumulator + parsed response headers (non-enumerable).
+        let req_headers = self.allocate_ordinary_object(Some(proto));
+        set(self, "__xhrReqHeaders", Value::Object(req_headers), false);
+        let empty2 = self.make_string_value("");
+        set(self, "__xhrRespHeaders", empty2, false);
+        // Methods.
+        for (name, builtin) in [
+            ("open", BuiltinId::XhrOpen),
+            ("send", BuiltinId::XhrSend),
+            ("setRequestHeader", BuiltinId::XhrSetRequestHeader),
+            ("abort", BuiltinId::XhrAbort),
+            ("getAllResponseHeaders", BuiltinId::XhrGetAllResponseHeaders),
+            ("getResponseHeader", BuiltinId::XhrGetResponseHeader),
+        ] {
+            let method = self.allocate_builtin_method(builtin);
+            self.define_data_property(object, PropertyKey::from(name), method, true, false, true);
+        }
+        Ok(Value::Object(object))
+    }
+
+    fn xhr_open(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let Value::Object(obj) = this else {
+            return Ok(Value::Undefined);
+        };
+        let obj = *obj;
+        let method = args
+            .first()
+            .map(|v| self.to_string(v))
+            .unwrap_or_else(|| "GET".to_string());
+        let url = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+        let method_v = self.make_string_value(&method);
+        let url_v = self.make_string_value(&url);
+        self.define_data_property(obj, PropertyKey::from("__xhrMethod"), method_v, false, false, true);
+        self.define_data_property(obj, PropertyKey::from("__xhrUrl"), url_v, false, false, true);
+        self.define_data_property(obj, PropertyKey::from("readyState"), Value::Number(1.0), true, true, true);
+        Ok(Value::Undefined)
+    }
+
+    fn xhr_set_request_header(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+        let value = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+        let headers = self.get_property_value(this, &PropertyKey::from("__xhrReqHeaders"))?;
+        if let Value::Object(h) = headers {
+            let v = self.make_string_value(&value);
+            self.define_data_property(h, PropertyKey::from(name.as_str()), v, true, true, true);
+        }
+        Ok(Value::Undefined)
+    }
+
+    fn xhr_send(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let Value::Object(obj) = this else {
+            return Ok(Value::Undefined);
+        };
+        let obj = *obj;
+        let method_str = {
+            let v = self.get_property_value(this, &PropertyKey::from("__xhrMethod"))?;
+            self.to_string(&v)
+        };
+        let url = {
+            let v = self.get_property_value(this, &PropertyKey::from("__xhrUrl"))?;
+            self.to_string(&v)
+        };
+        let method = match method_str.to_uppercase().as_str() {
+            "POST" => HttpMethod::Post,
+            "PUT" => HttpMethod::Put,
+            "PATCH" => HttpMethod::Patch,
+            "DELETE" => HttpMethod::Delete,
+            "HEAD" => HttpMethod::Head,
+            "OPTIONS" => HttpMethod::Options,
+            _ => HttpMethod::Get,
+        };
+        let mut headers = Vec::new();
+        let hv = self.get_property_value(this, &PropertyKey::from("__xhrReqHeaders"))?;
+        if let Value::Object(h) = hv {
+            for key in self.object_own_enumerable_keys(h) {
+                if let PropertyKey::String(name) = &key {
+                    let val = self.get_property_value(&Value::Object(h), &key)?;
+                    headers.push((name.clone(), self.to_string(&val)));
+                }
+            }
+        }
+        let body = match args.first() {
+            Some(v) if !matches!(v, Value::Undefined | Value::Null) => {
+                FetchBody::Utf8(self.to_string(v))
+            }
+            _ => FetchBody::Empty,
+        };
+        let request = FetchRequest {
+            window: WindowId(0),
+            url: url.clone(),
+            method,
+            headers,
+            body,
+            mode: FetchMode::Cors,
+            keepalive: false,
+        };
+
+        match self.host.fetch_sync(request) {
+            Ok(response) => {
+                let status = response.status;
+                let status_text = self.make_string_value(&response.status_text);
+                let final_url = if response.final_url.is_empty() {
+                    url.clone()
+                } else {
+                    response.final_url.clone()
+                };
+                let final_url_v = self.make_string_value(&final_url);
+                let text = String::from_utf8_lossy(&response.body).into_owned();
+                let text_v = self.make_string_value(&text);
+                // Raw response headers string (CRLF-joined "name: value").
+                let raw_headers = response
+                    .headers
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k.to_lowercase(), v))
+                    .collect::<Vec<_>>()
+                    .join("\r\n");
+                let raw_headers_v = self.make_string_value(&raw_headers);
+                self.define_data_property(obj, PropertyKey::from("__xhrRespHeaders"), raw_headers_v, false, false, true);
+                self.define_data_property(obj, PropertyKey::from("status"), Value::Number(status as f64), true, true, true);
+                self.define_data_property(obj, PropertyKey::from("statusText"), status_text, true, true, true);
+                self.define_data_property(obj, PropertyKey::from("responseText"), text_v.clone(), true, true, true);
+                self.define_data_property(obj, PropertyKey::from("responseURL"), final_url_v, true, true, true);
+                // `response` honors responseType === 'json'.
+                let response_type = {
+                    let v = self.get_property_value(this, &PropertyKey::from("responseType"))?;
+                    self.to_string(&v)
+                };
+                let response_value = if response_type == "json" {
+                    match serde_json::from_str::<JsonValue>(&text) {
+                        Ok(json) => self.from_json_value(&json)?,
+                        Err(_) => Value::Null,
+                    }
+                } else {
+                    text_v
+                };
+                self.define_data_property(obj, PropertyKey::from("response"), response_value, true, true, true);
+                self.define_data_property(obj, PropertyKey::from("readyState"), Value::Number(4.0), true, true, true);
+                self.xhr_fire(this, "onreadystatechange")?;
+                self.xhr_fire(this, "onload")?;
+                self.xhr_fire(this, "onloadend")?;
+            }
+            Err(_) => {
+                self.define_data_property(obj, PropertyKey::from("status"), Value::Number(0.0), true, true, true);
+                self.define_data_property(obj, PropertyKey::from("readyState"), Value::Number(4.0), true, true, true);
+                self.xhr_fire(this, "onreadystatechange")?;
+                self.xhr_fire(this, "onerror")?;
+                self.xhr_fire(this, "onloadend")?;
+            }
+        }
+        Ok(Value::Undefined)
+    }
+
+    /// Invoke an XHR `on*` handler property if it is callable.
+    fn xhr_fire(&mut self, this: &Value, handler: &str) -> Result<(), VmError> {
+        let cb = self.get_property_value(this, &PropertyKey::from(handler))?;
+        if self.is_callable_value(&cb) {
+            self.call_value_sync(cb, this.clone(), Vec::new())?;
+            self.drain_microtasks();
+        }
+        Ok(())
+    }
+
+    fn xhr_get_all_response_headers(&mut self, this: &Value) -> Result<Value, VmError> {
+        let v = self.get_property_value(this, &PropertyKey::from("__xhrRespHeaders"))?;
+        let text = self.to_string(&v);
+        Ok(self.make_string_value(&text))
+    }
+
+    fn xhr_get_response_header(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let name = args
+            .first()
+            .map(|v| self.to_string(v))
+            .unwrap_or_default()
+            .to_lowercase();
+        let v = self.get_property_value(this, &PropertyKey::from("__xhrRespHeaders"))?;
+        let raw = self.to_string(&v);
+        for line in raw.split("\r\n") {
+            if let Some((k, val)) = line.split_once(": ") {
+                if k.eq_ignore_ascii_case(&name) {
+                    return Ok(self.make_string_value(val));
+                }
+            }
+        }
+        Ok(Value::Null)
+    }
+
     fn build_response_object(&mut self, url: &str, response: FetchResponse) -> Value {
         let proto = self.object_prototype_ref();
         let object = self.allocate_ordinary_object(Some(proto));
@@ -7402,6 +7620,18 @@ impl Vm {
             BuiltinId::MutationObserverTakeRecords => {
                 self.mutation_observer_take_records(&this_value)
             }
+            BuiltinId::XhrConstructor => self.xhr_construct(),
+            BuiltinId::XhrOpen => self.xhr_open(&this_value, &args),
+            BuiltinId::XhrSetRequestHeader => self.xhr_set_request_header(&this_value, &args),
+            BuiltinId::XhrSend => self.xhr_send(&this_value, &args),
+            BuiltinId::XhrAbort => {
+                if let Value::Object(o) = &this_value {
+                    self.define_data_property(*o, PropertyKey::from("readyState"), Value::Number(0.0), true, true, true);
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::XhrGetAllResponseHeaders => self.xhr_get_all_response_headers(&this_value),
+            BuiltinId::XhrGetResponseHeader => self.xhr_get_response_header(&this_value, &args),
             BuiltinId::ArrayIsArray => Ok(Value::Bool(matches!(
                 args.first(),
                 Some(Value::Object(object))
