@@ -419,6 +419,10 @@ struct LayoutContext {
     containing_block_origin: (u32, u32),
     scroll_y_for_fixed: u32,
     positioned_commands: Vec<(i32, Vec<DrawCommand>)>,
+    /// Content height of the nearest ancestor with a definite (pixel) height,
+    /// used to resolve a child's `height: <percent>`. `None` when no ancestor
+    /// has a definite height (then percentage heights are treated as auto).
+    container_height: Option<u32>,
 }
 
 impl Default for LayoutContext {
@@ -434,6 +438,7 @@ impl Default for LayoutContext {
             containing_block_origin: (0, 0),
             scroll_y_for_fixed: 0,
             positioned_commands: Vec::new(),
+            container_height: None,
         }
     }
 }
@@ -969,14 +974,35 @@ fn layout_node(
 /// separately). Percent / min-/max-/fit-content heights are left to the
 /// content-based height because resolving them needs the containing block's
 /// height, which is not threaded through here.
+/// The element's definite content height in px (a pixel value, or a percentage
+/// resolved against the containing block's definite height), or `None` for an
+/// auto height. Used to set the containing block for descendant percent heights.
+fn resolve_definite_height(style: &ComputedStyle, container_height: Option<u32>) -> Option<u32> {
+    match style.height {
+        Some(LengthValue::Pixels(px)) => Some(px),
+        Some(LengthValue::Percent(pct)) => {
+            container_height.map(|ch| (ch as u64 * pct as u64 / 100) as u32)
+        }
+        _ => None,
+    }
+}
+
 fn explicit_box_height(
     style: &ComputedStyle,
     background_top: u32,
     content_height: u32,
     cursor_y: &mut u32,
+    container_height: Option<u32>,
 ) -> u32 {
-    let Some(LengthValue::Pixels(px)) = style.height else {
-        return content_height;
+    // Resolve the specified content-box height to pixels: a pixel value directly,
+    // or a percentage against the containing block's definite height.
+    let px = match style.height {
+        Some(LengthValue::Pixels(px)) => px,
+        Some(LengthValue::Percent(pct)) => match container_height {
+            Some(ch) => (ch as u64 * pct as u64 / 100) as u32,
+            None => return content_height, // % against an auto height → auto
+        },
+        _ => return content_height,
     };
     // `height` is the content-box height; this engine's box height also spans the
     // vertical padding (borders are drawn overlapping it), so add the padding to
@@ -1227,6 +1253,17 @@ fn layout_block_element(
         )
         .max(1);
 
+    // Resolve this block's definite content height (pixel, or percent against the
+    // current containing block) and make it the containing block for descendants'
+    // `height: <percent>`. Auto-height blocks leave the inherited value so a
+    // percent height passes through wrapper divs to the nearest definite ancestor.
+    let parent_container_height = context.container_height;
+    let this_content_height = resolve_definite_height(&element.style, parent_container_height);
+    let saved_container_height = context.container_height;
+    if let Some(h) = this_content_height {
+        context.container_height = Some(h);
+    }
+
     if element.tag_name == "hr" {
         context.commands.push(DrawCommand::Rect(RectCommand {
             x: content_x,
@@ -1250,12 +1287,18 @@ fn layout_block_element(
             current_form,
         );
     }
+    context.container_height = saved_container_height;
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     let content_height = cursor_y.saturating_sub(background_top).max(1);
-    // Honor an explicit CSS pixel `height` (expands a short box; advances cursor_y).
-    let background_height =
-        explicit_box_height(&element.style, background_top, content_height, cursor_y);
+    // Honor an explicit CSS `height` (px or percent); expands a short box.
+    let background_height = explicit_box_height(
+        &element.style,
+        background_top,
+        content_height,
+        cursor_y,
+        parent_container_height,
+    );
 
     // Emit element hitbox for interactive state (hover/focus) detection
     if let Some(node_id) = element_node_id(element) {
@@ -1688,6 +1731,12 @@ fn layout_block_element_as_layer(
         )
         .max(1);
 
+    // Containing block height for descendant percent heights (see the non-layer
+    // path). Children of a layer use `sub_context`, so seed it from the parent.
+    let parent_container_height = context.container_height;
+    let this_content_height = resolve_definite_height(&element.style, parent_container_height);
+    sub_context.container_height = this_content_height.or(parent_container_height);
+
     if element.tag_name == "hr" {
         sub_context.commands.push(DrawCommand::Rect(RectCommand {
             x: content_x,
@@ -1714,9 +1763,14 @@ fn layout_block_element_as_layer(
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     let content_height = cursor_y.saturating_sub(background_top).max(1);
-    // Honor an explicit CSS pixel `height` (expands a short box; advances cursor_y).
-    let final_height =
-        explicit_box_height(&element.style, background_top, content_height, cursor_y);
+    // Honor an explicit CSS `height` (px or percent); expands a short box.
+    let final_height = explicit_box_height(
+        &element.style,
+        background_top,
+        content_height,
+        cursor_y,
+        parent_container_height,
+    );
 
     if let Some(shadow_idx) = shadow_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(shadow_idx) {
@@ -4482,6 +4536,34 @@ mod tests {
             layout.content_height >= 600,
             "explicit height should expand the box (content_height = {})",
             layout.content_height
+        );
+    }
+
+    #[test]
+    fn resolves_percent_height_against_definite_parent() {
+        // A child with height:100% inside a definite-height parent fills it
+        // (e.g. a progress-bar fill). Without this it collapses to content height
+        // (0 for an empty element) and renders invisible.
+        let document = parse_document(
+            "<div style=\"height: 40px\"><div style=\"height: 100%; background: #123456\"></div></div>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
+        let inner = layout
+            .rects()
+            .into_iter()
+            .find(|r| r.color == 0x123456)
+            .expect("inner background rect should exist");
+        assert!(
+            inner.height >= 40,
+            "percent height should resolve to the parent's 40px, got {}",
+            inner.height
         );
     }
 
