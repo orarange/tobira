@@ -119,6 +119,11 @@ struct BrowserApp {
     scroll_y: u32,
     modifiers: ModifiersState,
     cursor_position: PhysicalPosition<f64>,
+    /// When dragging the custom title bar, the cursor's position within the
+    /// window at grab time. We move the window ourselves on CursorMoved instead
+    /// of calling `drag_window()`, which would hand control to the OS modal move
+    /// loop and freeze our event loop (timers/animation) until the drag ends.
+    window_drag_grab: Option<PhysicalPosition<f64>>,
     address_bar: AddressBarState,
     focused_page_input: Option<FocusedPageInput>,
     hovered_target: HitTarget,
@@ -257,6 +262,7 @@ impl BrowserApp {
             scroll_y,
             modifiers: ModifiersState::default(),
             cursor_position: PhysicalPosition::new(0.0, 0.0),
+            window_drag_grab: None,
             address_bar,
             focused_page_input: None,
             hovered_target: HitTarget::None,
@@ -1962,7 +1968,10 @@ impl BrowserApp {
             HitTarget::TitleBar => {
                 self.blur_address_bar();
                 self.blur_page_input();
-                let _ = window.drag_window();
+                // Start a manual drag (move the window ourselves on CursorMoved)
+                // rather than `drag_window()`, so our event loop — and thus
+                // timers/animation — keeps running while the window is moved.
+                self.window_drag_grab = Some(self.cursor_position);
             }
             HitTarget::None => {
                 self.blur_address_bar();
@@ -2137,6 +2146,22 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = position;
+                // Manual window drag: move the window by how far the cursor has
+                // moved from the grab point (stable: as the window follows the
+                // cursor, the in-window cursor position returns to the grab point).
+                if let Some(grab) = self.window_drag_grab {
+                    if let Ok(outer) = window.outer_position() {
+                        let dx = (position.x - grab.x).round() as i32;
+                        let dy = (position.y - grab.y).round() as i32;
+                        if dx != 0 || dy != 0 {
+                            window.set_outer_position(PhysicalPosition::new(
+                                outer.x + dx,
+                                outer.y + dy,
+                            ));
+                        }
+                    }
+                    return;
+                }
                 self.update_hover(window.inner_size());
             }
             WindowEvent::CursorLeft { .. } => {
@@ -2167,6 +2192,14 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
                 if self.handle_left_click(window.inner_size()) {
                     event_loop.exit();
                 }
+            }
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state: ElementState::Released,
+                ..
+            } => {
+                // End any in-progress manual window drag.
+                self.window_drag_grab = None;
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();

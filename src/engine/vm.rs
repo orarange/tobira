@@ -11645,9 +11645,9 @@ impl Vm {
                 let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: false });
                 Ok(Value::Number(match res { Ok(DomReadResult::Nodes(ids)) => ids.len() as f64, _ => 0.0 }))
             }
-            // Geometry / layout properties (all return 0 — layout not wired yet)
+            // Box dimensions derived from the laid-out bounding rect.
             "offsetWidth" | "offsetHeight" | "offsetLeft" | "offsetTop"
-            | "clientWidth" | "clientHeight" | "clientLeft" | "clientTop"
+            | "clientWidth" | "clientHeight"
             | "scrollWidth" | "scrollHeight" => {
                 // Derive box metrics from the laid-out bounding rect. offset/scroll
                 // dimensions ≈ the border-box size; offsetLeft/Top ≈ document
