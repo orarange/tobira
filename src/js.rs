@@ -101,6 +101,11 @@ enum JavaScriptSessionCommand {
         width: u32,
         height: u32,
     },
+    /// Feed element geometry from the browser's latest layout so
+    /// `getBoundingClientRect`/`offsetWidth` return real values (engine path).
+    SetGeometry {
+        rects: Vec<(usize, f32, f32, f32, f32)>,
+    },
     SetAttribute {
         node_id: usize,
         name: String,
@@ -183,6 +188,12 @@ impl JavaScriptSession {
     pub(crate) fn set_viewport_size(&self, width: u32, height: u32) -> bool {
         self.command_tx
             .send(JavaScriptSessionCommand::SetViewportSize { width, height })
+            .is_ok()
+    }
+
+    pub(crate) fn set_geometry(&self, rects: Vec<(usize, f32, f32, f32, f32)>) -> bool {
+        self.command_tx
+            .send(JavaScriptSessionCommand::SetGeometry { rects })
             .is_ok()
     }
 
@@ -583,6 +594,9 @@ fn start_engine_script_session(
                     JavaScriptSessionCommand::SetViewportSize { width, height } => {
                         session.set_viewport_size(width, height);
                     }
+                    JavaScriptSessionCommand::SetGeometry { rects } => {
+                        session.set_geometry(&rects);
+                    }
                     JavaScriptSessionCommand::Shutdown => break,
                 }
             }
@@ -659,6 +673,10 @@ pub fn start_document_script_session(
                         }
                         JavaScriptSessionCommand::SetViewportSize { width, height } => {
                             runtime.set_viewport_size(width, height);
+                        }
+                        JavaScriptSessionCommand::SetGeometry { .. } => {
+                            // boa path: getBoundingClientRect is handled inside the
+                            // boa runtime; no external geometry feed needed.
                         }
                         JavaScriptSessionCommand::SetAttribute {
                             node_id,

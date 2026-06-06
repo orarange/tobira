@@ -181,6 +181,16 @@ impl BrowserPage {
         false
     }
 
+    /// Feed element geometry from the latest layout into the JS session so
+    /// `getBoundingClientRect` / `offsetWidth` etc. return real values.
+    /// `rects` is `(data-tobira-node-id, x, y, width, height)` (document coords).
+    pub fn set_geometry(&self, rects: Vec<(usize, f32, f32, f32, f32)>) -> bool {
+        if let Some(session) = &self.javascript_session {
+            return session.set_geometry(rects);
+        }
+        false
+    }
+
     pub fn set_scroll_position(&mut self, y: u32) -> bool {
         // Track the offset directly so `scroll_y()` is correct even when the
         // scroll event doesn't round-trip through a snapshot (e.g. the engine

@@ -124,6 +124,18 @@
   </section>
 
   <section>
+    <h2>★ getBoundingClientRect — 要素の実寸/位置を測定</h2>
+    <p class="hint">
+      レイアウト座標をエンジンに渡して <code>getBoundingClientRect()</code> /
+      <code>offsetWidth</code> が実値を返す。ボタンを押すと、その上のボックスの
+      実際の寸法・位置(スクロール反映)を表示する。
+    </p>
+    <div id="rect-box" style="width: 240px; height: 60px; background: #eef1ff; border-radius: 6px;"></div>
+    <p><button id="measure">このボックスを測る</button></p>
+    <p id="rect-out" class="frames">測定結果: （まだ）</p>
+  </section>
+
+  <section>
     <h2>1. カウンター — click → textContent</h2>
     <button id="inc">+1 する</button>
     <span id="count" class="count">0</span>
@@ -289,6 +301,17 @@
       }
     });
     fwRender();
+
+    // --- ★ getBoundingClientRect(実寸測定)---
+    document.getElementById('measure').addEventListener('click', () => {
+      const box = document.getElementById('rect-box');
+      const r = box.getBoundingClientRect();
+      document.getElementById('rect-out').innerHTML =
+        '<span class="ok-text">測定結果: ' +
+        'width=' + Math.round(r.width) + ' height=' + Math.round(r.height) +
+        ' top=' + Math.round(r.top) + ' left=' + Math.round(r.left) +
+        ' (offsetWidth=' + box.offsetWidth + ')</span>';
+    });
 
     // --- 1. カウンター ---
     let n = 0;

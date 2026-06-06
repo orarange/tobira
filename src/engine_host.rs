@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use tobira_engine::engine::{
     Compiler, ConsoleMessage, DomEventInit, DomEventRequest, DomEventResult, DomMutation,
@@ -127,6 +127,12 @@ pub struct BrowserHost {
     /// Observer registrations, indexed by `ObserverId.0`. `None` slots are
     /// disconnected observers (kept so ids stay stable).
     observers: Vec<Option<ObserverEntry>>,
+    /// Last-known element geometry from the browser's layout, keyed by the
+    /// `data-tobira-node-id` (pre-order id) the browser assigns. Document
+    /// coordinates; `getBoundingClientRect` subtracts the scroll offset to get
+    /// viewport coordinates. Stale after a DOM mutation until the next layout
+    /// feed (same as a real browser between reflows).
+    geometry: HashMap<usize, DomRect>,
 }
 
 impl BrowserHost {
@@ -147,6 +153,7 @@ impl BrowserHost {
             inner_width: 1280.0,
             inner_height: 720.0,
             observers: Vec::new(),
+            geometry: HashMap::new(),
         };
         host.document = host.push(DomNode::document());
         // The parsed root is an "document" element; graft its children under our
@@ -446,6 +453,71 @@ impl BrowserHost {
         }
         let mut counter = 0usize;
         self.find_by_tobira_id(self.document, target_id, &mut counter)
+    }
+
+    /// Inverse of `handle_for_node_id`: the `data-tobira-node-id` (1-based
+    /// pre-order position over Document + Elements) for an arena node index.
+    fn tobira_id_for_handle(&self, target_idx: usize) -> Option<usize> {
+        let mut counter = 0usize;
+        self.find_tobira_id(self.document, target_idx, &mut counter)
+    }
+
+    fn find_tobira_id(&self, idx: usize, target_idx: usize, counter: &mut usize) -> Option<usize> {
+        if matches!(
+            self.nodes[idx].kind,
+            DomNodeKind::Document | DomNodeKind::Element(_)
+        ) {
+            *counter += 1;
+            if idx == target_idx {
+                return Some(*counter);
+            }
+        }
+        for i in 0..self.nodes[idx].children.len() {
+            let child = self.nodes[idx].children[i];
+            if let Some(found) = self.find_tobira_id(child, target_idx, counter) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Feed element geometry from the browser's most recent layout. `rects` is
+    /// `(data-tobira-node-id, x, y, width, height)` in document coordinates.
+    pub fn set_geometry(&mut self, rects: &[(usize, f32, f32, f32, f32)]) {
+        self.geometry.clear();
+        for &(id, x, y, w, h) in rects {
+            self.geometry.insert(
+                id,
+                DomRect {
+                    x: x as f64,
+                    y: y as f64,
+                    width: w as f64,
+                    height: h as f64,
+                },
+            );
+        }
+    }
+
+    /// `getBoundingClientRect` for an arena node: document-coordinate geometry
+    /// from the last layout, shifted into viewport coordinates by the current
+    /// scroll offset. Returns a zero rect when geometry is unknown.
+    fn bounding_client_rect(&self, arena_idx: usize) -> DomRect {
+        if let Some(id) = self.tobira_id_for_handle(arena_idx) {
+            if let Some(rect) = self.geometry.get(&id) {
+                return DomRect {
+                    x: rect.x - self.scroll_x,
+                    y: rect.y - self.scroll_y,
+                    width: rect.width,
+                    height: rect.height,
+                };
+            }
+        }
+        DomRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        }
     }
 
     fn find_by_tobira_id(
@@ -998,12 +1070,9 @@ impl Host for BrowserHost {
                 ))
             }
             DomRead::ShadowRoot { .. } | DomRead::AssignedNodes { .. } => Ok(DomReadResult::None),
-            DomRead::BoundingClientRect { .. } => Ok(DomReadResult::Rect(DomRect {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 0.0,
-            })),
+            DomRead::BoundingClientRect { node } => {
+                Ok(DomReadResult::Rect(self.bounding_client_rect(node.0 as usize)))
+            }
             DomRead::ScrollMetrics { .. } => Ok(DomReadResult::ScrollMetrics(ScrollMetrics {
                 scroll_left: 0.0,
                 scroll_top: 0.0,
@@ -1492,6 +1561,13 @@ impl EngineSession {
     /// Record the viewport size (`window.innerWidth` / `innerHeight`).
     pub fn set_viewport_size(&mut self, width: u32, height: u32) {
         self.host().set_viewport(width as f64, height as f64);
+    }
+
+    /// Feed element geometry from the browser's latest layout so
+    /// `getBoundingClientRect` / `offsetWidth` etc. return real values.
+    /// `rects` is `(data-tobira-node-id, x, y, width, height)` in document coords.
+    pub fn set_geometry(&mut self, rects: &[(usize, f32, f32, f32, f32)]) {
+        self.host().set_geometry(rects);
     }
 
     /// Current DOM snapshot. Console output captured since the last snapshot is
@@ -2118,6 +2194,69 @@ mod tests {
         );
         let snap = session.snapshot();
         assert_eq!(snap.html.matches("<li>hit</li>").count(), 2);
+    }
+
+    #[test]
+    fn get_bounding_client_rect_uses_fed_geometry() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body>
+            <button id="btn">go</button>
+            <div id="out">none</div>
+            <script>
+                document.getElementById('btn').addEventListener('click', () => {
+                    const r = document.getElementById('btn').getBoundingClientRect();
+                    document.getElementById('out').textContent =
+                        r.x + ',' + r.y + ',' + r.width + ',' + r.height + ',' + r.right + ',' + r.bottom;
+                });
+            </script>
+        </body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "error: {:?}", initial.error);
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let btn_id = find_node_id_by_attr(&tree, "id", "btn").expect("button id");
+
+        // Feed geometry the browser would compute from layout (document coords).
+        session.set_geometry(&[(btn_id, 10.0, 20.0, 100.0, 40.0)]);
+
+        let result = session.dispatch_event(btn_id, "click", &DomEventInit::default());
+        assert!(
+            result.html.contains(">10,20,100,40,110,60</div>"),
+            "getBoundingClientRect did not reflect fed geometry, html: {}",
+            result.html
+        );
+    }
+
+    #[test]
+    fn get_bounding_client_rect_subtracts_scroll() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body>
+            <button id="btn">go</button>
+            <div id="out">none</div>
+            <script>
+                document.getElementById('btn').addEventListener('click', () => {
+                    const r = document.getElementById('btn').getBoundingClientRect();
+                    document.getElementById('out').textContent = r.y + '';
+                });
+            </script>
+        </body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let btn_id = find_node_id_by_attr(&tree, "id", "btn").expect("button id");
+
+        session.set_geometry(&[(btn_id, 0.0, 500.0, 100.0, 40.0)]);
+        session.set_scroll_position(300); // viewport y = 500 - 300 = 200
+        let result = session.dispatch_event(btn_id, "click", &DomEventInit::default());
+        assert!(
+            result.html.contains(">200</div>"),
+            "getBoundingClientRect should subtract scroll, html: {}",
+            result.html
+        );
     }
 
     #[test]
