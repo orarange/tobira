@@ -745,6 +745,21 @@ impl BrowserApp {
             .map(|frame| frame.content_height)
             .unwrap_or(layout.content_height);
         let max_scroll_y = max_scroll(viewport_height, content_height);
+        if std::env::var_os("TOBIRA_DEBUG_SCROLL").is_some() {
+            eprintln!(
+                "[draw] scroll_y={} match={} frame(scroll={:?} cw={:?} ch={:?}) layout_ch={} content_h={} vp_h={} cw={} max_scroll={}",
+                self.scroll_y,
+                frame_matches,
+                self.latest_render_frame.as_ref().map(|f| f.scroll_y),
+                self.latest_render_frame.as_ref().map(|f| f.content_width),
+                self.latest_render_frame.as_ref().map(|f| f.content_height),
+                layout.content_height,
+                content_height,
+                viewport_height,
+                content_width,
+                max_scroll_y,
+            );
+        }
         // Only clamp when we have a real content height. A 0 here means the
         // height is momentarily unknown (e.g. layout cache invalidated by an
         // animation tick before the next render lands); clamping to it would snap
@@ -1698,6 +1713,12 @@ impl BrowserApp {
             }
         }
 
+        if std::env::var_os("TOBIRA_DEBUG_SCROLL").is_some() {
+            eprintln!(
+                "[wheel] prev={} -> scroll_y={} (content_metrics: vp_h={} content_h={})",
+                previous_scroll_y, self.scroll_y, viewport_height, content_height
+            );
+        }
         if self.scroll_y != previous_scroll_y {
             self.sync_scroll_position();
         }
@@ -5591,6 +5612,69 @@ mod tests {
     fn max_scroll_stops_at_zero() {
         assert_eq!(max_scroll(400, 100), 0);
         assert_eq!(max_scroll(100, 400), 300);
+    }
+
+    #[test]
+    fn scroll_renders_correct_vertical_slice() {
+        use super::{render_content_frame, HitTarget, RenderPageSnapshot, RenderRequest};
+        use crate::css::{build_styled_tree, parse_stylesheet, InteractiveState};
+        use crate::html::parse_document;
+        use crate::image::ImageStore;
+
+        // Marker band (#abcdef) sits at document y 300..360.
+        let html = "<div style=\"height:300px;background:#111111\"></div>\
+                    <div style=\"height:60px;background:#abcdef\"></div>\
+                    <div style=\"height:1000px;background:#222222\"></div>";
+        let styled = build_styled_tree(
+            &parse_document(html),
+            &parse_stylesheet(""),
+            1280,
+            &InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+
+        let render_at = |scroll_y: u32, fonts: &mut FontContext| {
+            render_content_frame(
+                RenderRequest {
+                    id: 1,
+                    content_width: 400,
+                    viewport_height: 200,
+                    scroll_y,
+                    page: RenderPageSnapshot {
+                        styled_document: styled.clone(),
+                        images: ImageStore::default(),
+                    },
+                    focused_page_input: None,
+                    hovered_target: HitTarget::None,
+                },
+                fonts,
+            )
+            .expect("render")
+        };
+        let first_row = |frame: &super::RenderedContentFrame, color: u32| -> Option<u32> {
+            let w = frame.content_width as usize;
+            (0..frame.viewport_height).find(|&row| {
+                let s = row as usize * w;
+                frame.pixels[s..s + w].iter().any(|&p| p == color)
+            })
+        };
+
+        // At scroll 0 the marker (y 300) is below the 200px viewport → not shown.
+        let f0 = render_at(0, &mut fonts);
+        assert!(
+            first_row(&f0, 0x00AB_CDEF).is_none(),
+            "marker should be below the viewport at scroll 0, got row {:?}",
+            first_row(&f0, 0x00AB_CDEF)
+        );
+
+        // At scroll 300 the marker top lands at the viewport top (buffer row ~0).
+        let f300 = render_at(300, &mut fonts);
+        let row = first_row(&f300, 0x00AB_CDEF)
+            .expect("marker should be visible at the top when scrolled to it");
+        assert!(
+            row <= 4,
+            "marker should be at the viewport top at scroll 300, got row {row}"
+        );
     }
 
     #[test]
