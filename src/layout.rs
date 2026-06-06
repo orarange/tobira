@@ -1,7 +1,7 @@
 use crate::css::{
     BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
     FontFamilyKind, GridTrackSize, LengthValue, ObjectFit, Overflow, Position, FlexDirection,
-    AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
+    FlexWrap, AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
     VerticalAlign, WhiteSpaceMode, apply_text_transform,
 };
 use crate::font::FontContext;
@@ -4281,9 +4281,15 @@ fn layout_flex_container(
 ) {
     *cursor_y = cursor_y.saturating_add(element.style.margin.top);
     let outer_x = x.saturating_add(element.style.margin.left);
-    let outer_width = width.saturating_sub(
-        element.style.margin.left + element.style.margin.right
-    );
+    let avail_width = width.saturating_sub(element.style.margin.left + element.style.margin.right);
+    // Honor an explicit width on the flex container (needed for flex-wrap to know
+    // where lines break); otherwise take the available width.
+    let outer_width = match element.style.width {
+        Some(LengthValue::Pixels(px)) => px,
+        Some(LengthValue::Percent(p)) => (avail_width as u64 * p as u64 / 100) as u32,
+        _ => avail_width,
+    }
+    .max(1);
     let background_top = *cursor_y;
 
     let border_left = if !element.style.border_style_none { element.style.border.left } else { 0 };
@@ -4366,24 +4372,32 @@ fn layout_flex_container(
                 layout_block_element(child, content_x, child_w, &mut dummy_y, &mut dummy_ctx, images, fonts, current_form.clone());
                 dummy_y.saturating_sub(content_y)
             }).collect();
-            let max_height = *item_heights.iter().max().unwrap_or(&0);
+            let content_max_height = *item_heights.iter().max().unwrap_or(&0);
+            // The flex line's cross size is the container's definite content
+            // height (if any), expanded to fit the tallest item — so
+            // `align-items: center`/`flex-end` center within the container, not
+            // just within the items (vertical centering in a fixed-height row).
+            let container_cross_height = match element.style.height {
+                Some(LengthValue::Pixels(px)) => Some(px),
+                Some(LengthValue::Percent(p)) => {
+                    context.container_height.map(|ch| (ch as u64 * p as u64 / 100) as u32)
+                }
+                _ => None,
+            };
+            let max_height = container_cross_height
+                .map(|h| h.max(content_max_height))
+                .unwrap_or(content_max_height);
 
-            // Compute justify-content offsets
-            let (start_offset, item_gap) = justify_content_offsets(
-                element.style.justify_content, content_width, total_fixed, total_gap, n as u32
-            );
-
-            // Second pass: actual layout
-            let mut cursor_x = content_x.saturating_add(start_offset);
-            for (i, child) in children.iter().enumerate() {
-                let child_w = child.style.width.as_ref().and_then(|lv| match lv {
+            let child_main_width = |child: &StyledElement| -> u32 {
+                child.style.width.as_ref().and_then(|lv| match lv {
                     LengthValue::Pixels(px) => Some(*px),
                     LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
                     LengthValue::MinContent => Some(0),
                     LengthValue::MaxContent => Some(content_width),
                     LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
-                }).unwrap_or(auto_width).max(1);
-
+                }).unwrap_or(auto_width).max(1)
+            };
+            let child_cross_offset = |child: &StyledElement, line_h: u32, item_h: u32| -> u32 {
                 let self_align = match child.style.align_self {
                     AlignSelf::Auto => element.style.align_items,
                     AlignSelf::FlexStart => AlignItems::FlexStart,
@@ -4392,21 +4406,71 @@ fn layout_flex_container(
                     AlignSelf::Stretch => AlignItems::Stretch,
                     AlignSelf::Baseline => AlignItems::Baseline,
                 };
-                let child_y_offset = match self_align {
-                    AlignItems::Center => (max_height.saturating_sub(item_heights[i])) / 2,
-                    AlignItems::FlexEnd => max_height.saturating_sub(item_heights[i]),
+                match self_align {
+                    AlignItems::Center => line_h.saturating_sub(item_h) / 2,
+                    AlignItems::FlexEnd => line_h.saturating_sub(item_h),
                     _ => 0,
-                };
+                }
+            };
 
-                let mut child_y = content_y.saturating_add(child_y_offset);
-                let child_form = form_context_for_element(child, context, current_form.clone());
-                layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts, child_form);
-                cursor_x = cursor_x.saturating_add(child_w).saturating_add(item_gap);
+            if element.style.flex_wrap == FlexWrap::NoWrap {
+                // Single line: honor justify-content + cross-axis alignment.
+                let (start_offset, item_gap) = justify_content_offsets(
+                    element.style.justify_content, content_width, total_fixed, total_gap, n as u32
+                );
+                let mut cursor_x = content_x.saturating_add(start_offset);
+                for (i, child) in children.iter().enumerate() {
+                    let child_w = child_main_width(child);
+                    let child_y_offset = child_cross_offset(child, max_height, item_heights[i]);
+                    let mut child_y = content_y.saturating_add(child_y_offset);
+                    let child_form = form_context_for_element(child, context, current_form.clone());
+                    layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts, child_form);
+                    cursor_x = cursor_x.saturating_add(child_w).saturating_add(item_gap);
+                }
+                *cursor_y = content_y.saturating_add(max_height)
+                    .saturating_add(element.style.padding.bottom)
+                    .saturating_add(border_bottom_sz);
+            } else {
+                // flex-wrap: greedily break items into lines that fit the
+                // container width, then lay each line out flex-start with
+                // per-line cross-axis alignment.
+                let gap = element.style.gap;
+                let widths: Vec<u32> = children.iter().map(|c| child_main_width(c)).collect();
+                let mut lines: Vec<Vec<usize>> = vec![Vec::new()];
+                let mut line_w = 0u32;
+                for (i, &w) in widths.iter().enumerate() {
+                    let line = lines.last_mut().expect("at least one line");
+                    let add = if line.is_empty() { w } else { w.saturating_add(gap) };
+                    if !line.is_empty() && line_w.saturating_add(add) > content_width {
+                        lines.push(vec![i]);
+                        line_w = w;
+                    } else {
+                        line.push(i);
+                        line_w = line_w.saturating_add(add);
+                    }
+                }
+                let mut line_y = content_y;
+                for line in &lines {
+                    let line_h = line.iter().map(|&i| item_heights[i]).max().unwrap_or(0);
+                    let mut cx = content_x;
+                    for &i in line {
+                        let child = &children[i];
+                        let w = widths[i];
+                        let yoff = child_cross_offset(child, line_h, item_heights[i]);
+                        let mut cy = line_y.saturating_add(yoff);
+                        let child_form = form_context_for_element(child, context, current_form.clone());
+                        layout_block_element(child, cx, w, &mut cy, context, images, fonts, child_form);
+                        cx = cx.saturating_add(w).saturating_add(gap);
+                    }
+                    line_y = line_y.saturating_add(line_h).saturating_add(gap);
+                }
+                if !lines.is_empty() {
+                    line_y = line_y.saturating_sub(gap); // drop trailing row gap
+                }
+                *cursor_y = line_y
+                    .saturating_add(element.style.padding.bottom)
+                    .saturating_add(border_bottom_sz);
             }
-
-            *cursor_y = content_y.saturating_add(max_height)
-                .saturating_add(element.style.padding.bottom)
-                .saturating_add(border_bottom_sz);
         } else {
             // Column direction: stack children vertically with gap
             *cursor_y = content_y;
@@ -4504,6 +4568,263 @@ mod tests {
     use crate::font::FontContext;
     use crate::html::parse_document;
     use crate::image::{DecodedImage, ImageStore};
+
+    // Empirical layout probe: runs real-world CSS layout patterns through the
+    // full parse → style → layout pipeline and checks the resulting geometry, to
+    // surface flexbox/positioning/box-model gaps. Diagnostic — prints a report,
+    // never fails. Run: cargo test --bin tobira layout_probe -- --nocapture
+    fn probe_layout(html: &str, width: u32) -> super::LayoutDocument {
+        let document = parse_document(html);
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        layout_styled_document(&styled, &ImageStore::default(), width, &mut fonts)
+    }
+
+    fn probe_rect(layout: &super::LayoutDocument, color: u32) -> Result<super::RectCommand, String> {
+        layout
+            .rects()
+            .into_iter()
+            .find(|r| r.color == color)
+            .ok_or_else(|| format!("rect #{color:06x} not found"))
+    }
+
+    #[test]
+    fn layout_probe_report() {
+        type Case = (&'static str, fn() -> Result<(), String>);
+        fn near(a: u32, b: u32, tol: u32) -> bool {
+            a.abs_diff(b) <= tol
+        }
+        let cases: Vec<Case> = vec![
+            ("flex-row-side-by-side", || {
+                let l = probe_layout(
+                    r#"<div style="display:flex"><div style="width:60px;height:40px;background:#aa0001"></div><div style="width:60px;height:40px;background:#aa0002"></div></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA0001)?;
+                let b = probe_rect(&l, 0xAA0002)?;
+                if b.x <= a.x {
+                    return Err(format!("not side by side: a.x={} b.x={}", a.x, b.x));
+                }
+                if !near(a.y, b.y, 4) {
+                    return Err(format!("rows misaligned: a.y={} b.y={}", a.y, b.y));
+                }
+                Ok(())
+            }),
+            ("flex-justify-center", || {
+                let l = probe_layout(
+                    r#"<div style="display:flex;justify-content:center;width:600px"><div style="width:100px;height:20px;background:#aa0003"></div></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA0003)?;
+                if !near(a.x, 250, 40) {
+                    return Err(format!("not centered: x={} (want ~250)", a.x));
+                }
+                Ok(())
+            }),
+            ("flex-column-stacked", || {
+                let l = probe_layout(
+                    r#"<div style="display:flex;flex-direction:column"><div style="width:60px;height:40px;background:#aa0004"></div><div style="width:60px;height:40px;background:#aa0005"></div></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA0004)?;
+                let b = probe_rect(&l, 0xAA0005)?;
+                if b.y <= a.y {
+                    return Err(format!("not stacked: a.y={} b.y={}", a.y, b.y));
+                }
+                Ok(())
+            }),
+            ("flex-justify-space-between", || {
+                let l = probe_layout(
+                    r#"<div style="display:flex;justify-content:space-between;width:600px"><div style="width:60px;height:20px;background:#aa0006"></div><div style="width:60px;height:20px;background:#aa0007"></div></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA0006)?;
+                let b = probe_rect(&l, 0xAA0007)?;
+                if !near(a.x, 0, 30) {
+                    return Err(format!("first not at start: x={}", a.x));
+                }
+                if !near(b.x, 540, 60) {
+                    return Err(format!("last not at end: x={} (want ~540)", b.x));
+                }
+                Ok(())
+            }),
+            ("flex-grow-equal", || {
+                let l = probe_layout(
+                    r#"<div style="display:flex;width:600px"><div style="flex:1;height:20px;background:#aa0008"></div><div style="flex:1;height:20px;background:#aa0009"></div></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA0008)?;
+                let b = probe_rect(&l, 0xAA0009)?;
+                if !near(a.width, 300, 80) {
+                    return Err(format!("grow item width={} (want ~300)", a.width));
+                }
+                if b.x <= a.x {
+                    return Err(format!("second item not after first: a.x={} b.x={}", a.x, b.x));
+                }
+                Ok(())
+            }),
+            ("flex-align-items-center", || {
+                let l = probe_layout(
+                    r#"<div style="display:flex;align-items:center;height:100px"><div style="width:40px;height:20px;background:#aa000a"></div></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA000A)?;
+                if !near(a.y, 40, 25) {
+                    return Err(format!("cross-axis not centered: y={} (want ~40)", a.y));
+                }
+                Ok(())
+            }),
+            ("position-absolute", || {
+                let l = probe_layout(
+                    r#"<div style="position:relative;height:200px"><div style="position:absolute;top:50px;left:80px;width:40px;height:40px;background:#aa000b"></div></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA000B)?;
+                if !near(a.x, 80, 12) || !near(a.y, 50, 12) {
+                    return Err(format!("absolute pos wrong: ({},{}) want (~80,~50)", a.x, a.y));
+                }
+                Ok(())
+            }),
+            ("position-relative-offset", || {
+                let l = probe_layout(
+                    r#"<div style="height:10px"></div><div style="position:relative;top:30px;width:40px;height:40px;background:#aa000c"></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA000C)?;
+                if a.y < 30 {
+                    return Err(format!("relative top offset not applied: y={}", a.y));
+                }
+                Ok(())
+            }),
+            ("box-sizing-border-box", || {
+                let l = probe_layout(
+                    r#"<div style="box-sizing:border-box;width:200px;padding:20px;background:#aa000d">x</div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA000D)?;
+                if !near(a.width, 200, 8) {
+                    return Err(format!("border-box width={} (want ~200)", a.width));
+                }
+                Ok(())
+            }),
+            ("block-margin-auto-center", || {
+                let l = probe_layout(
+                    r#"<div style="width:200px;margin-left:auto;margin-right:auto;height:20px;background:#aa000e"></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA000E)?;
+                if !near(a.x, 200, 40) {
+                    return Err(format!("margin auto not centered: x={} (want ~200)", a.x));
+                }
+                Ok(())
+            }),
+            ("flex-gap", || {
+                let l = probe_layout(
+                    r#"<div style="display:flex;gap:20px"><div style="width:60px;height:20px;background:#aa000f"></div><div style="width:60px;height:20px;background:#aa0010"></div></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA000F)?;
+                let b = probe_rect(&l, 0xAA0010)?;
+                if !near(b.x, a.x + a.width + 20, 12) {
+                    return Err(format!("gap not applied: a.x+w={} b.x={}", a.x + a.width, b.x));
+                }
+                Ok(())
+            }),
+            ("flex-wrap", || {
+                let l = probe_layout(
+                    r#"<div style="display:flex;flex-wrap:wrap;width:140px"><div style="width:60px;height:30px;background:#aa0011"></div><div style="width:60px;height:30px;background:#aa0012"></div><div style="width:60px;height:30px;background:#aa0013"></div></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA0011)?;
+                let c = probe_rect(&l, 0xAA0013)?;
+                if c.y <= a.y {
+                    return Err(format!("third item did not wrap: a.y={} c.y={}", a.y, c.y));
+                }
+                Ok(())
+            }),
+            ("grid-two-columns", || {
+                let l = probe_layout(
+                    r#"<div style="display:grid;grid-template-columns:1fr 1fr;width:400px"><div style="height:20px;background:#aa0014"></div><div style="height:20px;background:#aa0015"></div></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA0014)?;
+                let b = probe_rect(&l, 0xAA0015)?;
+                if b.x <= a.x {
+                    return Err(format!("grid columns not side by side: a.x={} b.x={}", a.x, b.x));
+                }
+                Ok(())
+            }),
+            ("min-width", || {
+                let l = probe_layout(
+                    r#"<div style="width:50px;min-width:200px;height:20px;background:#aa0016"></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA0016)?;
+                if a.width < 190 {
+                    return Err(format!("min-width not applied: width={} (want >=200)", a.width));
+                }
+                Ok(())
+            }),
+            ("max-width", || {
+                let l = probe_layout(
+                    r#"<div style="width:100%;max-width:300px;height:20px;background:#aa0017"></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA0017)?;
+                if a.width > 320 {
+                    return Err(format!("max-width not capping: width={} (want ~300)", a.width));
+                }
+                Ok(())
+            }),
+            ("position-fixed-top", || {
+                let l = probe_layout(
+                    r#"<div style="height:50px"></div><div style="position:fixed;top:0;left:0;width:40px;height:30px;background:#aa0018"></div>"#,
+                    600,
+                );
+                let a = probe_rect(&l, 0xAA0018)?;
+                if a.y > 12 {
+                    return Err(format!("fixed top not at viewport top: y={}", a.y));
+                }
+                Ok(())
+            }),
+            ("nested-flex-navbar", || {
+                // logo on the left, two nav links pushed right via space-between
+                let l = probe_layout(
+                    r#"<div style="display:flex;justify-content:space-between;width:600px"><div style="width:80px;height:24px;background:#aa0019"></div><div style="display:flex;gap:10px"><div style="width:50px;height:24px;background:#aa001a"></div><div style="width:50px;height:24px;background:#aa001b"></div></div></div>"#,
+                    600,
+                );
+                let logo = probe_rect(&l, 0xAA0019)?;
+                let link2 = probe_rect(&l, 0xAA001B)?;
+                if !near(logo.x, 0, 20) {
+                    return Err(format!("logo not at left: x={}", logo.x));
+                }
+                if link2.x + link2.width < 520 {
+                    return Err(format!("nav links not pushed right: last right edge={}", link2.x + link2.width));
+                }
+                Ok(())
+            }),
+        ];
+
+        let mut failures: Vec<(&str, String)> = Vec::new();
+        for (name, case) in &cases {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(case)) {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => failures.push((name, e)),
+                Err(_) => failures.push((name, "PANIC".to_string())),
+            }
+        }
+        let total = cases.len();
+        println!("\n=== layout probe: {}/{} passed ===", total - failures.len(), total);
+        for (name, err) in &failures {
+            println!("  [layout] {name}: {err}");
+        }
+        println!();
+    }
 
     #[test]
     fn hides_display_none_content() {
