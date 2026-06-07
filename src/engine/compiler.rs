@@ -1231,6 +1231,39 @@ impl<'a> FunctionCompiler<'a> {
         self.compile_expression(statement.val())?;
         self.emit(Opcode::SetLocal(discriminant_slot));
 
+        // A switch is a single block. Per spec every function declaration inside
+        // its cases is instantiated at block entry, BEFORE the discriminant
+        // dispatch picks a case — otherwise a `function g(){}` declared in one
+        // case is undefined when control jumps directly to another case (or when
+        // a case references a helper declared in a later case). Minified code
+        // (Terser) emits exactly this shape in reducers / dispatch tables, so the
+        // gap surfaced as "X is not defined". Hoist them here, mirroring
+        // `compile_statements`: predeclare all the names first (so sibling helpers
+        // cross-reference), then build the closures.
+        let case_statements: Vec<StatementNode> = statement
+            .cases()
+            .iter()
+            .flat_map(|case| {
+                case.body()
+                    .statements()
+                    .iter()
+                    .map(|item| statement_list_item_to_node(item.clone()))
+            })
+            .collect();
+        if !self.is_top_level {
+            for stmt in &case_statements {
+                if let StatementNode::FunctionDeclaration(declaration) = stmt {
+                    let name = self.identifier_name(&declaration.name());
+                    self.declare_function_scoped(&name)?;
+                }
+            }
+        }
+        for stmt in &case_statements {
+            if let StatementNode::FunctionDeclaration(declaration) = stmt {
+                self.compile_function_declaration_statement(declaration)?;
+            }
+        }
+
         let mut case_jump_indices = Vec::new();
         let mut default_jump = None;
         let mut case_starts = vec![0usize; statement.cases().len()];
@@ -1253,6 +1286,11 @@ impl<'a> FunctionCompiler<'a> {
             case_starts[index] = self.code.len();
             for item in case.body().statements() {
                 let statement = statement_list_item_to_node(item.clone());
+                // Function declarations were already hoisted/instantiated at switch
+                // entry above; don't re-compile them inline.
+                if matches!(statement, StatementNode::FunctionDeclaration(_)) {
+                    continue;
+                }
                 self.compile_statement(&statement)?;
             }
         }
@@ -2240,7 +2278,118 @@ impl<'a> FunctionCompiler<'a> {
             .iter()
             .map(|item| statement_list_item_to_node(item.clone()))
             .collect();
+        // `var` is function-scoped, so a `var` nested anywhere in this body (inside
+        // blocks, if/for/while, try/catch, switch cases, labels — but NOT inside
+        // nested functions) must be allocated a function slot BEFORE we compile the
+        // body. Otherwise a closure created earlier than the textual `var` (e.g. a
+        // hoisted function declaration, or a function expression assigned before
+        // the `var`'s block runs) snapshots the outer scope without that name and
+        // resolves it as a global → "X is not defined" at call time. Minified code
+        // (Terser) routinely places `var`s inside blocks while closures above them
+        // capture them, which is exactly how real React tripped this.
+        if !self.is_top_level {
+            let mut var_names = Vec::new();
+            Self::collect_var_names(self.program, &statements, &mut var_names);
+            for name in var_names {
+                self.declare_function_scoped(&name)?;
+            }
+        }
         self.compile_statements(&statements)
+    }
+
+    /// Recursively collect the names introduced by `var` declarations within these
+    /// statements, descending into nested control-flow blocks but NOT into nested
+    /// function/class bodies (which have their own scope). Destructuring patterns
+    /// are skipped here (handled when the declaration itself is compiled).
+    fn collect_var_names(program: &Program, statements: &[StatementNode], out: &mut Vec<String>) {
+        fn push_decl_names(program: &Program, decl: &VariableDeclaration, out: &mut Vec<String>) {
+            if !decl.is_var() {
+                return;
+            }
+            for variable in decl.variables() {
+                if let BindingNode::Identifier(identifier) = variable.binding() {
+                    out.push(program.resolve_sym(identifier.sym()));
+                }
+            }
+        }
+        fn visit(program: &Program, statement: &StatementNode, out: &mut Vec<String>) {
+            match statement {
+                StatementNode::VariableDeclaration(decl) => push_decl_names(program, decl, out),
+                StatementNode::BlockStatement(block) => {
+                    for item in block.statement_list().statements() {
+                        visit(program, &statement_list_item_to_node(item.clone()), out);
+                    }
+                }
+                StatementNode::IfStatement(stmt) => {
+                    visit(program, &super::ast::statement_to_node(stmt.body().clone()), out);
+                    if let Some(else_node) = stmt.else_node() {
+                        visit(program, &super::ast::statement_to_node(else_node.clone()), out);
+                    }
+                }
+                StatementNode::ForStatement(stmt) => {
+                    if let Some(ForLoopInitializerNode::Var(var_decl)) = stmt.init() {
+                        push_decl_names(program, &VariableDeclaration::Var(var_decl.clone()), out);
+                    }
+                    visit(program, &super::ast::statement_to_node(stmt.body().clone()), out);
+                }
+                StatementNode::ForInStatement(stmt) => {
+                    if let IterableLoopInitializerNode::Var(variable) = stmt.initializer() {
+                        if let BindingNode::Identifier(identifier) = variable.binding() {
+                            out.push(program.resolve_sym(identifier.sym()));
+                        }
+                    }
+                    visit(program, &super::ast::statement_to_node(stmt.body().clone()), out);
+                }
+                StatementNode::ForOfStatement(stmt) => {
+                    if let IterableLoopInitializerNode::Var(variable) = stmt.initializer() {
+                        if let BindingNode::Identifier(identifier) = variable.binding() {
+                            out.push(program.resolve_sym(identifier.sym()));
+                        }
+                    }
+                    visit(program, &super::ast::statement_to_node(stmt.body().clone()), out);
+                }
+                StatementNode::WhileStatement(stmt) => {
+                    visit(program, &super::ast::statement_to_node(stmt.body().clone()), out);
+                }
+                StatementNode::DoWhileStatement(stmt) => {
+                    visit(program, &super::ast::statement_to_node(stmt.body().clone()), out);
+                }
+                StatementNode::SwitchStatement(stmt) => {
+                    for case in stmt.cases() {
+                        for item in case.body().statements() {
+                            visit(program, &statement_list_item_to_node(item.clone()), out);
+                        }
+                    }
+                }
+                StatementNode::TryStatement(stmt) => {
+                    for item in stmt.block().statement_list().statements() {
+                        visit(program, &statement_list_item_to_node(item.clone()), out);
+                    }
+                    if let Some(catch) = stmt.catch() {
+                        for item in catch.block().statement_list().statements() {
+                            visit(program, &statement_list_item_to_node(item.clone()), out);
+                        }
+                    }
+                    if let Some(finally) = stmt.finally() {
+                        for item in finally.block().statement_list().statements() {
+                            visit(program, &statement_list_item_to_node(item.clone()), out);
+                        }
+                    }
+                }
+                StatementNode::LabeledStatement(labeled) => {
+                    if let boa_ast::statement::LabelledItem::Statement(inner) = labeled.item() {
+                        visit(program, &super::ast::statement_to_node(inner.clone()), out);
+                    }
+                }
+                // Function/class declarations introduce their own scope; their inner
+                // `var`s do not belong to this function. All other statements carry
+                // no nested `var` bindings.
+                _ => {}
+            }
+        }
+        for statement in statements {
+            visit(program, statement, out);
+        }
     }
 
     fn compile_statement(&mut self, statement: &StatementNode) -> Result<(), CompileError> {
@@ -3227,6 +3376,24 @@ impl<'a> FunctionCompiler<'a> {
         is_generator: bool,
         is_arrow: bool,
     ) -> Result<(), CompileError> {
+        // Named function EXPRESSIONS bind their own name inside the function body
+        // (and only there) to the function itself, so recursive self-reference
+        // works: `var f = function I(n){ return n<=1?1:n*I(n-1); }`. Minifiers
+        // (Terser) rely on this heavily — every self-referential helper becomes a
+        // short-named function expression like `function I(){…I…}`. We desugar it
+        // the spec way: introduce a fresh block scope in THIS (outer) compiler
+        // holding the name, compile the body so it captures that binding as an
+        // upvalue, then store the freshly made closure into the binding. Arrows
+        // have no such self-binding, and declarations bind in the enclosing scope
+        // already, so this only applies to non-arrow expressions with a name.
+        let self_binding_slot = match (&name, is_arrow) {
+            (Some(fn_name), false) => {
+                self.push_scope();
+                Some((self.declare_block_scoped(fn_name)?, ()))
+            }
+            _ => None,
+        };
+
         let index = self.compile_nested_function(
             name,
             parameters,
@@ -3237,6 +3404,15 @@ impl<'a> FunctionCompiler<'a> {
             is_arrow,
         )?;
         self.emit(Opcode::MakeClosure(index));
+
+        if let Some((slot, ())) = self_binding_slot {
+            // Closure is on the stack; copy it into the self-binding cell that the
+            // body captured as an upvalue, leaving the closure as the expression's
+            // value. Then drop the scope so the name isn't visible to outer code.
+            self.emit(Opcode::Dup);
+            self.emit(Opcode::SetLocal(slot));
+            self.pop_scope();
+        }
         Ok(())
     }
 
