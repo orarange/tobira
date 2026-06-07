@@ -1566,6 +1566,50 @@ pub struct EngineSession {
     vm: Vm,
 }
 
+/// JS polyfills injected before page scripts. See `EngineSession::start`.
+const RUNTIME_PRELUDE: &str = r#"
+(function(){
+  var g = globalThis;
+  if (typeof g.MessageChannel === 'undefined') {
+    function MessagePort(){ this._onmessage = null; this._other = null; this._listeners = null; }
+    MessagePort.prototype.postMessage = function(data){
+      var other = this._other;
+      setTimeout(function(){
+        if (!other) return;
+        var ev = { data: data };
+        if (typeof other._onmessage === 'function') other._onmessage(ev);
+        if (other._listeners) {
+          for (var i = 0; i < other._listeners.length; i++) other._listeners[i](ev);
+        }
+      }, 0);
+    };
+    Object.defineProperty(MessagePort.prototype, 'onmessage', {
+      configurable: true,
+      get: function(){ return this._onmessage; },
+      set: function(v){ this._onmessage = v; }
+    });
+    MessagePort.prototype.addEventListener = function(t, fn){
+      if (t === 'message') { if (!this._listeners) this._listeners = []; this._listeners.push(fn); }
+    };
+    MessagePort.prototype.removeEventListener = function(t, fn){
+      if (t === 'message' && this._listeners) {
+        this._listeners = this._listeners.filter(function(l){ return l !== fn; });
+      }
+    };
+    MessagePort.prototype.start = function(){};
+    MessagePort.prototype.close = function(){};
+    function MessageChannel(){
+      this.port1 = new MessagePort();
+      this.port2 = new MessagePort();
+      this.port1._other = this.port2;
+      this.port2._other = this.port1;
+    }
+    g.MessageChannel = MessageChannel;
+    g.MessagePort = MessagePort;
+  }
+})();
+"#;
+
 impl EngineSession {
     /// Build the runtime, run the document's inline scripts, settle async
     /// deferred work, and return the runtime plus the initial snapshot.
@@ -1575,6 +1619,15 @@ impl EngineSession {
         let mut vm = Vm::with_host(Heap::new(), Box::new(host));
 
         let mut error = None;
+        // Runtime prelude: a small JS polyfill for MessageChannel, which the engine
+        // doesn't implement natively but React's scheduler uses to flush deferred
+        // work (e.g. passive effects / useEffect on update). Built on setTimeout,
+        // which the event loop already pumps. Guarded so a future native impl wins.
+        if let Ok(program) = Parser::new(RUNTIME_PRELUDE).parse() {
+            if let Ok(chunk) = Compiler::new(&program).compile() {
+                let _ = vm.execute(&chunk);
+            }
+        }
         for script in &scripts {
             match Parser::new(script).parse() {
                 Ok(program) => match Compiler::new(&program).compile() {
@@ -2978,6 +3031,140 @@ mod tests {
             "state did not update after click; html={}",
             after_click.html
         );
+    }
+
+    /// Real React 18 with useEffect (re-run on dep change), keyed list rendering
+    /// that grows on click, and conditional rendering toggled on click. Exercises
+    /// the scheduler-driven passive-effect flush (relies on the MessageChannel
+    /// polyfill) end-to-end against the production bundle.
+    #[test]
+    fn react_umd_effects_lists_conditional() {
+        let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
+            .expect("react fixture present");
+        let react_dom =
+            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+                .expect("react-dom fixture present");
+        let app = r#"
+            var e = React.createElement;
+            var useState = React.useState, useEffect = React.useEffect;
+            function App() {
+              var s = useState(['a','b']); var items = s[0]; var setItems = s[1];
+              var t = useState(false); var shown = t[0]; var setShown = t[1];
+              useEffect(function(){ console.log('EFFECT len=' + items.length); }, [items]);
+              return e('div', null,
+                e('button', { id:'add', onClick:function(){ setItems(items.concat('x')); } }, 'add'),
+                e('button', { id:'toggle', onClick:function(){ setShown(!shown); } }, 'toggle'),
+                shown ? e('p', { id:'panel' }, 'PANEL') : null,
+                e('ul', { id:'list' }, items.map(function(it, i){ return e('li', { key:i }, it); }))
+              );
+            }
+            ReactDOM.createRoot(document.getElementById('root')).render(e(App));
+        "#;
+        let html = format!(
+            "<html><body><div id=\"root\"></div><script>{react}</script><script>{react_dom}</script><script>{app}</script></body></html>"
+        );
+        let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
+        assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
+        let pump = |s: &mut EngineSession| {
+            let mut now = 0u64;
+            for _ in 0..200 { if !s.has_pending_work() { break; } now += 16; s.pump(now); }
+        };
+        pump(&mut session);
+        let mount = session.snapshot();
+        assert!(
+            mount.html.contains("<li>a</li><li>b</li>"),
+            "initial list wrong: {}",
+            mount.html
+        );
+
+        // Add an item; the effect must re-run (dep changed) and the list must grow.
+        let add = session.eval_for_test("document.getElementById('add').click();");
+        assert!(add.error.is_none(), "add error: {:?}", add.error);
+        pump(&mut session);
+        assert!(
+            add.console_logs.iter().any(|l| l == "EFFECT len=3"),
+            "useEffect did not re-run on update; logs: {:?}",
+            add.console_logs
+        );
+        let after_add = session.snapshot();
+        assert!(
+            after_add.html.contains("<li>a</li><li>b</li><li>x</li>"),
+            "list did not grow after click: {}",
+            after_add.html
+        );
+
+        // Toggle conditional rendering: the panel appears.
+        let toggle = session.eval_for_test("document.getElementById('toggle').click();");
+        assert!(toggle.error.is_none(), "toggle error: {:?}", toggle.error);
+        pump(&mut session);
+        assert!(
+            session.snapshot().html.contains("id=\"panel\""),
+            "conditional panel did not render after toggle"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn react_umd_complex_diag() {
+        let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
+            .expect("react fixture present");
+        let react_dom =
+            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+                .expect("react-dom fixture present");
+        // Exercise useEffect, list rendering with keys, conditional rendering, and
+        // a multi-item state update driven by a click.
+        let app = r#"
+            var e = React.createElement;
+            var useState = React.useState, useEffect = React.useEffect;
+            function App() {
+              var s = useState(['a','b']); var items = s[0]; var setItems = s[1];
+              var t = useState(false); var shown = t[0]; var setShown = t[1];
+              useEffect(function(){ console.log('EFFECT items=' + items.length); }, [items]);
+              useEffect(function(){ console.log('EFFECT_EVERY items=' + items.length); });
+              return e('div', null,
+                e('button', { id:'add', onClick:function(){ setItems(items.concat('x')); } }, 'add'),
+                e('button', { id:'toggle', onClick:function(){ setShown(!shown); } }, 'toggle'),
+                shown ? e('p', { id:'panel' }, 'PANEL') : null,
+                e('ul', { id:'list' }, items.map(function(it, i){ return e('li', { key: i }, it); }))
+              );
+            }
+            ReactDOM.createRoot(document.getElementById('root')).render(e(App));
+        "#;
+        let html = format!(
+            "<html><body><div id=\"root\"></div><script>{react}</script><script>{react_dom}</script><script>{app}</script></body></html>"
+        );
+        let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
+        println!("INIT_ERR: {:?}", initial.error);
+        println!("INIT_LOGS: {:?}", initial.console_logs);
+        let mc = session.eval_for_test("console.log('MC=' + typeof MessageChannel + ' perf=' + typeof performance);");
+        println!("MC_LOGS: {:?}", mc.console_logs);
+        let pump = |s: &mut EngineSession| {
+            let mut now = 0u64;
+            for _ in 0..200 { if !s.has_pending_work() { break; } now += 16; s.pump(now); }
+        };
+        pump(&mut session);
+        let m = session.snapshot();
+        println!("AFTER_MOUNT_LOGS: {:?}", m.console_logs);
+        let show_list = |s: &mut EngineSession, label: &str| {
+            let snap = s.snapshot();
+            if let Some(i) = snap.html.find("id=\"list\"") {
+                let end = (i + 120).min(snap.html.len());
+                println!("{label} LIST: {}", &snap.html[i..end]);
+            }
+            println!("{label} HAS_PANEL: {}", snap.html.contains("id=\"panel\""));
+        };
+        show_list(&mut session, "MOUNT");
+        let r1 = session.eval_for_test("document.getElementById('add').click();");
+        println!("ADD_ERR: {:?}", r1.error);
+        println!("ADD_IMMEDIATE_LOGS: {:?}", r1.console_logs);
+        println!("PENDING_AFTER_ADD: {}", session.has_pending_work());
+        pump(&mut session);
+        println!("ADD_LOGS: {:?}", session.snapshot().console_logs);
+        show_list(&mut session, "AFTER_ADD");
+        let r2 = session.eval_for_test("document.getElementById('toggle').click();");
+        println!("TOGGLE_ERR: {:?}", r2.error);
+        pump(&mut session);
+        show_list(&mut session, "AFTER_TOGGLE");
     }
 
     #[test]
