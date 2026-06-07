@@ -1098,7 +1098,35 @@ pub struct Vm {
     /// Result of the most recent generator step, set by Yield/Return and read by
     /// `Generator.prototype.next`.
     generator_outcome: Option<GeneratorOutcome>,
+    /// DOM interface constructor objects (`Node`, `Element`, `HTMLElement`, …)
+    /// keyed by the constructor's heap ref, mapped to the interface name. Host DOM
+    /// nodes don't have their prototype chains wired to these, so `instanceof`
+    /// special-cases them by interface name (see `instanceof_value`). Real DOM
+    /// libraries (React) gate on `x instanceof Element` etc.
+    dom_interface_ctors: HashMap<RawGcRef, &'static str>,
 }
+
+/// DOM interface names exposed as global constructors for `instanceof`. `Event`
+/// and `CustomEvent` are intentionally omitted — they already exist as globals.
+const DOM_INTERFACE_NAMES: &[&str] = &[
+    "EventTarget",
+    "Node",
+    "Element",
+    "HTMLElement",
+    "Document",
+    "DocumentFragment",
+    "CharacterData",
+    "Text",
+    "Comment",
+    "HTMLIFrameElement",
+    "HTMLInputElement",
+    "HTMLTextAreaElement",
+    "HTMLSelectElement",
+    "HTMLButtonElement",
+    "HTMLAnchorElement",
+    "SVGElement",
+    "Window",
+];
 
 /// How a generator step ended.
 enum GeneratorOutcome {
@@ -1164,6 +1192,7 @@ impl Vm {
             symbol_descriptions: HashMap::new(),
             symbol_registry: HashMap::new(),
             generator_outcome: None,
+            dom_interface_ctors: HashMap::new(),
         };
         vm.install_globals();
         vm
@@ -2423,6 +2452,26 @@ impl Vm {
         // their exports to it (e.g. `self.React = {}`); pointing `self` at the
         // document meant those exports never landed on the real global.
         self.globals.insert("self".to_string(), window_obj);
+
+        // DOM interface constructors so `node instanceof Element` (and friends)
+        // works. Host DOM nodes don't have prototype chains linked to these, so
+        // `instanceof_value` recognizes them by interface name; here we just make
+        // each constructor exist as an object with a `.prototype`, register it as
+        // a global, and remember its ref→interface mapping.
+        for &iface in DOM_INTERFACE_NAMES {
+            let ctor = self.allocate_ordinary_object(Some(object_prototype));
+            let proto = self.allocate_ordinary_object(Some(object_prototype));
+            self.define_data_property(
+                ctor,
+                PropertyKey::from("prototype"),
+                Value::Object(proto),
+                false,
+                false,
+                false,
+            );
+            self.dom_interface_ctors.insert(ctor.raw(), iface);
+            self.globals.insert(iface.to_string(), Value::Object(ctor));
+        }
 
         // Encoding globals
         let btoa = self.allocate_builtin_method(BuiltinId::Btoa);
@@ -7033,11 +7082,39 @@ impl Vm {
         }
     }
 
+    /// The DOM interfaces a host node value satisfies, for `instanceof`. Host DOM
+    /// nodes are not wired into the JS prototype chain of the interface
+    /// constructors, so membership is decided structurally by the host class.
+    fn host_node_interfaces(&self, object: GcRef<JsObject>) -> Option<&'static [&'static str]> {
+        let data = self.heap.objects().get(object)?;
+        if let ObjectKind::Host(slot) = &data.kind {
+            return Some(match slot.class {
+                // Element nodes (our generic node wrapper) — treat as the element
+                // interface chain. Text/Comment also use this class today; the
+                // distinction rarely matters for the libraries that gate on these.
+                HostObjectClass::Node | HostObjectClass::EventTarget => {
+                    &["EventTarget", "Node", "Element", "HTMLElement"]
+                }
+                HostObjectClass::Document => &["EventTarget", "Node", "Document"],
+                HostObjectClass::Window => &["EventTarget", "Window"],
+                _ => return None,
+            });
+        }
+        None
+    }
+
     fn instanceof_value(&self, value: &Value, constructor: &Value) -> Result<bool, VmError> {
         let Value::Object(object) = value else {
             return Ok(false);
         };
         let ctor = self.require_object_ref(constructor, "instanceof right-hand side")?;
+        // DOM interface constructors (`Element`, `Node`, …): host nodes satisfy
+        // them by interface name rather than by JS prototype chain.
+        if let Some(iface) = self.dom_interface_ctors.get(&ctor.raw()) {
+            return Ok(self
+                .host_node_interfaces(*object)
+                .is_some_and(|set| set.iter().any(|name| name == iface)));
+        }
         let prototype =
             match self.get_own_property_descriptor(ctor, &PropertyKey::from("prototype")) {
                 Some(JsPropertyDescriptor::Data {

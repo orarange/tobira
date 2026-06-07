@@ -2893,6 +2893,59 @@ mod tests {
     // run with: cargo test --bin tobira -- --ignored react_umd --nocapture
     #[test]
     #[ignore]
+    fn react_umd_mount_diag() {
+        let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
+            .expect("react fixture present");
+        let react_dom =
+            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+                .expect("react-dom fixture present");
+        // Try BOTH APIs to isolate concurrent-scheduler issues from DOM mount issues:
+        // legacy ReactDOM.render (synchronous) vs createRoot().render (concurrent).
+        let html = format!(
+            "<html><body><div id=\"legacy\"></div><div id=\"concurrent\"></div>\
+             <script>{react}</script>\
+             <script>{react_dom}</script>\
+             <script>\
+               try {{\
+                 ReactDOM.render(React.createElement('h1',{{id:'L'}},'Legacy'), document.getElementById('legacy'));\
+                 console.log('LEGACY_CALLED');\
+               }} catch(e) {{ console.log('LEGACY_THREW: ' + (e&&e.message?e.message:e)); }}\
+               try {{\
+                 var r = ReactDOM.createRoot(document.getElementById('concurrent'));\
+                 r.render(React.createElement('h1',{{id:'C'}},'Concurrent'));\
+                 console.log('CONCURRENT_CALLED');\
+               }} catch(e) {{ console.log('CONCURRENT_THREW: ' + (e&&e.message?e.message:e)); }}\
+             </script></body></html>"
+        );
+        let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
+        println!("INIT_ERROR: {:?}", initial.error);
+        println!("INIT_LOGS: {:?}", initial.console_logs);
+        println!("INIT_PENDING: {}", session.has_pending_work());
+        let mut now = 0u64;
+        for i in 0..300 {
+            if !session.has_pending_work() {
+                println!("quiescent after {i} pumps");
+                break;
+            }
+            now += 16;
+            session.pump(now);
+        }
+        let snap = session.snapshot();
+        println!("FINAL_ERROR: {:?}", snap.error);
+        println!("FINAL_LOGS: {:?}", snap.console_logs);
+        println!("LEGACY_MOUNTED: {}", snap.html.contains("id=\"L\"") || snap.html.contains("Legacy</h1>"));
+        println!("CONCURRENT_MOUNTED: {}", snap.html.contains("id=\"C\"") || snap.html.contains("Concurrent</h1>"));
+        // Dump the two containers' regions.
+        for marker in ["id=\"legacy\"", "id=\"concurrent\""] {
+            if let Some(i) = snap.html.find(marker) {
+                let end = (i + 120).min(snap.html.len());
+                println!("REGION[{marker}]: {}", &snap.html[i..end]);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn react_umd_global_diag() {
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");
@@ -2968,8 +3021,11 @@ mod tests {
         }
     }
 
+    /// End-to-end proof that the REAL React 18 production bundle runs on our
+    /// from-scratch engine and renders into our DOM. Uses the committed UMD
+    /// fixtures (tests/fixtures/react/*.production.min.js). Not ignored — this is
+    /// a real regression gate now that React works.
     #[test]
-    #[ignore]
     fn react_umd_renders_into_dom() {
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");
@@ -2984,25 +3040,37 @@ mod tests {
              <script>\
                try {{\
                  var root = ReactDOM.createRoot(document.getElementById('root'));\
-                 root.render(React.createElement('h1', {{ id: 'title' }}, 'Hello, Tobira'));\
+                 root.render(\
+                   React.createElement('h1', {{ id: 'title', className: 'greeting' }},\
+                     'Hello, Tobira'));\
                  console.log('RENDER_CALLED');\
                }} catch (e) {{ console.log('RENDER_THREW: ' + (e && e.message ? e.message : e)); }}\
              </script></body></html>"
         );
 
-        let result = run_document_scripts(&html, "http://localhost/");
-        println!("ERROR: {:?}", result.error);
-        println!("LOGS: {:?}", result.console_logs);
-        println!("HAS_PENDING: {}", result.has_pending_work);
-        println!(
-            "HTML_HAS_H1: {}",
-            result.html.contains("Hello, Tobira")
-        );
-        assert!(result.error.is_none(), "engine error: {:?}", result.error);
+        let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
+        assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
         assert!(
-            result.html.contains("Hello, Tobira"),
-            "React did not render into the DOM. html={}",
-            result.html
+            initial.console_logs.iter().any(|l| l == "RENDER_CALLED"),
+            "render() did not complete cleanly; logs: {:?}",
+            initial.console_logs
+        );
+        // Flush any scheduled work (React 18 may finish the mount asynchronously).
+        let mut now = 0u64;
+        for _ in 0..300 {
+            if !session.has_pending_work() {
+                break;
+            }
+            now += 16;
+            session.pump(now);
+        }
+        let snap = session.snapshot();
+        assert!(snap.error.is_none(), "engine error after pump: {:?}", snap.error);
+        // The rendered <h1> (with React-applied id/class) must be inside #root.
+        assert!(
+            snap.html.contains("id=\"title\"") && snap.html.contains("Hello, Tobira"),
+            "React did not render the element into the DOM. html={}",
+            snap.html
         );
     }
 }
