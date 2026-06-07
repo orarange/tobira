@@ -3160,7 +3160,9 @@ mod tests {
             function Form() {
               var s = useState(''); var val = s[0]; var setVal = s[1];
               return e('div', null,
-                e('input', { id:'in', value: val, onChange: function(ev){ console.log('CHANGE ' + ev.target.value); setVal(ev.target.value); } }),
+                e('input', { id:'in', value: val,
+                    onClick: function(){ console.log('INPUT_CLICK'); },
+                    onChange: function(ev){ console.log('CHANGE ' + ev.target.value); setVal(ev.target.value); } }),
                 e('span', { id:'echo' }, 'echo:' + val)
               );
             }
@@ -3189,12 +3191,14 @@ mod tests {
         // onChange to the 'input' event).
         let r = session.eval_for_test(
             "var el=document.getElementById('in'); \
-             el.addEventListener('input', function(){ console.log('OWN_INPUT val=' + el.value); }); \
-             document.getElementById('root').addEventListener('input', function(){ console.log('ROOT_INPUT'); }); \
+             console.log('el.type=' + el.type + ' el.nodeName=' + el.nodeName); \
+             var keys = Object.keys(el).filter(function(k){ return k.indexOf('__react')===0; }); \
+             console.log('react_keys=' + keys.join(',')); \
+             console.log('tracker=' + (el._valueTracker !== undefined && el._valueTracker !== null)); \
+             console.log('hasOwn_value=' + el.hasOwnProperty('value')); \
+             console.log('ctor_proto=' + (typeof el.constructor + '/' + (el.constructor && typeof el.constructor.prototype))); \
              el.value='hello'; \
-             var ev = new Event('input', { bubbles:true }); \
-             console.log('ev.bubbles=' + ev.bubbles + ' ev.type=' + ev.type); \
-             el.dispatchEvent(ev);",
+             el.dispatchEvent(new Event('input', { bubbles:true }));",
         );
         println!("TYPE_ERR: {:?}", r.error);
         println!("TYPE_LOGS: {:?}", r.console_logs);

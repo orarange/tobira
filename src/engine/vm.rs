@@ -11688,6 +11688,24 @@ impl Vm {
                 let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
             }
+            "type" => {
+                // `input.type` reflects the attribute but DEFAULTS to "text" when
+                // absent. React's isTextInputElement does `supportedInputTypes[el.type]`
+                // — returning "" there makes React treat a plain <input> as a
+                // non-text element and skip its onChange handling entirely.
+                let attr = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "type".to_string() }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                if !attr.is_empty() {
+                    return Ok(self.make_string_value(&attr));
+                }
+                let tag = match self.host.read_dom(DomRead::NodeName { node: node_id }) {
+                    Ok(DomReadResult::String(s)) => s.to_ascii_uppercase(),
+                    _ => String::new(),
+                };
+                Ok(self.make_string_value(if tag == "INPUT" { "text" } else { "" }))
+            }
             "classList" => Ok(self.make_host_object(HostObjectSlot {
                 class: HostObjectClass::Other("TokenList"),
                 interface_name: "DOMTokenList",
