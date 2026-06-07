@@ -9679,7 +9679,29 @@ impl Vm {
                 set(self, "bottom", y + h);
                 Ok(Value::Object(rect_obj))
             }
-            BuiltinId::DomNodeScrollIntoView | BuiltinId::DomNodeFocus | BuiltinId::DomNodeBlur | BuiltinId::DomNodeClick => {
+            BuiltinId::DomNodeScrollIntoView
+            | BuiltinId::DomNodeFocus
+            | BuiltinId::DomNodeBlur => Ok(Value::Undefined),
+            BuiltinId::DomNodeClick => {
+                // `el.click()` must actually dispatch a trusted, bubbling,
+                // cancelable click — otherwise delegated handlers never fire. This
+                // is exactly how React responds to clicks: it registers ONE listener
+                // on the root container and relies on the event bubbling up from the
+                // real target, so a no-op `click()` left React UIs inert.
+                let target_handle = self
+                    .node_id_from_host_val(&this_value)
+                    .map(|id| id.0)
+                    .unwrap_or(0);
+                let init = DomEventInit {
+                    bubbles: true,
+                    cancelable: true,
+                    button: Some(0),
+                    buttons: Some(1),
+                    ..DomEventInit::default()
+                };
+                let event_ref = self.build_host_event("click", &this_value, &init);
+                let event_val = Value::Object(event_ref);
+                self.propagate_event(target_handle, &event_val, "click", true)?;
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeAddEventListener => {

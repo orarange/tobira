@@ -1193,6 +1193,15 @@ impl Host for BrowserHost {
                 if !exists(&self.nodes, idx) {
                     return Err(HostError::InvalidHandle);
                 }
+                // On a Text/Comment node, `textContent`/`nodeValue`/`data` set the
+                // node's OWN character data — it has no children. (React's
+                // setTextContent fast-path does `firstChild.nodeValue = text` on the
+                // text node, so getting this wrong leaves the UI stuck on its
+                // initial text after every state update.)
+                if let DomNodeKind::Text(text) = &mut self.nodes[idx].kind {
+                    *text = value;
+                    return Ok(DomMutationResult::None);
+                }
                 let removed: Vec<usize> = self.nodes[idx].children.clone();
                 for &child in &removed {
                     self.nodes[child].parent = None;
@@ -1714,6 +1723,22 @@ impl EngineSession {
                 value: value.to_string(),
             });
         }
+    }
+
+    /// Test helper: compile and run an extra script against the live session,
+    /// settle deferred work, and return a fresh snapshot. Lets tests drive the
+    /// page the way later user interaction would (e.g. `el.click()`).
+    #[cfg(test)]
+    pub fn eval_for_test(&mut self, src: &str) -> EngineRunResult {
+        let error = match Parser::new(src).parse() {
+            Ok(program) => match Compiler::new(&program).compile() {
+                Ok(chunk) => self.vm.execute(&chunk).err().map(|e| format!("{e:?}")),
+                Err(e) => Some(format!("compile: {e:?}")),
+            },
+            Err(e) => Some(format!("parse: {e:?}")),
+        };
+        self.vm.run_due_jobs(10_000);
+        self.snapshot_with_error(error)
     }
 }
 
@@ -2891,6 +2916,118 @@ mod tests {
     // production bundles from tests/fixtures/react and renders a component against
     // the real DOM host. Ignored by default (still failing while we close gaps);
     // run with: cargo test --bin tobira -- --ignored react_umd --nocapture
+    /// Real React 18 interactivity: a useState counter with an onClick handler.
+    /// Clicking the button (via `el.click()`, which now dispatches a bubbling
+    /// click that React's delegated root listener catches) must update state and
+    /// re-render the DOM. This is the end-to-end "React works as a framework"
+    /// proof, not just a static render.
+    #[test]
+    fn react_umd_usestate_onclick_rerenders() {
+        let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
+            .expect("react fixture present");
+        let react_dom =
+            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+                .expect("react-dom fixture present");
+
+        let html = format!(
+            "<html><body><div id=\"root\"></div>\
+             <script>{react}</script>\
+             <script>{react_dom}</script>\
+             <script>\
+               var e = React.createElement;\
+               function Counter() {{\
+                 var s = React.useState(0); var n = s[0]; var setN = s[1];\
+                 return e('button', {{ id: 'btn', onClick: function(){{ setN(n + 1); }} }},\
+                          'count: ' + n);\
+               }}\
+               try {{\
+                 ReactDOM.createRoot(document.getElementById('root')).render(e(Counter));\
+                 console.log('RENDER_CALLED');\
+               }} catch (err) {{ console.log('THREW: ' + (err && err.message ? err.message : err)); }}\
+             </script></body></html>"
+        );
+
+        let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
+        assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
+        let pump = |session: &mut EngineSession| {
+            let mut now = 0u64;
+            for _ in 0..300 {
+                if !session.has_pending_work() {
+                    break;
+                }
+                now += 16;
+                session.pump(now);
+            }
+        };
+        pump(&mut session);
+        let after_mount = session.snapshot();
+        assert!(
+            after_mount.html.contains("count: 0"),
+            "initial render missing 'count: 0'; html={}",
+            after_mount.html
+        );
+
+        // Click the button: dispatch through the engine (bubbles to React's root
+        // delegated listener), then flush the scheduled re-render.
+        let click = session.eval_for_test("document.getElementById('btn').click();");
+        assert!(click.error.is_none(), "click error: {:?}", click.error);
+        pump(&mut session);
+        let after_click = session.snapshot();
+        assert!(
+            after_click.html.contains("count: 1"),
+            "state did not update after click; html={}",
+            after_click.html
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn react_umd_click_diag() {
+        let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
+            .expect("react fixture present");
+        let react_dom =
+            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+                .expect("react-dom fixture present");
+        let html = format!(
+            "<html><body><div id=\"root\"></div>\
+             <script>{react}</script>\
+             <script>{react_dom}</script>\
+             <script>\
+               var e = React.createElement;\
+               function Counter() {{\
+                 var s = React.useState(0); var n = s[0]; var setN = s[1];\
+                 console.log('RENDER n=' + n);\
+                 return e('button', {{ id: 'btn', onClick: function(){{ console.log('HANDLER_FIRED'); setN(n+1); }} }}, 'count: ' + n);\
+               }}\
+               ReactDOM.createRoot(document.getElementById('root')).render(e(Counter));\
+               console.log('btn_exists=' + (document.getElementById('btn') !== null));\
+             </script></body></html>"
+        );
+        let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
+        println!("INIT_ERR: {:?}", initial.error);
+        println!("INIT_LOGS: {:?}", initial.console_logs);
+        let mut now = 0u64;
+        for _ in 0..50 { if !session.has_pending_work() { break; } now += 16; session.pump(now); }
+        // manual listener probe + click
+        let r1 = session.eval_for_test(
+            "var b=document.getElementById('btn'); \
+             console.log('have_btn=' + (b!==null)); \
+             b.addEventListener('click', function(){ console.log('OWN_LISTENER'); }); \
+             b.click();",
+        );
+        println!("CLICK_ERR: {:?}", r1.error);
+        println!("CLICK_LOGS: {:?}", r1.console_logs);
+        println!("PENDING_AFTER_CLICK: {}", session.has_pending_work());
+        let mut now = 0u64;
+        for _ in 0..50 { if !session.has_pending_work() { break; } now += 16; session.pump(now); }
+        let snap = session.snapshot();
+        println!("AFTER_LOGS: {:?}", snap.console_logs);
+        if let Some(i) = snap.html.find("id=\"root\"") {
+            let end = (i + 90).min(snap.html.len());
+            println!("ROOT: {}", &snap.html[i..end]);
+        }
+    }
+
     #[test]
     #[ignore]
     fn react_umd_mount_diag() {
