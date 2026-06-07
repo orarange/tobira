@@ -11640,6 +11640,34 @@ impl Vm {
                 let res = self.host.read_dom(DomRead::NodeName { node: node_id });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Undefined })
             }
+            "constructor" => {
+                // Return the node's DOM interface constructor so libraries can read
+                // `node.constructor.prototype` (React's input value-tracker does this
+                // — if it throws on `undefined.prototype`, mounting ANY <input>
+                // fails). The constructor has a `.prototype` but no `value`/`checked`
+                // accessor, so React's tracker bails gracefully and falls back to
+                // firing change on every input event.
+                let tag = match self.host.read_dom(DomRead::NodeName { node: node_id }) {
+                    Ok(DomReadResult::String(s)) => s.to_ascii_uppercase(),
+                    _ => String::new(),
+                };
+                let iface = match tag.as_str() {
+                    "INPUT" => "HTMLInputElement",
+                    "TEXTAREA" => "HTMLTextAreaElement",
+                    "SELECT" => "HTMLSelectElement",
+                    "BUTTON" => "HTMLButtonElement",
+                    "A" => "HTMLAnchorElement",
+                    "#TEXT" => "Text",
+                    "#COMMENT" => "Comment",
+                    _ => "HTMLElement",
+                };
+                Ok(self
+                    .globals
+                    .get(iface)
+                    .cloned()
+                    .or_else(|| self.globals.get("HTMLElement").cloned())
+                    .unwrap_or(Value::Undefined))
+            }
             "nodeValue" => {
                 let res = self.host.read_dom(DomRead::NodeValue { node: node_id });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Null })
@@ -11830,6 +11858,15 @@ impl Vm {
             "addEventListener" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener)),
             "removeEventListener" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemoveEventListener)),
             "dispatchEvent" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeDispatchEvent)),
+            // Object.prototype methods that libraries call on DOM nodes. Host nodes
+            // aren't wired into the JS prototype chain, so expose the common ones
+            // directly. React's input value-tracker calls `node.hasOwnProperty(...)`
+            // during mount — without this it hit "attempted to call a non-function
+            // value" and every <input> failed to render.
+            "hasOwnProperty" => Ok(self.allocate_builtin_method(BuiltinId::ObjectProtoHasOwnProperty)),
+            "isPrototypeOf" => Ok(self.allocate_builtin_method(BuiltinId::ObjectProtoIsPrototypeOf)),
+            "valueOf" => Ok(self.allocate_builtin_method(BuiltinId::ObjectProtoValueOf)),
+            "toString" => Ok(self.allocate_builtin_method(BuiltinId::ObjectProtoToString)),
             _ => Ok(Value::Undefined),
         }
     }

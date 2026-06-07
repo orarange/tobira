@@ -3103,6 +3103,105 @@ mod tests {
         );
     }
 
+    /// React 18 renders a controlled `<input>` (value bound to state) plus a
+    /// sibling. This used to crash the whole render: React's input value-tracker
+    /// reads `node.constructor.prototype` and calls `node.hasOwnProperty(...)`,
+    /// which host DOM nodes didn't support ("attempted to call a non-function
+    /// value"). Now inputs mount with their bound value.
+    #[test]
+    fn react_umd_controlled_input_mounts() {
+        let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
+            .expect("react fixture present");
+        let react_dom =
+            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+                .expect("react-dom fixture present");
+        let app = r#"
+            var e = React.createElement;
+            function Form() {
+              var s = React.useState('hi'); var val = s[0];
+              return e('div', null,
+                e('input', { id:'in', value: val, readOnly: true }),
+                e('span', { id:'echo' }, 'echo:' + val)
+              );
+            }
+            ReactDOM.createRoot(document.getElementById('root')).render(e(Form));
+        "#;
+        let html = format!(
+            "<html><body><div id=\"root\"></div><script>{react}</script><script>{react_dom}</script><script>{app}</script></body></html>"
+        );
+        let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
+        assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
+        let mut now = 0u64;
+        for _ in 0..200 { if !session.has_pending_work() { break; } now += 16; session.pump(now); }
+        let snap = session.snapshot();
+        assert!(
+            snap.html.contains("id=\"in\""),
+            "controlled <input> did not mount: {}",
+            snap.html
+        );
+        assert!(
+            snap.html.contains("echo:hi"),
+            "state-bound sibling did not render: {}",
+            snap.html
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn react_umd_form_diag() {
+        let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
+            .expect("react fixture present");
+        let react_dom =
+            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+                .expect("react-dom fixture present");
+        let app = r#"
+            var e = React.createElement;
+            var useState = React.useState;
+            function Form() {
+              var s = useState(''); var val = s[0]; var setVal = s[1];
+              return e('div', null,
+                e('input', { id:'in', value: val, onChange: function(ev){ console.log('CHANGE ' + ev.target.value); setVal(ev.target.value); } }),
+                e('span', { id:'echo' }, 'echo:' + val)
+              );
+            }
+            ReactDOM.createRoot(document.getElementById('root')).render(e(Form));
+            console.log('RENDER_OK');
+        "#;
+        let html = format!(
+            "<html><body><div id=\"root\"></div><script>{react}</script><script>{react_dom}</script><script>{app}</script></body></html>"
+        );
+        let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
+        println!("INIT_ERR: {:?}", initial.error);
+        let pump = |s: &mut EngineSession| { let mut now=0u64; for _ in 0..200 { if !s.has_pending_work(){break;} now+=16; s.pump(now); } };
+        pump(&mut session);
+        let show = |s: &mut EngineSession, label: &str| {
+            let snap = s.snapshot();
+            if let Some(i) = snap.html.find("id=\"echo\"") { let end=(i+60).min(snap.html.len()); println!("{label} ECHO: {}", &snap.html[i..end]); }
+            if let Some(i) = snap.html.find("id=\"in\"") { let end=(i+80).min(snap.html.len()); println!("{label} INPUT: {}", &snap.html[i..end]); }
+        };
+        {
+            let snap = session.snapshot();
+            println!("INIT_LOGS: {:?}", initial.console_logs);
+            if let Some(i) = snap.html.find("id=\"root\"") { let end=(i+200).min(snap.html.len()); println!("ROOT: {}", &snap.html[i..end]); }
+        }
+        show(&mut session, "MOUNT");
+        // Simulate typing: set value + dispatch a bubbling input event (React maps
+        // onChange to the 'input' event).
+        let r = session.eval_for_test(
+            "var el=document.getElementById('in'); \
+             el.addEventListener('input', function(){ console.log('OWN_INPUT val=' + el.value); }); \
+             document.getElementById('root').addEventListener('input', function(){ console.log('ROOT_INPUT'); }); \
+             el.value='hello'; \
+             var ev = new Event('input', { bubbles:true }); \
+             console.log('ev.bubbles=' + ev.bubbles + ' ev.type=' + ev.type); \
+             el.dispatchEvent(ev);",
+        );
+        println!("TYPE_ERR: {:?}", r.error);
+        println!("TYPE_LOGS: {:?}", r.console_logs);
+        pump(&mut session);
+        show(&mut session, "AFTER_TYPE");
+    }
+
     #[test]
     #[ignore]
     fn react_umd_complex_diag() {
