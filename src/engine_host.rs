@@ -3146,6 +3146,53 @@ mod tests {
         );
     }
 
+    /// Real React 18 controlled input: typing fires onChange, which updates state
+    /// and re-renders. Exercises React's native-input event path end-to-end (the
+    /// `'oninput' in document` feature-detect must read true, else React falls
+    /// back to an IE polyfill and onChange never fires).
+    #[test]
+    fn react_umd_controlled_input_onchange() {
+        let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
+            .expect("react fixture present");
+        let react_dom =
+            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+                .expect("react-dom fixture present");
+        let app = r#"
+            var e = React.createElement;
+            function Form() {
+              var s = React.useState(''); var val = s[0]; var setVal = s[1];
+              return e('div', null,
+                e('input', { id:'in', value: val,
+                    onChange: function(ev){ setVal(ev.target.value); } }),
+                e('span', { id:'echo' }, 'echo:' + val)
+              );
+            }
+            ReactDOM.createRoot(document.getElementById('root')).render(e(Form));
+        "#;
+        let html = format!(
+            "<html><body><div id=\"root\"></div><script>{react}</script><script>{react_dom}</script><script>{app}</script></body></html>"
+        );
+        let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
+        assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
+        let pump = |s: &mut EngineSession| { let mut now=0u64; for _ in 0..200 { if !s.has_pending_work(){break;} now+=16; s.pump(now); } };
+        pump(&mut session);
+        assert!(session.snapshot().html.contains("echo:"), "form did not mount");
+
+        // Type into the input: set value + fire a bubbling 'input' event, the way a
+        // real keystroke does. React's onChange should update the bound state.
+        let typed = session.eval_for_test(
+            "var el=document.getElementById('in'); el.value='hello'; \
+             el.dispatchEvent(new Event('input', { bubbles:true }));",
+        );
+        assert!(typed.error.is_none(), "type error: {:?}", typed.error);
+        pump(&mut session);
+        assert!(
+            session.snapshot().html.contains("echo:hello"),
+            "controlled onChange did not update state; html={}",
+            session.snapshot().html
+        );
+    }
+
     #[test]
     #[ignore]
     fn react_umd_form_diag() {
@@ -3162,6 +3209,7 @@ mod tests {
               return e('div', null,
                 e('input', { id:'in', value: val,
                     onClick: function(){ console.log('INPUT_CLICK'); },
+                    onInput: function(ev){ console.log('ONINPUT ' + ev.target.value); },
                     onChange: function(ev){ console.log('CHANGE ' + ev.target.value); setVal(ev.target.value); } }),
                 e('span', { id:'echo' }, 'echo:' + val)
               );

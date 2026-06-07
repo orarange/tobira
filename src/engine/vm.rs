@@ -1823,7 +1823,10 @@ impl Vm {
                 });
                 let present = match proxy {
                     Some((target, handler)) => self.proxy_has(target, handler, &key)?,
-                    None => self.lookup_property_descriptor(object, &key).is_some(),
+                    None => {
+                        self.lookup_property_descriptor(object, &key).is_some()
+                            || self.host_has_event_handler_property(object, &key)
+                    }
                 };
                 self.stack.push(Value::Bool(present));
             }
@@ -7101,6 +7104,34 @@ impl Vm {
             });
         }
         None
+    }
+
+    /// Whether `key` is an event-handler IDL attribute (`onclick`, `oninput`, …)
+    /// on a host DOM object. In a real browser these properties always exist on
+    /// Element/Document/Window (defaulting to null), and feature detection relies
+    /// on it: `'oninput' in document` is how React decides whether the native
+    /// `input` event is supported — if it reads false, React falls back to an IE
+    /// polyfill path and `onChange` never fires from input events.
+    fn host_has_event_handler_property(&self, object: GcRef<JsObject>, key: &PropertyKey) -> bool {
+        let PropertyKey::String(name) = key else {
+            return false;
+        };
+        if !(name.len() > 2 && name.starts_with("on") && name.as_bytes()[2].is_ascii_lowercase()) {
+            return false;
+        }
+        self.heap.objects().get(object).is_some_and(|data| {
+            matches!(
+                &data.kind,
+                ObjectKind::Host(slot)
+                    if matches!(
+                        slot.class,
+                        HostObjectClass::Node
+                            | HostObjectClass::EventTarget
+                            | HostObjectClass::Document
+                            | HostObjectClass::Window
+                    )
+            )
+        })
     }
 
     fn instanceof_value(&self, value: &Value, constructor: &Value) -> Result<bool, VmError> {
