@@ -2917,6 +2917,59 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn react_umd_dev_renders_into_dom() {
+        // Dev builds are large (~1MB) and gitignored; download with:
+        //   curl -sSL -o tests/fixtures/react/react.development.js \
+        //     https://unpkg.com/react@18.3.1/umd/react.development.js
+        //   curl -sSL -o tests/fixtures/react/react-dom.development.js \
+        //     https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js
+        let (react, react_dom) = match (
+            std::fs::read_to_string("tests/fixtures/react/react.development.js"),
+            std::fs::read_to_string("tests/fixtures/react/react-dom.development.js"),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => {
+                println!("SKIP: react dev fixtures not present (gitignored)");
+                return;
+            }
+        };
+        let html = format!(
+            "<html><body><div id=\"root\"></div>\
+             <script>{react}</script>\
+             <script>{react_dom}</script>\
+             <script>\
+               try {{\
+                 var root = ReactDOM.createRoot(document.getElementById('root'));\
+                 root.render(React.createElement('h1', {{ id: 'title' }}, 'Hello, Tobira'));\
+                 console.log('RENDER_CALLED');\
+               }} catch (e) {{ console.log('RENDER_THREW: ' + (e && e.message ? e.message : e)); }}\
+             </script></body></html>"
+        );
+        let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
+        println!("INIT_ERROR: {:?}", initial.error);
+        println!("INIT_LOGS: {:?}", initial.console_logs);
+        let mut now = 0u64;
+        for _ in 0..200 {
+            if !session.has_pending_work() {
+                break;
+            }
+            now += 16;
+            session.pump(now);
+        }
+        let snap = session.snapshot();
+        println!("ERROR: {:?}", snap.error);
+        println!("LOGS: {:?}", snap.console_logs);
+        println!("RENDERED_TITLE_TAG: {}", snap.html.contains("id=\"title\""));
+        // Surface the region around #root so we can see what actually mounted.
+        if let Some(i) = snap.html.find("id=\"root\"") {
+            let start = i.saturating_sub(8);
+            let end = (i + 160).min(snap.html.len());
+            println!("ROOT_REGION: {}", &snap.html[start..end]);
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn react_umd_renders_into_dom() {
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");

@@ -1,3 +1,4 @@
 /target
 
 scroll_debug.txt
+tests/fixtures/react/*.development.js
