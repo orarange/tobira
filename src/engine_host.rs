@@ -2886,4 +2886,70 @@ mod tests {
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.console_logs, vec!["sum=6".to_string()]);
     }
+
+    // Empirical "does real React run on our engine" probe. Loads the React 18 UMD
+    // production bundles from tests/fixtures/react and renders a component against
+    // the real DOM host. Ignored by default (still failing while we close gaps);
+    // run with: cargo test --bin tobira -- --ignored react_umd --nocapture
+    #[test]
+    #[ignore]
+    fn react_umd_global_diag() {
+        let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
+            .expect("react fixture present");
+        let html = format!(
+            "<html><body><script>\
+               console.log('this=' + (typeof this));\
+               console.log('self=' + (typeof self));\
+               console.log('window=' + (typeof window));\
+               console.log('globalThis=' + (typeof globalThis));\
+             </script>\
+             <script>{react}</script>\
+             <script>\
+               console.log('React=' + (typeof React));\
+               console.log('window.React=' + (typeof window.React));\
+               console.log('globalThis.React=' + (typeof globalThis.React));\
+             </script></body></html>"
+        );
+        let result = run_document_scripts(&html, "http://localhost/");
+        println!("ERROR: {:?}", result.error);
+        println!("LOGS: {:?}", result.console_logs);
+    }
+
+    #[test]
+    #[ignore]
+    fn react_umd_renders_into_dom() {
+        let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
+            .expect("react fixture present");
+        let react_dom =
+            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+                .expect("react-dom fixture present");
+
+        let html = format!(
+            "<html><body><div id=\"root\"></div>\
+             <script>{react}</script>\
+             <script>{react_dom}</script>\
+             <script>\
+               try {{\
+                 var root = ReactDOM.createRoot(document.getElementById('root'));\
+                 root.render(React.createElement('h1', {{ id: 'title' }}, 'Hello, Tobira'));\
+                 console.log('RENDER_CALLED');\
+               }} catch (e) {{ console.log('RENDER_THREW: ' + (e && e.message ? e.message : e)); }}\
+             </script></body></html>"
+        );
+
+        let result = run_document_scripts(&html, "http://localhost/");
+        println!("ERROR: {:?}", result.error);
+        println!("LOGS: {:?}", result.console_logs);
+        println!("HAS_PENDING: {}", result.has_pending_work);
+        println!(
+            "HTML_HAS_H1: {}",
+            result.html.contains("Hello, Tobira")
+        );
+        assert!(result.error.is_none(), "engine error: {:?}", result.error);
+        assert!(
+            result.html.contains("Hello, Tobira"),
+            "React did not render into the DOM. html={}",
+            result.html
+        );
+    }
 }

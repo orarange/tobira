@@ -2417,8 +2417,12 @@ impl Vm {
         });
         self.globals.insert("document".to_string(), document_obj.clone());
         self.globals.insert("window".to_string(), window_obj.clone());
-        self.globals.insert("globalThis".to_string(), window_obj);
-        self.globals.insert("self".to_string(), document_obj); // some libraries use self
+        self.globals.insert("globalThis".to_string(), window_obj.clone());
+        // `self` is an alias for the global object (Window), NOT the document.
+        // UMD bundles resolve their global via `global || self` and then attach
+        // their exports to it (e.g. `self.React = {}`); pointing `self` at the
+        // document meant those exports never landed on the real global.
+        self.globals.insert("self".to_string(), window_obj);
 
         // Encoding globals
         let btoa = self.allocate_builtin_method(BuiltinId::Btoa);
@@ -5554,9 +5558,21 @@ impl Vm {
                 }
                 Ok(Value::Undefined)
             }
-            Value::Null | Value::Undefined => Err(VmError::TypeError(
-                "cannot read properties of null or undefined".to_string(),
-            )),
+            Value::Null | Value::Undefined => {
+                let what = if matches!(receiver, Value::Null) {
+                    "null"
+                } else {
+                    "undefined"
+                };
+                let key_str = match key {
+                    PropertyKey::String(s) => format!(" (reading '{s}')"),
+                    PropertyKey::Index(i) => format!(" (reading '{i}')"),
+                    PropertyKey::Symbol(_) => String::new(),
+                };
+                Err(VmError::TypeError(format!(
+                    "cannot read properties of {what}{key_str}"
+                )))
+            }
             _ => Ok(Value::Undefined),
         }
     }
