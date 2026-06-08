@@ -40,3 +40,31 @@ cargo run --release -- http://localhost:8000/engine_demo.html
 
 `TOBIRA_ENGINE` を付けずに起動すれば従来の boa 版になるので、見た目を
 比較できます。
+
+## ⚛️ React 18 デモ (`react-demo.html`)
+
+**本物の** react@18.3.1 / react-dom の本番ビルドを、ゼロから書いた JS
+エンジンで動かすデモです(`react.production.min.js` /
+`react-dom.production.min.js` をそのまま読み込んでいます)。
+
+```sh
+cd demo
+python -m http.server 8000
+# 別ターミナル(リポジトリのルート)で:
+TOBIRA_ENGINE=1 cargo run --release -- http://localhost:8000/react-demo.html
+```
+
+### 確認ポイント
+
+- **① カウンター** — `useState` + `onClick`。＋/− で数字が増減、リセットで 0。
+- **② 制御コンポーネント** — `value` + `onChange`。入力すると下に `echo: …` が即時反映。
+- **③ TODO リスト** — key 付きレンダリング。入力して「追加」で行が増え、「削除」で消える。
+
+`useState` / `useEffect` / 合成イベント(`onChange` は内部で `input` イベントに
+マッピング)/ 差分再描画 / key 付きリストの再構成まで、React の本番コードが
+そのまま走っています。
+
+> この demo が壊れていないことは
+> `cargo test --bin tobira react_demo_file -- --nocapture` で自動検証できます
+> (実際の `react-demo.html` を読み込み、外部バンドルを inline 展開して、
+> マウント→クリック→入力→追加→削除を本物の DOM イベントで駆動します)。

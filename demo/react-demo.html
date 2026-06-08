@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>React 18 on Tobira 自作エンジン</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 640px;
+      margin: 24px auto;
+      padding: 0 16px;
+      color: #1a1a1a;
+      line-height: 1.6;
+      background: #fafafa;
+    }
+    h1 { font-size: 24px; }
+    .sub { color: #666; font-size: 14px; margin-top: -8px; }
+    section {
+      border: 1px solid #e2e2e2;
+      border-radius: 10px;
+      padding: 16px 18px;
+      margin: 16px 0;
+      background: #fff;
+    }
+    h2 { font-size: 17px; margin: 0 0 10px; }
+    button {
+      font-size: 15px;
+      padding: 8px 14px;
+      border: 1px solid #3457d5;
+      background: #3457d5;
+      color: #fff;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-right: 6px;
+    }
+    button:hover { background: #2742a8; }
+    button.ghost { background: #fff; color: #3457d5; }
+    .count { font-size: 28px; font-weight: 700; margin: 0 12px; }
+    input {
+      font-size: 15px;
+      padding: 8px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      width: 60%;
+    }
+    .echo { margin-top: 10px; color: #14622a; font-weight: 600; min-height: 22px; }
+    ul { list-style: none; padding: 0; margin: 12px 0 0; }
+    li {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      border-radius: 6px;
+      background: #f3f4fb;
+      margin-bottom: 6px;
+    }
+    li button { background: #d23; border-color: #d23; padding: 4px 10px; font-size: 13px; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: #d8f5dd;
+      color: #14622a;
+      font-size: 12px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <h1>⚛️ React 18 on Tobira <span class="badge">自作JSエンジン</span></h1>
+  <p class="sub">本物の react@18.3.1 / react-dom 本番ビルドを、ゼロから作った JS エンジンで動かしてるで。</p>
+
+  <div id="root"></div>
+
+  <script src="./react.production.min.js"></script>
+  <script src="./react-dom.production.min.js"></script>
+  <script>
+    var h = React.createElement;
+    var useState = React.useState;
+    var useEffect = React.useEffect;
+
+    function Counter() {
+      var s = useState(0);
+      var n = s[0], setN = s[1];
+      return h('section', null,
+        h('h2', null, '① カウンター (useState + onClick)'),
+        h('div', { style: { display: 'flex', alignItems: 'center' } },
+          h('button', { onClick: function () { setN(n - 1); } }, '−'),
+          h('span', { className: 'count' }, String(n)),
+          h('button', { onClick: function () { setN(n + 1); } }, '＋'),
+          h('button', { className: 'ghost', onClick: function () { setN(0); } }, 'リセット')
+        )
+      );
+    }
+
+    function Echo() {
+      var s = useState('');
+      var text = s[0], setText = s[1];
+      return h('section', null,
+        h('h2', null, '② 制御コンポーネント (onChange エコー)'),
+        h('input', {
+          value: text,
+          placeholder: 'ここに入力してみて…',
+          onChange: function (e) { setText(e.target.value); }
+        }),
+        h('div', { className: 'echo' }, text ? ('echo: ' + text) : '（入力待ち）')
+      );
+    }
+
+    var nextId = 3;
+    function Todos() {
+      var listS = useState([
+        { id: 1, text: 'エンジンを書く' },
+        { id: 2, text: 'React を動かす' }
+      ]);
+      var items = listS[0], setItems = listS[1];
+      var draftS = useState('');
+      var draft = draftS[0], setDraft = draftS[1];
+
+      function add() {
+        if (!draft) return;
+        setItems(items.concat([{ id: nextId++, text: draft }]));
+        setDraft('');
+      }
+      function remove(id) {
+        setItems(items.filter(function (it) { return it.id !== id; }));
+      }
+
+      return h('section', null,
+        h('h2', null, '③ TODO リスト (key付きレンダリング + 追加/削除)'),
+        h('div', { style: { display: 'flex' } },
+          h('input', {
+            value: draft,
+            placeholder: '新しいタスク',
+            onChange: function (e) { setDraft(e.target.value); }
+          }),
+          h('button', { style: { marginLeft: '8px' }, onClick: add }, '追加')
+        ),
+        h('ul', null, items.map(function (it) {
+          return h('li', { key: it.id },
+            h('span', null, it.text),
+            h('button', { onClick: function () { remove(it.id); } }, '削除')
+          );
+        }))
+      );
+    }
+
+    function App() {
+      return h('div', null,
+        h(Counter, null),
+        h(Echo, null),
+        h(Todos, null)
+      );
+    }
+
+    var root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(h(App, null));
+  </script>
+</body>
+</html>

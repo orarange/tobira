@@ -3548,4 +3548,133 @@ mod tests {
             snap.html
         );
     }
+
+    /// End-to-end smoke test of the shipped demo (`demo/react-demo.html`). Reads
+    /// the ACTUAL demo file, inlines its external `<script src>` bundles exactly as
+    /// the engine would fetch them over HTTP, mounts it, and drives the three
+    /// interactive widgets (counter / controlled input / keyed todo list) through
+    /// real DOM events. Guards the demo against rot: if any feature the demo relies
+    /// on regresses, this fails. Run with:
+    ///   cargo test --bin tobira -- react_demo_file --nocapture
+    #[test]
+    fn react_demo_file_renders_and_is_interactive() {
+        let dir = std::path::Path::new("demo");
+        let raw = std::fs::read_to_string(dir.join("react-demo.html"))
+            .expect("demo/react-demo.html present");
+        // Inline external bundles in place of their <script src="./x"> tags, just
+        // like the browser would after fetching them.
+        let inline = |html: String, src: &str, file: &str| -> String {
+            let bundle = std::fs::read_to_string(dir.join(file))
+                .unwrap_or_else(|_| panic!("demo bundle {file} present"));
+            let tag = format!("<script src=\"{src}\"></script>");
+            assert!(html.contains(&tag), "demo missing expected tag: {tag}");
+            html.replace(&tag, &format!("<script>{bundle}</script>"))
+        };
+        let html = inline(raw, "./react.production.min.js", "react.production.min.js");
+        let html = inline(html, "./react-dom.production.min.js", "react-dom.production.min.js");
+
+        let (mut session, initial) = EngineSession::start(&html, "http://localhost:8000/");
+        assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
+        let pump = |s: &mut EngineSession| {
+            let mut now = 0u64;
+            for _ in 0..400 {
+                if !s.has_pending_work() {
+                    break;
+                }
+                now += 16;
+                s.pump(now);
+            }
+        };
+        pump(&mut session);
+
+        // ① Mount: all three sections present, counter at 0, both seed todos shown.
+        let mount = session.snapshot();
+        assert!(mount.error.is_none(), "error after mount: {:?}", mount.error);
+        println!("=== MOUNTED DOM (excerpt) ===\n{}", excerpt_root(&mount.html));
+        assert!(mount.html.contains("カウンター"), "counter section missing: {}", mount.html);
+        assert!(mount.html.contains("エンジンを書く"), "seed todo 1 missing");
+        assert!(mount.html.contains("React を動かす"), "seed todo 2 missing");
+
+        // ② Counter: the first +/− buttons live in the counter section. Click '＋'
+        // twice via the first button whose text is '＋'.
+        let inc = session.eval_for_test(
+            "var bs=document.getElementsByTagName('button'); \
+             for (var i=0;i<bs.length;i++){ if(bs[i].textContent==='＋'){ bs[i].click(); bs[i].click(); break; } }",
+        );
+        assert!(inc.error.is_none(), "increment error: {:?}", inc.error);
+        pump(&mut session);
+        let after_inc = session.snapshot();
+        assert!(
+            after_inc.html.contains(">2<") || after_inc.html.contains("class=\"count\">2"),
+            "counter did not reach 2; html={}",
+            excerpt_root(&after_inc.html)
+        );
+        println!("counter after two clicks: OK (=2)");
+
+        // ③ Controlled input: type into the echo input (first input on the page),
+        // React's onChange must update the echo line.
+        let typed = session.eval_for_test(
+            "var el=document.getElementsByTagName('input')[0]; \
+             el.value='tobira'; el.dispatchEvent(new Event('input', { bubbles:true }));",
+        );
+        assert!(typed.error.is_none(), "type error: {:?}", typed.error);
+        pump(&mut session);
+        let after_type = session.snapshot();
+        assert!(
+            after_type.html.contains("echo: tobira"),
+            "controlled input echo did not update; html={}",
+            excerpt_root(&after_type.html)
+        );
+        println!("controlled input echo: OK (echo: tobira)");
+
+        // ④ Todo list: type into the todo input (second input), click '追加'.
+        let add = session.eval_for_test(
+            "var ins=document.getElementsByTagName('input'); \
+             ins[1].value='デモを作る'; ins[1].dispatchEvent(new Event('input', { bubbles:true })); \
+             var bs=document.getElementsByTagName('button'); \
+             for (var i=0;i<bs.length;i++){ if(bs[i].textContent==='追加'){ bs[i].click(); break; } }",
+        );
+        assert!(add.error.is_none(), "add-todo error: {:?}", add.error);
+        pump(&mut session);
+        let after_add = session.snapshot();
+        assert!(
+            after_add.html.contains("デモを作る"),
+            "new todo not rendered; html={}",
+            excerpt_root(&after_add.html)
+        );
+        println!("todo add: OK (デモを作る appended)");
+
+        // ⑤ Delete the first todo via its '削除' button.
+        let del = session.eval_for_test(
+            "var bs=document.getElementsByTagName('button'); \
+             for (var i=0;i<bs.length;i++){ if(bs[i].textContent==='削除'){ bs[i].click(); break; } }",
+        );
+        assert!(del.error.is_none(), "delete-todo error: {:?}", del.error);
+        pump(&mut session);
+        let after_del = session.snapshot();
+        // Check the rendered #root subtree, not the full document: the demo's own
+        // inline <script> source contains the seed-todo string literal, so a
+        // whole-document `contains` would always see it.
+        let del_root = excerpt_root(&after_del.html);
+        assert!(
+            !del_root.contains("エンジンを書く"),
+            "first todo was not removed; root={del_root}"
+        );
+        println!("todo delete: OK (エンジンを書く removed)");
+        println!("=== FINAL DOM (excerpt) ===\n{}", excerpt_root(&after_del.html));
+    }
+
+    /// Pull the `#root` subtree out of a serialized document for readable test
+    /// output (the React bundles are huge and inline in the serialized <head>).
+    #[cfg(test)]
+    fn excerpt_root(html: &str) -> String {
+        match html.find("id=\"root\"") {
+            Some(i) => {
+                let start = html[..i].rfind('<').unwrap_or(i);
+                let end = (start + 1200).min(html.len());
+                html[start..end].to_string()
+            }
+            None => html.chars().take(400).collect(),
+        }
+    }
 }
