@@ -4327,6 +4327,55 @@ fn resolve_grid_tracks(tracks: &[GridTrackSize], available_px: u32, gap: u32) ->
     widths
 }
 
+/// Intrinsic main-axis content width of a flex item: lay it out in a throwaway
+/// context at the container's content width and take the farthest right edge of
+/// what it produced (rects/text/images/controls). Used to size flex items that
+/// have neither an explicit `width` nor `flex-basis`, so they shrink-to-fit
+/// instead of stretching to fill.
+fn flex_item_content_width(
+    child: &StyledElement,
+    avail_width: u32,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+    bg: Color,
+) -> u32 {
+    fn max_right(cmds: &[DrawCommand]) -> u32 {
+        let mut m = 0;
+        for cmd in cmds {
+            let r = match cmd {
+                DrawCommand::Rect(r) => r.x.saturating_add(r.width),
+                DrawCommand::Text(t) => t.x.saturating_add(t.width),
+                DrawCommand::Image(i) => i.x.saturating_add(i.width),
+                DrawCommand::Gradient(g) => g.x.saturating_add(g.width),
+                DrawCommand::Layer(l) => l.x.saturating_add(l.width).max(max_right(&l.commands)),
+                DrawCommand::Sticky(s) => s.layer.x.saturating_add(s.layer.width),
+            };
+            m = m.max(r);
+        }
+        m
+    }
+    let mut dummy_y = 0u32;
+    let mut ctx = LayoutContext {
+        background_color: bg,
+        ..LayoutContext::default()
+    };
+    layout_block_element(
+        child,
+        0,
+        avail_width.max(1),
+        &mut dummy_y,
+        &mut ctx,
+        images,
+        fonts,
+        None,
+    );
+    let mut w = max_right(&ctx.commands);
+    for c in &ctx.controls {
+        w = w.max(c.x.saturating_add(c.width));
+    }
+    w.max(1)
+}
+
 fn layout_flex_container(
     element: &StyledElement,
     x: u32,
@@ -4401,35 +4450,109 @@ fn layout_flex_container(
             let n = children.len();
             let total_gap = gap.saturating_mul((n.saturating_sub(1)) as u32);
 
-            // Calculate total width of children with explicit widths (+ margins)
-            let total_fixed: u32 = children.iter().map(|child| {
-                child.style.width.as_ref().and_then(|lv| match lv {
-                    LengthValue::Pixels(px) => Some(*px),
-                    LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
-                    LengthValue::MinContent => Some(0),
-                    LengthValue::MaxContent => Some(content_width),
-                    LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
-                }).unwrap_or(0)
-                + child.style.margin.left + child.style.margin.right
-            }).sum();
-            let n_auto = children.iter().filter(|child| child.style.width.is_none()).count() as u32;
-            let remaining = content_width.saturating_sub(total_fixed).saturating_sub(total_gap);
-            let auto_width = if n_auto > 0 { remaining / n_auto } else { 0 };
+            // Resolve a LengthValue against the flex content width.
+            let resolve = |lv: &LengthValue| -> u32 {
+                match lv {
+                    LengthValue::Pixels(px) => *px,
+                    LengthValue::Percent(p) => (content_width as f32 * (*p as f32) / 100.0) as u32,
+                    LengthValue::MinContent => 0,
+                    LengthValue::MaxContent => content_width,
+                    LengthValue::FitContent(max_px) => content_width.min(*max_px),
+                }
+            };
 
-            // First pass: measure heights for alignment
-            let item_heights: Vec<u32> = children.iter().map(|child| {
-                let child_w = child.style.width.as_ref().and_then(|lv| match lv {
-                    LengthValue::Pixels(px) => Some(*px),
-                    LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
-                    LengthValue::MinContent => Some(0),
-                    LengthValue::MaxContent => Some(content_width),
-                    LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
-                }).unwrap_or(auto_width).max(1);
-                let mut dummy_y = content_y;
-                let mut dummy_ctx = LayoutContext { background_color: context.background_color, ..LayoutContext::default() };
-                layout_block_element(child, content_x, child_w, &mut dummy_y, &mut dummy_ctx, images, fonts, current_form.clone());
-                dummy_y.saturating_sub(content_y)
-            }).collect();
+            // Base main size per item: explicit `width`, else `flex-basis`, else
+            // the item's intrinsic content width. Items grow past their base only
+            // when `flex-grow > 0` (default 0); otherwise they stay content-sized
+            // and the leftover space is distributed by justify-content. (The old
+            // code stretched every auto-width item to `remaining / n`, i.e. it
+            // treated everything as `flex-grow: 1`, which spread out the React
+            // demo's buttons and pushed `space-between` items off-screen.)
+            let base_widths: Vec<u32> = children
+                .iter()
+                .map(|child| {
+                    if let Some(w) = child.style.width.as_ref() {
+                        resolve(w).max(1)
+                    } else if let Some(b) = child.style.flex_basis.as_ref() {
+                        resolve(b).max(1)
+                    } else {
+                        flex_item_content_width(
+                            child,
+                            content_width,
+                            images,
+                            fonts,
+                            context.background_color,
+                        )
+                        .min(content_width)
+                        .max(1)
+                    }
+                })
+                .collect();
+
+            let margins_total: u32 = children
+                .iter()
+                .map(|c| c.style.margin.left + c.style.margin.right)
+                .sum();
+            let base_sum: u32 = base_widths.iter().sum();
+            let mut item_widths = base_widths.clone();
+            if base_sum
+                .saturating_add(margins_total)
+                .saturating_add(total_gap)
+                > content_width
+                && element.style.flex_wrap == FlexWrap::NoWrap
+                && base_sum > 0
+            {
+                // Single-line overflow: shrink items proportionally to fit.
+                let avail = content_width
+                    .saturating_sub(total_gap)
+                    .saturating_sub(margins_total)
+                    .max(1);
+                for w in item_widths.iter_mut() {
+                    *w = (((*w as u64) * (avail as u64)) / base_sum as u64).max(1) as u32;
+                }
+            } else {
+                // Distribute free space to growers (flex-grow), proportionally.
+                let free = content_width
+                    .saturating_sub(base_sum)
+                    .saturating_sub(margins_total)
+                    .saturating_sub(total_gap);
+                let total_grow: u32 = children.iter().map(|c| c.style.flex_grow).sum();
+                if free > 0 && total_grow > 0 {
+                    for (i, child) in children.iter().enumerate() {
+                        if child.style.flex_grow > 0 {
+                            item_widths[i] = item_widths[i].saturating_add(
+                                free.saturating_mul(child.style.flex_grow) / total_grow,
+                            );
+                        }
+                    }
+                }
+            }
+            let total_fixed: u32 = item_widths.iter().sum::<u32>() + margins_total;
+
+            // Measure heights at the final item widths (wrapping depends on width).
+            let item_heights: Vec<u32> = children
+                .iter()
+                .enumerate()
+                .map(|(i, child)| {
+                    let child_w = item_widths[i].max(1);
+                    let mut dummy_y = content_y;
+                    let mut dummy_ctx = LayoutContext {
+                        background_color: context.background_color,
+                        ..LayoutContext::default()
+                    };
+                    layout_block_element(
+                        child,
+                        content_x,
+                        child_w,
+                        &mut dummy_y,
+                        &mut dummy_ctx,
+                        images,
+                        fonts,
+                        current_form.clone(),
+                    );
+                    dummy_y.saturating_sub(content_y)
+                })
+                .collect();
             let content_max_height = *item_heights.iter().max().unwrap_or(&0);
             // The flex line's cross size is the container's definite content
             // height (if any), expanded to fit the tallest item — so
@@ -4446,15 +4569,6 @@ fn layout_flex_container(
                 .map(|h| h.max(content_max_height))
                 .unwrap_or(content_max_height);
 
-            let child_main_width = |child: &StyledElement| -> u32 {
-                child.style.width.as_ref().and_then(|lv| match lv {
-                    LengthValue::Pixels(px) => Some(*px),
-                    LengthValue::Percent(p) => Some((content_width as f32 * (*p as f32) / 100.0) as u32),
-                    LengthValue::MinContent => Some(0),
-                    LengthValue::MaxContent => Some(content_width),
-                    LengthValue::FitContent(max_px) => Some(content_width.min(*max_px)),
-                }).unwrap_or(auto_width).max(1)
-            };
             let child_cross_offset = |child: &StyledElement, line_h: u32, item_h: u32| -> u32 {
                 let self_align = match child.style.align_self {
                     AlignSelf::Auto => element.style.align_items,
@@ -4478,7 +4592,7 @@ fn layout_flex_container(
                 );
                 let mut cursor_x = content_x.saturating_add(start_offset);
                 for (i, child) in children.iter().enumerate() {
-                    let child_w = child_main_width(child);
+                    let child_w = item_widths[i];
                     let child_y_offset = child_cross_offset(child, max_height, item_heights[i]);
                     let mut child_y = content_y.saturating_add(child_y_offset);
                     let child_form = form_context_for_element(child, context, current_form.clone());
@@ -4493,7 +4607,7 @@ fn layout_flex_container(
                 // container width, then lay each line out flex-start with
                 // per-line cross-axis alignment.
                 let gap = element.style.gap;
-                let widths: Vec<u32> = children.iter().map(|c| child_main_width(c)).collect();
+                let widths: Vec<u32> = item_widths.clone();
                 let mut lines: Vec<Vec<usize>> = vec![Vec::new()];
                 let mut line_w = 0u32;
                 for (i, &w) in widths.iter().enumerate() {
@@ -4657,6 +4771,35 @@ mod tests {
             l.controls.iter().any(|c| matches!(c.kind, super::FormControlKind::TextInput)),
             "flex <input> did not register as a text-input control"
         );
+    }
+
+    /// Regression: flex items without an explicit width / flex-basis are
+    /// content-sized (default flex-grow: 0), not stretched to fill. A row of
+    /// buttons packs left; a `space-between` row keeps its last item inside the
+    /// container. Before the fix, every auto item got `remaining / n`, spreading
+    /// the demo's buttons out and pushing space-between items off-screen.
+    #[test]
+    fn flex_items_are_content_sized_not_stretched() {
+        let l = probe_layout(
+            r#"<html><body><div style="display:flex;align-items:center"><button>minus</button><span>0</span><button>plus</button><button>reset</button></div>
+               <ul><li style="display:flex;justify-content:space-between"><span>item one</span><button>del</button></li></ul></body></html>"#,
+            640,
+        );
+        let by_label = |label: &str| -> super::FormControlCommand {
+            l.controls.iter().find(|c| c.label == label).cloned()
+                .unwrap_or_else(|| panic!("control {label:?} missing"))
+        };
+        let minus = by_label("minus");
+        let plus = by_label("plus");
+        let reset = by_label("reset");
+        // Packed left in order, each only as wide as its content (< 120px).
+        assert!(minus.x < plus.x && plus.x < reset.x, "buttons not in row order: {} {} {}", minus.x, plus.x, reset.x);
+        assert!(plus.x < 200, "buttons stretched/spread: plus.x={}", plus.x);
+        assert!(minus.width < 120 && plus.width < 120, "button too wide: {} {}", minus.width, plus.width);
+        // space-between: the delete button stays within the 640px container.
+        let del = by_label("del");
+        assert!(del.x + del.width <= 640, "space-between item off-screen: del.x={} w={}", del.x, del.width);
+        assert!(del.x > 400, "space-between item not pushed right: del.x={}", del.x);
     }
 
     /// Diagnostic: dump form-control + element-hitbox geometry for flex-laid-out
