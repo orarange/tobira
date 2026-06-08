@@ -660,6 +660,41 @@ impl BrowserHost {
         }
     }
 
+    /// Collect every `<script>` in document order, distinguishing inline source
+    /// from external (`src`) references. External scripts carry the raw `src`
+    /// attribute, to be resolved against the document URL and fetched by the
+    /// caller. Preserves source order so dependencies (e.g. React before the app)
+    /// execute correctly.
+    pub fn ordered_scripts(&self) -> Vec<ScriptSource> {
+        let mut scripts = Vec::new();
+        self.collect_ordered_scripts(self.document, &mut scripts);
+        scripts
+    }
+
+    fn collect_ordered_scripts(&self, root: usize, out: &mut Vec<ScriptSource>) {
+        for &child in &self.nodes[root].children {
+            if self.nodes[child].tag_name() == Some("script") {
+                match self.nodes[child].attrs.get("src") {
+                    Some(src) if !src.trim().is_empty() => {
+                        out.push(ScriptSource::External(src.trim().to_string()));
+                    }
+                    _ => {
+                        let text = self.collect_text(child);
+                        if !text.trim().is_empty() {
+                            out.push(ScriptSource::Inline(text));
+                        }
+                    }
+                }
+            }
+            self.collect_ordered_scripts(child, out);
+        }
+    }
+
+    /// The document's base URL (used to resolve relative `src`/`href`).
+    pub fn base_href(&self) -> String {
+        self.location.href.clone()
+    }
+
     /// Match a (possibly grouped) selector against a node.
     ///
     /// Supports: selector lists (`a, b`), compound selectors (`p.note#x[a=b]`),
@@ -1554,6 +1589,14 @@ pub struct EngineRunResult {
 ///
 /// This is the engine-backed counterpart of the boa path in `js.rs`, used behind
 /// the `TOBIRA_ENGINE` flag while parity is built up.
+/// A `<script>` collected from the document: either inline source text or an
+/// external reference whose `src` must be resolved + fetched before execution.
+#[derive(Debug, Clone)]
+pub enum ScriptSource {
+    Inline(String),
+    External(String),
+}
+
 pub fn run_document_scripts(html: &str, url: &str) -> EngineRunResult {
     EngineSession::start(html, url).1
 }
@@ -1615,7 +1658,10 @@ impl EngineSession {
     /// deferred work, and return the runtime plus the initial snapshot.
     pub fn start(html: &str, url: &str) -> (Self, EngineRunResult) {
         let host = BrowserHost::from_html(html, url);
-        let scripts = host.inline_scripts();
+        // Collect scripts in document order (inline + external `src`) and the base
+        // URL to resolve relative `src` against, before the host moves into the Vm.
+        let scripts = host.ordered_scripts();
+        let base_href = host.base_href();
         let mut vm = Vm::with_host(Heap::new(), Box::new(host));
 
         let mut error = None;
@@ -1628,8 +1674,33 @@ impl EngineSession {
                 let _ = vm.execute(&chunk);
             }
         }
-        for script in &scripts {
-            match Parser::new(script).parse() {
+        'scripts: for script in &scripts {
+            // Resolve the source: inline text is used directly; an external `src`
+            // is resolved against the document URL and fetched over HTTP (just like
+            // a real browser loading `<script src>`). A fetch failure aborts the
+            // remaining scripts, mirroring a hard load error.
+            let source = match script {
+                ScriptSource::Inline(text) => text.clone(),
+                ScriptSource::External(src) => {
+                    let resolved = Url::parse(&base_href)
+                        .and_then(|base| base.resolve(src))
+                        .or_else(|_| Url::parse(src));
+                    match resolved {
+                        Ok(url) => match crate::http::fetch(&url) {
+                            Ok(response) => String::from_utf8_lossy(&response.body).into_owned(),
+                            Err(e) => {
+                                error = Some(format!("failed to fetch script {src}: {e}"));
+                                break 'scripts;
+                            }
+                        },
+                        Err(e) => {
+                            error = Some(format!("invalid script url {src}: {e:?}"));
+                            break 'scripts;
+                        }
+                    }
+                }
+            };
+            match Parser::new(&source).parse() {
                 Ok(program) => match Compiler::new(&program).compile() {
                     Ok(chunk) => {
                         if let Err(e) = vm.execute(&chunk) {
@@ -3662,6 +3733,48 @@ mod tests {
         );
         println!("todo delete: OK (エンジンを書く removed)");
         println!("=== FINAL DOM (excerpt) ===\n{}", excerpt_root(&after_del.html));
+    }
+
+    /// Verifies the REAL external-`<script src>` load path end-to-end: fetches the
+    /// demo page over HTTP and lets the engine resolve + fetch the React bundles
+    /// itself (exactly the GUI/`TOBIRA_ENGINE` path), rather than pre-inlining them.
+    /// Needs a static server serving `demo/`:
+    ///   (cd demo && python -m http.server 8000)
+    ///   cargo test --bin tobira react_demo_external_src -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn react_demo_external_src_over_http() {
+        let url = crate::url::Url::parse("http://localhost:8000/react-demo.html")
+            .expect("valid url");
+        let page = crate::http::fetch(&url).expect("demo server running on :8000");
+        let html = String::from_utf8_lossy(&page.body).into_owned();
+        // The page must reference the bundles externally — no inlining here.
+        assert!(
+            html.contains("<script src=\"./react.production.min.js\"></script>"),
+            "demo should load React via external src"
+        );
+
+        let (mut session, initial) =
+            EngineSession::start(&html, "http://localhost:8000/react-demo.html");
+        assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
+        let mut now = 0u64;
+        for _ in 0..400 {
+            if !session.has_pending_work() {
+                break;
+            }
+            now += 16;
+            session.pump(now);
+        }
+        let mount = session.snapshot();
+        let root = excerpt_root(&mount.html);
+        println!("=== EXTERNAL-SRC MOUNT (excerpt) ===\n{root}");
+        // If the engine fetched + ran the external React bundles, the component
+        // tree renders into #root.
+        assert!(
+            root.contains("カウンター") && root.contains("エンジンを書く"),
+            "React did not render via external src; root={root}"
+        );
+        println!("external <script src> React load: OK");
     }
 
     /// Pull the `#root` subtree out of a serialized document for readable test
