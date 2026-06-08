@@ -1080,6 +1080,64 @@ fn layout_block_element(
         return;
     }
 
+    // Form controls (button / input / textarea) can reach block layout as flex
+    // items (a flex container lays each child out via `layout_block_element`) or
+    // as `display:block` elements. The inline path registers them as interactive
+    // controls via `push_control`; without mirroring that here, a control inside
+    // `display:flex` paints but is dead to hit-testing (no FormControlCommand →
+    // hit-test never returns it → clicks/focus do nothing). Emit the control at
+    // this block position so it stays clickable, matching the inline behavior.
+    if matches!(element.tag_name.as_str(), "input" | "textarea" | "button") {
+        if let Some(spec) = build_form_control_spec(element, current_form.as_ref(), context) {
+            if matches!(spec.kind, FormControlKind::Hidden) {
+                // Hidden inputs take no space and need no geometry.
+                return;
+            }
+            let (ctrl_w, ctrl_h) = measure_form_control(&spec, fonts);
+            *cursor_y = cursor_y.saturating_add(element.style.margin.top);
+            let control_x = x.saturating_add(element.style.margin.left);
+            // Shrink-to-fit the control, but never exceed the slot width.
+            let final_w = ctrl_w.min(width.max(1)).max(1);
+            let background_color = if spec.disabled {
+                0xE4E6EA
+            } else if matches!(spec.kind, FormControlKind::Button) {
+                0xE7EBF2
+            } else {
+                0xFFFFFF
+            };
+            let border_color = if spec.disabled { 0xA9AFB8 } else { 0x7F8B9C };
+            context.controls.push(FormControlCommand {
+                id: spec.id,
+                node_id: spec.node_id,
+                form_node_id: spec.form_node_id,
+                kind: spec.kind,
+                x: control_x,
+                y: *cursor_y,
+                width: final_w,
+                height: ctrl_h.max(1),
+                name: spec.name.clone(),
+                value: spec.value.clone(),
+                label: spec.label.clone(),
+                placeholder: spec.placeholder.clone(),
+                form_id: spec.form_id,
+                form_action: spec.form_action.clone(),
+                form_method: spec.form_method.clone(),
+                activates_submit: spec.activates_submit,
+                disabled: spec.disabled,
+                masked: spec.masked,
+                font_size_px: element.style.font_size_px,
+                font_family: element.style.font_family,
+                text_color: element.style.color,
+                background_color,
+                border_color,
+            });
+            *cursor_y = cursor_y
+                .saturating_add(ctrl_h)
+                .saturating_add(element.style.margin.bottom);
+            return;
+        }
+    }
+
     let block_cmd_start = context.commands.len();
 
     *cursor_y = cursor_y.saturating_add(element.style.margin.top);
@@ -4573,6 +4631,68 @@ mod tests {
     // full parse → style → layout pipeline and checks the resulting geometry, to
     // surface flexbox/positioning/box-model gaps. Diagnostic — prints a report,
     // never fails. Run: cargo test --bin tobira layout_probe -- --nocapture
+    /// Regression: form controls inside a flex container (and a flex `<li>`) must
+    /// still register as interactive `FormControlCommand`s. Before the fix, flex
+    /// children were laid out via `layout_block_element` (block path), which never
+    /// emitted controls, so buttons/inputs inside `display:flex` painted but were
+    /// dead to hit-testing (the React demo's counter / todo controls).
+    #[test]
+    fn flex_child_controls_are_registered() {
+        let l = probe_layout(
+            r#"<html><body><button>nonflex</button>
+               <div style="display:flex;align-items:center"><button>minus</button><span>0</span><button>plus</button><button>reset</button></div>
+               <div style="display:flex"><input><button>add</button></div>
+               <ul><li style="display:flex;justify-content:space-between"><span>item one</span><button>del</button></li></ul></body></html>"#,
+            640,
+        );
+        let labels: Vec<&str> = l.controls.iter().map(|c| c.label.as_str()).collect();
+        for want in ["nonflex", "minus", "plus", "reset", "add", "del"] {
+            assert!(
+                labels.contains(&want),
+                "control {want:?} not registered (flex controls dead to hit-test); got {labels:?}"
+            );
+        }
+        // The flex <input> must register as a TextInput control too.
+        assert!(
+            l.controls.iter().any(|c| matches!(c.kind, super::FormControlKind::TextInput)),
+            "flex <input> did not register as a text-input control"
+        );
+    }
+
+    /// Diagnostic: dump form-control + element-hitbox geometry for flex-laid-out
+    /// buttons/inputs, to check whether interactive controls inside a flex
+    /// container get their flex position (so hit-test matches paint).
+    /// Run: cargo test --bin tobira probe_flex_control_geometry -- --nocapture
+    #[test]
+    fn probe_flex_control_geometry() {
+        // Mirrors the React demo's counter row and todo row (flex containers).
+        let l = probe_layout(
+            r#"<html><body><button>nonflex</button><div style="display:flex;align-items:center"><button>minus</button><span>0</span><button>plus</button><button>reset</button></div>
+               <ul><li style="display:flex;justify-content:space-between"><span>item one</span><button>del</button></li></ul></body></html>"#,
+            640,
+        );
+        println!("=== controls (hit-test targets): {} ===", l.controls.len());
+        for c in &l.controls {
+            println!(
+                "kind={:?} label={:?} x={} y={} w={} h={} node_id={:?}",
+                c.kind, c.label, c.x, c.y, c.width, c.height, c.node_id
+            );
+        }
+        println!("=== element_hitboxes: {} ===", l.element_hitboxes.len());
+        for h in &l.element_hitboxes {
+            println!(
+                "node_id={} x={} y={} w={} h={}",
+                h.node_id, h.x, h.y, h.width, h.height
+            );
+        }
+        println!("=== all rects (paint): {} ===", l.commands.len());
+        for cmd in &l.commands {
+            if let DrawCommand::Rect(r) = cmd {
+                println!("rect x={} y={} w={} h={} color=#{:06x}", r.x, r.y, r.width, r.height, r.color & 0xFFFFFF);
+            }
+        }
+    }
+
     fn probe_layout(html: &str, width: u32) -> super::LayoutDocument {
         let document = parse_document(html);
         let styled = build_styled_tree(

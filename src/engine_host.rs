@@ -3777,6 +3777,108 @@ mod tests {
         println!("external <script src> React load: OK");
     }
 
+    /// Reproduces the REAL GUI click path: instead of `el.click()` (the
+    /// script-driven builtin), it dispatches through `EngineSession::dispatch_event`
+    /// using a `data-tobira-node-id` computed exactly like the browser does
+    /// (`annotate_node_ids` over the serialized snapshot) — the same id the GUI's
+    /// hit-test passes. Isolates whether React onClick fires via the host event
+    /// path + node-id mapping (the GUI), not just the script path.
+    /// Run with: cargo test --bin tobira react_gui_click_path -- --nocapture
+    #[test]
+    fn react_gui_click_path_increments_counter() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::{parse_document, Node};
+
+        let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
+            .expect("react fixture present");
+        let react_dom = std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+            .expect("react-dom fixture present");
+        let app = r#"
+            var e = React.createElement;
+            function Counter() {
+              var s = React.useState(0); var n = s[0]; var setN = s[1];
+              return e('button', { onClick: function(){ setN(n + 1); } }, 'count: ' + n);
+            }
+            ReactDOM.createRoot(document.getElementById('root')).render(e(Counter));
+        "#;
+        let html = format!(
+            "<html><body><div id=\"root\"></div><script>{react}</script><script>{react_dom}</script><script>{app}</script></body></html>"
+        );
+        let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
+        assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
+        let pump = |s: &mut EngineSession| {
+            let mut now = 0u64;
+            for _ in 0..400 {
+                if !s.has_pending_work() {
+                    break;
+                }
+                now += 16;
+                s.pump(now);
+            }
+        };
+        pump(&mut session);
+        let mount = session.snapshot();
+        assert!(mount.html.contains("count: 0"), "mount: {}", excerpt_root(&mount.html));
+
+        // Replicate the browser: parse the snapshot + annotate node ids, then find
+        // the button's id by its rendered text — exactly what hit-test would carry.
+        let mut tree = parse_document(&mount.html);
+        annotate_node_ids(&mut tree);
+        fn find_button_id(node: &Node, want_text: &str) -> Option<usize> {
+            if let Node::Element(el) = node {
+                if el.tag_name.eq_ignore_ascii_case("button") {
+                    let text = collect_node_text(node);
+                    if text.contains(want_text) {
+                        return el
+                            .attributes
+                            .get("data-tobira-node-id")
+                            .and_then(|s| s.parse().ok());
+                    }
+                }
+                for c in &el.children {
+                    if let Some(id) = find_button_id(c, want_text) {
+                        return Some(id);
+                    }
+                }
+            }
+            None
+        }
+        fn collect_node_text(node: &Node) -> String {
+            match node {
+                Node::Text(t) => t.clone(),
+                Node::Element(el) => el.children.iter().map(collect_node_text).collect(),
+            }
+        }
+        let btn_id = find_button_id(&tree, "count:").expect("counter button has a node id");
+        println!("counter button data-tobira-node-id = {btn_id}");
+        // Cross-check: the engine maps that id back to a <button>.
+        let mapped_tag = session
+            .host()
+            .handle_for_node_id(btn_id)
+            .map(|h| session.host().nodes[h].tag_name().map(|s| s.to_string()));
+        println!("handle_for_node_id({btn_id}) -> tag {mapped_tag:?}");
+
+        // Dispatch the click the way the GUI does.
+        let init = DomEventInit {
+            bubbles: true,
+            cancelable: true,
+            button: Some(0),
+            buttons: Some(1),
+            ..Default::default()
+        };
+        let after = session.dispatch_event(btn_id, "click", &init);
+        pump(&mut session);
+        let snap = session.snapshot();
+        println!("after GUI-path click: {}", excerpt_root(&snap.html));
+        assert!(
+            snap.html.contains("count: 1"),
+            "GUI-path click did NOT fire React onClick; default_prevented={}; html={}",
+            after.default_prevented,
+            excerpt_root(&snap.html)
+        );
+        println!("GUI-path click: OK (count: 1)");
+    }
+
     /// Pull the `#root` subtree out of a serialized document for readable test
     /// output (the React bundles are huge and inline in the serialized <head>).
     #[cfg(test)]
