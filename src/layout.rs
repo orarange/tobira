@@ -789,6 +789,34 @@ fn element_node_id(element: &StyledElement) -> Option<usize> {
         .and_then(|value| value.parse::<usize>().ok())
 }
 
+/// Background + border colors for an interactive control. Authored CSS wins
+/// (`background` on the element; `border` when an actual border was set);
+/// otherwise fall back to the native-widget chrome. Disabled controls always
+/// use the grayed-out chrome.
+fn control_colors(spec: &FormControlSpec) -> (Color, Color) {
+    if spec.disabled {
+        return (0xE4E6EA, 0xA9AFB8);
+    }
+    let background = spec.style.background_color.unwrap_or(
+        if matches!(spec.kind, FormControlKind::Button) {
+            0xE7EBF2
+        } else {
+            0xFFFFFF
+        },
+    );
+    let has_css_border = !spec.style.border_style_none
+        && (spec.style.border.left > 0
+            || spec.style.border.top > 0
+            || spec.style.border.right > 0
+            || spec.style.border.bottom > 0);
+    let border = if has_css_border {
+        spec.style.border_color
+    } else {
+        0x7F8B9C
+    };
+    (background, border)
+}
+
 fn measure_form_control(control: &FormControlSpec, fonts: &mut FontContext) -> (u32, u32) {
     let line_height = text_line_height(&control.style, fonts);
     let height = line_height.saturating_add(10).max(28);
@@ -1098,14 +1126,7 @@ fn layout_block_element(
             let control_x = x.saturating_add(element.style.margin.left);
             // Shrink-to-fit the control, but never exceed the slot width.
             let final_w = ctrl_w.min(width.max(1)).max(1);
-            let background_color = if spec.disabled {
-                0xE4E6EA
-            } else if matches!(spec.kind, FormControlKind::Button) {
-                0xE7EBF2
-            } else {
-                0xFFFFFF
-            };
-            let border_color = if spec.disabled { 0xA9AFB8 } else { 0x7F8B9C };
+            let (background_color, border_color) = control_colors(&spec);
             context.controls.push(FormControlCommand {
                 id: spec.id,
                 node_id: spec.node_id,
@@ -3569,14 +3590,7 @@ fn emit_line_impl(
     for span in &line.spans {
         if let Some(control) = &span.control {
             let control_y = cursor_y.saturating_add(line_height.saturating_sub(span.height) / 2);
-            let background_color = if control.disabled {
-                0xE4E6EA
-            } else if matches!(control.kind, FormControlKind::Button) {
-                0xE7EBF2
-            } else {
-                0xFFFFFF
-            };
-            let border_color = if control.disabled { 0xA9AFB8 } else { 0x7F8B9C };
+            let (background_color, border_color) = control_colors(control);
             context.controls.push(FormControlCommand {
                 id: control.id,
                 node_id: control.node_id,
@@ -4891,10 +4905,21 @@ mod tests {
         dump(&l.commands, 0);
         for c in &l.controls {
             println!(
-                "CONTROL {:?} label={:?} x={} y={} w={} h={} font={}",
-                c.kind, c.label, c.x, c.y, c.width, c.height, c.font_size_px
+                "CONTROL {:?} label={:?} x={} y={} w={} h={} font={} bg=#{:06x} text=#{:06x} border=#{:06x}",
+                c.kind, c.label, c.x, c.y, c.width, c.height, c.font_size_px,
+                c.background_color, c.text_color, c.border_color
             );
         }
+        // CSS-authored colors must reach the control: the demo's blue buttons
+        // (background #3457d5, white text, border #3457d5) and the ghost variant
+        // (white bg, blue text).
+        let minus = l.controls.iter().find(|c| c.label == "−").expect("minus button");
+        assert_eq!(minus.background_color, 0x3457D5, "button background from CSS");
+        assert_eq!(minus.text_color, 0xFFFFFF, "button text color from CSS");
+        assert_eq!(minus.border_color, 0x3457D5, "button border from CSS");
+        let ghost = l.controls.iter().find(|c| c.label == "リセット").expect("ghost button");
+        assert_eq!(ghost.background_color, 0xFFFFFF, "ghost background from CSS");
+        assert_eq!(ghost.text_color, 0x3457D5, "ghost text from CSS");
     }
 
     fn probe_layout(html: &str, width: u32) -> super::LayoutDocument {
