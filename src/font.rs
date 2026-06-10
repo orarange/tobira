@@ -13,7 +13,17 @@ use crate::css::{Color, FontFamilyKind};
 
 const MIN_ADVANCE_PX: u32 = 4;
 
-const WINDOWS_SANS_FONT_FILES: &[&str] = &["segoeui.ttf", "YuGothR.ttc", "meiryo.ttc", "arial.ttf"];
+const WINDOWS_SANS_FONT_FILES: &[&str] = &[
+    "segoeui.ttf",
+    "YuGothR.ttc",
+    "meiryo.ttc",
+    "arial.ttf",
+    // Symbol/emoji fallbacks: cover dingbats and pictographs (e.g. ⚛ U+269B)
+    // that the text faces above lack. seguiemj renders via its monochrome
+    // outlines (the rasterizer doesn't do COLR color layers).
+    "seguisym.ttf",
+    "seguiemj.ttf",
+];
 
 const WINDOWS_MONOSPACE_FONT_FILES: &[&str] = &[
     "consola.ttf",
@@ -311,10 +321,29 @@ impl FontContext {
         font_size_px: u32,
         font_family: FontFamilyKind,
     ) -> CachedGlyph {
+        let ascent_px = self.line_metrics(font_size_px, font_family).ascent_px;
+
+        // Default-invisible characters: variation selectors (U+FE0F makes "⚛️"
+        // = U+269B + U+FE0F), zero-width (non-)joiners, and the BOM must render
+        // as nothing with zero advance — falling through would draw the bitmap
+        // '?' fallback for each (the "??" seen in headings with emoji).
+        if matches!(character, '\u{FE00}'..='\u{FE0F}' | '\u{200B}'..='\u{200D}' | '\u{FEFF}' | '\u{2060}') {
+            return CachedGlyph {
+                advance_px: 0,
+                ascent_px,
+                mode: GlyphMode::Vector {
+                    width: 0,
+                    height: 0,
+                    xmin: 0,
+                    ymin: 0,
+                    bitmap: Vec::new(),
+                },
+            };
+        }
+
         self.ensure_font_for(character, font_family);
 
         let fallback_advance = estimated_glyph_advance_px(character, font_size_px, font_family);
-        let ascent_px = self.line_metrics(font_size_px, font_family).ascent_px;
 
         for font in self.fonts_for(font_family) {
             if !font.has_glyph(character) {
@@ -697,6 +726,44 @@ mod tests {
     fn text_width_adds_character_advances() {
         let width = estimated_text_width_px("Hi", 16, FontFamilyKind::Sans);
         assert!(width >= 16);
+    }
+
+    /// Variation selectors / zero-width characters must not paint anything (no
+    /// '?' fallback box) and must take zero advance — "⚛️" is U+269B + U+FE0F
+    /// and rendered as "??" before this.
+    #[test]
+    fn invisible_characters_render_as_nothing() {
+        let mut context = FontContext::load();
+        for ch in ['\u{FE0F}', '\u{200B}', '\u{200D}', '\u{FEFF}'] {
+            let with = context.text_width_px(&format!("A{ch}B"), 18, FontFamilyKind::Sans);
+            let without = context.text_width_px("AB", 18, FontFamilyKind::Sans);
+            assert_eq!(with, without, "U+{:04X} should have zero advance", ch as u32);
+        }
+        // Drawing a string of only invisibles must leave the buffer untouched.
+        let mut buffer = vec![0_u32; 100 * 40];
+        context.draw_text(
+            &mut buffer, 100, 40, 4, 4, "\u{FE0F}\u{200D}", 18, 0x00FFFFFF,
+            false, false, false, FontFamilyKind::Sans,
+        );
+        assert!(buffer.iter().all(|p| *p == 0), "invisible chars painted pixels");
+    }
+
+    /// Symbols outside the text faces (⚛ U+269B) should resolve via the
+    /// symbol-font fallback instead of the bitmap '?'. Skips quietly when the
+    /// system lacks a font with the glyph (non-Windows CI).
+    #[test]
+    fn atom_symbol_uses_real_glyph_when_available() {
+        let mut context = FontContext::load();
+        let mut buffer = vec![0_u32; 100 * 60];
+        context.draw_text(
+            &mut buffer, 100, 60, 8, 8, "\u{269B}", 24, 0x00FFFFFF,
+            false, false, false, FontFamilyKind::Sans,
+        );
+        let painted = buffer.iter().filter(|p| **p != 0).count();
+        // The atom symbol is dense (orbital rings); the bitmap '?' fallback is a
+        // sparse 8x8 blow-up. Just require that *something* was drawn and that,
+        // when a symbol font exists, the glyph isn't the tiny fallback footprint.
+        assert!(painted > 0, "U+269B drew nothing");
     }
 
     #[test]

@@ -4373,7 +4373,12 @@ fn flex_item_content_width(
     for c in &ctx.controls {
         w = w.max(c.x.saturating_add(c.width));
     }
-    w.max(1)
+    // `max_right` already includes margin.left (the child was laid out at x=0 and
+    // block layout offsets content by it), but the right edge of painted content
+    // doesn't cover margin.right — add it, or the item's slot is too narrow and a
+    // later height-measure at that width wraps the content (a one-line span
+    // ballooned to two lines, pushing every other flex item down).
+    w.saturating_add(child.style.margin.right).max(1)
 }
 
 fn layout_flex_container(
@@ -4833,6 +4838,62 @@ mod tests {
             if let DrawCommand::Rect(r) = cmd {
                 println!("rect x={} y={} w={} h={} color=#{:06x}", r.x, r.y, r.width, r.height, r.color & 0xFFFFFF);
             }
+        }
+    }
+
+    /// Diagnostic: replicate the React demo's counter section exactly (flex row
+    /// with −/＋/リセット buttons + a count span, with the demo's real CSS) and
+    /// dump every text command + control, to locate the stray "−" rendered above
+    /// the row. Run: cargo test --bin tobira probe_demo_counter_row -- --nocapture
+    #[test]
+    fn probe_demo_counter_row() {
+        let html = r#"<html><head><style>
+            section { border: 1px solid #e2e2e2; border-radius: 10px; padding: 16px 18px; margin: 16px 0; background: #fff; }
+            h2 { font-size: 17px; margin: 0 0 10px; }
+            button { font-size: 15px; padding: 8px 14px; border: 1px solid #3457d5; background: #3457d5; color: #fff; border-radius: 6px; cursor: pointer; margin-right: 6px; }
+            button.ghost { background: #fff; color: #3457d5; }
+            .count { font-size: 28px; font-weight: 700; margin: 0 12px; }
+        </style></head><body>
+            <section><h2>① カウンター (useState + onClick)</h2><div style="display: flex; align-items: center"><button>−</button><span class="count">4</span><button>＋</button><button class="ghost">リセット</button></div></section>
+        </body></html>"#;
+        // Apply the demo's real CSS (probe_layout uses an empty stylesheet).
+        let css = r#"
+            section { border: 1px solid #e2e2e2; border-radius: 10px; padding: 16px 18px; margin: 16px 0; background: #fff; }
+            h2 { font-size: 17px; margin: 0 0 10px; }
+            button { font-size: 15px; padding: 8px 14px; border: 1px solid #3457d5; background: #3457d5; color: #fff; border-radius: 6px; cursor: pointer; margin-right: 6px; }
+            button.ghost { background: #fff; color: #3457d5; }
+            .count { font-size: 28px; font-weight: 700; margin: 0 12px; }
+        "#;
+        let document = parse_document(html);
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(css),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let l = layout_styled_document(&styled, &ImageStore::default(), 700, &mut fonts);
+        fn dump(cmds: &[super::DrawCommand], depth: usize) {
+            for cmd in cmds {
+                match cmd {
+                    super::DrawCommand::Text(t) => println!(
+                        "{:indent$}TEXT {:?} x={} y={} w={} size={}",
+                        "", t.text, t.x, t.y, t.width, t.font_size_px, indent = depth * 2
+                    ),
+                    super::DrawCommand::Layer(layer) => {
+                        println!("{:indent$}LAYER x={} y={}", "", layer.x, layer.y, indent = depth * 2);
+                        dump(&layer.commands, depth + 1);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        dump(&l.commands, 0);
+        for c in &l.controls {
+            println!(
+                "CONTROL {:?} label={:?} x={} y={} w={} h={} font={}",
+                c.kind, c.label, c.x, c.y, c.width, c.height, c.font_size_px
+            );
         }
     }
 
