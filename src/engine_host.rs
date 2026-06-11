@@ -432,8 +432,11 @@ impl BrowserHost {
                 if VOID_ELEMENTS.contains(&tag.as_str()) {
                     return out;
                 }
-                if RAW_TEXT_ELEMENTS.contains(&tag.as_str()) {
-                    // <script>/<style> content is raw text — emit verbatim.
+                if tag == "script" {
+                    // Scripts already ran; the snapshot must not re-expose their
+                    // source (matches the boa snapshot behavior).
+                } else if RAW_TEXT_ELEMENTS.contains(&tag.as_str()) {
+                    // <style> content is raw text — emit verbatim.
                     out.push_str(&self.collect_text(idx));
                 } else {
                     out.push_str(&self.inner_html(idx));
@@ -1852,7 +1855,7 @@ impl EngineSession {
                 Ok(program) => match Compiler::new(&program).compile() {
                     Ok(chunk) => {
                         if let Err(e) = vm.execute(&chunk) {
-                            error = Some(format!("{e:?}"));
+                            error = Some(format!("{e}"));
                             break;
                         }
                     }
@@ -1989,8 +1992,21 @@ impl EngineSession {
 
     /// Set an attribute on the node identified by the browser's node id.
     pub fn set_attribute(&mut self, node_id: usize, name: &str, value: &str) {
-        if let Some(handle) = self.host().handle_for_node_id(node_id) {
-            let _ = self.host().mutate_dom(DomMutation::SetAttribute {
+        let host = self.host();
+        if let Some(mut handle) = host.handle_for_node_id(node_id) {
+            // Browser id 1 is the synthetic document root; attributes can't
+            // serialize on the Document node, so they land on the root
+            // element instead (matches the boa backend).
+            if matches!(host.nodes[handle].kind, DomNodeKind::Document) {
+                if let Some(&root) = host.nodes[handle]
+                    .children
+                    .iter()
+                    .find(|&&c| matches!(host.nodes[c].kind, DomNodeKind::Element(_)))
+                {
+                    handle = root;
+                }
+            }
+            let _ = host.mutate_dom(DomMutation::SetAttribute {
                 node: NodeId(handle as u32),
                 name: name.to_string(),
                 value: value.to_string(),
@@ -2005,7 +2021,7 @@ impl EngineSession {
     pub fn eval_for_test(&mut self, src: &str) -> EngineRunResult {
         let error = match Parser::new(src).parse() {
             Ok(program) => match Compiler::new(&program).compile() {
-                Ok(chunk) => self.vm.execute(&chunk).err().map(|e| format!("{e:?}")),
+                Ok(chunk) => self.vm.execute(&chunk).err().map(|e| format!("{e}")),
                 Err(e) => Some(format!("compile: {e:?}")),
             },
             Err(e) => Some(format!("parse: {e:?}")),

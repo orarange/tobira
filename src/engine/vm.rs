@@ -544,7 +544,7 @@ impl std::fmt::Display for VmError {
             | Self::ReferenceError(message)
             | Self::RangeError(message) => write!(f, "{message}"),
             Self::Thrown(value) => write!(f, "uncaught throw: {value:?}"),
-            Self::InfiniteLoop => write!(f, "execution exceeded the per-call loop budget"),
+            Self::InfiniteLoop => write!(f, "Maximum loop iteration limit exceeded"),
             Self::StackOverflow => write!(f, "call stack exceeded the phase 3 limit"),
             Self::Unimplemented(feature) => write!(f, "unimplemented in phase 3: {feature}"),
         }
@@ -3774,7 +3774,7 @@ impl Vm {
             VmError::Thrown(value) => value.clone(),
             VmError::InfiniteLoop => self.create_error_object(
                 "Error",
-                "execution exceeded the per-call loop budget".to_string(),
+                "Maximum loop iteration limit exceeded".to_string(),
             ),
             VmError::StackOverflow => self.create_error_object(
                 "RangeError",
@@ -9905,7 +9905,14 @@ impl Vm {
             }
             // style
             BuiltinId::DomStyleGetProperty => {
-                Ok(self.make_string_value(""))
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let prop = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "style".to_string() }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                let value = get_inline_style_prop(&existing, &prop);
+                Ok(self.make_string_value(&value))
             }
             BuiltinId::DomStyleSetProperty => {
                 let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
@@ -9920,7 +9927,15 @@ impl Vm {
                 Ok(Value::Undefined)
             }
             BuiltinId::DomStyleRemoveProperty => {
-                Ok(self.make_string_value(""))
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let prop = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "style".to_string() }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                let (updated, removed) = remove_inline_style_prop(&existing, &prop);
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "style".to_string(), value: updated });
+                Ok(self.make_string_value(&removed))
             }
             // performance.now()
             BuiltinId::HistoryPushState | BuiltinId::HistoryReplaceState => {
@@ -10040,8 +10055,35 @@ impl Vm {
             }
             // window
             BuiltinId::WindowScrollTo | BuiltinId::WindowScrollBy => {
-                let y = args.get(1).map(|v| self.to_number(v)).unwrap_or(0.0);
-                let _ = self.host.mutate_dom(DomMutation::SetWindowScroll { window: WindowId(0), x: 0.0, y });
+                // scrollTo(x, y) / scrollTo({left, top}); scrollBy offsets the
+                // current position, and scrollTo keeps it for omitted axes.
+                let is_by = matches!(builtin, BuiltinId::WindowScrollBy);
+                let (cur_x, cur_y) = self
+                    .host
+                    .window_metrics(WindowId(0))
+                    .map(|m| (m.scroll_x, m.scroll_y))
+                    .unwrap_or((0.0, 0.0));
+                let (opt_x, opt_y) = match args.first() {
+                    Some(options @ Value::Object(_)) => {
+                        let mut axis = |vm: &mut Self, key: &str| {
+                            match vm.get_property_value(options, &PropertyKey::from(key)) {
+                                Ok(Value::Undefined) | Err(_) => None,
+                                Ok(v) => Some(vm.to_number(&v)),
+                            }
+                        };
+                        (axis(self, "left"), axis(self, "top"))
+                    }
+                    _ => (
+                        args.first().map(|v| self.to_number(v)),
+                        args.get(1).map(|v| self.to_number(v)),
+                    ),
+                };
+                let (x, y) = if is_by {
+                    (cur_x + opt_x.unwrap_or(0.0), cur_y + opt_y.unwrap_or(0.0))
+                } else {
+                    (opt_x.unwrap_or(cur_x), opt_y.unwrap_or(cur_y))
+                };
+                let _ = self.host.mutate_dom(DomMutation::SetWindowScroll { window: WindowId(0), x, y });
                 Ok(Value::Undefined)
             }
             BuiltinId::WindowGetComputedStyle => {
@@ -11998,7 +12040,25 @@ impl Vm {
                 };
                 Ok(Value::Number(value))
             }
-            "clientLeft" | "clientTop" | "scrollLeft" | "scrollTop" => Ok(Value::Number(0.0)),
+            "clientLeft" | "clientTop" => Ok(Value::Number(0.0)),
+            "scrollLeft" | "scrollTop" => {
+                // The root element's scrollLeft/scrollTop mirror the window
+                // scroll; other elements don't track their own overflow yet.
+                let is_root = matches!(
+                    self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) }),
+                    Ok(DomReadResult::Node(root)) if root == node_id
+                );
+                if is_root {
+                    let v = self
+                        .host
+                        .window_metrics(WindowId(0))
+                        .map(|m| if name == "scrollLeft" { m.scroll_x } else { m.scroll_y })
+                        .unwrap_or(0.0);
+                    Ok(Value::Number(v))
+                } else {
+                    Ok(Value::Number(0.0))
+                }
+            }
             "offsetParent" => Ok(Value::Null),
             "isConnected" => Ok(Value::Bool(true)),
             "ownerDocument" => Ok(self.globals.get("document").cloned().unwrap_or(Value::Undefined)),
@@ -12149,6 +12209,24 @@ impl Vm {
                         let truthy = self.is_truthy(&value);
                         if truthy { let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "disabled".to_string(), value: String::new() }); }
                         else { let _ = self.host.mutate_dom(DomMutation::RemoveAttribute { node: node_id, name: "disabled".to_string() }); }
+                    }
+                    "scrollTop" | "scrollLeft" => {
+                        // Only the root element scrolls the window; other
+                        // elements don't track their own overflow yet.
+                        let is_root = matches!(
+                            self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) }),
+                            Ok(DomReadResult::Node(root)) if root == node_id
+                        );
+                        if is_root {
+                            let n = self.to_number(&value);
+                            let (cur_x, cur_y) = self
+                                .host
+                                .window_metrics(WindowId(0))
+                                .map(|m| (m.scroll_x, m.scroll_y))
+                                .unwrap_or((0.0, 0.0));
+                            let (x, y) = if name == "scrollLeft" { (n, cur_y) } else { (cur_x, n) };
+                            let _ = self.host.mutate_dom(DomMutation::SetWindowScroll { window: WindowId(0), x, y });
+                        }
                     }
                     _ => {}
                 }
@@ -12704,6 +12782,8 @@ fn is_dom_managed_node_property(name: &str) -> bool {
             | "src"
             | "hidden"
             | "disabled"
+            | "scrollTop"
+            | "scrollLeft"
     )
 }
 
@@ -12721,6 +12801,31 @@ fn get_inline_style_prop(existing: &str, prop: &str) -> String {
             }
         })
         .unwrap_or_default()
+}
+
+/// Remove one declaration from an inline `style` attribute string. Returns the
+/// updated declaration string and the removed value (empty if absent).
+fn remove_inline_style_prop(existing: &str, prop: &str) -> (String, String) {
+    let mut removed = String::new();
+    let kept: Vec<String> = existing
+        .split(';')
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                return None;
+            }
+            let mut iter = part.splitn(2, ':');
+            let k = iter.next()?.trim();
+            let v = iter.next().unwrap_or("").trim();
+            if k.eq_ignore_ascii_case(prop) {
+                removed = v.to_string();
+                None
+            } else {
+                Some(format!("{k}: {v}"))
+            }
+        })
+        .collect();
+    (kept.join("; "), removed)
 }
 
 fn set_inline_style_prop(existing: &str, prop: &str, value: &str) -> String {
