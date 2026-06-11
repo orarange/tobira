@@ -14,6 +14,7 @@ use super::event_loop::{
 };
 use super::heap::{GcRef, Heap, RawGcRef};
 use super::host::{
+    AdjacentPosition,
     ConsoleLevel, ConsoleMessage, DomMutation, DomMutationResult, DomRead, DomReadResult, FetchBody,
     FetchMode,
     FetchRequest, FetchResponse, HistoryAction, Host, HostData, HttpMethod, NavigationAction,
@@ -252,6 +253,8 @@ enum BuiltinId {
     DomClassListReplace,
     DomClassListItem,
     DomClassListToString,
+    DomNodeInsertAdjacentHtml,
+    DomNodeReplaceChildren,
     // style (CSSStyleDeclaration)
     DomStyleGetProperty,
     DomStyleSetProperty,
@@ -9479,15 +9482,15 @@ impl Vm {
             // ----------------------------------------------------------------
             BuiltinId::DomDocQuerySelector => {
                 let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let root_res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
-                let root = match root_res { Ok(DomReadResult::Node(id)) => id, _ => return Ok(Value::Null) };
+                // Root at the document node itself (boa parity): documentElement
+                // can miss parser-rescued content outside <html>.
+                let root = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
                 let res = self.host.read_dom(DomRead::QuerySelector { root, selectors: sel });
                 Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
             }
             BuiltinId::DomDocQuerySelectorAll => {
                 let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let root_res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
-                let root = match root_res { Ok(DomReadResult::Node(id)) => id, _ => return self.make_array_from_values(vec![]) };
+                let root = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
                 let res = self.host.read_dom(DomRead::QuerySelectorAll { root, selectors: sel });
                 match res {
                     Ok(DomReadResult::Nodes(ids)) => {
@@ -9500,16 +9503,16 @@ impl Vm {
             BuiltinId::DomDocGetElementById => {
                 let id_str = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let sel = format!("#{id_str}");
-                let root_res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
-                let root = match root_res { Ok(DomReadResult::Node(id)) => id, _ => return Ok(Value::Null) };
+                // Root at the document node itself (boa parity): documentElement
+                // can miss parser-rescued content outside <html>.
+                let root = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
                 let res = self.host.read_dom(DomRead::QuerySelector { root, selectors: sel });
                 Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
             }
             BuiltinId::DomDocGetElementsByClassName => {
                 let cls = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let sel = cls.split_whitespace().map(|c| format!(".{c}")).collect::<Vec<_>>().join("");
-                let root_res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
-                let root = match root_res { Ok(DomReadResult::Node(id)) => id, _ => return self.make_array_from_values(vec![]) };
+                let root = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
                 let res = self.host.read_dom(DomRead::QuerySelectorAll { root, selectors: sel });
                 match res {
                     Ok(DomReadResult::Nodes(ids)) => {
@@ -9521,8 +9524,7 @@ impl Vm {
             }
             BuiltinId::DomDocGetElementsByTagName => {
                 let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let root_res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
-                let root = match root_res { Ok(DomReadResult::Node(id)) => id, _ => return self.make_array_from_values(vec![]) };
+                let root = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
                 let res = self.host.read_dom(DomRead::QuerySelectorAll { root, selectors: tag });
                 match res {
                     Ok(DomReadResult::Nodes(ids)) => {
@@ -9582,7 +9584,7 @@ impl Vm {
             }
             BuiltinId::DomNodeAppendChild => {
                 let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
-                let child_ids: Vec<NodeId> = args.iter().filter_map(|v| self.node_id_from_host_val(v)).collect();
+                let child_ids = self.node_ids_from_node_or_string_args(&args);
                 let _ = self.host.mutate_dom(DomMutation::Append { parent: parent_id, children: child_ids });
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
             }
@@ -9595,11 +9597,26 @@ impl Vm {
             }
             BuiltinId::DomNodePrepend => {
                 let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
-                let child_ids: Vec<NodeId> =
-                    args.iter().filter_map(|v| self.node_id_from_host_val(v)).collect();
+                let child_ids = self.node_ids_from_node_or_string_args(&args);
                 let _ = self
                     .host
                     .mutate_dom(DomMutation::Prepend { parent: parent_id, children: child_ids });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomNodeReplaceChildren => {
+                let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let child_ids = self.node_ids_from_node_or_string_args(&args);
+                let existing = match self
+                    .host
+                    .read_dom(DomRead::Children { node: parent_id, elements_only: false })
+                {
+                    Ok(DomReadResult::Nodes(ids)) => ids,
+                    _ => Vec::new(),
+                };
+                for child in existing {
+                    let _ = self.host.mutate_dom(DomMutation::Remove { node: child });
+                }
+                let _ = self.host.mutate_dom(DomMutation::Append { parent: parent_id, children: child_ids });
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeHasChildNodes => {
@@ -9610,9 +9627,17 @@ impl Vm {
                 Ok(Value::Bool(matches!(res, Ok(DomReadResult::Nodes(ids)) if !ids.is_empty())))
             }
             BuiltinId::DomNodeRemoveChild => {
+                // Only detach when the node really is a child of `this` (per
+                // spec removeChild on a non-child throws; we no-op instead).
                 let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
                 let child_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
-                let _ = self.host.mutate_dom(DomMutation::ReplaceChild { parent: parent_id, new_child: child_id, old_child: child_id });
+                let is_child = matches!(
+                    self.host.read_dom(DomRead::Parent { node: child_id }),
+                    Ok(DomReadResult::Node(p)) if p == parent_id
+                );
+                if is_child {
+                    let _ = self.host.mutate_dom(DomMutation::Remove { node: child_id });
+                }
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
             }
             BuiltinId::DomNodeReplaceChild => {
@@ -9902,6 +9927,22 @@ impl Vm {
                     _ => String::new(),
                 };
                 Ok(self.make_string_value(&existing))
+            }
+            BuiltinId::DomNodeInsertAdjacentHtml => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let position_str = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let html = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+                let Some(position) = AdjacentPosition::parse(&position_str) else {
+                    return Err(VmError::TypeError(format!(
+                        "insertAdjacentHTML: invalid position '{position_str}'"
+                    )));
+                };
+                let _ = self.host.mutate_dom(DomMutation::InsertAdjacentHtml {
+                    node: node_id,
+                    position,
+                    html,
+                });
+                Ok(Value::Undefined)
             }
             // style
             BuiltinId::DomStyleGetProperty => {
@@ -11130,6 +11171,26 @@ impl Vm {
         None
     }
 
+    /// Map `append`/`prepend`/`replaceChildren` arguments to node ids: DOM
+    /// nodes pass through, anything else becomes a new text node (per spec).
+    fn node_ids_from_node_or_string_args(&mut self, args: &[Value]) -> Vec<NodeId> {
+        args.iter()
+            .filter_map(|v| {
+                if let Some(id) = self.node_id_from_host_val(v) {
+                    return Some(id);
+                }
+                let data = self.to_string(v);
+                match self.host.mutate_dom(DomMutation::CreateTextNode {
+                    window: WindowId(0),
+                    data,
+                }) {
+                    Ok(DomMutationResult::Node(id)) => Some(id),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     fn get_host_property(
         &mut self,
         slot: HostObjectSlot,
@@ -11744,6 +11805,8 @@ impl Vm {
 
     fn get_document_property(&mut self, name: String) -> Result<Value, VmError> {
         match name.as_str() {
+            // The document is its own root; per spec its ownerDocument is null.
+            "ownerDocument" => Ok(Value::Null),
             "body" => {
                 let res = self.host.read_dom(DomRead::DocumentBody { window: WindowId(0) });
                 Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
@@ -11879,6 +11942,11 @@ impl Vm {
                 let res = self.host.read_dom(DomRead::InnerHtml { node: node_id });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
             }
+            "outerHTML" => {
+                let res = self.host.read_dom(DomRead::OuterHtml { node: node_id });
+                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
+            }
+            "insertAdjacentHTML" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeInsertAdjacentHtml)),
             "id" => {
                 let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "id".to_string() });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
@@ -12078,6 +12146,7 @@ impl Vm {
             "hasChildNodes" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeHasChildNodes)),
             "removeChild" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemoveChild)),
             "replaceChild" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeReplaceChild)),
+            "replaceChildren" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeReplaceChildren)),
             "cloneNode" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeCloneNode)),
             "remove" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemove)),
             "querySelector" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeQuerySelector)),
@@ -12191,6 +12260,10 @@ impl Vm {
                         let html = self.to_string(&value);
                         let _ = self.host.mutate_dom(DomMutation::SetInnerHtml { node: node_id, html });
                     }
+                    "outerHTML" => {
+                        let html = self.to_string(&value);
+                        let _ = self.host.mutate_dom(DomMutation::SetOuterHtml { node: node_id, html });
+                    }
                     "textContent" | "nodeValue" => {
                         let text = self.to_string(&value);
                         let _ = self.host.mutate_dom(DomMutation::SetTextContent { node: node_id, value: text });
@@ -12260,7 +12333,21 @@ impl Vm {
                     let text = self.to_string(&value);
                     let head = match self.host.read_dom(DomRead::DocumentHead { window: WindowId(0) }) {
                         Ok(DomReadResult::Node(id)) => Some(id),
-                        _ => None,
+                        // No <head> yet: create one under documentElement (or
+                        // the document itself) — boa creates it on demand too.
+                        _ => {
+                            let parent = match self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) }) {
+                                Ok(DomReadResult::Node(root)) => root,
+                                _ => NodeId(0),
+                            };
+                            match self.host.mutate_dom(DomMutation::CreateElement { window: WindowId(0), local_name: "head".to_string() }) {
+                                Ok(DomMutationResult::Node(h)) => {
+                                    let _ = self.host.mutate_dom(DomMutation::Append { parent, children: vec![h] });
+                                    Some(h)
+                                }
+                                _ => None,
+                            }
+                        }
                     };
                     let existing = head.and_then(|h| {
                         match self.host.read_dom(DomRead::QuerySelector { root: h, selectors: "title".to_string() }) {
@@ -12773,6 +12860,7 @@ fn is_dom_managed_node_property(name: &str) -> bool {
     matches!(
         name,
         "innerHTML"
+            | "outerHTML"
             | "textContent"
             | "nodeValue"
             | "id"

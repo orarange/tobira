@@ -26,6 +26,7 @@ pub use heap::{
     RootSet,
 };
 pub use host::{
+    AdjacentPosition,
     ConsoleLevel, ConsoleMessage, DomEventRequest, DomEventResult, DomMutation, DomMutationResult,
     DomRead, DomReadResult, DomRect, EventTarget, FetchBody, FetchMode, FetchRequest,
     FetchResponse, FrameId,

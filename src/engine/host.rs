@@ -223,6 +223,9 @@ pub enum DomRead {
     InnerHtml {
         node: NodeId,
     },
+    OuterHtml {
+        node: NodeId,
+    },
     Attribute {
         node: NodeId,
         name: String,
@@ -284,6 +287,15 @@ pub enum DomMutation {
         node: NodeId,
         html: String,
     },
+    SetOuterHtml {
+        node: NodeId,
+        html: String,
+    },
+    InsertAdjacentHtml {
+        node: NodeId,
+        position: AdjacentPosition,
+        html: String,
+    },
     WriteHtml {
         window: WindowId,
         html: String,
@@ -337,6 +349,28 @@ pub enum DomMutation {
         host: NodeId,
         open: bool,
     },
+}
+
+/// Insertion point for `insertAdjacentHTML` (relative to the target node).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdjacentPosition {
+    BeforeBegin,
+    AfterBegin,
+    BeforeEnd,
+    AfterEnd,
+}
+
+impl AdjacentPosition {
+    /// Parse the case-insensitive DOM string form ("beforebegin", …).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "beforebegin" => Some(Self::BeforeBegin),
+            "afterbegin" => Some(Self::AfterBegin),
+            "beforeend" => Some(Self::BeforeEnd),
+            "afterend" => Some(Self::AfterEnd),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

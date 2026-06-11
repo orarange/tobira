@@ -393,6 +393,11 @@ impl Host for TestDom {
                 if idx >= self.nodes.len() { return Err(HostError::InvalidHandle); }
                 Ok(DomReadResult::String(self.inner_html(idx)))
             }
+            DomRead::OuterHtml { node } => {
+                let idx = node.0 as usize;
+                if idx >= self.nodes.len() { return Err(HostError::InvalidHandle); }
+                Ok(DomReadResult::String(self.serialize_node(idx)))
+            }
             DomRead::Attribute { node, name } => {
                 let idx = node.0 as usize;
                 if idx >= self.nodes.len() { return Err(HostError::InvalidHandle); }
@@ -480,6 +485,11 @@ impl Host for TestDom {
                 Ok(DomMutationResult::None)
             }
             DomMutation::WriteHtml { .. } => Ok(DomMutationResult::None),
+            // The TestDom doesn't exercise outerHTML/insertAdjacentHTML — the
+            // BrowserHost (engine_host.rs) covers them with the real parser.
+            DomMutation::SetOuterHtml { .. } | DomMutation::InsertAdjacentHtml { .. } => {
+                Ok(DomMutationResult::None)
+            }
             DomMutation::SetAttribute { node, name, value } => {
                 let idx = node.0 as usize;
                 if idx >= self.nodes.len() { return Err(HostError::InvalidHandle); }

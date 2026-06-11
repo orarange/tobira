@@ -15,8 +15,8 @@ use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 
 use tobira_engine::engine::{
-    Compiler, ConsoleMessage, DomEventInit, DomEventRequest, DomEventResult, DomMutation,
-    DomMutationResult,
+    AdjacentPosition, Compiler, ConsoleMessage, DomEventInit, DomEventRequest, DomEventResult,
+    DomMutation, DomMutationResult,
     DomRead, DomReadResult, DomRect, FetchRequest, FetchResponse, FrameId, Heap, HistoryAction,
     HistoryOutcome,
     Host, HostData, HostError, HostEvent, HostResult, HostTimeSnapshot, LocationSnapshot,
@@ -126,9 +126,6 @@ struct HistoryEntry {
 pub struct BrowserHost {
     nodes: Vec<DomNode>,
     document: usize,
-    html: usize,
-    head: usize,
-    body: usize,
     console: Vec<String>,
     location: LocationSnapshot,
     /// A full (cross-document) navigation requested this turn — the browser
@@ -164,9 +161,6 @@ impl BrowserHost {
         let mut host = Self {
             nodes: Vec::new(),
             document: 0,
-            html: 0,
-            head: 0,
-            body: 0,
             console: Vec::new(),
             location: location_from_url(url),
             navigation: None,
@@ -185,15 +179,16 @@ impl BrowserHost {
             geometry: HashMap::new(),
         };
         host.document = host.push(DomNode::document());
-        // The parsed root is an "document" element; graft its children under our
-        // document node, then make sure html/head/body exist.
+        // The parsed root is an "document" element; graft its children under
+        // our document node. html/head/body are NOT synthesized — like the boa
+        // backend, `document.body` etc. are dynamic lookups that return null
+        // until the page (or its scripts) provide the element.
         if let Node::Element(element) = &root {
             for child in &element.children {
                 let child_idx = host.build_from_node(child);
                 host.attach(host.document, child_idx);
             }
         }
-        host.ensure_skeleton();
         host
     }
 
@@ -230,27 +225,20 @@ impl BrowserHost {
         }
     }
 
-    /// Make sure <html>, <head>, <body> exist and record their indices.
-    fn ensure_skeleton(&mut self) {
-        self.html = self
-            .find_descendant_tag(self.document, "html")
-            .unwrap_or_else(|| {
-                let idx = self.push(DomNode::element("html"));
-                self.attach(self.document, idx);
-                idx
-            });
-        self.head = self.find_descendant_tag(self.html, "head").unwrap_or_else(|| {
-            let idx = self.push(DomNode::element("head"));
-            // head goes first under html
-            self.nodes[idx].parent = Some(self.html);
-            self.nodes[self.html].children.insert(0, idx);
-            idx
-        });
-        self.body = self.find_descendant_tag(self.html, "body").unwrap_or_else(|| {
-            let idx = self.push(DomNode::element("body"));
-            self.attach(self.html, idx);
-            idx
-        });
+    /// The current `<html>` element (`document.documentElement`), found live so
+    /// script-built documents resolve correctly.
+    fn html_idx(&self) -> Option<usize> {
+        self.find_descendant_tag(self.document, "html")
+    }
+
+    /// The current `<head>` element, found live (pre-order, like boa).
+    fn head_idx(&self) -> Option<usize> {
+        self.find_descendant_tag(self.document, "head")
+    }
+
+    /// The current `<body>` element, found live (pre-order, like boa).
+    fn body_idx(&self) -> Option<usize> {
+        self.find_descendant_tag(self.document, "body")
     }
 
     fn find_descendant_tag(&self, root: usize, tag: &str) -> Option<usize> {
@@ -986,6 +974,35 @@ impl BrowserHost {
         }
     }
 
+    /// DocumentFragment insertion semantics: inserting a fragment moves its
+    /// children and leaves the fragment empty. Returns the nodes to insert
+    /// (the node itself when it isn't a fragment), detached from any parent.
+    fn flatten_fragment(&mut self, child_idx: usize) -> Vec<usize> {
+        if matches!(self.nodes[child_idx].kind, DomNodeKind::Fragment) {
+            let kids: Vec<usize> = self.nodes[child_idx].children.drain(..).collect();
+            for &kid in &kids {
+                self.nodes[kid].parent = None;
+            }
+            kids
+        } else {
+            vec![child_idx]
+        }
+    }
+
+    /// Parse an HTML fragment and build arena nodes for its top-level children
+    /// (returned detached — the caller decides where they go).
+    fn build_fragment_children(&mut self, html: &str) -> Vec<usize> {
+        let fragment = parse_document(html);
+        match &fragment {
+            Node::Element(element) => element
+                .children
+                .iter()
+                .map(|child| self.build_from_node(child))
+                .collect(),
+            Node::Text(_) => vec![self.build_from_node(&fragment)],
+        }
+    }
+
     fn parse_and_set_inner_html(&mut self, parent: usize, html: &str) {
         let old_children: Vec<usize> = self.nodes[parent].children.clone();
         for child in old_children {
@@ -1170,9 +1187,18 @@ impl Host for BrowserHost {
     fn read_dom(&self, read: DomRead) -> HostResult<DomReadResult> {
         let node_exists = |idx: usize| idx < self.nodes.len();
         match read {
-            DomRead::DocumentRoot { .. } => Ok(DomReadResult::Node(NodeId(self.document as u32))),
-            DomRead::DocumentHead { .. } => Ok(DomReadResult::Node(NodeId(self.head as u32))),
-            DomRead::DocumentBody { .. } => Ok(DomReadResult::Node(NodeId(self.body as u32))),
+            DomRead::DocumentRoot { .. } => Ok(match self.html_idx() {
+                Some(idx) => DomReadResult::Node(NodeId(idx as u32)),
+                None => DomReadResult::None,
+            }),
+            DomRead::DocumentHead { .. } => Ok(match self.head_idx() {
+                Some(idx) => DomReadResult::Node(NodeId(idx as u32)),
+                None => DomReadResult::None,
+            }),
+            DomRead::DocumentBody { .. } => Ok(match self.body_idx() {
+                Some(idx) => DomReadResult::Node(NodeId(idx as u32)),
+                None => DomReadResult::None,
+            }),
             DomRead::ActiveElement { .. } => Ok(DomReadResult::None),
             DomRead::QuerySelector { root, selectors } => {
                 match self.query_selector(root.0 as usize, &selectors) {
@@ -1312,6 +1338,12 @@ impl Host for BrowserHost {
                 }
                 Ok(DomReadResult::String(self.inner_html(node.0 as usize)))
             }
+            DomRead::OuterHtml { node } => {
+                if !node_exists(node.0 as usize) {
+                    return Err(HostError::InvalidHandle);
+                }
+                Ok(DomReadResult::String(self.serialize_node(node.0 as usize)))
+            }
             DomRead::Attribute { node, name } => {
                 if !node_exists(node.0 as usize) {
                     return Err(HostError::InvalidHandle);
@@ -1407,9 +1439,68 @@ impl Host for BrowserHost {
                 self.record_childlist_mutation(idx, &added, &removed);
                 Ok(DomMutationResult::None)
             }
+            DomMutation::SetOuterHtml { node, html } => {
+                let idx = node.0 as usize;
+                if !exists(&self.nodes, idx) {
+                    return Err(HostError::InvalidHandle);
+                }
+                let Some(parent) = self.nodes[idx].parent else {
+                    return Err(HostError::InvalidHandle);
+                };
+                let pos = self.nodes[parent]
+                    .children
+                    .iter()
+                    .position(|&c| c == idx)
+                    .unwrap_or(0);
+                let added = self.build_fragment_children(&html);
+                self.detach(idx);
+                for (offset, &child) in added.iter().enumerate() {
+                    self.nodes[child].parent = Some(parent);
+                    self.nodes[parent].children.insert(pos + offset, child);
+                }
+                self.record_childlist_mutation(parent, &added, &[idx]);
+                Ok(DomMutationResult::None)
+            }
+            DomMutation::InsertAdjacentHtml { node, position, html } => {
+                let idx = node.0 as usize;
+                if !exists(&self.nodes, idx) {
+                    return Err(HostError::InvalidHandle);
+                }
+                let added = self.build_fragment_children(&html);
+                let (parent, insert_at) = match position {
+                    AdjacentPosition::BeforeBegin | AdjacentPosition::AfterEnd => {
+                        let Some(parent) = self.nodes[idx].parent else {
+                            return Err(HostError::InvalidHandle);
+                        };
+                        let pos = self.nodes[parent]
+                            .children
+                            .iter()
+                            .position(|&c| c == idx)
+                            .unwrap_or(0);
+                        let at = if matches!(position, AdjacentPosition::BeforeBegin) {
+                            pos
+                        } else {
+                            pos + 1
+                        };
+                        (parent, at)
+                    }
+                    AdjacentPosition::AfterBegin => (idx, 0),
+                    AdjacentPosition::BeforeEnd => (idx, self.nodes[idx].children.len()),
+                };
+                for (offset, &child) in added.iter().enumerate() {
+                    self.nodes[child].parent = Some(parent);
+                    self.nodes[parent].children.insert(insert_at + offset, child);
+                }
+                self.record_childlist_mutation(parent, &added, &[]);
+                Ok(DomMutationResult::None)
+            }
             DomMutation::WriteHtml { html, .. } => {
-                // document.write appends parsed content to <body>.
-                let body = self.body;
+                // document.write appends parsed content to <body> (falling back
+                // to <html>/document when the page has no body element).
+                let body = self
+                    .body_idx()
+                    .or_else(|| self.html_idx())
+                    .unwrap_or(self.document);
                 let fragment = parse_document(&html);
                 if let Node::Element(element) = &fragment {
                     let child_indices: Vec<usize> = element
@@ -1469,9 +1560,11 @@ impl Host for BrowserHost {
                     if !exists(&self.nodes, child_idx) {
                         continue;
                     }
-                    self.detach(child_idx);
-                    self.attach(parent_idx, child_idx);
-                    added.push(child_idx);
+                    for idx in self.flatten_fragment(child_idx) {
+                        self.detach(idx);
+                        self.attach(parent_idx, idx);
+                        added.push(idx);
+                    }
                 }
                 self.record_childlist_mutation(parent_idx, &added, &[]);
                 Ok(DomMutationResult::None)
@@ -1488,11 +1581,13 @@ impl Host for BrowserHost {
                     if !exists(&self.nodes, child_idx) {
                         continue;
                     }
-                    self.detach(child_idx);
-                    self.nodes[child_idx].parent = Some(parent_idx);
-                    self.nodes[parent_idx].children.insert(pos, child_idx);
-                    pos += 1;
-                    added.push(child_idx);
+                    for idx in self.flatten_fragment(child_idx) {
+                        self.detach(idx);
+                        self.nodes[idx].parent = Some(parent_idx);
+                        self.nodes[parent_idx].children.insert(pos, idx);
+                        pos += 1;
+                        added.push(idx);
+                    }
                 }
                 self.record_childlist_mutation(parent_idx, &added, &[]);
                 Ok(DomMutationResult::None)
@@ -1507,20 +1602,23 @@ impl Host for BrowserHost {
                 if !exists(&self.nodes, parent_idx) || !exists(&self.nodes, child_idx) {
                     return Err(HostError::InvalidHandle);
                 }
-                self.detach(child_idx);
-                self.nodes[child_idx].parent = Some(parent_idx);
-                match reference {
-                    Some(reference) => {
-                        let pos = self.nodes[parent_idx]
+                let inserted = self.flatten_fragment(child_idx);
+                for &idx in &inserted {
+                    self.detach(idx);
+                    self.nodes[idx].parent = Some(parent_idx);
+                    // Recompute against the reference each round: inserting
+                    // before it keeps the fragment children in order.
+                    let pos = match reference {
+                        Some(reference) => self.nodes[parent_idx]
                             .children
                             .iter()
                             .position(|&c| c == reference.0 as usize)
-                            .unwrap_or(self.nodes[parent_idx].children.len());
-                        self.nodes[parent_idx].children.insert(pos, child_idx);
-                    }
-                    None => self.nodes[parent_idx].children.push(child_idx),
+                            .unwrap_or(self.nodes[parent_idx].children.len()),
+                        None => self.nodes[parent_idx].children.len(),
+                    };
+                    self.nodes[parent_idx].children.insert(pos, idx);
                 }
-                self.record_childlist_mutation(parent_idx, &[child_idx], &[]);
+                self.record_childlist_mutation(parent_idx, &inserted, &[]);
                 Ok(DomMutationResult::None)
             }
             DomMutation::ReplaceChild {
