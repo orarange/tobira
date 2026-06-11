@@ -325,6 +325,10 @@ pub struct FormControlCommand {
     pub text_color: Color,
     pub background_color: Color,
     pub border_color: Color,
+    /// True when colors fell back to the native widget chrome (no CSS
+    /// background/border). The renderer applies its own hover/focus affordance
+    /// only for these; CSS-styled controls keep their authored colors.
+    pub native_chrome: bool,
 }
 
 /// Scan the document tree for a body/html element with a solid background color.
@@ -792,18 +796,20 @@ fn element_node_id(element: &StyledElement) -> Option<usize> {
 /// Background + border colors for an interactive control. Authored CSS wins
 /// (`background` on the element; `border` when an actual border was set);
 /// otherwise fall back to the native-widget chrome. Disabled controls always
-/// use the grayed-out chrome.
-fn control_colors(spec: &FormControlSpec) -> (Color, Color) {
+/// use the grayed-out chrome. The returned bool is `native_chrome`: true when
+/// neither background nor border came from CSS, so the renderer may apply its
+/// native hover/focus affordance (a CSS-styled control keeps its own colors,
+/// and its `:hover` rule already flows through here on the hover relayout).
+fn control_colors(spec: &FormControlSpec) -> (Color, Color, bool) {
     if spec.disabled {
-        return (0xE4E6EA, 0xA9AFB8);
+        return (0xE4E6EA, 0xA9AFB8, true);
     }
-    let background = spec.style.background_color.unwrap_or(
-        if matches!(spec.kind, FormControlKind::Button) {
-            0xE7EBF2
-        } else {
-            0xFFFFFF
-        },
-    );
+    let css_bg = spec.style.background_color;
+    let background = css_bg.unwrap_or(if matches!(spec.kind, FormControlKind::Button) {
+        0xE7EBF2
+    } else {
+        0xFFFFFF
+    });
     let has_css_border = !spec.style.border_style_none
         && (spec.style.border.left > 0
             || spec.style.border.top > 0
@@ -814,7 +820,8 @@ fn control_colors(spec: &FormControlSpec) -> (Color, Color) {
     } else {
         0x7F8B9C
     };
-    (background, border)
+    let native_chrome = css_bg.is_none() && !has_css_border;
+    (background, border, native_chrome)
 }
 
 fn measure_form_control(control: &FormControlSpec, fonts: &mut FontContext) -> (u32, u32) {
@@ -1126,7 +1133,7 @@ fn layout_block_element(
             let control_x = x.saturating_add(element.style.margin.left);
             // Shrink-to-fit the control, but never exceed the slot width.
             let final_w = ctrl_w.min(width.max(1)).max(1);
-            let (background_color, border_color) = control_colors(&spec);
+            let (background_color, border_color, native_chrome) = control_colors(&spec);
             context.controls.push(FormControlCommand {
                 id: spec.id,
                 node_id: spec.node_id,
@@ -1151,6 +1158,7 @@ fn layout_block_element(
                 text_color: element.style.color,
                 background_color,
                 border_color,
+                native_chrome,
             });
             *cursor_y = cursor_y
                 .saturating_add(ctrl_h)
@@ -2399,6 +2407,7 @@ fn layout_table_element(
                 text_color: ctrl.text_color,
                 background_color: ctrl.background_color,
                 border_color: ctrl.border_color,
+                native_chrome: ctrl.native_chrome,
             }));
             context.element_hitboxes.extend(layout.element_hitboxes.iter().map(|h| ElementHitbox {
                 node_id: h.node_id,
@@ -2719,6 +2728,7 @@ fn merge_fragment(
             text_color: control.text_color,
             background_color: control.background_color,
             border_color: control.border_color,
+            native_chrome: control.native_chrome,
         }));
     context
         .element_hitboxes
@@ -3590,7 +3600,7 @@ fn emit_line_impl(
     for span in &line.spans {
         if let Some(control) = &span.control {
             let control_y = cursor_y.saturating_add(line_height.saturating_sub(span.height) / 2);
-            let (background_color, border_color) = control_colors(control);
+            let (background_color, border_color, native_chrome) = control_colors(control);
             context.controls.push(FormControlCommand {
                 id: control.id,
                 node_id: control.node_id,
@@ -3615,6 +3625,7 @@ fn emit_line_impl(
                 text_color: span.style.color,
                 background_color,
                 border_color,
+                native_chrome,
             });
 
             cursor_x = cursor_x.saturating_add(span.width);
@@ -4853,6 +4864,36 @@ mod tests {
                 println!("rect x={} y={} w={} h={} color=#{:06x}", r.x, r.y, r.width, r.height, r.color & 0xFFFFFF);
             }
         }
+    }
+
+    /// Regression: a `button:hover` rule recolors the control when that button
+    /// is the hovered node. Controls are not in `element_hitboxes`, so the GUI
+    /// resolves hover against the controls list; here we confirm the CSS side —
+    /// styling the tree with the button marked hovered flows its :hover
+    /// background into the emitted FormControlCommand (native_chrome stays false
+    /// so the renderer won't override it with the gray chrome hover).
+    #[test]
+    fn button_hover_rule_recolors_control() {
+        let html = r#"<html><body><button data-tobira-node-id="2">Go</button></body></html>"#;
+        let css = "button { background: #3457d5; color: #fff; border: 1px solid #3457d5; } button:hover { background: #2742a8; }";
+        let document = parse_document(html);
+        let mut fonts = FontContext::load();
+
+        let normal = {
+            let styled = build_styled_tree(&document, &parse_stylesheet(css), 700, &crate::css::InteractiveState::default());
+            layout_styled_document(&styled, &ImageStore::default(), 700, &mut fonts)
+        };
+        let nb = normal.controls.iter().find(|c| c.label == "Go").expect("button");
+        assert_eq!(nb.background_color, 0x3457D5, "resting background from CSS");
+        assert!(!nb.native_chrome, "CSS-styled button must not be native chrome");
+
+        let hovered = {
+            let interactive = crate::css::InteractiveState { hovered_node_id: Some(2), ..Default::default() };
+            let styled = build_styled_tree(&document, &parse_stylesheet(css), 700, &interactive);
+            layout_styled_document(&styled, &ImageStore::default(), 700, &mut fonts)
+        };
+        let hb = hovered.controls.iter().find(|c| c.label == "Go").expect("button");
+        assert_eq!(hb.background_color, 0x2742A8, "hover background from :hover rule");
     }
 
     /// Diagnostic: replicate the React demo's counter section exactly (flex row

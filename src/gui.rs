@@ -1020,6 +1020,19 @@ impl BrowserApp {
             .saturating_sub(body_top)
             .saturating_add(self.scroll_y);
         let content_x = (pos_x as u32).saturating_sub(FRAME_PADDING / 2);
+        // Form controls live in their own list, not `element_hitboxes`, so check
+        // them first — otherwise hovering a button/input never sets its node as
+        // hovered and `:hover` rules (e.g. `button:hover`) never match.
+        if let Some(control) = layout.controls.iter().rev().find(|c| {
+            content_x >= c.x
+                && content_x < c.x + c.width
+                && content_y >= c.y
+                && content_y < c.y + c.height
+        }) {
+            if control.node_id.is_some() {
+                return control.node_id;
+            }
+        }
         // Find the deepest (last) hitbox that contains the cursor
         layout
             .element_hitboxes
@@ -3993,15 +4006,22 @@ fn paint_page_control(
         return;
     }
 
-    let background =
-        if matches!(control.kind, FormControlKind::Button) && is_hovered && !control.disabled {
-            COLOR_CONTROL_BUTTON_HOVER
-        } else {
-            control.background_color
-        };
+    // CSS-styled controls keep their authored colors (their `:hover` rule, if
+    // any, already recolored `background_color` on the hover relayout). Only
+    // native-chrome controls get the built-in gray hover / focus-border
+    // affordance, so a page's blue button doesn't flip to gray on hover.
+    let background = if matches!(control.kind, FormControlKind::Button)
+        && is_hovered
+        && !control.disabled
+        && control.native_chrome
+    {
+        COLOR_CONTROL_BUTTON_HOVER
+    } else {
+        control.background_color
+    };
     let border = if focused.is_some() {
         COLOR_ADDRESS_BAR_FOCUS
-    } else if is_hovered {
+    } else if is_hovered && control.native_chrome {
         COLOR_ADDRESS_BAR_BORDER
     } else {
         control.border_color
