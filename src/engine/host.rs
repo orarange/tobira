@@ -349,6 +349,12 @@ pub enum DomMutation {
         host: NodeId,
         open: bool,
     },
+    /// `Text.splitText(offset)`: truncate `node` at `offset` and insert a new
+    /// text node holding the remainder right after it. Returns the new node.
+    SplitText {
+        node: NodeId,
+        offset: usize,
+    },
     /// A focus/blur event reached `node` — update `document.activeElement`
     /// (blur only clears it when `node` is the currently active element).
     NoteFocusChange {

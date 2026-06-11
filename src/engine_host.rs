@@ -336,6 +336,60 @@ impl BrowserHost {
         }
     }
 
+    /// Record a characterData mutation against every observer watching
+    /// `target_idx` (directly or, with `subtree`, as an ancestor).
+    fn record_characterdata_mutation(&mut self, target_idx: usize, old_value: &str) {
+        if self.observers.is_empty() {
+            return;
+        }
+        let mut hits: Vec<(usize, bool)> = Vec::new();
+        for (oid, slot) in self.observers.iter().enumerate() {
+            let Some(entry) = slot else { continue };
+            if entry.kind != ObserverKind::Mutation {
+                continue;
+            }
+            let mut matched = false;
+            let mut want_old = false;
+            for (obs_target, opts) in &entry.targets {
+                if !opts.character_data {
+                    continue;
+                }
+                let in_scope = *obs_target == target_idx
+                    || (opts.subtree && self.is_self_or_ancestor(*obs_target, target_idx));
+                if in_scope {
+                    matched = true;
+                    want_old |= opts.character_data_old_value;
+                }
+            }
+            if matched {
+                hits.push((oid, want_old));
+            }
+        }
+        for (oid, want_old) in hits {
+            let payload = HostData::Object(vec![
+                (
+                    "type".to_string(),
+                    HostData::String("characterData".to_string()),
+                ),
+                (
+                    "oldValue".to_string(),
+                    if want_old {
+                        HostData::String(old_value.to_string())
+                    } else {
+                        HostData::Null
+                    },
+                ),
+            ]);
+            if let Some(Some(entry)) = self.observers.get_mut(oid) {
+                entry.pending.push(ObserverRecord {
+                    target: NodeId(target_idx as u32),
+                    kind: ObserverKind::Mutation,
+                    payload,
+                });
+            }
+        }
+    }
+
     /// Record a childList mutation (added/removed nodes) against every observer
     /// watching `parent_idx` (directly or, with `subtree`, as an ancestor).
     fn record_childlist_mutation(&mut self, parent_idx: usize, added: &[usize], removed: &[usize]) {
@@ -1423,7 +1477,8 @@ impl Host for BrowserHost {
                 // text node, so getting this wrong leaves the UI stuck on its
                 // initial text after every state update.)
                 if let DomNodeKind::Text(text) = &mut self.nodes[idx].kind {
-                    *text = value;
+                    let old = std::mem::replace(text, value);
+                    self.record_characterdata_mutation(idx, &old);
                     return Ok(DomMutationResult::None);
                 }
                 let removed: Vec<usize> = self.nodes[idx].children.clone();
@@ -1677,6 +1732,39 @@ impl Host for BrowserHost {
                     self.record_childlist_mutation(parent_idx, &[], &[idx]);
                 }
                 Ok(DomMutationResult::None)
+            }
+            DomMutation::SplitText { node, offset } => {
+                let idx = node.0 as usize;
+                if !exists(&self.nodes, idx) {
+                    return Err(HostError::InvalidHandle);
+                }
+                let DomNodeKind::Text(text) = &self.nodes[idx].kind else {
+                    return Err(HostError::InvalidHandle);
+                };
+                let old = text.clone();
+                let split_at = old
+                    .char_indices()
+                    .nth(offset)
+                    .map(|(byte, _)| byte)
+                    .unwrap_or(old.len());
+                let head = old[..split_at].to_string();
+                let tail = old[split_at..].to_string();
+                if let DomNodeKind::Text(text) = &mut self.nodes[idx].kind {
+                    *text = head;
+                }
+                let tail_idx = self.push(DomNode::text(&tail));
+                if let Some(parent) = self.nodes[idx].parent {
+                    let pos = self.nodes[parent]
+                        .children
+                        .iter()
+                        .position(|&c| c == idx)
+                        .map(|p| p + 1)
+                        .unwrap_or(self.nodes[parent].children.len());
+                    self.nodes[tail_idx].parent = Some(parent);
+                    self.nodes[parent].children.insert(pos, tail_idx);
+                }
+                self.record_characterdata_mutation(idx, &old);
+                Ok(DomMutationResult::Node(NodeId(tail_idx as u32)))
             }
             DomMutation::NoteFocusChange { node, focused, .. } => {
                 let idx = node.0 as usize;

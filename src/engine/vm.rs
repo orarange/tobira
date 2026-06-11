@@ -262,6 +262,7 @@ enum BuiltinId {
     DomClassListToString,
     DomNodeInsertAdjacentHtml,
     DomNodeReplaceChildren,
+    DomNodeSplitText,
     // attributes (NamedNodeMap)
     DomAttrMapItem,
     DomAttrMapGetNamedItem,
@@ -270,6 +271,9 @@ enum BuiltinId {
     DomStyleGetProperty,
     DomStyleSetProperty,
     DomStyleRemoveProperty,
+    // getComputedStyle snapshot
+    DomComputedStyleGetProperty,
+    DomComputedStyleGetPriority,
     // history
     HistoryPushState,
     HistoryReplaceState,
@@ -5864,7 +5868,11 @@ impl Vm {
                     }
                 }
             }
-            return self.set_host_property(slot, key, value);
+            let result = self.set_host_property(slot, key, value);
+            // boa parity: DOM property writes flush mutation observers
+            // synchronously (see invoke_builtin).
+            self.deliver_mutation_records();
+            return result;
         }
 
         // Typed-array indexed writes go straight to the backing buffer (an
@@ -7335,6 +7343,21 @@ impl Vm {
     }
 
     fn invoke_builtin(
+        &mut self,
+        builtin: BuiltinId,
+        this_value: Value,
+        args: Vec<Value>,
+    ) -> Result<Value, VmError> {
+        let result = self.invoke_builtin_inner(builtin, this_value, args);
+        // boa parity: mutation observers flush synchronously after every DOM
+        // operation, so scripts can read their effects mid-turn. Cheap (two
+        // field reads) when no observers are registered, and re-entrancy is
+        // guarded inside the delivery itself.
+        self.deliver_mutation_records();
+        result
+    }
+
+    fn invoke_builtin_inner(
         &mut self,
         builtin: BuiltinId,
         this_value: Value,
@@ -10249,6 +10272,14 @@ impl Vm {
                 };
                 Ok(self.make_string_value(&existing))
             }
+            BuiltinId::DomNodeSplitText => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let offset = args.first().map(|v| self.to_number(v).max(0.0) as usize).unwrap_or(0);
+                match self.host.mutate_dom(DomMutation::SplitText { node: node_id, offset }) {
+                    Ok(DomMutationResult::Node(tail)) => Ok(self.make_dom_node_value(tail)),
+                    _ => Err(VmError::TypeError("splitText: not a Text node".to_string())),
+                }
+            }
             BuiltinId::DomNodeHasAttributes => {
                 let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
                 let names = match self.host.read_dom(DomRead::AttributeNames { node: node_id }) {
@@ -10314,6 +10345,14 @@ impl Vm {
                 let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "style".to_string(), value: updated });
                 Ok(Value::Undefined)
             }
+            BuiltinId::DomComputedStyleGetProperty => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let raw = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let prop = camel_to_css_prop(raw.trim());
+                let value = self.computed_style_value(node_id, &prop);
+                Ok(self.make_string_value(&value))
+            }
+            BuiltinId::DomComputedStyleGetPriority => Ok(self.make_string_value("")),
             BuiltinId::DomStyleRemoveProperty => {
                 let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
                 let prop = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -10475,7 +10514,19 @@ impl Vm {
                 Ok(Value::Undefined)
             }
             BuiltinId::WindowGetComputedStyle => {
-                Ok(Value::Object(self.allocate_ordinary_object(None)))
+                let Some(node_id) = args.first().and_then(|v| self.node_id_from_host_val(v)) else {
+                    return Err(VmError::TypeError(
+                        "getComputedStyle requires an Element".to_string(),
+                    ));
+                };
+                Ok(self.make_host_object(HostObjectSlot {
+                    class: HostObjectClass::Other("ComputedStyle"),
+                    interface_name: "CSSStyleDeclaration",
+                    handle: node_id.0 as u64,
+                    dispatch: HostDispatch::Ordinary,
+                    supports_indexed_properties: false,
+                    supports_named_properties: true,
+                }))
             }
             BuiltinId::WindowMatchMedia => {
                 let result_obj = self.allocate_ordinary_object(None);
@@ -11560,6 +11611,9 @@ impl Vm {
             }
             HostObjectClass::Other("TokenList") => self.get_classlist_property(slot, name),
             HostObjectClass::Other("CSSStyleDeclaration") => self.get_style_property(slot, name),
+            HostObjectClass::Other("ComputedStyle") => {
+                self.get_computed_style_object_property(slot, name)
+            }
             HostObjectClass::Other("Dataset") => self.get_dataset_property(slot, name),
             HostObjectClass::Other("Location") => self.get_location_property(name),
             HostObjectClass::Other("History") => self.get_history_property(name),
@@ -12003,18 +12057,23 @@ impl Vm {
                     _ => continue,
                 };
                 delivered_any = true;
-                let records_array = match self.build_mutation_record_array(records) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                };
-                let _ = self.call_value_sync(
-                    reg.callback.clone(),
-                    reg.instance.clone(),
-                    vec![records_array, reg.instance.clone()],
-                );
-                // Drain microtasks the callback queued (delivery is guarded, so
-                // this won't recurse into another delivery pass).
-                self.drain_microtasks();
+                // One record per callback invocation: the boa backend flushes
+                // after every DOM mutation, so observers see each change as
+                // its own delivery.
+                for record in records {
+                    let records_array = match self.build_mutation_record_array(vec![record]) {
+                        Ok(value) => value,
+                        Err(_) => continue,
+                    };
+                    let _ = self.call_value_sync(
+                        reg.callback.clone(),
+                        reg.instance.clone(),
+                        vec![records_array, reg.instance.clone()],
+                    );
+                    // Drain microtasks the callback queued (delivery is guarded,
+                    // so this won't recurse into another delivery pass).
+                    self.drain_microtasks();
+                }
             }
             if !delivered_any {
                 break;
@@ -12348,10 +12407,11 @@ impl Vm {
                     .or_else(|| self.globals.get("HTMLElement").cloned())
                     .unwrap_or(Value::Undefined))
             }
-            "nodeValue" => {
+            "nodeValue" | "data" => {
                 let res = self.host.read_dom(DomRead::NodeValue { node: node_id });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Null })
             }
+            "splitText" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeSplitText)),
             "textContent" => {
                 let res = self.host.read_dom(DomRead::TextContent { node: node_id });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Null })
@@ -12488,6 +12548,17 @@ impl Vm {
                 Ok(Value::Bool(matches!(res, Ok(DomReadResult::String(_)))))
             }
             "length" => {
+                // CharacterData length (text nodes) vs child count elsewhere.
+                if matches!(
+                    self.host.read_dom(DomRead::NodeKind { node: node_id }),
+                    Ok(DomReadResult::Kind(NodeKind::Text))
+                ) {
+                    let text = match self.host.read_dom(DomRead::NodeValue { node: node_id }) {
+                        Ok(DomReadResult::String(s)) => s,
+                        _ => String::new(),
+                    };
+                    return Ok(Value::Number(text.chars().count() as f64));
+                }
                 let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: false });
                 Ok(Value::Number(match res { Ok(DomReadResult::Nodes(ids)) => ids.len() as f64, _ => 0.0 }))
             }
@@ -12680,6 +12751,162 @@ impl Vm {
         })
     }
 
+    /// Property access on a `getComputedStyle(el)` snapshot object.
+    fn get_computed_style_object_property(
+        &mut self,
+        slot: HostObjectSlot,
+        name: String,
+    ) -> Result<Value, VmError> {
+        match name.as_str() {
+            "getPropertyValue" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomComputedStyleGetProperty))
+            }
+            "getPropertyPriority" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomComputedStyleGetPriority))
+            }
+            _ => {
+                let prop = camel_to_css_prop(&name);
+                let value = self.computed_style_value(NodeId(slot.handle as u32), &prop);
+                Ok(self.make_string_value(&value))
+            }
+        }
+    }
+
+    /// The computed value of one CSS property — a port of the boa backend's
+    /// `computed_style_property_value`: inline declarations win (with
+    /// `inherit` walking up), inheritable properties fall back to the parent,
+    /// and everything else gets a per-tag UA default.
+    fn computed_style_value(&mut self, node: NodeId, prop: &str) -> String {
+        let inline = {
+            let style = match self.host.read_dom(DomRead::Attribute {
+                node,
+                name: "style".to_string(),
+            }) {
+                Ok(DomReadResult::String(s)) => s,
+                _ => String::new(),
+            };
+            get_inline_style_prop(&style, prop)
+        };
+        if !inline.is_empty() {
+            if inline.eq_ignore_ascii_case("inherit") {
+                return self.computed_style_parent_value(node, prop).unwrap_or_default();
+            }
+            return inline;
+        }
+
+        let tag = match self.host.read_dom(DomRead::NodeName { node }) {
+            Ok(DomReadResult::String(s)) => s.to_ascii_lowercase(),
+            _ => String::new(),
+        };
+
+        match prop {
+            "display" => {
+                let hidden = matches!(
+                    self.host.read_dom(DomRead::Attribute { node, name: "hidden".to_string() }),
+                    Ok(DomReadResult::String(_))
+                );
+                if hidden {
+                    "none".to_string()
+                } else {
+                    default_display_for_tag(&tag).to_string()
+                }
+            }
+            "position" => "static".to_string(),
+            "visibility" => self
+                .computed_style_parent_value(node, "visibility")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "visible".to_string()),
+            "color" => self
+                .computed_style_parent_value(node, "color")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "rgb(0, 0, 0)".to_string()),
+            "background-color" => default_background_color_for_tag(&tag).to_string(),
+            "font-size" => match tag.as_str() {
+                "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                    default_font_size_for_tag(&tag).to_string()
+                }
+                _ => self
+                    .computed_style_parent_value(node, "font-size")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "16px".to_string()),
+            },
+            "font-weight" => match tag.as_str() {
+                "strong" | "b" | "th" => default_font_weight_for_tag(&tag).to_string(),
+                _ => self
+                    .computed_style_parent_value(node, "font-weight")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "400".to_string()),
+            },
+            "font-family" => self
+                .computed_style_parent_value(node, "font-family")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "sans-serif".to_string()),
+            "font-style" => "normal".to_string(),
+            "line-height" => self
+                .computed_style_parent_value(node, "line-height")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "normal".to_string()),
+            "text-align" => self
+                .computed_style_parent_value(node, "text-align")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "left".to_string()),
+            "white-space" => self
+                .computed_style_parent_value(node, "white-space")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "normal".to_string()),
+            "text-decoration" => "none".to_string(),
+            "text-transform" => "none".to_string(),
+            "text-indent" => "0px".to_string(),
+            "letter-spacing" => "normal".to_string(),
+            "pointer-events" => "auto".to_string(),
+            "opacity" => "1".to_string(),
+            "overflow" => "visible".to_string(),
+            "width" | "height" => "auto".to_string(),
+            "max-width" | "min-width" | "max-height" | "min-height" => "none".to_string(),
+            "margin-top" | "margin-right" | "margin-bottom" | "margin-left" | "padding-top"
+            | "padding-right" | "padding-bottom" | "padding-left" => "0px".to_string(),
+            "margin" | "padding" | "border-width" | "border-style" | "border-color" => {
+                let suffix = prop.strip_prefix("border-").unwrap_or("");
+                let (t, r, b, l) = if prop == "margin" || prop == "padding" {
+                    (
+                        format!("{prop}-top"),
+                        format!("{prop}-right"),
+                        format!("{prop}-bottom"),
+                        format!("{prop}-left"),
+                    )
+                } else {
+                    (
+                        format!("border-top-{suffix}"),
+                        format!("border-right-{suffix}"),
+                        format!("border-bottom-{suffix}"),
+                        format!("border-left-{suffix}"),
+                    )
+                };
+                let top = self.computed_style_value(node, &t);
+                let right = self.computed_style_value(node, &r);
+                let bottom = self.computed_style_value(node, &b);
+                let left = self.computed_style_value(node, &l);
+                box_shorthand_value(&top, &right, &bottom, &left)
+            }
+            "border-top-width" | "border-right-width" | "border-bottom-width"
+            | "border-left-width" => "0px".to_string(),
+            "border-top-style" | "border-right-style" | "border-bottom-style"
+            | "border-left-style" => "none".to_string(),
+            "border-top-color" | "border-right-color" | "border-bottom-color"
+            | "border-left-color" => "currentcolor".to_string(),
+            "vertical-align" => "baseline".to_string(),
+            "cursor" => "auto".to_string(),
+            _ => String::new(),
+        }
+    }
+
+    fn computed_style_parent_value(&mut self, node: NodeId, prop: &str) -> Option<String> {
+        match self.host.read_dom(DomRead::Parent { node }) {
+            Ok(DomReadResult::Node(parent)) => Some(self.computed_style_value(parent, prop)),
+            _ => None,
+        }
+    }
+
     fn set_host_property(
         &mut self,
         slot: HostObjectSlot,
@@ -12699,7 +12926,7 @@ impl Vm {
                         let html = self.to_string(&value);
                         let _ = self.host.mutate_dom(DomMutation::SetOuterHtml { node: node_id, html });
                     }
-                    "textContent" | "nodeValue" => {
+                    "textContent" | "nodeValue" | "data" => {
                         let text = self.to_string(&value);
                         let _ = self.host.mutate_dom(DomMutation::SetTextContent { node: node_id, value: text });
                     }
@@ -13298,6 +13525,7 @@ fn is_dom_managed_node_property(name: &str) -> bool {
             | "outerHTML"
             | "textContent"
             | "nodeValue"
+            | "data"
             | "id"
             | "className"
             | "value"
@@ -13324,6 +13552,64 @@ fn get_inline_style_prop(existing: &str, prop: &str) -> String {
             }
         })
         .unwrap_or_default()
+}
+
+// ── getComputedStyle UA defaults (ported from the boa backend) ──────────────
+
+fn default_display_for_tag(tag_name: &str) -> &'static str {
+    match tag_name {
+        "html" | "body" | "div" | "section" | "article" | "aside" | "main" | "header"
+        | "footer" | "nav" | "p" | "ul" | "ol" | "form" | "fieldset" | "legend" | "pre"
+        | "blockquote" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "block",
+        "table" => "table",
+        "tr" => "table-row",
+        "td" | "th" => "table-cell",
+        "thead" | "tbody" | "tfoot" => "table-row-group",
+        "li" => "list-item",
+        "img" | "button" | "input" | "select" | "textarea" => "inline-block",
+        "span" | "a" | "b" | "i" | "u" | "strong" | "em" | "small" | "code" | "abbr" | "label"
+        | "sup" | "sub" | "mark" => "inline",
+        "script" | "style" | "head" | "meta" | "link" | "title" | "template" => "none",
+        _ => "inline",
+    }
+}
+
+fn default_font_size_for_tag(tag_name: &str) -> &'static str {
+    match tag_name {
+        "h1" => "2em",
+        "h2" => "1.5em",
+        "h3" => "1.17em",
+        "h4" => "1em",
+        "h5" => "0.83em",
+        "h6" => "0.67em",
+        _ => "16px",
+    }
+}
+
+fn default_font_weight_for_tag(tag_name: &str) -> &'static str {
+    match tag_name {
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "strong" | "b" | "th" => "700",
+        _ => "400",
+    }
+}
+
+fn default_background_color_for_tag(tag_name: &str) -> &'static str {
+    match tag_name {
+        "html" | "body" => "rgb(255, 255, 255)",
+        _ => "rgba(0, 0, 0, 0)",
+    }
+}
+
+fn box_shorthand_value(top: &str, right: &str, bottom: &str, left: &str) -> String {
+    if top == right && right == bottom && bottom == left {
+        top.to_string()
+    } else if top == bottom && right == left {
+        format!("{top} {right}")
+    } else if right == left {
+        format!("{top} {right} {bottom}")
+    } else {
+        format!("{top} {right} {bottom} {left}")
+    }
 }
 
 /// Remove one declaration from an inline `style` attribute string. Returns the

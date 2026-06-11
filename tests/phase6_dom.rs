@@ -489,6 +489,7 @@ impl Host for TestDom {
             // the BrowserHost (engine_host.rs) covers them with the real DOM.
             DomMutation::SetOuterHtml { .. }
             | DomMutation::InsertAdjacentHtml { .. }
+            | DomMutation::SplitText { .. }
             | DomMutation::NoteFocusChange { .. } => {
                 Ok(DomMutationResult::None)
             }
