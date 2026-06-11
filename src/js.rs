@@ -456,10 +456,22 @@ pub fn process_document_scripts(html: &str, base_url: &Url) -> ProcessedScriptHt
     processed
 }
 
-/// Whether the experimental self-built engine backend is enabled via the
-/// `TOBIRA_ENGINE` environment variable. Any non-empty value other than "0"
-/// turns it on. When enabled, document scripts run on the in-tree
-/// `tobira_engine` VM (via `engine_host`) instead of boa.
+/// Whether the self-built engine backend is enabled via the `TOBIRA_ENGINE`
+/// environment variable. Any non-empty value other than "0" turns it on. When
+/// enabled, document scripts run on the in-tree `tobira_engine` VM (via
+/// `engine_host`) instead of boa.
+///
+/// boa is still the DEFAULT. Flipping the default (Stage 4 cutover) currently
+/// regresses ~10 boa-path tests, so it is blocked on closing these engine gaps
+/// (verified 2026-06-11 by temporarily defaulting to the engine):
+///   - History API: `engine_host::history()` is a stub — pushState/replaceState/
+///     popstate/back/forward + scroll restore are not wired to the browser.
+///   - `hashchange`: not dispatched on `location.hash` changes.
+///   - `location` href/assign changes must report a navigation_target.
+///   - nested-timeout ordering and `document.write` output need parity checks
+///     against the boa snapshots; live `setAttribute` must rebuild the snapshot.
+/// fuel-based runaway-loop limiting and the `document.write` binding already
+/// exist. See ENGINE_INTEGRATION_PLAN.md Stage 3/4.
 fn engine_backend_enabled() -> bool {
     std::env::var("TOBIRA_ENGINE")
         .map(|value| !value.is_empty() && value != "0")
