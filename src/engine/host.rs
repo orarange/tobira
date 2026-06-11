@@ -349,6 +349,13 @@ pub enum DomMutation {
         host: NodeId,
         open: bool,
     },
+    /// A focus/blur event reached `node` — update `document.activeElement`
+    /// (blur only clears it when `node` is the currently active element).
+    NoteFocusChange {
+        window: WindowId,
+        node: NodeId,
+        focused: bool,
+    },
 }
 
 /// Insertion point for `insertAdjacentHTML` (relative to the target node).

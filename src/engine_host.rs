@@ -126,6 +126,8 @@ struct HistoryEntry {
 pub struct BrowserHost {
     nodes: Vec<DomNode>,
     document: usize,
+    /// The focused node (`document.activeElement`), set by focus/blur events.
+    active_element: Option<usize>,
     console: Vec<String>,
     location: LocationSnapshot,
     /// A full (cross-document) navigation requested this turn — the browser
@@ -161,6 +163,7 @@ impl BrowserHost {
         let mut host = Self {
             nodes: Vec::new(),
             document: 0,
+            active_element: None,
             console: Vec::new(),
             location: location_from_url(url),
             navigation: None,
@@ -1199,7 +1202,16 @@ impl Host for BrowserHost {
                 Some(idx) => DomReadResult::Node(NodeId(idx as u32)),
                 None => DomReadResult::None,
             }),
-            DomRead::ActiveElement { .. } => Ok(DomReadResult::None),
+            DomRead::ActiveElement { .. } => {
+                // Falls back body → html → document, mirroring boa.
+                let idx = self
+                    .active_element
+                    .filter(|&idx| node_exists(idx))
+                    .or_else(|| self.body_idx())
+                    .or_else(|| self.html_idx())
+                    .unwrap_or(self.document);
+                Ok(DomReadResult::Node(NodeId(idx as u32)))
+            }
             DomRead::QuerySelector { root, selectors } => {
                 match self.query_selector(root.0 as usize, &selectors) {
                     Some(idx) => Ok(DomReadResult::Node(NodeId(idx as u32))),
@@ -1666,6 +1678,15 @@ impl Host for BrowserHost {
                 }
                 Ok(DomMutationResult::None)
             }
+            DomMutation::NoteFocusChange { node, focused, .. } => {
+                let idx = node.0 as usize;
+                if focused {
+                    self.active_element = Some(idx);
+                } else if self.active_element == Some(idx) {
+                    self.active_element = None;
+                }
+                Ok(DomMutationResult::None)
+            }
             DomMutation::SetWindowScroll { x, y, .. } => {
                 // `window.scrollTo/scrollBy` — record the offset so `window.scrollY`
                 // reflects it (and history scroll-restore can save/restore it).
@@ -1969,9 +1990,18 @@ impl EngineSession {
             }
         }
 
-        // Settle deferred work (Promise microtasks + zero-delay timers) so async
-        // initial rendering reflects in the snapshot.
-        vm.run_due_jobs(10_000);
+        // The document is parsed and its scripts ran: fire the initial load
+        // events on the document/window (handle 0), like boa's
+        // dispatch_initial_load_events.
+        for event_type in ["readystatechange", "DOMContentLoaded", "load"] {
+            let _ = vm.fire_dom_event(0, event_type);
+        }
+
+        // Settle deferred work (Promise microtasks + a 1ms timer window) so
+        // async initial rendering reflects in the snapshot. The 1ms window
+        // runs `setTimeout(fn, 1)` "next turn" callbacks like boa does, while
+        // timers those callbacks schedule (and longer delays) stay pending.
+        vm.run_due_jobs_at(1, 10_000);
 
         let mut session = Self { vm };
         let snapshot = session.snapshot_with_error(error);

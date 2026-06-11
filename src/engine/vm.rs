@@ -220,6 +220,13 @@ enum BuiltinId {
     // Event / CustomEvent
     EventConstructor,
     CustomEventConstructor,
+    KeyboardEventConstructor,
+    MouseEventConstructor,
+    // AbortController / AbortSignal
+    AbortControllerConstructor,
+    AbortControllerAbort,
+    AbortSignalAddEventListener,
+    AbortSignalRemoveEventListener,
     EventPreventDefault,
     EventStopPropagation,
     EventStopImmediatePropagation,
@@ -1274,6 +1281,14 @@ impl Vm {
             return Ok(());
         };
         let event_ref = *event_ref;
+        // focus/blur reaching a node moves document.activeElement (boa parity).
+        if event_type.eq_ignore_ascii_case("focus") || event_type.eq_ignore_ascii_case("blur") {
+            let _ = self.host.mutate_dom(DomMutation::NoteFocusChange {
+                window: WindowId(0),
+                node: NodeId(target_handle),
+                focused: event_type.eq_ignore_ascii_case("focus"),
+            });
+        }
         let mut path: Vec<u32> = vec![target_handle];
         if bubbles {
             let mut current = target_handle;
@@ -1416,6 +1431,32 @@ impl Vm {
         }
     }
 
+    /// Read a string field from an event init options object (e.g. `key`).
+    fn event_option_string(&mut self, options: &Option<Value>, name: &str) -> String {
+        match options {
+            Some(opts @ Value::Object(_)) => {
+                match self.get_property_value(opts, &PropertyKey::from(name)) {
+                    Ok(Value::Undefined) | Err(_) => String::new(),
+                    Ok(v) => self.to_string(&v),
+                }
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Read a numeric field from an event init options object (e.g. `clientX`).
+    fn event_option_number(&mut self, options: &Option<Value>, name: &str) -> f64 {
+        match options {
+            Some(opts @ Value::Object(_)) => {
+                match self.get_property_value(opts, &PropertyKey::from(name)) {
+                    Ok(Value::Undefined) | Err(_) => 0.0,
+                    Ok(v) => self.to_number(&v),
+                }
+            }
+            _ => 0.0,
+        }
+    }
+
     /// Build a JS `Event` (or `CustomEvent`) object: standard data properties
     /// plus the `preventDefault` / `stopPropagation` / `stopImmediatePropagation`
     /// methods (cached builtins). Used by the constructors and could back
@@ -1498,6 +1539,33 @@ impl Vm {
         }
     }
 
+    /// Compile and run a script source on the live VM without resetting the
+    /// stack/frames — `document.write`'d <script> elements run nested inside
+    /// the writing script's execution.
+    pub fn eval_source(&mut self, source: &str) -> Result<Value, VmError> {
+        use super::compiler::Compiler;
+        use super::parser::Parser;
+        let program = Parser::new(source)
+            .parse()
+            .map_err(|e| VmError::TypeError(format!("parse: {e:?}")))?;
+        let chunk = Compiler::new(&program)
+            .compile()
+            .map_err(|e| VmError::TypeError(format!("compile: {e:?}")))?;
+        let closure = RuntimeClosure {
+            proto: Rc::new(chunk.top_level.clone()),
+            upvalues: Vec::new(),
+        };
+        let base_depth = self.frames.len();
+        let stack_len = self.stack.len();
+        self.push_call_frame(closure, Vec::new(), Value::Undefined, None)?;
+        self.run_until_frame_depth(base_depth)?;
+        if self.stack.len() > stack_len {
+            self.pop_value()
+        } else {
+            Ok(Value::Undefined)
+        }
+    }
+
     pub fn event_loop_tick(&mut self, now_ms: u64, has_render_opportunity: bool) -> TickResult {
         self.event_loop.current_time_ms = now_ms;
         self.enqueue_due_timers(now_ms);
@@ -1553,8 +1621,17 @@ impl Vm {
     /// zero-delay timers that reschedule themselves; returns the number of
     /// macrotasks executed.
     pub fn run_due_jobs(&mut self, max_steps: usize) -> usize {
-        self.drain_microtasks();
         let now = self.event_loop.current_time_ms;
+        self.run_due_jobs_at(now, max_steps)
+    }
+
+    /// Like `run_due_jobs`, but first advances the virtual clock to `now_ms`
+    /// (never backwards). The initial settle uses a 1ms window so "next turn"
+    /// timers fire before the first snapshot (boa parity) while timers they
+    /// schedule — and longer delays — stay pending.
+    pub fn run_due_jobs_at(&mut self, now_ms: u64, max_steps: usize) -> usize {
+        self.drain_microtasks();
+        let now = self.event_loop.current_time_ms.max(now_ms);
         let mut steps = 0;
         while steps < max_steps {
             if matches!(self.event_loop_tick(now, false), TickResult::Idle) {
@@ -2410,6 +2487,26 @@ impl Vm {
             self.allocate_builtin_value(BuiltinId::CustomEventConstructor, true, None);
         self.globals
             .insert("CustomEvent".to_string(), custom_event_ctor);
+        // UI event constructors. FocusEvent/InputEvent/UIEvent carry no extra
+        // init we model, so the plain Event shape stands in for them.
+        let keyboard_event_ctor =
+            self.allocate_builtin_value(BuiltinId::KeyboardEventConstructor, true, None);
+        self.globals
+            .insert("KeyboardEvent".to_string(), keyboard_event_ctor);
+        for name in ["MouseEvent", "PointerEvent"] {
+            let ctor = self.allocate_builtin_value(BuiltinId::MouseEventConstructor, true, None);
+            self.globals.insert(name.to_string(), ctor);
+        }
+        for name in ["UIEvent", "FocusEvent", "InputEvent"] {
+            let ctor = self.allocate_builtin_value(BuiltinId::EventConstructor, true, None);
+            self.globals.insert(name.to_string(), ctor);
+        }
+
+        // AbortController constructor.
+        let abort_controller_ctor =
+            self.allocate_builtin_value(BuiltinId::AbortControllerConstructor, true, None);
+        self.globals
+            .insert("AbortController".to_string(), abort_controller_ctor);
 
         // MutationObserver constructor.
         let mutation_observer_ctor =
@@ -4884,6 +4981,9 @@ impl Vm {
                 | BuiltinId::TypedArrayConstructor(_)
                 | BuiltinId::EventConstructor
                 | BuiltinId::CustomEventConstructor
+                | BuiltinId::KeyboardEventConstructor
+                | BuiltinId::MouseEventConstructor
+                | BuiltinId::AbortControllerConstructor
                 | BuiltinId::MutationObserverConstructor
                 | BuiltinId::XhrConstructor
                 | BuiltinId::IntersectionObserverConstructor
@@ -6633,6 +6733,25 @@ impl Vm {
             other => self.to_string(other),
         };
         let init = args.get(1).cloned();
+        // An already-aborted AbortSignal rejects without hitting the network.
+        if let Some(init_val @ Value::Object(_)) = &init {
+            let signal = self
+                .get_property_value(init_val, &PropertyKey::from("signal"))
+                .unwrap_or(Value::Undefined);
+            if matches!(signal, Value::Object(_)) {
+                let aborted = self
+                    .get_property_value(&signal, &PropertyKey::from("aborted"))
+                    .unwrap_or(Value::Undefined);
+                if self.is_truthy(&aborted) {
+                    let err = self.create_error_object(
+                        "AbortError",
+                        "The operation was aborted".to_string(),
+                    );
+                    let promise = self.promise_reject_value(err)?;
+                    return Ok(Value::Object(promise));
+                }
+            }
+        }
         let (method, headers, body) = self.read_fetch_init(&init);
         let request = FetchRequest {
             window: WindowId(0),
@@ -6808,6 +6927,17 @@ impl Vm {
             }
             _ => FetchBody::Empty,
         };
+        // Browser policy (boa parity): request bodies are rejected — the
+        // browser only issues body-less requests. Surface it as a network
+        // error so `onerror` fires.
+        if !matches!(body, FetchBody::Empty) {
+            self.define_data_property(obj, PropertyKey::from("status"), Value::Number(0.0), true, true, true);
+            self.define_data_property(obj, PropertyKey::from("readyState"), Value::Number(4.0), true, true, true);
+            self.xhr_fire(this, "onreadystatechange")?;
+            self.xhr_fire(this, "onerror")?;
+            self.xhr_fire(this, "onloadend")?;
+            return Ok(Value::Undefined);
+        }
         let request = FetchRequest {
             window: WindowId(0),
             url: url.clone(),
@@ -7715,6 +7845,140 @@ impl Vm {
             BuiltinId::CustomEventConstructor => {
                 let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 self.make_event_object(&event_type, args.get(1).cloned(), true)
+            }
+            BuiltinId::AbortControllerConstructor => {
+                let proto = self.object_prototype_ref();
+                let signal = self.allocate_ordinary_object(Some(proto));
+                self.define_data_property(signal, PropertyKey::from("aborted"), Value::Bool(false), true, true, true);
+                self.define_data_property(signal, PropertyKey::from("reason"), Value::Undefined, true, true, true);
+                self.define_data_property(signal, PropertyKey::from("onabort"), Value::Null, true, true, true);
+                let add = self.allocate_builtin_method(BuiltinId::AbortSignalAddEventListener);
+                self.define_data_property(signal, PropertyKey::from("addEventListener"), add, true, false, true);
+                let remove = self.allocate_builtin_method(BuiltinId::AbortSignalRemoveEventListener);
+                self.define_data_property(signal, PropertyKey::from("removeEventListener"), remove, true, false, true);
+                let listeners = self.make_array_from_values(Vec::new())?;
+                self.define_data_property(signal, PropertyKey::from("__abortListeners"), listeners, true, false, true);
+                let controller = self.allocate_ordinary_object(Some(proto));
+                self.define_data_property(controller, PropertyKey::from("signal"), Value::Object(signal), true, true, true);
+                let abort_fn = self.allocate_builtin_method(BuiltinId::AbortControllerAbort);
+                self.define_data_property(controller, PropertyKey::from("abort"), abort_fn, true, false, true);
+                Ok(Value::Object(controller))
+            }
+            BuiltinId::AbortControllerAbort => {
+                let signal = self.get_property_value(&this_value, &PropertyKey::from("signal"))?;
+                let Value::Object(signal_ref) = signal else {
+                    return Ok(Value::Undefined);
+                };
+                let signal_val = Value::Object(signal_ref);
+                let aborted = self.get_property_value(&signal_val, &PropertyKey::from("aborted"))?;
+                if self.is_truthy(&aborted) {
+                    return Ok(Value::Undefined);
+                }
+                self.define_data_property(signal_ref, PropertyKey::from("aborted"), Value::Bool(true), true, true, true);
+                let reason = args.first().cloned().unwrap_or(Value::Undefined);
+                self.define_data_property(signal_ref, PropertyKey::from("reason"), reason, true, true, true);
+                let event = self.make_event_object("abort", None, false)?;
+                if let Value::Object(event_ref) = event {
+                    self.define_data_property(event_ref, PropertyKey::from("target"), signal_val.clone(), true, true, true);
+                    self.define_data_property(event_ref, PropertyKey::from("currentTarget"), signal_val.clone(), true, true, true);
+                }
+                let listeners_val =
+                    self.get_property_value(&signal_val, &PropertyKey::from("__abortListeners"))?;
+                let listeners = match &listeners_val {
+                    Value::Object(_) => self.array_like_to_vec(&listeners_val)?,
+                    _ => Vec::new(),
+                };
+                for listener in listeners {
+                    if self.is_callable_value(&listener) {
+                        let _ = self.call_value_sync(listener, signal_val.clone(), vec![event.clone()]);
+                    }
+                }
+                let onabort = self.get_property_value(&signal_val, &PropertyKey::from("onabort"))?;
+                if self.is_callable_value(&onabort) {
+                    let _ = self.call_value_sync(onabort, signal_val.clone(), vec![event]);
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::AbortSignalAddEventListener => {
+                let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let listener = args.get(1).cloned().unwrap_or(Value::Undefined);
+                if event_type == "abort" && self.is_callable_value(&listener) {
+                    let listeners_val = self
+                        .get_property_value(&this_value, &PropertyKey::from("__abortListeners"))?;
+                    let mut listeners = match &listeners_val {
+                        Value::Object(_) => self.array_like_to_vec(&listeners_val)?,
+                        _ => Vec::new(),
+                    };
+                    listeners.push(listener);
+                    let updated = self.make_array_from_values(listeners)?;
+                    if let Value::Object(signal_ref) = &this_value {
+                        self.define_data_property(*signal_ref, PropertyKey::from("__abortListeners"), updated, true, false, true);
+                    }
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::AbortSignalRemoveEventListener => {
+                let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let listener = args.get(1).cloned().unwrap_or(Value::Undefined);
+                if event_type == "abort" {
+                    let listeners_val = self
+                        .get_property_value(&this_value, &PropertyKey::from("__abortListeners"))?;
+                    if matches!(listeners_val, Value::Object(_)) {
+                        let all = self.array_like_to_vec(&listeners_val)?;
+                        let listeners: Vec<Value> = all
+                            .into_iter()
+                            .filter(|l| !self.strict_equal(l, &listener))
+                            .collect();
+                        let updated = self.make_array_from_values(listeners)?;
+                        if let Value::Object(signal_ref) = &this_value {
+                            self.define_data_property(*signal_ref, PropertyKey::from("__abortListeners"), updated, true, false, true);
+                        }
+                    }
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::KeyboardEventConstructor => {
+                let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let options = args.get(1).cloned();
+                let event = self.make_event_object(&event_type, options.clone(), false)?;
+                if let Value::Object(event_ref) = event {
+                    for name in ["key", "code"] {
+                        let v = self.event_option_string(&options, name);
+                        let v = self.make_string_value(&v);
+                        self.define_data_property(event_ref, PropertyKey::from(name), v, true, true, true);
+                    }
+                    for name in ["ctrlKey", "shiftKey", "altKey", "metaKey", "repeat"] {
+                        let flag = self.event_option_flag(&options, name);
+                        self.define_data_property(event_ref, PropertyKey::from(name), Value::Bool(flag), true, true, true);
+                    }
+                    let location = self.event_option_number(&options, "location");
+                    self.define_data_property(event_ref, PropertyKey::from("location"), Value::Number(location), true, true, true);
+                }
+                Ok(event)
+            }
+            BuiltinId::MouseEventConstructor => {
+                let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let options = args.get(1).cloned();
+                let event = self.make_event_object(&event_type, options.clone(), false)?;
+                if let Value::Object(event_ref) = event {
+                    for name in ["clientX", "clientY", "screenX", "screenY", "pageX", "pageY", "button", "buttons", "detail"] {
+                        let n = self.event_option_number(&options, name);
+                        self.define_data_property(event_ref, PropertyKey::from(name), Value::Number(n), true, true, true);
+                    }
+                    for name in ["ctrlKey", "shiftKey", "altKey", "metaKey"] {
+                        let flag = self.event_option_flag(&options, name);
+                        self.define_data_property(event_ref, PropertyKey::from(name), Value::Bool(flag), true, true, true);
+                    }
+                    let related = match &options {
+                        Some(opts) => self
+                            .get_property_value(opts, &PropertyKey::from("relatedTarget"))
+                            .unwrap_or(Value::Null),
+                        None => Value::Null,
+                    };
+                    let related = if matches!(related, Value::Undefined) { Value::Null } else { related };
+                    self.define_data_property(event_ref, PropertyKey::from("relatedTarget"), related, true, true, true);
+                }
+                Ok(event)
             }
             BuiltinId::EventPreventDefault => {
                 if let Value::Object(event) = &this_value {
@@ -9576,7 +9840,30 @@ impl Vm {
             }
             BuiltinId::DomDocWrite => {
                 let html = args.iter().map(|v| self.to_string(v)).collect::<Vec<_>>().join("");
+                // document.write is recursive: any <script> the write adds
+                // executes immediately. Diff the document's scripts around the
+                // mutation to find what it added.
+                let scripts_of = |vm: &mut Self| -> Vec<NodeId> {
+                    match vm.host.read_dom(DomRead::QuerySelectorAll {
+                        root: NodeId(0),
+                        selectors: "script".to_string(),
+                    }) {
+                        Ok(DomReadResult::Nodes(ids)) => ids,
+                        _ => Vec::new(),
+                    }
+                };
+                let before = scripts_of(self);
                 let _ = self.host.mutate_dom(DomMutation::WriteHtml { window: WindowId(0), html });
+                let after = scripts_of(self);
+                for id in after.into_iter().filter(|id| !before.contains(id)) {
+                    let source = match self.host.read_dom(DomRead::TextContent { node: id }) {
+                        Ok(DomReadResult::String(s)) => s,
+                        _ => continue,
+                    };
+                    if !source.trim().is_empty() {
+                        let _ = self.eval_source(&source);
+                    }
+                }
                 Ok(Value::Undefined)
             }
             // ----------------------------------------------------------------
@@ -9760,9 +10047,25 @@ impl Vm {
                 set(self, "bottom", y + h);
                 Ok(Value::Object(rect_obj))
             }
-            BuiltinId::DomNodeScrollIntoView
-            | BuiltinId::DomNodeFocus
-            | BuiltinId::DomNodeBlur => Ok(Value::Undefined),
+            BuiltinId::DomNodeScrollIntoView => Ok(Value::Undefined),
+            BuiltinId::DomNodeFocus | BuiltinId::DomNodeBlur => {
+                // focus()/blur() dispatch the corresponding (non-bubbling)
+                // event; propagate_event moves document.activeElement.
+                let target_handle = self
+                    .node_id_from_host_val(&this_value)
+                    .map(|id| id.0)
+                    .unwrap_or(0);
+                let event_type = if matches!(builtin, BuiltinId::DomNodeFocus) {
+                    "focus"
+                } else {
+                    "blur"
+                };
+                let init = DomEventInit::default();
+                let event_ref = self.build_host_event(event_type, &this_value, &init);
+                let event_val = Value::Object(event_ref);
+                self.propagate_event(target_handle, &event_val, event_type, false)?;
+                Ok(Value::Undefined)
+            }
             BuiltinId::DomNodeClick => {
                 // `el.click()` must actually dispatch a trusted, bubbling,
                 // cancelable click — otherwise delegated handlers never fire. This

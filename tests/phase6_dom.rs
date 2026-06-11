@@ -485,9 +485,11 @@ impl Host for TestDom {
                 Ok(DomMutationResult::None)
             }
             DomMutation::WriteHtml { .. } => Ok(DomMutationResult::None),
-            // The TestDom doesn't exercise outerHTML/insertAdjacentHTML — the
-            // BrowserHost (engine_host.rs) covers them with the real parser.
-            DomMutation::SetOuterHtml { .. } | DomMutation::InsertAdjacentHtml { .. } => {
+            // The TestDom doesn't exercise outerHTML/insertAdjacentHTML/focus —
+            // the BrowserHost (engine_host.rs) covers them with the real DOM.
+            DomMutation::SetOuterHtml { .. }
+            | DomMutation::InsertAdjacentHtml { .. }
+            | DomMutation::NoteFocusChange { .. } => {
                 Ok(DomMutationResult::None)
             }
             DomMutation::SetAttribute { node, name, value } => {
