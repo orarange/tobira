@@ -255,6 +255,10 @@ enum BuiltinId {
     DomClassListToString,
     DomNodeInsertAdjacentHtml,
     DomNodeReplaceChildren,
+    // attributes (NamedNodeMap)
+    DomAttrMapItem,
+    DomAttrMapGetNamedItem,
+    DomNodeHasAttributes,
     // style (CSSStyleDeclaration)
     DomStyleGetProperty,
     DomStyleSetProperty,
@@ -6042,7 +6046,21 @@ impl Vm {
 
     fn array_like_length(&mut self, value: &Value) -> Result<u32, VmError> {
         match value {
-            Value::Object(object) => Ok(self.array_length(*object)),
+            Value::Object(object) => {
+                // Host array-likes (NamedNodeMap, …) compute `length` via the
+                // host dispatch — it is not an own data property.
+                if self
+                    .heap
+                    .objects()
+                    .get(*object)
+                    .is_some_and(|o| matches!(o.kind, ObjectKind::Host(_)))
+                {
+                    let v = self.get_property_value(value, &PropertyKey::from("length"))?;
+                    let n = self.to_number(&v);
+                    return Ok(if n.is_finite() && n > 0.0 { n as u32 } else { 0 });
+                }
+                Ok(self.array_length(*object))
+            }
             Value::String(string) => Ok(self.string_text(*string).chars().count() as u32),
             _ => Err(VmError::TypeError("value is not array-like".to_string())),
         }
@@ -9928,6 +9946,32 @@ impl Vm {
                 };
                 Ok(self.make_string_value(&existing))
             }
+            BuiltinId::DomNodeHasAttributes => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let names = match self.host.read_dom(DomRead::AttributeNames { node: node_id }) {
+                    Ok(DomReadResult::StringList(names)) => names,
+                    _ => Vec::new(),
+                };
+                Ok(Value::Bool(!names.is_empty()))
+            }
+            BuiltinId::DomAttrMapItem | BuiltinId::DomAttrMapGetNamedItem => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let names = match self.host.read_dom(DomRead::AttributeNames { node: node_id }) {
+                    Ok(DomReadResult::StringList(names)) => names,
+                    _ => Vec::new(),
+                };
+                let found = if matches!(builtin, BuiltinId::DomAttrMapItem) {
+                    let index = args.first().map(|v| self.to_number(v) as usize).unwrap_or(0);
+                    names.get(index).cloned()
+                } else {
+                    let wanted = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                    names.iter().find(|n| **n == wanted).cloned()
+                };
+                Ok(match found {
+                    Some(name) => self.make_attr_value(node_id, &name),
+                    None => Value::Null,
+                })
+            }
             BuiltinId::DomNodeInsertAdjacentHtml => {
                 let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
                 let position_str = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -11196,6 +11240,11 @@ impl Vm {
         slot: HostObjectSlot,
         key: &PropertyKey,
     ) -> Result<Value, VmError> {
+        // NamedNodeMap supports indexed access (`attrs[0]`), so it gets the
+        // raw key before the string-only fast path below.
+        if matches!(slot.class, HostObjectClass::Other("NamedNodeMap")) {
+            return self.get_attrmap_property(slot, key);
+        }
         let name = match key {
             PropertyKey::String(s) => s.clone(),
             _ => return Ok(Value::Undefined),
@@ -11213,6 +11262,72 @@ impl Vm {
             HostObjectClass::Other("History") => self.get_history_property(name),
             HostObjectClass::StorageArea => self.get_storage_property(slot, name),
             HostObjectClass::Observer => self.get_observer_property(name),
+            _ => Ok(Value::Undefined),
+        }
+    }
+
+    /// The attribute names of the node backing a NamedNodeMap host object.
+    fn attrmap_names(&mut self, slot: &HostObjectSlot) -> Vec<String> {
+        let node_id = NodeId(slot.handle as u32);
+        match self.host.read_dom(DomRead::AttributeNames { node: node_id }) {
+            Ok(DomReadResult::StringList(names)) => names,
+            _ => Vec::new(),
+        }
+    }
+
+    /// An `Attr`-like snapshot object (`{name, value}`) for one attribute.
+    fn make_attr_value(&mut self, node: NodeId, name: &str) -> Value {
+        let value = match self.host.read_dom(DomRead::Attribute {
+            node,
+            name: name.to_string(),
+        }) {
+            Ok(DomReadResult::String(s)) => s,
+            _ => String::new(),
+        };
+        let obj = self.allocate_ordinary_object(None);
+        let name_v = self.make_string_value(name);
+        let value_v = self.make_string_value(&value);
+        self.define_data_property(obj, PropertyKey::from("name"), name_v.clone(), true, true, true);
+        self.define_data_property(obj, PropertyKey::from("localName"), name_v.clone(), true, true, true);
+        self.define_data_property(obj, PropertyKey::from("nodeName"), name_v, true, true, true);
+        self.define_data_property(obj, PropertyKey::from("value"), value_v, true, true, true);
+        Value::Object(obj)
+    }
+
+    /// `element.attributes` (NamedNodeMap): length / item() / getNamedItem() /
+    /// indexed and named access. Attr objects are read-only snapshots.
+    fn get_attrmap_property(
+        &mut self,
+        slot: HostObjectSlot,
+        key: &PropertyKey,
+    ) -> Result<Value, VmError> {
+        let node_id = NodeId(slot.handle as u32);
+        match key {
+            PropertyKey::Index(i) => {
+                let names = self.attrmap_names(&slot);
+                Ok(match names.get(*i as usize) {
+                    Some(name) => {
+                        let name = name.clone();
+                        self.make_attr_value(node_id, &name)
+                    }
+                    None => Value::Undefined,
+                })
+            }
+            PropertyKey::String(s) => match s.as_str() {
+                "length" => Ok(Value::Number(self.attrmap_names(&slot).len() as f64)),
+                "item" => Ok(self.allocate_builtin_method(BuiltinId::DomAttrMapItem)),
+                "getNamedItem" => {
+                    Ok(self.allocate_builtin_method(BuiltinId::DomAttrMapGetNamedItem))
+                }
+                name => {
+                    let names = self.attrmap_names(&slot);
+                    Ok(if names.iter().any(|n| n == name) {
+                        self.make_attr_value(node_id, name)
+                    } else {
+                        Value::Undefined
+                    })
+                }
+            },
             _ => Ok(Value::Undefined),
         }
     }
@@ -12138,8 +12253,17 @@ impl Vm {
             "setAttribute" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeSetAttribute)),
             "removeAttribute" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemoveAttribute)),
             "hasAttribute" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeHasAttribute)),
+            "hasAttributes" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeHasAttributes)),
             "toggleAttribute" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeToggleAttribute)),
             "getAttributeNames" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeGetAttributeNames)),
+            "attributes" => Ok(self.make_host_object(HostObjectSlot {
+                class: HostObjectClass::Other("NamedNodeMap"),
+                interface_name: "NamedNodeMap",
+                handle: slot.handle,
+                dispatch: HostDispatch::Ordinary,
+                supports_indexed_properties: true,
+                supports_named_properties: true,
+            })),
             "appendChild" | "append" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeAppendChild)),
             "prepend" => Ok(self.allocate_builtin_method(BuiltinId::DomNodePrepend)),
             "insertBefore" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeInsertBefore)),
@@ -12241,7 +12365,15 @@ impl Vm {
             .read_dom(DomRead::Attribute { node: node_id, name: attr });
         Ok(match res {
             Ok(DomReadResult::String(s)) => self.make_string_value(&s),
-            _ => Value::Undefined,
+            // Absent data attribute: fall back to Object.prototype so plain
+            // members (`dataset.toString`, `hasOwnProperty`, …) still resolve.
+            _ => {
+                let proto = self.object_prototype_ref();
+                match self.lookup_property_descriptor(proto, &PropertyKey::from(name.as_str())) {
+                    Some((_, JsPropertyDescriptor::Data { value, .. })) => value,
+                    _ => Value::Undefined,
+                }
+            }
         })
     }
 
