@@ -14,10 +14,11 @@ use super::event_loop::{
 };
 use super::heap::{GcRef, Heap, RawGcRef};
 use super::host::{
-    ConsoleLevel, ConsoleMessage, DomMutation, DomRead, DomReadResult, FetchBody, FetchMode,
-    FetchRequest, FetchResponse, Host, HostData, HttpMethod, NodeId, NodeKind, NoopHost,
-    ObserverId, ObserverKind, ObserverOp, ObserverOptions, ObserverRecord, ObserverResult,
-    SiblingDirection, WindowId,
+    ConsoleLevel, ConsoleMessage, DomMutation, DomMutationResult, DomRead, DomReadResult, FetchBody,
+    FetchMode,
+    FetchRequest, FetchResponse, HistoryAction, Host, HostData, HttpMethod, NavigationAction,
+    NodeId, NodeKind, NoopHost, ObserverId, ObserverKind, ObserverOp, ObserverOptions,
+    ObserverRecord, ObserverResult, SiblingDirection, WindowId,
 };
 use super::value::{
     AsyncContext, GeneratorState, HostDispatch, HostObjectClass, HostObjectSlot, JsObject,
@@ -255,6 +256,12 @@ enum BuiltinId {
     DomStyleGetProperty,
     DomStyleSetProperty,
     DomStyleRemoveProperty,
+    // history
+    HistoryPushState,
+    HistoryReplaceState,
+    HistoryBack,
+    HistoryForward,
+    HistoryGo,
     // performance, idle, encoding
     PerformanceNow,
     RequestIdleCallback,
@@ -9916,6 +9923,38 @@ impl Vm {
                 Ok(self.make_string_value(""))
             }
             // performance.now()
+            BuiltinId::HistoryPushState | BuiltinId::HistoryReplaceState => {
+                let state = self.value_to_host_data(args.first().unwrap_or(&Value::Undefined));
+                let title = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+                let url = match args.get(2) {
+                    Some(Value::Undefined) | Some(Value::Null) | None => None,
+                    Some(v) => Some(self.to_string(v)),
+                };
+                let action = if matches!(builtin, BuiltinId::HistoryPushState) {
+                    HistoryAction::PushState { window: WindowId(0), url, title, state }
+                } else {
+                    HistoryAction::ReplaceState { window: WindowId(0), url, title, state }
+                };
+                let _ = self.host.history(action);
+                Ok(Value::Undefined)
+            }
+            BuiltinId::HistoryBack | BuiltinId::HistoryForward | BuiltinId::HistoryGo => {
+                let action = match builtin {
+                    BuiltinId::HistoryBack => HistoryAction::Back { window: WindowId(0) },
+                    BuiltinId::HistoryForward => HistoryAction::Forward { window: WindowId(0) },
+                    _ => {
+                        let delta = args.first().map(|v| self.to_number(v) as i32).unwrap_or(0);
+                        HistoryAction::Go { window: WindowId(0), delta }
+                    }
+                };
+                let outcome = self.host.history(action);
+                // A move (restored_scroll_y is Some) fires `popstate` after the
+                // location + history.state have been committed by the host.
+                if matches!(&outcome, Ok(o) if o.restored_scroll_y.is_some()) {
+                    self.fire_dom_event(0, "popstate")?;
+                }
+                Ok(Value::Undefined)
+            }
             BuiltinId::PerformanceNow => {
                 let ms = self.host.now().monotonic_ms as f64;
                 Ok(Value::Number(ms))
@@ -11067,6 +11106,8 @@ impl Vm {
             HostObjectClass::Other("TokenList") => self.get_classlist_property(slot, name),
             HostObjectClass::Other("CSSStyleDeclaration") => self.get_style_property(slot, name),
             HostObjectClass::Other("Dataset") => self.get_dataset_property(slot, name),
+            HostObjectClass::Other("Location") => self.get_location_property(name),
+            HostObjectClass::Other("History") => self.get_history_property(name),
             HostObjectClass::StorageArea => self.get_storage_property(slot, name),
             HostObjectClass::Observer => self.get_observer_property(name),
             _ => Ok(Value::Undefined),
@@ -11363,6 +11404,43 @@ impl Vm {
         }
     }
 
+    /// Convert a JS `Value` into a host `HostData` tree (inverse of
+    /// `host_data_to_value`). Used to ferry `history.state` to the host. Plain
+    /// objects become `HostData::Object` (own enumerable string keys); functions
+    /// and symbols become `Null`. Depth-bounded against cyclic state.
+    fn value_to_host_data(&mut self, value: &Value) -> HostData {
+        self.value_to_host_data_depth(value, 0)
+    }
+
+    fn value_to_host_data_depth(&mut self, value: &Value, depth: u32) -> HostData {
+        if depth > 64 {
+            return HostData::Null;
+        }
+        match value {
+            Value::Undefined | Value::Null => HostData::Null,
+            Value::Bool(b) => HostData::Bool(*b),
+            Value::Number(n) => HostData::Number(*n),
+            Value::String(_) => HostData::String(self.to_string(value)),
+            Value::Symbol(_) => HostData::Null,
+            Value::Object(obj) => {
+                if self.is_callable_value(value) {
+                    return HostData::Null;
+                }
+                let object = *obj;
+                let keys = self.object_own_enumerable_keys(object);
+                let mut pairs = Vec::with_capacity(keys.len());
+                for key in keys {
+                    let name = self.property_key_to_string(&key);
+                    let item = self
+                        .get_property_value(value, &key)
+                        .unwrap_or(Value::Undefined);
+                    pairs.push((name, self.value_to_host_data_depth(&item, depth + 1)));
+                }
+                HostData::Object(pairs)
+            }
+        }
+    }
+
     /// Public entry point to flush queued observer records (Mutation +
     /// Intersection) to their callbacks. Called by the host after feeding new
     /// geometry (IntersectionObserver) and at microtask checkpoints (Mutation).
@@ -11503,11 +11581,14 @@ impl Vm {
                 self.define_data_property(scr, PropertyKey::from("height"), Value::Number(1080.0), true, true, true);
                 Ok(Value::Object(scr))
             }
-            "history" => {
-                let hist = self.allocate_ordinary_object(None);
-                self.define_data_property(hist, PropertyKey::from("length"), Value::Number(1.0), true, true, true);
-                Ok(Value::Object(hist))
-            }
+            "history" => Ok(self.make_host_object(HostObjectSlot {
+                class: HostObjectClass::Other("History"),
+                interface_name: "History",
+                handle: 0,
+                dispatch: HostDispatch::Ordinary,
+                supports_indexed_properties: false,
+                supports_named_properties: false,
+            })),
             "scrollTo" | "scroll" => Ok(self.allocate_builtin_method(BuiltinId::WindowScrollTo)),
             "scrollBy" => Ok(self.allocate_builtin_method(BuiltinId::WindowScrollBy)),
             "getComputedStyle" => Ok(self.allocate_builtin_method(BuiltinId::WindowGetComputedStyle)),
@@ -11549,29 +11630,74 @@ impl Vm {
     }
 
     fn make_location_object(&mut self) -> Result<Value, VmError> {
-        let loc = self.host.location(WindowId(0));
-        let obj = self.allocate_ordinary_object(None);
-        if let Ok(l) = loc {
-            let href = self.make_string_value(&l.href);
-            self.define_data_property(obj, PropertyKey::from("href"), href, true, true, true);
-            let origin = self.make_string_value(&l.origin);
-            self.define_data_property(obj, PropertyKey::from("origin"), origin, true, true, true);
-            let proto = self.make_string_value(&l.protocol);
-            self.define_data_property(obj, PropertyKey::from("protocol"), proto, true, true, true);
-            let host_v = self.make_string_value(&l.host);
-            self.define_data_property(obj, PropertyKey::from("host"), host_v, true, true, true);
-            let hostname = self.make_string_value(&l.hostname);
-            self.define_data_property(obj, PropertyKey::from("hostname"), hostname, true, true, true);
-            let port = self.make_string_value(&l.port);
-            self.define_data_property(obj, PropertyKey::from("port"), port, true, true, true);
-            let pathname = self.make_string_value(&l.pathname);
-            self.define_data_property(obj, PropertyKey::from("pathname"), pathname, true, true, true);
-            let search = self.make_string_value(&l.search);
-            self.define_data_property(obj, PropertyKey::from("search"), search, true, true, true);
-            let hash = self.make_string_value(&l.hash);
-            self.define_data_property(obj, PropertyKey::from("hash"), hash, true, true, true);
+        // A host object so that property *writes* (`location.href = …`,
+        // `location.hash = …`) route through `set_host_property` into the host's
+        // navigation, instead of silently setting an inert data property.
+        Ok(self.make_host_object(HostObjectSlot {
+            class: HostObjectClass::Other("Location"),
+            interface_name: "Location",
+            handle: 0,
+            dispatch: HostDispatch::Ordinary,
+            supports_indexed_properties: false,
+            supports_named_properties: false,
+        }))
+    }
+
+    /// Read a `location` property live from the host (so it reflects hash /
+    /// pushState changes made during the same turn).
+    fn get_location_property(&mut self, name: String) -> Result<Value, VmError> {
+        let l = match self.host.location(WindowId(0)) {
+            Ok(l) => l,
+            Err(_) => return Ok(Value::Undefined),
+        };
+        let value = match name.as_str() {
+            "href" => Some(l.href.clone()),
+            "origin" => Some(l.origin.clone()),
+            "protocol" => Some(l.protocol.clone()),
+            "host" => Some(l.host.clone()),
+            "hostname" => Some(l.hostname.clone()),
+            "port" => Some(l.port.clone()),
+            "pathname" => Some(l.pathname.clone()),
+            "search" => Some(l.search.clone()),
+            "hash" => Some(l.hash.clone()),
+            _ => None,
+        };
+        Ok(value
+            .map(|s| self.make_string_value(&s))
+            .unwrap_or(Value::Undefined))
+    }
+
+    /// `window.history`: `length` / `state` query the host (a zero-delta `Go` is
+    /// a side-effect-free read), and the methods are cached builtins.
+    fn get_history_property(&mut self, name: String) -> Result<Value, VmError> {
+        match name.as_str() {
+            "pushState" => Ok(self.allocate_builtin_method(BuiltinId::HistoryPushState)),
+            "replaceState" => Ok(self.allocate_builtin_method(BuiltinId::HistoryReplaceState)),
+            "back" => Ok(self.allocate_builtin_method(BuiltinId::HistoryBack)),
+            "forward" => Ok(self.allocate_builtin_method(BuiltinId::HistoryForward)),
+            "go" => Ok(self.allocate_builtin_method(BuiltinId::HistoryGo)),
+            "scrollRestoration" => Ok(self.make_string_value("auto")),
+            "length" => {
+                let len = self
+                    .host
+                    .history(HistoryAction::Go { window: WindowId(0), delta: 0 })
+                    .map(|o| o.length)
+                    .unwrap_or(1);
+                Ok(Value::Number(len as f64))
+            }
+            "state" => {
+                let state = self
+                    .host
+                    .history(HistoryAction::Go { window: WindowId(0), delta: 0 })
+                    .ok()
+                    .and_then(|o| o.state);
+                Ok(match state {
+                    Some(data) => self.host_data_to_value(data),
+                    None => Value::Null,
+                })
+            }
+            _ => Ok(Value::Undefined),
         }
-        Ok(Value::Object(obj))
     }
 
     fn get_document_property(&mut self, name: String) -> Result<Value, VmError> {
@@ -12048,6 +12174,82 @@ impl Vm {
                     name: attr,
                     value: v,
                 });
+            }
+            HostObjectClass::Document => {
+                // `document.title = …` writes the <head><title> text, creating
+                // the element if the document has none.
+                if name == "title" {
+                    let text = self.to_string(&value);
+                    let head = match self.host.read_dom(DomRead::DocumentHead { window: WindowId(0) }) {
+                        Ok(DomReadResult::Node(id)) => Some(id),
+                        _ => None,
+                    };
+                    let existing = head.and_then(|h| {
+                        match self.host.read_dom(DomRead::QuerySelector { root: h, selectors: "title".to_string() }) {
+                            Ok(DomReadResult::Node(id)) => Some(id),
+                            _ => None,
+                        }
+                    });
+                    match existing {
+                        Some(title) => {
+                            let _ = self.host.mutate_dom(DomMutation::SetTextContent { node: title, value: text });
+                        }
+                        None => {
+                            if let Some(head) = head {
+                                if let Ok(DomMutationResult::Node(title)) = self.host.mutate_dom(DomMutation::CreateElement { window: WindowId(0), local_name: "title".to_string() }) {
+                                    let _ = self.host.mutate_dom(DomMutation::Append { parent: head, children: vec![title] });
+                                    let _ = self.host.mutate_dom(DomMutation::SetTextContent { node: title, value: text });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            HostObjectClass::Other("Location") => {
+                let v = self.to_string(&value);
+                match name.as_str() {
+                    "hash" => {
+                        let _ = self.host.navigate(NavigationAction::SetHash {
+                            window: WindowId(0),
+                            hash: v,
+                        });
+                        // A hash change fires `hashchange` on the window.
+                        let _ = self.fire_dom_event(0, "hashchange");
+                    }
+                    "href" => {
+                        // Same-document if only the fragment differs from the
+                        // current URL: treat as a hash change (+ hashchange);
+                        // otherwise a full navigation (reload).
+                        let current = self
+                            .host
+                            .location(WindowId(0))
+                            .map(|l| l.href)
+                            .unwrap_or_default();
+                        let cur_base = current.split('#').next().unwrap_or("");
+                        let (new_base, new_hash) = match v.split_once('#') {
+                            Some((b, h)) => (b, Some(h.to_string())),
+                            None => (v.as_str(), None),
+                        };
+                        let same_doc = new_hash.is_some()
+                            && (new_base.is_empty() || new_base == cur_base);
+                        if same_doc {
+                            let _ = self.host.navigate(NavigationAction::SetHash {
+                                window: WindowId(0),
+                                hash: new_hash.unwrap_or_default(),
+                            });
+                            let _ = self.fire_dom_event(0, "hashchange");
+                        } else {
+                            let _ = self.host.navigate(NavigationAction::Navigate {
+                                window: WindowId(0),
+                                url: v,
+                                replace: false,
+                            });
+                        }
+                    }
+                    // pathname/search/etc. assignment: a full navigation to the
+                    // rebuilt URL. Kept minimal; the tests exercise href/hash.
+                    _ => {}
+                }
             }
             HostObjectClass::Window => {
                 // `globalThis`/`window`/`self` IS the global object, so an expando

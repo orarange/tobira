@@ -115,6 +115,14 @@ struct ObserverEntry {
     intersecting: HashMap<usize, bool>,
 }
 
+/// One session-history entry: its URL, the `history.state` associated with it,
+/// and the scroll position to restore when navigating (back/forward) to it.
+struct HistoryEntry {
+    url: String,
+    state: HostData,
+    scroll_y: f64,
+}
+
 pub struct BrowserHost {
     nodes: Vec<DomNode>,
     document: usize,
@@ -123,7 +131,17 @@ pub struct BrowserHost {
     body: usize,
     console: Vec<String>,
     location: LocationSnapshot,
+    /// A full (cross-document) navigation requested this turn — the browser
+    /// reloads. Set by `location.href`/`assign`/`reload` and `Navigate`.
     navigation: Option<String>,
+    /// A same-document navigation requested this turn (hash change, pushState,
+    /// replaceState, back/forward) — the browser updates the URL bar + history
+    /// without reloading. The most recent one wins.
+    soft_navigation: Option<String>,
+    /// Session history stack and the index of the current entry. Always holds at
+    /// least the initial entry.
+    history_stack: Vec<HistoryEntry>,
+    history_index: usize,
     scroll_x: f64,
     scroll_y: f64,
     inner_width: f64,
@@ -152,6 +170,13 @@ impl BrowserHost {
             console: Vec::new(),
             location: location_from_url(url),
             navigation: None,
+            soft_navigation: None,
+            history_stack: vec![HistoryEntry {
+                url: location_from_url(url).href,
+                state: HostData::Null,
+                scroll_y: 0.0,
+            }],
+            history_index: 0,
             scroll_x: 0.0,
             scroll_y: 0.0,
             inner_width: 1280.0,
@@ -639,6 +664,69 @@ impl BrowserHost {
         self.navigation.clone()
     }
 
+    /// A same-document navigation (hash / pushState / popstate) requested this
+    /// turn, if any. The browser updates the URL + history without reloading.
+    pub fn soft_navigation_target(&self) -> Option<String> {
+        self.soft_navigation.clone()
+    }
+
+    /// Resolve a (possibly relative) URL against the current document URL.
+    fn resolve_href(&self, url: &str) -> String {
+        Url::parse(&self.location.href)
+            .and_then(|base| base.resolve(url))
+            .map(|u| u.to_string())
+            .or_else(|_| Url::parse(url).map(|u| u.to_string()))
+            .unwrap_or_else(|_| url.to_string())
+    }
+
+    fn strip_hash<'a>(&self, href: &'a str) -> &'a str {
+        href.split('#').next().unwrap_or(href)
+    }
+
+    /// Apply a same-document URL change: update `location`, record the soft
+    /// navigation target. Does NOT touch the history stack (callers do).
+    fn commit_same_document(&mut self, href: &str) {
+        self.location = location_from_url(href);
+        self.soft_navigation = Some(href.to_string());
+    }
+
+    fn save_current_scroll(&mut self) {
+        let y = self.scroll_y;
+        if let Some(entry) = self.history_stack.get_mut(self.history_index) {
+            entry.scroll_y = y;
+        }
+    }
+
+    /// Move the history cursor by `delta`, clamped to the stack. When the cursor
+    /// actually moves, restores the target entry's URL + scroll and reports a
+    /// soft navigation; a zero/clamped move is a pure query (no side effects).
+    fn history_go(&mut self, delta: i32) -> HistoryOutcome {
+        let target = (self.history_index as i64 + delta as i64)
+            .clamp(0, self.history_stack.len() as i64 - 1) as usize;
+        if target == self.history_index {
+            return self.current_history_outcome(None);
+        }
+        self.save_current_scroll();
+        self.history_index = target;
+        let (url, scroll) = {
+            let entry = &self.history_stack[target];
+            (entry.url.clone(), entry.scroll_y)
+        };
+        self.commit_same_document(&url);
+        self.scroll_y = scroll;
+        self.current_history_outcome(Some(scroll))
+    }
+
+    fn current_history_outcome(&self, restored_scroll_y: Option<f64>) -> HistoryOutcome {
+        let entry = &self.history_stack[self.history_index];
+        HistoryOutcome {
+            href: entry.url.clone(),
+            state: Some(entry.state.clone()),
+            length: self.history_stack.len(),
+            restored_scroll_y,
+        }
+    }
+
     /// Collect inline `<script>` source (those without a `src` attribute).
     pub fn inline_scripts(&self) -> Vec<String> {
         let mut scripts = Vec::new();
@@ -944,10 +1032,16 @@ fn location_from_url(url: &str) -> LocationSnapshot {
             } else {
                 format!("{}:{}", u.host, port)
             };
-            // The path may carry a query string; split it off for `search`.
-            let (pathname, search) = match u.path.split_once('?') {
+            // The fragment (`#…`) is taken from the raw URL — the path parser may
+            // fold it into `u.path`. Strip it before splitting path / query.
+            let hash = match url.split_once('#') {
+                Some((_, frag)) => format!("#{frag}"),
+                None => String::new(),
+            };
+            let path_no_hash = u.path.split('#').next().unwrap_or(&u.path);
+            let (pathname, search) = match path_no_hash.split_once('?') {
                 Some((path, query)) => (path.to_string(), format!("?{query}")),
-                None => (u.path.clone(), String::new()),
+                None => (path_no_hash.to_string(), String::new()),
             };
             LocationSnapshot {
                 href: url.to_string(),
@@ -958,7 +1052,7 @@ fn location_from_url(url: &str) -> LocationSnapshot {
                 port,
                 pathname,
                 search,
-                hash: String::new(),
+                hash,
             }
         }
         Err(_) => LocationSnapshot {
@@ -999,27 +1093,75 @@ impl Host for BrowserHost {
     }
 
     fn navigate(&mut self, action: NavigationAction) -> HostResult<NavigationOutcome> {
-        if let NavigationAction::Navigate { url, .. } = action {
-            self.navigation = Some(url);
-            Ok(NavigationOutcome {
-                committed: true,
-                same_document: false,
-            })
-        } else {
-            Ok(NavigationOutcome {
-                committed: false,
-                same_document: true,
-            })
+        match action {
+            NavigationAction::Navigate { url, .. } => {
+                // A full (cross-document) navigation: resolve against the current
+                // document URL and let the browser reload.
+                let resolved = self.resolve_href(&url);
+                self.navigation = Some(resolved);
+                Ok(NavigationOutcome {
+                    committed: true,
+                    same_document: false,
+                })
+            }
+            NavigationAction::SetHash { hash, .. } => {
+                // Same-document hash change: update the location + current history
+                // entry and request a soft navigation (no reload).
+                let hash = if hash.is_empty() || hash.starts_with('#') {
+                    hash
+                } else {
+                    format!("#{hash}")
+                };
+                let base = self.strip_hash(&self.location.href);
+                let new_href = format!("{base}{hash}");
+                self.commit_same_document(&new_href);
+                if let Some(entry) = self.history_stack.get_mut(self.history_index) {
+                    entry.url = new_href.clone();
+                }
+                Ok(NavigationOutcome {
+                    committed: true,
+                    same_document: true,
+                })
+            }
         }
     }
 
-    fn history(&mut self, _action: HistoryAction) -> HostResult<HistoryOutcome> {
-        Ok(HistoryOutcome {
-            href: self.location.href.clone(),
-            state: None,
-            length: 1,
-            restored_scroll_y: None,
-        })
+    fn history(&mut self, action: HistoryAction) -> HostResult<HistoryOutcome> {
+        match action {
+            HistoryAction::PushState { url, state, .. } => {
+                let href = url
+                    .filter(|u| !u.is_empty())
+                    .map(|u| self.resolve_href(&u))
+                    .unwrap_or_else(|| self.location.href.clone());
+                // Save the outgoing entry's scroll, drop any forward entries,
+                // then push the new entry and make it current.
+                self.save_current_scroll();
+                self.history_stack.truncate(self.history_index + 1);
+                self.history_stack.push(HistoryEntry {
+                    url: href.clone(),
+                    state,
+                    scroll_y: 0.0,
+                });
+                self.history_index = self.history_stack.len() - 1;
+                self.commit_same_document(&href);
+                Ok(self.current_history_outcome(None))
+            }
+            HistoryAction::ReplaceState { url, state, .. } => {
+                let href = url
+                    .filter(|u| !u.is_empty())
+                    .map(|u| self.resolve_href(&u))
+                    .unwrap_or_else(|| self.location.href.clone());
+                if let Some(entry) = self.history_stack.get_mut(self.history_index) {
+                    entry.url = href.clone();
+                    entry.state = state;
+                }
+                self.commit_same_document(&href);
+                Ok(self.current_history_outcome(None))
+            }
+            HistoryAction::Back { .. } => Ok(self.history_go(-1)),
+            HistoryAction::Forward { .. } => Ok(self.history_go(1)),
+            HistoryAction::Go { delta, .. } => Ok(self.history_go(delta)),
+        }
     }
 
     fn read_dom(&self, read: DomRead) -> HostResult<DomReadResult> {
@@ -1423,9 +1565,14 @@ impl Host for BrowserHost {
                 }
                 Ok(DomMutationResult::None)
             }
-            DomMutation::SetScrollOffset { .. } | DomMutation::SetWindowScroll { .. } => {
+            DomMutation::SetWindowScroll { x, y, .. } => {
+                // `window.scrollTo/scrollBy` — record the offset so `window.scrollY`
+                // reflects it (and history scroll-restore can save/restore it).
+                self.scroll_x = x.max(0.0);
+                self.scroll_y = y.max(0.0);
                 Ok(DomMutationResult::None)
             }
+            DomMutation::SetScrollOffset { .. } => Ok(DomMutationResult::None),
             DomMutation::AttachShadow { .. } => Err(HostError::Unsupported),
         }
     }
@@ -1576,6 +1723,7 @@ pub struct EngineRunResult {
     pub console_logs: Vec<String>,
     pub title: Option<String>,
     pub navigation_target: Option<String>,
+    pub soft_navigation_target: Option<String>,
     pub error: Option<String>,
     pub scroll_y: u32,
     pub default_prevented: bool,
@@ -1745,6 +1893,7 @@ impl EngineSession {
             console_logs: host.take_console(),
             title: host.title(),
             navigation_target: host.navigation_target(),
+            soft_navigation_target: host.soft_navigation_target(),
             error,
             scroll_y: host.scroll_y(),
             default_prevented: false,
@@ -3617,6 +3766,54 @@ mod tests {
             snap.html.contains("id=\"title\"") && snap.html.contains("Hello, Tobira"),
             "React did not render the element into the DOM. html={}",
             snap.html
+        );
+    }
+
+    /// History API + location parity on the engine path: mirrors the boa-path
+    /// tests in js.rs (navigation_target / soft_navigation_target / title) but
+    /// drives the self-built engine via `run_document_scripts`. These are the
+    /// Stage 4 cutover blockers; closing them lets the default flip to the engine.
+    #[test]
+    fn engine_history_and_location() {
+        let run = |script: &str| {
+            run_document_scripts(
+                &format!("<html><body><script>{script}</script></body></html>"),
+                "https://example.com/start",
+            )
+        };
+
+        // location.href = full navigation (reload), resolved against the doc URL.
+        let r = run("location.href = '/next?from=test';");
+        assert_eq!(r.navigation_target.as_deref(), Some("https://example.com/next?from=test"), "err={:?}", r.error);
+
+        // location.hash = soft navigation + hashchange.
+        let r = run("window.addEventListener('hashchange', function(){ document.title = location.href + '|' + location.hash; }); location.hash = '#frag';");
+        assert_eq!(r.soft_navigation_target.as_deref(), Some("https://example.com/start#frag"));
+        assert!(r.navigation_target.is_none(), "hash change must not full-navigate");
+        assert_eq!(r.title.as_deref(), Some("https://example.com/start#frag|#frag"));
+
+        // history.pushState: soft nav, location updates, no reload.
+        let r = run("history.pushState({ page: 1 }, '', '/next?from=test#frag'); document.title = location.href + '|' + location.hash;");
+        assert_eq!(r.soft_navigation_target.as_deref(), Some("https://example.com/next?from=test#frag"));
+        assert!(r.navigation_target.is_none());
+        assert_eq!(r.title.as_deref(), Some("https://example.com/next?from=test#frag|#frag"));
+
+        // pushState x2 + back: popstate fires, history.state restored.
+        let r = run("window.addEventListener('popstate', function(){ document.title = location.href + '|' + String(history.state.page); }); history.pushState({page:1},'','/one'); history.pushState({page:2},'','/two'); history.back();");
+        assert_eq!(r.soft_navigation_target.as_deref(), Some("https://example.com/one"));
+        assert_eq!(r.title.as_deref(), Some("https://example.com/one|1"));
+
+        // back then forward: lands on /two, history.length == 3.
+        let r = run("history.pushState({},'','/one'); history.pushState({},'','/two'); history.back(); history.forward(); document.title = location.href + '|' + location.hash + '|' + String(history.length);");
+        assert_eq!(r.soft_navigation_target.as_deref(), Some("https://example.com/two"));
+        assert!(r.navigation_target.is_none());
+        assert_eq!(r.title.as_deref(), Some("https://example.com/two||3"));
+
+        // scroll restore across back/forward.
+        let r = run("window.scrollTo(0,120); history.pushState({},'','/one'); window.scrollTo(0,240); history.pushState({},'','/two'); history.back(); var a = location.href + '|' + String(window.scrollY); history.back(); var b = location.href + '|' + String(window.scrollY); history.forward(); var c = location.href + '|' + String(window.scrollY); document.title = a + '||' + b + '||' + c;");
+        assert_eq!(
+            r.title.as_deref(),
+            Some("https://example.com/one|240||https://example.com/start|120||https://example.com/one|240")
         );
     }
 

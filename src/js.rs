@@ -495,7 +495,7 @@ fn engine_result_to_processed(result: crate::engine_host::EngineRunResult) -> Pr
         title_override: result.title,
         console_logs,
         navigation_target: result.navigation_target,
-        soft_navigation_target: None,
+        soft_navigation_target: result.soft_navigation_target,
         scroll_y: result.scroll_y,
         has_pending_work: result.has_pending_work,
     }
