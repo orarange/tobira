@@ -3586,6 +3586,34 @@ mod tests {
         );
     }
 
+    /// `for await...of` over a sync iterable awaits each element. Covers the
+    /// common shapes (promise sequences, plain values, empty, break/continue,
+    /// an await in the body, and a rejected element propagating as a throw).
+    #[test]
+    fn supports_for_await_of_over_sync_iterables() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("promises", "async function f(){let s=0; for await (const x of [Promise.resolve(1),Promise.resolve(2)]) s+=x; return s}", "3"),
+            ("plain", "async function f(){let o=''; for await (const x of [1,2,3]) o+=x; return o}", "123"),
+            ("empty", "async function f(){let n=0; for await (const x of []) n++; return n}", "0"),
+            ("break", "async function f(){let s=0; for await (const x of [1,2,3,4]){ if(x===3) break; s+=x; } return s}", "3"),
+            ("continue", "async function f(){let s=0; for await (const x of [1,2,3,4]){ if(x%2===0) continue; s+=x; } return s}", "4"),
+            ("await-in-body", "async function f(){let s=0; for await (const x of [10,20]){ const y=await Promise.resolve(x); s+=y; } return s}", "30"),
+            ("reject", "async function f(){try{ for await (const x of [Promise.reject('boom')]) {} }catch(e){return 'caught:'+e} return 'no'}", "caught:boom"),
+        ];
+        for (name, body, expected) in cases {
+            let html = format!(
+                "<html><body><script>{body}\nf().then(r=>{{ document.title = String(r); }});</script></body></html>"
+            );
+            let result = run_document_scripts(&html, "http://localhost/");
+            assert!(result.error.is_none(), "[{name}] error: {:?}", result.error);
+            assert_eq!(
+                result.title.as_deref(),
+                Some(*expected),
+                "[{name}] wrong result"
+            );
+        }
+    }
+
     #[test]
     fn engine_session_keydown_preventdefault_is_reported() {
         use crate::browser::annotate_node_ids;

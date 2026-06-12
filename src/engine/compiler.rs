@@ -1377,8 +1377,11 @@ impl<'a> FunctionCompiler<'a> {
         &mut self,
         statement: &super::ast::ForOfStatement,
     ) -> Result<(), CompileError> {
-        if statement.r#await() {
-            return Err(CompileError::Unimplemented("for await...of statements"));
+        let is_await = statement.r#await();
+        if is_await && !self.is_async {
+            return Err(CompileError::message(
+                "for await...of is only valid inside async functions",
+            ));
         }
         self.push_scope();
         self.compile_expression(statement.iterable())?;
@@ -1395,6 +1398,17 @@ impl<'a> FunctionCompiler<'a> {
         self.emit(Opcode::SetLocal(value_slot));
         self.emit(Opcode::GetLocal(done_slot));
         let exit_jump = self.emit_jump(Opcode::JumpIfTruePop(0));
+        // `for await...of` awaits each produced value before binding it: the
+        // iterable is materialized synchronously (arrays/sync iterables), so a
+        // sequence of promises is awaited one element at a time, per spec for
+        // sync iterables (each IteratorValue is awaited). `Await` suspends the
+        // whole async frame — the hidden loop locals are frame locals, so the
+        // loop position is preserved across the suspension/resume.
+        if is_await {
+            self.emit(Opcode::GetLocal(value_slot));
+            self.emit(Opcode::Await);
+            self.emit(Opcode::SetLocal(value_slot));
+        }
         self.compile_iterable_initializer_store(statement.initializer(), value_slot)?;
         self.push_control_context(true);
         let body = super::ast::statement_to_node(statement.body().clone());
