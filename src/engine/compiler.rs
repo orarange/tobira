@@ -1385,50 +1385,83 @@ impl<'a> FunctionCompiler<'a> {
         }
         self.push_scope();
         self.compile_expression(statement.iterable())?;
-        self.emit(Opcode::GetForOfIterator);
+        self.emit(if is_await {
+            Opcode::GetForAwaitIterator
+        } else {
+            Opcode::GetForOfIterator
+        });
         let iter_slot = self.allocate_hidden_local()?;
         let value_slot = self.allocate_hidden_local()?;
         let done_slot = self.allocate_hidden_local()?;
         self.emit(Opcode::SetLocal(iter_slot));
 
         let loop_start = self.code.len();
-        self.emit(Opcode::GetLocal(iter_slot));
-        self.emit(Opcode::ForOfNext);
-        self.emit(Opcode::SetLocal(done_slot));
-        self.emit(Opcode::SetLocal(value_slot));
-        self.emit(Opcode::GetLocal(done_slot));
-        let exit_jump = self.emit_jump(Opcode::JumpIfTruePop(0));
-        // `for await...of` awaits each produced value before binding it: the
-        // iterable is materialized synchronously (arrays/sync iterables), so a
-        // sequence of promises is awaited one element at a time, per spec for
-        // sync iterables (each IteratorValue is awaited). `Await` suspends the
-        // whole async frame — the hidden loop locals are frame locals, so the
-        // loop position is preserved across the suspension/resume.
         if is_await {
-            self.emit(Opcode::GetLocal(value_slot));
+            self.emit(Opcode::GetLocal(iter_slot));
+            let next_name = self.add_string_constant("next".to_string())?;
+            self.emit(Opcode::GetPropForCall(next_name));
+            self.emit(Opcode::Call(0));
+            self.emit(Opcode::Await);
+            self.emit(Opcode::SetLocal(done_slot));
+            self.emit(Opcode::GetLocal(done_slot));
+            let done_name = self.add_string_constant("done".to_string())?;
+            self.emit(Opcode::LoadConst(done_name));
+            self.emit(Opcode::GetProp);
+            let exit_jump = self.emit_jump(Opcode::JumpIfTruePop(0));
+            self.emit(Opcode::GetLocal(done_slot));
+            let value_name = self.add_string_constant("value".to_string())?;
+            self.emit(Opcode::LoadConst(value_name));
+            self.emit(Opcode::GetProp);
             self.emit(Opcode::Await);
             self.emit(Opcode::SetLocal(value_slot));
+            self.compile_iterable_initializer_store(statement.initializer(), value_slot)?;
+            self.push_control_context(true);
+            let body = super::ast::statement_to_node(statement.body().clone());
+            self.compile_statement(&body)?;
+            let increment_start = self.code.len();
+            let context = self
+                .control_stack
+                .pop()
+                .expect("for-of control context should exist");
+            for jump in context.continue_jumps {
+                self.patch_jump(jump, increment_start)?;
+            }
+            self.emit_back_jump(loop_start)?;
+            let loop_end = self.code.len();
+            self.patch_jump(exit_jump, loop_end)?;
+            for jump in context.break_jumps {
+                self.patch_jump(jump, loop_end)?;
+            }
+            self.pop_scope();
+            Ok(())
+        } else {
+            self.emit(Opcode::GetLocal(iter_slot));
+            self.emit(Opcode::ForOfNext);
+            self.emit(Opcode::SetLocal(done_slot));
+            self.emit(Opcode::SetLocal(value_slot));
+            self.emit(Opcode::GetLocal(done_slot));
+            let exit_jump = self.emit_jump(Opcode::JumpIfTruePop(0));
+            self.compile_iterable_initializer_store(statement.initializer(), value_slot)?;
+            self.push_control_context(true);
+            let body = super::ast::statement_to_node(statement.body().clone());
+            self.compile_statement(&body)?;
+            let increment_start = self.code.len();
+            let context = self
+                .control_stack
+                .pop()
+                .expect("for-of control context should exist");
+            for jump in context.continue_jumps {
+                self.patch_jump(jump, increment_start)?;
+            }
+            self.emit_back_jump(loop_start)?;
+            let loop_end = self.code.len();
+            self.patch_jump(exit_jump, loop_end)?;
+            for jump in context.break_jumps {
+                self.patch_jump(jump, loop_end)?;
+            }
+            self.pop_scope();
+            Ok(())
         }
-        self.compile_iterable_initializer_store(statement.initializer(), value_slot)?;
-        self.push_control_context(true);
-        let body = super::ast::statement_to_node(statement.body().clone());
-        self.compile_statement(&body)?;
-        let increment_start = self.code.len();
-        let context = self
-            .control_stack
-            .pop()
-            .expect("for-of control context should exist");
-        for jump in context.continue_jumps {
-            self.patch_jump(jump, increment_start)?;
-        }
-        self.emit_back_jump(loop_start)?;
-        let loop_end = self.code.len();
-        self.patch_jump(exit_jump, loop_end)?;
-        for jump in context.break_jumps {
-            self.patch_jump(jump, loop_end)?;
-        }
-        self.pop_scope();
-        Ok(())
     }
 
     fn compile_iterable_initializer_store(
@@ -1835,9 +1868,7 @@ impl<'a> FunctionCompiler<'a> {
             MethodDefinitionKindNode::Async => (None, true, false),
             MethodDefinitionKindNode::Get => (Some(true), false, false),
             MethodDefinitionKindNode::Set => (Some(false), false, false),
-            MethodDefinitionKindNode::AsyncGenerator => {
-                return Err(CompileError::Unimplemented("async generator class methods"));
-            }
+            MethodDefinitionKindNode::AsyncGenerator => (None, true, true),
         };
         let nested_index = self.compile_nested_function_with_options(
             Some(self.class_element_name_string(method.name())),
@@ -2791,10 +2822,6 @@ impl<'a> FunctionCompiler<'a> {
         &mut self,
         declaration: &FunctionDeclaration,
     ) -> Result<(), CompileError> {
-        if declaration.is_generator() && declaration.is_async() {
-            return Err(CompileError::Unimplemented("async generator functions"));
-        }
-
         let name = self.identifier_name(&declaration.name());
         let resolved = if self.is_top_level {
             ResolvedBinding::Global
@@ -2853,9 +2880,6 @@ impl<'a> FunctionCompiler<'a> {
         field_initializers: &[&super::ast::ClassFieldDefinitionNode],
         private_field_initializers: &[&boa_ast::function::PrivateFieldDefinition],
     ) -> Result<u16, CompileError> {
-        if is_generator && is_async {
-            return Err(CompileError::Unimplemented("async generator functions"));
-        }
         let arity = u8::try_from(parameters.length())
             .map_err(|_| CompileError::message("function arity exceeded u8"))?;
         let outer = Some(self.snapshot_outer_bindings());
@@ -2969,8 +2993,18 @@ impl<'a> FunctionCompiler<'a> {
                     false,
                     false,
                 ),
-            ExpressionNode::AsyncGeneratorExpression(_) => {
-                Err(CompileError::Unimplemented("async generator expressions"))
+            ExpressionNode::AsyncGeneratorExpression(function) => {
+                self.compile_nested_function_value(
+                    function
+                        .name()
+                        .map(|identifier| self.identifier_name(&identifier)),
+                    function.parameters(),
+                    function.body(),
+                    function.body().strict(),
+                    true,
+                    true,
+                    false,
+                )
             }
             ExpressionNode::ClassExpression(class_expression) => {
                 self.compile_class_expression(class_expression)
@@ -3150,9 +3184,7 @@ impl<'a> FunctionCompiler<'a> {
                 return Err(CompileError::Unimplemented("object literal accessors"));
             }
             MethodDefinitionKindNode::Async => (true, false),
-            MethodDefinitionKindNode::AsyncGenerator => {
-                return Err(CompileError::Unimplemented("async generator object methods"));
-            }
+            MethodDefinitionKindNode::AsyncGenerator => (true, true),
         };
 
         self.compile_nested_function_value(
@@ -3268,6 +3300,9 @@ impl<'a> FunctionCompiler<'a> {
                 self.emit(Opcode::LoadUndefined);
             }
         };
+        if self.is_async && self.is_generator {
+            self.emit(Opcode::Await);
+        }
         self.emit(Opcode::Yield);
         Ok(())
     }
@@ -3288,6 +3323,9 @@ impl<'a> FunctionCompiler<'a> {
         self.emit(Opcode::GetLocal(iter_slot));
         self.emit(Opcode::ForOfNext); // -> [value, done]
         let exit = self.emit_jump(Opcode::JumpIfTruePop(0)); // pop done; if done jump out
+        if self.is_async && self.is_generator {
+            self.emit(Opcode::Await);
+        }
         self.emit(Opcode::Yield); // yields value; on resume leaves the sent value
         self.emit(Opcode::Pop); // discard the sent value
         self.emit_back_jump(loop_start)?;

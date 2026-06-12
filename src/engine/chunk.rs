@@ -97,6 +97,7 @@ pub enum Opcode {
     Spread,
     GetForInKeys,
     GetForOfIterator,
+    GetForAwaitIterator,
     ForOfNext,
     GetProto,
     SetProtoOf,

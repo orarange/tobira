@@ -153,11 +153,19 @@ pub enum PromiseState {
 pub struct AsyncContext {
     pub frame: Box<crate::engine::vm::CallFrame>,
     pub stack_snapshot: Vec<Value>,
-    pub outer_promise: GcRef<JsObject>,
+    pub outer_promise: Option<GcRef<JsObject>>,
+    pub async_generator_request: Option<GcRef<JsObject>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsyncGeneratorRequest {
+    pub sent: Value,
+    pub promise: GcRef<JsObject>,
+    pub is_return: bool,
 }
 
 /// Execution state of a generator object.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum GeneratorState {
     /// Paused, either at the start (ip 0, `started` false) or at a `yield`.
     Suspended {
@@ -299,6 +307,10 @@ pub enum ObjectKind {
     Error,
     Promise(Box<PromiseState>),
     AsyncResumer(Box<AsyncContext>),
+    AsyncGenerator {
+        state: Box<GeneratorState>,
+        queue: std::collections::VecDeque<AsyncGeneratorRequest>,
+    },
     Generator(Box<GeneratorState>),
     Proxy {
         target: GcRef<JsObject>,
@@ -343,6 +355,11 @@ impl std::fmt::Debug for ObjectKind {
             Self::Error => f.write_str("Error"),
             Self::Promise(state) => f.debug_tuple("Promise").field(state).finish(),
             Self::AsyncResumer(_) => f.write_str("AsyncResumer(..)"),
+            Self::AsyncGenerator { state, queue } => f
+                .debug_struct("AsyncGenerator")
+                .field("state", state)
+                .field("queue", queue)
+                .finish(),
             Self::Generator(_) => f.write_str("Generator(..)"),
             Self::Proxy { .. } => f.write_str("Proxy(..)"),
             Self::RegExp {
@@ -383,6 +400,11 @@ impl std::fmt::Debug for ObjectKind {
                 .field("values", values)
                 .field("index", index)
                 .finish(),
+            Self::AsyncGenerator { state, queue } => f
+                .debug_struct("AsyncGenerator")
+                .field("state", state)
+                .field("queue", queue)
+                .finish(),
             Self::Host(slot) => f.debug_tuple("Host").field(slot).finish(),
             Self::Exotic(name) => f.debug_tuple("Exotic").field(name).finish(),
         }
@@ -398,6 +420,16 @@ impl PartialEq for ObjectKind {
             | (Self::Error, Self::Error) => true,
             (Self::Promise(left), Self::Promise(right)) => left == right,
             (Self::AsyncResumer(_), Self::AsyncResumer(_)) => true,
+            (
+                Self::AsyncGenerator {
+                    state: left_state,
+                    queue: left_queue,
+                },
+                Self::AsyncGenerator {
+                    state: right_state,
+                    queue: right_queue,
+                },
+            ) => left_state == right_state && left_queue == right_queue,
             (
                 Self::RegExp {
                     source: left_source,

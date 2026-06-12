@@ -1,7 +1,7 @@
 use std::{
     cell::RefCell,
     cmp::{Ordering, Reverse},
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -22,9 +22,9 @@ use super::host::{
     ObserverRecord, ObserverResult, SiblingDirection, WindowId,
 };
 use super::value::{
-    AsyncContext, GeneratorState, HostDispatch, HostObjectClass, HostObjectSlot, JsObject,
-    JsPropertyDescriptor, JsString, ObjectKind, PromiseReaction, PromiseState, PropertyKey,
-    SymbolId, TypedArrayKind, Value,
+    AsyncContext, AsyncGeneratorRequest, GeneratorState, HostDispatch, HostObjectClass,
+    HostObjectSlot, JsObject, JsPropertyDescriptor, JsString, ObjectKind, PromiseReaction,
+    PromiseState, PropertyKey, SymbolId, TypedArrayKind, Value,
 };
 
 type ValueCell = Rc<RefCell<Value>>;
@@ -412,6 +412,10 @@ enum BuiltinId {
     GeneratorProtoNext,
     GeneratorProtoReturn,
     GeneratorProtoIterator,
+    ForOfIteratorAdapterNext,
+    AsyncGeneratorProtoNext,
+    AsyncGeneratorProtoReturn,
+    AsyncGeneratorProtoIterator,
     ArrayProtoToSorted,
     ArrayProtoToReversed,
     ArrayProtoWith,
@@ -533,7 +537,7 @@ enum Callable {
     PromiseAnyRejectElement(PromiseAnyRejectElement),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CallFrame {
     proto: Rc<FunctionProto>,
     ip: usize,
@@ -544,6 +548,7 @@ pub struct CallFrame {
     construct_fallback: Option<Value>,
     pending_exception: Option<Value>,
     async_outer_promise: Option<GcRef<JsObject>>,
+    async_gen_request: Option<GcRef<JsObject>>,
     /// The generator object that owns this frame, if it is a generator body.
     generator: Option<GcRef<JsObject>>,
     /// Call arguments retained for the `arguments` object (only when the function
@@ -1091,6 +1096,7 @@ pub struct Vm {
     regexp_prototype: Option<GcRef<JsObject>>,
     date_prototype: Option<GcRef<JsObject>>,
     generator_prototype: Option<GcRef<JsObject>>,
+    async_generator_prototype: Option<GcRef<JsObject>>,
     url_search_params_prototype: Option<GcRef<JsObject>>,
     error_prototype: Option<GcRef<JsObject>>,
     promise_prototype: Option<GcRef<JsObject>>,
@@ -1182,6 +1188,7 @@ enum GeneratorOutcome {
 
 /// Well-known symbol id for `Symbol.iterator`.
 const SYMBOL_ITERATOR_ID: u32 = 1;
+const SYMBOL_ASYNC_ITERATOR_ID: u32 = 2;
 /// Well-known symbol id for `Symbol.toPrimitive` (see the registration table in
 /// the global setup: iterator=1, asyncIterator=2, hasInstance=3, toPrimitive=4).
 const SYMBOL_TO_PRIMITIVE_ID: u32 = 4;
@@ -1219,6 +1226,7 @@ impl Vm {
             regexp_prototype: None,
             date_prototype: None,
             generator_prototype: None,
+            async_generator_prototype: None,
             url_search_params_prototype: None,
             error_prototype: None,
             promise_prototype: None,
@@ -1418,7 +1426,7 @@ impl Vm {
         let proto = self.object_prototype_ref();
         let event = self.allocate_ordinary_object(Some(proto));
         let type_val = self.make_string_value(event_type);
-        let mut set = |vm: &mut Self, name: &str, value: Value| {
+        let set = |vm: &mut Self, name: &str, value: Value| {
             vm.define_data_property(event, PropertyKey::from(name), value, true, true, true);
         };
         set(self, "type", type_val);
@@ -1540,7 +1548,7 @@ impl Vm {
         let proto = self.object_prototype_ref();
         let event = self.allocate_ordinary_object(Some(proto));
         let type_val = self.make_string_value(event_type);
-        let mut set = |vm: &mut Self, name: &str, value: Value| {
+        let set = |vm: &mut Self, name: &str, value: Value| {
             vm.define_data_property(event, PropertyKey::from(name), value, true, true, true);
         };
         set(self, "type", type_val);
@@ -2104,6 +2112,24 @@ impl Vm {
                 });
                 self.stack.push(Value::Object(iterator));
             }
+            Opcode::GetForAwaitIterator => {
+                let value = self.pop_value()?;
+                if let Ok(async_iter) = self.get_property_value(
+                    &value,
+                    &PropertyKey::Symbol(SymbolId(SYMBOL_ASYNC_ITERATOR_ID)),
+                ) {
+                    if self.is_callable_value(&async_iter) {
+                        let iterator = self.call_value_sync(async_iter, value.clone(), Vec::new())?;
+                        self.stack.push(iterator);
+                    } else {
+                        let iterator = self.allocate_for_of_iterator_adapter(&value)?;
+                        self.stack.push(Value::Object(iterator));
+                    }
+                } else {
+                    let iterator = self.allocate_for_of_iterator_adapter(&value)?;
+                    self.stack.push(Value::Object(iterator));
+                }
+            }
             Opcode::ForOfNext => {
                 let iterator = self.pop_value()?;
                 let iterator_ref = self.require_object_ref(&iterator, "for...of iterator")?;
@@ -2189,16 +2215,60 @@ impl Vm {
                 let generator = frame.generator.ok_or_else(|| {
                     VmError::TypeError("yield is only valid inside a generator".to_string())
                 })?;
-                let stack = self.stack.split_off(frame.stack_base);
-                self.set_generator_state(
-                    generator,
-                    GeneratorState::Suspended {
-                        frame: Box::new(frame),
-                        stack,
-                        started: true,
-                    },
-                );
-                self.generator_outcome = Some(GeneratorOutcome::Yielded(value));
+                if frame.async_gen_request.is_some() {
+                    let request = frame.async_gen_request.ok_or_else(|| {
+                        VmError::TypeError("async generator request missing".to_string())
+                    })?;
+                    let (_, queue) = self.take_async_generator_state(generator).ok_or_else(|| {
+                        VmError::TypeError("yield is only valid inside a generator".to_string())
+                    })?;
+                    let stack = self.stack.split_off(frame.stack_base);
+                    let mut frame = frame;
+                    frame.async_gen_request = None;
+                    self.set_async_generator_state(
+                        generator,
+                        GeneratorState::Suspended {
+                            frame: Box::new(frame),
+                            stack,
+                            started: true,
+                        },
+                        queue,
+                    );
+                    let result = self.make_iter_result(value, false)?;
+                    self.resolve_promise_from_resolution(request, result)?;
+                    if let Some((GeneratorState::Suspended { frame, stack, started }, mut queue)) =
+                        self.take_async_generator_state(generator)
+                    {
+                        if let Some(next_request) = queue.pop_front() {
+                            let remaining_queue = queue;
+                            let _ = self.resume_async_generator_suspended(
+                                generator,
+                                next_request,
+                                frame,
+                                stack,
+                                started,
+                                remaining_queue,
+                            )?;
+                        } else {
+                            self.set_async_generator_state(
+                                generator,
+                                GeneratorState::Suspended { frame, stack, started },
+                                queue,
+                            );
+                        }
+                    }
+                } else {
+                    let stack = self.stack.split_off(frame.stack_base);
+                    self.set_generator_state(
+                        generator,
+                        GeneratorState::Suspended {
+                            frame: Box::new(frame),
+                            stack,
+                            started: true,
+                        },
+                    );
+                    self.generator_outcome = Some(GeneratorOutcome::Yielded(value));
+                }
             }
             Opcode::MakeClosure(index) => {
                 let proto = self
@@ -2313,6 +2383,7 @@ impl Vm {
         let regexp_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let date_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let generator_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let async_generator_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let url_search_params_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let error_prototype = self.heap.allocate_object(JsObject {
             kind: ObjectKind::Error,
@@ -2334,6 +2405,7 @@ impl Vm {
         self.regexp_prototype = Some(regexp_prototype);
         self.date_prototype = Some(date_prototype);
         self.generator_prototype = Some(generator_prototype);
+        self.async_generator_prototype = Some(async_generator_prototype);
         self.url_search_params_prototype = Some(url_search_params_prototype);
         self.error_prototype = Some(error_prototype);
         self.promise_prototype = Some(promise_prototype);
@@ -2891,6 +2963,26 @@ impl Vm {
             false,
             true,
         );
+        self.define_builtin_method(
+            async_generator_prototype,
+            "next",
+            BuiltinId::AsyncGeneratorProtoNext,
+        );
+        self.define_builtin_method(
+            async_generator_prototype,
+            "return",
+            BuiltinId::AsyncGeneratorProtoReturn,
+        );
+        let async_generator_iterator =
+            self.allocate_builtin_method(BuiltinId::AsyncGeneratorProtoIterator);
+        self.define_data_property(
+            async_generator_prototype,
+            PropertyKey::Symbol(SymbolId(SYMBOL_ASYNC_ITERATOR_ID)),
+            async_generator_iterator,
+            true,
+            false,
+            true,
+        );
 
         for (name, builtin) in [
             ("get", BuiltinId::UspGet),
@@ -3061,7 +3153,7 @@ impl Vm {
             // Well-known symbols exposed as static properties of Symbol.
             for (name, id) in [
                 ("iterator", SYMBOL_ITERATOR_ID),
-                ("asyncIterator", 2),
+                ("asyncIterator", SYMBOL_ASYNC_ITERATOR_ID),
                 ("hasInstance", 3),
                 ("toPrimitive", 4),
                 ("toStringTag", 5),
@@ -3212,9 +3304,28 @@ impl Vm {
             .expect("generator prototype should be installed")
     }
 
+    fn async_generator_prototype_ref(&self) -> GcRef<JsObject> {
+        self.async_generator_prototype
+            .expect("async generator prototype should be installed")
+    }
+
     fn set_generator_state(&mut self, generator: GcRef<JsObject>, state: GeneratorState) {
         if let Some(object) = self.heap.objects_mut().get_mut(generator) {
             object.kind = ObjectKind::Generator(Box::new(state));
+        }
+    }
+
+    fn set_async_generator_state(
+        &mut self,
+        generator: GcRef<JsObject>,
+        state: GeneratorState,
+        queue: VecDeque<AsyncGeneratorRequest>,
+    ) {
+        if let Some(object) = self.heap.objects_mut().get_mut(generator) {
+            object.kind = ObjectKind::AsyncGenerator {
+                state: Box::new(state),
+                queue,
+            };
         }
     }
 
@@ -3225,6 +3336,25 @@ impl Vm {
                 let kind = std::mem::replace(&mut object.kind, ObjectKind::Ordinary);
                 match kind {
                     ObjectKind::Generator(state) => Some(*state),
+                    other => {
+                        object.kind = other;
+                        None
+                    }
+                }
+            }
+            None => None,
+        }
+    }
+
+    fn take_async_generator_state(
+        &mut self,
+        generator: GcRef<JsObject>,
+    ) -> Option<(GeneratorState, VecDeque<AsyncGeneratorRequest>)> {
+        match self.heap.objects_mut().get_mut(generator) {
+            Some(object) => {
+                let kind = std::mem::replace(&mut object.kind, ObjectKind::Ordinary);
+                match kind {
+                    ObjectKind::AsyncGenerator { state, queue } => Some((*state, queue)),
                     other => {
                         object.kind = other;
                         None
@@ -3248,6 +3378,59 @@ impl Vm {
             true,
         );
         Ok(Value::Object(object))
+    }
+
+    fn settle_async_generator_request(
+        &mut self,
+        request: AsyncGeneratorRequest,
+        value: Value,
+        done: bool,
+    ) -> Result<(), VmError> {
+        let result = self.make_iter_result(value, done)?;
+        let promise = request.promise;
+        self.resolve_promise_from_resolution(promise, result)?;
+        Ok(())
+    }
+
+    fn settle_async_generator_queue_completed(
+        &mut self,
+        queue: &mut std::collections::VecDeque<AsyncGeneratorRequest>,
+    ) -> Result<(), VmError> {
+        while let Some(request) = queue.pop_front() {
+            self.settle_async_generator_request(request, Value::Undefined, true)?;
+        }
+        Ok(())
+    }
+
+    fn resume_async_generator_suspended(
+        &mut self,
+        generator: GcRef<JsObject>,
+        request: AsyncGeneratorRequest,
+        frame: Box<CallFrame>,
+        stack: Vec<Value>,
+        started: bool,
+        queue: std::collections::VecDeque<AsyncGeneratorRequest>,
+    ) -> Result<Value, VmError> {
+        if request.is_return {
+            self.set_async_generator_state(generator, GeneratorState::Completed, queue);
+            let result = self.make_iter_result(request.sent, true)?;
+            self.resolve_promise_from_resolution(request.promise, result)?;
+            let promise = request.promise;
+            return Ok(Value::Object(promise));
+        }
+        let base_depth = self.frames.len();
+        let mut frame = *frame;
+        frame.stack_base = self.stack.len();
+        frame.async_gen_request = Some(request.promise);
+        self.frames.push(frame);
+        self.stack.extend(stack);
+        if started {
+            self.stack.push(request.sent);
+        }
+        self.set_async_generator_state(generator, GeneratorState::Running, queue);
+        self.run_until_frame_depth(base_depth)?;
+        let promise = request.promise;
+        Ok(Value::Object(promise))
     }
 
     /// Resume (or start) a generator and run until its next yield or completion.
@@ -3291,6 +3474,52 @@ impl Vm {
                     None => self.make_iter_result(Value::Undefined, true),
                 }
             }
+        }
+    }
+
+    fn async_generator_resume(
+        &mut self,
+        generator: GcRef<JsObject>,
+        sent: Value,
+        is_return: bool,
+    ) -> Result<Value, VmError> {
+        let promise = self.allocate_pending_promise_object();
+        let request = AsyncGeneratorRequest {
+            sent,
+            promise,
+            is_return,
+        };
+        match self.take_async_generator_state(generator) {
+            None => Err(VmError::TypeError(
+                "async generator method called on non-async-generator".to_string(),
+            )),
+            Some((GeneratorState::Completed, queue)) => {
+                self.set_async_generator_state(generator, GeneratorState::Completed, queue);
+                let value = if is_return { request.sent } else { Value::Undefined };
+                let result = self.make_iter_result(value, true)?;
+                self.resolve_promise_from_resolution(request.promise, result)?;
+                Ok(Value::Object(promise))
+            }
+            Some((GeneratorState::Running, mut queue)) => {
+                queue.push_back(request);
+                self.set_async_generator_state(generator, GeneratorState::Running, queue);
+                Ok(Value::Object(promise))
+            }
+            Some((
+                GeneratorState::Suspended {
+                    frame,
+                    stack,
+                    started,
+                },
+                queue,
+            )) => self.resume_async_generator_suspended(
+                generator,
+                request,
+                frame,
+                stack,
+                started,
+                queue,
+            ),
         }
     }
 
@@ -4349,14 +4578,19 @@ impl Vm {
             .frames
             .pop()
             .ok_or_else(|| VmError::RangeError("await without an async frame".to_string()))?;
-        let outer_promise = frame.async_outer_promise.ok_or_else(|| {
-            VmError::TypeError("await expressions are only valid in async frames".to_string())
-        })?;
+        let outer_promise = frame.async_outer_promise;
+        let async_generator_request = frame.async_gen_request;
+        if outer_promise.is_none() && async_generator_request.is_none() {
+            return Err(VmError::TypeError(
+                "await expressions are only valid in async frames".to_string(),
+            ));
+        }
         let stack_snapshot = self.stack.split_off(frame.stack_base);
         let context = AsyncContext {
             frame: Box::new(frame),
             stack_snapshot,
             outer_promise,
+            async_generator_request,
         };
         let fulfill_resumer = self.allocate_async_resumer(context.clone());
         let reject_resumer = self.allocate_async_resumer(context);
@@ -4380,11 +4614,37 @@ impl Vm {
             .frames
             .pop()
             .ok_or_else(|| VmError::RangeError("async return without a frame".to_string()))?;
-        let outer_promise = frame.async_outer_promise.ok_or_else(|| {
-            VmError::TypeError("async return without an outer promise".to_string())
-        })?;
+        let outer_promise = frame.async_outer_promise;
+        let async_generator_request = frame.async_gen_request;
+        let generator = frame.generator;
         self.stack.truncate(frame.stack_base);
-        self.resolve_promise_from_resolution(outer_promise, result)
+        if let Some(promise) = outer_promise {
+            self.resolve_promise_from_resolution(promise, result)
+        } else if let Some(request) = async_generator_request {
+            let generator = generator.ok_or_else(|| {
+                VmError::TypeError("async return without a generator".to_string())
+            })?;
+            let iter_result = self.make_iter_result(result, true)?;
+            self.resolve_promise_from_resolution(request, iter_result)
+                .and_then(|_| {
+                    let (_state, mut queue) = self.take_async_generator_state(generator).ok_or_else(
+                        || VmError::TypeError("async return without a generator".to_string()),
+                    )?;
+                    self.settle_async_generator_queue_completed(&mut queue)?;
+                    self.set_async_generator_state(generator, GeneratorState::Completed, queue);
+                    Ok(())
+                })
+        } else {
+            let generator = generator.ok_or_else(|| {
+                VmError::TypeError("async return without a generator".to_string())
+            })?;
+            let (_state, mut queue) = self.take_async_generator_state(generator).ok_or_else(|| {
+                VmError::TypeError("async return without a generator".to_string())
+            })?;
+            self.settle_async_generator_queue_completed(&mut queue)?;
+            self.set_async_generator_state(generator, GeneratorState::Completed, queue);
+            Ok(())
+        }
     }
 
     fn require_promise_this(
@@ -4686,6 +4946,7 @@ impl Vm {
             construct_fallback,
             pending_exception: None,
             async_outer_promise: None,
+            async_gen_request: None,
             generator: None,
             arguments,
             new_target: Value::Undefined,
@@ -4701,7 +4962,23 @@ impl Vm {
         match self.resolve_callable(&callee)? {
             Callable::Builtin(builtin) => Ok(Some(self.invoke_builtin(builtin, this_value, args)?)),
             Callable::Closure(closure) => {
-                if closure.proto.is_generator {
+                if closure.proto.is_generator && closure.proto.is_async {
+                    let generator =
+                        self.allocate_ordinary_object(Some(self.async_generator_prototype_ref()));
+                    let mut frame = self.make_call_frame(closure, args, this_value, None)?;
+                    frame.generator = Some(generator);
+                    frame.async_gen_request = None;
+                    self.set_async_generator_state(
+                        generator,
+                        GeneratorState::Suspended {
+                            frame: Box::new(frame),
+                            stack: Vec::new(),
+                            started: false,
+                        },
+                        VecDeque::new(),
+                    );
+                    Ok(Some(Value::Object(generator)))
+                } else if closure.proto.is_generator {
                     // Calling a generator function does not run the body; it
                     // returns a generator object suspended at the start.
                     let generator = self.allocate_ordinary_object(Some(self.generator_prototype_ref()));
@@ -4970,6 +5247,20 @@ impl Vm {
                 })?;
                 self.stack.truncate(frame.stack_base);
                 self.reject_promise_with_value(outer_promise, thrown)?;
+                return Ok(());
+            } else if let Some(request) = self.frames[frame_index].async_gen_request {
+                let frame = self.frames.pop().ok_or_else(|| {
+                    VmError::RangeError("async exception propagation without a frame".to_string())
+                })?;
+                self.stack.truncate(frame.stack_base);
+                let generator = frame.generator.ok_or_else(|| {
+                    VmError::TypeError("async generator frame must have generator".to_string())
+                })?;
+                if let Some((_, mut queue)) = self.take_async_generator_state(generator) {
+                    self.settle_async_generator_queue_completed(&mut queue)?;
+                    self.set_async_generator_state(generator, GeneratorState::Completed, queue);
+                }
+                self.reject_promise_with_value(request, thrown)?;
                 return Ok(());
             }
 
@@ -6928,7 +7219,7 @@ impl Vm {
         let proto = self.object_prototype_ref();
         let object = self.allocate_ordinary_object(Some(proto));
         let empty = self.make_string_value("");
-        let mut set = |vm: &mut Self, name: &str, value: Value, enumerable: bool| {
+        let set = |vm: &mut Self, name: &str, value: Value, enumerable: bool| {
             vm.define_data_property(object, PropertyKey::from(name), value, true, enumerable, true);
         };
         set(self, "readyState", Value::Number(0.0), true);
@@ -7143,7 +7434,7 @@ impl Vm {
         let headers = self.build_headers_object(&response.headers);
         let text_method = self.allocate_builtin_method(BuiltinId::ResponseText);
         let json_method = self.allocate_builtin_method(BuiltinId::ResponseJson);
-        let mut set = |vm: &mut Self, name: &str, value: Value| {
+        let set = |vm: &mut Self, name: &str, value: Value| {
             vm.define_data_property(object, PropertyKey::from(name), value, true, true, true);
         };
         set(self, "ok", Value::Bool(ok));
@@ -7330,6 +7621,28 @@ impl Vm {
                 "object is not a for...of iterator".to_string(),
             )),
         }
+    }
+
+    fn allocate_for_of_iterator_adapter(
+        &mut self,
+        value: &Value,
+    ) -> Result<GcRef<JsObject>, VmError> {
+        let values = self.for_of_values(value)?;
+        let iterator = self.heap.allocate_object(JsObject {
+            kind: ObjectKind::ForOfIterator { values, index: 0 },
+            prototype: Some(self.object_prototype_ref()),
+            ..JsObject::default()
+        });
+        let next = self.allocate_builtin_method(BuiltinId::ForOfIteratorAdapterNext);
+        self.define_data_property(
+            iterator,
+            PropertyKey::from("next"),
+            next,
+            true,
+            true,
+            true,
+        );
+        Ok(iterator)
     }
 
     /// The DOM interfaces a host node value satisfies, for `instanceof`. Host DOM
@@ -9027,6 +9340,33 @@ impl Vm {
                 self.make_iter_result(value, true)
             }
             BuiltinId::GeneratorProtoIterator => Ok(this_value),
+            BuiltinId::AsyncGeneratorProtoNext => {
+                let generator =
+                    self.require_object_ref(&this_value, "AsyncGenerator.prototype.next")?;
+                self.async_generator_resume(
+                    generator,
+                    args.first().cloned().unwrap_or(Value::Undefined),
+                    false,
+                )
+            }
+            BuiltinId::AsyncGeneratorProtoReturn => {
+                let generator =
+                    self.require_object_ref(&this_value, "AsyncGenerator.prototype.return")?;
+                self.async_generator_resume(
+                    generator,
+                    args.first().cloned().unwrap_or(Value::Undefined),
+                    true,
+                )
+            }
+            BuiltinId::AsyncGeneratorProtoIterator => Ok(this_value),
+            BuiltinId::ForOfIteratorAdapterNext => {
+                let iterator =
+                    self.require_object_ref(&this_value, "ForOfIteratorAdapter.next")?;
+                match self.for_of_next(iterator)? {
+                    Some(value) => self.make_iter_result(value, false),
+                    None => self.make_iter_result(Value::Undefined, true),
+                }
+            }
             BuiltinId::ArrayProtoToSorted => {
                 let mut values = self.array_like_to_vec(&this_value)?;
                 self.sort_values(&mut values, args.first())?;
@@ -10211,7 +10551,7 @@ impl Vm {
                     _ => (0.0, 0.0, 0.0, 0.0),
                 };
                 let rect_obj = self.allocate_ordinary_object(None);
-                let mut set = |vm: &mut Self, name: &str, value: f64| {
+                let set = |vm: &mut Self, name: &str, value: f64| {
                     vm.define_data_property(rect_obj, PropertyKey::from(name), Value::Number(value), true, true, true);
                 };
                 set(self, "x", x);
@@ -10711,7 +11051,7 @@ impl Vm {
                     .unwrap_or((0.0, 0.0));
                 let (opt_x, opt_y) = match args.first() {
                     Some(options @ Value::Object(_)) => {
-                        let mut axis = |vm: &mut Self, key: &str| {
+                        let axis = |vm: &mut Self, key: &str| {
                             match vm.get_property_value(options, &PropertyKey::from(key)) {
                                 Ok(Value::Undefined) | Err(_) => None,
                                 Ok(v) => Some(vm.to_number(&v)),
