@@ -8156,48 +8156,30 @@ impl Vm {
                     bound_args,
                 }))
             }
-            BuiltinId::ErrorConstructor => Ok(self.create_error_object(
-                "Error",
-                args.first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default(),
-            )),
-            BuiltinId::TypeErrorConstructor => Ok(self.create_error_object(
-                "TypeError",
-                args.first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default(),
-            )),
-            BuiltinId::RangeErrorConstructor => Ok(self.create_error_object(
-                "RangeError",
-                args.first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default(),
-            )),
-            BuiltinId::ReferenceErrorConstructor => Ok(self.create_error_object(
-                "ReferenceError",
-                args.first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default(),
-            )),
-            BuiltinId::SyntaxErrorConstructor => Ok(self.create_error_object(
-                "SyntaxError",
-                args.first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default(),
-            )),
-            BuiltinId::UriErrorConstructor => Ok(self.create_error_object(
-                "URIError",
-                args.first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default(),
-            )),
-            BuiltinId::EvalErrorConstructor => Ok(self.create_error_object(
-                "EvalError",
-                args.first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default(),
-            )),
+            BuiltinId::ErrorConstructor
+            | BuiltinId::TypeErrorConstructor
+            | BuiltinId::RangeErrorConstructor
+            | BuiltinId::ReferenceErrorConstructor
+            | BuiltinId::SyntaxErrorConstructor
+            | BuiltinId::UriErrorConstructor
+            | BuiltinId::EvalErrorConstructor => {
+                let name = match builtin {
+                    BuiltinId::ErrorConstructor => "Error",
+                    BuiltinId::TypeErrorConstructor => "TypeError",
+                    BuiltinId::RangeErrorConstructor => "RangeError",
+                    BuiltinId::ReferenceErrorConstructor => "ReferenceError",
+                    BuiltinId::SyntaxErrorConstructor => "SyntaxError",
+                    BuiltinId::UriErrorConstructor => "URIError",
+                    BuiltinId::EvalErrorConstructor => "EvalError",
+                    _ => unreachable!(),
+                };
+                Ok(self.create_error_object(
+                    name,
+                    args.first()
+                        .map(|value| self.to_string(value))
+                        .unwrap_or_default(),
+                ))
+            }
             BuiltinId::ArrayConstructor => {
                 // `Array(n)` with a single non-negative integer creates an array
                 // of that length; otherwise the args become the elements.
@@ -10268,17 +10250,17 @@ impl Vm {
             // ----------------------------------------------------------------
             // DOM — document-level methods (this = Document host object)
             // ----------------------------------------------------------------
-            BuiltinId::DomDocQuerySelector => {
+            BuiltinId::DomDocQuerySelector | BuiltinId::DomNodeQuerySelector => {
                 let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 // Root at the document node itself (boa parity): documentElement
                 // can miss parser-rescued content outside <html>.
-                let root = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let root = self.this_node_id(&this_value);
                 let res = self.host.read_dom(DomRead::QuerySelector { root, selectors: sel });
                 Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
             }
-            BuiltinId::DomDocQuerySelectorAll => {
+            BuiltinId::DomDocQuerySelectorAll | BuiltinId::DomNodeQuerySelectorAll => {
                 let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let root = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let root = self.this_node_id(&this_value);
                 let res = self.host.read_dom(DomRead::QuerySelectorAll { root, selectors: sel });
                 match res {
                     Ok(DomReadResult::Nodes(ids)) => {
@@ -10293,14 +10275,14 @@ impl Vm {
                 let sel = format!("#{id_str}");
                 // Root at the document node itself (boa parity): documentElement
                 // can miss parser-rescued content outside <html>.
-                let root = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let root = self.this_node_id(&this_value);
                 let res = self.host.read_dom(DomRead::QuerySelector { root, selectors: sel });
                 Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
             }
             BuiltinId::DomDocGetElementsByClassName => {
                 let cls = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let sel = cls.split_whitespace().map(|c| format!(".{c}")).collect::<Vec<_>>().join("");
-                let root = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let root = self.this_node_id(&this_value);
                 let res = self.host.read_dom(DomRead::QuerySelectorAll { root, selectors: sel });
                 match res {
                     Ok(DomReadResult::Nodes(ids)) => {
@@ -10312,7 +10294,7 @@ impl Vm {
             }
             BuiltinId::DomDocGetElementsByTagName => {
                 let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let root = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let root = self.this_node_id(&this_value);
                 let res = self.host.read_dom(DomRead::QuerySelectorAll { root, selectors: tag });
                 match res {
                     Ok(DomReadResult::Nodes(ids)) => {
@@ -10375,39 +10357,21 @@ impl Vm {
             // ----------------------------------------------------------------
             // DOM — node/element methods (this = Node host object)
             // ----------------------------------------------------------------
-            BuiltinId::DomNodeQuerySelector => {
-                let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
-                let res = self.host.read_dom(DomRead::QuerySelector { root: node_id, selectors: sel });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
-            }
-            BuiltinId::DomNodeQuerySelectorAll => {
-                let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
-                let res = self.host.read_dom(DomRead::QuerySelectorAll { root: node_id, selectors: sel });
-                match res {
-                    Ok(DomReadResult::Nodes(ids)) => {
-                        let items: Vec<Value> = ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
-                        self.make_array_from_values(items)
-                    }
-                    _ => self.make_array_from_values(vec![]),
-                }
-            }
             BuiltinId::DomNodeAppendChild => {
-                let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let parent_id = self.this_node_id(&this_value);
                 let child_ids = self.node_ids_from_node_or_string_args(&args);
                 let _ = self.host.mutate_dom(DomMutation::Append { parent: parent_id, children: child_ids });
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
             }
             BuiltinId::DomNodeInsertBefore => {
-                let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let parent_id = self.this_node_id(&this_value);
                 let child_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
                 let ref_id = args.get(1).and_then(|v| self.node_id_from_host_val(v));
                 let _ = self.host.mutate_dom(DomMutation::InsertBefore { parent: parent_id, child: child_id, reference: ref_id });
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
             }
             BuiltinId::DomNodePrepend => {
-                let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let parent_id = self.this_node_id(&this_value);
                 let child_ids = self.node_ids_from_node_or_string_args(&args);
                 let _ = self
                     .host
@@ -10415,7 +10379,7 @@ impl Vm {
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeReplaceChildren => {
-                let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let parent_id = self.this_node_id(&this_value);
                 let child_ids = self.node_ids_from_node_or_string_args(&args);
                 let existing = match self
                     .host
@@ -10431,7 +10395,7 @@ impl Vm {
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeHasChildNodes => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let res = self
                     .host
                     .read_dom(DomRead::Children { node: node_id, elements_only: false });
@@ -10440,7 +10404,7 @@ impl Vm {
             BuiltinId::DomNodeRemoveChild => {
                 // Only detach when the node really is a child of `this` (per
                 // spec removeChild on a non-child throws; we no-op instead).
-                let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let parent_id = self.this_node_id(&this_value);
                 let child_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
                 let is_child = matches!(
                     self.host.read_dom(DomRead::Parent { node: child_id }),
@@ -10452,25 +10416,25 @@ impl Vm {
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
             }
             BuiltinId::DomNodeReplaceChild => {
-                let parent_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let parent_id = self.this_node_id(&this_value);
                 let new_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
                 let old_id = self.node_id_from_host_val(args.get(1).unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
                 let _ = self.host.mutate_dom(DomMutation::ReplaceChild { parent: parent_id, new_child: new_id, old_child: old_id });
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
             }
             BuiltinId::DomNodeCloneNode => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let deep = args.first().map(|v| self.is_truthy(v)).unwrap_or(false);
                 let res = self.host.mutate_dom(DomMutation::CloneNode { node: node_id, deep });
                 Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
             }
             BuiltinId::DomNodeRemove => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let _ = self.host.mutate_dom(DomMutation::Remove { node: node_id });
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeSetAttribute => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let value = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
                 let old = match self.host.read_dom(DomRead::Attribute { node: node_id, name: name.clone() }) {
@@ -10488,32 +10452,32 @@ impl Vm {
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeGetAttribute => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let res = self.host.read_dom(DomRead::Attribute { node: node_id, name });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Null })
             }
             BuiltinId::DomNodeRemoveAttribute => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let _ = self.host.mutate_dom(DomMutation::RemoveAttribute { node: node_id, name });
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeHasAttribute => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let res = self.host.read_dom(DomRead::Attribute { node: node_id, name });
                 Ok(Value::Bool(matches!(res, Ok(DomReadResult::String(_)))))
             }
             BuiltinId::DomNodeToggleAttribute => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let force = args.get(1).map(|v| self.is_truthy(v));
                 let res = self.host.mutate_dom(DomMutation::ToggleAttribute { node: node_id, name, force });
                 Ok(match res { Ok(super::host::DomMutationResult::Bool(b)) => Value::Bool(b), _ => Value::Bool(false) })
             }
             BuiltinId::DomNodeGetAttributeNames => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let res = self.host.read_dom(DomRead::AttributeNames { node: node_id });
                 match res {
                     Ok(DomReadResult::StringList(names)) => {
@@ -10524,25 +10488,25 @@ impl Vm {
                 }
             }
             BuiltinId::DomNodeClosest => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let res = self.host.read_dom(DomRead::Closest { node: node_id, selectors: sel });
                 Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
             }
             BuiltinId::DomNodeMatches => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let res = self.host.read_dom(DomRead::Matches { node: node_id, selectors: sel });
                 Ok(match res { Ok(DomReadResult::Bool(b)) => Value::Bool(b), _ => Value::Bool(false) })
             }
             BuiltinId::DomNodeContains => {
-                let ancestor_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let ancestor_id = self.this_node_id(&this_value);
                 let descendant_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
                 let res = self.host.read_dom(DomRead::Contains { ancestor: ancestor_id, descendant: descendant_id });
                 Ok(match res { Ok(DomReadResult::Bool(b)) => Value::Bool(b), _ => Value::Bool(false) })
             }
             BuiltinId::DomNodeGetBoundingClientRect => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let (x, y, w, h) = match self
                     .host
                     .read_dom(DomRead::BoundingClientRect { node: node_id })
@@ -10671,13 +10635,10 @@ impl Vm {
             // classList (TokenList) — this = TokenList host object with handle = element NodeId
             // ----------------------------------------------------------------
             BuiltinId::DomClassListAdd => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 for arg in args {
                     let class_to_add = self.to_string(&arg);
-                    let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
-                        Ok(DomReadResult::String(s)) => s,
-                        _ => String::new(),
-                    };
+                    let existing = self.get_dom_attribute(node_id, "class");
                     let mut classes: Vec<String> = existing.split_whitespace().map(|s| s.to_string()).collect();
                     if !classes.iter().any(|c| c == &class_to_add) {
                         classes.push(class_to_add);
@@ -10687,12 +10648,9 @@ impl Vm {
                 Ok(Value::Undefined)
             }
             BuiltinId::DomClassListRemove => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let names_to_remove: Vec<String> = args.iter().map(|v| self.to_string(v)).collect();
-                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
-                    Ok(DomReadResult::String(s)) => s,
-                    _ => String::new(),
-                };
+                let existing = self.get_dom_attribute(node_id, "class");
                 let filtered: Vec<String> = existing.split_whitespace()
                     .filter(|c| !names_to_remove.iter().any(|r| r == c))
                     .map(|c| c.to_string())
@@ -10701,22 +10659,16 @@ impl Vm {
                 Ok(Value::Undefined)
             }
             BuiltinId::DomClassListContains => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let class_name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
-                    Ok(DomReadResult::String(s)) => s,
-                    _ => String::new(),
-                };
+                let existing = self.get_dom_attribute(node_id, "class");
                 Ok(Value::Bool(existing.split_whitespace().any(|c| c == class_name)))
             }
             BuiltinId::DomClassListToggle => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let class_name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let force = args.get(1).map(|v| self.is_truthy(v));
-                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
-                    Ok(DomReadResult::String(s)) => s,
-                    _ => String::new(),
-                };
+                let existing = self.get_dom_attribute(node_id, "class");
                 let has = existing.split_whitespace().any(|c| c == class_name);
                 let should_add = force.unwrap_or(!has);
                 if should_add {
@@ -10731,13 +10683,10 @@ impl Vm {
                 Ok(Value::Bool(should_add))
             }
             BuiltinId::DomClassListReplace => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let old_cls = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let new_cls = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
-                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
-                    Ok(DomReadResult::String(s)) => s,
-                    _ => String::new(),
-                };
+                let existing = self.get_dom_attribute(node_id, "class");
                 if existing.split_whitespace().any(|c| c == old_cls) {
                     let updated: String = existing.split_whitespace()
                         .map(|c| if c == old_cls { new_cls.as_str() } else { c })
@@ -10749,25 +10698,19 @@ impl Vm {
                 }
             }
             BuiltinId::DomClassListItem => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let index = args.first().map(|v| self.to_number(v) as usize).unwrap_or(0);
-                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
-                    Ok(DomReadResult::String(s)) => s,
-                    _ => String::new(),
-                };
+                let existing = self.get_dom_attribute(node_id, "class");
                 let item = existing.split_whitespace().nth(index).map(|s| self.make_string_value(s));
                 Ok(item.unwrap_or(Value::Null))
             }
             BuiltinId::DomClassListToString => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
-                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() }) {
-                    Ok(DomReadResult::String(s)) => s,
-                    _ => String::new(),
-                };
+                let node_id = self.this_node_id(&this_value);
+                let existing = self.get_dom_attribute(node_id, "class");
                 Ok(self.make_string_value(&existing))
             }
             BuiltinId::DomNodeAttachShadow => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let mode = match args.first() {
                     Some(opts @ Value::Object(_)) => self
                         .get_property_value(opts, &PropertyKey::from("mode"))
@@ -10782,7 +10725,7 @@ impl Vm {
                 }
             }
             BuiltinId::DomNodeGetRootNode => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let composed = match args.first() {
                     Some(opts @ Value::Object(_)) => {
                         let v = self.get_property_value(opts, &PropertyKey::from("composed")).unwrap_or(Value::Undefined);
@@ -10797,7 +10740,7 @@ impl Vm {
                 })
             }
             BuiltinId::DomSlotAssignedNodes | BuiltinId::DomSlotAssignedElements => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let flatten = match args.first() {
                     Some(opts @ Value::Object(_)) => {
                         let v = self.get_property_value(opts, &PropertyKey::from("flatten")).unwrap_or(Value::Undefined);
@@ -10832,7 +10775,7 @@ impl Vm {
                 }
             }
             BuiltinId::DomNodeSplitText => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let offset = args.first().map(|v| self.to_number(v).max(0.0) as usize).unwrap_or(0);
                 match self.host.mutate_dom(DomMutation::SplitText { node: node_id, offset }) {
                     Ok(DomMutationResult::Node(tail)) => Ok(self.make_dom_node_value(tail)),
@@ -10840,7 +10783,7 @@ impl Vm {
                 }
             }
             BuiltinId::DomNodeHasAttributes => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let names = match self.host.read_dom(DomRead::AttributeNames { node: node_id }) {
                     Ok(DomReadResult::StringList(names)) => names,
                     _ => Vec::new(),
@@ -10848,7 +10791,7 @@ impl Vm {
                 Ok(Value::Bool(!names.is_empty()))
             }
             BuiltinId::DomAttrMapItem | BuiltinId::DomAttrMapGetNamedItem => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let names = match self.host.read_dom(DomRead::AttributeNames { node: node_id }) {
                     Ok(DomReadResult::StringList(names)) => names,
                     _ => Vec::new(),
@@ -10866,7 +10809,7 @@ impl Vm {
                 })
             }
             BuiltinId::DomNodeInsertAdjacentHtml => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let position_str = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let html = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
                 let Some(position) = AdjacentPosition::parse(&position_str) else {
@@ -10883,29 +10826,23 @@ impl Vm {
             }
             // style
             BuiltinId::DomStyleGetProperty => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let prop = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "style".to_string() }) {
-                    Ok(DomReadResult::String(s)) => s,
-                    _ => String::new(),
-                };
+                let existing = self.get_dom_attribute(node_id, "style");
                 let value = get_inline_style_prop(&existing, &prop);
                 Ok(self.make_string_value(&value))
             }
             BuiltinId::DomStyleSetProperty => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let prop = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let val = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
-                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "style".to_string() }) {
-                    Ok(DomReadResult::String(s)) => s,
-                    _ => String::new(),
-                };
+                let existing = self.get_dom_attribute(node_id, "style");
                 let updated = set_inline_style_prop(&existing, &prop, &val);
                 let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "style".to_string(), value: updated });
                 Ok(Value::Undefined)
             }
             BuiltinId::DomComputedStyleGetProperty => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let raw = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let prop = camel_to_css_prop(raw.trim());
                 let value = self.computed_style_value(node_id, &prop);
@@ -10913,12 +10850,9 @@ impl Vm {
             }
             BuiltinId::DomComputedStyleGetPriority => Ok(self.make_string_value("")),
             BuiltinId::DomStyleRemoveProperty => {
-                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let node_id = self.this_node_id(&this_value);
                 let prop = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "style".to_string() }) {
-                    Ok(DomReadResult::String(s)) => s,
-                    _ => String::new(),
-                };
+                let existing = self.get_dom_attribute(node_id, "style");
                 let (updated, removed) = remove_inline_style_prop(&existing, &prop);
                 let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "style".to_string(), value: updated });
                 Ok(self.make_string_value(&removed))
@@ -12161,10 +12095,10 @@ impl Vm {
         old_value: Option<&str>,
         new_value: Option<&str>,
     ) -> Result<(), VmError> {
-        let tag = match self.host.read_dom(DomRead::NodeName { node }) {
-            Ok(DomReadResult::String(s)) => s.to_ascii_lowercase(),
-            _ => return Ok(()),
-        };
+        let tag = self.get_node_name(node).to_ascii_lowercase();
+        if tag.is_empty() {
+            return Ok(());
+        }
         let Some(def) = self.custom_elements.get(&tag).cloned() else {
             return Ok(());
         };
@@ -12205,6 +12139,27 @@ impl Vm {
             }
         }
         None
+    }
+
+    fn this_node_id(&self, this_value: &Value) -> NodeId {
+        self.node_id_from_host_val(this_value).unwrap_or(NodeId(0))
+    }
+
+    fn get_dom_attribute(&self, node_id: NodeId, name: &str) -> String {
+        match self.host.read_dom(DomRead::Attribute {
+            node: node_id,
+            name: name.to_string(),
+        }) {
+            Ok(DomReadResult::String(s)) => s,
+            _ => String::new(),
+        }
+    }
+
+    fn get_node_name(&self, node_id: NodeId) -> String {
+        match self.host.read_dom(DomRead::NodeName { node: node_id }) {
+            Ok(DomReadResult::String(s)) => s,
+            _ => String::new(),
+        }
     }
 
     /// Map `append`/`prepend`/`replaceChildren` arguments to node ids: DOM
@@ -13014,8 +12969,8 @@ impl Vm {
                 })
             }
             "nodeName" | "tagName" => {
-                let res = self.host.read_dom(DomRead::NodeName { node: node_id });
-                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Undefined })
+                let tag = self.get_node_name(node_id);
+                Ok(self.make_string_value(&tag))
             }
             "constructor" => {
                 // Return the node's DOM interface constructor so libraries can read
@@ -13024,10 +12979,7 @@ impl Vm {
                 // fails). The constructor has a `.prototype` but no `value`/`checked`
                 // accessor, so React's tracker bails gracefully and falls back to
                 // firing change on every input event.
-                let tag = match self.host.read_dom(DomRead::NodeName { node: node_id }) {
-                    Ok(DomReadResult::String(s)) => s.to_ascii_uppercase(),
-                    _ => String::new(),
-                };
+                let tag = self.get_node_name(node_id).to_ascii_uppercase();
                 let iface = match tag.as_str() {
                     "INPUT" => "HTMLInputElement",
                     "TEXTAREA" => "HTMLTextAreaElement",
@@ -13068,8 +13020,8 @@ impl Vm {
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
             }
             "className" => {
-                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() });
-                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
+                let value = self.get_dom_attribute(node_id, "class");
+                Ok(self.make_string_value(&value))
             }
             "type" => {
                 // `input.type` reflects the attribute but DEFAULTS to "text" when
@@ -13083,10 +13035,7 @@ impl Vm {
                 if !attr.is_empty() {
                     return Ok(self.make_string_value(&attr));
                 }
-                let tag = match self.host.read_dom(DomRead::NodeName { node: node_id }) {
-                    Ok(DomReadResult::String(s)) => s.to_ascii_uppercase(),
-                    _ => String::new(),
-                };
+                let tag = self.get_node_name(node_id).to_ascii_uppercase();
                 Ok(self.make_string_value(if tag == "INPUT" { "text" } else { "" }))
             }
             "classList" => Ok(self.make_host_object(HostObjectSlot {
@@ -13456,10 +13405,7 @@ impl Vm {
             return inline;
         }
 
-        let tag = match self.host.read_dom(DomRead::NodeName { node }) {
-            Ok(DomReadResult::String(s)) => s.to_ascii_lowercase(),
-            _ => String::new(),
-        };
+        let tag = self.get_node_name(node).to_ascii_lowercase();
 
         match prop {
             "display" => {

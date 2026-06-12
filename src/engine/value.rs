@@ -400,11 +400,6 @@ impl std::fmt::Debug for ObjectKind {
                 .field("values", values)
                 .field("index", index)
                 .finish(),
-            Self::AsyncGenerator { state, queue } => f
-                .debug_struct("AsyncGenerator")
-                .field("state", state)
-                .field("queue", queue)
-                .finish(),
             Self::Host(slot) => f.debug_tuple("Host").field(slot).finish(),
             Self::Exotic(name) => f.debug_tuple("Exotic").field(name).finish(),
         }
