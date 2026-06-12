@@ -19,7 +19,8 @@ use super::host::{
     FetchMode,
     FetchRequest, FetchResponse, HistoryAction, Host, HostData, HttpMethod, NavigationAction,
     NodeId, NodeKind, NoopHost, ObserverId, ObserverKind, ObserverOp, ObserverOptions,
-    ObserverRecord, ObserverResult, SiblingDirection, WindowId,
+    ObserverRecord, ObserverResult, SiblingDirection, StorageAreaKind, StorageAreaScope,
+    StorageOp, StorageResult, WindowId,
 };
 use super::value::{
     AsyncContext, AsyncGeneratorRequest, GeneratorState, HostDispatch, HostObjectClass,
@@ -7899,22 +7900,6 @@ impl Vm {
                 self.queue_microtask_job(MicrotaskJob::QueueMicrotask(callback));
                 Ok(Value::Undefined)
             }
-            BuiltinId::SetTimeout => {
-                let callback = self.require_callable_object(
-                    args.first().unwrap_or(&Value::Undefined),
-                    "setTimeout",
-                )?;
-                let delay_ms = self
-                    .to_number(args.get(1).unwrap_or(&Value::Number(0.0)))
-                    .max(0.0) as i64;
-                let id = self.schedule_timer(
-                    callback,
-                    delay_ms,
-                    None,
-                    args.into_iter().skip(2).collect(),
-                );
-                Ok(Value::Number(id as f64))
-            }
             BuiltinId::ClearTimeout | BuiltinId::ClearInterval => {
                 if let Some(id_value) = args.first() {
                     let id = self.to_uint32(id_value);
@@ -7922,18 +7907,31 @@ impl Vm {
                 }
                 Ok(Value::Undefined)
             }
-            BuiltinId::SetInterval => {
+            BuiltinId::SetTimeout | BuiltinId::SetInterval => {
+                let callback_name = match builtin {
+                    BuiltinId::SetTimeout => "setTimeout",
+                    BuiltinId::SetInterval => "setInterval",
+                    _ => unreachable!(),
+                };
                 let callback = self.require_callable_object(
                     args.first().unwrap_or(&Value::Undefined),
-                    "setInterval",
+                    callback_name,
                 )?;
-                let delay_ms = self
+                let delay = self
                     .to_number(args.get(1).unwrap_or(&Value::Number(0.0)))
-                    .max(0.0) as u64;
+                    .max(0.0);
+                let (delay_ms, interval) = match builtin {
+                    BuiltinId::SetTimeout => (delay as i64, None),
+                    BuiltinId::SetInterval => {
+                        let delay_ms = delay as u64;
+                        (delay_ms as i64, Some(delay_ms))
+                    }
+                    _ => unreachable!(),
+                };
                 let id = self.schedule_timer(
                     callback,
-                    delay_ms as i64,
-                    Some(delay_ms),
+                    delay_ms,
+                    interval,
                     args.into_iter().skip(2).collect(),
                 );
                 Ok(Value::Number(id as f64))
@@ -9768,58 +9766,41 @@ impl Vm {
                     .map(|value| Value::Number(value as f64))
                     .unwrap_or(Value::Number(f64::NAN)))
             }
-            BuiltinId::StringProtoIndexOf => {
+            BuiltinId::StringProtoIndexOf
+            | BuiltinId::StringProtoLastIndexOf
+            | BuiltinId::StringProtoIncludes
+            | BuiltinId::StringProtoStartsWith
+            | BuiltinId::StringProtoEndsWith => {
                 let text = self.builtin_string_this(&this_value)?;
                 let needle = args
                     .first()
                     .map(|value| self.to_string(value))
                     .unwrap_or_default();
-                let from = args
-                    .get(1)
-                    .map(|value| self.to_number(value) as usize)
-                    .unwrap_or(0);
-                let index = text[from.min(text.len())..]
-                    .find(&needle)
-                    .map(|value| value + from)
-                    .map(|value| value as f64)
-                    .unwrap_or(-1.0);
-                Ok(Value::Number(index))
-            }
-            BuiltinId::StringProtoLastIndexOf => {
-                let text = self.builtin_string_this(&this_value)?;
-                let needle = args
-                    .first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default();
-                let index = text
-                    .rfind(&needle)
-                    .map(|value| value as f64)
-                    .unwrap_or(-1.0);
-                Ok(Value::Number(index))
-            }
-            BuiltinId::StringProtoIncludes => {
-                let text = self.builtin_string_this(&this_value)?;
-                let needle = args
-                    .first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default();
-                Ok(Value::Bool(text.contains(&needle)))
-            }
-            BuiltinId::StringProtoStartsWith => {
-                let text = self.builtin_string_this(&this_value)?;
-                let needle = args
-                    .first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default();
-                Ok(Value::Bool(text.starts_with(&needle)))
-            }
-            BuiltinId::StringProtoEndsWith => {
-                let text = self.builtin_string_this(&this_value)?;
-                let needle = args
-                    .first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_default();
-                Ok(Value::Bool(text.ends_with(&needle)))
+                Ok(match builtin {
+                    BuiltinId::StringProtoIndexOf => {
+                        let from = args
+                            .get(1)
+                            .map(|value| self.to_number(value) as usize)
+                            .unwrap_or(0);
+                        let index = text[from.min(text.len())..]
+                            .find(&needle)
+                            .map(|value| value + from)
+                            .map(|value| value as f64)
+                            .unwrap_or(-1.0);
+                        Value::Number(index)
+                    }
+                    BuiltinId::StringProtoLastIndexOf => {
+                        let index = text
+                            .rfind(&needle)
+                            .map(|value| value as f64)
+                            .unwrap_or(-1.0);
+                        Value::Number(index)
+                    }
+                    BuiltinId::StringProtoIncludes => Value::Bool(text.contains(&needle)),
+                    BuiltinId::StringProtoStartsWith => Value::Bool(text.starts_with(&needle)),
+                    BuiltinId::StringProtoEndsWith => Value::Bool(text.ends_with(&needle)),
+                    _ => unreachable!(),
+                })
             }
             BuiltinId::StringProtoSlice => {
                 let text = self.builtin_string_this(&this_value)?;
@@ -10917,56 +10898,51 @@ impl Vm {
             }
             // Storage item ops (this = Storage host object with kind encoded in handle)
             BuiltinId::StorageGetItem => {
-                use super::host::{StorageAreaKind, StorageAreaScope, StorageOp, StorageResult};
                 let key = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let kind = self.storage_kind_from_host_val(&this_value);
+                let (kind, scope) = self.storage_context(&this_value);
                 let res = self.host.storage(StorageOp::Get {
                     kind,
-                    scope: StorageAreaScope::Window(WindowId(0)),
+                    scope,
                     key,
                 });
                 Ok(match res { Ok(StorageResult::Value(Some(v))) => self.make_string_value(&v), _ => Value::Null })
             }
             BuiltinId::StorageSetItem => {
-                use super::host::{StorageAreaScope, StorageOp};
                 let key = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let val = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
-                let kind = self.storage_kind_from_host_val(&this_value);
+                let (kind, scope) = self.storage_context(&this_value);
                 let _ = self.host.storage(StorageOp::Set {
                     kind,
-                    scope: StorageAreaScope::Window(WindowId(0)),
+                    scope,
                     key,
                     value: val,
                 });
                 Ok(Value::Undefined)
             }
             BuiltinId::StorageRemoveItem => {
-                use super::host::{StorageAreaScope, StorageOp};
                 let key = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let kind = self.storage_kind_from_host_val(&this_value);
+                let (kind, scope) = self.storage_context(&this_value);
                 let _ = self.host.storage(StorageOp::Remove {
                     kind,
-                    scope: StorageAreaScope::Window(WindowId(0)),
+                    scope,
                     key,
                 });
                 Ok(Value::Undefined)
             }
             BuiltinId::StorageClear => {
-                use super::host::{StorageAreaScope, StorageOp};
-                let kind = self.storage_kind_from_host_val(&this_value);
+                let (kind, scope) = self.storage_context(&this_value);
                 let _ = self.host.storage(StorageOp::Clear {
                     kind,
-                    scope: StorageAreaScope::Window(WindowId(0)),
+                    scope,
                 });
                 Ok(Value::Undefined)
             }
             BuiltinId::StorageKey => {
-                use super::host::{StorageAreaScope, StorageOp, StorageResult};
                 let index = args.first().map(|v| self.to_number(v) as usize).unwrap_or(0);
-                let kind = self.storage_kind_from_host_val(&this_value);
+                let (kind, scope) = self.storage_context(&this_value);
                 let res = self.host.storage(StorageOp::Keys {
                     kind,
-                    scope: StorageAreaScope::Window(WindowId(0)),
+                    scope,
                 });
                 Ok(match res {
                     Ok(StorageResult::Keys(keys)) => keys.get(index).map(|k| self.make_string_value(k)).unwrap_or(Value::Null),
@@ -13737,6 +13713,13 @@ impl Vm {
         super::host::StorageAreaKind::Local
     }
 
+    fn storage_context(&self, this_value: &Value) -> (StorageAreaKind, StorageAreaScope) {
+        (
+            self.storage_kind_from_host_val(this_value),
+            StorageAreaScope::Window(WindowId(0)),
+        )
+    }
+
     fn get_storage_property(&mut self, slot: HostObjectSlot, name: String) -> Result<Value, VmError> {
         use super::host::{StorageAreaScope, StorageOp, StorageResult};
         let kind = match slot.handle {
@@ -13778,12 +13761,7 @@ impl From<&str> for PropertyKey {
 
 impl From<String> for PropertyKey {
     fn from(value: String) -> Self {
-        if let Ok(index) = value.parse::<u32>() {
-            if index.to_string() == value {
-                return PropertyKey::Index(index);
-            }
-        }
-        PropertyKey::String(value)
+        Vm::property_key_from_text(&value)
     }
 }
 
