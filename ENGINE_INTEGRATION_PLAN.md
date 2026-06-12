@@ -1,5 +1,15 @@
 # Engine Integration Plan — replacing `boa` with the self-built engine
 
+> **✅ COMPLETE (Stage 0–4 landed on `master`).** The self-built engine is now
+> the browser's sole JavaScript backend. Stage 3 closed every DOM-API parity
+> gap (events/focus, computed style, shadow DOM, custom elements,
+> MutationObserver, AbortController, …); Stage 4 flipped the default and then
+> deleted the boa runtime (`src/js.rs` shrank from ~12.5k to ~1.1k lines;
+> `boa_engine`/`boa_gc` removed from `Cargo.toml` — only `boa_ast`/`boa_parser`/
+> `boa_interner` remain for the engine's AST front-end). The sections below are
+> kept as the historical design record. One thing still wants a human eye:
+> animation smoothness of the `requestAnimationFrame` loop in the live GUI.
+
 Goal: make the self-built engine (`src/engine/`) the browser's actual JavaScript
 runtime and remove `boa` entirely ("完全自作"), without regressing the browser's
 existing features (DOM, shadow DOM, CSS, async UI).
