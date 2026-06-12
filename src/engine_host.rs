@@ -3442,7 +3442,7 @@ mod tests {
 
         // The interactive verification demo must actually work on the engine
         // (so the user's GUI check only has to confirm the render path).
-        let html = include_str!("../demo/engine_demo.html");
+        let html = include_str!("../demo/engine-demo.html");
         let (mut session, initial) = EngineSession::start(html, "http://localhost:8000/");
         assert!(initial.error.is_none(), "demo error: {:?}", initial.error);
 
