@@ -424,7 +424,14 @@ impl Host for TestDom {
                     }
                 }
             }
-            DomRead::ShadowRoot { .. } | DomRead::AssignedNodes { .. } => Ok(DomReadResult::None),
+            DomRead::ShadowRoot { .. }
+            | DomRead::ShadowRootHost { .. }
+            | DomRead::AssignedSlot { .. }
+            | DomRead::RetargetTarget { .. }
+            | DomRead::AssignedNodes { .. } => Ok(DomReadResult::None),
+            DomRead::ShadowRootMode { .. } => Ok(DomReadResult::String(String::new())),
+            DomRead::RootNode { node, .. } => Ok(DomReadResult::Node(node)),
+            DomRead::EventPath { node, .. } => Ok(DomReadResult::Nodes(vec![node])),
             DomRead::BoundingClientRect { .. } => {
                 Ok(DomReadResult::Rect(tobira_engine::engine::DomRect { x: 0.0, y: 0.0, width: 100.0, height: 20.0 }))
             }
@@ -585,6 +592,7 @@ impl Host for TestDom {
                 Ok(DomMutationResult::None)
             }
             DomMutation::AttachShadow { .. } => Err(HostError::Unsupported),
+            DomMutation::TakeSlotchangeSlots { .. } => Ok(DomMutationResult::Nodes(Vec::new())),
         }
     }
 

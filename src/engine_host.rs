@@ -36,6 +36,8 @@ enum DomNodeKind {
     Element(String), // lowercased tag name
     Text(String),
     Fragment,
+    /// A shadow root attached to `host` (arena index). `open` is its mode.
+    ShadowRoot { host: usize, open: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +147,11 @@ pub struct BrowserHost {
     scroll_y: f64,
     inner_width: f64,
     inner_height: f64,
+    /// Shadow root arena index keyed by host element index.
+    shadow_root_by_host: HashMap<usize, usize>,
+    /// Per-slot snapshot of assigned light nodes, so `slotchange` only fires on
+    /// a real change. Keyed by slot arena index.
+    slot_snapshots: HashMap<usize, Vec<usize>>,
     /// Observer registrations, indexed by `ObserverId.0`. `None` slots are
     /// disconnected observers (kept so ids stay stable).
     observers: Vec<Option<ObserverEntry>>,
@@ -178,6 +185,8 @@ impl BrowserHost {
             scroll_y: 0.0,
             inner_width: 1280.0,
             inner_height: 720.0,
+            shadow_root_by_host: HashMap::new(),
+            slot_snapshots: HashMap::new(),
             observers: Vec::new(),
             geometry: HashMap::new(),
         };
@@ -489,6 +498,8 @@ impl BrowserHost {
                 out.push_str(&format!("</{tag}>"));
                 out
             }
+            // Shadow content is not part of the light-DOM snapshot.
+            DomNodeKind::ShadowRoot { .. } => String::new(),
             DomNodeKind::Document | DomNodeKind::Fragment => self.inner_html(idx),
         }
     }
@@ -1031,6 +1042,196 @@ impl BrowserHost {
         }
     }
 
+    // ── Shadow DOM helpers (ported from the boa backend) ────────────────────
+
+    fn is_shadow_root(&self, idx: usize) -> bool {
+        matches!(
+            self.nodes.get(idx).map(|n| &n.kind),
+            Some(DomNodeKind::ShadowRoot { .. })
+        )
+    }
+
+    /// The host element of a shadow-root node.
+    fn shadow_root_host(&self, idx: usize) -> Option<usize> {
+        match self.nodes.get(idx).map(|n| &n.kind) {
+            Some(DomNodeKind::ShadowRoot { host, .. }) => Some(*host),
+            _ => None,
+        }
+    }
+
+    /// The nearest ancestor shadow root above `idx` (excluding `idx`).
+    fn enclosing_shadow_root(&self, idx: usize) -> Option<usize> {
+        let mut current = self.nodes.get(idx).and_then(|n| n.parent);
+        while let Some(parent) = current {
+            if self.is_shadow_root(parent) {
+                return Some(parent);
+            }
+            current = self.nodes.get(parent).and_then(|n| n.parent);
+        }
+        None
+    }
+
+    /// The host element of the shadow tree containing `idx` (or, if `idx` is a
+    /// shadow root, its own host).
+    fn shadow_root_host_for_node(&self, idx: usize) -> Option<usize> {
+        if self.is_shadow_root(idx) {
+            return self.shadow_root_host(idx);
+        }
+        self.enclosing_shadow_root(idx)
+            .and_then(|sr| self.shadow_root_host(sr))
+    }
+
+    /// Like `parent`, but a shadow root's "parent" is its host element.
+    fn shadow_including_parent(&self, idx: usize) -> Option<usize> {
+        if let Some(parent) = self.nodes.get(idx).and_then(|n| n.parent) {
+            return Some(parent);
+        }
+        self.shadow_root_host(idx)
+    }
+
+    /// The root of `idx`'s tree. With `composed`, crosses shadow boundaries.
+    fn root_node_id(&self, idx: usize, composed: bool) -> Option<usize> {
+        let mut current = idx;
+        loop {
+            let parent = if composed {
+                self.shadow_including_parent(current)
+            } else {
+                self.nodes.get(current).and_then(|n| n.parent)
+            };
+            match parent {
+                Some(p) => current = p,
+                None => return Some(current),
+            }
+        }
+    }
+
+    fn attr_of(&self, idx: usize, name: &str) -> String {
+        self.nodes
+            .get(idx)
+            .and_then(|n| n.attrs.get(name).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Light-DOM nodes assigned to `slot_idx` (by matching slot name).
+    fn slot_assigned_nodes(&self, slot_idx: usize) -> Vec<usize> {
+        let Some(host_idx) = self.shadow_root_host_for_node(slot_idx) else {
+            return Vec::new();
+        };
+        let slot_name = self.attr_of(slot_idx, "name");
+        self.nodes
+            .get(host_idx)
+            .map(|host| {
+                host.children
+                    .iter()
+                    .copied()
+                    .filter(|&child| {
+                        let child_slot = self.attr_of(child, "slot");
+                        if slot_name.is_empty() {
+                            child_slot.is_empty()
+                        } else {
+                            child_slot == slot_name
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn slot_assigned_nodes_flattened(&self, slot_idx: usize) -> Vec<usize> {
+        fn collect(host: &BrowserHost, slot_idx: usize, visited: &mut Vec<usize>, out: &mut Vec<usize>) {
+            if visited.contains(&slot_idx) {
+                return;
+            }
+            visited.push(slot_idx);
+            for node in host.slot_assigned_nodes(slot_idx) {
+                if host.nodes[node].tag_name() == Some("slot") {
+                    let before = out.len();
+                    collect(host, node, visited, out);
+                    if out.len() > before {
+                        continue;
+                    }
+                }
+                out.push(node);
+            }
+            visited.pop();
+        }
+        let mut visited = Vec::new();
+        let mut out = Vec::new();
+        collect(self, slot_idx, &mut visited, &mut out);
+        out
+    }
+
+    /// All `<slot>` elements in a shadow tree (pre-order).
+    fn slot_nodes_in_shadow_root(&self, shadow_idx: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        self.collect_slots(shadow_idx, &mut out);
+        out
+    }
+
+    fn collect_slots(&self, idx: usize, out: &mut Vec<usize>) {
+        for &child in &self.nodes[idx].children {
+            if self.nodes[child].tag_name() == Some("slot") {
+                out.push(child);
+            }
+            self.collect_slots(child, out);
+        }
+    }
+
+    /// The `<slot>` a light-DOM `idx` is assigned to (its host's shadow tree).
+    fn assigned_slot_for_node(&self, idx: usize) -> Option<usize> {
+        let parent = self.nodes.get(idx).and_then(|n| n.parent)?;
+        let shadow_idx = self.shadow_root_by_host.get(&parent).copied()?;
+        let slot_name = self.attr_of(idx, "slot");
+        self.slot_nodes_in_shadow_root(shadow_idx).into_iter().find(|&slot| {
+            let name_on_slot = self.attr_of(slot, "name");
+            if name_on_slot.is_empty() {
+                slot_name.is_empty()
+            } else {
+                name_on_slot == slot_name
+            }
+        })
+    }
+
+    /// Event propagation path for `idx` in target → root order.
+    fn event_path(&self, idx: usize, composed: bool) -> Vec<usize> {
+        let mut path = vec![idx];
+        let mut current = idx;
+        loop {
+            let parent = if composed {
+                self.shadow_including_parent(current)
+            } else {
+                self.nodes.get(current).and_then(|n| n.parent)
+            };
+            match parent {
+                Some(p) => {
+                    path.push(p);
+                    current = p;
+                    if path.len() > 4096 {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        path
+    }
+
+    /// Retarget `target` relative to `current`'s tree root (shadow retargeting).
+    fn retarget_event_target(&self, target: usize, current: usize) -> usize {
+        let current_root = self.root_node_id(current, false).unwrap_or(current);
+        let mut candidate = target;
+        loop {
+            let candidate_root = self.root_node_id(candidate, false).unwrap_or(candidate);
+            if candidate_root == current_root {
+                return candidate;
+            }
+            match self.shadow_root_host_for_node(candidate) {
+                Some(next) if next != candidate => candidate = next,
+                _ => return candidate,
+            }
+        }
+    }
+
     /// DocumentFragment insertion semantics: inserting a fragment moves its
     /// children and leaves the fragment empty. Returns the nodes to insert
     /// (the node itself when it isn't a fragment), detached from any parent.
@@ -1367,7 +1568,9 @@ impl Host for BrowserHost {
                     DomNodeKind::Document => NodeKind::Document,
                     DomNodeKind::Element(_) => NodeKind::Element,
                     DomNodeKind::Text(_) => NodeKind::Text,
-                    DomNodeKind::Fragment => NodeKind::DocumentFragment,
+                    DomNodeKind::Fragment | DomNodeKind::ShadowRoot { .. } => {
+                        NodeKind::DocumentFragment
+                    }
                 };
                 Ok(DomReadResult::Kind(kind))
             }
@@ -1380,6 +1583,7 @@ impl Host for BrowserHost {
                     DomNodeKind::Element(tag) => tag.to_uppercase(),
                     DomNodeKind::Text(_) => "#text".to_string(),
                     DomNodeKind::Fragment => "#document-fragment".to_string(),
+                    DomNodeKind::ShadowRoot { .. } => "#document-fragment".to_string(),
                 };
                 Ok(DomReadResult::String(name))
             }
@@ -1427,7 +1631,58 @@ impl Host for BrowserHost {
                     self.nodes[node.0 as usize].attrs.keys().cloned().collect(),
                 ))
             }
-            DomRead::ShadowRoot { .. } | DomRead::AssignedNodes { .. } => Ok(DomReadResult::None),
+            DomRead::ShadowRoot { host } => Ok(match self.shadow_root_by_host.get(&(host.0 as usize)) {
+                Some(&idx) => DomReadResult::Node(NodeId(idx as u32)),
+                None => DomReadResult::None,
+            }),
+            DomRead::ShadowRootHost { node } => {
+                match self.nodes.get(node.0 as usize).map(|n| &n.kind) {
+                    Some(DomNodeKind::ShadowRoot { host, .. }) => {
+                        Ok(DomReadResult::Node(NodeId(*host as u32)))
+                    }
+                    _ => Ok(DomReadResult::None),
+                }
+            }
+            DomRead::ShadowRootMode { node } => {
+                match self.nodes.get(node.0 as usize).map(|n| &n.kind) {
+                    Some(DomNodeKind::ShadowRoot { open, .. }) => Ok(DomReadResult::String(
+                        if *open { "open" } else { "closed" }.to_string(),
+                    )),
+                    _ => Ok(DomReadResult::String(String::new())),
+                }
+            }
+            DomRead::RootNode { node, composed } => {
+                match self.root_node_id(node.0 as usize, composed) {
+                    Some(idx) => Ok(DomReadResult::Node(NodeId(idx as u32))),
+                    None => Ok(DomReadResult::None),
+                }
+            }
+            DomRead::AssignedSlot { node } => {
+                match self.assigned_slot_for_node(node.0 as usize) {
+                    Some(idx) => Ok(DomReadResult::Node(NodeId(idx as u32))),
+                    None => Ok(DomReadResult::None),
+                }
+            }
+            DomRead::EventPath { node, composed } => {
+                let path = self.event_path(node.0 as usize, composed);
+                Ok(DomReadResult::Nodes(
+                    path.into_iter().map(|i| NodeId(i as u32)).collect(),
+                ))
+            }
+            DomRead::RetargetTarget { target, current } => {
+                let idx = self.retarget_event_target(target.0 as usize, current.0 as usize);
+                Ok(DomReadResult::Node(NodeId(idx as u32)))
+            }
+            DomRead::AssignedNodes { slot, flatten } => {
+                let nodes = if flatten {
+                    self.slot_assigned_nodes_flattened(slot.0 as usize)
+                } else {
+                    self.slot_assigned_nodes(slot.0 as usize)
+                };
+                Ok(DomReadResult::Nodes(
+                    nodes.into_iter().map(|i| NodeId(i as u32)).collect(),
+                ))
+            }
             DomRead::BoundingClientRect { node } => {
                 Ok(DomReadResult::Rect(self.bounding_client_rect(node.0 as usize)))
             }
@@ -1783,7 +2038,44 @@ impl Host for BrowserHost {
                 Ok(DomMutationResult::None)
             }
             DomMutation::SetScrollOffset { .. } => Ok(DomMutationResult::None),
-            DomMutation::AttachShadow { .. } => Err(HostError::Unsupported),
+            DomMutation::AttachShadow { host, open } => {
+                let host_idx = host.0 as usize;
+                if !exists(&self.nodes, host_idx) || !self.nodes[host_idx].is_element() {
+                    return Err(HostError::InvalidHandle);
+                }
+                if self.shadow_root_by_host.contains_key(&host_idx) {
+                    // Already attached — return the existing root.
+                    return Ok(DomMutationResult::Node(NodeId(
+                        self.shadow_root_by_host[&host_idx] as u32,
+                    )));
+                }
+                let shadow_idx = self.push(DomNode {
+                    kind: DomNodeKind::ShadowRoot { host: host_idx, open },
+                    parent: None,
+                    children: Vec::new(),
+                    attrs: BTreeMap::new(),
+                });
+                self.shadow_root_by_host.insert(host_idx, shadow_idx);
+                Ok(DomMutationResult::Node(NodeId(shadow_idx as u32)))
+            }
+            DomMutation::TakeSlotchangeSlots { .. } => {
+                let mut changed = Vec::new();
+                let shadow_ids: Vec<usize> = self.shadow_root_by_host.values().copied().collect();
+                for shadow_idx in shadow_ids {
+                    for slot in self.slot_nodes_in_shadow_root(shadow_idx) {
+                        let assigned = self.slot_assigned_nodes(slot);
+                        let changed_now = match self.slot_snapshots.get(&slot) {
+                            Some(prev) => prev != &assigned,
+                            None => !assigned.is_empty(),
+                        };
+                        if changed_now {
+                            self.slot_snapshots.insert(slot, assigned);
+                            changed.push(NodeId(slot as u32));
+                        }
+                    }
+                }
+                Ok(DomMutationResult::Nodes(changed))
+            }
         }
     }
 

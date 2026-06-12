@@ -236,6 +236,35 @@ pub enum DomRead {
     ShadowRoot {
         host: NodeId,
     },
+    /// The host element of a shadow-root node.
+    ShadowRootHost {
+        node: NodeId,
+    },
+    /// "open" / "closed" for a shadow-root node (empty string otherwise).
+    ShadowRootMode {
+        node: NodeId,
+    },
+    /// The root of `node`'s tree. With `composed`, crosses shadow boundaries
+    /// (a shadow root's parent becomes its host).
+    RootNode {
+        node: NodeId,
+        composed: bool,
+    },
+    /// The `<slot>` a light-DOM `node` is assigned to, if any.
+    AssignedSlot {
+        node: NodeId,
+    },
+    /// The event propagation path for `node` (target → root order). With
+    /// `composed`, crosses shadow boundaries.
+    EventPath {
+        node: NodeId,
+        composed: bool,
+    },
+    /// Retarget `target` relative to `current`'s tree root (shadow retargeting).
+    RetargetTarget {
+        target: NodeId,
+        current: NodeId,
+    },
     AssignedNodes {
         slot: NodeId,
         flatten: bool,
@@ -349,6 +378,11 @@ pub enum DomMutation {
         host: NodeId,
         open: bool,
     },
+    /// Drain the set of `<slot>` elements whose flattened assignment changed
+    /// since the last drain (updating the snapshot). Returns `Nodes`.
+    TakeSlotchangeSlots {
+        window: WindowId,
+    },
     /// `Text.splitText(offset)`: truncate `node` at `offset` and insert a new
     /// text node holding the remainder right after it. Returns the new node.
     SplitText {
@@ -390,6 +424,7 @@ impl AdjacentPosition {
 pub enum DomMutationResult {
     None,
     Node(NodeId),
+    Nodes(Vec<NodeId>),
     Bool(bool),
 }
 

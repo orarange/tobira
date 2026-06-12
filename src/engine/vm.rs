@@ -266,6 +266,12 @@ enum BuiltinId {
     DomNodeInsertAdjacentHtml,
     DomNodeReplaceChildren,
     DomNodeSplitText,
+    // Shadow DOM
+    DomNodeAttachShadow,
+    DomNodeGetRootNode,
+    DomSlotAssignedNodes,
+    DomSlotAssignedElements,
+    DomEventComposedPath,
     // attributes (NamedNodeMap)
     DomAttrMapItem,
     DomAttrMapGetNamedItem,
@@ -1106,6 +1112,8 @@ pub struct Vm {
     /// `drain_microtasks` calls made while delivering don't recurse into another
     /// delivery pass.
     delivering_mutations: bool,
+    /// Re-entrancy guard for `slotchange` event delivery.
+    delivering_slotchange: bool,
     /// Interned DOM node wrappers keyed by node handle, so that accessing the
     /// same node twice (`el.parentNode === parent`, `a.nextSibling === b`)
     /// returns the SAME object — node identity that frameworks rely on. Also
@@ -1224,6 +1232,7 @@ impl Vm {
             event_listeners: HashMap::new(),
             mutation_observers: HashMap::new(),
             delivering_mutations: false,
+            delivering_slotchange: false,
             node_wrappers: HashMap::new(),
             builtin_method_cache: HashMap::new(),
             next_symbol_id: FIRST_USER_SYMBOL,
@@ -1307,25 +1316,63 @@ impl Vm {
                 focused: event_type.eq_ignore_ascii_case("focus"),
             });
         }
-        let mut path: Vec<u32> = vec![target_handle];
-        if bubbles {
-            let mut current = target_handle;
-            while let Ok(DomReadResult::Node(parent)) =
-                self.host.read_dom(DomRead::Parent { node: NodeId(current) })
-            {
-                path.push(parent.0);
-                current = parent.0;
-                if path.len() > 4096 {
-                    break; // cycle guard
-                }
-            }
-        }
+        // The full propagation path (target → root), crossing shadow boundaries
+        // when the event is composed. composedPath() returns it; propagation
+        // only visits ancestors when the event bubbles.
+        let composed = self
+            .get_property_value(event_val, &PropertyKey::from("composed"))
+            .map(|v| self.is_truthy(&v))
+            .unwrap_or(false);
+        let full_path: Vec<u32> = match self.host.read_dom(DomRead::EventPath {
+            node: NodeId(target_handle),
+            composed,
+        }) {
+            Ok(DomReadResult::Nodes(ids)) => ids.iter().map(|id| id.0).collect(),
+            _ => vec![target_handle],
+        };
+        // Store composedPath (target → root order) on the event.
+        let composed_path_values: Vec<Value> = full_path
+            .iter()
+            .map(|&h| self.make_dom_node_value(NodeId(h)))
+            .collect();
+        let composed_path_array = self.make_array_from_values(composed_path_values)?;
+        self.define_data_property(
+            event_ref,
+            PropertyKey::from("__composedPath"),
+            composed_path_array,
+            true,
+            false,
+            true,
+        );
+        let path: Vec<u32> = if bubbles {
+            full_path
+        } else {
+            vec![target_handle]
+        };
         'propagate: for node_handle in path {
             let current_target = self.make_dom_node_value(NodeId(node_handle));
             self.define_data_property(
                 event_ref,
                 PropertyKey::from("currentTarget"),
                 current_target.clone(),
+                true,
+                true,
+                true,
+            );
+            // Shadow retargeting: the event's `target` is rewritten relative to
+            // the current node's tree root as it crosses shadow boundaries.
+            let retargeted = match self.host.read_dom(DomRead::RetargetTarget {
+                target: NodeId(target_handle),
+                current: NodeId(node_handle),
+            }) {
+                Ok(DomReadResult::Node(id)) => id,
+                _ => NodeId(target_handle),
+            };
+            let retargeted_value = self.make_dom_node_value(retargeted);
+            self.define_data_property(
+                event_ref,
+                PropertyKey::from("target"),
+                retargeted_value,
                 true,
                 true,
                 true,
@@ -1433,6 +1480,8 @@ impl Vm {
             true,
             true,
         );
+        let composed_path = self.allocate_builtin_method(BuiltinId::DomEventComposedPath);
+        self.define_data_property(event, PropertyKey::from("composedPath"), composed_path, true, false, true);
         event
     }
 
@@ -1535,6 +1584,8 @@ impl Vm {
             true,
             true,
         );
+        let composed_path = self.allocate_builtin_method(BuiltinId::DomEventComposedPath);
+        self.define_data_property(event, PropertyKey::from("composedPath"), composed_path, true, false, true);
         Ok(Value::Object(event))
     }
 
@@ -5912,6 +5963,7 @@ impl Vm {
             // boa parity: DOM property writes flush mutation observers
             // synchronously (see invoke_builtin).
             self.deliver_mutation_records();
+            self.deliver_slotchange();
             return result;
         }
 
@@ -7394,7 +7446,28 @@ impl Vm {
         // field reads) when no observers are registered, and re-entrancy is
         // guarded inside the delivery itself.
         self.deliver_mutation_records();
+        self.deliver_slotchange();
         result
+    }
+
+    /// Fire `slotchange` on every `<slot>` whose assignment changed since the
+    /// last delivery (boa parity: flushed after each DOM operation). Bounded
+    /// and re-entrancy guarded.
+    fn deliver_slotchange(&mut self) {
+        if self.delivering_slotchange {
+            return;
+        }
+        self.delivering_slotchange = true;
+        for _ in 0..8 {
+            let slots = match self.host.mutate_dom(DomMutation::TakeSlotchangeSlots { window: WindowId(0) }) {
+                Ok(DomMutationResult::Nodes(ids)) if !ids.is_empty() => ids,
+                _ => break,
+            };
+            for slot in slots {
+                let _ = self.fire_dom_event(slot.0, "slotchange");
+            }
+        }
+        self.delivering_slotchange = false;
     }
 
     fn invoke_builtin_inner(
@@ -10364,6 +10437,71 @@ impl Vm {
                 };
                 Ok(self.make_string_value(&existing))
             }
+            BuiltinId::DomNodeAttachShadow => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let mode = match args.first() {
+                    Some(opts @ Value::Object(_)) => self
+                        .get_property_value(opts, &PropertyKey::from("mode"))
+                        .map(|v| self.to_string(&v))
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                let open = !mode.eq_ignore_ascii_case("closed");
+                match self.host.mutate_dom(DomMutation::AttachShadow { host: node_id, open }) {
+                    Ok(DomMutationResult::Node(shadow)) => Ok(self.make_dom_node_value(shadow)),
+                    _ => Err(VmError::TypeError("attachShadow failed".to_string())),
+                }
+            }
+            BuiltinId::DomNodeGetRootNode => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let composed = match args.first() {
+                    Some(opts @ Value::Object(_)) => {
+                        let v = self.get_property_value(opts, &PropertyKey::from("composed")).unwrap_or(Value::Undefined);
+                        self.is_truthy(&v)
+                    }
+                    _ => false,
+                };
+                let res = self.host.read_dom(DomRead::RootNode { node: node_id, composed });
+                Ok(match res {
+                    Ok(DomReadResult::Node(id)) => self.root_node_value(id),
+                    _ => Value::Null,
+                })
+            }
+            BuiltinId::DomSlotAssignedNodes | BuiltinId::DomSlotAssignedElements => {
+                let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
+                let flatten = match args.first() {
+                    Some(opts @ Value::Object(_)) => {
+                        let v = self.get_property_value(opts, &PropertyKey::from("flatten")).unwrap_or(Value::Undefined);
+                        self.is_truthy(&v)
+                    }
+                    _ => false,
+                };
+                let nodes = match self.host.read_dom(DomRead::AssignedNodes { slot: node_id, flatten }) {
+                    Ok(DomReadResult::Nodes(ids)) => ids,
+                    _ => Vec::new(),
+                };
+                let elements_only = matches!(builtin, BuiltinId::DomSlotAssignedElements);
+                let mut items = Vec::new();
+                for id in nodes {
+                    if elements_only
+                        && !matches!(
+                            self.host.read_dom(DomRead::NodeKind { node: id }),
+                            Ok(DomReadResult::Kind(NodeKind::Element))
+                        )
+                    {
+                        continue;
+                    }
+                    items.push(self.make_dom_node_value(id));
+                }
+                self.make_array_from_values(items)
+            }
+            BuiltinId::DomEventComposedPath => {
+                let stored = self.get_property_value(&this_value, &PropertyKey::from("__composedPath"))?;
+                match stored {
+                    Value::Object(_) => Ok(stored),
+                    _ => self.make_array_from_values(Vec::new()),
+                }
+            }
             BuiltinId::DomNodeSplitText => {
                 let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
                 let offset = args.first().map(|v| self.to_number(v).max(0.0) as usize).unwrap_or(0);
@@ -11715,6 +11853,20 @@ impl Vm {
         Ok(())
     }
 
+    /// Wrap a node, but return the global `document` host object when the node
+    /// is the document (so `getRootNode() === document` holds).
+    fn root_node_value(&mut self, id: NodeId) -> Value {
+        if matches!(
+            self.host.read_dom(DomRead::NodeKind { node: id }),
+            Ok(DomReadResult::Kind(NodeKind::Document))
+        ) {
+            if let Some(doc) = self.globals.get("document").cloned() {
+                return doc;
+            }
+        }
+        self.make_dom_node_value(id)
+    }
+
     fn node_id_from_host_val(&self, value: &Value) -> Option<NodeId> {
         if let Value::Object(obj_ref) = value {
             if let Some(obj) = self.heap.objects().get(*obj_ref) {
@@ -12813,6 +12965,30 @@ impl Vm {
             "scrollIntoView" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeScrollIntoView)),
             "focus" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeFocus)),
             "blur" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeBlur)),
+            "attachShadow" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeAttachShadow)),
+            "getRootNode" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeGetRootNode)),
+            "assignedNodes" => Ok(self.allocate_builtin_method(BuiltinId::DomSlotAssignedNodes)),
+            "assignedElements" => Ok(self.allocate_builtin_method(BuiltinId::DomSlotAssignedElements)),
+            "shadowRoot" => {
+                let res = self.host.read_dom(DomRead::ShadowRoot { host: node_id });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
+            // ShadowRoot-node accessors (the wrapper is a generic Node).
+            "host" => {
+                let res = self.host.read_dom(DomRead::ShadowRootHost { node: node_id });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+            }
+            "mode" => {
+                let res = self.host.read_dom(DomRead::ShadowRootMode { node: node_id });
+                match res {
+                    Ok(DomReadResult::String(s)) if !s.is_empty() => Ok(self.make_string_value(&s)),
+                    _ => Ok(Value::Undefined),
+                }
+            }
+            "assignedSlot" => {
+                let res = self.host.read_dom(DomRead::AssignedSlot { node: node_id });
+                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+            }
             "click" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeClick)),
             "addEventListener" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener)),
             "removeEventListener" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemoveEventListener)),
