@@ -222,6 +222,9 @@ enum BuiltinId {
     CustomEventConstructor,
     KeyboardEventConstructor,
     MouseEventConstructor,
+    // Custom elements
+    CustomElementsDefine,
+    CustomElementsGet,
     // AbortController / AbortSignal
     AbortControllerConstructor,
     AbortControllerAbort,
@@ -1129,6 +1132,16 @@ pub struct Vm {
     /// special-cases them by interface name (see `instanceof_value`). Real DOM
     /// libraries (React) gate on `x instanceof Element` etc.
     dom_interface_ctors: HashMap<RawGcRef, &'static str>,
+    /// `customElements.define` registry: lowercase tag name → definition.
+    custom_elements: HashMap<String, CustomElementDef>,
+}
+
+/// A `customElements.define`d class: the constructor value plus its
+/// (lowercased) `observedAttributes` list.
+#[derive(Clone)]
+struct CustomElementDef {
+    class_value: Value,
+    observed: Vec<String>,
 }
 
 /// DOM interface names exposed as global constructors for `instanceof`. `Event`
@@ -1218,6 +1231,7 @@ impl Vm {
             symbol_registry: HashMap::new(),
             generator_outcome: None,
             dom_interface_ctors: HashMap::new(),
+            custom_elements: HashMap::new(),
         };
         vm.install_globals();
         vm
@@ -2602,6 +2616,15 @@ impl Vm {
         let cancel_idle = self.allocate_builtin_method(BuiltinId::CancelIdleCallback);
         self.globals.insert("requestIdleCallback".to_string(), request_idle);
         self.globals.insert("cancelIdleCallback".to_string(), cancel_idle);
+
+        // customElements registry
+        let custom_elements_object = self.allocate_ordinary_object(Some(object_prototype));
+        self.define_builtin_method(custom_elements_object, "define", BuiltinId::CustomElementsDefine);
+        self.define_builtin_method(custom_elements_object, "get", BuiltinId::CustomElementsGet);
+        self.globals.insert(
+            "customElements".to_string(),
+            Value::Object(custom_elements_object),
+        );
 
         // console object
         let console_object = self.allocate_ordinary_object(Some(object_prototype));
@@ -5779,6 +5802,23 @@ impl Vm {
                 {
                     return Ok(value);
                 }
+                // Upgraded custom elements get their class prototype linked, so
+                // walk it for methods like `connectedCallback` / user methods.
+                if let Some(proto) = self.heap.objects().get(object).and_then(|o| o.prototype) {
+                    if let Some((_, descriptor)) = self.lookup_property_descriptor(proto, key) {
+                        return match descriptor {
+                            JsPropertyDescriptor::Data { value, .. } => Ok(value),
+                            JsPropertyDescriptor::Accessor { get, .. } => match get {
+                                Some(getter) => self.call_value_sync(
+                                    Value::Object(getter),
+                                    receiver.clone(),
+                                    Vec::new(),
+                                ),
+                                None => Ok(Value::Undefined),
+                            },
+                        };
+                    }
+                }
             }
             return Ok(value);
         }
@@ -7868,6 +7908,47 @@ impl Vm {
             BuiltinId::CustomEventConstructor => {
                 let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 self.make_event_object(&event_type, args.get(1).cloned(), true)
+            }
+            BuiltinId::CustomElementsDefine => {
+                let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default().to_ascii_lowercase();
+                let class_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+                if tag.is_empty() || !matches!(class_value, Value::Object(_)) {
+                    return Ok(Value::Undefined);
+                }
+                // Read the static `observedAttributes` getter (lowercased).
+                let observed = match self.get_property_value(&class_value, &PropertyKey::from("observedAttributes")) {
+                    Ok(list @ Value::Object(_)) => self
+                        .array_like_to_vec(&list)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|v| self.to_string(v).to_ascii_lowercase())
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                self.custom_elements.insert(
+                    tag.clone(),
+                    CustomElementDef { class_value: class_value.clone(), observed },
+                );
+                // Upgrade existing matching elements in document order.
+                let matches = match self.host.read_dom(DomRead::QuerySelectorAll {
+                    root: NodeId(0),
+                    selectors: tag.clone(),
+                }) {
+                    Ok(DomReadResult::Nodes(ids)) => ids,
+                    _ => Vec::new(),
+                };
+                for node in matches {
+                    self.upgrade_custom_element(node, &tag)?;
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::CustomElementsGet => {
+                let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default().to_ascii_lowercase();
+                Ok(self
+                    .custom_elements
+                    .get(&tag)
+                    .map(|def| def.class_value.clone())
+                    .unwrap_or(Value::Undefined))
             }
             BuiltinId::AbortControllerConstructor => {
                 let proto = self.object_prototype_ref();
@@ -9990,7 +10071,18 @@ impl Vm {
                 let node_id = self.node_id_from_host_val(&this_value).unwrap_or(NodeId(0));
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let value = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
-                let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name, value });
+                let old = match self.host.read_dom(DomRead::Attribute { node: node_id, name: name.clone() }) {
+                    Ok(DomReadResult::String(s)) => Some(s),
+                    _ => None,
+                };
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: name.clone(), value: value.clone() });
+                self.fire_attribute_changed_callback(
+                    node_id,
+                    &this_value,
+                    &name.to_ascii_lowercase(),
+                    old.as_deref(),
+                    Some(&value),
+                )?;
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeGetAttribute => {
@@ -11556,6 +11648,71 @@ impl Vm {
             self.node_wrappers.insert(node_id.0, object);
         }
         value
+    }
+
+    /// Upgrade one element to its registered custom-element class: link the
+    /// node wrapper's prototype to the class prototype (so `instanceof` and
+    /// method lookup resolve) and fire `connectedCallback`.
+    fn upgrade_custom_element(&mut self, node: NodeId, tag: &str) -> Result<(), VmError> {
+        let Some(def) = self.custom_elements.get(tag).cloned() else {
+            return Ok(());
+        };
+        let class_proto = match self.get_property_value(&def.class_value, &PropertyKey::from("prototype")) {
+            Ok(Value::Object(proto)) => Some(proto),
+            _ => None,
+        };
+        let wrapper = self.make_dom_node_value(node);
+        if let (Value::Object(wrapper_ref), Some(proto)) = (&wrapper, class_proto) {
+            if let Some(data) = self.heap.objects_mut().get_mut(*wrapper_ref) {
+                data.prototype = Some(proto);
+            }
+        }
+        // connectedCallback (looked up on the class prototype).
+        let cb = self.get_property_value(&wrapper, &PropertyKey::from("connectedCallback"))?;
+        if self.is_callable_value(&cb) {
+            self.call_value_sync(cb, wrapper.clone(), Vec::new())?;
+        }
+        // Deliver attributeChangedCallback for already-present observed attrs.
+        for attr in &def.observed {
+            if let Ok(DomReadResult::String(value)) = self.host.read_dom(DomRead::Attribute {
+                node,
+                name: attr.clone(),
+            }) {
+                self.fire_attribute_changed_callback(node, &wrapper, attr, None, Some(&value))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fire a custom element's `attributeChangedCallback(name, old, new)` when
+    /// the attribute is observed. `wrapper` is the node's JS object.
+    fn fire_attribute_changed_callback(
+        &mut self,
+        node: NodeId,
+        wrapper: &Value,
+        attr_name: &str,
+        old_value: Option<&str>,
+        new_value: Option<&str>,
+    ) -> Result<(), VmError> {
+        let tag = match self.host.read_dom(DomRead::NodeName { node }) {
+            Ok(DomReadResult::String(s)) => s.to_ascii_lowercase(),
+            _ => return Ok(()),
+        };
+        let Some(def) = self.custom_elements.get(&tag).cloned() else {
+            return Ok(());
+        };
+        if !def.observed.iter().any(|a| a == attr_name) {
+            return Ok(());
+        }
+        let cb = self.get_property_value(wrapper, &PropertyKey::from("attributeChangedCallback"))?;
+        if !self.is_callable_value(&cb) {
+            return Ok(());
+        }
+        let name_v = self.make_string_value(attr_name);
+        let old_v = old_value.map(|v| self.make_string_value(v)).unwrap_or(Value::Null);
+        let new_v = new_value.map(|v| self.make_string_value(v)).unwrap_or(Value::Null);
+        self.call_value_sync(cb, wrapper.clone(), vec![name_v, old_v, new_v])?;
+        Ok(())
     }
 
     fn node_id_from_host_val(&self, value: &Value) -> Option<NodeId> {
