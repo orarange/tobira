@@ -2491,10 +2491,13 @@ impl DocumentView {
     }
 
     fn window_title(&self) -> String {
+        // Lead with the build version so the running revision is always visible
+        // in the OS title bar (a quick "is my patch in this build?" check).
+        let version = crate::version_string();
         if self.title.is_empty() {
-            "Tobira".to_string()
+            format!("Tobira {version}")
         } else {
-            format!("Tobira - {}", self.title)
+            format!("Tobira {version} - {}", self.title)
         }
     }
 
@@ -3586,10 +3589,39 @@ fn paint_chrome(
     );
 
     let app_width = fonts.text_width_px("TOBIRA", APP_FONT_SIZE, FontFamilyKind::Sans);
-    let page_title_x = chrome
+
+    // Build badge right after the brand: the running revision is always on
+    // screen, so verifying "is my patch in this build?" is a glance away even
+    // though the OS title bar is hidden (decorations off).
+    let version_badge = crate::version_badge();
+    let version_x = chrome
         .title_bar
         .x
         .saturating_add(app_width + TITLE_META_GAP);
+    let version_y = chrome.title_bar.y.saturating_add(
+        chrome
+            .title_bar
+            .height
+            .saturating_sub(fonts.line_height_px(TITLE_FONT_SIZE, FontFamilyKind::Sans))
+            / 2,
+    );
+    fonts.draw_text(
+        buffer,
+        width,
+        height,
+        version_x,
+        version_y,
+        &version_badge,
+        TITLE_FONT_SIZE,
+        COLOR_HEADER_MUTED,
+        false,
+        false,
+        false,
+        FontFamilyKind::Sans,
+    );
+    let version_width = fonts.text_width_px(&version_badge, TITLE_FONT_SIZE, FontFamilyKind::Sans);
+
+    let page_title_x = version_x.saturating_add(version_width + TITLE_META_GAP);
     let page_title_max_width = chrome
         .minimize_button
         .x
