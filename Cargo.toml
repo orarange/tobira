@@ -5,11 +5,9 @@ edition = "2024"
 
 [dependencies]
 arboard = "3.6.1"
-# boa_engine / boa_gc back the legacy browser runtime (src/js.rs).
-boa_engine = "0.21.1"
-boa_gc = "0.21.1"
 # boa_ast / boa_parser / boa_interner are used only by the self-built engine
-# (src/engine/) for its AST front-end.
+# (src/engine/) for its AST front-end. The boa runtime (boa_engine / boa_gc)
+# was removed when the self-built engine became the sole JS backend (Stage 4).
 boa_ast = "0.21.1"
 boa_interner = "0.21.1"
 boa_parser = "0.21.1"
@@ -29,8 +27,8 @@ unicode-width = "0.2.2"
 winit = "0.30.13"
 
 # The self-built JS engine is exposed as a library crate (`tobira_engine`) so the
-# test suite under tests/ can exercise it directly. The browser binary
-# (src/main.rs) still runs on boa for now; see ENGINE_INTEGRATION_PLAN.md.
+# test suite under tests/ can exercise it directly. It is now the browser's sole
+# JS backend (src/main.rs); see ENGINE_INTEGRATION_PLAN.md.
 [lib]
 name = "tobira_engine"
 path = "src/lib.rs"
