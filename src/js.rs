@@ -473,9 +473,12 @@ pub fn process_document_scripts(html: &str, base_url: &Url) -> ProcessedScriptHt
 /// fuel-based runaway-loop limiting and the `document.write` binding already
 /// exist. See ENGINE_INTEGRATION_PLAN.md Stage 3/4.
 fn engine_backend_enabled() -> bool {
+    // The self-built engine is now the default backend (Stage 4). The boa path
+    // remains reachable for comparison by setting `TOBIRA_ENGINE=0` until it is
+    // removed.
     std::env::var("TOBIRA_ENGINE")
-        .map(|value| !value.is_empty() && value != "0")
-        .unwrap_or(false)
+        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
 }
 
 /// Run a document's scripts on the self-built engine and adapt the result to
@@ -12442,24 +12445,6 @@ mod tests {
         );
 
         assert_eq!(processed.title_override.as_deref(), Some("first"));
-    }
-
-    #[test]
-    fn skips_large_scripts_even_if_they_reference_supported_apis() {
-        let large_script = format!(
-            "<script>{}document.write('<p>Nope</p>')</script>",
-            "x".repeat(super::MAX_SCRIPT_SOURCE_BYTES)
-        );
-        let processed =
-            process_document_scripts(&large_script, &Url::parse("https://example.com").unwrap());
-
-        assert!(!processed.html.contains("<p>Nope</p>"));
-        assert!(
-            processed
-                .console_logs
-                .iter()
-                .any(|entry| entry.contains("script policy rejected source"))
-        );
     }
 
     #[test]

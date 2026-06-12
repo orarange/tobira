@@ -7027,17 +7027,6 @@ impl Vm {
             }
             _ => FetchBody::Empty,
         };
-        // Browser policy (boa parity): request bodies are rejected — the
-        // browser only issues body-less requests. Surface it as a network
-        // error so `onerror` fires.
-        if !matches!(body, FetchBody::Empty) {
-            self.define_data_property(obj, PropertyKey::from("status"), Value::Number(0.0), true, true, true);
-            self.define_data_property(obj, PropertyKey::from("readyState"), Value::Number(4.0), true, true, true);
-            self.xhr_fire(this, "onreadystatechange")?;
-            self.xhr_fire(this, "onerror")?;
-            self.xhr_fire(this, "onloadend")?;
-            return Ok(Value::Undefined);
-        }
         let request = FetchRequest {
             window: WindowId(0),
             url: url.clone(),

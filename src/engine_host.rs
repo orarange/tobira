@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap};
 use tobira_engine::engine::{
     AdjacentPosition, Compiler, ConsoleMessage, DomEventInit, DomEventRequest, DomEventResult,
     DomMutation, DomMutationResult,
-    DomRead, DomReadResult, DomRect, FetchRequest, FetchResponse, FrameId, Heap, HistoryAction,
+    DomRead, DomReadResult, DomRect, FetchBody, FetchRequest, FetchResponse, FrameId, Heap, HistoryAction,
     HistoryOutcome,
     Host, HostData, HostError, HostEvent, HostResult, HostTimeSnapshot, LocationSnapshot,
     NavigationAction,
@@ -2106,6 +2106,12 @@ impl Host for BrowserHost {
         Err(HostError::Unsupported)
     }
     fn fetch_sync(&mut self, request: FetchRequest) -> HostResult<FetchResponse> {
+        // Browser policy (boa parity): the browser only issues body-less
+        // requests, so a request carrying a body is rejected as a network
+        // error (XHR/fetch then fire onerror/reject).
+        if !matches!(request.body, FetchBody::Empty) {
+            return Err(HostError::Network);
+        }
         // Resolve the (possibly relative) URL against the document URL, then
         // perform the request with the browser's own HTTP client.
         let resolved = Url::parse(&self.location.href)
