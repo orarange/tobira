@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use crate::html::{Element, Node};
@@ -23,6 +23,8 @@ pub struct Stylesheet {
     /// Each entry is `(condition, vars)` and is only applied when the condition matches
     /// the current viewport width at style-computation time.
     pub media_root_vars: Vec<(MediaCondition, BTreeMap<String, String>)>,
+    #[cfg(test)]
+    rule_index: RuleIndex,
 }
 
 impl Stylesheet {
@@ -34,6 +36,98 @@ impl Stylesheet {
         self.root_vars = Rc::new(merged);
         // Merge media-conditional root vars
         self.media_root_vars.extend(other.media_root_vars);
+        #[cfg(test)]
+        self.rule_index.rebuild(&self.rules);
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RuleIndex {
+    by_id: HashMap<String, Vec<usize>>,
+    by_class: HashMap<String, Vec<usize>>,
+    by_tag: HashMap<String, Vec<usize>>,
+    universal: Vec<usize>,
+}
+
+impl RuleIndex {
+    #[cfg(test)]
+    fn rebuild(&mut self, rules: &[Rule]) {
+        *self = Self::build(rules);
+    }
+
+    fn build(rules: &[Rule]) -> Self {
+        let mut index = Self::default();
+        for (rule_index, rule) in rules.iter().enumerate() {
+            let mut saw_bucket = false;
+            for selector in &rule.selectors {
+                if let Some(bucket) = selector.key_bucket() {
+                    saw_bucket = true;
+                    bucket.insert(&mut index, rule_index);
+                } else {
+                    saw_bucket = true;
+                    index.universal.push(rule_index);
+                }
+            }
+            if !saw_bucket {
+                continue;
+            }
+        }
+        index.sort_dedup();
+        index
+    }
+
+    fn sort_dedup(&mut self) {
+        for values in self.by_id.values_mut() {
+            values.sort_unstable();
+            values.dedup();
+        }
+        for values in self.by_class.values_mut() {
+            values.sort_unstable();
+            values.dedup();
+        }
+        for values in self.by_tag.values_mut() {
+            values.sort_unstable();
+            values.dedup();
+        }
+        self.universal.sort_unstable();
+        self.universal.dedup();
+    }
+
+    fn candidates_for(&self, element: &ElementIdentity) -> Vec<usize> {
+        let mut candidates = Vec::new();
+        if let Some(id) = &element.id && let Some(values) = self.by_id.get(id) {
+            candidates.extend(values);
+        }
+        for class_name in &element.classes {
+            if let Some(values) = self.by_class.get(class_name) {
+                candidates.extend(values);
+            }
+        }
+        if let Some(values) = self.by_tag.get(&element.tag_name) {
+            candidates.extend(values);
+        }
+        candidates.extend(&self.universal);
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
+    }
+}
+
+enum RuleBucket<'a> {
+    Id(&'a str),
+    Class(&'a str),
+    Tag(&'a str),
+    Universal,
+}
+
+impl<'a> RuleBucket<'a> {
+    fn insert(self, index: &mut RuleIndex, rule_index: usize) {
+        match self {
+            RuleBucket::Id(id) => index.by_id.entry(id.to_string()).or_default().push(rule_index),
+            RuleBucket::Class(class) => index.by_class.entry(class.to_string()).or_default().push(rule_index),
+            RuleBucket::Tag(tag) => index.by_tag.entry(tag.to_string()).or_default().push(rule_index),
+            RuleBucket::Universal => index.universal.push(rule_index),
+        }
     }
 }
 
@@ -980,7 +1074,15 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         }
     }
 
-    Stylesheet { rules, root_vars: Rc::new(root_vars), media_root_vars }
+    #[cfg(test)]
+    let rule_index = RuleIndex::build(&rules);
+    Stylesheet {
+        rules,
+        root_vars: Rc::new(root_vars),
+        media_root_vars,
+        #[cfg(test)]
+        rule_index,
+    }
 }
 
 fn parse_media_condition(query: &str) -> MediaCondition {
@@ -1033,9 +1135,14 @@ pub fn build_styled_tree(
     interactive: &InteractiveState,
 ) -> StyledNode {
     let ancestors = Vec::new();
+    #[cfg(test)]
+    let rule_index = &stylesheet.rule_index;
+    #[cfg(not(test))]
+    let rule_index = RuleIndex::build(&stylesheet.rules);
     build_node(
         document,
         stylesheet,
+        &rule_index,
         None,
         &ancestors,
         0,
@@ -1050,6 +1157,7 @@ pub fn build_styled_tree(
 fn build_node(
     node: &Node,
     stylesheet: &Stylesheet,
+    rule_index: &RuleIndex,
     parent_style: Option<&ComputedStyle>,
     ancestors: &[AncestorSlot],
     sibling_index: usize,
@@ -1085,6 +1193,7 @@ fn build_node(
             let style = compute_style(
                 element,
                 stylesheet,
+                rule_index,
                 parent_style,
                 ancestors,
                 sibling_index,
@@ -1133,6 +1242,7 @@ fn build_node(
                     build_node(
                         child,
                         stylesheet,
+                        rule_index,
                         Some(&style),
                         &next_ancestors,
                         idx,
@@ -1321,6 +1431,33 @@ pub fn compute_placeholder_style(
 fn compute_style(
     element: &Element,
     stylesheet: &Stylesheet,
+    rule_index: &RuleIndex,
+    parent_style: Option<&ComputedStyle>,
+    ancestors: &[AncestorSlot],
+    sibling_index: usize,
+    sibling_count: usize,
+    preceding_siblings: &[ElementIdentity],
+    viewport_width: u32,
+    interactive: &InteractiveState,
+) -> ComputedStyle {
+    compute_style_with_rules(
+        element,
+        stylesheet,
+        rule_index.candidates_for(&ElementIdentity::from(element)),
+        parent_style,
+        ancestors,
+        sibling_index,
+        sibling_count,
+        preceding_siblings,
+        viewport_width,
+        interactive,
+    )
+}
+
+fn compute_style_with_rules(
+    element: &Element,
+    stylesheet: &Stylesheet,
+    candidate_rule_indices: Vec<usize>,
     parent_style: Option<&ComputedStyle>,
     ancestors: &[AncestorSlot],
     sibling_index: usize,
@@ -1351,7 +1488,8 @@ fn compute_style(
     }
     let mut applicable: Vec<(usize, usize, Declaration)> = Vec::new();
 
-    for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
+    for rule_index in candidate_rule_indices {
+        let rule = &stylesheet.rules[rule_index];
         // Skip rules where ALL selectors are pseudo-element rules — they are handled by collect_pseudo_content
         if rule.selectors.iter().all(|sel| sel.pseudo_element.is_some()) {
             continue;
@@ -1461,6 +1599,33 @@ fn compute_style(
         .unwrap_or(style.opacity);
 
     style
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn compute_style_naive(
+    element: &Element,
+    stylesheet: &Stylesheet,
+    parent_style: Option<&ComputedStyle>,
+    ancestors: &[AncestorSlot],
+    sibling_index: usize,
+    sibling_count: usize,
+    preceding_siblings: &[ElementIdentity],
+    viewport_width: u32,
+    interactive: &InteractiveState,
+) -> ComputedStyle {
+    compute_style_with_rules(
+        element,
+        stylesheet,
+        (0..stylesheet.rules.len()).collect(),
+        parent_style,
+        ancestors,
+        sibling_index,
+        sibling_count,
+        preceding_siblings,
+        viewport_width,
+        interactive,
+    )
 }
 
 fn substitute_vars(value: &str, vars: &BTreeMap<String, String>) -> String {
@@ -2863,6 +3028,23 @@ enum SelectorMode {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl Selector {
+    fn key_bucket(&self) -> Option<RuleBucket<'_>> {
+        let key = &self.parts.last()?.simple;
+        if key.never_match {
+            return None;
+        }
+        if let Some(id) = key.id.as_deref() {
+            return Some(RuleBucket::Id(id));
+        }
+        if let Some(class) = key.classes.first().map(String::as_str) {
+            return Some(RuleBucket::Class(class));
+        }
+        if let Some(tag) = key.tag_name.as_deref() {
+            return Some(RuleBucket::Tag(tag));
+        }
+        Some(RuleBucket::Universal)
+    }
+
     fn specificity(&self) -> usize {
         self.parts.iter().map(|part| part.simple.specificity()).sum()
     }
@@ -4471,7 +4653,7 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
         // Color could be a keyword, #hex, rgb(...), etc.
         // It's usually the first token but could be combined with a function
         // Reassemble function calls that were split
-        let mut color_str = String::new();
+        let color_str;
         let mut pos_str: Option<String> = None;
 
         // Attempt: first join parts that belong to a function (rgb/rgba/hsl)
@@ -4491,7 +4673,7 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
             pos_str = Some(second_last.unwrap().clone());
             color_str = parts[..parts.len() - 2].join(" ");
         } else {
-            color_str = joined.clone();
+            color_str = joined;
         }
 
         if let Some(c) = parse_color(color_str.trim()) {
@@ -4533,9 +4715,11 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use super::{
-        AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, JustifyContent, LengthValue,
-        Position, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
+        AlignItems, Display, FlexDirection, FlexWrap, JustifyContent, LengthValue,
+        Position, RuleIndex, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
         build_styled_tree, compute_style, parse_color, parse_length, parse_stylesheet,
         split_at_top_level,
     };
@@ -4577,6 +4761,85 @@ mod tests {
                     .iter()
                     .find_map(|child| find_element_by_id(child, id))
             }
+        }
+    }
+
+    fn compare_indexed_and_naive_styles(
+        node: &Node,
+        styled: &StyledNode,
+        stylesheet: &super::Stylesheet,
+        ancestors: &[super::AncestorSlot],
+        sibling_index: usize,
+        sibling_count: usize,
+        preceding_siblings: &[super::ElementIdentity],
+        viewport_width: u32,
+        interactive: &super::InteractiveState,
+        parent_style: Option<&super::ComputedStyle>,
+        parent_all_sibling_ids: Option<Rc<[super::ElementIdentity]>>,
+    ) {
+        match (node, styled) {
+            (Node::Text(_), StyledNode::Text(_)) => {}
+            (Node::Element(element), StyledNode::Element(styled_element)) => {
+                let naive = super::compute_style_naive(
+                    element,
+                    stylesheet,
+                    parent_style,
+                    ancestors,
+                    sibling_index,
+                    sibling_count,
+                    preceding_siblings,
+                    viewport_width,
+                    interactive,
+                );
+                assert_eq!(
+                    naive,
+                    styled_element.style,
+                    "style mismatch for <{} id={:?}>",
+                    element.tag_name,
+                    element.attributes.get("id")
+                );
+
+                let all_sibling_ids: Rc<[super::ElementIdentity]> = element
+                    .children
+                    .iter()
+                    .filter_map(|c| if let Node::Element(e) = c { Some(super::ElementIdentity::from(e)) } else { None })
+                    .collect::<Vec<_>>()
+                    .into();
+                let current_slot = super::AncestorSlot {
+                    element: super::ElementIdentity::from(element),
+                    sibling_index,
+                    sibling_count,
+                    siblings: parent_all_sibling_ids.unwrap_or_else(|| Rc::from(preceding_siblings)),
+                    prec_count: sibling_index,
+                };
+                let mut next_ancestors = ancestors.to_vec();
+                next_ancestors.push(current_slot);
+
+                let mut elem_sibling_idx = 0;
+                for (child, styled_child) in element.children.iter().zip(&styled_element.children) {
+                    let (idx, count, prec_snap) = if matches!(child, Node::Element(_)) {
+                        let idx = elem_sibling_idx;
+                        elem_sibling_idx += 1;
+                        (idx, all_sibling_ids.len(), &all_sibling_ids[..idx])
+                    } else {
+                        (0, 0, &all_sibling_ids[..0])
+                    };
+                    compare_indexed_and_naive_styles(
+                        child,
+                        styled_child,
+                        stylesheet,
+                        &next_ancestors,
+                        idx,
+                        count,
+                        prec_snap,
+                        viewport_width,
+                        interactive,
+                        Some(&styled_element.style),
+                        Some(all_sibling_ids.clone()),
+                    );
+                }
+            }
+            _ => panic!("node shape mismatch"),
         }
     }
 
@@ -4736,6 +4999,65 @@ mod tests {
         assert_eq!(cell.style.width, Some(LengthValue::Percent(60)));
         assert_eq!(cell.style.height, Some(LengthValue::Pixels(40)));
         assert_eq!(cell.style.vertical_align, VerticalAlign::Middle);
+    }
+
+    #[test]
+    fn indexed_style_matches_naive_style_for_complex_selector_mix() {
+        let document = parse_document(
+            "<div id=\"root\" class=\"shell a\" data-x=\"abc\" data-y=\"prefix-mid-suffix\" title=\"hello-world\">\
+                <section id=\"sec\" class=\"panel a b\" data-x=\"abacus\" data-z=\"z1\">\
+                    <h1 id=\"title\" class=\"head a\">Title</h1>\
+                    <p id=\"p1\" class=\"a b\" data-x=\"abc\" data-y=\"prefix-mid-suffix\" data-flag>One</p>\
+                    <p id=\"p2\" class=\"b\" data-x=\"zzz\" data-y=\"nope\" title=\"hello-world\">Two</p>\
+                    <span id=\"s1\" class=\"a b c\" data-x=\"abc\" data-y=\"suffix\" data-k=\"v\">Three</span>\
+                    <div id=\"wrap\" class=\"b\">\
+                        <span id=\"s2\" class=\"a\" data-x=\"abc\" data-y=\"prefix\">Four</span>\
+                        <span id=\"s3\" class=\"c\" data-x=\"xyz\">Five</span>\
+                    </div>\
+                </section>\
+                <footer id=\"foot\" class=\"a\" data-x=\"abc\"><em id=\"em1\" class=\"b\">Six</em></footer>\
+            </div>",
+        );
+        let stylesheet = parse_stylesheet(
+            r#"
+                * { margin: 1px; }
+                [data-flag] { display: none; }
+                [data-x] { color: #111111; }
+                [data-x^=ab] { color: #222222; }
+                [data-y$=suffix] { background-color: #333333; }
+                [data-y*=mid] { font-size: 18px; }
+                [title=hello-world] { white-space: pre; }
+                #root { margin: 4px; }
+                div.shell { margin-top: 7px; }
+                section.panel > h1 { color: #ff0000; }
+                section.panel p + p { color: #00ff00; }
+                section.panel p ~ span { background-color: #0000ff; }
+                section.panel div > span { font-size: 20px; }
+                div section span.a.b { color: #aa00aa; }
+                div section span.a.b:not(.c) { margin-left: 9px; }
+                div section :nth-child(2) { margin-right: 11px; }
+                div section :first-child { padding: 2px; }
+                div section :last-child { padding: 3px; }
+                div section span, p::before, span::after { border-width: 5px; }
+                p::before { content: "x"; }
+                span::after { content: attr(data-x); }
+                em { color: #0f0f0f; }
+            "#,
+        );
+        let optimized = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        compare_indexed_and_naive_styles(
+            &document,
+            &optimized,
+            &stylesheet,
+            &[],
+            0,
+            0,
+            &[],
+            1280,
+            &super::InteractiveState::default(),
+            None,
+            None,
+        );
     }
 
     fn find_second_paragraph<'a>(node: &'a StyledNode) -> Option<&'a super::StyledElement> {
@@ -5145,7 +5467,8 @@ mod tests {
     fn test_position_relative_parsed() {
         let ss = parse_stylesheet("div { position: relative; top: 10px; left: 20px; }");
         let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
-        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
+        let rule_index = RuleIndex::build(&ss.rules);
+        let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
         assert_eq!(style.position, Position::Relative);
         assert_eq!(style.top, Some(10));
         assert_eq!(style.left, Some(20));
@@ -5155,7 +5478,8 @@ mod tests {
     fn test_position_absolute_parsed() {
         let ss = parse_stylesheet("div { position: absolute; top: 0px; }");
         let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
-        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
+        let rule_index = RuleIndex::build(&ss.rules);
+        let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
         assert_eq!(style.position, Position::Absolute);
     }
 
@@ -5163,7 +5487,8 @@ mod tests {
     fn test_flex_display_parsed() {
         let ss = parse_stylesheet("div { display: flex; flex-direction: column; gap: 8px; }");
         let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
-        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
+        let rule_index = RuleIndex::build(&ss.rules);
+        let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
         assert_eq!(style.display, Display::Flex);
         assert_eq!(style.flex_direction, FlexDirection::Column);
         assert_eq!(style.gap, 8);
@@ -5173,7 +5498,8 @@ mod tests {
     fn test_justify_content_parsed() {
         let ss = parse_stylesheet("div { display: flex; justify-content: space-between; align-items: center; }");
         let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
-        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
+        let rule_index = RuleIndex::build(&ss.rules);
+        let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
         assert_eq!(style.justify_content, JustifyContent::SpaceBetween);
         assert_eq!(style.align_items, AlignItems::Center);
     }
@@ -5182,7 +5508,8 @@ mod tests {
     fn test_z_index_parsed() {
         let ss = parse_stylesheet("div { position: absolute; z-index: 10; }");
         let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
-        let style = compute_style(&el, &ss, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
+        let rule_index = RuleIndex::build(&ss.rules);
+        let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
         assert_eq!(style.z_index, Some(10));
     }
 
