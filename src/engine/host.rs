@@ -398,6 +398,28 @@ pub enum DomMutation {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum DomStructuralChange {
+    SetAttribute {
+        node: NodeId,
+        name: String,
+        value: String,
+    },
+    RemoveAttribute {
+        node: NodeId,
+        name: String,
+    },
+    SetText {
+        node: NodeId,
+        value: String,
+    },
+    ChildList {
+        parent: NodeId,
+        added: Vec<NodeId>,
+        removed: Vec<NodeId>,
+    },
+}
+
 /// Insertion point for `insertAdjacentHTML` (relative to the target node).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdjacentPosition {

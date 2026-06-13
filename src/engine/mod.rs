@@ -28,7 +28,7 @@ pub use heap::{
 pub use host::{
     AdjacentPosition,
     ConsoleLevel, ConsoleMessage, DomEventRequest, DomEventResult, DomMutation, DomMutationResult,
-    DomRead, DomReadResult, DomRect, EventTarget, FetchBody, FetchMode, FetchRequest,
+    DomRead, DomReadResult, DomRect, DomStructuralChange, EventTarget, FetchBody, FetchMode, FetchRequest,
     FetchResponse, FrameId,
     HistoryAction, HistoryOutcome, Host, HostData, HostError, HostEvent, HostResult,
     HostTimeSnapshot, HttpMethod, LocationSnapshot, NavigationAction, NavigationOutcome,

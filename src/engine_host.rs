@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use tobira_engine::engine::{
     AdjacentPosition, Compiler, ConsoleMessage, DomEventInit, DomEventRequest, DomEventResult,
-    DomMutation, DomMutationResult,
+    DomMutation, DomMutationResult, DomStructuralChange,
     DomRead, DomReadResult, DomRect, FetchBody, FetchRequest, FetchResponse, FrameId, Heap, HistoryAction,
     HistoryOutcome,
     Host, HostData, HostError, HostEvent, HostResult, HostTimeSnapshot, LocationSnapshot,
@@ -161,6 +161,7 @@ pub struct BrowserHost {
     /// viewport coordinates. Stale after a DOM mutation until the next layout
     /// feed (same as a real browser between reflows).
     geometry: HashMap<usize, DomRect>,
+    structural_changes: Vec<DomStructuralChange>,
 }
 
 impl BrowserHost {
@@ -189,6 +190,7 @@ impl BrowserHost {
             slot_snapshots: HashMap::new(),
             observers: Vec::new(),
             geometry: HashMap::new(),
+            structural_changes: Vec::new(),
         };
         host.document = host.push(DomNode::document());
         // The parsed root is an "document" element; graft its children under
@@ -294,6 +296,19 @@ impl BrowserHost {
         name: &str,
         old_value: Option<String>,
     ) {
+        let node_id = NodeId(target_idx as u32);
+        if let Some(value) = self.nodes[target_idx].attrs.get(name).cloned() {
+            self.structural_changes.push(DomStructuralChange::SetAttribute {
+                node: node_id,
+                name: name.to_string(),
+                value,
+            });
+        } else {
+            self.structural_changes.push(DomStructuralChange::RemoveAttribute {
+                node: node_id,
+                name: name.to_string(),
+            });
+        }
         if self.observers.is_empty() {
             return;
         }
@@ -348,6 +363,12 @@ impl BrowserHost {
     /// Record a characterData mutation against every observer watching
     /// `target_idx` (directly or, with `subtree`, as an ancestor).
     fn record_characterdata_mutation(&mut self, target_idx: usize, old_value: &str) {
+        if let DomNodeKind::Text(text) = &self.nodes[target_idx].kind {
+            self.structural_changes.push(DomStructuralChange::SetText {
+                node: NodeId(target_idx as u32),
+                value: text.clone(),
+            });
+        }
         if self.observers.is_empty() {
             return;
         }
@@ -402,7 +423,15 @@ impl BrowserHost {
     /// Record a childList mutation (added/removed nodes) against every observer
     /// watching `parent_idx` (directly or, with `subtree`, as an ancestor).
     fn record_childlist_mutation(&mut self, parent_idx: usize, added: &[usize], removed: &[usize]) {
-        if self.observers.is_empty() || (added.is_empty() && removed.is_empty()) {
+        if added.is_empty() && removed.is_empty() {
+            return;
+        }
+        self.structural_changes.push(DomStructuralChange::ChildList {
+            parent: NodeId(parent_idx as u32),
+            added: added.iter().map(|i| NodeId(*i as u32)).collect(),
+            removed: removed.iter().map(|i| NodeId(*i as u32)).collect(),
+        });
+        if self.observers.is_empty() {
             return;
         }
         let mut hits: Vec<usize> = Vec::new();
@@ -507,6 +536,10 @@ impl BrowserHost {
     /// Current vertical scroll offset (`window.scrollY`).
     pub fn scroll_y(&self) -> u32 {
         self.scroll_y.max(0.0) as u32
+    }
+
+    pub fn take_structural_changes(&mut self) -> Vec<DomStructuralChange> {
+        std::mem::take(&mut self.structural_changes)
     }
 
     /// Update the window scroll offset (driven by the browser's scroll input).
@@ -2238,6 +2271,7 @@ pub struct EngineRunResult {
     /// Whether the engine still has pending event-loop work (timers / RAF /
     /// queued tasks) after this operation — the host should keep pumping.
     pub has_pending_work: bool,
+    pub structural_changes: Vec<DomStructuralChange>,
 }
 
 /// Parse `html`, run its inline `<script>`s on the self-built engine against a
@@ -2415,6 +2449,7 @@ impl EngineSession {
             scroll_y: host.scroll_y(),
             default_prevented: false,
             has_pending_work: pending,
+            structural_changes: host.take_structural_changes(),
         }
     }
 
@@ -2548,6 +2583,14 @@ impl EngineSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_structural_changes(html: &str, script: &str) -> Vec<DomStructuralChange> {
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
+        let result = session.eval_for_test(script);
+        assert!(result.error.is_none(), "script error: {:?}", result.error);
+        result.structural_changes
+    }
 
     /// DOM-heavy probe: runs framework-grade DOM snippets through a real
     /// `BrowserHost` (the engine's production host) and reports which fail. Each
@@ -2787,6 +2830,57 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.console_logs, vec!["hello 3".to_string()]);
+    }
+
+    #[test]
+    fn structural_changes_record_without_observers() {
+        let changes = run_structural_changes(
+            "<html><body><div id=\"box\"></div><input id=\"field\" value=\"a\"><p id=\"p\">x</p><div id=\"wrap\">y</div><script>/* noop */</script></body></html>",
+            r#"
+                const box = document.getElementById('box');
+                const field = document.getElementById('field');
+                const p = document.getElementById('p');
+                const wrap = document.getElementById('wrap');
+                box.setAttribute('data-x', '1');
+                field.removeAttribute('value');
+                const child = document.createElement('div');
+                box.appendChild(child);
+                child.remove();
+                p.textContent = 'hello';
+                const text = wrap.firstChild;
+                text.data = 'z';
+            "#,
+        );
+
+        assert_eq!(changes.len(), 6);
+        assert!(matches!(
+            &changes[0],
+            DomStructuralChange::SetAttribute { name, value, .. }
+                if name == "data-x" && value == "1"
+        ));
+        assert!(matches!(
+            &changes[1],
+            DomStructuralChange::RemoveAttribute { name, .. } if name == "value"
+        ));
+        assert!(matches!(
+            &changes[2],
+            DomStructuralChange::ChildList { added, removed, .. }
+                if added.len() == 1 && removed.is_empty()
+        ));
+        assert!(matches!(
+            &changes[3],
+            DomStructuralChange::ChildList { added, removed, .. }
+                if added.is_empty() && removed.len() == 1
+        ));
+        assert!(matches!(
+            &changes[4],
+            DomStructuralChange::ChildList { added, removed, .. }
+                if added.len() == 1 && removed.len() == 1
+        ));
+        assert!(matches!(
+            &changes[5],
+            DomStructuralChange::SetText { value, .. } if value == "z"
+        ));
     }
 
     #[test]

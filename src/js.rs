@@ -2,10 +2,11 @@ use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 use crate::url::Url;
+use tobira_engine::engine::DomStructuralChange;
 
 const JS_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProcessedScriptHtml {
     pub html: String,
     pub title_override: Option<String>,
@@ -18,6 +19,7 @@ pub struct ProcessedScriptHtml {
     /// `setInterval` / `setTimeout(fn, delay)` / animation loops fire over time.
     /// Always false for the boa backend (it drains synchronously).
     pub has_pending_work: bool,
+    pub structural_changes: Vec<DomStructuralChange>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,7 +46,7 @@ pub struct DomEventRequest {
     pub meta_key: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DomEventDispatchResult {
     pub snapshot: ProcessedScriptHtml,
     pub default_prevented: bool,
@@ -232,6 +234,7 @@ fn engine_result_to_processed(result: crate::engine_host::EngineRunResult) -> Pr
         soft_navigation_target: result.soft_navigation_target,
         scroll_y: result.scroll_y,
         has_pending_work: result.has_pending_work,
+        structural_changes: result.structural_changes,
     }
 }
 
@@ -384,6 +387,7 @@ fn process_document_scripts_error(html: String, message: String) -> ProcessedScr
         soft_navigation_target: None,
         scroll_y: 0,
         has_pending_work: false,
+        structural_changes: Vec::new(),
     }
 }
 

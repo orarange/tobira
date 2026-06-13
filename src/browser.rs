@@ -3809,6 +3809,7 @@ mod tests {
             soft_navigation_target: None,
             scroll_y: 0,
             has_pending_work: false,
+            structural_changes: Vec::new(),
         };
 
         page.apply_script_snapshot(snapshot);
@@ -3870,6 +3871,7 @@ mod tests {
             soft_navigation_target: None,
             scroll_y: 320,
             has_pending_work: false,
+            structural_changes: Vec::new(),
         };
         page.apply_script_snapshot(snapshot);
 
