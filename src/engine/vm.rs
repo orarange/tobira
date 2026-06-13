@@ -7854,22 +7854,25 @@ impl Vm {
                 let values = self.for_of_values(&iterable)?;
                 self.promise_any(values)
             }
-            BuiltinId::PromiseProtoThen => {
-                let promise = self.require_promise_this(&this_value, "Promise.prototype.then")?;
-                let on_fulfilled = self.normalize_handler_value(args.first());
-                let on_rejected = self.normalize_handler_value(args.get(1));
+            BuiltinId::PromiseProtoThen | BuiltinId::PromiseProtoCatch => {
+                let is_catch = matches!(builtin, BuiltinId::PromiseProtoCatch);
+                let context = if is_catch {
+                    "Promise.prototype.catch"
+                } else {
+                    "Promise.prototype.then"
+                };
+                let promise = self.require_promise_this(&this_value, context)?;
+                let (on_fulfilled, on_rejected) = if is_catch {
+                    (None, self.normalize_handler_value(args.first()))
+                } else {
+                    (
+                        self.normalize_handler_value(args.first()),
+                        self.normalize_handler_value(args.get(1)),
+                    )
+                };
                 Ok(Value::Object(self.promise_then_internal(
                     promise,
                     on_fulfilled,
-                    on_rejected,
-                )?))
-            }
-            BuiltinId::PromiseProtoCatch => {
-                let promise = self.require_promise_this(&this_value, "Promise.prototype.catch")?;
-                let on_rejected = self.normalize_handler_value(args.first());
-                Ok(Value::Object(self.promise_then_internal(
-                    promise,
-                    None,
                     on_rejected,
                 )?))
             }
@@ -10241,15 +10244,7 @@ impl Vm {
             }
             BuiltinId::DomDocQuerySelectorAll | BuiltinId::DomNodeQuerySelectorAll => {
                 let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let root = self.this_node_id(&this_value);
-                let res = self.host.read_dom(DomRead::QuerySelectorAll { root, selectors: sel });
-                match res {
-                    Ok(DomReadResult::Nodes(ids)) => {
-                        let items: Vec<Value> = ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
-                        self.make_array_from_values(items)
-                    }
-                    _ => self.make_array_from_values(vec![]),
-                }
+                self.query_all_to_array(self.this_node_id(&this_value), sel)
             }
             BuiltinId::DomDocGetElementById => {
                 let id_str = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -10263,27 +10258,11 @@ impl Vm {
             BuiltinId::DomDocGetElementsByClassName => {
                 let cls = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let sel = cls.split_whitespace().map(|c| format!(".{c}")).collect::<Vec<_>>().join("");
-                let root = self.this_node_id(&this_value);
-                let res = self.host.read_dom(DomRead::QuerySelectorAll { root, selectors: sel });
-                match res {
-                    Ok(DomReadResult::Nodes(ids)) => {
-                        let items: Vec<Value> = ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
-                        self.make_array_from_values(items)
-                    }
-                    _ => self.make_array_from_values(vec![]),
-                }
+                self.query_all_to_array(self.this_node_id(&this_value), sel)
             }
             BuiltinId::DomDocGetElementsByTagName => {
                 let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let root = self.this_node_id(&this_value);
-                let res = self.host.read_dom(DomRead::QuerySelectorAll { root, selectors: tag });
-                match res {
-                    Ok(DomReadResult::Nodes(ids)) => {
-                        let items: Vec<Value> = ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
-                        self.make_array_from_values(items)
-                    }
-                    _ => self.make_array_from_values(vec![]),
-                }
+                self.query_all_to_array(self.this_node_id(&this_value), tag)
             }
             BuiltinId::DomDocCreateElement => {
                 let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -12121,6 +12100,37 @@ impl Vm {
         self.node_id_from_host_val(this_value).unwrap_or(NodeId(0))
     }
 
+    fn dom_child(&mut self, node_id: NodeId, elements_only: bool, last: bool) -> Value {
+        match self.host.read_dom(DomRead::Children {
+            node: node_id,
+            elements_only,
+        }) {
+            Ok(DomReadResult::Nodes(ids)) => {
+                let target = if last { ids.last() } else { ids.first() };
+                target
+                    .map(|&id| self.make_dom_node_value(id))
+                    .unwrap_or(Value::Null)
+            }
+            _ => Value::Null,
+        }
+    }
+
+    fn dom_sibling(
+        &mut self,
+        node_id: NodeId,
+        direction: SiblingDirection,
+        elements_only: bool,
+    ) -> Value {
+        match self.host.read_dom(DomRead::Sibling {
+            node: node_id,
+            direction,
+            elements_only,
+        }) {
+            Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id),
+            _ => Value::Null,
+        }
+    }
+
     fn get_dom_attribute(&self, node_id: NodeId, name: &str) -> String {
         match self.host.read_dom(DomRead::Attribute {
             node: node_id,
@@ -12135,6 +12145,16 @@ impl Vm {
         match self.host.read_dom(DomRead::NodeName { node: node_id }) {
             Ok(DomReadResult::String(s)) => s,
             _ => String::new(),
+        }
+    }
+
+    fn query_all_to_array(&mut self, root: NodeId, selectors: String) -> Result<Value, VmError> {
+        match self.host.read_dom(DomRead::QuerySelectorAll { root, selectors }) {
+            Ok(DomReadResult::Nodes(ids)) => {
+                let items: Vec<Value> = ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
+                self.make_array_from_values(items)
+            }
+            _ => self.make_array_from_values(vec![]),
         }
     }
 
@@ -13066,38 +13086,14 @@ impl Vm {
                 let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: true });
                 Ok(Value::Number(match res { Ok(DomReadResult::Nodes(ids)) => ids.len() as f64, _ => 0.0 }))
             }
-            "firstChild" => {
-                let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: false });
-                Ok(match res { Ok(DomReadResult::Nodes(ids)) => ids.first().map(|&id| self.make_dom_node_value(id)).unwrap_or(Value::Null), _ => Value::Null })
-            }
-            "lastChild" => {
-                let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: false });
-                Ok(match res { Ok(DomReadResult::Nodes(ids)) => ids.last().map(|&id| self.make_dom_node_value(id)).unwrap_or(Value::Null), _ => Value::Null })
-            }
-            "firstElementChild" => {
-                let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: true });
-                Ok(match res { Ok(DomReadResult::Nodes(ids)) => ids.first().map(|&id| self.make_dom_node_value(id)).unwrap_or(Value::Null), _ => Value::Null })
-            }
-            "lastElementChild" => {
-                let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: true });
-                Ok(match res { Ok(DomReadResult::Nodes(ids)) => ids.last().map(|&id| self.make_dom_node_value(id)).unwrap_or(Value::Null), _ => Value::Null })
-            }
-            "nextSibling" => {
-                let res = self.host.read_dom(DomRead::Sibling { node: node_id, direction: SiblingDirection::Next, elements_only: false });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
-            }
-            "previousSibling" => {
-                let res = self.host.read_dom(DomRead::Sibling { node: node_id, direction: SiblingDirection::Previous, elements_only: false });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
-            }
-            "nextElementSibling" => {
-                let res = self.host.read_dom(DomRead::Sibling { node: node_id, direction: SiblingDirection::Next, elements_only: true });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
-            }
-            "previousElementSibling" => {
-                let res = self.host.read_dom(DomRead::Sibling { node: node_id, direction: SiblingDirection::Previous, elements_only: true });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
-            }
+            "firstChild" => Ok(self.dom_child(node_id, false, false)),
+            "lastChild" => Ok(self.dom_child(node_id, false, true)),
+            "firstElementChild" => Ok(self.dom_child(node_id, true, false)),
+            "lastElementChild" => Ok(self.dom_child(node_id, true, true)),
+            "nextSibling" => Ok(self.dom_sibling(node_id, SiblingDirection::Next, false)),
+            "previousSibling" => Ok(self.dom_sibling(node_id, SiblingDirection::Previous, false)),
+            "nextElementSibling" => Ok(self.dom_sibling(node_id, SiblingDirection::Next, true)),
+            "previousElementSibling" => Ok(self.dom_sibling(node_id, SiblingDirection::Previous, true)),
             "value" => {
                 let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "value".to_string() });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
