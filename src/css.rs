@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::html::{Element, Node};
@@ -1154,6 +1156,54 @@ pub fn build_styled_tree(
     )
 }
 
+#[cfg(test)]
+pub fn build_styled_tree_incremental(
+    document: &Node,
+    stylesheet: &Stylesheet,
+    viewport_width: u32,
+    interactive: &InteractiveState,
+    old_styled: &StyledNode,
+    old_node_order: &[u32],
+    new_node_order: &[u32],
+    dirty_roots: &HashSet<u32>,
+) -> Option<StyledNode> {
+    if new_node_order.is_empty() {
+        return None;
+    }
+    if dirty_roots.contains(&new_node_order[0]) {
+        return None;
+    }
+
+    let mut old_map = HashMap::new();
+    let mut old_iter = old_node_order.iter();
+    collect_styled_node_map(old_styled, &mut old_iter, &mut old_map)?;
+    if old_iter.next().is_some() {
+        return None;
+    }
+
+    let mut new_iter = new_node_order.iter();
+    let result = build_node_incremental(
+        document,
+        stylesheet,
+        &RuleIndex::build(&stylesheet.rules),
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        None,
+        viewport_width,
+        interactive,
+        &mut new_iter,
+        &old_map,
+        dirty_roots,
+    )?;
+    if new_iter.next().is_some() {
+        return None;
+    }
+    Some(result)
+}
+
 fn build_node(
     node: &Node,
     stylesheet: &Stylesheet,
@@ -1300,6 +1350,198 @@ fn build_node(
                 style,
                 children,
             })
+        }
+    }
+}
+
+#[cfg(test)]
+fn collect_styled_node_map<'a>(
+    node: &'a StyledNode,
+    node_order: &mut std::slice::Iter<'_, u32>,
+    map: &mut HashMap<u32, &'a StyledNode>,
+) -> Option<()> {
+    match node {
+        StyledNode::Text(_) => Some(()),
+        StyledNode::Element(element) => {
+            let id = *node_order.next()?;
+            map.insert(id, node);
+            for child in &element.children {
+                collect_styled_node_map(child, node_order, map)?;
+            }
+            Some(())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+fn build_node_incremental(
+    node: &Node,
+    stylesheet: &Stylesheet,
+    rule_index: &RuleIndex,
+    parent_style: Option<&ComputedStyle>,
+    ancestors: &[AncestorSlot],
+    sibling_index: usize,
+    sibling_count: usize,
+    preceding_siblings: &[ElementIdentity],
+    parent_all_sibling_ids: Option<Rc<[ElementIdentity]>>,
+    viewport_width: u32,
+    interactive: &InteractiveState,
+    new_node_order: &mut std::slice::Iter<'_, u32>,
+    old_map: &HashMap<u32, &StyledNode>,
+    dirty_roots: &HashSet<u32>,
+) -> Option<StyledNode> {
+    match node {
+        Node::Text(text) => {
+            let mut style = parent_style
+                .cloned()
+                .unwrap_or_else(|| ComputedStyle::for_element("body", None));
+            if let Some(parent) = parent_style {
+                let parent_is_block = !matches!(parent.display, Display::Inline);
+                if parent.opacity < 255 && parent_is_block {
+                    style.effective_opacity = 255;
+                }
+            }
+            Some(StyledNode::Text(StyledText {
+                text: text.clone(),
+                style,
+            }))
+        }
+        Node::Element(element) => {
+            let mut lookahead = new_node_order.clone();
+            let contains_dirty = subtree_contains_dirty(node, &mut lookahead, dirty_roots)?;
+            let id = *new_node_order.next()?;
+            let under_dirty = dirty_roots.contains(&id)
+                || ancestors
+                    .iter()
+                    .any(|ancestor| ancestor.element.node_id.is_some_and(|ancestor_id| dirty_roots.contains(&(ancestor_id as u32))));
+            let reuse = !under_dirty && !contains_dirty && old_map.contains_key(&id);
+            if reuse {
+                return old_map.get(&id).cloned().cloned();
+            }
+
+            let style = compute_style(
+                element,
+                stylesheet,
+                rule_index,
+                parent_style,
+                ancestors,
+                sibling_index,
+                sibling_count,
+                preceding_siblings,
+                viewport_width,
+                interactive,
+            );
+            let all_sibling_ids: Rc<[ElementIdentity]> = element
+                .children
+                .iter()
+                .filter_map(|c| if let Node::Element(e) = c { Some(ElementIdentity::from(e)) } else { None })
+                .collect::<Vec<_>>()
+                .into();
+            let child_element_count = all_sibling_ids.len();
+            let current_slot = AncestorSlot {
+                element: ElementIdentity::from(element),
+                sibling_index,
+                sibling_count,
+                siblings: parent_all_sibling_ids.unwrap_or_else(|| Rc::from(preceding_siblings)),
+                prec_count: sibling_index,
+            };
+            let mut next_ancestors = ancestors.to_vec();
+            next_ancestors.push(current_slot);
+
+            let mut elem_sibling_idx = 0;
+            let mut children = Vec::with_capacity(element.children.len());
+            for child in &element.children {
+                let (idx, count, prec_snap) = if matches!(child, Node::Element(_)) {
+                    let idx = elem_sibling_idx;
+                    elem_sibling_idx += 1;
+                    (idx, child_element_count, &all_sibling_ids[..idx])
+                } else {
+                    (0, 0, &all_sibling_ids[..0])
+                };
+                children.push(build_node_incremental(
+                    child,
+                    stylesheet,
+                    rule_index,
+                    Some(&style),
+                    &next_ancestors,
+                    idx,
+                    count,
+                    prec_snap,
+                    Some(all_sibling_ids.clone()),
+                    viewport_width,
+                    interactive,
+                    new_node_order,
+                    old_map,
+                    dirty_roots,
+                )?);
+            }
+
+            let mut children = children;
+            if let Some((before_text, pseudo_style)) = collect_pseudo_content(
+                element,
+                stylesheet,
+                ancestors,
+                sibling_index,
+                sibling_count,
+                preceding_siblings,
+                viewport_width,
+                &PseudoElement::Before,
+                &style,
+                interactive,
+            ) {
+                children.insert(0, StyledNode::Text(StyledText {
+                    text: before_text,
+                    style: pseudo_style,
+                }));
+            }
+            if let Some((after_text, pseudo_style)) = collect_pseudo_content(
+                element,
+                stylesheet,
+                ancestors,
+                sibling_index,
+                sibling_count,
+                preceding_siblings,
+                viewport_width,
+                &PseudoElement::After,
+                &style,
+                interactive,
+            ) {
+                children.push(StyledNode::Text(StyledText {
+                    text: after_text,
+                    style: pseudo_style,
+                }));
+            }
+
+            Some(StyledNode::Element(StyledElement {
+                tag_name: element.tag_name.clone(),
+                attributes: element.attributes.clone(),
+                style,
+                children,
+            }))
+        }
+    }
+}
+
+#[cfg(test)]
+fn subtree_contains_dirty(
+    node: &Node,
+    node_order: &mut std::slice::Iter<'_, u32>,
+    dirty_roots: &HashSet<u32>,
+) -> Option<bool> {
+    match node {
+        Node::Text(_) => Some(false),
+        Node::Element(element) => {
+            let id = *node_order.next()?;
+            if dirty_roots.contains(&id) {
+                return Some(true);
+            }
+            for child in &element.children {
+                if subtree_contains_dirty(child, node_order, dirty_roots)? {
+                    return Some(true);
+                }
+            }
+            Some(false)
         }
     }
 }

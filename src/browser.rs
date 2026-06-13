@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -470,6 +472,59 @@ pub(crate) fn annotate_node_ids(document: &mut Node) {
 
     let mut next_id = 1;
     walk(document, &mut next_id);
+}
+
+#[cfg(test)]
+pub fn compute_dirty_roots(
+    changes: &[tobira_engine::engine::DomStructuralChange],
+    new_doc: &Node,
+    new_node_order: &[u32],
+) -> Option<HashSet<u32>> {
+    if new_node_order.is_empty() {
+        return None;
+    }
+    let mut parent_by_id = HashMap::new();
+    build_parent_map(new_doc, &mut new_node_order.iter(), &mut parent_by_id, None)?;
+    let mut dirty_roots = HashSet::new();
+    for change in changes {
+        match change {
+            tobira_engine::engine::DomStructuralChange::ChildList { parent, .. } => {
+                dirty_roots.insert(parent.0);
+            }
+            tobira_engine::engine::DomStructuralChange::SetAttribute { node, .. }
+            | tobira_engine::engine::DomStructuralChange::RemoveAttribute { node, .. } => {
+                let parent = *parent_by_id.get(&node.0)?;
+                dirty_roots.insert(parent);
+            }
+            tobira_engine::engine::DomStructuralChange::SetText { .. } => return None,
+        }
+    }
+    if dirty_roots.contains(&new_node_order[0]) {
+        return None;
+    }
+    Some(dirty_roots)
+}
+
+#[cfg(test)]
+fn build_parent_map(
+    node: &Node,
+    node_order: &mut std::slice::Iter<'_, u32>,
+    parent_by_id: &mut HashMap<u32, u32>,
+    parent_id: Option<u32>,
+) -> Option<()> {
+    match node {
+        Node::Text(_) => Some(()),
+        Node::Element(element) => {
+            let id = *node_order.next()?;
+            if let Some(parent_id) = parent_id {
+                parent_by_id.insert(id, parent_id);
+            }
+            for child in &element.children {
+                build_parent_map(child, node_order, parent_by_id, Some(id))?;
+            }
+            Some(())
+        }
+    }
 }
 
 fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<Option<Node>> {

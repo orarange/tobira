@@ -3292,6 +3292,187 @@ mod tests {
         assert_eq!(snap.html.matches("<li>hit</li>").count(), 2);
     }
 
+    fn incremental_restyle_matches_full(
+        initial_html: &str,
+        stylesheet: &str,
+        trigger: impl FnOnce(&mut EngineSession, usize) -> EngineRunResult,
+    ) {
+        use crate::browser::{annotate_node_ids, compute_dirty_roots};
+        use crate::css::{
+            InteractiveState, build_styled_tree, build_styled_tree_incremental, parse_stylesheet,
+        };
+        use crate::html::parse_document;
+
+        let stylesheet = parse_stylesheet(stylesheet);
+        let (mut session, initial) = EngineSession::start(initial_html, "http://localhost/");
+        assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
+
+        let mut old_doc = parse_document(&initial.html);
+        annotate_node_ids(&mut old_doc);
+        let go_id = find_node_id_by_attr(&old_doc, "id", "go").expect("go node id");
+        let old_styled = build_styled_tree(
+            &old_doc,
+            &stylesheet,
+            1280,
+            &InteractiveState::default(),
+        );
+        let old_node_order: Vec<u32> = initial.node_order.iter().map(|id| id.0 as u32).collect();
+
+        let result = trigger(&mut session, go_id);
+        assert!(result.error.is_none(), "result error: {:?}", result.error);
+
+        let mut new_doc = parse_document(&result.html);
+        annotate_node_ids(&mut new_doc);
+        let new_node_order: Vec<u32> = result.node_order.iter().map(|id| id.0 as u32).collect();
+        let dirty_roots = compute_dirty_roots(&result.structural_changes, &new_doc, &new_node_order)
+            .expect("dirty roots");
+        let incremental = build_styled_tree_incremental(
+            &new_doc,
+            &stylesheet,
+            1280,
+            &InteractiveState::default(),
+            &old_styled,
+            &old_node_order,
+            &new_node_order,
+            &dirty_roots,
+        )
+        .expect("incremental style");
+        let full = build_styled_tree(
+            &new_doc,
+            &stylesheet,
+            1280,
+            &InteractiveState::default(),
+        );
+        assert_eq!(incremental, full);
+    }
+
+    #[test]
+    fn incremental_restyle_append_child_matches_full() {
+        incremental_restyle_matches_full(
+            r#"<html><body><ul id="list"><li class="a">one</li><li class="b">two</li></ul><button id="go">go</button><script>document.getElementById('go').addEventListener('click', () => { const li = document.createElement('li'); li.className = 'x'; li.textContent = 'three'; document.getElementById('list').appendChild(li); });</script></body></html>"#,
+            r#"
+                li:nth-child(2n) { color: rgb(1, 2, 3); }
+                .a + .b { color: rgb(4, 5, 6); }
+                .a ~ .x { color: rgb(7, 8, 9); }
+                .x { font-weight: bold; }
+            "#,
+            |session, go_id| session.dispatch_event(go_id, "click", &DomEventInit::default()),
+        );
+    }
+
+    #[test]
+    fn incremental_restyle_insert_before_matches_full() {
+        incremental_restyle_matches_full(
+            r#"<html><body><ul id="list"><li class="a">one</li><li class="b">two</li><li class="c">three</li></ul><button id="go">go</button><script>document.getElementById('go').addEventListener('click', () => { const li = document.createElement('li'); li.className = 'x'; li.textContent = 'inserted'; document.getElementById('list').insertBefore(li, document.getElementById('list').children[1]); });</script></body></html>"#,
+            r#"
+                li:nth-child(2n) { color: rgb(1, 2, 3); }
+                .a + .b { color: rgb(4, 5, 6); }
+                .a ~ .x { color: rgb(7, 8, 9); }
+                .x:not(.skip) { font-style: italic; }
+            "#,
+            |session, go_id| session.dispatch_event(go_id, "click", &DomEventInit::default()),
+        );
+    }
+
+    #[test]
+    fn incremental_restyle_remove_child_matches_full() {
+        incremental_restyle_matches_full(
+            r#"<html><body><ul id="list"><li class="a">one</li><li class="b">two</li><li class="c">three</li></ul><button id="go">go</button><script>document.getElementById('go').addEventListener('click', () => { const list = document.getElementById('list'); list.removeChild(list.children[1]); });</script></body></html>"#,
+            r#"
+                li:nth-child(2n) { color: rgb(1, 2, 3); }
+                .a + .c { color: rgb(4, 5, 6); }
+                .a ~ .c { color: rgb(7, 8, 9); }
+            "#,
+            |session, go_id| session.dispatch_event(go_id, "click", &DomEventInit::default()),
+        );
+    }
+
+    #[test]
+    fn incremental_restyle_attribute_change_matches_full() {
+        incremental_restyle_matches_full(
+            r#"<html><body><div id="wrap"><div id="target" class="old"><span class="d">x</span></div><p class="y">y</p></div><button id="go">go</button><script>document.getElementById('go').addEventListener('click', () => { const t = document.getElementById('target'); t.className = 'new'; });</script></body></html>"#,
+            r#"
+                .new + .y { color: rgb(1, 2, 3); }
+                .new ~ .y { font-weight: bold; }
+                .new .d { text-transform: uppercase; }
+                [class~="new"] { background: rgb(4, 5, 6); }
+            "#,
+            |session, go_id| session.dispatch_event(go_id, "click", &DomEventInit::default()),
+        );
+    }
+
+    #[test]
+    fn incremental_restyle_remove_attribute_matches_full() {
+        incremental_restyle_matches_full(
+            r#"<html><body><div id="wrap"><div id="target" class="new"><span class="d">x</span></div><p class="y">y</p></div><button id="go">go</button><script>document.getElementById('go').addEventListener('click', () => { const t = document.getElementById('target'); t.removeAttribute('class'); });</script></body></html>"#,
+            r#"
+                .new + .y { color: rgb(1, 2, 3); }
+                .new ~ .y { font-weight: bold; }
+                .new .d { text-transform: uppercase; }
+                [class] { background: rgb(4, 5, 6); }
+            "#,
+            |session, go_id| session.dispatch_event(go_id, "click", &DomEventInit::default()),
+        );
+    }
+
+    #[test]
+    fn incremental_restyle_deep_nested_change_matches_full() {
+        incremental_restyle_matches_full(
+            r#"<html><body><section id="outer"><div class="a"><div class="b"><div id="target" class="old"><span class="d">deep</span></div></div></div><aside class="z">z</aside></section><button id="go">go</button><script>document.getElementById('go').addEventListener('click', () => { document.getElementById('target').className = 'new'; });</script></body></html>"#,
+            r#"
+                .new .d { color: rgb(1, 2, 3); }
+                .a .b .new { font-weight: bold; }
+                .new ~ .z { background: rgb(4, 5, 6); }
+                section :not(.missing) { border-width: 1px; }
+            "#,
+            |session, go_id| session.dispatch_event(go_id, "click", &DomEventInit::default()),
+        );
+    }
+
+    #[test]
+    fn incremental_restyle_multiple_changes_matches_full() {
+        incremental_restyle_matches_full(
+            r#"<html><body><ul id="list"><li class="a">one</li><li class="b">two</li><li class="c">three</li></ul><button id="go">go</button><script>document.getElementById('go').addEventListener('click', () => { const list = document.getElementById('list'); const li = document.createElement('li'); li.className = 'x'; li.textContent = 'new'; list.insertBefore(li, list.children[1]); list.removeChild(list.lastElementChild); });</script></body></html>"#,
+            r#"
+                li:nth-child(2n) { color: rgb(1, 2, 3); }
+                .a + .x { color: rgb(4, 5, 6); }
+                .x ~ .c { font-weight: bold; }
+                .x:not(.skip) { background: rgb(7, 8, 9); }
+            "#,
+            |session, go_id| session.dispatch_event(go_id, "click", &DomEventInit::default()),
+        );
+    }
+
+    #[test]
+    fn incremental_restyle_falls_back_for_text_change() {
+        use crate::browser::{annotate_node_ids, compute_dirty_roots};
+        use crate::css::{InteractiveState, build_styled_tree};
+        use crate::html::parse_document;
+        use tobira_engine::engine::{DomStructuralChange, NodeId};
+
+        let html = r#"<html><body><p id="p">a</p><button id="go">go</button><script>document.getElementById('go').addEventListener('click', () => { document.getElementById('p').textContent = 'b'; });</script></body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        let mut old_doc = parse_document(&initial.html);
+        annotate_node_ids(&mut old_doc);
+        let _old_styled = build_styled_tree(&old_doc, &crate::css::parse_stylesheet("p { color: rgb(1, 2, 3); }"), 1280, &InteractiveState::default());
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let go_id = find_node_id_by_attr(&tree, "id", "go").expect("go node id");
+        let result = session.dispatch_event(go_id, "click", &DomEventInit::default());
+        let mut new_doc = parse_document(&result.html);
+        annotate_node_ids(&mut new_doc);
+        let new_node_order: Vec<u32> = result.node_order.iter().map(|id| id.0 as u32).collect();
+        assert!(compute_dirty_roots(
+            &[DomStructuralChange::SetText {
+                node: NodeId(1),
+                value: "b".to_string(),
+            }],
+            &new_doc,
+            &new_node_order,
+        )
+        .is_none());
+    }
+
     #[test]
     fn intersection_observer_fires_on_scroll_into_view() {
         use crate::browser::annotate_node_ids;
