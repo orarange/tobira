@@ -14,6 +14,7 @@ use crate::js::{
 use crate::render::render_document;
 use crate::text::decode_text_response;
 use crate::url::Url;
+use tobira_engine::engine::NodeId;
 
 const MAX_FRAME_DEPTH: usize = 3;
 const MAX_SCRIPT_NAVIGATION_DEPTH: usize = 3;
@@ -32,6 +33,8 @@ pub struct BrowserPage {
     pub images: ImageStore,
     pub rendered: Option<String>,
     pub javascript_session: Option<JavaScriptSession>,
+    #[allow(dead_code)]
+    node_order: Vec<NodeId>,
     layout_revision: u64,
     scroll_y: u32,
     /// Whether the JS engine still has pending event-loop work (timers / RAF).
@@ -89,6 +92,7 @@ impl BrowserPage {
             include_rendered_output,
             layout_revision,
             javascript_session,
+            snapshot.node_order.clone(),
         );
         *self = rebuilt;
         self.scroll_y = snapshot.scroll_y;
@@ -286,6 +290,7 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
         include_rendered_output,
         0,
         source.javascript_session,
+        source.processed_html.node_order,
     );
     page.scroll_y = source.processed_html.scroll_y;
     page.engine_pending = source.processed_html.has_pending_work;
@@ -310,6 +315,7 @@ fn rebuild_page_from_html(
     include_rendered_output: bool,
     layout_revision: u64,
     javascript_session: Option<JavaScriptSession>,
+    node_order: Vec<NodeId>,
 ) -> BrowserPage {
     let mut parsed_document = parse_document(html);
     if let Some(rewritten) = build_site_specific_document(&parsed_document, html, url) {
@@ -338,6 +344,7 @@ fn rebuild_page_from_html(
         include_rendered_output,
         layout_revision,
         javascript_session,
+        node_order,
     )
 }
 
@@ -352,6 +359,7 @@ fn rebuild_page_from_document(
     include_rendered_output: bool,
     layout_revision: u64,
     javascript_session: Option<JavaScriptSession>,
+    node_order: Vec<NodeId>,
 ) -> BrowserPage {
     annotate_node_ids(&mut document);
     let original_title = title_override.or_else(|| document_title(&document));
@@ -380,6 +388,7 @@ fn rebuild_page_from_document(
         images,
         rendered,
         javascript_session,
+        node_order,
         layout_revision,
         scroll_y: 0,
         engine_pending: false,
@@ -3426,6 +3435,7 @@ mod tests {
                 true,
                 0,
                 session,
+                processed.node_order.clone(),
             )
         });
 
@@ -3460,6 +3470,7 @@ mod tests {
                 true,
                 0,
                 session,
+                processed.node_order.clone(),
             );
             page.set_dom_attribute(Some(1), "data-bench", "1");
             page
@@ -3477,6 +3488,7 @@ mod tests {
                 true,
                 0,
                 session,
+                processed.node_order.clone(),
             );
             if let Some(session) = page.javascript_session.as_ref().cloned()
                 && session.set_attribute(1, "data-bench", "1")
@@ -3631,6 +3643,7 @@ mod tests {
             images: crate::image::ImageStore::default(),
             rendered: Some("   ".to_string()),
             javascript_session: None,
+            node_order: Vec::new(),
             layout_revision: 0,
             scroll_y: 0,
             engine_pending: false,
@@ -3654,6 +3667,7 @@ mod tests {
             images: crate::image::ImageStore::default(),
             rendered: Some("# Hello".to_string()),
             javascript_session: None,
+            node_order: Vec::new(),
             layout_revision: 0,
             scroll_y: 0,
             engine_pending: false,
@@ -3797,6 +3811,7 @@ mod tests {
             images: crate::image::ImageStore::default(),
             rendered: None,
             javascript_session: None,
+            node_order: Vec::new(),
             layout_revision: 0,
             scroll_y: 0,
             engine_pending: false,
@@ -3810,6 +3825,7 @@ mod tests {
             scroll_y: 0,
             has_pending_work: false,
             structural_changes: Vec::new(),
+            node_order: Vec::new(),
         };
 
         page.apply_script_snapshot(snapshot);
@@ -3832,6 +3848,7 @@ mod tests {
             true,
             0,
             session,
+            processed.node_order.clone(),
         );
 
         let initial_html = page.html_source.clone();
@@ -3860,6 +3877,7 @@ mod tests {
             true,
             0,
             session,
+            processed.node_order.clone(),
         );
         let baseline_revision = page.layout_revision();
 
@@ -3872,6 +3890,7 @@ mod tests {
             scroll_y: 320,
             has_pending_work: false,
             structural_changes: Vec::new(),
+            node_order: Vec::new(),
         };
         page.apply_script_snapshot(snapshot);
 

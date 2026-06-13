@@ -583,6 +583,25 @@ impl BrowserHost {
         self.find_tobira_id(self.document, target_idx, &mut counter)
     }
 
+    /// Arena indices in the same pre-order as `data-tobira-node-id`.
+    pub fn node_order(&self) -> Vec<NodeId> {
+        let mut order = Vec::new();
+        self.collect_node_order(self.document, &mut order);
+        order
+    }
+
+    fn collect_node_order(&self, idx: usize, order: &mut Vec<NodeId>) {
+        if matches!(
+            self.nodes[idx].kind,
+            DomNodeKind::Document | DomNodeKind::Element(_)
+        ) {
+            order.push(NodeId(idx as u32));
+        }
+        for &child in &self.nodes[idx].children {
+            self.collect_node_order(child, order);
+        }
+    }
+
     fn find_tobira_id(&self, idx: usize, target_idx: usize, counter: &mut usize) -> Option<usize> {
         if matches!(
             self.nodes[idx].kind,
@@ -2272,6 +2291,7 @@ pub struct EngineRunResult {
     /// queued tasks) after this operation — the host should keep pumping.
     pub has_pending_work: bool,
     pub structural_changes: Vec<DomStructuralChange>,
+    pub node_order: Vec<NodeId>,
 }
 
 /// Parse `html`, run its inline `<script>`s on the self-built engine against a
@@ -2450,6 +2470,7 @@ impl EngineSession {
             default_prevented: false,
             has_pending_work: pending,
             structural_changes: host.take_structural_changes(),
+            node_order: host.node_order(),
         }
     }
 
@@ -3090,6 +3111,66 @@ mod tests {
             checked >= min_checks,
             "expected at least {min_checks} elements checked, got {checked}"
         );
+    }
+
+    #[test]
+    fn node_order_matches_preorder_ids_and_browser_annotation() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::{Node, parse_document};
+
+        let html = r#"<html><head><title>T</title></head><body>
+            <div id="a"><p id="b">x</p><span id="c">y</span></div>
+            <button id="d">go</button>
+        </body></html>"#;
+        let host = BrowserHost::from_html(html, "http://localhost/");
+        let node_order = host.node_order();
+
+        let expected_len = host
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    DomNodeKind::Document | DomNodeKind::Element(_)
+                )
+            })
+            .count();
+        assert_eq!(node_order.len(), expected_len);
+
+        for (i, node_id) in node_order.iter().enumerate() {
+            assert_eq!(
+                host.tobira_id_for_handle(node_id.0 as usize),
+                Some(i + 1),
+                "node_order[{i}] should map to tobira id {}",
+                i + 1
+            );
+        }
+
+        let mut annotated = parse_document(&host.serialize_document());
+        annotate_node_ids(&mut annotated);
+
+        fn collect_annotated_ids(node: &Node, out: &mut Vec<usize>) {
+            if let Node::Element(el) = node {
+                if let Some(id) = el.attributes.get("data-tobira-node-id") {
+                    out.push(id.parse().expect("numeric tobira id"));
+                }
+                for child in &el.children {
+                    collect_annotated_ids(child, out);
+                }
+            }
+        }
+
+        let mut annotated_ids = Vec::new();
+        collect_annotated_ids(&annotated, &mut annotated_ids);
+        let node_order_ids: Vec<usize> = node_order
+            .iter()
+            .map(|id| {
+                host.tobira_id_for_handle(id.0 as usize)
+                    .expect("node should map to a tobira id")
+            })
+            .collect();
+        assert_eq!(node_order_ids.len(), annotated_ids.len());
+        assert_eq!(node_order_ids, annotated_ids);
     }
 
     #[test]

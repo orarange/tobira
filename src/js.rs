@@ -2,7 +2,7 @@ use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 use crate::url::Url;
-use tobira_engine::engine::DomStructuralChange;
+use tobira_engine::engine::{DomStructuralChange, NodeId};
 
 const JS_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
 
@@ -20,6 +20,7 @@ pub struct ProcessedScriptHtml {
     /// Always false for the boa backend (it drains synchronously).
     pub has_pending_work: bool,
     pub structural_changes: Vec<DomStructuralChange>,
+    pub node_order: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -235,6 +236,7 @@ fn engine_result_to_processed(result: crate::engine_host::EngineRunResult) -> Pr
         scroll_y: result.scroll_y,
         has_pending_work: result.has_pending_work,
         structural_changes: result.structural_changes,
+        node_order: result.node_order,
     }
 }
 
@@ -388,6 +390,7 @@ fn process_document_scripts_error(html: String, message: String) -> ProcessedScr
         scroll_y: 0,
         has_pending_work: false,
         structural_changes: Vec::new(),
+        node_order: Vec::new(),
     }
 }
 
