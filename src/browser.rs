@@ -3063,68 +3063,316 @@ fn collect_raw_text_into(node: &Node, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use std::hint::black_box;
+    use std::fmt::Write as _;
     use std::time::{Duration, Instant};
 
     use super::{
         BrowserPage, build_site_specific_document, build_youtube_generic_document_from_html,
         collect_frame_specs, collect_stylesheet, document_has_meaningful_body, document_title,
         extract_body_children, rebuild_page_from_html, should_follow_script_navigation,
-        synthetic_document,
+        synthetic_document, annotate_node_ids,
     };
-    use crate::css::StyledNode;
+    use crate::css::{InteractiveState, StyledNode, build_styled_tree};
     use crate::html::{Node, parse_document};
     use crate::js::start_document_script_session;
     use crate::url::Url;
 
+    const HEAVY_CLASS_POOL: &[&str] = &[
+        "page",
+        "shell",
+        "masthead",
+        "brand",
+        "nav",
+        "nav-item",
+        "nav-link",
+        "content",
+        "feed",
+        "story",
+        "story-card",
+        "card",
+        "card-title",
+        "card-body",
+        "media",
+        "thumb",
+        "avatar",
+        "meta",
+        "tag",
+        "badge",
+        "btn",
+        "btn-primary",
+        "btn-ghost",
+        "kicker",
+        "summary",
+        "excerpt",
+        "list",
+        "list-row",
+        "list-item",
+        "toolbar",
+        "toolbar-item",
+        "panel",
+        "panel-header",
+        "panel-body",
+        "footer",
+        "footer-link",
+        "timestamp",
+        "byline",
+        "hero",
+        "hero-copy",
+        "figure",
+        "caption",
+        "topic",
+    ];
+
+    fn pick<'a>(items: &'a [&'a str], idx: usize) -> &'a str {
+        items[idx % items.len()]
+    }
+
+    fn append_classes(out: &mut String, idx: usize) {
+        let c1 = pick(HEAVY_CLASS_POOL, idx * 7 + 3);
+        let c2 = pick(HEAVY_CLASS_POOL, idx * 11 + 5);
+        let c3 = pick(HEAVY_CLASS_POOL, idx * 13 + 17);
+        out.push_str(" class=\"");
+        out.push_str(c1);
+        if c2 != c1 {
+            out.push(' ');
+            out.push_str(c2);
+        }
+        if idx % 3 == 0 && c3 != c1 && c3 != c2 {
+            out.push(' ');
+            out.push_str(c3);
+        }
+        out.push('"');
+    }
+
     fn make_heavy_html(n: usize) -> String {
-        let item_count = (n / 3).max(1);
-        let mut html = String::with_capacity(n.saturating_mul(32));
+        let block_count = ((n + 19) / 20).max(1);
+        let mut html = String::with_capacity(block_count.saturating_mul(1600));
         html.push_str("<html><head><title>Heavy DOM</title><style>");
         html.push_str(
             r###"
             html, body { margin: 0; padding: 0; }
-            body { font-family: sans-serif; }
-            .item { display: block; padding: 2px 4px; margin: 1px 0; }
-            .item .label { font-weight: bold; }
-            .item > a { color: #1144cc; text-decoration: none; }
-            .item[data-kind="primary"] { border-left: 2px solid #cc5500; }
-            .item[data-kind="secondary"] { border-left: 2px solid #008855; }
-            .item[data-state="active"] { background: #eef6ff; }
-            .item[data-state="idle"] { background: #fffaf0; }
-            .item:hover { outline: 1px solid #999; }
-            div.item { line-height: 1.3; }
-            span.label { letter-spacing: 0.2px; }
-            a[href="#"] { cursor: pointer; }
-            div.item > span.label + a { margin-left: 8px; }
-            body > div.item { contain: content; }
-            .item[id^="i1"] { color: #333; }
-            .item[id^="i2"] { color: #444; }
-            .item[id^="i3"] { color: #555; }
-            .item[id^="i4"] { color: #666; }
-            .item[id^="i5"] { color: #777; }
-            .item[id^="i6"] { color: #888; }
-            .item[data-seq$="0"] { font-size: 15px; }
-            .item[data-seq$="1"] { font-size: 15px; }
-            .item[data-seq$="2"] { font-size: 15px; }
-            .item[data-seq$="3"] { font-size: 15px; }
-            .item[data-seq$="4"] { font-size: 15px; }
-            .item[data-seq$="5"] { font-size: 15px; }
-            .item[data-seq$="6"] { font-size: 15px; }
-            .item[data-seq$="7"] { font-size: 15px; }
-            .item[data-seq$="8"] { font-size: 15px; }
-            .item[data-seq$="9"] { font-size: 15px; }
+            body { font-family: sans-serif; background: #fafafa; }
+            .page { color: #1c1c1c; }
+            .shell { display: block; }
+            .masthead { border-bottom: 1px solid #ddd; }
+            .brand { font-weight: 700; }
+            .nav { display: flex; gap: 12px; }
+            .nav .nav-item { display: inline-flex; }
+            .nav-item + .nav-item { margin-left: 6px; }
+            .nav-link { text-decoration: none; color: #2156d1; }
+            .content { padding: 16px; }
+            .feed { display: grid; gap: 16px; }
+            .story { contain: content; }
+            .story:nth-child(odd) { background: #fff; }
+            .story:nth-child(even) { background: #f4f7fb; }
+            .story-card { border: 1px solid #e2e5ea; border-radius: 10px; overflow: hidden; }
+            .story-card > .card-title { margin: 0; }
+            .card { display: block; }
+            .card > .card-body { padding: 12px 14px; }
+            .card .meta { font-size: 12px; color: #667; }
+            .card .badge { display: inline-block; padding: 1px 6px; border-radius: 999px; }
+            .badge[data-state="active"] { background: #dff4e7; }
+            .badge[data-state="idle"] { background: #f0f0f0; }
+            .btn { display: inline-flex; align-items: center; }
+            .btn.btn-primary { background: #2156d1; color: #fff; }
+            .btn.btn-ghost { background: transparent; color: #2156d1; }
+            .btn + .btn { margin-left: 8px; }
+            .toolbar { display: flex; justify-content: space-between; }
+            .toolbar-item:first-child { margin-left: 0; }
+            .toolbar-item:last-child { margin-right: 0; }
+            .panel > .panel-header { font-size: 13px; text-transform: uppercase; }
+            .panel > .panel-body { padding: 10px 12px; }
+            .list { list-style: none; padding: 0; margin: 0; }
+            .list-row { display: flex; align-items: center; }
+            .list-row + .list-row { border-top: 1px solid #eceef3; }
+            .list-row:first-child { border-top: 0; }
+            .list-row:last-child { border-bottom: 0; }
+            .list-item { line-height: 1.45; }
+            .list-item:not(.muted) { color: #1f2430; }
+            .hero { padding: 20px 16px; }
+            .hero-copy > p { max-width: 62ch; }
+            .figure img { display: block; width: 100%; }
+            .figure figcaption { font-size: 12px; color: #667; }
+            .avatar { width: 32px; height: 32px; border-radius: 50%; }
+            .thumb { aspect-ratio: 16 / 9; object-fit: cover; }
+            .excerpt p { margin: 0 0 8px; }
+            .excerpt p:first-child { font-weight: 500; }
+            .excerpt p:last-child { opacity: 0.88; }
+            .timestamp[data-kind="primary"] { color: #506070; }
+            .timestamp[data-kind="secondary"] { color: #708090; }
+            .byline { font-size: 12px; letter-spacing: 0.1px; }
+            .tag { display: inline-block; }
+            .tag + .tag { margin-left: 6px; }
+            .footer { border-top: 1px solid #e7e7e7; padding-top: 8px; }
+            .footer-link[href^="/"] { color: #2457cf; }
+            .footer-link[aria-hidden="true"] { color: #9aa; }
+            .kicker { text-transform: uppercase; }
+            .summary { line-height: 1.5; }
+            .summary:not(.muted) { color: #28323f; }
+            .caption { font-size: 12px; }
+            .topic { font-style: italic; }
+            .panel[data-state="active"] { box-shadow: 0 0 0 1px rgba(33, 86, 209, 0.2); }
+            .panel[data-state="idle"] { box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.04); }
+            section > article > .card { margin-bottom: 18px; }
+            article > .story-card + .story-card { margin-top: 12px; }
+            header .brand + .timestamp { margin-left: 10px; }
+            nav .nav-item:first-child .nav-link { font-weight: 600; }
+            nav .nav-item:last-child .nav-link { opacity: 0.8; }
+            .feed > .story:nth-child(3n) .badge { letter-spacing: 0.03em; }
+            .feed > .story:nth-child(4n) .card-title { text-decoration: underline; }
+            .feed > .story:nth-child(5n) .summary { max-width: 54ch; }
+            .story[data-kind="primary"] .card-title { color: #111827; }
+            .story[data-kind="secondary"] .card-title { color: #26364d; }
+            .story[data-state="active"] .card-body { background: #fbfdff; }
+            .story[data-state="idle"] .card-body { background: #ffffff; }
+            [data-state="active"] .btn-primary:not(:disabled) { cursor: pointer; }
+            [data-state="idle"] .btn-ghost { opacity: 0.9; }
+            .card[id^="card-1"] { outline: 0; }
+            .card[id^="card-2"] { border-left: 3px solid #e6efff; }
+            .card[id^="card-3"] { border-left: 3px solid #eaf5ea; }
+            .card[id^="card-4"] { border-left: 3px solid #fdebd6; }
+            .card[id^="card-5"] { border-left: 3px solid #f7e4ff; }
+            .card[id^="card-6"] { border-left: 3px solid #e5f4f4; }
+            .card[id^="card-7"] { border-left: 3px solid #f1f1f1; }
+            .card[id^="card-8"] { border-left: 3px solid #fff1d9; }
+            .card[id^="card-9"] { border-left: 3px solid #dde8ff; }
+            .card[data-kind="primary"] .meta { font-weight: 600; }
+            .card[data-kind="secondary"] .meta { font-weight: 400; }
+            .list-item[data-state="active"] { background: #f8fbff; }
+            .list-item[data-state="idle"] { background: transparent; }
+            .list-row > .avatar + .list-item { margin-left: 10px; }
+            .panel-header > .kicker + .summary { margin-top: 4px; }
+            .hero-copy > h2 + p { margin-top: 8px; }
+            .hero-copy > p + .btn { margin-top: 12px; }
+            .nav-link[aria-current="page"] { text-decoration: underline; }
+            .nav-link[href^="/"] { padding: 2px 0; }
+            .card .tag[data-state="active"] { color: #175d32; }
+            .card .tag[data-state="idle"] { color: #5b6575; }
+            .summary + .footer { margin-top: 10px; }
+            .figure + .excerpt { margin-top: 8px; }
+            .card-title:first-child { letter-spacing: 0.01em; }
+            .card-title:last-child { letter-spacing: 0.02em; }
         "###,
         );
         html.push_str("</style></head><body>");
+        html.push_str("<div class=\"page shell\"><header class=\"masthead\" data-kind=\"primary\" data-state=\"active\"><div class=\"brand\" id=\"brand-root\">tobira</div><nav class=\"nav\" aria-label=\"Primary\"><a class=\"nav-item nav-link\" href=\"/home\" aria-current=\"page\">Home</a><a class=\"nav-item nav-link\" href=\"/topics\">Topics</a><a class=\"nav-item nav-link\" href=\"#\">More</a></nav><div class=\"timestamp\" data-kind=\"secondary\" data-state=\"idle\">updated now</div></header><main class=\"content\"><section class=\"hero\" data-kind=\"primary\" data-state=\"active\"><div class=\"hero-copy\"><h2 class=\"kicker\">bench</h2><p class=\"summary\">Deterministic multi-shape DOM for selector indexing and style invalidation.</p><button class=\"btn btn-primary toolbar-item\" data-state=\"active\" aria-pressed=\"false\">Run</button><button class=\"btn btn-ghost toolbar-item\" data-state=\"idle\">Later</button></div></section><section class=\"feed\">");
 
-        for k in 0..item_count {
-            let kind = if k % 2 == 0 { "primary" } else { "secondary" };
-            let state = if k % 3 == 0 { "active" } else { "idle" };
-            html.push_str(&format!(
-                "<div class=\"item\" id=\"i{0}\" data-kind=\"{1}\" data-state=\"{2}\" data-seq=\"{0}\"><span class=\"label\">text {0}</span><a href=\"#\">link</a></div>",
-                k, kind, state
-            ));
+        for k in 0..block_count {
+            let kind = if k % 4 == 0 { "primary" } else { "secondary" };
+            let state = if k % 5 == 0 { "active" } else { "idle" };
+            let article_tag = pick(&["article", "div"], k);
+            let heading_tag = pick(&["h2", "h3"], k);
+            let list_tag = pick(&["ul", "ol"], k + 1);
+            let lead_tag = pick(&["p", "span"], k + 2);
+            let mut class_attr = String::new();
+
+            write!(&mut html, "<{} ", article_tag).unwrap();
+            append_classes(&mut class_attr, k * 3 + 1);
+            html.push_str(&class_attr);
+            class_attr.clear();
+            if k % 7 == 0 {
+                write!(&mut html, " id=\"card-{}\"", k).unwrap();
+            }
+            write!(
+                &mut html,
+                " data-kind=\"{}\" data-state=\"{}\" data-seq=\"{}\">",
+                kind, state, k
+            )
+            .unwrap();
+
+            write!(&mut html, "<section ").unwrap();
+            append_classes(&mut class_attr, k * 3 + 2);
+            html.push_str(&class_attr);
+            class_attr.clear();
+            if k % 11 == 0 {
+                write!(&mut html, " aria-label=\"story {}\"", k).unwrap();
+            }
+            html.push('>');
+
+            write!(&mut html, "<div ").unwrap();
+            append_classes(&mut class_attr, k * 3 + 3);
+            html.push_str(&class_attr);
+            class_attr.clear();
+            write!(
+                &mut html,
+                " data-kind=\"{}\" data-state=\"{}\">",
+                kind, state
+            )
+            .unwrap();
+
+            write!(&mut html, "<{} class=\"card-title\" ", heading_tag).unwrap();
+            if k % 6 == 0 {
+                write!(&mut html, "id=\"card-{}-title\" ", k).unwrap();
+            }
+            html.push_str("data-kind=\"primary\">");
+            write!(&mut html, "Story {}", k).unwrap();
+            write!(&mut html, "</{}>", heading_tag).unwrap();
+
+            html.push_str("<div class=\"card-body excerpt\" data-kind=\"secondary\" data-state=\"");
+            html.push_str(state);
+            html.push_str("\">");
+
+            write!(&mut html, "<{} class=\"summary\" data-kind=\"{}\">", lead_tag, kind).unwrap();
+            write!(&mut html, "{}", "A varied subtree with list, metadata, links, and controls.").unwrap();
+            write!(&mut html, "</{}>", lead_tag).unwrap();
+
+            write!(&mut html, "<{} class=\"list\" data-kind=\"secondary\">", list_tag).unwrap();
+            for j in 0..3 {
+                let item_state = if (k + j) % 4 == 0 { "active" } else { "idle" };
+                let item_kind = if j == 0 { "primary" } else { "secondary" };
+                write!(&mut html, "<li ").unwrap();
+                if j == 1 && k % 4 == 0 {
+                    write!(&mut html, "id=\"card-{}-item-{}\" ", k, j).unwrap();
+                }
+                html.push_str("class=\"list-row list-item\"");
+                if j == 0 {
+                    html.push_str(" data-kind=\"primary\"");
+                } else {
+                    html.push_str(" data-kind=\"secondary\"");
+                }
+                write!(
+                    &mut html,
+                    " data-state=\"{}\" data-index=\"{}\">",
+                    item_state, j
+                )
+                .unwrap();
+                write!(&mut html, "<span class=\"avatar\" aria-hidden=\"true\">{}</span>", if j == 0 { "◎" } else { "◌" }).unwrap();
+                write!(
+                    &mut html,
+                    "<span class=\"meta\" data-kind=\"{}\" data-state=\"{}\">meta {}/{} </span>",
+                    item_kind, item_state, k, j
+                )
+                .unwrap();
+                write!(
+                    &mut html,
+                    "<a class=\"tag\" href=\"/topic/{}\" aria-label=\"tag {}\">tag</a>",
+                    (k + j) % 9,
+                    j
+                )
+                .unwrap();
+                if j == 2 {
+                    html.push_str("<button class=\"btn btn-ghost\" data-state=\"idle\">Open</button>");
+                }
+                html.push_str("</li>");
+            }
+            write!(&mut html, "</{}>", list_tag).unwrap();
+
+            html.push_str("<footer class=\"footer\" data-kind=\"secondary\" data-state=\"idle\">");
+            write!(
+                &mut html,
+                "<a class=\"footer-link\" href=\"/story/{}\">read more</a>",
+                k
+            )
+            .unwrap();
+            html.push_str("<a class=\"footer-link\" href=\"#\" aria-hidden=\"true\">share</a>");
+            html.push_str("</footer>");
+
+            html.push_str("</div></section></");
+            html.push_str(article_tag);
+            html.push('>');
         }
+
+        html.push_str("</section><aside class=\"panel\" data-kind=\"secondary\" data-state=\"idle\"><div class=\"panel-header\"><span class=\"kicker\">topics</span><p class=\"summary muted\">More varied selectors, same deterministic tree.</p></div><div class=\"panel-body\"><figure class=\"figure\"><img class=\"thumb\" src=\"/img/thumb.png\" alt=\"thumb\" /><figcaption class=\"caption\">caption text</figcaption></figure></div></aside></main><footer class=\"footer\" data-kind=\"secondary\" data-state=\"idle\"><a class=\"footer-link\" href=\"/about\">about</a></footer></div>");
 
         html.push_str("</body></html>");
         html
@@ -3161,7 +3409,7 @@ mod tests {
         samples
     }
 
-    fn benchmark_heavy_dom_case(n: usize) -> (f64, f64, f64, f64) {
+    fn benchmark_heavy_dom_case(n: usize) -> (f64, f64, f64, f64, f64, f64) {
         let url = Url::parse("https://example.com/heavy-dom").unwrap();
         let html = make_heavy_html(n);
         let runs = 6;
@@ -3178,6 +3426,20 @@ mod tests {
                 true,
                 0,
                 session,
+            )
+        });
+
+        let parse_samples = measure_n(runs, || parse_document(&html));
+
+        let mut style_document = parse_document(&html);
+        annotate_node_ids(&mut style_document);
+        let style_stylesheet = collect_stylesheet(&style_document, &url);
+        let style_samples = measure_n(runs, || {
+            build_styled_tree(
+                &style_document,
+                &style_stylesheet,
+                1280,
+                &InteractiveState::default(),
             )
         });
 
@@ -3227,6 +3489,8 @@ mod tests {
 
         (
             median_ms(&build_samples),
+            median_ms(&parse_samples),
+            median_ms(&style_samples),
             median_ms(&serialize_samples),
             median_ms(&apply_samples),
             median_ms(&cycle_samples),
@@ -3244,15 +3508,17 @@ mod tests {
         }
 
         println!("=== tobira heavy-DOM benchmark (release) ===");
-        println!("N        build(ms)  serialize(ms)  apply(ms)  cycle(ms)");
+        println!("N        build(ms)  parse(ms)  style(ms)  serialize(ms)  apply(ms)  cycle(ms)");
         println!("        build = initial parse + styled tree rebuild");
+        println!("        parse = parse_document() only");
+        println!("        style = build_styled_tree() only");
         println!("        serialize = session.snapshot() / serialize_document");
         println!("        apply = one DOM attribute change + rebuild");
         println!("        cycle = attribute change -> snapshot -> apply");
-        for (n, (build, serialize, apply, cycle)) in rows {
+        for (n, (build, parse, style, serialize, apply, cycle)) in rows {
             println!(
-                "{:<8} {:<10.2} {:<14.2} {:<10.2} {:<10.2}",
-                n, build, serialize, apply, cycle
+                "{:<8} {:<10.2} {:<10.2} {:<10.2} {:<14.2} {:<10.2} {:<10.2}",
+                n, build, parse, style, serialize, apply, cycle
             );
         }
         println!("querySelectorAll benchmark: not measured");
