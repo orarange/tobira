@@ -6109,7 +6109,6 @@ impl Vm {
                     "cannot read properties of {what}{key_str}"
                 )))
             }
-            _ => Ok(Value::Undefined),
         }
     }
 
