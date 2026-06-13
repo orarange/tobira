@@ -3062,6 +3062,9 @@ fn collect_raw_text_into(node: &Node, output: &mut String) {
 
 #[cfg(test)]
 mod tests {
+    use std::hint::black_box;
+    use std::time::{Duration, Instant};
+
     use super::{
         BrowserPage, build_site_specific_document, build_youtube_generic_document_from_html,
         collect_frame_specs, collect_stylesheet, document_has_meaningful_body, document_title,
@@ -3072,6 +3075,188 @@ mod tests {
     use crate::html::{Node, parse_document};
     use crate::js::start_document_script_session;
     use crate::url::Url;
+
+    fn make_heavy_html(n: usize) -> String {
+        let item_count = (n / 3).max(1);
+        let mut html = String::with_capacity(n.saturating_mul(32));
+        html.push_str("<html><head><title>Heavy DOM</title><style>");
+        html.push_str(
+            r###"
+            html, body { margin: 0; padding: 0; }
+            body { font-family: sans-serif; }
+            .item { display: block; padding: 2px 4px; margin: 1px 0; }
+            .item .label { font-weight: bold; }
+            .item > a { color: #1144cc; text-decoration: none; }
+            .item[data-kind="primary"] { border-left: 2px solid #cc5500; }
+            .item[data-kind="secondary"] { border-left: 2px solid #008855; }
+            .item[data-state="active"] { background: #eef6ff; }
+            .item[data-state="idle"] { background: #fffaf0; }
+            .item:hover { outline: 1px solid #999; }
+            div.item { line-height: 1.3; }
+            span.label { letter-spacing: 0.2px; }
+            a[href="#"] { cursor: pointer; }
+            div.item > span.label + a { margin-left: 8px; }
+            body > div.item { contain: content; }
+            .item[id^="i1"] { color: #333; }
+            .item[id^="i2"] { color: #444; }
+            .item[id^="i3"] { color: #555; }
+            .item[id^="i4"] { color: #666; }
+            .item[id^="i5"] { color: #777; }
+            .item[id^="i6"] { color: #888; }
+            .item[data-seq$="0"] { font-size: 15px; }
+            .item[data-seq$="1"] { font-size: 15px; }
+            .item[data-seq$="2"] { font-size: 15px; }
+            .item[data-seq$="3"] { font-size: 15px; }
+            .item[data-seq$="4"] { font-size: 15px; }
+            .item[data-seq$="5"] { font-size: 15px; }
+            .item[data-seq$="6"] { font-size: 15px; }
+            .item[data-seq$="7"] { font-size: 15px; }
+            .item[data-seq$="8"] { font-size: 15px; }
+            .item[data-seq$="9"] { font-size: 15px; }
+        "###,
+        );
+        html.push_str("</style></head><body>");
+
+        for k in 0..item_count {
+            let kind = if k % 2 == 0 { "primary" } else { "secondary" };
+            let state = if k % 3 == 0 { "active" } else { "idle" };
+            html.push_str(&format!(
+                "<div class=\"item\" id=\"i{0}\" data-kind=\"{1}\" data-state=\"{2}\" data-seq=\"{0}\"><span class=\"label\">text {0}</span><a href=\"#\">link</a></div>",
+                k, kind, state
+            ));
+        }
+
+        html.push_str("</body></html>");
+        html
+    }
+
+    fn median_ms(samples: &[Duration]) -> f64 {
+        let mut values: Vec<f64> = samples
+            .iter()
+            .map(|duration| duration.as_secs_f64() * 1000.0)
+            .collect();
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mid = values.len() / 2;
+        if values.len() % 2 == 1 {
+            values[mid]
+        } else {
+            (values[mid - 1] + values[mid]) / 2.0
+        }
+    }
+
+    fn measure_n<T, F>(runs: usize, mut f: F) -> Vec<Duration>
+    where
+        F: FnMut() -> T,
+    {
+        let mut samples = Vec::with_capacity(runs.saturating_sub(1));
+        for i in 0..runs {
+            let start = Instant::now();
+            let value = f();
+            black_box(value);
+            let elapsed = start.elapsed();
+            if i > 0 {
+                samples.push(elapsed);
+            }
+        }
+        samples
+    }
+
+    fn benchmark_heavy_dom_case(n: usize) -> (f64, f64, f64, f64) {
+        let url = Url::parse("https://example.com/heavy-dom").unwrap();
+        let html = make_heavy_html(n);
+        let runs = 6;
+
+        let build_samples = measure_n(runs, || {
+            let (processed, session) = start_document_script_session(&html, &url);
+            rebuild_page_from_html(
+                &url,
+                200,
+                "OK".to_string(),
+                Some("text/html".to_string()),
+                &processed.html,
+                processed.title_override.clone(),
+                true,
+                0,
+                session,
+            )
+        });
+
+        let serialize_samples = measure_n(runs, || {
+            let (_processed, mut session) = start_document_script_session(&html, &url);
+            session.as_mut().map(|s| s.snapshot())
+        });
+
+        let apply_samples = measure_n(runs, || {
+            let (processed, session) = start_document_script_session(&html, &url);
+            let mut page = rebuild_page_from_html(
+                &url,
+                200,
+                "OK".to_string(),
+                Some("text/html".to_string()),
+                &processed.html,
+                processed.title_override.clone(),
+                true,
+                0,
+                session,
+            );
+            page.set_dom_attribute(Some(1), "data-bench", "1");
+            page
+        });
+
+        let cycle_samples = measure_n(runs, || {
+            let (processed, session) = start_document_script_session(&html, &url);
+            let mut page = rebuild_page_from_html(
+                &url,
+                200,
+                "OK".to_string(),
+                Some("text/html".to_string()),
+                &processed.html,
+                processed.title_override.clone(),
+                true,
+                0,
+                session,
+            );
+            if let Some(session) = page.javascript_session.as_ref().cloned()
+                && session.set_attribute(1, "data-bench", "1")
+                && let Some(snapshot) = session.snapshot()
+            {
+                page.apply_script_snapshot(snapshot);
+            }
+            page
+        });
+
+        (
+            median_ms(&build_samples),
+            median_ms(&serialize_samples),
+            median_ms(&apply_samples),
+            median_ms(&cycle_samples),
+        )
+    }
+
+    #[test]
+    #[ignore]
+    fn heavy_dom_benchmark() {
+        let cases = [1000, 5000, 10000, 20000];
+        let mut rows = Vec::new();
+
+        for &n in &cases {
+            rows.push((n, benchmark_heavy_dom_case(n)));
+        }
+
+        println!("=== tobira heavy-DOM benchmark (release) ===");
+        println!("N        build(ms)  serialize(ms)  apply(ms)  cycle(ms)");
+        println!("        build = initial parse + styled tree rebuild");
+        println!("        serialize = session.snapshot() / serialize_document");
+        println!("        apply = one DOM attribute change + rebuild");
+        println!("        cycle = attribute change -> snapshot -> apply");
+        for (n, (build, serialize, apply, cycle)) in rows {
+            println!(
+                "{:<8} {:<10.2} {:<14.2} {:<10.2} {:<10.2}",
+                n, build, serialize, apply, cycle
+            );
+        }
+        println!("querySelectorAll benchmark: not measured");
+    }
 
     #[test]
     fn falls_back_when_document_is_empty() {
