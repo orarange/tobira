@@ -525,8 +525,14 @@ fn incremental_restyle_enabled() -> bool {
     if INCREMENTAL_RESTYLE_OVERRIDE_SET.load(std::sync::atomic::Ordering::Relaxed) {
         return INCREMENTAL_RESTYLE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
     }
+    // On by default: incremental restyle is byte-for-byte equivalent to a full
+    // rebuild (proven by the heavy-DOM equivalence tests) and falls back to a
+    // full rebuild on anything it can't handle. Set TOBIRA_INCREMENTAL_RESTYLE=0
+    // to force the old always-full-rebuild path.
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| matches!(std::env::var("TOBIRA_INCREMENTAL_RESTYLE").as_deref(), Ok("1")))
+    *ENABLED.get_or_init(|| {
+        !matches!(std::env::var("TOBIRA_INCREMENTAL_RESTYLE").as_deref(), Ok("0"))
+    })
 }
 
 #[cfg(test)]
