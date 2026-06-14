@@ -248,6 +248,10 @@ enum BuiltinId {
     // MutationObserver builtins above)
     IntersectionObserverConstructor,
     IntersectionObserverUnobserve,
+    // ResizeObserver (observe/disconnect/takeRecords reuse the kind-agnostic
+    // MutationObserver builtins above)
+    ResizeObserverConstructor,
+    ResizeObserverUnobserve,
     // XMLHttpRequest
     XhrConstructor,
     XhrOpen,
@@ -1080,6 +1084,13 @@ struct MutationObserverReg {
     instance: Value,
 }
 
+/// A registered `ResizeObserver`: its JS callback and observer instance.
+#[derive(Clone)]
+struct ResizeObserverReg {
+    callback: Value,
+    instance: Value,
+}
+
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
@@ -1115,6 +1126,10 @@ pub struct Vm {
     /// and the observer object itself (passed back to the callback as `this` and
     /// its 2nd argument). Lives in the VM so the callback/instance survive.
     mutation_observers: HashMap<u64, MutationObserverReg>,
+    /// Live `ResizeObserver` instances keyed by `ObserverId.0`: the JS callback
+    /// and the observer object itself (passed back to the callback as `this` and
+    /// its 2nd argument). Lives in the VM so the callback/instance survive.
+    resize_observers: HashMap<u64, ResizeObserverReg>,
     /// Re-entrancy guard for the mutation-observer delivery checkpoint, so the
     /// `drain_microtasks` calls made while delivering don't recurse into another
     /// delivery pass.
@@ -1240,6 +1255,7 @@ impl Vm {
             host,
             event_listeners: HashMap::new(),
             mutation_observers: HashMap::new(),
+            resize_observers: HashMap::new(),
             delivering_mutations: false,
             delivering_slotchange: false,
             node_wrappers: HashMap::new(),
@@ -2666,6 +2682,12 @@ impl Vm {
             self.allocate_builtin_value(BuiltinId::IntersectionObserverConstructor, true, None);
         self.globals
             .insert("IntersectionObserver".to_string(), intersection_observer_ctor);
+
+        // ResizeObserver constructor.
+        let resize_observer_ctor =
+            self.allocate_builtin_value(BuiltinId::ResizeObserverConstructor, true, None);
+        self.globals
+            .insert("ResizeObserver".to_string(), resize_observer_ctor);
 
         self.globals
             .insert("Promise".to_string(), promise_ctor.clone());
@@ -5357,6 +5379,7 @@ impl Vm {
                 | BuiltinId::MutationObserverConstructor
                 | BuiltinId::XhrConstructor
                 | BuiltinId::IntersectionObserverConstructor
+                | BuiltinId::ResizeObserverConstructor
         )
     }
 
@@ -8512,6 +8535,21 @@ impl Vm {
                 self.intersection_observer_construct(args.first().cloned())
             }
             BuiltinId::IntersectionObserverUnobserve => {
+                if let (Some(id), Some(target)) = (
+                    self.observer_id_from_this(&this_value),
+                    self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)),
+                ) {
+                    let _ = self.host.observer(ObserverOp::Unobserve {
+                        observer: ObserverId(id),
+                        target,
+                    });
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::ResizeObserverConstructor => {
+                self.resize_observer_construct(args.first().cloned())
+            }
+            BuiltinId::ResizeObserverUnobserve => {
                 if let (Some(id), Some(target)) = (
                     self.observer_id_from_this(&this_value),
                     self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)),
@@ -12289,8 +12327,8 @@ impl Vm {
             "takeRecords" => {
                 Ok(self.allocate_builtin_method(BuiltinId::MutationObserverTakeRecords))
             }
-            // IntersectionObserver-only; observe/disconnect/takeRecords above are
-            // kind-agnostic and shared with MutationObserver.
+            // IntersectionObserver / ResizeObserver-only; observe/disconnect/takeRecords
+            // above are kind-agnostic and shared with MutationObserver.
             "unobserve" => {
                 Ok(self.allocate_builtin_method(BuiltinId::IntersectionObserverUnobserve))
             }
@@ -12343,6 +12381,43 @@ impl Vm {
         self.mutation_observers.insert(
             id,
             MutationObserverReg {
+                callback,
+                instance: instance.clone(),
+            },
+        );
+        Ok(instance)
+    }
+
+    /// `new ResizeObserver(callback)` — create the host observer, remember
+    /// callback + instance, return the instance host object.
+    fn resize_observer_construct(&mut self, callback: Option<Value>) -> Result<Value, VmError> {
+        let callback = callback.unwrap_or(Value::Undefined);
+        if !self.is_callable_value(&callback) {
+            return Err(VmError::TypeError(
+                "ResizeObserver constructor argument is not callable".to_string(),
+            ));
+        }
+        let id = match self.host.observer(ObserverOp::Create {
+            kind: ObserverKind::Resize,
+        }) {
+            Ok(ObserverResult::Created(ObserverId(id))) => id,
+            _ => {
+                return Err(VmError::TypeError(
+                    "host does not support ResizeObserver".to_string(),
+                ));
+            }
+        };
+        let instance = self.make_host_object(HostObjectSlot {
+            class: HostObjectClass::Observer,
+            interface_name: "ResizeObserver",
+            handle: id,
+            dispatch: HostDispatch::Ordinary,
+            supports_indexed_properties: false,
+            supports_named_properties: false,
+        });
+        self.resize_observers.insert(
+            id,
+            ResizeObserverReg {
                 callback,
                 instance: instance.clone(),
             },
@@ -12526,6 +12601,81 @@ impl Vm {
         Ok(Value::Object(object))
     }
 
+    /// Build a `ResizeObserverEntry` JS object from a host record.
+    /// `devicePixelContentBoxSize` and the depth-gated multi-pass loop are
+    /// intentionally omitted for now.
+    fn build_resize_entry(&mut self, record: ObserverRecord) -> Result<Value, VmError> {
+        let target = self.make_dom_node_value(record.target);
+        let mut width = 0.0;
+        let mut height = 0.0;
+        if let HostData::Object(pairs) = record.payload {
+            for (key, value) in pairs {
+                match (key.as_str(), value) {
+                    ("width", HostData::Number(n)) => width = n,
+                    ("height", HostData::Number(n)) => height = n,
+                    _ => {}
+                }
+            }
+        }
+        let rect = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+        for (key, val) in [
+            ("width", Value::Number(width)),
+            ("height", Value::Number(height)),
+            ("top", Value::Number(0.0)),
+            ("left", Value::Number(0.0)),
+            ("bottom", Value::Number(height)),
+            ("right", Value::Number(width)),
+        ] {
+            self.define_data_property(rect, PropertyKey::from(key), val, true, true, true);
+        }
+        let size = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+        self.define_data_property(
+            size,
+            PropertyKey::from("inlineSize"),
+            Value::Number(width),
+            true,
+            true,
+            true,
+        );
+        self.define_data_property(
+            size,
+            PropertyKey::from("blockSize"),
+            Value::Number(height),
+            true,
+            true,
+            true,
+        );
+        let content_box = self.make_array_from_values(vec![Value::Object(size)])?;
+        let border_box = self.make_array_from_values(vec![Value::Object(size)])?;
+        let entry = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+        self.define_data_property(entry, PropertyKey::from("target"), target, true, true, true);
+        self.define_data_property(
+            entry,
+            PropertyKey::from("contentRect"),
+            Value::Object(rect),
+            true,
+            true,
+            true,
+        );
+        self.define_data_property(
+            entry,
+            PropertyKey::from("contentBoxSize"),
+            content_box,
+            true,
+            true,
+            true,
+        );
+        self.define_data_property(
+            entry,
+            PropertyKey::from("borderBoxSize"),
+            border_box,
+            true,
+            true,
+            true,
+        );
+        Ok(Value::Object(entry))
+    }
+
     fn ensure_default_property(&mut self, object: GcRef<JsObject>, key: &str, default: Value) {
         let pk = PropertyKey::from(key);
         if self.get_own_property_descriptor(object, &pk).is_none() {
@@ -12609,6 +12759,7 @@ impl Vm {
     /// geometry (IntersectionObserver) and at microtask checkpoints (Mutation).
     pub fn deliver_observer_records(&mut self) {
         self.deliver_mutation_records();
+        self.deliver_resize_records();
     }
 
     /// Deliver pending observer records (Mutation + Intersection) to each
@@ -12668,6 +12819,43 @@ impl Vm {
             }
         }
         self.delivering_mutations = false;
+    }
+
+    fn deliver_resize_records(&mut self) {
+        if self.resize_observers.is_empty() {
+            return;
+        }
+        let regs: Vec<(u64, ResizeObserverReg)> = self
+            .resize_observers
+            .iter()
+            .map(|(id, reg)| (*id, reg.clone()))
+            .collect();
+        for (id, reg) in regs {
+            if !self.resize_observers.contains_key(&id) {
+                continue;
+            }
+            let records = match self.host.observer(ObserverOp::TakeRecords {
+                observer: ObserverId(id),
+            }) {
+                Ok(ObserverResult::Records(records)) if !records.is_empty() => records,
+                _ => continue,
+            };
+            let mut entries = Vec::with_capacity(records.len());
+            for record in records {
+                match self.build_resize_entry(record) {
+                    Ok(entry) => entries.push(entry),
+                    Err(_) => continue,
+                }
+            }
+            let Ok(entries_array) = self.make_array_from_values(entries) else {
+                continue;
+            };
+            let _ = self.call_value_sync(
+                reg.callback.clone(),
+                Value::Undefined,
+                vec![entries_array, reg.instance],
+            );
+        }
     }
 
     /// Names that resolve as bare globals by virtue of the window being the

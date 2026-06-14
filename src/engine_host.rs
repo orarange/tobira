@@ -115,6 +115,8 @@ struct ObserverEntry {
     /// index, so a record is only queued when the state changes (and once on
     /// first observe).
     intersecting: HashMap<usize, bool>,
+    /// For ResizeObserver: last delivered box size per target arena index.
+    sizes: HashMap<usize, (f64, f64)>,
 }
 
 /// One session-history entry: its URL, the `history.state` associated with it,
@@ -708,6 +710,50 @@ impl BrowserHost {
                 entry.pending.push(ObserverRecord {
                     target: NodeId(target_idx as u32),
                     kind: ObserverKind::Intersection,
+                    payload,
+                });
+            }
+        }
+
+        // ResizeObserver uses the same fed geometry. tobira currently exposes
+        // only the layout box here, so content-box is approximated from it and
+        // border-box reuses the same size for now.
+        let mut resize_updates: Vec<(usize, usize, f64, f64)> = Vec::new();
+        for (oid, slot) in self.observers.iter().enumerate() {
+            let Some(entry) = slot else { continue };
+            if entry.kind != ObserverKind::Resize {
+                continue;
+            }
+            for (target_idx, _opts) in &entry.targets {
+                let Some(tid) = self.tobira_id_for_handle(*target_idx) else {
+                    continue;
+                };
+                let Some(rect) = self.geometry.get(&tid) else {
+                    continue;
+                };
+                let inline_size = rect.width.max(0.0);
+                let block_size = rect.height.max(0.0);
+                if entry.sizes.get(target_idx).copied() != Some((inline_size, block_size)) {
+                    resize_updates.push((oid, *target_idx, inline_size, block_size));
+                }
+            }
+        }
+        for (oid, target_idx, inline_size, block_size) in resize_updates {
+            if let Some(Some(entry)) = self.observers.get_mut(oid) {
+                entry.sizes.insert(target_idx, (inline_size, block_size));
+                // device-pixel sizing and the multi-pass loop are intentionally
+                // omitted in tobira's minimum viable mapping.
+                let payload = HostData::Object(vec![
+                    ("width".to_string(), HostData::Number(inline_size)),
+                    ("height".to_string(), HostData::Number(block_size)),
+                    ("top".to_string(), HostData::Number(0.0)),
+                    ("left".to_string(), HostData::Number(0.0)),
+                    ("right".to_string(), HostData::Number(inline_size)),
+                    ("bottom".to_string(), HostData::Number(block_size)),
+                ]);
+                entry.pending.push(ObserverRecord {
+                    target: NodeId(target_idx as u32),
+                    kind: ObserverKind::Resize,
                     payload,
                 });
             }
@@ -2199,6 +2245,7 @@ impl Host for BrowserHost {
                     targets: Vec::new(),
                     pending: Vec::new(),
                     intersecting: HashMap::new(),
+                    sizes: HashMap::new(),
                 }));
                 Ok(ObserverResult::Created(ObserverId(id)))
             }
@@ -2215,6 +2262,8 @@ impl Host for BrowserHost {
                     // Per spec, re-observing the same target replaces its options.
                     entry.targets.retain(|(idx, _)| *idx != target_idx);
                     entry.targets.push((target_idx, options));
+                    entry.intersecting.remove(&target_idx);
+                    entry.sizes.remove(&target_idx);
                     Ok(ObserverResult::None)
                 } else {
                     Err(HostError::InvalidHandle)
@@ -2225,6 +2274,7 @@ impl Host for BrowserHost {
                 if let Some(Some(entry)) = self.observers.get_mut(observer.0 as usize) {
                     entry.targets.retain(|(idx, _)| *idx != target_idx);
                     entry.intersecting.remove(&target_idx);
+                    entry.sizes.remove(&target_idx);
                 }
                 Ok(ObserverResult::None)
             }
@@ -2532,7 +2582,7 @@ impl EngineSession {
     /// Feed element geometry from the browser's latest layout so
     /// `getBoundingClientRect` / `offsetWidth` etc. return real values.
     /// `rects` is `(data-tobira-node-id, x, y, width, height)` in document coords.
-    /// Also recomputes IntersectionObserver state and delivers any changes.
+    /// Also recomputes IntersectionObserver / ResizeObserver state and delivers any changes.
     pub fn set_geometry(&mut self, rects: &[(usize, f32, f32, f32, f32)]) {
         self.host().set_geometry(rects);
         // IntersectionObserver records queued by the geometry update are flushed
@@ -3699,6 +3749,40 @@ mod tests {
         assert!(
             snap.html.contains(">out,in,out</div>"),
             "scroll-out did not fire, html: {}",
+            snap.html
+        );
+    }
+
+    #[test]
+    fn resize_observer_fires_on_initial_layout_feed() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body>
+            <div id="target">x</div>
+            <div id="out">init</div>
+            <script>
+                const log = [typeof ResizeObserver];
+                const ro = new ResizeObserver((entries) => {
+                    for (const e of entries) {
+                        log.push(String(e.contentBoxSize[0].inlineSize));
+                    }
+                    document.getElementById('out').textContent = log.join(',');
+                });
+                ro.observe(document.getElementById('target'));
+            </script>
+        </body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "error: {:?}", initial.error);
+        let mut tree = parse_document(&initial.html);
+        annotate_node_ids(&mut tree);
+        let target_id = find_node_id_by_attr(&tree, "id", "target").expect("target id");
+
+        session.set_geometry(&[(target_id, 0.0, 0.0, 120.0, 40.0)]);
+        let snap = session.snapshot();
+        assert!(
+            snap.html.contains(">function,120</div>"),
+            "resize observer did not fire with initial size, html: {}",
             snap.html
         );
     }
