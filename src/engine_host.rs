@@ -3507,6 +3507,56 @@ mod tests {
     }
 
     #[test]
+    fn incremental_restyle_disjoint_dirty_roots_matches_full() {
+        // Two mutations in distant subtrees in one snapshot: both dirty regions
+        // must be recomputed while the clean region between them is reused.
+        incremental_restyle_matches_full(
+            r#"<html><body><div id="left"><p class="a">L</p></div><div id="mid"><p class="m">M</p></div><div id="right"><p class="b">R</p></div><button id="go">go</button><script>document.getElementById('go').addEventListener('click', () => { document.querySelector('#left .a').className = 'a on'; document.querySelector('#right .b').className = 'b on'; });</script></body></html>"#,
+            r#"
+                .a.on { color: rgb(1, 2, 3); }
+                .b.on { color: rgb(4, 5, 6); }
+                .m { font-weight: bold; }
+                #mid .m { letter-spacing: 1px; }
+            "#,
+            |session, go_id| session.dispatch_event(go_id, "click", &DomEventInit::default()),
+        );
+    }
+
+    #[test]
+    fn incremental_restyle_append_subtree_with_children_matches_full() {
+        // Append a node that itself has children, and remove a node that has
+        // children — both reconstructed/removed wholesale under the dirty parent.
+        incremental_restyle_matches_full(
+            r#"<html><body><ul id="list"><li class="row"><span class="t">a</span></li><li class="row"><span class="t">b</span></li></ul><button id="go">go</button><script>document.getElementById('go').addEventListener('click', () => { const list = document.getElementById('list'); const li = document.createElement('li'); li.className = 'row new'; const s = document.createElement('span'); s.className = 't'; s.textContent = 'c'; li.appendChild(s); list.appendChild(li); list.removeChild(list.firstElementChild); });</script></body></html>"#,
+            r#"
+                .row:nth-child(2n) { color: rgb(1, 2, 3); }
+                .row .t { font-weight: bold; }
+                .row.new .t { color: rgb(7, 8, 9); }
+                .row + .row { letter-spacing: 1px; }
+            "#,
+            |session, go_id| session.dispatch_event(go_id, "click", &DomEventInit::default()),
+        );
+    }
+
+    #[test]
+    fn incremental_restyle_with_pseudo_elements_matches_full() {
+        // ::before/::after content on elements inside and outside the dirty
+        // subtree: reused subtrees keep their pseudo content, recomputed ones
+        // regenerate it — both must match a full rebuild.
+        incremental_restyle_matches_full(
+            r#"<html><body><div id="keep"><p class="k">keep</p></div><div id="target"><p class="t">x</p></div><button id="go">go</button><script>document.getElementById('go').addEventListener('click', () => { document.querySelector('#target .t').className = 't hot'; });</script></body></html>"#,
+            r#"
+                .k::before { content: "K"; }
+                .t::before { content: "T"; }
+                .t::after { content: "!"; }
+                .t.hot { color: rgb(7, 8, 9); }
+                .t.hot::after { content: "?"; }
+            "#,
+            |session, go_id| session.dispatch_event(go_id, "click", &DomEventInit::default()),
+        );
+    }
+
+    #[test]
     fn incremental_restyle_heavy_dom_childlist_matches_full() {
         // ~3600 elements. A childList mutation deep in the tree (#card200) shifts
         // the pre-order data-tobira-node-id of every node after it, so the large
