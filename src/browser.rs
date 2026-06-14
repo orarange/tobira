@@ -337,6 +337,11 @@ pub fn load_page_for_cli(url: &Url) -> Result<BrowserPage> {
 
 fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<BrowserPage> {
     let source = load_document_source(url, 0)?;
+    if std::env::var("TOBIRA_DEBUG_CONSOLE").is_ok() {
+        for line in &source.processed_html.console_logs {
+            eprintln!("[console] {line}");
+        }
+    }
     let mut page = rebuild_page_from_document(
         &source.final_url,
         source.status_code,
