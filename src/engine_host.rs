@@ -2434,7 +2434,7 @@ impl EngineSession {
                 let _ = vm.execute(&chunk);
             }
         }
-        'scripts: for script in &scripts {
+        'scripts: for (script_index, script) in scripts.iter().enumerate() {
             // Resolve the source: inline text is used directly; an external `src`
             // is resolved against the document URL and fetched over HTTP (just like
             // a real browser loading `<script src>`). A fetch failure aborts the
@@ -2464,18 +2464,30 @@ impl EngineSession {
                 Ok(program) => match Compiler::new(&program).compile() {
                     Ok(chunk) => {
                         if let Err(e) = vm.execute(&chunk) {
-                            error = Some(format!("{e}"));
-                            break;
+                            let script_label = match script {
+                                ScriptSource::External(src) => format!("external script {src}"),
+                                ScriptSource::Inline(_) => format!("inline script #{script_index}"),
+                            };
+                            error = Some(format!("{e} (in {script_label})"));
+                            break 'scripts;
                         }
                     }
                     Err(e) => {
-                        error = Some(format!("compile: {e:?}"));
-                        break;
+                        let script_label = match script {
+                            ScriptSource::External(src) => format!("external script {src}"),
+                            ScriptSource::Inline(_) => format!("inline script #{script_index}"),
+                        };
+                        error = Some(format!("compile: {e:?} (in {script_label})"));
+                        break 'scripts;
                     }
                 },
                 Err(e) => {
-                    error = Some(format!("parse: {e:?}"));
-                    break;
+                    let script_label = match script {
+                        ScriptSource::External(src) => format!("external script {src}"),
+                        ScriptSource::Inline(_) => format!("inline script #{script_index}"),
+                    };
+                    error = Some(format!("parse: {e:?} (in {script_label})"));
+                    break 'scripts;
                 }
             }
         }
@@ -3284,6 +3296,97 @@ mod tests {
             </ul></body></html>"#,
             8,
         );
+    }
+
+    #[test]
+    fn global_image_constructor_reuses_img_element() {
+        use crate::html::{parse_document, Node};
+
+        let html = r#"
+            <html><body>
+              <script>
+                const img = new Image(40, 20);
+                document.body.appendChild(img);
+                document.body.setAttribute('data-typeof-image', typeof Image);
+                document.body.setAttribute('data-tag-name', img.tagName);
+                document.body.setAttribute('data-node-name', img.nodeName);
+                document.body.setAttribute('data-width', img.getAttribute('width'));
+                document.body.setAttribute('data-height', img.getAttribute('height'));
+              </script>
+            </body></html>
+        "#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
+        let snapshot = session.snapshot();
+        assert!(snapshot.error.is_none(), "snapshot error: {:?}", snapshot.error);
+        let tree = parse_document(&snapshot.html);
+        fn find_body<'a>(node: &'a Node) -> Option<&'a crate::html::Element> {
+            match node {
+                Node::Element(el) => {
+                    if el.tag_name.eq_ignore_ascii_case("body") {
+                        return Some(el);
+                    }
+                    for child in &el.children {
+                        if let Some(body) = find_body(child) {
+                            return Some(body);
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            }
+        }
+        let body = find_body(&tree).expect("body element present");
+        assert_eq!(body.attributes.get("data-typeof-image").map(String::as_str), Some("function"));
+        assert_eq!(body.attributes.get("data-tag-name").map(String::as_str), Some("IMG"));
+        assert_eq!(body.attributes.get("data-node-name").map(String::as_str), Some("IMG"));
+        assert_eq!(body.attributes.get("data-width").map(String::as_str), Some("40"));
+        assert_eq!(body.attributes.get("data-height").map(String::as_str), Some("20"));
+    }
+
+    #[test]
+    fn document_expando_properties_survive_and_title_still_works() {
+        use crate::html::{parse_document, Node};
+
+        let html = r#"
+            <html><body>
+              <script>
+                (function(a){var d={tag:'ok'};d.r=1;a.__gwbp=d})(document);
+                var P=document.__gwbp.r;
+                document.title = 'Hi';
+                document.body.setAttribute('data-expando-tag', document.__gwbp.tag === undefined ? 'missing' : document.__gwbp.tag);
+                document.body.setAttribute('data-expando-r', String(P));
+                document.body.setAttribute('data-expando-present', String(document.__gwbp !== undefined));
+                document.body.setAttribute('data-title', document.title);
+              </script>
+            </body></html>
+        "#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
+        let snapshot = session.snapshot();
+        assert!(snapshot.error.is_none(), "snapshot error: {:?}", snapshot.error);
+        let tree = parse_document(&snapshot.html);
+        fn find_body<'a>(node: &'a Node) -> Option<&'a crate::html::Element> {
+            match node {
+                Node::Element(el) => {
+                    if el.tag_name.eq_ignore_ascii_case("body") {
+                        return Some(el);
+                    }
+                    for child in &el.children {
+                        if let Some(body) = find_body(child) {
+                            return Some(body);
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            }
+        }
+        let body = find_body(&tree).expect("body element present");
+        assert_eq!(body.attributes.get("data-expando-present").map(String::as_str), Some("true"));
+        assert_eq!(body.attributes.get("data-expando-r").map(String::as_str), Some("1"));
+        assert_eq!(body.attributes.get("data-expando-tag").map(String::as_str), Some("ok"));
+        assert_eq!(body.attributes.get("data-title").map(String::as_str), Some("Hi"));
     }
 
     #[test]

@@ -252,7 +252,8 @@ enum BuiltinId {
     // MutationObserver builtins above)
     ResizeObserverConstructor,
     ResizeObserverUnobserve,
-    // XMLHttpRequest
+    // XMLHttpRequest / Image
+    ImageConstructor,
     XhrConstructor,
     XhrOpen,
     XhrSetRequestHeader,
@@ -2676,6 +2677,10 @@ impl Vm {
         let xhr_ctor = self.allocate_builtin_value(BuiltinId::XhrConstructor, true, None);
         self.globals
             .insert("XMLHttpRequest".to_string(), xhr_ctor);
+
+        // Image constructor.
+        let image_ctor = self.allocate_builtin_value(BuiltinId::ImageConstructor, true, None);
+        self.globals.insert("Image".to_string(), image_ctor);
 
         // IntersectionObserver constructor.
         let intersection_observer_ctor =
@@ -5377,6 +5382,7 @@ impl Vm {
                 | BuiltinId::MouseEventConstructor
                 | BuiltinId::AbortControllerConstructor
                 | BuiltinId::MutationObserverConstructor
+                | BuiltinId::ImageConstructor
                 | BuiltinId::XhrConstructor
                 | BuiltinId::IntersectionObserverConstructor
                 | BuiltinId::ResizeObserverConstructor
@@ -6160,7 +6166,10 @@ impl Vm {
             // Fall back to an own expando property for Node names the DOM doesn't
             // expose (mirrors the set path above).
             if matches!(value, Value::Undefined)
-                && matches!(slot.class, HostObjectClass::Node | HostObjectClass::EventTarget)
+                && matches!(
+                    slot.class,
+                    HostObjectClass::Node | HostObjectClass::EventTarget | HostObjectClass::Document
+                )
             {
                 if let Some(JsPropertyDescriptor::Data { value, .. }) =
                     self.get_own_property_descriptor(object, key)
@@ -6268,6 +6277,14 @@ impl Vm {
             if matches!(slot.class, HostObjectClass::Node | HostObjectClass::EventTarget) {
                 if let PropertyKey::String(name) = &key {
                     if !is_dom_managed_node_property(name) {
+                        self.define_data_property(object, key, value, true, true, true);
+                        return Ok(());
+                    }
+                }
+            }
+            if matches!(slot.class, HostObjectClass::Document) {
+                if let PropertyKey::String(name) = &key {
+                    if !is_dom_managed_document_property(name) {
                         self.define_data_property(object, key, value, true, true, true);
                         return Ok(());
                     }
@@ -7272,6 +7289,34 @@ impl Vm {
             self.define_data_property(object, PropertyKey::from(name), method, true, false, true);
         }
         Ok(Value::Object(object))
+    }
+
+    fn image_construct(&mut self, args: &[Value]) -> Result<Value, VmError> {
+        let res = self.host.mutate_dom(DomMutation::CreateElement {
+            window: WindowId(0),
+            local_name: "img".to_string(),
+        });
+        let node_id = match res {
+            Ok(super::host::DomMutationResult::Node(id)) => id,
+            _ => return Ok(Value::Undefined),
+        };
+        if let Some(width) = args.first() {
+            let value = self.to_string(width);
+            let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                node: node_id,
+                name: "width".to_string(),
+                value,
+            });
+        }
+        if let Some(height) = args.get(1) {
+            let value = self.to_string(height);
+            let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                node: node_id,
+                name: "height".to_string(),
+                value,
+            });
+        }
+        Ok(self.make_dom_node_value(node_id))
     }
 
     fn xhr_open(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
@@ -8561,6 +8606,7 @@ impl Vm {
                 }
                 Ok(Value::Undefined)
             }
+            BuiltinId::ImageConstructor => self.image_construct(&args),
             BuiltinId::XhrConstructor => self.xhr_construct(),
             BuiltinId::XhrOpen => self.xhr_open(&this_value, &args),
             BuiltinId::XhrSetRequestHeader => self.xhr_set_request_header(&this_value, &args),
@@ -13221,6 +13267,16 @@ impl Vm {
                 let tag = self.get_node_name(node_id).to_ascii_uppercase();
                 Ok(self.make_string_value(if tag == "INPUT" { "text" } else { "" }))
             }
+            "width" | "height" => {
+                let attr = match self.host.read_dom(DomRead::Attribute {
+                    node: node_id,
+                    name: name.clone(),
+                }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                Ok(self.make_string_value(&attr))
+            }
             "classList" => Ok(self.make_host_object(HostObjectSlot {
                 class: HostObjectClass::Other("TokenList"),
                 interface_name: "DOMTokenList",
@@ -14304,6 +14360,50 @@ fn is_dom_managed_node_property(name: &str) -> bool {
             | "disabled"
             | "scrollTop"
             | "scrollLeft"
+    )
+}
+
+/// Property names that `get_document_property` manages directly.
+/// Keep this list in sync with `get_document_property`.
+fn is_dom_managed_document_property(name: &str) -> bool {
+    matches!(
+        name,
+        "ownerDocument"
+            | "body"
+            | "head"
+            | "documentElement"
+            | "title"
+            | "nodeType"
+            | "nodeName"
+            | "readyState"
+            | "compatMode"
+            | "charset"
+            | "characterSet"
+            | "location"
+            | "URL"
+            | "documentURI"
+            | "domain"
+            | "querySelector"
+            | "querySelectorAll"
+            | "getElementById"
+            | "getElementsByClassName"
+            | "getElementsByTagName"
+            | "createElement"
+            | "createElementNS"
+            | "createTextNode"
+            | "createDocumentFragment"
+            | "write"
+            | "writeln"
+            | "addEventListener"
+            | "removeEventListener"
+            | "cookie"
+            | "referrer"
+            | "hidden"
+            | "visibilityState"
+            | "activeElement"
+            | "createEvent"
+            | "createComment"
+            | "implementation"
     )
 }
 
