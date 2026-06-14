@@ -1095,6 +1095,7 @@ struct ResizeObserverReg {
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
+    last_backtrace: Option<String>,
     heap: Heap,
     globals: HashMap<String, Value>,
     callables: HashMap<RawGcRef, Callable>,
@@ -1229,6 +1230,7 @@ impl Vm {
         let mut vm = Self {
             stack: Vec::new(),
             frames: Vec::new(),
+            last_backtrace: None,
             heap,
             globals: HashMap::new(),
             callables: HashMap::new(),
@@ -1275,6 +1277,26 @@ impl Vm {
     /// Borrow the host mutably (for reading results after execution).
     pub fn host_mut(&mut self) -> &mut dyn Host {
         self.host.as_mut()
+    }
+
+    fn capture_backtrace(&self) -> String {
+        let mut lines = Vec::with_capacity(self.frames.len());
+        for (index, frame) in self.frames.iter().enumerate().rev() {
+            let name = if index == 0 {
+                "<script>"
+            } else {
+                match frame.proto.name.as_deref() {
+                    Some(name) if !name.is_empty() => name,
+                    _ => "<anonymous>",
+                }
+            };
+            lines.push(format!("    at {name}"));
+        }
+        lines.join("\n")
+    }
+
+    pub fn take_last_backtrace(&mut self) -> Option<String> {
+        self.last_backtrace.take()
     }
 
     /// Fire a DOM event on a node handle, invoking all registered JS listeners.
@@ -5238,6 +5260,7 @@ impl Vm {
 
     fn handle_thrown_value(&mut self, value: Value) -> Result<(), VmError> {
         let mut thrown = value;
+        self.last_backtrace = Some(self.capture_backtrace());
         loop {
             let Some(frame_index) = self.frames.len().checked_sub(1) else {
                 return Err(VmError::TypeError(format!(
@@ -5411,8 +5434,17 @@ impl Vm {
         let object = match value {
             Value::Object(object) => object.raw(),
             _ => {
+                let described = match value {
+                    Value::Undefined => "undefined".to_string(),
+                    Value::Null => "null".to_string(),
+                    Value::Bool(_) => "boolean".to_string(),
+                    Value::Number(_) => "number".to_string(),
+                    Value::String(_) => "string".to_string(),
+                    Value::Object(_) => "object".to_string(),
+                    Value::Symbol(_) => "symbol".to_string(),
+                };
                 return Err(VmError::TypeError(
-                    "attempted to call a non-function value".to_string(),
+                    format!("attempted to call a non-function value ({described})"),
                 ));
             }
         };
@@ -14020,6 +14052,16 @@ mod tests {
         vm.execute(&chunk).expect("script should execute");
     }
 
+    fn execute_script(source: &str) -> (Vm, Result<(), crate::engine::vm::VmError>) {
+        let program = Parser::new(source).parse().expect("script should parse");
+        let chunk = Compiler::new(&program)
+            .compile()
+            .expect("script should compile");
+        let mut vm = Vm::new(Heap::new());
+        let result = vm.execute(&chunk).map(|_| ());
+        (vm, result)
+    }
+
     #[test]
     fn phase_2_arithmetic_and_coercion_corpus() {
         run_script(
@@ -14175,6 +14217,41 @@ mod tests {
             assert(result === "try catch:test finally");
             "#,
         );
+    }
+
+    #[test]
+    fn uncaught_throw_captures_backtrace_in_call_order() {
+        let (mut vm, result) = execute_script(
+            r#"
+            function outer() { inner(); }
+            function inner() { null.x; }
+            outer();
+            "#,
+        );
+        let error = result.expect_err("script should throw");
+        let backtrace = vm
+            .take_last_backtrace()
+            .expect("backtrace should be captured");
+        assert!(!format!("{error}").is_empty());
+        let inner = backtrace.find("    at inner").expect("inner frame");
+        let outer = backtrace.find("    at outer").expect("outer frame");
+        let script = backtrace.find("    at <script>").expect("script frame");
+        assert!(inner < outer, "backtrace order was not innermost-first: {backtrace}");
+        assert!(outer < script, "backtrace order was not innermost-first: {backtrace}");
+    }
+
+    #[test]
+    fn non_function_call_mentions_value_type() {
+        let (mut vm, result) = execute_script(
+            r#"
+            undefined();
+            "#,
+        );
+        let error = result.expect_err("script should fail");
+        let message = format!("{error}");
+        assert!(message.contains("non-function value"), "{message}");
+        assert!(message.contains("undefined"), "{message}");
+        assert!(vm.take_last_backtrace().is_some(), "backtrace should be captured");
     }
 
     #[test]

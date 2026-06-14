@@ -2468,7 +2468,13 @@ impl EngineSession {
                                 ScriptSource::External(src) => format!("external script {src}"),
                                 ScriptSource::Inline(_) => format!("inline script #{script_index}"),
                             };
-                            error = Some(format!("{e} (in {script_label})"));
+                            let backtrace = vm.take_last_backtrace();
+                            error = Some(match backtrace {
+                                Some(backtrace) if !backtrace.is_empty() => {
+                                    format!("{e} (in {script_label})\n{backtrace}")
+                                }
+                                _ => format!("{e} (in {script_label})"),
+                            });
                             break 'scripts;
                         }
                     }
@@ -2683,7 +2689,13 @@ impl EngineSession {
     pub fn eval_for_test(&mut self, src: &str) -> EngineRunResult {
         let error = match Parser::new(src).parse() {
             Ok(program) => match Compiler::new(&program).compile() {
-                Ok(chunk) => self.vm.execute(&chunk).err().map(|e| format!("{e}")),
+                Ok(chunk) => self.vm.execute(&chunk).err().map(|e| {
+                    let backtrace = self.vm.take_last_backtrace();
+                    match backtrace {
+                        Some(backtrace) if !backtrace.is_empty() => format!("{e}\n{backtrace}"),
+                        _ => format!("{e}"),
+                    }
+                }),
                 Err(e) => Some(format!("compile: {e:?}")),
             },
             Err(e) => Some(format!("parse: {e:?}")),
@@ -3296,6 +3308,24 @@ mod tests {
             </ul></body></html>"#,
             8,
         );
+    }
+
+    #[test]
+    fn run_document_scripts_includes_js_backtrace() {
+        let result = run_document_scripts(
+            r#"
+            <script>
+            function outer() { inner(); }
+            function inner() { null.x; }
+            outer();
+            </script>
+            "#,
+            "http://localhost/",
+        );
+        let error = result.error.expect("expected uncaught error");
+        assert!(error.contains("inner"), "{error}");
+        assert!(error.contains("outer"), "{error}");
+        assert!(error.contains("<script>"), "{error}");
     }
 
     #[test]
