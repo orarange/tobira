@@ -1906,6 +1906,20 @@ fn compute_style_with_rules(
         })
         .unwrap_or(style.opacity);
 
+    // Anti-FOUC guard: pages routinely hide <html>/<body> (via `opacity: 0` or
+    // `visibility: hidden`, which we fold into opacity) and then reveal it with a
+    // JS onload handler or a CSS fade-in animation. We run neither reliably, so
+    // honoring opacity:0 on the root leaves the entire page invisible — which is
+    // exactly the "blank page" failure on Google/YouTube. A root element is never
+    // meant to be permanently transparent, so clamp it back to fully opaque.
+    if style.opacity == 0
+        && (element.tag_name.eq_ignore_ascii_case("body")
+            || element.tag_name.eq_ignore_ascii_case("html"))
+    {
+        style.opacity = 255;
+        style.effective_opacity = 255;
+    }
+
     style
 }
 
@@ -5770,6 +5784,29 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn root_opacity_zero_is_clamped_but_others_honored() {
+        fn opacity_of(tag: &str, css: &str) -> u8 {
+            let ss = parse_stylesheet(css);
+            let el = Element {
+                tag_name: tag.into(),
+                attributes: Default::default(),
+                children: vec![],
+            };
+            let idx = RuleIndex::build(&ss.rules);
+            compute_style(&el, &ss, &idx, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default())
+                .opacity
+        }
+        // Anti-FOUC: a transparent root would blank the whole page, so clamp it.
+        assert_eq!(opacity_of("body", "body { opacity: 0; }"), 255);
+        assert_eq!(opacity_of("html", "html { opacity: 0; }"), 255);
+        assert_eq!(opacity_of("body", "body { visibility: hidden; }"), 255);
+        // Non-root elements still honor opacity:0, and a partially transparent
+        // root keeps its real value (only a fully-transparent root is clamped).
+        assert_eq!(opacity_of("div", "div { opacity: 0; }"), 0);
+        assert_eq!(opacity_of("body", "body { opacity: 0.5; }"), 128);
+    }
 
     #[test]
     fn test_position_relative_parsed() {
