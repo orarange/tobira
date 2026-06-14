@@ -3444,6 +3444,68 @@ mod tests {
     }
 
     #[test]
+    fn incremental_restyle_heavy_dom_childlist_matches_full() {
+        // ~3600 elements. A childList mutation deep in the tree (#card200) shifts
+        // the pre-order data-tobira-node-id of every node after it, so the large
+        // clean subtrees before/after it are reused wholesale. This exercises the
+        // scale path that small DOMs hide: id-space confusion in the dirty check,
+        // unconsumed ids on reused subtrees, and stale data-tobira-node-id on
+        // reused subtrees (all of which only surface when arena indices diverge
+        // from pre-order ids and reused subtrees are large).
+        let mut body = String::new();
+        for i in 0..400 {
+            body.push_str(&format!(
+                "<section class=\"card\" id=\"card{i}\"><h3 class=\"title\">t{i}</h3><div class=\"body\"><p class=\"text\">p{i}</p><ul class=\"list\"><li class=\"row a\">x</li><li class=\"row b\">y</li><li class=\"row c\">z</li></ul></div></section>"
+            ));
+        }
+        let html = format!(
+            "<html><head></head><body><main id=\"root\">{body}</main><button id=\"go\">go</button><script>document.getElementById('go').addEventListener('click', () => {{ const list = document.querySelector('#card200 .list'); const li = document.createElement('li'); li.className = 'row d'; li.textContent = 'new'; list.insertBefore(li, list.children[1]); }});</script></body></html>"
+        );
+        incremental_restyle_matches_full(
+            &html,
+            r#"
+                .card { margin: 1px; }
+                .card .title { font-weight: bold; }
+                .list .row:nth-child(2n) { color: rgb(1, 2, 3); }
+                .row.a + .row { color: rgb(4, 5, 6); }
+                .row.a ~ .row.d { color: rgb(7, 8, 9); }
+                .row.d:not(.skip) { font-weight: bold; }
+                section:nth-child(3n) .text { letter-spacing: 1px; }
+                .body .text { text-transform: uppercase; }
+            "#,
+            |session, go_id| session.dispatch_event(go_id, "click", &DomEventInit::default()),
+        );
+    }
+
+    #[test]
+    fn incremental_restyle_heavy_dom_attribute_matches_full() {
+        // Same large tree, but a class change on a deep element. No ids shift, so
+        // the bulk of the tree is reused; verifies the reuse path stays exact at
+        // scale and that the dirty subtree (the changed element's parent) is the
+        // only part recomputed.
+        let mut body = String::new();
+        for i in 0..400 {
+            body.push_str(&format!(
+                "<section class=\"card\" id=\"card{i}\"><h3 class=\"title\">t{i}</h3><div class=\"body\"><p class=\"text\">p{i}</p><ul class=\"list\"><li class=\"row a\">x</li><li class=\"row b\">y</li></ul></div></section>"
+            ));
+        }
+        let html = format!(
+            "<html><head></head><body><main id=\"root\">{body}</main><button id=\"go\">go</button><script>document.getElementById('go').addEventListener('click', () => {{ document.querySelector('#card200 .text').className = 'text hot'; }});</script></body></html>"
+        );
+        incremental_restyle_matches_full(
+            &html,
+            r#"
+                .card .title { font-weight: bold; }
+                .text.hot { color: rgb(7, 8, 9); }
+                .text.hot + .list .row { color: rgb(1, 2, 3); }
+                .body .text { text-transform: uppercase; }
+                section:nth-child(3n) { color: rgb(9, 9, 9); }
+            "#,
+            |session, go_id| session.dispatch_event(go_id, "click", &DomEventInit::default()),
+        );
+    }
+
+    #[test]
     fn incremental_restyle_falls_back_for_text_change() {
         use crate::browser::{annotate_node_ids, compute_dirty_roots};
         use crate::css::{InteractiveState, build_styled_tree};

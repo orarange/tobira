@@ -1181,8 +1181,32 @@ pub fn build_styled_tree_incremental(
         return None;
     }
 
+    // Build a stable-id -> parent-stable-id map over the new tree, then derive
+    // the "dirty spine": every dirty root plus all of its ancestors. A subtree
+    // can be reused wholesale only when its root is NOT on the spine (i.e. no
+    // dirty root lives anywhere inside it) and is not itself under a dirty root.
+    // The stable ids are engine arena indices (sparse, since text/detached nodes
+    // consume indices too) — never the browser pre-order data-tobira-node-id —
+    // so the dirty comparisons must be done against these same arena ids.
+    let mut parent_map: HashMap<u32, Option<u32>> = HashMap::new();
+    let mut pm_iter = new_node_order.iter();
+    build_parent_map(document, None, &mut pm_iter, &mut parent_map)?;
+    if pm_iter.next().is_some() {
+        return None;
+    }
+    let mut dirty_spine: HashSet<u32> = HashSet::new();
+    for &root in dirty_roots {
+        let mut cur = Some(root);
+        while let Some(id) = cur {
+            if !dirty_spine.insert(id) {
+                break;
+            }
+            cur = parent_map.get(&id).copied().flatten();
+        }
+    }
+
     let mut new_iter = new_node_order.iter();
-    let result = build_node_incremental(
+    let mut result = build_node_incremental(
         document,
         stylesheet,
         &RuleIndex::build(&stylesheet.rules),
@@ -1197,11 +1221,35 @@ pub fn build_styled_tree_incremental(
         &mut new_iter,
         &old_map,
         dirty_roots,
+        &dirty_spine,
+        false,
     )?;
     if new_iter.next().is_some() {
         return None;
     }
+    // Reused subtrees carry the previous tree's `data-tobira-node-id` values,
+    // which shift whenever a structural change inserts or removes a node. Re-stamp
+    // them in pre-order (matching browser::annotate_node_ids) so every element's
+    // id reflects its new position — a full rebuild would assign exactly these.
+    let mut counter = 0usize;
+    restamp_tobira_node_ids(&mut result, &mut counter);
     Some(result)
+}
+
+/// Re-number `data-tobira-node-id` on every styled element in pre-order, 1-based,
+/// reproducing `browser::annotate_node_ids` over the styled tree (pseudo-element
+/// text nodes are skipped, exactly as they are absent from the source document).
+#[cfg(test)]
+fn restamp_tobira_node_ids(node: &mut StyledNode, counter: &mut usize) {
+    if let StyledNode::Element(element) = node {
+        *counter += 1;
+        element
+            .attributes
+            .insert("data-tobira-node-id".to_string(), counter.to_string());
+        for child in &mut element.children {
+            restamp_tobira_node_ids(child, counter);
+        }
+    }
 }
 
 fn build_node(
@@ -1390,6 +1438,8 @@ fn build_node_incremental(
     new_node_order: &mut std::slice::Iter<'_, u32>,
     old_map: &HashMap<u32, &StyledNode>,
     dirty_roots: &HashSet<u32>,
+    dirty_spine: &HashSet<u32>,
+    under_dirty: bool,
 ) -> Option<StyledNode> {
     match node {
         Node::Text(text) => {
@@ -1408,15 +1458,20 @@ fn build_node_incremental(
             }))
         }
         Node::Element(element) => {
-            let mut lookahead = new_node_order.clone();
-            let contains_dirty = subtree_contains_dirty(node, &mut lookahead, dirty_roots)?;
             let id = *new_node_order.next()?;
-            let under_dirty = dirty_roots.contains(&id)
-                || ancestors
-                    .iter()
-                    .any(|ancestor| ancestor.element.node_id.is_some_and(|ancestor_id| dirty_roots.contains(&(ancestor_id as u32))));
-            let reuse = !under_dirty && !contains_dirty && old_map.contains_key(&id);
+            // `under_dirty` (a dirty root is at or above this node) propagates
+            // down; `dirty_spine` membership means a dirty root lives somewhere
+            // inside this node's subtree. Either disqualifies wholesale reuse.
+            let under_dirty = under_dirty || dirty_roots.contains(&id);
+            let subtree_has_dirty = dirty_spine.contains(&id);
+            let reuse = !under_dirty && !subtree_has_dirty && old_map.contains_key(&id);
             if reuse {
+                // The whole subtree is reused unchanged, but its descendants'
+                // stable ids must still be consumed from the iterator to keep it
+                // aligned with the document walk.
+                for child in &element.children {
+                    skip_element_ids(child, new_node_order)?;
+                }
                 return old_map.get(&id).cloned().cloned();
             }
 
@@ -1474,6 +1529,8 @@ fn build_node_incremental(
                     new_node_order,
                     old_map,
                     dirty_roots,
+                    dirty_spine,
+                    under_dirty,
                 )?);
             }
 
@@ -1523,25 +1580,42 @@ fn build_node_incremental(
     }
 }
 
+/// Walk the document in the same Element-only pre-order as `node_order` and
+/// record each element's stable id -> parent stable id. Returns None if the
+/// document and `node_order` disagree on element count (the iterator runs dry).
 #[cfg(test)]
-fn subtree_contains_dirty(
+fn build_parent_map(
     node: &Node,
+    parent_id: Option<u32>,
     node_order: &mut std::slice::Iter<'_, u32>,
-    dirty_roots: &HashSet<u32>,
-) -> Option<bool> {
+    out: &mut HashMap<u32, Option<u32>>,
+) -> Option<()> {
     match node {
-        Node::Text(_) => Some(false),
+        Node::Text(_) => Some(()),
         Node::Element(element) => {
             let id = *node_order.next()?;
-            if dirty_roots.contains(&id) {
-                return Some(true);
-            }
+            out.insert(id, parent_id);
             for child in &element.children {
-                if subtree_contains_dirty(child, node_order, dirty_roots)? {
-                    return Some(true);
-                }
+                build_parent_map(child, Some(id), node_order, out)?;
             }
-            Some(false)
+            Some(())
+        }
+    }
+}
+
+/// Advance `node_order` past every element id in `node`'s subtree (including
+/// `node` itself). Used when a clean subtree is reused wholesale so the shared
+/// iterator stays aligned with the document walk.
+#[cfg(test)]
+fn skip_element_ids(node: &Node, node_order: &mut std::slice::Iter<'_, u32>) -> Option<()> {
+    match node {
+        Node::Text(_) => Some(()),
+        Node::Element(element) => {
+            node_order.next()?;
+            for child in &element.children {
+                skip_element_ids(child, node_order)?;
+            }
+            Some(())
         }
     }
 }
