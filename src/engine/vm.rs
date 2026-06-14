@@ -1624,7 +1624,8 @@ impl Vm {
             proto: Rc::new(chunk.top_level.clone()),
             upvalues: Vec::new(),
         };
-        self.push_call_frame(closure, Vec::new(), Value::Undefined, None)?;
+        let global_this = self.globals.get("window").cloned().unwrap_or(Value::Undefined);
+        self.push_call_frame(closure, Vec::new(), global_this, None)?;
         self.run_until_frame_depth(0)?;
         self.drain_microtasks();
         if self.stack.is_empty() {
@@ -1652,7 +1653,8 @@ impl Vm {
         };
         let base_depth = self.frames.len();
         let stack_len = self.stack.len();
-        self.push_call_frame(closure, Vec::new(), Value::Undefined, None)?;
+        let global_this = self.globals.get("window").cloned().unwrap_or(Value::Undefined);
+        self.push_call_frame(closure, Vec::new(), global_this, None)?;
         self.run_until_frame_depth(base_depth)?;
         if self.stack.len() > stack_len {
             self.pop_value()

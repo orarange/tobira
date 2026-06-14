@@ -3345,6 +3345,53 @@ mod tests {
     }
 
     #[test]
+    fn top_level_this_is_global_object() {
+        use crate::html::{parse_document, Node};
+
+        let html = r#"
+            <html><body><div id="out"></div><script>
+              this.__hdtest = { ok: 1 };
+              (function(g) { g.__umd = 7; })(this);
+              document.getElementById('out').setAttribute(
+                'data-result',
+                String(this === globalThis) + '|' +
+                String(this === window) + '|' +
+                String(window.__umd === 7) + '|' +
+                String(globalThis.__umd === 7) + '|' +
+                String(this.__hdtest.ok === 1)
+              );
+            </script></body></html>
+        "#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
+        let snapshot = session.snapshot();
+        assert!(snapshot.error.is_none(), "snapshot error: {:?}", snapshot.error);
+        let tree = parse_document(&snapshot.html);
+        fn find_data_result(node: &Node) -> Option<String> {
+            match node {
+                Node::Element(el) => {
+                    if el.tag_name.eq_ignore_ascii_case("div")
+                        && el.attributes.get("id").map(String::as_str) == Some("out")
+                    {
+                        return el.attributes.get("data-result").cloned();
+                    }
+                    for child in &el.children {
+                        if let Some(value) = find_data_result(child) {
+                            return Some(value);
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            }
+        }
+        assert_eq!(
+            find_data_result(&tree).as_deref(),
+            Some("true|true|true|true|true")
+        );
+    }
+
+    #[test]
     fn document_expando_properties_survive_and_title_still_works() {
         use crate::html::{parse_document, Node};
 
