@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
-#[cfg(test)]
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use serde_json::Value;
 
-use crate::css::{InteractiveState, StyledNode, Stylesheet, build_styled_tree, parse_stylesheet};
+use crate::css::{
+    build_styled_tree, build_styled_tree_incremental, InteractiveState, StyledNode, Stylesheet,
+    parse_stylesheet,
+};
 use crate::error::Result;
 use crate::html::{Element, Node, parse_document};
 use crate::http::fetch;
@@ -75,6 +78,7 @@ impl BrowserPage {
         let pending = snapshot.has_pending_work;
         let include_rendered_output = self.rendered.is_some();
         let javascript_session = self.javascript_session.take();
+        let javascript_session_fallback = javascript_session.clone();
         let layout_revision = self
             .layout_revision
             .checked_add(1)
@@ -84,18 +88,60 @@ impl BrowserPage {
             .as_deref()
             .and_then(|target| Url::parse(target).ok())
             .unwrap_or_else(|| self.url.clone());
-        let rebuilt = rebuild_page_from_html(
-            &url,
-            self.status_code,
-            self.reason_phrase.clone(),
-            self.content_type.clone(),
-            &snapshot.html,
-            snapshot.title_override.clone(),
-            include_rendered_output,
-            layout_revision,
-            javascript_session,
-            snapshot.node_order.clone(),
-        );
+        let rebuilt = if incremental_restyle_enabled()
+            && snapshot.navigation_target.is_none()
+            && snapshot.soft_navigation_target.is_none()
+            && !snapshot.structural_changes.is_empty()
+            && !snapshot.node_order.is_empty()
+            && !self.node_order.is_empty()
+        {
+            let old_node_order: Vec<u32> = self.node_order.iter().map(|id| id.0 as u32).collect();
+            let new_node_order: Vec<u32> = snapshot.node_order.iter().map(|id| id.0 as u32).collect();
+            rebuild_page_from_html_incremental(
+                &url,
+                self.status_code,
+                self.reason_phrase.clone(),
+                self.content_type.clone(),
+                &snapshot.html,
+                snapshot.title_override.clone(),
+                include_rendered_output,
+                layout_revision,
+                javascript_session.clone(),
+                snapshot.node_order.clone(),
+                &snapshot.structural_changes,
+                &self.styled_document,
+                &old_node_order,
+                &self.main_stylesheet,
+                &new_node_order,
+            )
+            .unwrap_or_else(|| {
+                rebuild_page_from_html(
+                    &url,
+                    self.status_code,
+                    self.reason_phrase.clone(),
+                    self.content_type.clone(),
+                    &snapshot.html,
+                    snapshot.title_override.clone(),
+                    include_rendered_output,
+                    layout_revision,
+                    javascript_session_fallback,
+                    snapshot.node_order.clone(),
+                )
+            })
+        } else {
+            rebuild_page_from_html(
+                &url,
+                self.status_code,
+                self.reason_phrase.clone(),
+                self.content_type.clone(),
+                &snapshot.html,
+                snapshot.title_override.clone(),
+                include_rendered_output,
+                layout_revision,
+                javascript_session_fallback,
+                snapshot.node_order.clone(),
+            )
+        };
         *self = rebuilt;
         self.scroll_y = snapshot.scroll_y;
         self.engine_pending = pending;
@@ -293,6 +339,7 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
         0,
         source.javascript_session,
         source.processed_html.node_order,
+        None,
     );
     page.scroll_y = source.processed_html.scroll_y;
     page.engine_pending = source.processed_html.has_pending_work;
@@ -347,6 +394,7 @@ fn rebuild_page_from_html(
         layout_revision,
         javascript_session,
         node_order,
+        None,
     )
 }
 
@@ -362,6 +410,7 @@ fn rebuild_page_from_document(
     layout_revision: u64,
     javascript_session: Option<JavaScriptSession>,
     node_order: Vec<NodeId>,
+    styled_document: Option<StyledNode>,
 ) -> BrowserPage {
     annotate_node_ids(&mut document);
     let original_title = title_override.or_else(|| document_title(&document));
@@ -373,8 +422,8 @@ fn rebuild_page_from_document(
     let stylesheet = collect_stylesheet(&document, url);
     let mut images = collect_image_resources(&document);
     let rendered = include_rendered_output.then(|| render_document(&document));
-    let styled_document =
-        build_styled_tree(&document, &stylesheet, 1280, &InteractiveState::default());
+    let styled_document = styled_document
+        .unwrap_or_else(|| build_styled_tree(&document, &stylesheet, 1280, &InteractiveState::default()));
     collect_styled_background_images(&styled_document, url, &mut images);
 
     BrowserPage {
@@ -395,6 +444,93 @@ fn rebuild_page_from_document(
         scroll_y: 0,
         engine_pending: false,
     }
+}
+
+fn rebuild_page_from_html_incremental(
+    url: &Url,
+    status_code: u16,
+    reason_phrase: String,
+    content_type: Option<String>,
+    html: &str,
+    title_override: Option<String>,
+    include_rendered_output: bool,
+    layout_revision: u64,
+    javascript_session: Option<JavaScriptSession>,
+    node_order: Vec<NodeId>,
+    structural_changes: &[tobira_engine::engine::DomStructuralChange],
+    old_styled_document: &StyledNode,
+    old_node_order: &[u32],
+    main_stylesheet: &Stylesheet,
+    new_node_order: &[u32],
+) -> Option<BrowserPage> {
+    let mut parsed_document = parse_document(html);
+    if let Some(rewritten) = build_site_specific_document(&parsed_document, html, url) {
+        parsed_document = rewritten;
+    } else if is_google_host(url) && !document_has_meaningful_body(&parsed_document) {
+        parsed_document = build_google_document_from_html(html, url);
+    } else if is_youtube_host(url)
+        && !is_youtube_watch_url(url)
+        && !document_has_meaningful_body(&parsed_document)
+    {
+        parsed_document = build_youtube_generic_document_from_html(html, url);
+    }
+    annotate_resource_urls(&mut parsed_document, url);
+    let document = expand_frames(&parsed_document, url, 1)
+        .ok()
+        .flatten()
+        .unwrap_or(parsed_document);
+    let stylesheet = collect_stylesheet(&document, url);
+    if stylesheet != *main_stylesheet {
+        return None;
+    }
+    let dirty_roots = compute_dirty_roots(structural_changes, &document, new_node_order)?;
+    let styled_document = build_styled_tree_incremental(
+        &document,
+        &stylesheet,
+        1280,
+        &InteractiveState::default(),
+        old_styled_document,
+        old_node_order,
+        new_node_order,
+        &dirty_roots,
+    )?;
+    Some(rebuild_page_from_document(
+        url,
+        status_code,
+        reason_phrase,
+        content_type,
+        document,
+        html.to_string(),
+        title_override,
+        include_rendered_output,
+        layout_revision,
+        javascript_session,
+        node_order,
+        Some(styled_document),
+    ))
+}
+
+fn incremental_restyle_enabled() -> bool {
+    #[cfg(test)]
+    if INCREMENTAL_RESTYLE_OVERRIDE_SET.load(std::sync::atomic::Ordering::Relaxed) {
+        return INCREMENTAL_RESTYLE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+    }
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| matches!(std::env::var("TOBIRA_INCREMENTAL_RESTYLE").as_deref(), Ok("1")))
+}
+
+#[cfg(test)]
+static INCREMENTAL_RESTYLE_OVERRIDE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+static INCREMENTAL_RESTYLE_OVERRIDE_SET: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn set_incremental_restyle_override(enabled: bool) {
+    INCREMENTAL_RESTYLE_OVERRIDE.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    INCREMENTAL_RESTYLE_OVERRIDE_SET.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn load_document_source(url: &Url, frame_depth: usize) -> Result<LoadedDocumentSource> {
@@ -474,8 +610,7 @@ pub(crate) fn annotate_node_ids(document: &mut Node) {
     walk(document, &mut next_id);
 }
 
-#[cfg(test)]
-pub fn compute_dirty_roots(
+pub(crate) fn compute_dirty_roots(
     changes: &[tobira_engine::engine::DomStructuralChange],
     new_doc: &Node,
     new_node_order: &[u32],
@@ -505,7 +640,6 @@ pub fn compute_dirty_roots(
     Some(dirty_roots)
 }
 
-#[cfg(test)]
 fn build_parent_map(
     node: &Node,
     node_order: &mut std::slice::Iter<'_, u32>,
@@ -3134,10 +3268,11 @@ mod tests {
         BrowserPage, build_site_specific_document, build_youtube_generic_document_from_html,
         collect_frame_specs, collect_stylesheet, document_has_meaningful_body, document_title,
         extract_body_children, rebuild_page_from_html, should_follow_script_navigation,
-        synthetic_document, annotate_node_ids,
+        synthetic_document, annotate_node_ids, set_incremental_restyle_override,
     };
     use crate::css::{InteractiveState, StyledNode, build_styled_tree};
     use crate::html::{Node, parse_document};
+    use tobira_engine::engine::NodeId;
     use crate::js::start_document_script_session;
     use crate::url::Url;
 
@@ -3473,10 +3608,42 @@ mod tests {
         samples
     }
 
-    fn benchmark_heavy_dom_case(n: usize) -> (f64, f64, f64, f64, f64, f64) {
+    fn benchmark_heavy_dom_case(n: usize) -> (f64, f64, f64, f64, f64, f64, f64) {
         let url = Url::parse("https://example.com/heavy-dom").unwrap();
         let html = make_heavy_html(n);
         let runs = 6;
+
+        let (base_processed, base_session) = start_document_script_session(&html, &url);
+        let base_page = rebuild_page_from_html(
+            &url,
+            200,
+            "OK".to_string(),
+            Some("text/html".to_string()),
+            &base_processed.html,
+            base_processed.title_override.clone(),
+            true,
+            0,
+            base_session,
+            base_processed.node_order.clone(),
+        );
+        let deep_node_id = base_page.node_order.len();
+        let incremental_snapshot = {
+            let session = base_page
+                .javascript_session
+                .as_ref()
+                .cloned()
+                .expect("benchmark page should have a JS session");
+            assert!(session.set_attribute(deep_node_id, "data-bench", "1"));
+            session
+                .snapshot()
+                .expect("benchmark snapshot should be available after mutation")
+        };
+        let old_node_order: Vec<u32> = base_page.node_order.iter().map(|id| id.0 as u32).collect();
+        let new_node_order: Vec<u32> = incremental_snapshot
+            .node_order
+            .iter()
+            .map(|id| id.0 as u32)
+            .collect();
 
         let build_samples = measure_n(runs, || {
             let (processed, session) = start_document_script_session(&html, &url);
@@ -3554,6 +3721,27 @@ mod tests {
             page
         });
 
+        let cycle_inc_samples = measure_n(runs, || {
+            super::rebuild_page_from_html_incremental(
+                &url,
+                200,
+                "OK".to_string(),
+                Some("text/html".to_string()),
+                &incremental_snapshot.html,
+                incremental_snapshot.title_override.clone(),
+                true,
+                1,
+                None,
+                incremental_snapshot.node_order.clone(),
+                &incremental_snapshot.structural_changes,
+                &base_page.styled_document,
+                &old_node_order,
+                &base_page.main_stylesheet,
+                &new_node_order,
+            )
+            .expect("incremental restyle should engage")
+        });
+
         (
             median_ms(&build_samples),
             median_ms(&parse_samples),
@@ -3561,6 +3749,7 @@ mod tests {
             median_ms(&serialize_samples),
             median_ms(&apply_samples),
             median_ms(&cycle_samples),
+            median_ms(&cycle_inc_samples),
         )
     }
 
@@ -3575,17 +3764,17 @@ mod tests {
         }
 
         println!("=== tobira heavy-DOM benchmark (release) ===");
-        println!("N        build(ms)  parse(ms)  style(ms)  serialize(ms)  apply(ms)  cycle(ms)");
+        println!("N        build(ms)  parse(ms)  style(ms)  serialize(ms)  apply(ms)  cycle(ms)  cycle_inc(ms)");
         println!("        build = initial parse + styled tree rebuild");
         println!("        parse = parse_document() only");
         println!("        style = build_styled_tree() only");
         println!("        serialize = session.snapshot() / serialize_document");
         println!("        apply = one DOM attribute change + rebuild");
         println!("        cycle = attribute change -> snapshot -> apply");
-        for (n, (build, parse, style, serialize, apply, cycle)) in rows {
+        for (n, (build, parse, style, serialize, apply, cycle, cycle_inc)) in rows {
             println!(
-                "{:<8} {:<10.2} {:<10.2} {:<10.2} {:<14.2} {:<10.2} {:<10.2}",
-                n, build, parse, style, serialize, apply, cycle
+                "{:<8} {:<10.2} {:<10.2} {:<10.2} {:<14.2} {:<10.2} {:<10.2} {:<13.2}",
+                n, build, parse, style, serialize, apply, cycle, cycle_inc
             );
         }
         println!("querySelectorAll benchmark: not measured");
@@ -3955,6 +4144,104 @@ mod tests {
             "unchanged HTML must not rebuild the page"
         );
         assert_eq!(page.scroll_y(), 320);
+    }
+
+    #[test]
+    fn apply_script_snapshot_uses_incremental_restyle_for_dom_mutations() {
+        // Drive the real production path: build the initial page through the
+        // normal pipeline (so node_order/styled_document carry the engine's
+        // stable arena ids), enable incremental restyle, mutate a deep element
+        // via set_dom_attribute (which snapshots and calls apply_script_snapshot),
+        // and assert the styled tree equals a full rebuild of the new HTML.
+        fn tobira_id_of(node: &Node, target_id: &str) -> Option<usize> {
+            if let Node::Element(element) = node {
+                if element.attributes.get("id").map(String::as_str) == Some(target_id) {
+                    return element
+                        .attributes
+                        .get("data-tobira-node-id")
+                        .and_then(|value| value.parse().ok());
+                }
+                for child in &element.children {
+                    if let Some(found) = tobira_id_of(child, target_id) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+
+        set_incremental_restyle_override(true);
+        let initial_html = r#"<html><head><style>
+            .box { color: rgb(10, 20, 30); }
+            .leaf { font-weight: bold; }
+            .leaf.hot { color: rgb(7, 8, 9); }
+            .list .row:nth-child(2n) { color: rgb(1, 2, 3); }
+            .row.a + .row { color: rgb(4, 5, 6); }
+          </style></head><body>
+            <div class="box">
+              <div id="target">
+                <span class="leaf" id="leaf">A</span>
+                <ul class="list"><li class="row a">x</li><li class="row b">y</li></ul>
+              </div>
+            </div>
+            <p class="after">tail</p>
+          </body></html>"#;
+        let url = Url::parse("https://example.com").unwrap();
+        let (processed, session) = start_document_script_session(initial_html, &url);
+        let mut page = rebuild_page_from_html(
+            &url,
+            200,
+            "OK".to_string(),
+            Some("text/html".to_string()),
+            &processed.html,
+            processed.title_override.clone(),
+            true,
+            0,
+            session,
+            processed.node_order.clone(),
+        );
+
+        let leaf_id = tobira_id_of(&page.raw_document, "leaf").expect("leaf id");
+        page.set_dom_attribute(Some(leaf_id), "class", "leaf hot");
+        assert!(page.html_source.contains("leaf hot"));
+
+        let mut rebuilt_doc = parse_document(&page.html_source);
+        annotate_node_ids(&mut rebuilt_doc);
+        let rebuilt_sheet = collect_stylesheet(&rebuilt_doc, &url);
+        let rebuilt_style =
+            build_styled_tree(&rebuilt_doc, &rebuilt_sheet, 1280, &InteractiveState::default());
+        assert_eq!(page.styled_document, rebuilt_style);
+
+        // A snapshot whose HTML changes a <style> must fall back to a full
+        // rebuild (and still match it).
+        let changed_html = page.html_source.replace(
+            ".leaf { font-weight: bold; }",
+            ".leaf { font-weight: bold; letter-spacing: 2px; }",
+        );
+        assert_ne!(changed_html, page.html_source);
+        let fallback_snapshot = crate::js::ProcessedScriptHtml {
+            html: changed_html.clone(),
+            title_override: None,
+            console_logs: Vec::new(),
+            navigation_target: None,
+            soft_navigation_target: None,
+            scroll_y: 0,
+            has_pending_work: false,
+            structural_changes: vec![tobira_engine::engine::DomStructuralChange::SetAttribute {
+                node: tobira_engine::engine::NodeId(2),
+                name: "data-x".to_string(),
+                value: "1".to_string(),
+            }],
+            node_order: page.node_order.clone(),
+        };
+        page.apply_script_snapshot(fallback_snapshot);
+        let mut fb_doc = parse_document(&changed_html);
+        annotate_node_ids(&mut fb_doc);
+        let fb_sheet = collect_stylesheet(&fb_doc, &url);
+        let fb_style = build_styled_tree(&fb_doc, &fb_sheet, 1280, &InteractiveState::default());
+        assert_eq!(page.styled_document, fb_style);
+
+        set_incremental_restyle_override(false);
     }
 
     #[test]

@@ -1,6 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
-#[cfg(test)]
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::html::{Element, Node};
@@ -1156,8 +1154,7 @@ pub fn build_styled_tree(
     )
 }
 
-#[cfg(test)]
-pub fn build_styled_tree_incremental(
+pub(crate) fn build_styled_tree_incremental(
     document: &Node,
     stylesheet: &Stylesheet,
     viewport_width: u32,
@@ -1239,7 +1236,6 @@ pub fn build_styled_tree_incremental(
 /// Re-number `data-tobira-node-id` on every styled element in pre-order, 1-based,
 /// reproducing `browser::annotate_node_ids` over the styled tree (pseudo-element
 /// text nodes are skipped, exactly as they are absent from the source document).
-#[cfg(test)]
 fn restamp_tobira_node_ids(node: &mut StyledNode, counter: &mut usize) {
     if let StyledNode::Element(element) = node {
         *counter += 1;
@@ -1402,7 +1398,6 @@ fn build_node(
     }
 }
 
-#[cfg(test)]
 fn collect_styled_node_map<'a>(
     node: &'a StyledNode,
     node_order: &mut std::slice::Iter<'_, u32>,
@@ -1422,7 +1417,6 @@ fn collect_styled_node_map<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
 fn build_node_incremental(
     node: &Node,
     stylesheet: &Stylesheet,
@@ -1583,7 +1577,6 @@ fn build_node_incremental(
 /// Walk the document in the same Element-only pre-order as `node_order` and
 /// record each element's stable id -> parent stable id. Returns None if the
 /// document and `node_order` disagree on element count (the iterator runs dry).
-#[cfg(test)]
 fn build_parent_map(
     node: &Node,
     parent_id: Option<u32>,
@@ -1606,7 +1599,6 @@ fn build_parent_map(
 /// Advance `node_order` past every element id in `node`'s subtree (including
 /// `node` itself). Used when a clean subtree is reused wholesale so the shared
 /// iterator stays aligned with the document walk.
-#[cfg(test)]
 fn skip_element_ids(node: &Node, node_order: &mut std::slice::Iter<'_, u32>) -> Option<()> {
     match node {
         Node::Text(_) => Some(()),
