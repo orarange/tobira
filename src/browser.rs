@@ -61,13 +61,17 @@ impl BrowserPage {
     }
 
     pub fn apply_script_snapshot(&mut self, snapshot: ProcessedScriptHtml) {
-        // Fast path: the scripts didn't change the DOM (e.g. a scroll/resize
-        // event whose listeners — if any — mutated nothing). Skip the expensive
-        // full re-parse/re-layout rebuild and just update the scroll offset.
-        // Without this, rapid scroll events each trigger a full page rebuild,
-        // which on the engine path starves the main thread and intermittently
-        // drops clicks.
-        if snapshot.html == self.html_source
+        // Fast path: the scripts didn't change the DOM (e.g. a scroll/resize or
+        // a requestAnimationFrame frame whose listeners — if any — mutated
+        // nothing). An empty structural-change log means the DOM is unchanged
+        // (every mutation is recorded at the mutate_dom choke points), so skip
+        // the expensive re-parse/re-style/re-layout rebuild and just update the
+        // scroll offset. The engine's lazy tick snapshot ships empty HTML for
+        // such frames (`html.is_empty()`); the `html == html_source` arm keeps
+        // the old string-equality behavior for any full snapshot.
+        let dom_unchanged = snapshot.structural_changes.is_empty()
+            && (snapshot.html.is_empty() || snapshot.html == self.html_source);
+        if dom_unchanged
             && snapshot.navigation_target.is_none()
             && snapshot.soft_navigation_target.is_none()
         {
@@ -177,7 +181,13 @@ impl BrowserPage {
             self.engine_pending = has_more;
             return false;
         };
-        let changed = snapshot.html != self.html_source
+        // A render is needed only if the DOM actually changed or we navigated.
+        // The engine's lazy tick snapshot leaves `html` empty on no-op frames,
+        // so detect change from the structural-change log (mirroring the no-op
+        // condition in apply_script_snapshot), not a raw HTML compare.
+        let dom_unchanged = snapshot.structural_changes.is_empty()
+            && (snapshot.html.is_empty() || snapshot.html == self.html_source);
+        let changed = !dom_unchanged
             || snapshot.navigation_target.is_some()
             || snapshot.soft_navigation_target.is_some();
         // `apply_script_snapshot` updates `engine_pending` from the snapshot.

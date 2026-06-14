@@ -332,11 +332,15 @@ fn start_engine_script_session(
                     JavaScriptSessionCommand::Tick { now_ms, response_tx } => {
                         // Only serialize a snapshot when the frame did work; a
                         // page with a pending interval but nothing due this frame
-                        // shouldn't pay a full DOM serialize every ~16ms.
+                        // shouldn't pay a full DOM serialize every ~16ms. And even
+                        // when work ran, `snapshot_lazy` skips the full serialize +
+                        // node-order walk if the frame mutated nothing (a common
+                        // requestAnimationFrame case) — the browser sees an empty
+                        // change log and treats it as a no-op.
                         let did_work = session.pump(now_ms);
                         let has_more = session.has_pending_work();
                         let snapshot = did_work
-                            .then(|| engine_result_to_processed(session.snapshot()));
+                            .then(|| engine_result_to_processed(session.snapshot_lazy()));
                         let _ = response_tx.send((snapshot, has_more));
                     }
                     JavaScriptSessionCommand::SetScrollPosition { y } => {

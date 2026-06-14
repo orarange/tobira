@@ -2457,20 +2457,42 @@ impl EngineSession {
     }
 
     fn snapshot_with_error(&mut self, error: Option<String>) -> EngineRunResult {
+        self.snapshot_with_options(error, true)
+    }
+
+    /// Build a snapshot. When `force_full` is false and the frame mutated nothing
+    /// (no structural changes, no navigation), the expensive full-document
+    /// serialize and pre-order node-order walk are skipped — the HTML and
+    /// node_order come back empty, and the browser treats an empty change log as
+    /// a no-op. The initial load and event/explicit snapshots pass `force_full`
+    /// true since they must hand the browser a complete document.
+    fn snapshot_with_options(&mut self, error: Option<String>, force_full: bool) -> EngineRunResult {
         let pending = self.vm.has_pending_event_loop_work();
         let host = self.host();
+        let structural_changes = host.take_structural_changes();
+        let navigation_target = host.navigation_target();
+        let soft_navigation_target = host.soft_navigation_target();
+        let is_noop = !force_full
+            && structural_changes.is_empty()
+            && navigation_target.is_none()
+            && soft_navigation_target.is_none();
+        let (html, node_order) = if is_noop {
+            (String::new(), Vec::new())
+        } else {
+            (host.serialize_document(), host.node_order())
+        };
         EngineRunResult {
-            html: host.serialize_document(),
+            html,
             console_logs: host.take_console(),
             title: host.title(),
-            navigation_target: host.navigation_target(),
-            soft_navigation_target: host.soft_navigation_target(),
+            navigation_target,
+            soft_navigation_target,
             error,
             scroll_y: host.scroll_y(),
             default_prevented: false,
             has_pending_work: pending,
-            structural_changes: host.take_structural_changes(),
-            node_order: host.node_order(),
+            structural_changes,
+            node_order,
         }
     }
 
@@ -2522,6 +2544,14 @@ impl EngineSession {
     /// drained into the result.
     pub fn snapshot(&mut self) -> EngineRunResult {
         self.snapshot_with_error(None)
+    }
+
+    /// Like `snapshot`, but skips the full-document serialize + node-order walk
+    /// when the frame mutated nothing. Used on the timer/`requestAnimationFrame`
+    /// tick path, where most frames don't touch the DOM; the browser detects the
+    /// no-op from the empty structural-change log.
+    pub fn snapshot_lazy(&mut self) -> EngineRunResult {
+        self.snapshot_with_options(None, false)
     }
 
     /// Dispatch a DOM event to the node identified by the browser's
@@ -3204,6 +3234,39 @@ mod tests {
             </ul></body></html>"#,
             8,
         );
+    }
+
+    #[test]
+    fn snapshot_lazy_skips_serialize_on_noop_and_serializes_on_mutation() {
+        use crate::browser::annotate_node_ids;
+        use crate::html::parse_document;
+
+        let html = r#"<html><body><span id="t">a</span><button id="go">go</button></body></html>"#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        // The initial load is always a full snapshot.
+        assert!(!initial.html.is_empty());
+        assert!(!initial.node_order.is_empty());
+
+        // No mutation since the initial load: a lazy snapshot skips the full
+        // serialize and the node-order walk entirely.
+        let noop = session.snapshot_lazy();
+        assert!(noop.html.is_empty(), "no-op lazy snapshot must skip serialize");
+        assert!(noop.structural_changes.is_empty());
+        assert!(noop.node_order.is_empty());
+
+        // A full snapshot always serializes, even with no changes.
+        let full = session.snapshot();
+        assert!(!full.html.is_empty());
+
+        // After a real mutation, a lazy snapshot serializes and reports the change.
+        let mut doc = parse_document(&initial.html);
+        annotate_node_ids(&mut doc);
+        let t_id = find_node_id_by_attr(&doc, "id", "t").expect("t id");
+        session.set_attribute(t_id, "data-x", "1");
+        let mutated = session.snapshot_lazy();
+        assert!(!mutated.html.is_empty(), "lazy snapshot must serialize after a mutation");
+        assert!(!mutated.structural_changes.is_empty());
+        assert!(mutated.html.contains("data-x"));
     }
 
     /// Find the `data-tobira-node-id` of the first element with `attr == value`
