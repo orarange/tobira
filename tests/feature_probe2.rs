@@ -114,6 +114,21 @@ fn probes() -> Vec<(&'static str, &'static str, &'static str)> {
         ("class", "private-method", "class A{ #m(){return 7;} call(){return this.#m();} } assert(new A().call()===7);"),
         ("class", "computed-method-name", "const k='go'; class A{ [k](){return 1;} } assert(new A().go()===1);"),
         ("class", "super-method", "class A{ m(){return 1;} } class B extends A{ m(){return super.m()+10;} } assert(new B().m()===11);"),
+        ("class", "super-arrow-call", r#"
+            class A { greet(){ return "A"; } }
+            class B extends A { greet(){ const f = () => super.greet() + "B"; return f(); } }
+            assert(new B().greet() === "AB");
+        "#),
+        ("class", "super-arrow-property", r#"
+            class A2 { get tag(){ return "T"; } }
+            class B2 extends A2 { run(){ const f = () => super.tag; return f(); } }
+            assert(new B2().run() === "T");
+        "#),
+        ("class", "super-nested-arrow", r#"
+            class A3 { greet(){ return "A"; } }
+            class B3 extends A3 { greet(){ const f = () => () => super.greet() + "C"; return f()(); } }
+            assert(new B3().greet() === "AC");
+        "#),
         ("class", "instanceof-chain", "class A{} class B extends A{} assert(new B() instanceof A);"),
         ("class", "static-inherit", "class A{ static make(){return new this();} } class B extends A{} assert(B.make() instanceof B);"),
 

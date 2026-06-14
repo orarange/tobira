@@ -2861,7 +2861,11 @@ impl<'a> FunctionCompiler<'a> {
             is_async,
             is_generator,
             is_arrow,
-            FunctionCompileOptions::default(),
+            if is_arrow {
+                self.options.clone()
+            } else {
+                FunctionCompileOptions::default()
+            },
             &[],
             &[],
         )
