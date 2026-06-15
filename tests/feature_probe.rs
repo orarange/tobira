@@ -131,6 +131,21 @@ b`; assert(s.length===3);
         ("iter", "for-in", r#"
             const o={a:1,b:2}; let k=''; for(const p in o) k+=p; assert(k==='ab');
         "#),
+        ("iter", "for-in-null-undefined-number-string", r#"
+            let n=0;
+            for (const k in null) n++;
+            for (const k in undefined) n++;
+            let out=[];
+            for (const k in 'ab') out.push(k);
+            let c=0;
+            for (const k in 42) c++;
+            let ks=[];
+            for (const k in {a:1,b:2}) ks.push(k);
+            assert(n===0);
+            assert(JSON.stringify(out)==='["0","1"]');
+            assert(c===0);
+            assert(ks.length===2);
+        "#),
         ("iter", "for-of-map", r#"
             const m=new Map([['a',1]]); let s=''; for(const [k,v] of m) s+=k+v; assert(s==='a1');
         "#),

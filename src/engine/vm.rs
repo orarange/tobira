@@ -2154,8 +2154,17 @@ impl Vm {
             }
             Opcode::GetForInKeys => {
                 let value = self.pop_value()?;
-                let object = self.require_object_ref(&value, "for...in target")?;
-                let keys = self.for_in_keys(object);
+                let keys = match value {
+                    Value::Object(object) => self.for_in_keys(object),
+                    Value::String(string) => self
+                        .string_text(string)
+                        .chars()
+                        .enumerate()
+                        .map(|(index, _)| index.to_string())
+                        .collect(),
+                    Value::Null | Value::Undefined => Vec::new(),
+                    _ => Vec::new(),
+                };
                 let values = keys
                     .into_iter()
                     .map(|key| self.make_string_value(&key))
