@@ -8267,19 +8267,19 @@ impl Vm {
                 Ok(Value::Object(object))
             }
             BuiltinId::ObjectFreeze => {
-                let object = self.require_object_ref(
-                    args.first().unwrap_or(&Value::Undefined),
-                    "Object.freeze",
-                )?;
-                self.freeze_object(object);
-                Ok(Value::Object(object))
+                match args.first().cloned().unwrap_or(Value::Undefined) {
+                    Value::Object(object) => {
+                        self.freeze_object(object);
+                        Ok(Value::Object(object))
+                    }
+                    value => Ok(value),
+                }
             }
             BuiltinId::ObjectIsFrozen => {
-                let object = self.require_object_ref(
-                    args.first().unwrap_or(&Value::Undefined),
-                    "Object.isFrozen",
-                )?;
-                Ok(Value::Bool(self.is_frozen(object)))
+                match args.first() {
+                    Some(Value::Object(object)) => Ok(Value::Bool(self.is_frozen(*object))),
+                    _ => Ok(Value::Bool(true)),
+                }
             }
             BuiltinId::ObjectProtoHasOwnProperty => {
                 let object = self.builtin_object_this(&this_value, "hasOwnProperty")?;
@@ -9273,38 +9273,45 @@ impl Vm {
             }
             BuiltinId::ObjectPreventExtensions => {
                 let target = args.first().cloned().unwrap_or(Value::Undefined);
-                if let Value::Object(object) = &target {
-                    if let Some(object_data) = self.heap.objects_mut().get_mut(*object) {
+                if let Value::Object(object) = target {
+                    if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
                         object_data.extensible = false;
                     }
                 }
                 Ok(target)
             }
             BuiltinId::ObjectIsExtensible => {
-                let extensible = matches!(args.first(), Some(Value::Object(object))
-                    if self.heap.objects().get(*object).map(|o| o.extensible).unwrap_or(false));
-                Ok(Value::Bool(extensible))
+                match args.first() {
+                    Some(Value::Object(object)) => Ok(Value::Bool(
+                        self.heap
+                            .objects()
+                            .get(*object)
+                            .map(|o| o.extensible)
+                            .unwrap_or(false),
+                    )),
+                    _ => Ok(Value::Bool(false)),
+                }
             }
             BuiltinId::ObjectSeal => {
                 let target = args.first().cloned().unwrap_or(Value::Undefined);
-                if let Value::Object(object) = &target {
-                    if let Some(object_data) = self.heap.objects_mut().get_mut(*object) {
+                if let Value::Object(object) = target {
+                    if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
                         object_data.extensible = false;
                     }
                 }
                 Ok(target)
             }
             BuiltinId::ObjectIsSealed => {
-                let sealed = match args.first() {
-                    Some(Value::Object(object)) => self
-                        .heap
-                        .objects()
-                        .get(*object)
-                        .map(|o| !o.extensible)
-                        .unwrap_or(true),
-                    _ => true,
-                };
-                Ok(Value::Bool(sealed))
+                match args.first() {
+                    Some(Value::Object(object)) => Ok(Value::Bool(
+                        self.heap
+                            .objects()
+                            .get(*object)
+                            .map(|o| !o.extensible)
+                            .unwrap_or(true),
+                    )),
+                    _ => Ok(Value::Bool(true)),
+                }
             }
             BuiltinId::MathSign => {
                 let number = self.number_arg(&args, 0);
@@ -14333,6 +14340,28 @@ mod tests {
             assert(obj.z === 3);
             assert(obj["y"] === 2);
             assert(typeof {} === "object");
+            "#,
+        );
+    }
+
+    #[test]
+    fn object_integrity_methods_accept_primitives_and_still_affect_objects() {
+        run_script(
+            r#"
+            assert(Object.freeze(42) === 42);
+            assert(Object.freeze("s") === "s");
+            assert(Object.freeze(null) === null);
+            assert(Object.freeze(undefined) === undefined);
+
+            assert(Object.isFrozen(42) === true);
+            assert(Object.isSealed("x") === true);
+            assert(Object.isExtensible(42) === false);
+
+            var o = { a: 1 };
+            Object.freeze(o);
+            o.a = 2;
+            assert(o.a === 1);
+            assert(Object.isFrozen(o) === true);
             "#,
         );
     }
