@@ -884,6 +884,47 @@ impl BrowserHost {
         }
     }
 
+    /// Per HTML spec: a `<script>` runs as JS only when its `type` is absent or
+    /// empty, a JavaScript MIME type essence match, or `module`. Everything else
+    /// is a data block and must not be executed.
+    fn is_executable_script_type(type_attr: Option<&str>) -> bool {
+        let Some(type_attr) = type_attr else {
+            return true;
+        };
+        let type_attr = type_attr.trim_matches(|c: char| c.is_ascii_whitespace());
+        if type_attr.is_empty() {
+            return true;
+        }
+
+        let essence = type_attr
+            .split_once(';')
+            .map(|(head, _)| head)
+            .unwrap_or(type_attr)
+            .trim_matches(|c: char| c.is_ascii_whitespace())
+            .to_ascii_lowercase();
+
+        matches!(
+            essence.as_str(),
+            "module"
+                | "application/ecmascript"
+                | "application/javascript"
+                | "application/x-ecmascript"
+                | "application/x-javascript"
+                | "text/ecmascript"
+                | "text/javascript"
+                | "text/javascript1.0"
+                | "text/javascript1.1"
+                | "text/javascript1.2"
+                | "text/javascript1.3"
+                | "text/javascript1.4"
+                | "text/javascript1.5"
+                | "text/jscript"
+                | "text/livescript"
+                | "text/x-ecmascript"
+                | "text/x-javascript"
+        )
+    }
+
     /// Collect inline `<script>` source (those without a `src` attribute).
     pub fn inline_scripts(&self) -> Vec<String> {
         let mut scripts = Vec::new();
@@ -893,12 +934,16 @@ impl BrowserHost {
 
     fn collect_inline_scripts(&self, root: usize, out: &mut Vec<String>) {
         for &child in &self.nodes[root].children {
-            if self.nodes[child].tag_name() == Some("script")
-                && !self.nodes[child].attrs.contains_key("src")
-            {
-                let text = self.collect_text(child);
-                if !text.trim().is_empty() {
-                    out.push(text);
+            if self.nodes[child].tag_name() == Some("script") {
+                if !Self::is_executable_script_type(self.nodes[child].attrs.get("type").map(String::as_str)) {
+                    self.collect_inline_scripts(child, out);
+                    continue;
+                }
+                if !self.nodes[child].attrs.contains_key("src") {
+                    let text = self.collect_text(child);
+                    if !text.trim().is_empty() {
+                        out.push(text);
+                    }
                 }
             }
             self.collect_inline_scripts(child, out);
@@ -919,6 +964,10 @@ impl BrowserHost {
     fn collect_ordered_scripts(&self, root: usize, out: &mut Vec<ScriptSource>) {
         for &child in &self.nodes[root].children {
             if self.nodes[child].tag_name() == Some("script") {
+                if !Self::is_executable_script_type(self.nodes[child].attrs.get("type").map(String::as_str)) {
+                    self.collect_ordered_scripts(child, out);
+                    continue;
+                }
                 match self.nodes[child].attrs.get("src") {
                     Some(src) if !src.trim().is_empty() => {
                         out.push(ScriptSource::External(src.trim().to_string()));
@@ -2955,6 +3004,36 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.console_logs, vec!["hello 3".to_string()]);
+    }
+
+    #[test]
+    fn executable_script_type_detection_matches_spec() {
+        assert!(BrowserHost::is_executable_script_type(None));
+        assert!(BrowserHost::is_executable_script_type(Some("")));
+        assert!(BrowserHost::is_executable_script_type(Some("text/javascript")));
+        assert!(BrowserHost::is_executable_script_type(Some(
+            "  text/javascript ; charset=utf-8 "
+        )));
+        assert!(BrowserHost::is_executable_script_type(Some("application/javascript")));
+        assert!(BrowserHost::is_executable_script_type(Some("MODULE")));
+        assert!(BrowserHost::is_executable_script_type(Some("module")));
+
+        assert!(!BrowserHost::is_executable_script_type(Some("application/json")));
+        assert!(!BrowserHost::is_executable_script_type(Some("application/ld+json")));
+        assert!(!BrowserHost::is_executable_script_type(Some("importmap")));
+        assert!(!BrowserHost::is_executable_script_type(Some("speculationrules")));
+        assert!(!BrowserHost::is_executable_script_type(Some("text/template")));
+        assert!(!BrowserHost::is_executable_script_type(Some("text/plain")));
+    }
+
+    #[test]
+    fn non_executable_script_type_is_skipped_before_execution() {
+        let result = run_document_scripts(
+            r#"<html><body><script type="application/json">{"a":1}</script><script>document.title='ok'</script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("ok"));
     }
 
     #[test]
