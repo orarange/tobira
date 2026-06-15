@@ -1096,6 +1096,7 @@ pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
     last_backtrace: Option<String>,
+    pending_call_name: Option<String>,
     heap: Heap,
     globals: HashMap<String, Value>,
     callables: HashMap<RawGcRef, Callable>,
@@ -1231,6 +1232,7 @@ impl Vm {
             stack: Vec::new(),
             frames: Vec::new(),
             last_backtrace: None,
+            pending_call_name: None,
             heap,
             globals: HashMap::new(),
             callables: HashMap::new(),
@@ -2096,7 +2098,11 @@ impl Vm {
                 let args = self.pop_args(argc)?;
                 let this_value = self.pop_value()?;
                 let callee = self.pop_value()?;
-                if let Some(result) = self.invoke_callable_value(callee, this_value, args)? {
+                let result = self.invoke_callable_value(callee, this_value, args);
+                // Best-effort diagnostic only: nested calls in argument position can
+                // overwrite this name before we reach resolve_callable.
+                self.pending_call_name = None;
+                if let Some(result) = result? {
                     self.stack.push(result);
                 }
             }
@@ -2372,7 +2378,8 @@ impl Vm {
             Opcode::GetPropForCall(index) => {
                 let object = self.pop_value()?;
                 let key = {
-                    let name = self.constant_name(index)?;
+                    let name = self.constant_name(index)?.to_string();
+                    self.pending_call_name = Some(name.clone());
                     PropertyKey::from(name)
                 };
                 let callee = self.get_property_value(&object, &key)?;
@@ -2382,6 +2389,11 @@ impl Vm {
             Opcode::GetIndexForCall => {
                 let key = self.pop_value()?;
                 let object = self.pop_value()?;
+                self.pending_call_name = match &key {
+                    Value::String(string) => Some(self.string_text(*string)),
+                    Value::Number(number) => Some(self.to_string(&Value::Number(*number))),
+                    _ => None,
+                };
                 let callee = self.get_property_value(&object, &self.to_property_key(&key)?)?;
                 self.stack.push(callee);
                 self.stack.push(object);
@@ -2389,7 +2401,9 @@ impl Vm {
             Opcode::New(argc) => {
                 let args = self.pop_args(argc)?;
                 let constructor = self.pop_value()?;
-                if let Some(result) = self.construct_value(constructor, args)? {
+                let result = self.construct_value(constructor, args);
+                self.pending_call_name = None;
+                if let Some(result) = result? {
                     self.stack.push(result);
                 }
             }
@@ -5443,8 +5457,12 @@ impl Vm {
                     Value::Object(_) => "object".to_string(),
                     Value::Symbol(_) => "symbol".to_string(),
                 };
+                let message = match &self.pending_call_name {
+                    Some(name) => format!("{name} is not a function ({described})"),
+                    None => format!("attempted to call a non-function value ({described})"),
+                };
                 return Err(VmError::TypeError(
-                    format!("attempted to call a non-function value ({described})"),
+                    message,
                 ));
             }
         };
@@ -14252,6 +14270,54 @@ mod tests {
         assert!(message.contains("non-function value"), "{message}");
         assert!(message.contains("undefined"), "{message}");
         assert!(vm.take_last_backtrace().is_some(), "backtrace should be captured");
+    }
+
+    #[test]
+    fn method_call_diagnostics_include_missing_property_name() {
+        let (_, result) = execute_script(
+            r#"
+            var o = {};
+            o.missing();
+            "#,
+        );
+        let error = result.expect_err("script should fail");
+        let message = format!("{error}");
+        assert!(message.contains("missing is not a function"), "{message}");
+        assert!(message.contains("undefined"), "{message}");
+    }
+
+    #[test]
+    fn indexed_method_call_diagnostics_include_string_key_name() {
+        let (_, result) = execute_script(
+            r#"
+            var o = { a: 1 };
+            o["b"]();
+            "#,
+        );
+        let error = result.expect_err("script should fail");
+        let message = format!("{error}");
+        assert!(message.contains("b is not a function"), "{message}");
+    }
+
+    #[test]
+    fn plain_non_method_calls_and_successful_method_calls_still_work() {
+        let (mut vm, result) = execute_script(
+            r#"
+            undefined();
+            "#,
+        );
+        let error = result.expect_err("script should fail");
+        let message = format!("{error}");
+        assert!(message.contains("non-function value"), "{message}");
+        assert!(message.contains("undefined"), "{message}");
+        assert!(vm.take_last_backtrace().is_some(), "backtrace should be captured");
+
+        run_script(
+            r#"
+            var o = { f() { return 5; } };
+            assert(o.f() === 5);
+            "#,
+        );
     }
 
     #[test]
