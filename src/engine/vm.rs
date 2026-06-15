@@ -297,6 +297,13 @@ enum BuiltinId {
     HistoryGo,
     // performance, idle, encoding
     PerformanceNow,
+    PerformanceMark,
+    PerformanceMeasure,
+    PerformanceClearMarks,
+    PerformanceClearMeasures,
+    PerformanceGetEntries,
+    PerformanceGetEntriesByName,
+    PerformanceGetEntriesByType,
     RequestIdleCallback,
     CancelIdleCallback,
     Btoa,
@@ -10989,7 +10996,33 @@ impl Vm {
                 let ms = self.host.now().monotonic_ms as f64;
                 Ok(Value::Number(ms))
             }
+            BuiltinId::PerformanceMark => {
+                let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let mark = self.allocate_ordinary_object(None);
+                let mark_name = self.make_string_value(&name);
+                let mark_entry_type = self.make_string_value("mark");
+                self.define_data_property(mark, PropertyKey::from("name"), mark_name, true, true, true);
+                self.define_data_property(mark, PropertyKey::from("entryType"), mark_entry_type, true, true, true);
+                self.define_data_property(mark, PropertyKey::from("startTime"), Value::Number(self.host.now().monotonic_ms as f64), true, true, true);
+                self.define_data_property(mark, PropertyKey::from("duration"), Value::Number(0.0), true, true, true);
+                Ok(Value::Object(mark))
+            }
             // requestIdleCallback — run callback synchronously
+            BuiltinId::PerformanceMeasure => {
+                let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let measure = self.allocate_ordinary_object(None);
+                let measure_name = self.make_string_value(&name);
+                let measure_entry_type = self.make_string_value("measure");
+                self.define_data_property(measure, PropertyKey::from("name"), measure_name, true, true, true);
+                self.define_data_property(measure, PropertyKey::from("entryType"), measure_entry_type, true, true, true);
+                self.define_data_property(measure, PropertyKey::from("startTime"), Value::Number(0.0), true, true, true);
+                self.define_data_property(measure, PropertyKey::from("duration"), Value::Number(0.0), true, true, true);
+                Ok(Value::Object(measure))
+            }
+            BuiltinId::PerformanceClearMarks | BuiltinId::PerformanceClearMeasures => Ok(Value::Undefined),
+            BuiltinId::PerformanceGetEntries | BuiltinId::PerformanceGetEntriesByName | BuiltinId::PerformanceGetEntriesByType => {
+                self.make_array_from_values(Vec::new())
+            }
             BuiltinId::RequestIdleCallback => {
                 let cb = args.first().cloned().unwrap_or(Value::Undefined);
                 if self.is_callable_value(&cb) {
@@ -13054,6 +13087,21 @@ impl Vm {
                 let perf = self.allocate_ordinary_object(None);
                 let now_fn = self.allocate_builtin_method(BuiltinId::PerformanceNow);
                 self.define_data_property(perf, PropertyKey::from("now"), now_fn, true, true, true);
+                self.define_data_property(perf, PropertyKey::from("timeOrigin"), Value::Number(0.0), true, true, true);
+                let mark_fn = self.allocate_builtin_method(BuiltinId::PerformanceMark);
+                self.define_data_property(perf, PropertyKey::from("mark"), mark_fn, true, true, true);
+                let measure_fn = self.allocate_builtin_method(BuiltinId::PerformanceMeasure);
+                self.define_data_property(perf, PropertyKey::from("measure"), measure_fn, true, true, true);
+                let clear_marks_fn = self.allocate_builtin_method(BuiltinId::PerformanceClearMarks);
+                self.define_data_property(perf, PropertyKey::from("clearMarks"), clear_marks_fn, true, true, true);
+                let clear_measures_fn = self.allocate_builtin_method(BuiltinId::PerformanceClearMeasures);
+                self.define_data_property(perf, PropertyKey::from("clearMeasures"), clear_measures_fn, true, true, true);
+                let get_entries_fn = self.allocate_builtin_method(BuiltinId::PerformanceGetEntries);
+                self.define_data_property(perf, PropertyKey::from("getEntries"), get_entries_fn, true, true, true);
+                let get_entries_by_name_fn = self.allocate_builtin_method(BuiltinId::PerformanceGetEntriesByName);
+                self.define_data_property(perf, PropertyKey::from("getEntriesByName"), get_entries_by_name_fn, true, true, true);
+                let get_entries_by_type_fn = self.allocate_builtin_method(BuiltinId::PerformanceGetEntriesByType);
+                self.define_data_property(perf, PropertyKey::from("getEntriesByType"), get_entries_by_type_fn, true, true, true);
                 let timing = self.allocate_ordinary_object(None);
                 self.define_data_property(timing, PropertyKey::from("navigationStart"), Value::Number(0.0), true, true, true);
                 self.define_data_property(perf, PropertyKey::from("timing"), Value::Object(timing), true, true, true);
@@ -14411,6 +14459,30 @@ mod tests {
               default: sw = "other";
             }
             assert(sw === "two");
+            "#,
+        );
+    }
+
+    #[test]
+    fn performance_api_minimal_surface() {
+        run_script(
+            r#"
+            assert(typeof performance.mark === "function");
+            const mark = performance.mark("x");
+            assert(mark && typeof mark === "object");
+            assert(mark.entryType === "mark");
+            assert(mark.name === "x");
+
+            const measure = performance.measure("m");
+            assert(measure && typeof measure === "object");
+            assert(measure.entryType === "measure");
+
+            const entries = performance.getEntriesByName("x");
+            assert(Array.isArray(entries) === true);
+            assert(entries.length === 0);
+
+            assert(performance.clearMarks("x") === undefined);
+            assert(typeof performance.now() === "number");
             "#,
         );
     }
