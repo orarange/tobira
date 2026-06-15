@@ -4380,6 +4380,12 @@ fn parse_calc(expr: &str, parent_font_size: u32) -> Option<u32> {
     if values.is_empty() {
         return None;
     }
+    // A well-formed calc has exactly one more operand than operators. Anything
+    // else (a dangling operator, an empty operand from an unresolved value, etc.)
+    // is invalid - bail instead of indexing past `values` and panicking.
+    if ops.len() + 1 != values.len() {
+        return None;
+    }
 
     // Pass 1: collapse * and / (higher precedence than + and -)
     let mut i = 0;
@@ -5042,7 +5048,7 @@ mod tests {
     use super::{
         AlignItems, Display, FlexDirection, FlexWrap, JustifyContent, LengthValue,
         Position, RuleIndex, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
-        build_styled_tree, compute_style, parse_color, parse_length, parse_stylesheet,
+        build_styled_tree, compute_style, parse_calc, parse_color, parse_length, parse_stylesheet,
         split_at_top_level,
     };
     use crate::html::{Element, Node, parse_document};
@@ -5663,6 +5669,17 @@ mod tests {
         // This locks the vh base against parse_length's viewport-unit handling
         let result = parse_length("calc(50vh)", 16);
         assert_eq!(result, Some(400));
+    }
+
+    #[test]
+    fn calc_invalid_trailing_operator_returns_none() {
+        assert_eq!(parse_calc("2 *", 16), None);
+        assert_eq!(parse_calc("100% *", 16), None);
+    }
+
+    #[test]
+    fn calc_valid_expression_still_evaluates() {
+        assert_eq!(parse_calc("2 * 3 + 1", 16), Some(7));
     }
 
     // ── rgba() blending tests ─────────────────────────────────────────────────
