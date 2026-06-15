@@ -231,6 +231,11 @@ enum BuiltinId {
     AbortControllerAbort,
     AbortSignalAddEventListener,
     AbortSignalRemoveEventListener,
+    AbortSignalThrowIfAborted,
+    AbortSignalConstructor,
+    AbortSignalAbortStatic,
+    AbortSignalTimeoutStatic,
+    AbortSignalAnyStatic,
     EventPreventDefault,
     EventStopPropagation,
     EventStopImmediatePropagation,
@@ -2726,6 +2731,40 @@ impl Vm {
             self.allocate_builtin_value(BuiltinId::AbortControllerConstructor, true, None);
         self.globals
             .insert("AbortController".to_string(), abort_controller_ctor);
+
+        // AbortSignal global object.
+        let abort_signal_ctor = self.allocate_builtin_value(BuiltinId::AbortSignalConstructor, false, None);
+        if let Value::Object(abort_signal_ref) = &abort_signal_ctor {
+            let abort_method = self.allocate_builtin_method(BuiltinId::AbortSignalAbortStatic);
+            self.define_data_property(
+                *abort_signal_ref,
+                PropertyKey::from("abort"),
+                abort_method,
+                true,
+                false,
+                true,
+            );
+            let timeout_method = self.allocate_builtin_method(BuiltinId::AbortSignalTimeoutStatic);
+            self.define_data_property(
+                *abort_signal_ref,
+                PropertyKey::from("timeout"),
+                timeout_method,
+                true,
+                false,
+                true,
+            );
+            let any_method = self.allocate_builtin_method(BuiltinId::AbortSignalAnyStatic);
+            self.define_data_property(
+                *abort_signal_ref,
+                PropertyKey::from("any"),
+                any_method,
+                true,
+                false,
+                true,
+            );
+        }
+        self.globals
+            .insert("AbortSignal".to_string(), abort_signal_ctor);
 
         // MutationObserver constructor.
         let mutation_observer_ctor =
@@ -8451,21 +8490,44 @@ impl Vm {
             }
             BuiltinId::AbortControllerConstructor => {
                 let proto = self.object_prototype_ref();
-                let signal = self.allocate_ordinary_object(Some(proto));
-                self.define_data_property(signal, PropertyKey::from("aborted"), Value::Bool(false), true, true, true);
-                self.define_data_property(signal, PropertyKey::from("reason"), Value::Undefined, true, true, true);
-                self.define_data_property(signal, PropertyKey::from("onabort"), Value::Null, true, true, true);
-                let add = self.allocate_builtin_method(BuiltinId::AbortSignalAddEventListener);
-                self.define_data_property(signal, PropertyKey::from("addEventListener"), add, true, false, true);
-                let remove = self.allocate_builtin_method(BuiltinId::AbortSignalRemoveEventListener);
-                self.define_data_property(signal, PropertyKey::from("removeEventListener"), remove, true, false, true);
-                let listeners = self.make_array_from_values(Vec::new())?;
-                self.define_data_property(signal, PropertyKey::from("__abortListeners"), listeners, true, false, true);
+                let signal = self.make_abort_signal(false, Value::Undefined)?;
                 let controller = self.allocate_ordinary_object(Some(proto));
                 self.define_data_property(controller, PropertyKey::from("signal"), Value::Object(signal), true, true, true);
                 let abort_fn = self.allocate_builtin_method(BuiltinId::AbortControllerAbort);
                 self.define_data_property(controller, PropertyKey::from("abort"), abort_fn, true, false, true);
                 Ok(Value::Object(controller))
+            }
+            BuiltinId::AbortSignalConstructor => self.make_abort_signal(false, Value::Undefined).map(Value::Object),
+            BuiltinId::AbortSignalAbortStatic => {
+                let reason = args.first().cloned().unwrap_or(Value::Undefined);
+                self.make_abort_signal(true, reason).map(Value::Object)
+            }
+            BuiltinId::AbortSignalTimeoutStatic => {
+                // Timed abort delivery is not wired into the event loop yet.
+                self.make_abort_signal(false, Value::Undefined).map(Value::Object)
+            }
+            BuiltinId::AbortSignalAnyStatic => {
+                let values = args.first().map(|v| self.array_like_to_vec(v)).transpose()?.unwrap_or_default();
+                for value in values {
+                    if let Value::Object(signal_ref) = &value {
+                        let signal_val = Value::Object(*signal_ref);
+                        let aborted = self.get_property_value(&signal_val, &PropertyKey::from("aborted"))?;
+                        if self.is_truthy(&aborted) {
+                            let reason = self.get_property_value(&signal_val, &PropertyKey::from("reason"))?;
+                            return self.make_abort_signal(true, reason).map(Value::Object);
+                        }
+                    }
+                }
+                // Future abort subscriptions are not wired yet.
+                self.make_abort_signal(false, Value::Undefined).map(Value::Object)
+            }
+            BuiltinId::AbortSignalThrowIfAborted => {
+                let aborted = self.get_property_value(&this_value, &PropertyKey::from("aborted"))?;
+                if self.is_truthy(&aborted) {
+                    let reason = self.get_property_value(&this_value, &PropertyKey::from("reason"))?;
+                    return Err(VmError::Thrown(reason));
+                }
+                Ok(Value::Undefined)
             }
             BuiltinId::AbortControllerAbort => {
                 let signal = self.get_property_value(&this_value, &PropertyKey::from("signal"))?;
@@ -12534,6 +12596,23 @@ impl Vm {
         Ok(instance)
     }
 
+    fn make_abort_signal(&mut self, aborted: bool, reason: Value) -> Result<GcRef<JsObject>, VmError> {
+        let proto = self.object_prototype_ref();
+        let signal = self.allocate_ordinary_object(Some(proto));
+        self.define_data_property(signal, PropertyKey::from("aborted"), Value::Bool(aborted), true, true, true);
+        self.define_data_property(signal, PropertyKey::from("reason"), reason, true, true, true);
+        self.define_data_property(signal, PropertyKey::from("onabort"), Value::Null, true, true, true);
+        let add = self.allocate_builtin_method(BuiltinId::AbortSignalAddEventListener);
+        self.define_data_property(signal, PropertyKey::from("addEventListener"), add, true, false, true);
+        let remove = self.allocate_builtin_method(BuiltinId::AbortSignalRemoveEventListener);
+        self.define_data_property(signal, PropertyKey::from("removeEventListener"), remove, true, false, true);
+        let throw_if_aborted = self.allocate_builtin_method(BuiltinId::AbortSignalThrowIfAborted);
+        self.define_data_property(signal, PropertyKey::from("throwIfAborted"), throw_if_aborted, true, false, true);
+        let listeners = self.make_array_from_values(Vec::new())?;
+        self.define_data_property(signal, PropertyKey::from("__abortListeners"), listeners, true, false, true);
+        Ok(signal)
+    }
+
     /// `new ResizeObserver(callback)` — create the host observer, remember
     /// callback + instance, return the instance host object.
     fn resize_observer_construct(&mut self, callback: Option<Value>) -> Result<Value, VmError> {
@@ -14532,6 +14611,40 @@ mod tests {
 
             assert(performance.clearMarks("x") === undefined);
             assert(typeof performance.now() === "number");
+            "#,
+        );
+    }
+
+    #[test]
+    fn abort_signal_global_and_controller_surface() {
+        run_script(
+            r#"
+            assert(typeof AbortSignal !== "undefined");
+            assert(typeof AbortSignal === "function" || typeof AbortSignal === "object");
+            assert(typeof AbortSignal.abort === "function");
+            assert(typeof AbortSignal.timeout === "function");
+            assert(typeof AbortSignal.any === "function");
+
+            const aborted = AbortSignal.abort();
+            assert(aborted.aborted === true);
+
+            const timeoutSignal = AbortSignal.timeout(50);
+            assert(timeoutSignal.aborted === false);
+
+            const controller = new AbortController();
+            assert(controller.signal.aborted === false);
+            controller.abort("x");
+            assert(controller.signal.aborted === true);
+            assert(controller.signal.reason === "x");
+
+            const s = AbortSignal.abort("boom");
+            let threw = false;
+            try {
+              s.throwIfAborted();
+            } catch (e) {
+              threw = (e === "boom");
+            }
+            assert(threw === true);
             "#,
         );
     }
