@@ -1104,6 +1104,7 @@ pub struct Vm {
     frames: Vec<CallFrame>,
     last_backtrace: Option<String>,
     pending_call_name: Option<String>,
+    current_script_src: Option<String>,
     heap: Heap,
     globals: HashMap<String, Value>,
     callables: HashMap<RawGcRef, Callable>,
@@ -1240,6 +1241,7 @@ impl Vm {
             frames: Vec::new(),
             last_backtrace: None,
             pending_call_name: None,
+            current_script_src: None,
             heap,
             globals: HashMap::new(),
             callables: HashMap::new(),
@@ -1306,6 +1308,10 @@ impl Vm {
 
     pub fn take_last_backtrace(&mut self) -> Option<String> {
         self.last_backtrace.take()
+    }
+
+    pub fn set_current_script_src(&mut self, src: Option<String>) {
+        self.current_script_src = src;
     }
 
     /// Fire a DOM event on a node handle, invoking all registered JS listeners.
@@ -13240,6 +13246,40 @@ impl Vm {
             "compatMode" => Ok(self.make_string_value("CSS1Compat")),
             "charset" | "characterSet" => Ok(self.make_string_value("UTF-8")),
             "location" => self.make_location_object(),
+            "currentScript" => {
+                if let Some(src) = self.current_script_src.clone() {
+                    let object = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+                    let src_value = self.make_string_value(&src);
+                    let tag_name = self.make_string_value("SCRIPT");
+                    self.define_data_property(
+                        object,
+                        PropertyKey::from("src"),
+                        src_value,
+                        true,
+                        true,
+                        true,
+                    );
+                    self.define_data_property(
+                        object,
+                        PropertyKey::from("tagName"),
+                        tag_name.clone(),
+                        true,
+                        true,
+                        true,
+                    );
+                    self.define_data_property(
+                        object,
+                        PropertyKey::from("nodeName"),
+                        tag_name,
+                        true,
+                        true,
+                        true,
+                    );
+                    Ok(Value::Object(object))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
             "URL" | "documentURI" => {
                 let res = self.host.location(WindowId(0));
                 Ok(match res { Ok(l) => self.make_string_value(&l.href), _ => self.make_string_value("") })

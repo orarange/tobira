@@ -2480,6 +2480,7 @@ impl EngineSession {
         // which the event loop already pumps. Guarded so a future native impl wins.
         if let Ok(program) = Parser::new(RUNTIME_PRELUDE).parse() {
             if let Ok(chunk) = Compiler::new(&program).compile() {
+                vm.set_current_script_src(None);
                 let _ = vm.execute(&chunk);
             }
         }
@@ -2488,15 +2489,18 @@ impl EngineSession {
             // is resolved against the document URL and fetched over HTTP (just like
             // a real browser loading `<script src>`). A fetch failure aborts the
             // remaining scripts, mirroring a hard load error.
-            let source = match script {
-                ScriptSource::Inline(text) => text.clone(),
+            let (source, current_script_src) = match script {
+                ScriptSource::Inline(text) => (text.clone(), None),
                 ScriptSource::External(src) => {
                     let resolved = Url::parse(&base_href)
                         .and_then(|base| base.resolve(src))
                         .or_else(|_| Url::parse(src));
                     match resolved {
                         Ok(url) => match crate::http::fetch(&url) {
-                            Ok(response) => String::from_utf8_lossy(&response.body).into_owned(),
+                            Ok(response) => (
+                                String::from_utf8_lossy(&response.body).into_owned(),
+                                Some(url.to_string()),
+                            ),
                             Err(e) => {
                                 error = Some(format!("failed to fetch script {src}: {e}"));
                                 break 'scripts;
@@ -2512,6 +2516,7 @@ impl EngineSession {
             match Parser::new(&source).parse() {
                 Ok(program) => match Compiler::new(&program).compile() {
                     Ok(chunk) => {
+                        vm.set_current_script_src(current_script_src.clone());
                         if let Err(e) = vm.execute(&chunk) {
                             let script_label = match script {
                                 ScriptSource::External(src) => format!("external script {src}"),
@@ -3405,6 +3410,35 @@ mod tests {
         assert!(error.contains("inner"), "{error}");
         assert!(error.contains("outer"), "{error}");
         assert!(error.contains("<script>"), "{error}");
+    }
+
+    #[test]
+    fn inline_script_sees_current_script_as_null() {
+        let html = r#"
+            <html><body>
+              <script>
+                document.body.setAttribute('data-document-type', typeof document);
+                document.body.setAttribute('data-current-script', String(document.currentScript === null));
+              </script>
+            </body></html>
+        "#;
+        let (mut session, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
+        let snapshot = session.snapshot();
+        assert!(
+            snapshot
+                .html
+                .contains("data-document-type=\"object\""),
+            "{:?}",
+            snapshot.html
+        );
+        assert!(
+            snapshot
+                .html
+                .contains("data-current-script=\"true\""),
+            "{:?}",
+            snapshot.html
+        );
     }
 
     #[test]
