@@ -2712,12 +2712,31 @@ impl EngineSession {
                         Self::load_module_graph(&dep_url, &dep_text, &dep_url, registry, post_order, in_progress)?;
                     }
                 }
+                StatementNode::ExportNamedDeclaration(export) => {
+                    if let boa_ast::declaration::ExportDeclaration::ReExport { specifier, .. } = &export.0 {
+                        let spec = program.resolve_sym(specifier.sym());
+                        let dep_url = resolve_specifier(&spec, base_url)?;
+                        imports.push((spec.clone(), dep_url.clone()));
+                        if !registry.contains_key(&dep_url) {
+                            let dep_src = crate::http::fetch(&Url::parse(&dep_url).map_err(|e| format!("{e:?}"))?)
+                                .map_err(|e| format!("failed to fetch module {dep_url}: {e}"))?;
+                            let dep_text = String::from_utf8_lossy(&dep_src.body).into_owned();
+                            Self::load_module_graph(&dep_url, &dep_text, &dep_url, registry, post_order, in_progress)?;
+                        }
+                    }
+                }
                 StatementNode::ExportAllDeclaration(export) => {
                     if let boa_ast::declaration::ExportDeclaration::ReExport { specifier, .. } = &export.0 {
                         let spec = program.resolve_sym(specifier.sym());
-                    let dep_url = resolve_specifier(&spec, base_url)?;
-                    imports.push((spec.clone(), dep_url.clone()));
-                }
+                        let dep_url = resolve_specifier(&spec, base_url)?;
+                        imports.push((spec.clone(), dep_url.clone()));
+                        if !registry.contains_key(&dep_url) {
+                            let dep_src = crate::http::fetch(&Url::parse(&dep_url).map_err(|e| format!("{e:?}"))?)
+                                .map_err(|e| format!("failed to fetch module {dep_url}: {e}"))?;
+                            let dep_text = String::from_utf8_lossy(&dep_src.body).into_owned();
+                            Self::load_module_graph(&dep_url, &dep_text, &dep_url, registry, post_order, in_progress)?;
+                        }
+                    }
                 }
                 _ => {}
             }

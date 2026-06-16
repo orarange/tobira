@@ -180,6 +180,7 @@ enum BuiltinId {
     ConsoleInfo,
     ConsoleWarn,
     ConsoleError,
+    ModuleReexportAll,
     // DOM Document methods
     DomDocQuerySelector,
     DomDocQuerySelectorAll,
@@ -3339,6 +3340,12 @@ impl Vm {
         }
         self.globals
             .insert("Reflect".to_string(), Value::Object(reflect_object));
+
+        let module_reexport_all = self.allocate_builtin_method(BuiltinId::ModuleReexportAll);
+        self.globals.insert(
+            "\u{0}builtin:moduleReexportAll".to_string(),
+            module_reexport_all,
+        );
 
         let proxy_ctor = self.allocate_builtin_value(BuiltinId::ProxyConstructor, true, None);
         self.globals.insert("Proxy".to_string(), proxy_ctor);
@@ -10359,6 +10366,28 @@ impl Vm {
                 let _ = self.host.console(ConsoleMessage { level, parts });
                 Ok(Value::Undefined)
             }
+            BuiltinId::ModuleReexportAll => {
+                let Some(self_namespace) = args.first().and_then(|value| match value {
+                    Value::Object(object) => Some(*object),
+                    _ => None,
+                }) else {
+                    return Err(VmError::TypeError("module namespace expected".to_string()));
+                };
+                let Some(dep_namespace) = args.get(1).and_then(|value| match value {
+                    Value::Object(object) => Some(*object),
+                    _ => None,
+                }) else {
+                    return Err(VmError::TypeError("module namespace expected".to_string()));
+                };
+                for key in self.object_own_enumerable_keys(dep_namespace) {
+                    if key == PropertyKey::from("default") {
+                        continue;
+                    }
+                    let value = self.get_property_value(&Value::Object(dep_namespace), &key)?;
+                    self.define_data_property(self_namespace, key, value, true, true, true);
+                }
+                Ok(Value::Undefined)
+            }
             BuiltinId::MapProtoSet => {
                 let object = self.builtin_object_this(&this_value, "Map.prototype.set")?;
                 let key = args.first().cloned().unwrap_or(Value::Undefined);
@@ -14292,7 +14321,7 @@ impl From<String> for PropertyKey {
 mod tests {
     use super::Vm;
     use crate::engine::ast::SourceType;
-    use crate::engine::{Compiler, Heap, Parser, Value};
+    use crate::engine::{Compiler, Heap, Parser, PropertyKey, Value};
     use crate::engine::compiler::ModuleContext;
 
     fn run_script(source: &str) {
@@ -14496,6 +14525,57 @@ mod tests {
         vm.set_global_object(self_key);
         vm.execute_module(&chunk).expect("module should execute");
         assert_eq!(vm.globals.get("__r3").cloned(), Some(Value::Number(1.0)));
+    }
+
+    #[test]
+    fn module_reexport_all_copies_enumerable_exports_except_default() {
+        let dep_key = "\u{0}module:dep".to_string();
+        let self_key = "\u{0}module:self".to_string();
+        let mut vm = Vm::new(Heap::new());
+
+        let dep_ns = vm.allocate_ordinary_object(None);
+        vm.define_data_property(dep_ns, PropertyKey::from("a"), Value::Number(1.0), true, true, true);
+        vm.define_data_property(dep_ns, PropertyKey::from("b"), Value::Number(2.0), true, true, true);
+        vm.define_data_property(dep_ns, PropertyKey::from("default"), Value::Number(99.0), true, true, true);
+        vm.globals.insert(dep_key.clone(), Value::Object(dep_ns));
+        vm.set_global_object(self_key.clone());
+
+        let program = Parser::new(
+            r#"
+            export * from "./dep";
+            "#,
+        )
+        .with_source_type(SourceType::Module)
+        .parse()
+        .expect("module should parse");
+        let chunk = Compiler::new(&program)
+            .with_module_context(ModuleContext {
+                self_key: self_key.clone(),
+                imports: std::iter::once(("./dep".to_string(), dep_key.clone())).collect(),
+            })
+            .compile()
+            .expect("module should compile");
+        vm.execute_module(&chunk).expect("module should execute");
+
+        let self_ns = match vm.globals.get(&self_key) {
+            Some(Value::Object(object)) => *object,
+            _ => panic!("self namespace should exist"),
+        };
+        assert_eq!(
+            vm.get_property_value(&Value::Object(self_ns), &PropertyKey::from("a"))
+                .expect("a should read"),
+            Value::Number(1.0)
+        );
+        assert_eq!(
+            vm.get_property_value(&Value::Object(self_ns), &PropertyKey::from("b"))
+                .expect("b should read"),
+            Value::Number(2.0)
+        );
+        assert_eq!(
+            vm.get_property_value(&Value::Object(self_ns), &PropertyKey::from("default"))
+                .expect("default should read"),
+            Value::Undefined
+        );
     }
 
     #[test]

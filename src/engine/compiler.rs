@@ -2616,8 +2616,53 @@ impl<'a> FunctionCompiler<'a> {
                 self.compile_export_list(list.as_ref())?;
                 Ok(())
             }
-            BoaExportDeclaration::ReExport { .. } => {
-                Err(CompileError::Unimplemented("export * (phase 2)"))
+            BoaExportDeclaration::ReExport { kind, specifier } => {
+                let Some(module_context) = self.module_context.clone() else {
+                    return Err(CompileError::Unimplemented("export * (phase 2)"));
+                };
+                let specifier = self.program.resolve_sym(specifier.sym());
+                let dep_key = module_context
+                    .imports
+                    .get(&specifier)
+                    .cloned()
+                    .ok_or_else(|| CompileError::message(format!("missing module context for re-export '{specifier}'")))?;
+                match kind {
+                    boa_ast::declaration::ReExportKind::Namespaced { name: Some(alias) } => {
+                        let self_key = self.module_self_key()?.to_string();
+                        self.emit_module_namespace(&self_key)?;
+                        let export_const = self.add_string_constant(&self.program.resolve_sym(alias))?;
+                        self.emit(Opcode::LoadConst(export_const));
+                        self.emit_module_namespace(&dep_key)?;
+                        self.emit(Opcode::SetProp);
+                        Ok(())
+                    }
+                    boa_ast::declaration::ReExportKind::Namespaced { name: None } => {
+                        let self_key = self.module_self_key()?.to_string();
+                        let builtin = self.add_string_constant("\u{0}builtin:moduleReexportAll")?;
+                        self.emit(Opcode::GetGlobal(builtin));
+                        self.emit(Opcode::LoadUndefined);
+                        self.emit_module_namespace(&self_key)?;
+                        self.emit_module_namespace(&dep_key)?;
+                        self.emit(Opcode::Call(2));
+                        self.emit(Opcode::Pop);
+                        Ok(())
+                    }
+                    boa_ast::declaration::ReExportKind::Named { names } => {
+                        let self_key = self.module_self_key()?.to_string();
+                        for spec in names.iter() {
+                            self.emit_module_namespace(&self_key)?;
+                            let export_const = self.add_string_constant(&self.program.resolve_sym(spec.alias()))?;
+                            self.emit(Opcode::LoadConst(export_const));
+                            self.emit_module_namespace(&dep_key)?;
+                            let import_const =
+                                self.add_string_constant(&self.program.resolve_sym(spec.private_name()))?;
+                            self.emit(Opcode::LoadConst(import_const));
+                            self.emit(Opcode::GetProp);
+                            self.emit(Opcode::SetProp);
+                        }
+                        Ok(())
+                    }
+                }
             }
             BoaExportDeclaration::DefaultFunctionDeclaration(_)
             | BoaExportDeclaration::DefaultGeneratorDeclaration(_)
@@ -2777,7 +2822,31 @@ impl<'a> FunctionCompiler<'a> {
         export: &super::ast::ExportAllDeclaration,
     ) -> Result<(), CompileError> {
         match export.0.clone() {
-            BoaExportDeclaration::ReExport { .. } => Err(CompileError::Unimplemented("export * (phase 2)")),
+            BoaExportDeclaration::ReExport { kind, specifier } => {
+                let Some(module_context) = self.module_context.clone() else {
+                    return Err(CompileError::Unimplemented("export * (phase 2)"));
+                };
+                let specifier = self.program.resolve_sym(specifier.sym());
+                let dep_key = module_context
+                    .imports
+                    .get(&specifier)
+                    .cloned()
+                    .ok_or_else(|| CompileError::message(format!("missing module context for re-export '{specifier}'")))?;
+                match kind {
+                    boa_ast::declaration::ReExportKind::Namespaced { name: None } => {
+                        let self_key = self.module_self_key()?.to_string();
+                        let builtin = self.add_string_constant("\u{0}builtin:moduleReexportAll")?;
+                        self.emit(Opcode::GetGlobal(builtin));
+                        self.emit(Opcode::LoadUndefined);
+                        self.emit_module_namespace(&self_key)?;
+                        self.emit_module_namespace(&dep_key)?;
+                        self.emit(Opcode::Call(2));
+                        self.emit(Opcode::Pop);
+                        Ok(())
+                    }
+                    _ => Err(CompileError::Unimplemented("export * as ns")),
+                }
+            }
             _ => Ok(()),
         }
     }
