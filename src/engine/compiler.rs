@@ -13,7 +13,7 @@ use super::ast::{
     ObjectPropertyDefinition, OptionalOperationKindNode, Program, PropertyAccessFieldNode,
     PropertyNameNode, RelationalOpNode, StatementNode, SuperCallExpression,
     SuperPropertyAccessNode, TemplateElementNode, UnaryOpNode, UpdateOpNode, UpdateTargetNode,
-    VariableDeclaration, statement_list_item_to_node,
+    VariableDeclaration, SourceType, statement_list_item_to_node,
 };
 use super::chunk::{Chunk, Constant, ExceptionHandler, FunctionProto, Opcode, UpvalueDescriptor};
 
@@ -168,17 +168,43 @@ struct FunctionCompileOptions {
     super_proto_binding: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ModuleContext {
+    pub self_key: String,
+    pub imports: HashMap<String, String>,
+}
+
 pub struct Compiler<'a> {
     program: &'a Program,
+    module_context: Option<ModuleContext>,
 }
 
 impl<'a> Compiler<'a> {
     #[must_use]
     pub const fn new(program: &'a Program) -> Self {
-        Self { program }
+        Self {
+            program,
+            module_context: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_module_context(mut self, module_context: ModuleContext) -> Self {
+        self.module_context = Some(module_context);
+        self
     }
 
     pub fn compile(&self) -> Result<Chunk, CompileError> {
+        let module_context = if self.program.source_type() == SourceType::Module {
+            self.module_context.clone().or_else(|| {
+                Some(ModuleContext {
+                    self_key: "\u{0}module:test".to_string(),
+                    imports: HashMap::new(),
+                })
+            })
+        } else {
+            self.module_context.clone()
+        };
         let mut function = FunctionCompiler::new(
             self.program,
             None,
@@ -187,6 +213,7 @@ impl<'a> Compiler<'a> {
             true,
             None,
             FunctionCompileOptions::default(),
+            module_context,
         );
         function.install_this_binding()?;
         function.compile_statements(self.program.body())?;
@@ -226,6 +253,7 @@ struct FunctionCompiler<'a> {
     /// Set when the body references the `arguments` object.
     uses_arguments: bool,
     options: FunctionCompileOptions,
+    module_context: Option<ModuleContext>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -237,6 +265,7 @@ impl<'a> FunctionCompiler<'a> {
         is_top_level: bool,
         outer: Option<OuterBindings>,
         options: FunctionCompileOptions,
+        module_context: Option<ModuleContext>,
     ) -> Self {
         Self {
             program,
@@ -262,6 +291,7 @@ impl<'a> FunctionCompiler<'a> {
             is_arrow: false,
             uses_arguments: false,
             options,
+            module_context,
         }
     }
 
@@ -1823,6 +1853,7 @@ impl<'a> FunctionCompiler<'a> {
             false,
             outer,
             options.clone(),
+            None,
         );
         if options.super_ctor_binding.is_some() {
             let rest_slot = child.allocate_hidden_local()?;
@@ -2530,12 +2561,8 @@ impl<'a> FunctionCompiler<'a> {
             StatementNode::ExportDefaultDeclaration(export) => {
                 self.compile_export_default_declaration(export)
             }
-            StatementNode::ExportAllDeclaration(_) => {
-                Err(CompileError::Unimplemented("export * (phase 2)"))
-            }
-            StatementNode::ImportDeclaration(_) => {
-                Err(CompileError::Unimplemented("import (phase 2)"))
-            }
+            StatementNode::ExportAllDeclaration(export) => self.compile_export_all_declaration(export),
+            StatementNode::ImportDeclaration(import) => self.compile_import_declaration(import),
             StatementNode::DebuggerStatement => Ok(()),
             StatementNode::WithStatement(_) => Err(CompileError::Unimplemented("with statements")),
         }
@@ -2548,24 +2575,23 @@ impl<'a> FunctionCompiler<'a> {
         match export.0.clone() {
             BoaExportDeclaration::Declaration(declaration) => match declaration {
                 boa_ast::declaration::Declaration::FunctionDeclaration(function) => {
-                    self.compile_function_declaration_statement(&FunctionDeclaration::Function(
-                        function,
-                    ))
+                    let name = self.identifier_name(&function.name());
+                    self.compile_function_declaration_statement(&FunctionDeclaration::Function(function))?;
+                    self.emit_module_export_name("default", &name)
                 }
                 boa_ast::declaration::Declaration::GeneratorDeclaration(function) => self
-                    .compile_function_declaration_statement(&FunctionDeclaration::Generator(
-                        function,
-                    )),
+                    .compile_function_declaration_statement(&FunctionDeclaration::Generator(function))
+                    .and_then(|_| self.emit_module_export_name("default", "default")),
                 boa_ast::declaration::Declaration::AsyncFunctionDeclaration(function) => self
-                    .compile_function_declaration_statement(&FunctionDeclaration::AsyncFunction(
-                        function,
-                    )),
+                    .compile_function_declaration_statement(&FunctionDeclaration::AsyncFunction(function))
+                    .and_then(|_| self.emit_module_export_name("default", "default")),
                 boa_ast::declaration::Declaration::AsyncGeneratorDeclaration(function) => self
-                    .compile_function_declaration_statement(&FunctionDeclaration::AsyncGenerator(
-                        function,
-                    )),
+                    .compile_function_declaration_statement(&FunctionDeclaration::AsyncGenerator(function))
+                    .and_then(|_| self.emit_module_export_name("default", "default")),
                 boa_ast::declaration::Declaration::ClassDeclaration(class_decl) => {
-                    self.compile_class_declaration_statement(class_decl.as_ref())
+                    let name = self.identifier_name(&class_decl.name());
+                    self.compile_class_declaration_statement(class_decl.as_ref())?;
+                    self.emit_module_export_name("default", &name)
                 }
                 boa_ast::declaration::Declaration::Lexical(lexical) => {
                     let declaration = match lexical {
@@ -2576,14 +2602,20 @@ impl<'a> FunctionCompiler<'a> {
                             VariableDeclaration::Const(lexical)
                         }
                     };
-                    self.compile_variable_declaration(&declaration, DeclarationContext::Statement)
+                    self.compile_variable_declaration(&declaration, DeclarationContext::Statement)?;
+                    self.emit_exported_variable_names(&declaration)?;
+                    Ok(())
                 }
             },
             BoaExportDeclaration::VarStatement(var) => {
                 let declaration = VariableDeclaration::Var(var);
-                self.compile_variable_declaration(&declaration, DeclarationContext::Statement)
+                self.compile_variable_declaration(&declaration, DeclarationContext::Statement)?;
+                self.emit_exported_variable_names(&declaration)
             }
-            BoaExportDeclaration::List(_) => Ok(()),
+            BoaExportDeclaration::List(list) => {
+                self.compile_export_list(list.as_ref())?;
+                Ok(())
+            }
             BoaExportDeclaration::ReExport { .. } => {
                 Err(CompileError::Unimplemented("export * (phase 2)"))
             }
@@ -2604,18 +2636,30 @@ impl<'a> FunctionCompiler<'a> {
     ) -> Result<(), CompileError> {
         match export.0.clone() {
             BoaExportDeclaration::DefaultFunctionDeclaration(function) => {
-                self.compile_function_declaration_statement(&FunctionDeclaration::Function(function))
+                self.compile_function_declaration_statement(&FunctionDeclaration::Function(function))?;
+                self.emit_module_export_name("default", "default")
             }
             BoaExportDeclaration::DefaultGeneratorDeclaration(function) => self
-                .compile_function_declaration_statement(&FunctionDeclaration::Generator(function)),
+                .compile_function_declaration_statement(&FunctionDeclaration::Generator(function))
+                .and_then(|_| self.emit_module_export_name("default", "default")),
             BoaExportDeclaration::DefaultAsyncFunctionDeclaration(function) => self
-                .compile_function_declaration_statement(&FunctionDeclaration::AsyncFunction(function)),
+                .compile_function_declaration_statement(&FunctionDeclaration::AsyncFunction(function))
+                .and_then(|_| self.emit_module_export_name("default", "default")),
             BoaExportDeclaration::DefaultAsyncGeneratorDeclaration(function) => self.compile_function_declaration_statement(&FunctionDeclaration::AsyncGenerator(function)),
             BoaExportDeclaration::DefaultClassDeclaration(class_decl) => {
-                self.compile_class_declaration_statement(class_decl.as_ref())
+                self.compile_class_declaration_statement(class_decl.as_ref())?;
+                self.emit_module_export_name("default", "default")
             }
             BoaExportDeclaration::DefaultAssignmentExpression(expr) => {
                 self.compile_expression(&expr)?;
+                let slot = self.allocate_hidden_local()?;
+                self.emit(Opcode::SetLocal(slot));
+                let self_key = self.module_self_key()?.to_string();
+                self.emit_module_namespace(&self_key)?;
+                let export_const = self.add_string_constant("default")?;
+                self.emit(Opcode::LoadConst(export_const));
+                self.emit(Opcode::GetLocal(slot));
+                self.emit(Opcode::SetProp);
                 self.emit(Opcode::Pop);
                 Ok(())
             }
@@ -2625,6 +2669,116 @@ impl<'a> FunctionCompiler<'a> {
             | BoaExportDeclaration::Declaration(_) => Err(CompileError::Unimplemented(
                 "invalid default export declaration",
             )),
+        }
+    }
+
+    fn compile_import_declaration(
+        &mut self,
+        import: &super::ast::JSImportDeclaration,
+    ) -> Result<(), CompileError> {
+        let Some(module_context) = self.module_context.clone() else {
+            return Err(CompileError::Unimplemented("import (phase 2)"));
+        };
+        let specifier = self.program.resolve_sym(import.specifier().sym());
+        let dep_key = module_context
+            .imports
+            .get(&specifier)
+            .cloned()
+            .ok_or_else(|| CompileError::message(format!("missing module context for import '{specifier}'")))?;
+        if let Some(default) = import.default() {
+            self.emit_module_import_name(&dep_key, "default")?;
+            let name = self.identifier_name(&default);
+            let slot = self.declare_block_scoped(&name)?;
+            self.emit(Opcode::SetLocal(slot));
+        }
+        match import.kind() {
+            boa_ast::declaration::ImportKind::DefaultOrUnnamed => {}
+            boa_ast::declaration::ImportKind::Namespaced { binding } => {
+                self.emit_module_namespace(&dep_key)?;
+                let slot = self.declare_block_scoped(&self.identifier_name(binding))?;
+                self.emit(Opcode::SetLocal(slot));
+            }
+            boa_ast::declaration::ImportKind::Named { names } => {
+                for spec in names.iter().copied() {
+                    self.emit_module_import_name(&dep_key, &self.program.resolve_sym(spec.export_name()))?;
+                    let slot = self.declare_block_scoped(&self.identifier_name(&spec.binding()))?;
+                    self.emit(Opcode::SetLocal(slot));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn module_self_key(&self) -> Result<&str, CompileError> {
+        self.module_context
+            .as_ref()
+            .map(|ctx| ctx.self_key.as_str())
+            .ok_or_else(|| CompileError::Unimplemented("module context"))
+    }
+
+    fn emit_module_namespace(&mut self, key: &str) -> Result<(), CompileError> {
+        let index = self.add_string_constant(key)?;
+        self.emit(Opcode::GetGlobal(index));
+        Ok(())
+    }
+
+    fn emit_module_import_name(&mut self, dep_key: &str, export_name: &str) -> Result<(), CompileError> {
+        self.emit_module_namespace(dep_key)?;
+        let export_const = self.add_string_constant(export_name)?;
+        self.emit(Opcode::LoadConst(export_const));
+        self.emit(Opcode::GetProp);
+        Ok(())
+    }
+
+    fn emit_module_export_name(&mut self, export_name: &str, local_name: &str) -> Result<(), CompileError> {
+        let self_key = self.module_self_key()?.to_string();
+        self.emit_module_namespace(&self_key)?;
+        let export_const = self.add_string_constant(export_name)?;
+        self.emit(Opcode::LoadConst(export_const));
+        let resolved = self.resolve_binding(local_name);
+        self.emit_load_binding(local_name, resolved)?;
+        self.emit(Opcode::SetProp);
+        Ok(())
+    }
+
+    fn emit_module_export_value(&mut self, export_name: &str) -> Result<(), CompileError> {
+        let self_key = self.module_self_key()?.to_string();
+        self.emit_module_namespace(&self_key)?;
+        let export_const = self.add_string_constant(export_name)?;
+        self.emit(Opcode::LoadConst(export_const));
+        self.emit(Opcode::SetProp);
+        Ok(())
+    }
+
+    fn emit_exported_variable_names(
+        &mut self,
+        declaration: &VariableDeclaration,
+    ) -> Result<(), CompileError> {
+        for variable in declaration.variables() {
+            if let BindingNode::Identifier(identifier) = variable.binding() {
+                let name = self.identifier_name(identifier);
+                self.emit_module_export_name(&name, &name)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn compile_export_list(&mut self, list: &[boa_ast::declaration::ExportSpecifier]) -> Result<(), CompileError> {
+        for spec in list.iter().copied() {
+            let local = self.program.resolve_sym(spec.private_name());
+            let export = self.program.resolve_sym(spec.alias());
+            self.emit_module_export_name(&export, &local)?;
+        }
+        Ok(())
+    }
+
+    fn compile_export_all_declaration(
+        &mut self,
+        export: &super::ast::ExportAllDeclaration,
+    ) -> Result<(), CompileError> {
+        match export.0.clone() {
+            BoaExportDeclaration::ReExport { .. } => Err(CompileError::Unimplemented("export * (phase 2)")),
+            _ => Ok(()),
         }
     }
 
@@ -2982,8 +3136,16 @@ impl<'a> FunctionCompiler<'a> {
         let arity = u8::try_from(parameters.length())
             .map_err(|_| CompileError::message("function arity exceeded u8"))?;
         let outer = Some(self.snapshot_outer_bindings());
-        let mut child =
-            FunctionCompiler::new(self.program, name, arity, is_strict, false, outer, options);
+        let mut child = FunctionCompiler::new(
+            self.program,
+            name,
+            arity,
+            is_strict,
+            false,
+            outer,
+            options,
+            None,
+        );
         child.is_async = is_async;
         child.is_generator = is_generator;
         child.is_arrow = is_arrow;

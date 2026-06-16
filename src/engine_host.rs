@@ -22,13 +22,37 @@ use tobira_engine::engine::{
     Host, HostData, HostError, HostEvent, HostResult, HostTimeSnapshot, LocationSnapshot,
     NavigationAction,
     NavigationOutcome, NetworkRequestId, NodeId, NodeKind, ObserverId, ObserverKind,
-    ObserverOptions, ObserverOp, ObserverRecord, ObserverResult, Parser,
-    ScrollMetrics, SiblingDirection, StorageOp, StorageResult, TimerId, TimerRequest, Vm, WindowId,
-    WindowMetrics, SourceType,
+    ObserverOptions, ObserverOp, ObserverRecord, ObserverResult, Parser, Program, SourceType,
+    ScrollMetrics, SiblingDirection, StatementNode, StorageOp, StorageResult, TimerId, TimerRequest, Vm, WindowId,
+    WindowMetrics,
 };
+use tobira_engine::engine::compiler::ModuleContext;
 
 use crate::html::{Node, parse_document};
 use crate::url::Url;
+
+#[derive(Debug)]
+struct ModuleRecord {
+    key: String,
+    program: Program,
+    imports: Vec<(String, String)>,
+    src_url: String,
+}
+
+fn resolve_specifier(specifier: &str, referrer_url: &str) -> Result<String, String> {
+    if specifier.starts_with("http://") || specifier.starts_with("https://") {
+        return Ok(specifier.to_string());
+    }
+    if specifier.starts_with('/') || specifier.starts_with("./") || specifier.starts_with("../") {
+        return Url::parse(referrer_url)
+            .and_then(|base| base.resolve(specifier))
+            .map(|url| url.to_string())
+            .map_err(|e| format!("failed to resolve module specifier '{specifier}': {e:?}"));
+    }
+    Err(format!(
+        "bare module specifier '{specifier}' is not supported (no import map)"
+    ))
+}
 
 #[derive(Debug, Clone)]
 enum DomNodeKind {
@@ -2537,23 +2561,75 @@ impl EngineSession {
                     }
                 }
             };
-            let parse_result = if script.is_module() {
-                Parser::new(&source)
-                    .with_source_type(SourceType::Module)
-                    .parse()
+            if script.is_module() {
+                let mut registry = HashMap::new();
+                let mut post_order = Vec::new();
+                let mut in_progress = std::collections::HashSet::new();
+                let base_url = current_script_src.as_deref().unwrap_or(&base_href);
+                let entry_url = current_script_src.clone().unwrap_or_else(|| base_href.clone());
+                let module_src = source.clone();
+                if let Err(e) = Self::load_module_graph(
+                    &entry_url,
+                    &module_src,
+                    base_url,
+                    &mut registry,
+                    &mut post_order,
+                    &mut in_progress,
+                ) {
+                    error = Some(format!("{e} (in module {entry_url})"));
+                    break 'scripts;
+                }
+                for url in post_order {
+                    let Some(record) = registry.get(&url) else { continue };
+                    let mut imports: HashMap<String, String> = HashMap::new();
+                    for (specifier, dep_url) in &record.imports {
+                        imports.insert(specifier.clone(), format!("\u{0}module:{dep_url}"));
+                    }
+                    vm.set_global_object(record.key.clone());
+                    let module_ctx = ModuleContext {
+                        self_key: record.key.clone(),
+                        imports,
+                    };
+                    match Compiler::new(&record.program).with_module_context(module_ctx).compile() {
+                        Ok(chunk) => {
+                            vm.set_current_script_src(Some(record.src_url.clone()));
+                            if let Err(e) = vm.execute_module(&chunk) {
+                                error = Some(format!("{e} (in module {url})"));
+                                break 'scripts;
+                            }
+                        }
+                        Err(e) => {
+                            error = Some(format!("compile: {e:?} (in module {url})"));
+                            break 'scripts;
+                        }
+                    }
+                }
             } else {
-                Parser::new(&source).parse()
-            };
-            match parse_result {
-                Ok(program) => match Compiler::new(&program).compile() {
-                    Ok(chunk) => {
-                        vm.set_current_script_src(current_script_src.clone());
-                        let execution = if script.is_module() {
-                            vm.execute_module(&chunk)
-                        } else {
-                            vm.execute(&chunk)
-                        };
-                        if let Err(e) = execution {
+                let parse_result = Parser::new(&source).parse();
+                match parse_result {
+                    Ok(program) => match Compiler::new(&program).compile() {
+                        Ok(chunk) => {
+                            vm.set_current_script_src(current_script_src.clone());
+                            if let Err(e) = vm.execute(&chunk) {
+                                let script_label = match script {
+                                    ScriptSource::External { src, .. } => {
+                                        format!("external script {src}")
+                                    }
+                                    ScriptSource::Inline { .. } => {
+                                        format!("inline script #{script_index}")
+                                    }
+                                };
+                                let backtrace = vm.take_last_backtrace();
+                                error = Some(match backtrace {
+                                    Some(backtrace) if !backtrace.is_empty() => {
+                                        format!("{e} (in {script_label})\n{backtrace}")
+                                    }
+                                    _ => format!("{e} (in {script_label})"),
+                                });
+                                break 'scripts;
+                            }
+                        }
+                        Err(e) => {
                             let script_label = match script {
                                 ScriptSource::External { src, .. } => {
                                     format!("external script {src}")
@@ -2562,36 +2638,20 @@ impl EngineSession {
                                     format!("inline script #{script_index}")
                                 }
                             };
-                            let backtrace = vm.take_last_backtrace();
-                            error = Some(match backtrace {
-                                Some(backtrace) if !backtrace.is_empty() => {
-                                    format!("{e} (in {script_label})\n{backtrace}")
-                                }
-                                _ => format!("{e} (in {script_label})"),
-                            });
+                            error = Some(format!("compile: {e:?} (in {script_label})"));
                             break 'scripts;
                         }
-                    }
+                    },
                     Err(e) => {
                         let script_label = match script {
                             ScriptSource::External { src, .. } => {
                                 format!("external script {src}")
                             }
-                            ScriptSource::Inline { .. } => {
-                                format!("inline script #{script_index}")
-                            }
+                            ScriptSource::Inline { .. } => format!("inline script #{script_index}"),
                         };
-                        error = Some(format!("compile: {e:?} (in {script_label})"));
+                        error = Some(format!("parse: {e:?} (in {script_label})"));
                         break 'scripts;
                     }
-                },
-                Err(e) => {
-                    let script_label = match script {
-                        ScriptSource::External { src, .. } => format!("external script {src}"),
-                        ScriptSource::Inline { .. } => format!("inline script #{script_index}"),
-                    };
-                    error = Some(format!("parse: {e:?} (in {script_label})"));
-                    break 'scripts;
                 }
             }
         }
@@ -2620,6 +2680,60 @@ impl EngineSession {
             .as_any_mut()
             .downcast_mut::<BrowserHost>()
             .expect("host is a BrowserHost")
+    }
+
+    fn load_module_graph(
+        url: &str,
+        source: &str,
+        base_url: &str,
+        registry: &mut HashMap<String, ModuleRecord>,
+        post_order: &mut Vec<String>,
+        in_progress: &mut std::collections::HashSet<String>,
+    ) -> Result<(), String> {
+        if registry.contains_key(url) || in_progress.contains(url) {
+            return Ok(());
+        }
+        in_progress.insert(url.to_string());
+        let program = Parser::new(source)
+            .with_source_type(SourceType::Module)
+            .parse()
+            .map_err(|e| format!("parse: {e:?} (in module {url})"))?;
+        let mut imports = Vec::new();
+        for stmt in program.body() {
+            match stmt {
+                StatementNode::ImportDeclaration(import) => {
+                    let spec = program.resolve_sym(import.specifier().sym());
+                    let dep_url = resolve_specifier(&spec, base_url)?;
+                    imports.push((spec.clone(), dep_url.clone()));
+                    if !registry.contains_key(&dep_url) {
+                        let dep_src = crate::http::fetch(&Url::parse(&dep_url).map_err(|e| format!("{e:?}"))?)
+                            .map_err(|e| format!("failed to fetch module {dep_url}: {e}"))?;
+                        let dep_text = String::from_utf8_lossy(&dep_src.body).into_owned();
+                        Self::load_module_graph(&dep_url, &dep_text, &dep_url, registry, post_order, in_progress)?;
+                    }
+                }
+                StatementNode::ExportAllDeclaration(export) => {
+                    if let boa_ast::declaration::ExportDeclaration::ReExport { specifier, .. } = &export.0 {
+                        let spec = program.resolve_sym(specifier.sym());
+                    let dep_url = resolve_specifier(&spec, base_url)?;
+                    imports.push((spec.clone(), dep_url.clone()));
+                }
+                }
+                _ => {}
+            }
+        }
+        registry.insert(
+            url.to_string(),
+            ModuleRecord {
+                key: format!("\u{0}module:{url}"),
+                program,
+                imports,
+                src_url: url.to_string(),
+            },
+        );
+        post_order.push(url.to_string());
+        in_progress.remove(url);
+        Ok(())
     }
 
     fn snapshot_with_error(&mut self, error: Option<String>) -> EngineRunResult {

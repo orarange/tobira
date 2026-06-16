@@ -1665,6 +1665,15 @@ impl Vm {
         self.execute_with_this(chunk, Value::Undefined)
     }
 
+    pub fn set_global(&mut self, name: impl Into<String>, value: Value) {
+        self.globals.insert(name.into(), value);
+    }
+
+    pub fn set_global_object(&mut self, name: impl Into<String>) {
+        let object = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+        self.globals.insert(name.into(), Value::Object(object));
+    }
+
     fn execute_with_this(&mut self, chunk: &Chunk, this_value: Value) -> Result<Value, VmError> {
         self.stack.clear();
         self.frames.clear();
@@ -14251,6 +14260,7 @@ mod tests {
     use super::Vm;
     use crate::engine::ast::SourceType;
     use crate::engine::{Compiler, Heap, Parser, Value};
+    use crate::engine::compiler::ModuleContext;
 
     fn run_script(source: &str) {
         let program = Parser::new(source).parse().expect("script should parse");
@@ -14387,6 +14397,7 @@ mod tests {
 
     #[test]
     fn module_exports_compile_and_run() {
+        let self_key = "\u{0}module:test".to_string();
         let program = Parser::new(
             r#"
             export const x = 5;
@@ -14400,9 +14411,14 @@ mod tests {
         .parse()
         .expect("module should parse");
         let chunk = Compiler::new(&program)
+            .with_module_context(ModuleContext {
+                self_key: self_key.clone(),
+                imports: Default::default(),
+            })
             .compile()
             .expect("module should compile");
         let mut vm = Vm::new(Heap::new());
+        vm.set_global_object(self_key);
         vm.execute_module(&chunk).expect("module should execute");
         assert_eq!(vm.globals.get("__r").cloned(), Some(Value::Number(10.0)));
         assert_eq!(vm.globals.get("__r2").cloned(), Some(Value::Number(7.0)));
@@ -14410,6 +14426,7 @@ mod tests {
 
     #[test]
     fn module_named_export_list_compiles_without_error() {
+        let self_key = "\u{0}module:test".to_string();
         let program = Parser::new(
             r#"
             const x = 1;
@@ -14421,9 +14438,14 @@ mod tests {
         .parse()
         .expect("module should parse");
         let chunk = Compiler::new(&program)
+            .with_module_context(ModuleContext {
+                self_key: self_key.clone(),
+                imports: Default::default(),
+            })
             .compile()
             .expect("module should compile");
         let mut vm = Vm::new(Heap::new());
+        vm.set_global_object(self_key);
         vm.execute_module(&chunk).expect("module should execute");
         assert_eq!(vm.globals.get("__r3").cloned(), Some(Value::Number(1.0)));
     }
