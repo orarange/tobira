@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use boa_ast::declaration::ExportDeclaration as BoaExportDeclaration;
+
 use super::ast::{
     ArithmeticOpNode, ArrayPatternElementNode, AssignOpNode, AssignTargetNode, BinaryOpNode,
     BindingNode, BitwiseOpNode, ClassDeclarationNode, ClassElementNameNode, ClassElementNode,
@@ -2522,14 +2524,107 @@ impl<'a> FunctionCompiler<'a> {
                 Ok(())
             }
             StatementNode::EmptyStatement => Ok(()),
-            StatementNode::ImportDeclaration(_)
-            | StatementNode::ExportNamedDeclaration(_)
-            | StatementNode::ExportDefaultDeclaration(_)
-            | StatementNode::ExportAllDeclaration(_) => Err(CompileError::Unimplemented(
-                "module import/export statements",
-            )),
+            StatementNode::ExportNamedDeclaration(export) => {
+                self.compile_export_named_declaration(export)
+            }
+            StatementNode::ExportDefaultDeclaration(export) => {
+                self.compile_export_default_declaration(export)
+            }
+            StatementNode::ExportAllDeclaration(_) => {
+                Err(CompileError::Unimplemented("export * (phase 2)"))
+            }
+            StatementNode::ImportDeclaration(_) => {
+                Err(CompileError::Unimplemented("import (phase 2)"))
+            }
             StatementNode::DebuggerStatement => Ok(()),
             StatementNode::WithStatement(_) => Err(CompileError::Unimplemented("with statements")),
+        }
+    }
+
+    fn compile_export_named_declaration(
+        &mut self,
+        export: &super::ast::ExportNamedDeclaration,
+    ) -> Result<(), CompileError> {
+        match export.0.clone() {
+            BoaExportDeclaration::Declaration(declaration) => match declaration {
+                boa_ast::declaration::Declaration::FunctionDeclaration(function) => {
+                    self.compile_function_declaration_statement(&FunctionDeclaration::Function(
+                        function,
+                    ))
+                }
+                boa_ast::declaration::Declaration::GeneratorDeclaration(function) => self
+                    .compile_function_declaration_statement(&FunctionDeclaration::Generator(
+                        function,
+                    )),
+                boa_ast::declaration::Declaration::AsyncFunctionDeclaration(function) => self
+                    .compile_function_declaration_statement(&FunctionDeclaration::AsyncFunction(
+                        function,
+                    )),
+                boa_ast::declaration::Declaration::AsyncGeneratorDeclaration(function) => self
+                    .compile_function_declaration_statement(&FunctionDeclaration::AsyncGenerator(
+                        function,
+                    )),
+                boa_ast::declaration::Declaration::ClassDeclaration(class_decl) => {
+                    self.compile_class_declaration_statement(class_decl.as_ref())
+                }
+                boa_ast::declaration::Declaration::Lexical(lexical) => {
+                    let declaration = match lexical {
+                        boa_ast::declaration::LexicalDeclaration::Let(_) => {
+                            VariableDeclaration::Let(lexical)
+                        }
+                        boa_ast::declaration::LexicalDeclaration::Const(_) => {
+                            VariableDeclaration::Const(lexical)
+                        }
+                    };
+                    self.compile_variable_declaration(&declaration, DeclarationContext::Statement)
+                }
+            },
+            BoaExportDeclaration::VarStatement(var) => {
+                let declaration = VariableDeclaration::Var(var);
+                self.compile_variable_declaration(&declaration, DeclarationContext::Statement)
+            }
+            BoaExportDeclaration::List(_) => Ok(()),
+            BoaExportDeclaration::ReExport { .. } => {
+                Err(CompileError::Unimplemented("export * (phase 2)"))
+            }
+            BoaExportDeclaration::DefaultFunctionDeclaration(_)
+            | BoaExportDeclaration::DefaultGeneratorDeclaration(_)
+            | BoaExportDeclaration::DefaultAsyncFunctionDeclaration(_)
+            | BoaExportDeclaration::DefaultAsyncGeneratorDeclaration(_)
+            | BoaExportDeclaration::DefaultClassDeclaration(_)
+            | BoaExportDeclaration::DefaultAssignmentExpression(_) => unreachable!(
+                "default export declarations are routed through compile_export_default_declaration"
+            ),
+        }
+    }
+
+    fn compile_export_default_declaration(
+        &mut self,
+        export: &super::ast::ExportDefaultDeclaration,
+    ) -> Result<(), CompileError> {
+        match export.0.clone() {
+            BoaExportDeclaration::DefaultFunctionDeclaration(function) => {
+                self.compile_function_declaration_statement(&FunctionDeclaration::Function(function))
+            }
+            BoaExportDeclaration::DefaultGeneratorDeclaration(function) => self
+                .compile_function_declaration_statement(&FunctionDeclaration::Generator(function)),
+            BoaExportDeclaration::DefaultAsyncFunctionDeclaration(function) => self
+                .compile_function_declaration_statement(&FunctionDeclaration::AsyncFunction(function)),
+            BoaExportDeclaration::DefaultAsyncGeneratorDeclaration(function) => self.compile_function_declaration_statement(&FunctionDeclaration::AsyncGenerator(function)),
+            BoaExportDeclaration::DefaultClassDeclaration(class_decl) => {
+                self.compile_class_declaration_statement(class_decl.as_ref())
+            }
+            BoaExportDeclaration::DefaultAssignmentExpression(expr) => {
+                self.compile_expression(&expr)?;
+                self.emit(Opcode::Pop);
+                Ok(())
+            }
+            BoaExportDeclaration::ReExport { .. }
+            | BoaExportDeclaration::List(_)
+            | BoaExportDeclaration::VarStatement(_)
+            | BoaExportDeclaration::Declaration(_) => Err(CompileError::Unimplemented(
+                "invalid default export declaration",
+            )),
         }
     }
 

@@ -1658,6 +1658,14 @@ impl Vm {
     }
 
     pub fn execute(&mut self, chunk: &Chunk) -> Result<Value, VmError> {
+        self.execute_with_this(chunk, self.globals.get("window").cloned().unwrap_or(Value::Undefined))
+    }
+
+    pub fn execute_module(&mut self, chunk: &Chunk) -> Result<Value, VmError> {
+        self.execute_with_this(chunk, Value::Undefined)
+    }
+
+    fn execute_with_this(&mut self, chunk: &Chunk, this_value: Value) -> Result<Value, VmError> {
         self.stack.clear();
         self.frames.clear();
         self.fuel = 1_000_000;
@@ -1666,8 +1674,7 @@ impl Vm {
             proto: Rc::new(chunk.top_level.clone()),
             upvalues: Vec::new(),
         };
-        let global_this = self.globals.get("window").cloned().unwrap_or(Value::Undefined);
-        self.push_call_frame(closure, Vec::new(), global_this, None)?;
+        self.push_call_frame(closure, Vec::new(), this_value, None)?;
         self.run_until_frame_depth(0)?;
         self.drain_microtasks();
         if self.stack.is_empty() {
@@ -14242,7 +14249,8 @@ impl From<String> for PropertyKey {
 #[cfg(test)]
 mod tests {
     use super::Vm;
-    use crate::engine::{Compiler, Heap, Parser};
+    use crate::engine::ast::SourceType;
+    use crate::engine::{Compiler, Heap, Parser, Value};
 
     fn run_script(source: &str) {
         let program = Parser::new(source).parse().expect("script should parse");
@@ -14342,6 +14350,82 @@ mod tests {
             assert(typeof {} === "object");
             "#,
         );
+    }
+
+    #[test]
+    fn module_top_level_this_is_undefined() {
+        let program = Parser::new("globalThis.__t = (typeof this);")
+            .with_source_type(SourceType::Module)
+            .parse()
+            .expect("module should parse");
+        let chunk = Compiler::new(&program)
+            .compile()
+            .expect("module should compile");
+        let mut vm = Vm::new(Heap::new());
+        vm.execute_module(&chunk).expect("module should execute");
+        assert_eq!(
+            vm.globals.get("__t").map(|value| vm.to_string(value)),
+            Some("undefined".to_string())
+        );
+    }
+
+    #[test]
+    fn classic_top_level_this_stays_global_object() {
+        let program = Parser::new("globalThis.__t = (typeof this);")
+            .parse()
+            .expect("script should parse");
+        let chunk = Compiler::new(&program)
+            .compile()
+            .expect("script should compile");
+        let mut vm = Vm::new(Heap::new());
+        vm.execute(&chunk).expect("script should execute");
+        assert_eq!(
+            vm.globals.get("__t").map(|value| vm.to_string(value)),
+            Some("object".to_string())
+        );
+    }
+
+    #[test]
+    fn module_exports_compile_and_run() {
+        let program = Parser::new(
+            r#"
+            export const x = 5;
+            globalThis.__r = x * 2;
+            export function f(){ return 7; }
+            globalThis.__r2 = f();
+            export default function(){ }
+            "#,
+        )
+        .with_source_type(SourceType::Module)
+        .parse()
+        .expect("module should parse");
+        let chunk = Compiler::new(&program)
+            .compile()
+            .expect("module should compile");
+        let mut vm = Vm::new(Heap::new());
+        vm.execute_module(&chunk).expect("module should execute");
+        assert_eq!(vm.globals.get("__r").cloned(), Some(Value::Number(10.0)));
+        assert_eq!(vm.globals.get("__r2").cloned(), Some(Value::Number(7.0)));
+    }
+
+    #[test]
+    fn module_named_export_list_compiles_without_error() {
+        let program = Parser::new(
+            r#"
+            const x = 1;
+            export { x };
+            globalThis.__r3 = x;
+            "#,
+        )
+        .with_source_type(SourceType::Module)
+        .parse()
+        .expect("module should parse");
+        let chunk = Compiler::new(&program)
+            .compile()
+            .expect("module should compile");
+        let mut vm = Vm::new(Heap::new());
+        vm.execute_module(&chunk).expect("module should execute");
+        assert_eq!(vm.globals.get("__r3").cloned(), Some(Value::Number(1.0)));
     }
 
     #[test]

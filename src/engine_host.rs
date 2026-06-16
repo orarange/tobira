@@ -24,7 +24,7 @@ use tobira_engine::engine::{
     NavigationOutcome, NetworkRequestId, NodeId, NodeKind, ObserverId, ObserverKind,
     ObserverOptions, ObserverOp, ObserverRecord, ObserverResult, Parser,
     ScrollMetrics, SiblingDirection, StorageOp, StorageResult, TimerId, TimerRequest, Vm, WindowId,
-    WindowMetrics,
+    WindowMetrics, SourceType,
 };
 
 use crate::html::{Node, parse_document};
@@ -968,14 +968,30 @@ impl BrowserHost {
                     self.collect_ordered_scripts(child, out);
                     continue;
                 }
+                let module = self.nodes[child]
+                    .attrs
+                    .get("type")
+                    .map(|type_attr| {
+                        type_attr
+                            .trim()
+                            .split(';')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .eq_ignore_ascii_case("module")
+                    })
+                    .unwrap_or(false);
                 match self.nodes[child].attrs.get("src") {
                     Some(src) if !src.trim().is_empty() => {
-                        out.push(ScriptSource::External(src.trim().to_string()));
+                        out.push(ScriptSource::External {
+                            src: src.trim().to_string(),
+                            module,
+                        });
                     }
                     _ => {
                         let text = self.collect_text(child);
                         if !text.trim().is_empty() {
-                            out.push(ScriptSource::Inline(text));
+                            out.push(ScriptSource::Inline { text, module });
                         }
                     }
                 }
@@ -2402,8 +2418,16 @@ pub struct EngineRunResult {
 /// external reference whose `src` must be resolved + fetched before execution.
 #[derive(Debug, Clone)]
 pub enum ScriptSource {
-    Inline(String),
-    External(String),
+    Inline { text: String, module: bool },
+    External { src: String, module: bool },
+}
+
+impl ScriptSource {
+    fn is_module(&self) -> bool {
+        match self {
+            Self::Inline { module, .. } | Self::External { module, .. } => *module,
+        }
+    }
 }
 
 pub fn run_document_scripts(html: &str, url: &str) -> EngineRunResult {
@@ -2490,8 +2514,8 @@ impl EngineSession {
             // a real browser loading `<script src>`). A fetch failure aborts the
             // remaining scripts, mirroring a hard load error.
             let (source, current_script_src) = match script {
-                ScriptSource::Inline(text) => (text.clone(), None),
-                ScriptSource::External(src) => {
+                ScriptSource::Inline { text, .. } => (text.clone(), None),
+                ScriptSource::External { src, .. } => {
                     let resolved = Url::parse(&base_href)
                         .and_then(|base| base.resolve(src))
                         .or_else(|_| Url::parse(src));
@@ -2513,14 +2537,30 @@ impl EngineSession {
                     }
                 }
             };
-            match Parser::new(&source).parse() {
+            let parse_result = if script.is_module() {
+                Parser::new(&source)
+                    .with_source_type(SourceType::Module)
+                    .parse()
+            } else {
+                Parser::new(&source).parse()
+            };
+            match parse_result {
                 Ok(program) => match Compiler::new(&program).compile() {
                     Ok(chunk) => {
                         vm.set_current_script_src(current_script_src.clone());
-                        if let Err(e) = vm.execute(&chunk) {
+                        let execution = if script.is_module() {
+                            vm.execute_module(&chunk)
+                        } else {
+                            vm.execute(&chunk)
+                        };
+                        if let Err(e) = execution {
                             let script_label = match script {
-                                ScriptSource::External(src) => format!("external script {src}"),
-                                ScriptSource::Inline(_) => format!("inline script #{script_index}"),
+                                ScriptSource::External { src, .. } => {
+                                    format!("external script {src}")
+                                }
+                                ScriptSource::Inline { .. } => {
+                                    format!("inline script #{script_index}")
+                                }
                             };
                             let backtrace = vm.take_last_backtrace();
                             error = Some(match backtrace {
@@ -2534,8 +2574,12 @@ impl EngineSession {
                     }
                     Err(e) => {
                         let script_label = match script {
-                            ScriptSource::External(src) => format!("external script {src}"),
-                            ScriptSource::Inline(_) => format!("inline script #{script_index}"),
+                            ScriptSource::External { src, .. } => {
+                                format!("external script {src}")
+                            }
+                            ScriptSource::Inline { .. } => {
+                                format!("inline script #{script_index}")
+                            }
                         };
                         error = Some(format!("compile: {e:?} (in {script_label})"));
                         break 'scripts;
@@ -2543,8 +2587,8 @@ impl EngineSession {
                 },
                 Err(e) => {
                     let script_label = match script {
-                        ScriptSource::External(src) => format!("external script {src}"),
-                        ScriptSource::Inline(_) => format!("inline script #{script_index}"),
+                        ScriptSource::External { src, .. } => format!("external script {src}"),
+                        ScriptSource::Inline { .. } => format!("inline script #{script_index}"),
                     };
                     error = Some(format!("parse: {e:?} (in {script_label})"));
                     break 'scripts;
@@ -3039,6 +3083,26 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.title.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn module_script_runs_in_module_mode() {
+        let result = run_document_scripts(
+            r#"<html><body><script type="module">export const x = 5; document.title = String(x * 2);</script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn classic_json_data_block_still_skips_execution() {
+        let result = run_document_scripts(
+            r#"<html><body><script type="application/json">{"x":1}</script><script>document.title='classic-ok'</script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("classic-ok"));
     }
 
     #[test]
