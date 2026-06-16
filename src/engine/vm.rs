@@ -94,6 +94,7 @@ enum BuiltinId {
     FunctionProtoCall,
     FunctionProtoApply,
     FunctionProtoBind,
+    FunctionConstructor,
     ErrorConstructor,
     TypeErrorConstructor,
     RangeErrorConstructor,
@@ -2547,6 +2548,11 @@ impl Vm {
             self.allocate_builtin_value(BuiltinId::ObjectConstructor, true, Some(object_prototype));
         let array_ctor =
             self.allocate_builtin_value(BuiltinId::ArrayConstructor, true, Some(array_prototype));
+        let function_ctor = self.allocate_builtin_value(
+            BuiltinId::FunctionConstructor,
+            true,
+            Some(function_prototype),
+        );
         let error_ctor =
             self.allocate_builtin_value(BuiltinId::ErrorConstructor, true, Some(error_prototype));
         let type_error_ctor = self.allocate_builtin_value(
@@ -2612,6 +2618,8 @@ impl Vm {
 
         self.globals
             .insert("Object".to_string(), object_ctor.clone());
+        self.globals
+            .insert("Function".to_string(), function_ctor.clone());
         self.globals.insert("Array".to_string(), array_ctor.clone());
         self.globals.insert("Error".to_string(), error_ctor.clone());
         self.globals
@@ -5471,6 +5479,7 @@ impl Vm {
             builtin,
             BuiltinId::ObjectConstructor
                 | BuiltinId::ArrayConstructor
+                | BuiltinId::FunctionConstructor
                 | BuiltinId::PromiseConstructor
                 | BuiltinId::ErrorConstructor
                 | BuiltinId::TypeErrorConstructor
@@ -8021,6 +8030,30 @@ impl Vm {
                         Ok(Value::Object(promise))
                     }
                 }
+            }
+            BuiltinId::FunctionConstructor => {
+                let body = args
+                    .last()
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default();
+                let params = if args.is_empty() {
+                    String::new()
+                } else {
+                    args[..args.len() - 1]
+                        .iter()
+                        .map(|value| self.to_string(value))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                let temp_name = "__tobira_function_constructor_result";
+                let source = format!(
+                    "globalThis.{temp_name} = (function anonymous({params}) {{\n{body}\n}});"
+                );
+                self.eval_source(&source)?;
+                Ok(self
+                    .globals
+                    .remove(temp_name)
+                    .unwrap_or(Value::Undefined))
             }
             BuiltinId::PromiseResolve => {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
@@ -14392,6 +14425,21 @@ mod tests {
         assert_eq!(
             vm.globals.get("__t").map(|value| vm.to_string(value)),
             Some("object".to_string())
+        );
+    }
+
+    #[test]
+    fn function_constructor_is_global_and_callable() {
+        run_script(
+            r#"
+            assert(typeof Function === "function");
+            assert(new Function("a","b","return a+b")(2,3) === 5);
+            assert(Function("return 42")() === 42);
+            assert(typeof Function.prototype !== "undefined");
+            assert((function(){}) instanceof Function === true);
+            assert(typeof Function.prototype.call === "function");
+            assert(typeof Function.prototype.apply === "function");
+            "#,
         );
     }
 
