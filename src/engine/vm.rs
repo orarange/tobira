@@ -1106,6 +1106,12 @@ struct ResizeObserverReg {
     instance: Value,
 }
 
+enum ObjectIntrospectionKind {
+    Keys,
+    Values,
+    Entries,
+}
+
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
@@ -6211,6 +6217,32 @@ impl Vm {
         }
     }
 
+    fn try_require_object_ref(
+        &self,
+        value: &Value,
+        context: &str,
+    ) -> Result<Option<GcRef<JsObject>>, VmError> {
+        match value {
+            Value::Object(object) => Ok(Some(*object)),
+            Value::Null | Value::Undefined => {
+                Err(VmError::TypeError(format!("{context} requires an object")))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn object_introspection_primitive_prototype_ref(
+        &self,
+        value: &Value,
+    ) -> GcRef<JsObject> {
+        match value {
+            Value::String(_) => self.string_prototype_ref(),
+            Value::Number(_) => self.number_prototype_ref(),
+            Value::Bool(_) => self.boolean_prototype_ref(),
+            _ => self.object_prototype_ref(),
+        }
+    }
+
     fn get_own_property_descriptor(
         &self,
         object: GcRef<JsObject>,
@@ -6382,6 +6414,202 @@ impl Vm {
                 Ok(Value::Number(text.chars().count() as f64))
             }
             _ => self.get_property_from_chain(self.string_prototype_ref(), receiver, key),
+        }
+    }
+
+    fn object_introspection_keys_like(
+        &mut self,
+        value: &Value,
+        kind: ObjectIntrospectionKind,
+        context: &str,
+    ) -> Result<Value, VmError> {
+        if let Some(object) = self.try_require_object_ref(value, context)? {
+            match kind {
+                ObjectIntrospectionKind::Keys => {
+                    let values = self
+                        .object_own_enumerable_keys(object)
+                        .into_iter()
+                        .map(|key| self.make_string_value(&self.property_key_to_string(&key)))
+                        .collect();
+                    self.make_array_from_values(values)
+                }
+                ObjectIntrospectionKind::Values => {
+                    let mut values = Vec::new();
+                    for key in self.object_own_enumerable_keys(object) {
+                        values.push(self.get_property_value(&Value::Object(object), &key)?);
+                    }
+                    self.make_array_from_values(values)
+                }
+                ObjectIntrospectionKind::Entries => {
+                    let mut entries = Vec::new();
+                    for key in self.object_own_enumerable_keys(object) {
+                        let pair = vec![
+                            self.make_string_value(&self.property_key_to_string(&key)),
+                            self.get_property_value(&Value::Object(object), &key)?,
+                        ];
+                        entries.push(self.make_array_from_values(pair)?);
+                    }
+                    self.make_array_from_values(entries)
+                }
+            }
+        } else {
+            match value {
+                Value::String(string) => {
+                    let text = self.string_text(*string);
+                    match kind {
+                        ObjectIntrospectionKind::Keys => {
+                            let values = text
+                                .chars()
+                                .enumerate()
+                                .map(|(index, _)| self.make_string_value(&index.to_string()))
+                                .collect();
+                            self.make_array_from_values(values)
+                        }
+                        ObjectIntrospectionKind::Values => {
+                            let values = text
+                                .chars()
+                                .map(|character| self.make_string_value(&character.to_string()))
+                                .collect();
+                            self.make_array_from_values(values)
+                        }
+                        ObjectIntrospectionKind::Entries => {
+                            let mut entries = Vec::new();
+                            for (index, character) in text.chars().enumerate() {
+                                let key = self.make_string_value(&index.to_string());
+                                let value = self.make_string_value(&character.to_string());
+                                entries.push(self.make_array_from_values(vec![
+                                    key,
+                                    value,
+                                ])?);
+                            }
+                            self.make_array_from_values(entries)
+                        }
+                    }
+                }
+                Value::Number(_) | Value::Bool(_) | Value::Symbol(_) => {
+                    self.make_array_from_values(Vec::new())
+                }
+                Value::Null | Value::Undefined => {
+                    Err(VmError::TypeError(format!("{context} requires an object")))
+                }
+                Value::Object(_) => unreachable!(),
+            }
+        }
+    }
+
+    fn object_introspection_get_own_property_names(
+        &mut self,
+        value: &Value,
+        context: &str,
+    ) -> Result<Value, VmError> {
+        if let Some(object) = self.try_require_object_ref(value, context)? {
+            let mut names = Vec::new();
+            if let Some(object_data) = self.heap.objects().get(object) {
+                for key in object_data.properties.keys() {
+                    if let PropertyKey::Symbol(_) = key {
+                        continue;
+                    }
+                    names.push(self.property_key_to_string(key));
+                }
+            }
+            let values = names.into_iter().map(|name| self.make_string_value(&name)).collect();
+            self.make_array_from_values(values)
+        } else {
+            match value {
+                Value::String(string) => {
+                    let text = self.string_text(*string);
+                    let mut names: Vec<Value> = text
+                        .chars()
+                        .enumerate()
+                        .map(|(index, _)| self.make_string_value(&index.to_string()))
+                        .collect();
+                    names.push(self.make_string_value("length"));
+                    self.make_array_from_values(names)
+                }
+                Value::Number(_) | Value::Bool(_) | Value::Symbol(_) => {
+                    self.make_array_from_values(Vec::new())
+                }
+                Value::Null | Value::Undefined => Err(VmError::TypeError(format!(
+                    "{context} requires an object"
+                ))),
+                Value::Object(_) => unreachable!(),
+            }
+        }
+    }
+
+    fn object_introspection_get_own_property_descriptor(
+        &mut self,
+        value: &Value,
+        key: &PropertyKey,
+        context: &str,
+    ) -> Result<Value, VmError> {
+        if let Some(object) = self.try_require_object_ref(value, context)? {
+            match self.get_own_property_descriptor(object, key) {
+                Some(descriptor) => self.property_descriptor_to_value(descriptor),
+                None => Ok(Value::Undefined),
+            }
+        } else {
+            match (value, key) {
+                (Value::String(string), PropertyKey::Index(index)) => {
+                    let text = self.string_text(*string);
+                    let chars: Vec<char> = text.chars().collect();
+                    if let Some(character) = chars.get(*index as usize) {
+                        let value = self.make_string_value(&character.to_string());
+                        self.property_descriptor_to_value(JsPropertyDescriptor::Data {
+                            value,
+                            writable: false,
+                            enumerable: true,
+                            configurable: false,
+                        })
+                    } else {
+                        Ok(Value::Undefined)
+                    }
+                }
+                (Value::String(string), PropertyKey::String(name)) if name == "length" => {
+                    let text = self.string_text(*string);
+                    self.property_descriptor_to_value(JsPropertyDescriptor::Data {
+                        value: Value::Number(text.chars().count() as f64),
+                        writable: false,
+                        enumerable: false,
+                        configurable: false,
+                    })
+                }
+                (Value::Number(_) | Value::Bool(_) | Value::Symbol(_), _) => Ok(Value::Undefined),
+                (Value::Null | Value::Undefined, _) => Err(VmError::TypeError(format!(
+                    "{context} requires an object"
+                ))),
+                (Value::String(_), PropertyKey::String(_)) => Ok(Value::Undefined),
+                (Value::String(_), PropertyKey::Symbol(_)) => Ok(Value::Undefined),
+                (Value::Object(_), _) => unreachable!(),
+            }
+        }
+    }
+
+    fn object_introspection_get_prototype_of(
+        &self,
+        value: &Value,
+        context: &str,
+    ) -> Result<Value, VmError> {
+        if let Some(object) = self.try_require_object_ref(value, context)? {
+            let prototype = self
+                .heap
+                .objects()
+                .get(object)
+                .and_then(|object_data| object_data.prototype)
+                .map(Value::Object)
+                .unwrap_or(Value::Null);
+            Ok(prototype)
+        } else {
+            match value {
+                Value::String(_)
+                | Value::Number(_)
+                | Value::Bool(_)
+                | Value::Symbol(_) => Ok(Value::Object(self.object_introspection_primitive_prototype_ref(value))),
+                Value::Null | Value::Undefined => Err(VmError::TypeError(format!(
+                    "{context} requires an object"
+                ))),
+                Value::Object(_) => unreachable!(),
+            }
         }
     }
 
@@ -8225,51 +8453,34 @@ impl Vm {
                 Ok(Value::Object(object))
             }
             BuiltinId::ObjectGetOwnPropertyDescriptor => {
-                let object = self.require_object_ref(
-                    args.first().unwrap_or(&Value::Undefined),
-                    "Object.getOwnPropertyDescriptor",
-                )?;
+                let target = args.first().unwrap_or(&Value::Undefined);
                 let key = self.to_property_key(args.get(1).unwrap_or(&Value::Undefined))?;
-                match self.get_own_property_descriptor(object, &key) {
-                    Some(descriptor) => self.property_descriptor_to_value(descriptor),
-                    None => Ok(Value::Undefined),
-                }
+                self.object_introspection_get_own_property_descriptor(
+                    target,
+                    &key,
+                    "Object.getOwnPropertyDescriptor",
+                )
             }
             BuiltinId::ObjectKeys => {
-                let object = self
-                    .require_object_ref(args.first().unwrap_or(&Value::Undefined), "Object.keys")?;
-                let values = self
-                    .object_own_enumerable_keys(object)
-                    .into_iter()
-                    .map(|key| self.make_string_value(&self.property_key_to_string(&key)))
-                    .collect();
-                self.make_array_from_values(values)
+                self.object_introspection_keys_like(
+                    args.first().unwrap_or(&Value::Undefined),
+                    ObjectIntrospectionKind::Keys,
+                    "Object.keys",
+                )
             }
             BuiltinId::ObjectValues => {
-                let object = self.require_object_ref(
+                self.object_introspection_keys_like(
                     args.first().unwrap_or(&Value::Undefined),
+                    ObjectIntrospectionKind::Values,
                     "Object.values",
-                )?;
-                let mut values = Vec::new();
-                for key in self.object_own_enumerable_keys(object) {
-                    values.push(self.get_property_value(&Value::Object(object), &key)?);
-                }
-                self.make_array_from_values(values)
+                )
             }
             BuiltinId::ObjectEntries => {
-                let object = self.require_object_ref(
+                self.object_introspection_keys_like(
                     args.first().unwrap_or(&Value::Undefined),
+                    ObjectIntrospectionKind::Entries,
                     "Object.entries",
-                )?;
-                let mut entries = Vec::new();
-                for key in self.object_own_enumerable_keys(object) {
-                    let pair = vec![
-                        self.make_string_value(&self.property_key_to_string(&key)),
-                        self.get_property_value(&Value::Object(object), &key)?,
-                    ];
-                    entries.push(self.make_array_from_values(pair)?);
-                }
-                self.make_array_from_values(entries)
+                )
             }
             BuiltinId::ObjectAssign => {
                 let target = self.require_object_ref(
@@ -8290,18 +8501,10 @@ impl Vm {
                 Ok(Value::Object(target))
             }
             BuiltinId::ObjectGetPrototypeOf => {
-                let object = self.require_object_ref(
+                self.object_introspection_get_prototype_of(
                     args.first().unwrap_or(&Value::Undefined),
                     "Object.getPrototypeOf",
-                )?;
-                let prototype = self
-                    .heap
-                    .objects()
-                    .get(object)
-                    .and_then(|object_data| object_data.prototype)
-                    .map(Value::Object)
-                    .unwrap_or(Value::Null);
-                Ok(prototype)
+                )
             }
             BuiltinId::ObjectSetPrototypeOf => {
                 let object = self.require_object_ref(
@@ -9303,21 +9506,10 @@ impl Vm {
                 Ok(Value::Object(object))
             }
             BuiltinId::ObjectGetOwnPropertyNames => {
-                let object = self.require_object_ref(
+                self.object_introspection_get_own_property_names(
                     args.first().unwrap_or(&Value::Undefined),
                     "Object.getOwnPropertyNames",
-                )?;
-                let mut names = Vec::new();
-                if let Some(object_data) = self.heap.objects().get(object) {
-                    for key in object_data.properties.keys() {
-                        if let PropertyKey::Symbol(_) = key {
-                            continue;
-                        }
-                        names.push(self.property_key_to_string(key));
-                    }
-                }
-                let values = names.into_iter().map(|name| self.make_string_value(&name)).collect();
-                self.make_array_from_values(values)
+                )
             }
             BuiltinId::ObjectHasOwn => {
                 let target = args.first().cloned().unwrap_or(Value::Undefined);
@@ -14420,6 +14612,34 @@ mod tests {
             assert(obj.z === 3);
             assert(obj["y"] === 2);
             assert(typeof {} === "object");
+            "#,
+        );
+    }
+
+    #[test]
+    fn object_introspection_to_object_semantics() {
+        run_script(
+            r#"
+            assert(JSON.stringify(Object.getOwnPropertyNames(42)) === "[]");
+            assert(JSON.stringify(Object.keys(42)) === "[]");
+
+            assert(JSON.stringify(Object.keys("ab")) === "[\"0\",\"1\"]");
+            assert(JSON.stringify(Object.getOwnPropertyNames("ab")) === "[\"0\",\"1\",\"length\"]");
+            assert(JSON.stringify(Object.values("ab")) === "[\"a\",\"b\"]");
+
+            assert(Object.getOwnPropertyDescriptor("ab", "0").value === "a");
+            assert(Object.getOwnPropertyDescriptor("ab", "length").value === 2);
+            assert(Object.getPrototypeOf("x") === String.prototype);
+
+            let threw = false;
+            try { Object.keys(null); } catch (e) { threw = true; }
+            assert(threw === true);
+
+            threw = false;
+            try { Object.getOwnPropertyNames(undefined); } catch (e) { threw = true; }
+            assert(threw === true);
+
+            assert(Object.keys({ a: 1, b: 2 }).length === 2);
             "#,
         );
     }
