@@ -44,7 +44,14 @@ impl std::error::Error for CompileError {}
 enum ResolvedBinding {
     Local(u16),
     Upvalue(u16),
+    ModuleImport,
     Global,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImportBinding {
+    Named { dep_key: String, export_name: String },
+    Namespace { dep_key: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +221,7 @@ impl<'a> Compiler<'a> {
             None,
             FunctionCompileOptions::default(),
             module_context,
+            HashMap::new(),
         );
         function.install_this_binding()?;
         function.compile_statements(self.program.body())?;
@@ -254,6 +262,7 @@ struct FunctionCompiler<'a> {
     uses_arguments: bool,
     options: FunctionCompileOptions,
     module_context: Option<ModuleContext>,
+    import_bindings: HashMap<String, ImportBinding>,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -266,6 +275,7 @@ impl<'a> FunctionCompiler<'a> {
         outer: Option<OuterBindings>,
         options: FunctionCompileOptions,
         module_context: Option<ModuleContext>,
+        import_bindings: HashMap<String, ImportBinding>,
     ) -> Self {
         Self {
             program,
@@ -292,6 +302,7 @@ impl<'a> FunctionCompiler<'a> {
             uses_arguments: false,
             options,
             module_context,
+            import_bindings,
         }
     }
 
@@ -442,6 +453,10 @@ impl<'a> FunctionCompiler<'a> {
 
         if let Some(index) = self.resolve_upvalue(name) {
             return ResolvedBinding::Upvalue(index);
+        }
+
+        if self.import_bindings.contains_key(name) {
+            return ResolvedBinding::ModuleImport;
         }
 
         ResolvedBinding::Global
@@ -1854,6 +1869,7 @@ impl<'a> FunctionCompiler<'a> {
             outer,
             options.clone(),
             None,
+            self.import_bindings.clone(),
         );
         if options.super_ctor_binding.is_some() {
             let rest_slot = child.allocate_hidden_local()?;
@@ -2266,6 +2282,24 @@ impl<'a> FunctionCompiler<'a> {
             ResolvedBinding::Upvalue(slot) => {
                 self.emit(Opcode::GetUpvalue(slot));
             }
+            ResolvedBinding::ModuleImport => {
+                match self.import_bindings.get(name) {
+                    Some(ImportBinding::Named { dep_key, export_name }) => {
+                        let dep_key = dep_key.clone();
+                        let export_name = export_name.clone();
+                        self.emit_module_import_name(&dep_key, &export_name)?;
+                    }
+                    Some(ImportBinding::Namespace { dep_key }) => {
+                        let dep_key = dep_key.clone();
+                        self.emit_module_namespace(&dep_key)?;
+                    }
+                    None => {
+                        return Err(CompileError::message(format!(
+                            "missing import binding for '{name}'"
+                        )));
+                    }
+                }
+            }
             ResolvedBinding::Global => {
                 let index = self.add_string_constant(name)?;
                 self.emit(Opcode::GetGlobal(index));
@@ -2286,6 +2320,11 @@ impl<'a> FunctionCompiler<'a> {
             ResolvedBinding::Upvalue(slot) => {
                 self.emit(Opcode::SetUpvalue(slot));
             }
+            ResolvedBinding::ModuleImport => {
+                return Err(CompileError::message(format!(
+                    "cannot assign to imported binding '{name}'"
+                )));
+            }
             ResolvedBinding::Global => {
                 let index = self.add_string_constant(name)?;
                 self.emit(Opcode::SetGlobal(index));
@@ -2299,6 +2338,9 @@ impl<'a> FunctionCompiler<'a> {
         // ahead of their textual position still resolve the variables they
         // capture (and so calling a function before its definition works).
         self.predeclare_hoisted(statements)?;
+        if self.is_top_level {
+            self.predeclare_imports(statements)?;
+        }
         // Hoist function declarations (create the closures up front).
         for statement in statements {
             if let StatementNode::FunctionDeclaration(declaration) = statement {
@@ -2721,6 +2763,22 @@ impl<'a> FunctionCompiler<'a> {
         &mut self,
         import: &super::ast::JSImportDeclaration,
     ) -> Result<(), CompileError> {
+        self.register_import_declaration(import)
+    }
+
+    fn predeclare_imports(&mut self, statements: &[StatementNode]) -> Result<(), CompileError> {
+        for statement in statements {
+            if let StatementNode::ImportDeclaration(import) = statement {
+                self.register_import_declaration(import)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn register_import_declaration(
+        &mut self,
+        import: &super::ast::JSImportDeclaration,
+    ) -> Result<(), CompileError> {
         let Some(module_context) = self.module_context.clone() else {
             return Err(CompileError::Unimplemented("import (phase 2)"));
         };
@@ -2731,23 +2789,34 @@ impl<'a> FunctionCompiler<'a> {
             .cloned()
             .ok_or_else(|| CompileError::message(format!("missing module context for import '{specifier}'")))?;
         if let Some(default) = import.default() {
-            self.emit_module_import_name(&dep_key, "default")?;
             let name = self.identifier_name(&default);
-            let slot = self.declare_block_scoped(&name)?;
-            self.emit(Opcode::SetLocal(slot));
+            self.import_bindings.insert(
+                name,
+                ImportBinding::Named {
+                    dep_key: dep_key.clone(),
+                    export_name: "default".to_string(),
+                },
+            );
         }
         match import.kind() {
             boa_ast::declaration::ImportKind::DefaultOrUnnamed => {}
             boa_ast::declaration::ImportKind::Namespaced { binding } => {
-                self.emit_module_namespace(&dep_key)?;
-                let slot = self.declare_block_scoped(&self.identifier_name(binding))?;
-                self.emit(Opcode::SetLocal(slot));
+                self.import_bindings.insert(
+                    self.identifier_name(binding),
+                    ImportBinding::Namespace {
+                        dep_key: dep_key.clone(),
+                    },
+                );
             }
             boa_ast::declaration::ImportKind::Named { names } => {
                 for spec in names.iter().copied() {
-                    self.emit_module_import_name(&dep_key, &self.program.resolve_sym(spec.export_name()))?;
-                    let slot = self.declare_block_scoped(&self.identifier_name(&spec.binding()))?;
-                    self.emit(Opcode::SetLocal(slot));
+                    self.import_bindings.insert(
+                        self.identifier_name(&spec.binding()),
+                        ImportBinding::Named {
+                            dep_key: dep_key.clone(),
+                            export_name: self.program.resolve_sym(spec.export_name()),
+                        },
+                    );
                 }
             }
         }
@@ -3214,6 +3283,7 @@ impl<'a> FunctionCompiler<'a> {
             outer,
             options,
             None,
+            self.import_bindings.clone(),
         );
         child.is_async = is_async;
         child.is_generator = is_generator;
@@ -3243,7 +3313,9 @@ impl<'a> FunctionCompiler<'a> {
                 match self.resolve_binding("this") {
                     ResolvedBinding::Local(slot) => self.emit(Opcode::GetLocal(slot)),
                     ResolvedBinding::Upvalue(slot) => self.emit(Opcode::GetUpvalue(slot)),
-                    ResolvedBinding::Global => self.emit(Opcode::LoadThis),
+                    ResolvedBinding::ModuleImport | ResolvedBinding::Global => {
+                        self.emit(Opcode::LoadThis)
+                    }
                 };
                 Ok(())
             }

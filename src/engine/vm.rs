@@ -14528,6 +14528,78 @@ mod tests {
     }
 
     #[test]
+    fn module_imports_are_live_bindings_not_snapshots() {
+        let dep_key = "\u{0}module:dep".to_string();
+        let self_key = "\u{0}module:self".to_string();
+        let program = Parser::new(
+            r#"
+            import { get } from "./dep";
+            globalThis.__call = () => get();
+            "#,
+        )
+        .with_source_type(SourceType::Module)
+        .parse()
+        .expect("module should parse");
+        let chunk = Compiler::new(&program)
+            .with_module_context(ModuleContext {
+                self_key: self_key.clone(),
+                imports: std::iter::once(("./dep".to_string(), dep_key.clone())).collect(),
+            })
+            .compile()
+            .expect("module should compile");
+        let mut vm = Vm::new(Heap::new());
+        vm.set_global_object(self_key.clone());
+        let dep_ns = vm.allocate_ordinary_object(None);
+        vm.globals.insert(dep_key.clone(), Value::Object(dep_ns));
+        vm.execute_module(&chunk).expect("module should execute");
+
+        let program = Parser::new(
+            r#"
+            globalThis["\u{0}module:dep"].get = () => 42;
+            globalThis.__result = globalThis.__call();
+            "#,
+        )
+        .parse()
+        .expect("script should parse");
+        let chunk = Compiler::new(&program)
+            .compile()
+            .expect("script should compile");
+        vm.execute(&chunk).expect("script should execute");
+        assert_eq!(vm.globals.get("__result").cloned(), Some(Value::Number(42.0)));
+    }
+
+    #[test]
+    fn module_import_is_shadowed_by_local_binding() {
+        let dep_key = "\u{0}module:dep".to_string();
+        let self_key = "\u{0}module:self".to_string();
+        let program = Parser::new(
+            r#"
+            import { get } from "./dep";
+            {
+                let get = () => 7;
+                globalThis.__shadow = get();
+            }
+            "#,
+        )
+        .with_source_type(SourceType::Module)
+        .parse()
+        .expect("module should parse");
+        let chunk = Compiler::new(&program)
+            .with_module_context(ModuleContext {
+                self_key: self_key.clone(),
+                imports: std::iter::once(("./dep".to_string(), dep_key.clone())).collect(),
+            })
+            .compile()
+            .expect("module should compile");
+        let mut vm = Vm::new(Heap::new());
+        vm.set_global_object(self_key);
+        let dep_ns = vm.allocate_ordinary_object(None);
+        vm.globals.insert(dep_key, Value::Object(dep_ns));
+        vm.execute_module(&chunk).expect("module should execute");
+        assert_eq!(vm.globals.get("__shadow").cloned(), Some(Value::Number(7.0)));
+    }
+
+    #[test]
     fn module_reexport_all_copies_enumerable_exports_except_default() {
         let dep_key = "\u{0}module:dep".to_string();
         let self_key = "\u{0}module:self".to_string();
