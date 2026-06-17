@@ -2619,21 +2619,27 @@ impl<'a> FunctionCompiler<'a> {
                 boa_ast::declaration::Declaration::FunctionDeclaration(function) => {
                     let name = self.identifier_name(&function.name());
                     self.compile_function_declaration_statement(&FunctionDeclaration::Function(function))?;
-                    self.emit_module_export_name("default", &name)
+                    self.emit_module_export_name(&name, &name)
                 }
-                boa_ast::declaration::Declaration::GeneratorDeclaration(function) => self
-                    .compile_function_declaration_statement(&FunctionDeclaration::Generator(function))
-                    .and_then(|_| self.emit_module_export_name("default", "default")),
-                boa_ast::declaration::Declaration::AsyncFunctionDeclaration(function) => self
-                    .compile_function_declaration_statement(&FunctionDeclaration::AsyncFunction(function))
-                    .and_then(|_| self.emit_module_export_name("default", "default")),
-                boa_ast::declaration::Declaration::AsyncGeneratorDeclaration(function) => self
-                    .compile_function_declaration_statement(&FunctionDeclaration::AsyncGenerator(function))
-                    .and_then(|_| self.emit_module_export_name("default", "default")),
+                boa_ast::declaration::Declaration::GeneratorDeclaration(function) => {
+                    let name = self.identifier_name(&function.name());
+                    self.compile_function_declaration_statement(&FunctionDeclaration::Generator(function))?;
+                    self.emit_module_export_name(&name, &name)
+                }
+                boa_ast::declaration::Declaration::AsyncFunctionDeclaration(function) => {
+                    let name = self.identifier_name(&function.name());
+                    self.compile_function_declaration_statement(&FunctionDeclaration::AsyncFunction(function))?;
+                    self.emit_module_export_name(&name, &name)
+                }
+                boa_ast::declaration::Declaration::AsyncGeneratorDeclaration(function) => {
+                    let name = self.identifier_name(&function.name());
+                    self.compile_function_declaration_statement(&FunctionDeclaration::AsyncGenerator(function))?;
+                    self.emit_module_export_name(&name, &name)
+                }
                 boa_ast::declaration::Declaration::ClassDeclaration(class_decl) => {
                     let name = self.identifier_name(&class_decl.name());
                     self.compile_class_declaration_statement(class_decl.as_ref())?;
-                    self.emit_module_export_name("default", &name)
+                    self.emit_module_export_name(&name, &name)
                 }
                 boa_ast::declaration::Declaration::Lexical(lexical) => {
                     let declaration = match lexical {

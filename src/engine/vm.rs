@@ -14321,7 +14321,7 @@ impl From<String> for PropertyKey {
 mod tests {
     use super::Vm;
     use crate::engine::ast::SourceType;
-    use crate::engine::{Compiler, Heap, Parser, PropertyKey, Value};
+    use crate::engine::{Compiler, Heap, JsPropertyDescriptor, Parser, PropertyKey, Value};
     use crate::engine::compiler::ModuleContext;
 
     fn run_script(source: &str) {
@@ -14499,6 +14499,64 @@ mod tests {
         vm.execute_module(&chunk).expect("module should execute");
         assert_eq!(vm.globals.get("__r").cloned(), Some(Value::Number(10.0)));
         assert_eq!(vm.globals.get("__r2").cloned(), Some(Value::Number(7.0)));
+    }
+
+    #[test]
+    fn module_named_function_and_class_exports_use_their_own_names() {
+        let self_key = "\u{0}module:self".to_string();
+        let program = Parser::new(
+            r#"
+            export function f(){ return 7; }
+            export class C {}
+            "#,
+        )
+        .with_source_type(SourceType::Module)
+        .parse()
+        .expect("module should parse");
+        let chunk = Compiler::new(&program)
+            .with_module_context(ModuleContext {
+                self_key: self_key.clone(),
+                imports: Default::default(),
+            })
+            .compile()
+            .expect("module should compile");
+        let mut vm = Vm::new(Heap::new());
+        vm.set_global_object(self_key.clone());
+        vm.execute_module(&chunk).expect("module should execute");
+
+        let self_ns = match vm.globals.get(&self_key) {
+            Some(Value::Object(object)) => *object,
+            _ => panic!("self namespace should exist"),
+        };
+        let f = vm
+            .get_own_property_descriptor(self_ns, &PropertyKey::from("f"))
+            .expect("f should be exported");
+        let c = vm
+            .get_own_property_descriptor(self_ns, &PropertyKey::from("C"))
+            .expect("C should be exported");
+        assert!(matches!(f, JsPropertyDescriptor::Data { value: Value::Object(_), .. }));
+        assert!(matches!(c, JsPropertyDescriptor::Data { value: Value::Object(_), .. }));
+        assert!(
+            vm.get_own_property_descriptor(self_ns, &PropertyKey::from("default"))
+                .is_none()
+        );
+        assert!(matches!(
+            vm.get_property_value(&Value::Object(self_ns), &PropertyKey::from("f"))
+                .expect("f should read"),
+            Value::Object(_)
+        ));
+        let script = Parser::new(
+            r#"
+            globalThis.__call = globalThis["\u{0}module:self"].f();
+            "#,
+        )
+        .parse()
+        .expect("script should parse");
+        let chunk = Compiler::new(&script)
+            .compile()
+            .expect("script should compile");
+        vm.execute(&chunk).expect("script should execute");
+        assert_eq!(vm.globals.get("__call").cloned(), Some(Value::Number(7.0)));
     }
 
     #[test]
