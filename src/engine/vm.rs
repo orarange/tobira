@@ -109,6 +109,8 @@ enum BuiltinId {
     ArrayConstructor,
     ArrayIsArray,
     ArrayFrom,
+    GlobalEscape,
+    GlobalUnescape,
     ArrayProtoPush,
     ArrayProtoPop,
     ArrayProtoShift,
@@ -189,6 +191,12 @@ enum BuiltinId {
     MathRandom,
     CryptoGetRandomValues,
     CryptoRandomUUID,
+    TextEncoderConstructor,
+    TextEncoderEncode,
+    TextDecoderConstructor,
+    TextDecoderDecode,
+    WeakRefConstructor,
+    WeakRefDeref,
     JsonStringify,
     JsonParse,
     ConsoleLog,
@@ -1343,6 +1351,9 @@ pub struct Vm {
     generator_prototype: Option<GcRef<JsObject>>,
     async_generator_prototype: Option<GcRef<JsObject>>,
     url_search_params_prototype: Option<GcRef<JsObject>>,
+    weak_ref_prototype: Option<GcRef<JsObject>>,
+    text_encoder_prototype: Option<GcRef<JsObject>>,
+    text_decoder_prototype: Option<GcRef<JsObject>>,
     url_prototype: Option<GcRef<JsObject>>,
     error_prototype: Option<GcRef<JsObject>>,
     promise_prototype: Option<GcRef<JsObject>>,
@@ -1489,6 +1500,9 @@ impl Vm {
             generator_prototype: None,
             async_generator_prototype: None,
             url_search_params_prototype: None,
+            weak_ref_prototype: None,
+            text_encoder_prototype: None,
+            text_decoder_prototype: None,
             url_prototype: None,
             error_prototype: None,
             promise_prototype: None,
@@ -2740,6 +2754,9 @@ impl Vm {
         let generator_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let async_generator_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let url_search_params_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let weak_ref_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let text_encoder_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let text_decoder_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let url_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let error_prototype = self.heap.allocate_object(JsObject {
             kind: ObjectKind::Error,
@@ -2763,6 +2780,9 @@ impl Vm {
         self.generator_prototype = Some(generator_prototype);
         self.async_generator_prototype = Some(async_generator_prototype);
         self.url_search_params_prototype = Some(url_search_params_prototype);
+        self.weak_ref_prototype = Some(weak_ref_prototype);
+        self.text_encoder_prototype = Some(text_encoder_prototype);
+        self.text_decoder_prototype = Some(text_decoder_prototype);
         self.url_prototype = Some(url_prototype);
         self.error_prototype = Some(error_prototype);
         self.promise_prototype = Some(promise_prototype);
@@ -2953,6 +2973,30 @@ impl Vm {
             "reverse",
             BuiltinId::TypedArrayProtoReverse,
         );
+
+        self.define_builtin_method(weak_ref_prototype, "deref", BuiltinId::WeakRefDeref);
+        let weak_ref_ctor =
+            self.allocate_builtin_value(BuiltinId::WeakRefConstructor, true, Some(weak_ref_prototype));
+        self.globals.insert("WeakRef".to_string(), weak_ref_ctor);
+
+        self.define_builtin_method(text_encoder_prototype, "encode", BuiltinId::TextEncoderEncode);
+        let text_encoder_ctor = self.allocate_builtin_value(
+            BuiltinId::TextEncoderConstructor,
+            true,
+            Some(text_encoder_prototype),
+        );
+        self.globals
+            .insert("TextEncoder".to_string(), text_encoder_ctor);
+
+        self.define_builtin_method(text_decoder_prototype, "decode", BuiltinId::TextDecoderDecode);
+        let text_decoder_ctor = self.allocate_builtin_value(
+            BuiltinId::TextDecoderConstructor,
+            true,
+            Some(text_decoder_prototype),
+        );
+        self.globals
+            .insert("TextDecoder".to_string(), text_decoder_ctor);
+
         for kind in [
             TypedArrayKind::Int8,
             TypedArrayKind::Uint8,
@@ -3710,6 +3754,8 @@ impl Vm {
             ("parseFloat", BuiltinId::GlobalParseFloat),
             ("isNaN", BuiltinId::GlobalIsNaN),
             ("isFinite", BuiltinId::GlobalIsFinite),
+            ("escape", BuiltinId::GlobalEscape),
+            ("unescape", BuiltinId::GlobalUnescape),
             ("encodeURIComponent", BuiltinId::EncodeUriComponent),
             ("decodeURIComponent", BuiltinId::DecodeUriComponent),
             ("encodeURI", BuiltinId::EncodeUri),
@@ -4430,6 +4476,21 @@ impl Vm {
     fn typed_array_prototype_ref(&self) -> GcRef<JsObject> {
         self.typed_array_prototype
             .expect("TypedArray prototype should be installed")
+    }
+
+    fn weak_ref_prototype_ref(&self) -> GcRef<JsObject> {
+        self.weak_ref_prototype
+            .expect("WeakRef prototype should be installed")
+    }
+
+    fn text_encoder_prototype_ref(&self) -> GcRef<JsObject> {
+        self.text_encoder_prototype
+            .expect("TextEncoder prototype should be installed")
+    }
+
+    fn text_decoder_prototype_ref(&self) -> GcRef<JsObject> {
+        self.text_decoder_prototype
+            .expect("TextDecoder prototype should be installed")
     }
 
     fn allocate_ordinary_object(&mut self, prototype: Option<GcRef<JsObject>>) -> GcRef<JsObject> {
@@ -5881,6 +5942,9 @@ impl Vm {
                 | BuiltinId::DateConstructor
                 | BuiltinId::ProxyConstructor
                 | BuiltinId::UrlSearchParamsConstructor
+                | BuiltinId::WeakRefConstructor
+                | BuiltinId::TextEncoderConstructor
+                | BuiltinId::TextDecoderConstructor
                 | BuiltinId::UrlConstructor
                 | BuiltinId::ArrayBufferConstructor
                 | BuiltinId::TypedArrayConstructor(_)
@@ -7433,6 +7497,16 @@ impl Vm {
         Ok(Value::Object(object))
     }
 
+    fn make_uint8_array(&mut self, bytes: Vec<u8>) -> Result<Value, VmError> {
+        let length = bytes.len();
+        let buffer = self.heap.allocate_object(JsObject {
+            kind: ObjectKind::ArrayBuffer(bytes),
+            prototype: Some(self.array_buffer_prototype_ref()),
+            ..JsObject::default()
+        });
+        self.make_typed_array(TypedArrayKind::Uint8, Value::Object(buffer), 0, length)
+    }
+
     fn is_array_buffer(&self, object: GcRef<JsObject>) -> bool {
         matches!(
             self.heap.objects().get(object).map(|o| &o.kind),
@@ -7626,6 +7700,53 @@ impl Vm {
                 self.make_typed_array(kind, buffer, 0, 0)
             }
         }
+    }
+
+    fn escape_legacy(&self, input: String) -> String {
+        let mut out = String::new();
+        for ch in input.chars() {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '@' | '*' | '_' | '+' | '-' | '.' | '/') {
+                out.push(ch);
+            } else {
+                let code = ch as u32;
+                if code < 256 {
+                    out.push_str(&format!("%{code:02X}"));
+                } else {
+                    out.push_str(&format!("%u{code:04X}"));
+                }
+            }
+        }
+        out
+    }
+
+    fn unescape_legacy(&self, input: String) -> String {
+        let chars: Vec<char> = input.chars().collect();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '%' && i + 1 < chars.len() {
+                if chars[i + 1] == 'u' && i + 5 < chars.len() {
+                    let hex: String = chars[i + 2..i + 6].iter().collect();
+                    if let Ok(code) = u32::from_str_radix(&hex, 16)
+                        && let Some(ch) = char::from_u32(code)
+                    {
+                        out.push(ch);
+                        i += 6;
+                        continue;
+                    }
+                } else if i + 2 < chars.len() {
+                    let hex: String = chars[i + 1..i + 3].iter().collect();
+                    if let Ok(code) = u8::from_str_radix(&hex, 16) {
+                        out.push(code as char);
+                        i += 3;
+                        continue;
+                    }
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
     }
 
     fn typed_array_from(
@@ -12015,6 +12136,14 @@ impl Vm {
                 Ok(Value::Number(0.0))
             }
             BuiltinId::CancelIdleCallback => Ok(Value::Undefined),
+            BuiltinId::GlobalEscape => {
+                let s = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                Ok(self.make_string_value(&self.escape_legacy(s)))
+            }
+            BuiltinId::GlobalUnescape => {
+                let s = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                Ok(self.make_string_value(&self.unescape_legacy(s)))
+            }
             // btoa / atob
             BuiltinId::Btoa => {
                 let s = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -12024,6 +12153,86 @@ impl Vm {
                 let s = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let decoded = base64_decode(&s).unwrap_or_default();
                 Ok(self.make_string_value(&String::from_utf8_lossy(&decoded)))
+            }
+            BuiltinId::WeakRefConstructor => {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                let target_obj = self.require_object_ref(&target, "WeakRef: target must be an object")?;
+                let weak_ref = self.allocate_ordinary_object(Some(self.weak_ref_prototype_ref()));
+                self.define_data_property(
+                    weak_ref,
+                    PropertyKey::from("\u{0}weakref:target"),
+                    Value::Object(target_obj),
+                    false,
+                    false,
+                    false,
+                );
+                Ok(Value::Object(weak_ref))
+            }
+            BuiltinId::WeakRefDeref => {
+                let target = self
+                    .get_property_value(&this_value, &PropertyKey::from("\u{0}weakref:target"))
+                    .unwrap_or(Value::Undefined);
+                Ok(target)
+            }
+            BuiltinId::TextEncoderConstructor => {
+                let encoder = self.allocate_ordinary_object(Some(self.text_encoder_prototype_ref()));
+                let encoding = self.make_string_value("utf-8");
+                self.define_data_property(
+                    encoder,
+                    PropertyKey::from("encoding"),
+                    encoding,
+                    true,
+                    true,
+                    true,
+                );
+                Ok(Value::Object(encoder))
+            }
+            BuiltinId::TextEncoderEncode => {
+                let s = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                self.make_uint8_array(s.into_bytes())
+            }
+            BuiltinId::TextDecoderConstructor => {
+                let label = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let encoding = if label.is_empty() || label.eq_ignore_ascii_case("utf-8") || label.eq_ignore_ascii_case("utf8") {
+                    "utf-8"
+                } else {
+                    "utf-8"
+                };
+                let decoder = self.allocate_ordinary_object(Some(self.text_decoder_prototype_ref()));
+                let encoding_value = self.make_string_value(encoding);
+                self.define_data_property(
+                    decoder,
+                    PropertyKey::from("encoding"),
+                    encoding_value,
+                    true,
+                    true,
+                    true,
+                );
+                Ok(Value::Object(decoder))
+            }
+            BuiltinId::TextDecoderDecode => {
+                let input = args.first().cloned().unwrap_or(Value::Undefined);
+                if matches!(input, Value::Undefined) {
+                    return Ok(self.make_string_value(""));
+                }
+                let bytes = if let Some((buffer, kind, byte_offset, length)) = self.typed_array_info(&input) {
+                    let byte_len = kind.bytes_per_element() * length;
+                    match self.heap.objects().get(buffer).map(|o| &o.kind) {
+                        Some(ObjectKind::ArrayBuffer(buf)) => buf
+                            .get(byte_offset..byte_offset + byte_len)
+                            .map(<[u8]>::to_vec)
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    }
+                } else if let Value::Object(object) = &input {
+                    match self.heap.objects().get(*object).map(|o| &o.kind) {
+                        Some(ObjectKind::ArrayBuffer(buf)) => buf.clone(),
+                        _ => Vec::new(),
+                    }
+                } else {
+                    Vec::new()
+                };
+                Ok(self.make_string_value(&String::from_utf8_lossy(&bytes)))
             }
             // Storage item ops (this = Storage host object with kind encoded in handle)
             BuiltinId::StorageGetItem => {
