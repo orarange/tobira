@@ -175,6 +175,8 @@ enum BuiltinId {
     MathLog10,
     MathExp,
     MathRandom,
+    CryptoGetRandomValues,
+    CryptoRandomUUID,
     JsonStringify,
     JsonParse,
     ConsoleLog,
@@ -2169,9 +2171,18 @@ impl Vm {
                 self.globals.insert(name, value);
             }
             Opcode::GetGlobalOptional(index) => {
-                let value = {
-                    let name = self.constant_name(index)?;
-                    self.globals.get(name).cloned().unwrap_or(Value::Undefined)
+                // Used by `typeof name`. Mirror `GetGlobal`'s window-global
+                // fallback so `typeof crypto` / `typeof navigator` report the
+                // real type instead of "undefined" (the global object IS the
+                // window). A name that is neither a real global nor a window
+                // global stays `undefined` — `typeof undeclared` must not throw.
+                let name = self.constant_name(index)?.to_string();
+                let value = if let Some(existing) = self.globals.get(&name).cloned() {
+                    existing
+                } else if Self::is_window_global(&name) {
+                    self.get_window_property(name)?
+                } else {
+                    Value::Undefined
                 };
                 self.stack.push(value);
             }
@@ -5760,6 +5771,8 @@ impl Vm {
                 | BuiltinId::XhrConstructor
                 | BuiltinId::IntersectionObserverConstructor
                 | BuiltinId::ResizeObserverConstructor
+                | BuiltinId::CryptoGetRandomValues
+                | BuiltinId::CryptoRandomUUID
         )
     }
 
@@ -10808,6 +10821,38 @@ impl Vm {
             BuiltinId::MathLog10 => Ok(Value::Number(self.number_arg(&args, 0).log10())),
             BuiltinId::MathExp => Ok(Value::Number(self.number_arg(&args, 0).exp())),
             BuiltinId::MathRandom => Ok(Value::Number(self.next_random())),
+            BuiltinId::CryptoGetRandomValues => {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
+                let Some((_, _kind, _, length)) = self.typed_array_info(&target) else {
+                    return Err(VmError::TypeError(
+                        "crypto.getRandomValues: argument must be an integer-typed TypedArray"
+                            .to_string(),
+                    ));
+                };
+                for index in 0..length {
+                    let r = (self.next_random() * 4294967296.0).floor();
+                    self.typed_array_write_element(&target, index, r)?;
+                }
+                Ok(target)
+            }
+            BuiltinId::CryptoRandomUUID => {
+                let mut bytes = [0u8; 16];
+                for b in bytes.iter_mut() {
+                    *b = (self.next_random() * 256.0).floor() as u8;
+                }
+                bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                let uuid = format!(
+                    "{}-{}-{}-{}-{}",
+                    &hex[0..8],
+                    &hex[8..12],
+                    &hex[12..16],
+                    &hex[16..20],
+                    &hex[20..32]
+                );
+                Ok(self.make_string_value(&uuid))
+            }
             BuiltinId::JsonStringify => {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
                 let replacer = args
@@ -13814,7 +13859,9 @@ impl Vm {
                 Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener)) // no-op stub
             }
             "crypto" => {
-                let crypto = self.allocate_ordinary_object(None);
+                let crypto = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+                self.define_builtin_method(crypto, "getRandomValues", BuiltinId::CryptoGetRandomValues);
+                self.define_builtin_method(crypto, "randomUUID", BuiltinId::CryptoRandomUUID);
                 Ok(Value::Object(crypto))
             }
             "isSecureContext" => Ok(Value::Bool(false)),
