@@ -19,17 +19,18 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-05-25`
+- Date: `2026-06-19`
 - Repo / package name: `tobira`
 - Working branch: `master`
 - Workflow:
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `200` passing tests on `2026-05-25`
-- `cargo build`: success on `2026-05-25`
+- `cargo test`: `571` passing tests on `2026-06-19`
+- `cargo build`: success on `2026-06-19` (release; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks)
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
+  - Scope caveat: "閲覧・操作" means rendering the page's DOM/CSS and running its JS — **not** video playback. The `softbuffer` CPU renderer has no GPU compositing or media decode, so smooth YouTube *video* is out of scope for the current rendering backend (a separate, much larger effort: codecs + GPU).
   - priority order: WebComponents / shadow DOM details -> DOM mutation to reflow / hit-test sync -> fetch/XHR / history / storage browser-grade behavior -> real-site stability checks
 - Current implementation highlights:
   - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
@@ -71,7 +72,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - `document.createDocumentFragment(...)` with fragment flattening on insertion
   - page event listeners now support capture + bubbling, plus `once` listeners and capture-sensitive `removeEventListener(...)`
   - shadow DOM / WebComponents now have `customElements`, `attachShadow(...)`, `slot.assignedNodes(...)` / `slot.assignedElements(...)` with `flatten`, `assignedSlot`, `slotchange`, and shadow-boundary event retargeting with `Event.composedPath()`
-  - guarded JavaScript execution through `boa_engine`
+  - guarded JavaScript execution through a from-scratch bytecode engine (`src/engine/`): self-built compiler + VM + tracing GC heap. Only `boa_ast`/`boa_parser`/`boa_interner` remain, as the parser front-end; the boa runtime (`boa_engine`/`boa_gc`) was removed (2026-06-12). JS values and DOM nodes live in one unified GC heap, so there is no JS-GC ↔ DOM lifetime-sync problem.
   - lightweight mutable DOM bridge with:
     - `querySelector(...)`, `querySelectorAll(...)`, `getElementById(...)`
     - `createElement(...)`, `createTextNode(...)`
@@ -137,6 +138,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Recent Commit Landmarks
 
+- `04bfc2f` engine: switch JS regex backend from `regex` crate to `regress` (look-ahead/-behind/backrefs; fixes react.dev's gtag regex)
+- `bac4893` engine: Annex B `{__proto__: value}` object-literal proto setting (fixes rust-lang.org highlight.js crash)
+- `896bf94` engine: `Object.*` introspection coerces primitives (ToObject, ES2015+)
+- `e4d1737` engine: ES module imports are live bindings (fixes circular deps) — part of the ES-module series `ce9ffbf`/`5059803`/`eee72e5`/`27923e9` (vuejs.org renders end-to-end)
+- (Major arc since Phase 5 CSS: the JS backend was rewritten from the boa runtime to a from-scratch bytecode engine — `src/engine/` — with ES2015+ coverage. The campaign drives real pages by following each uncaught error and filling the missing API; CLEAN: example.com / Hacker News / Wikipedia / web.dev / vuejs.org / rust-lang.org.)
 - `1616499` mutation notifications and history scroll restoration implementation complete (Codex JS/Event capture)
 - `e2558bf` docs: update HANDOFF + CSS_ROADMAP for Phase 5 completion (Claude Phase 5 CSS)
 - `0e81ade` feat: Phase 5 Batch 6 — filter, ::placeholder/::selection, @supports/@layer, no-op props — PR #49
@@ -198,6 +204,13 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-06-19 - Claude PM / Codex (real-page campaign: rust-lang, react.dev + doc refresh)
+
+- Fixed rust-lang.org crash: object literal `{__proto__: value}` now sets `[[Prototype]]` (Annex B.3.1) instead of creating an own `__proto__` property. Root cause was highlight.js's `Object.freeze({__proto__:null,...})` + `for...in` enumerating the bogus own property (`typeof null === "object"`) → `Object.getOwnPropertyNames(null)` threw. New opcode `SetObjectLiteralProto`; primitives ignored (no throw). Regression tests in `tests/proto_literal.rs`. (`bac4893`, `af64f1b`)
+- Fixed react.dev regex abort: swapped the JS regex backend from the Rust `regex` crate to `regress` (JS-compatible: look-ahead/-behind/backreferences). New `src/engine/js_regex.rs` adapter keeps vm.rs call sites mostly unchanged; `translate_regex_named_groups` dropped (regress supports `(?<name>)` natively); `regex` dependency removed. Regression tests added to `tests/regexp_coverage.rs`. react.dev's next wall is webpack-internal `modules[id].call` (deeper; content already renders). (`04bfc2f`)
+- Refreshed stale docs: README/HANDOFF said `boa_engine` (removed 2026-06-12) and `200` tests (now `571`); clarified the north-star scope (render YouTube's page DOM/CSS ≠ play its video on the CPU `softbuffer` renderer). These stale lines had invited an off-base external critique.
+- Verified: `cargo test` `571` passing; release build green.
 
 ### 2026-05-25 - Codex (shadow DOM / composed path)
 

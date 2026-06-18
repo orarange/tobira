@@ -46,7 +46,9 @@ Current capabilities:
 - System font rendering with TrueType / OpenType fonts via `fontdue`
 - Background page loading and content rendering workers keep the title bar and address bar responsive while navigation is in flight
 - Plain text CLI renderer with `--cli`
-- JavaScript execution via `boa_engine` & sandboxed DOM/API support:
+- JavaScript execution via a from-scratch bytecode engine (`src/engine/`) & sandboxed DOM/API support:
+  - the engine is self-built (compiler + bytecode VM + tracing GC heap); only `boa_ast`/`boa_parser`/`boa_interner` are reused as the parser front-end — the boa runtime (`boa_engine`/`boa_gc`) is **not** used
+  - JS values and DOM nodes share one unified GC heap, so there is no cross-language lifetime-sync problem between a JS GC and the DOM tree
   - inline `<script>` and external `<script src>`
   - block-list filter (allows most utility scripts; blocks known-dangerous APIs)
   - `document.write()` / `document.writeln()` with recursive expansion
@@ -207,7 +209,8 @@ cargo run -- http://127.0.0.1:8765/demo/storage-demo.html
 - `src/font.rs` — System font loading, glyph rasterization, and text measurement helpers
 - `src/browser.rs` — Page loading pipeline, stylesheet collection, site-specific rewrites, YouTube/Google synthetic documents
 - `src/gui.rs` — `winit` event loop, address bar, input handling, software rendering
-- `src/js.rs` — Sandboxed JS execution, block-list filter, mutable DOM bridge, browser-ish stubs
+- `src/engine/` — From-scratch JavaScript engine: lexer, parser front-end (boa AST), bytecode compiler, VM, tracing GC heap, regex (regress-backed), event loop
+- `src/js.rs` — Host bridge between the engine and the browser: sandboxed DOM/API surface, block-list filter, browser-ish stubs
 - `src/render.rs` — Plain text fallback renderer for CLI mode
 - `src/main.rs` — Application entry point
 
@@ -223,7 +226,12 @@ Short version:
 
 ## JavaScript Scope
 
-Current JS support is intentionally small:
+> Note: this list is historical. The engine has since grown a full from-scratch VM with
+> ES2015+ language coverage (classes, generators, async/await, ES modules with live bindings,
+> Proxy/Reflect, typed arrays, regex via `regress`, etc.). The items below are the original
+> minimal DOM/browser surface, not the current language support.
+
+Original minimal browser surface:
 
 - inline `<script>`
 - external `<script src>`
