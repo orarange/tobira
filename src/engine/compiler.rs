@@ -3507,9 +3507,19 @@ impl<'a> FunctionCompiler<'a> {
                     self.emit(Opcode::SetProp);
                 }
                 ObjectPropertyDefinition::Property(name, value) => {
-                    self.compile_property_name_value(name)?;
-                    self.compile_expression(value)?;
-                    self.emit(Opcode::SetProp);
+                    match name {
+                        PropertyNameNode::Literal(identifier)
+                            if self.identifier_name(identifier) == "__proto__" =>
+                        {
+                            self.compile_expression(value)?;
+                            self.emit(Opcode::SetObjectLiteralProto);
+                        }
+                        _ => {
+                            self.compile_property_name_value(name)?;
+                            self.compile_expression(value)?;
+                            self.emit(Opcode::SetProp);
+                        }
+                    }
                 }
                 ObjectPropertyDefinition::MethodDefinition(method) => {
                     match method.kind() {

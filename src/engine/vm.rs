@@ -2267,6 +2267,21 @@ impl Vm {
                 }
                 self.stack.push(Value::Object(object));
             }
+            Opcode::SetObjectLiteralProto => {
+                let value = self.pop_value()?;
+                let object = match self.pop_value()? {
+                    Value::Object(object) => object,
+                    _ => return Ok(()),
+                };
+                let prototype = match value {
+                    Value::Object(object) => Some(object),
+                    Value::Null => None,
+                    _ => return Ok(()),
+                };
+                if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
+                    object_data.prototype = prototype;
+                }
+            }
             Opcode::EnterTry(_) | Opcode::LeaveTry => {}
             Opcode::EndFinally => {
                 if let Some(frame) = self.frames.last_mut()

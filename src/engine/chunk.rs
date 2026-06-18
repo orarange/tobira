@@ -101,6 +101,7 @@ pub enum Opcode {
     ForOfNext,
     GetProto,
     SetProtoOf,
+    SetObjectLiteralProto,
     GetSuperCtor,
 
     EnterTry(u16),
