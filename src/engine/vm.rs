@@ -209,6 +209,8 @@ enum BuiltinId {
     DomNodeGetAttribute,
     DomNodeRemoveAttribute,
     DomNodeHasAttribute,
+    ElementStubGetAttribute,
+    ElementStubHasAttribute,
     DomNodeToggleAttribute,
     DomNodeGetAttributeNames,
     DomNodeQuerySelector,
@@ -11276,6 +11278,28 @@ impl Vm {
                 let res = self.host.read_dom(DomRead::Attribute { node: node_id, name });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Null })
             }
+            BuiltinId::ElementStubGetAttribute => {
+                let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let key = PropertyKey::from(name);
+                let value = match this_value {
+                    Value::Object(object) => self.get_own_property_descriptor(object, &key),
+                    _ => None,
+                };
+                Ok(match value {
+                    Some(JsPropertyDescriptor::Data { value, .. }) if matches!(value, Value::String(_)) => value,
+                    None => Value::Null,
+                    _ => Value::Null,
+                })
+            }
+            BuiltinId::ElementStubHasAttribute => {
+                let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let key = PropertyKey::from(name);
+                let value = match this_value {
+                    Value::Object(object) => self.get_own_property_descriptor(object, &key),
+                    _ => None,
+                };
+                Ok(Value::Bool(matches!(value, Some(JsPropertyDescriptor::Data { value: Value::String(_), .. }))))
+            }
             BuiltinId::DomNodeRemoveAttribute => {
                 let node_id = self.this_node_id(&this_value);
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -14018,6 +14042,8 @@ impl Vm {
                         true,
                         true,
                     );
+                    self.define_builtin_method(object, "getAttribute", BuiltinId::ElementStubGetAttribute);
+                    self.define_builtin_method(object, "hasAttribute", BuiltinId::ElementStubHasAttribute);
                     Ok(Value::Object(object))
                 } else {
                     Ok(Value::Null)
