@@ -17,8 +17,12 @@ fn fresh_vm_starts_small() {
     let vm = run_and_keep_vm("");
     let live = vm.heap().objects().len();
     eprintln!("fresh_vm live objects: {live}");
+    // Baseline is the builtin/prototype objects installed at startup (~400 and
+    // growing as standard methods are added). The bound has generous headroom —
+    // its job is to catch a fresh VM ballooning into the thousands, not to pin
+    // the exact builtin count. Bump it if new builtins legitimately push it up.
     assert!(
-        live < 400,
+        live < 600,
         "fresh VM should start small, got {live} live objects"
     );
 }

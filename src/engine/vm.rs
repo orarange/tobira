@@ -82,6 +82,7 @@ enum BuiltinId {
     ObjectDefineProperty,
     ObjectGetOwnPropertyDescriptor,
     ObjectKeys,
+    ObjectGetOwnPropertySymbols,
     ObjectValues,
     ObjectEntries,
     ObjectAssign,
@@ -153,6 +154,7 @@ enum BuiltinId {
     NumberIsNaN,
     NumberIsFinite,
     NumberIsInteger,
+    NumberIsSafeInteger,
     NumberParseInt,
     NumberParseFloat,
     MathFloor,
@@ -165,12 +167,20 @@ enum BuiltinId {
     MathPow,
     MathSqrt,
     MathCbrt,
+    MathExpm1,
+    MathFround,
     MathSin,
     MathCos,
     MathTan,
+    MathSinh,
+    MathCosh,
+    MathTanh,
     MathAsin,
     MathAcos,
     MathAtan,
+    MathAsinh,
+    MathAcosh,
+    MathAtanh,
     MathAtan2,
     MathLog,
     MathLog2,
@@ -424,6 +434,8 @@ enum BuiltinId {
     SymbolProtoToString,
     DateConstructor,
     DateNow,
+    DateUTC,
+    DateParse,
     DateProtoGetTime,
     DateProtoGetFullYear,
     DateProtoGetMonth,
@@ -433,6 +445,7 @@ enum BuiltinId {
     DateProtoGetMinutes,
     DateProtoGetSeconds,
     DateProtoGetMilliseconds,
+    DateProtoGetTimezoneOffset,
     DateProtoToISOString,
     DateProtoToString,
     DateProtoValueOf,
@@ -949,6 +962,12 @@ fn floor_div(a: i64, b: i64) -> i64 {
 
 fn floor_mod(a: i64, b: i64) -> i64 {
     ((a % b) + b) % b
+}
+
+fn normalize_utc_month(year: i64, month0: i64) -> (i64, i64) {
+    let year = year + floor_div(month0, 12);
+    let month0 = floor_mod(month0, 12);
+    (year, month0)
 }
 
 /// `application/x-www-form-urlencoded` decode: `+` → space, `%XX` → byte.
@@ -3338,6 +3357,7 @@ impl Vm {
             ("getMinutes", BuiltinId::DateProtoGetMinutes),
             ("getSeconds", BuiltinId::DateProtoGetSeconds),
             ("getMilliseconds", BuiltinId::DateProtoGetMilliseconds),
+            ("getTimezoneOffset", BuiltinId::DateProtoGetTimezoneOffset),
             ("toISOString", BuiltinId::DateProtoToISOString),
             ("toJSON", BuiltinId::DateProtoToISOString),
             ("toString", BuiltinId::DateProtoToString),
@@ -3434,6 +3454,11 @@ impl Vm {
                 BuiltinId::ObjectGetOwnPropertyDescriptor,
             );
             self.define_builtin_method(object_ref, "keys", BuiltinId::ObjectKeys);
+            self.define_builtin_method(
+                object_ref,
+                "getOwnPropertySymbols",
+                BuiltinId::ObjectGetOwnPropertySymbols,
+            );
             self.define_builtin_method(object_ref, "values", BuiltinId::ObjectValues);
             self.define_builtin_method(object_ref, "entries", BuiltinId::ObjectEntries);
             self.define_builtin_method(object_ref, "assign", BuiltinId::ObjectAssign);
@@ -3505,6 +3530,11 @@ impl Vm {
             self.define_builtin_method(number_ref, "isNaN", BuiltinId::NumberIsNaN);
             self.define_builtin_method(number_ref, "isFinite", BuiltinId::NumberIsFinite);
             self.define_builtin_method(number_ref, "isInteger", BuiltinId::NumberIsInteger);
+            self.define_builtin_method(
+                number_ref,
+                "isSafeInteger",
+                BuiltinId::NumberIsSafeInteger,
+            );
             self.define_builtin_method(number_ref, "parseInt", BuiltinId::NumberParseInt);
             self.define_builtin_method(number_ref, "parseFloat", BuiltinId::NumberParseFloat);
             self.define_data_property(
@@ -3617,6 +3647,8 @@ impl Vm {
 
         if let Some(date_ref) = self.value_object_ref(date_ctor) {
             self.define_builtin_method(date_ref, "now", BuiltinId::DateNow);
+            self.define_builtin_method(date_ref, "UTC", BuiltinId::DateUTC);
+            self.define_builtin_method(date_ref, "parse", BuiltinId::DateParse);
         }
 
         self.define_builtin_method(math_object, "floor", BuiltinId::MathFloor);
@@ -3629,12 +3661,20 @@ impl Vm {
         self.define_builtin_method(math_object, "pow", BuiltinId::MathPow);
         self.define_builtin_method(math_object, "sqrt", BuiltinId::MathSqrt);
         self.define_builtin_method(math_object, "cbrt", BuiltinId::MathCbrt);
+        self.define_builtin_method(math_object, "expm1", BuiltinId::MathExpm1);
+        self.define_builtin_method(math_object, "fround", BuiltinId::MathFround);
         self.define_builtin_method(math_object, "sin", BuiltinId::MathSin);
         self.define_builtin_method(math_object, "cos", BuiltinId::MathCos);
         self.define_builtin_method(math_object, "tan", BuiltinId::MathTan);
+        self.define_builtin_method(math_object, "sinh", BuiltinId::MathSinh);
+        self.define_builtin_method(math_object, "cosh", BuiltinId::MathCosh);
+        self.define_builtin_method(math_object, "tanh", BuiltinId::MathTanh);
         self.define_builtin_method(math_object, "asin", BuiltinId::MathAsin);
         self.define_builtin_method(math_object, "acos", BuiltinId::MathAcos);
         self.define_builtin_method(math_object, "atan", BuiltinId::MathAtan);
+        self.define_builtin_method(math_object, "asinh", BuiltinId::MathAsinh);
+        self.define_builtin_method(math_object, "acosh", BuiltinId::MathAcosh);
+        self.define_builtin_method(math_object, "atanh", BuiltinId::MathAtanh);
         self.define_builtin_method(math_object, "atan2", BuiltinId::MathAtan2);
         self.define_builtin_method(math_object, "log", BuiltinId::MathLog);
         self.define_builtin_method(math_object, "log2", BuiltinId::MathLog2);
@@ -3995,6 +4035,80 @@ impl Vm {
         let (year, month, day) = civil_from_days(days);
         let weekday = floor_mod(days + 4, 7); // 1970-01-01 was a Thursday
         Some((year, month - 1, day, hours, minutes, seconds, millis, weekday))
+    }
+
+    fn parse_date_utc_ms(&self, text: &str) -> f64 {
+        fn parse_i64(text: &str) -> Option<i64> {
+            text.parse::<i64>().ok()
+        }
+
+        let text = text.strip_suffix('Z').unwrap_or(text);
+        let (date_part, time_part) = match text.split_once('T') {
+            Some(parts) => parts,
+            None => (text, ""),
+        };
+        let mut date_parts = date_part.split('-');
+        let year = match parse_i64(date_parts.next().unwrap_or("")) {
+            Some(value) => value,
+            None => return f64::NAN,
+        };
+        let month = match parse_i64(date_parts.next().unwrap_or("")) {
+            Some(value) => value,
+            None => return f64::NAN,
+        };
+        let day = match parse_i64(date_parts.next().unwrap_or("")) {
+            Some(value) => value,
+            None => return f64::NAN,
+        };
+        if date_parts.next().is_some() {
+            return f64::NAN;
+        }
+        let (hours, minutes, seconds, millis) = if time_part.is_empty() {
+            (0, 0, 0, 0)
+        } else {
+            let mut time_parts = time_part.split(':');
+            let hours = match parse_i64(time_parts.next().unwrap_or("")) {
+                Some(value) => value,
+                None => return f64::NAN,
+            };
+            let minutes = match parse_i64(time_parts.next().unwrap_or("")) {
+                Some(value) => value,
+                None => return f64::NAN,
+            };
+            let seconds_and_ms = time_parts.next();
+            if time_parts.next().is_some() {
+                return f64::NAN;
+            }
+            match seconds_and_ms {
+                None => (hours, minutes, 0, 0),
+                Some(part) => {
+                    let (seconds, millis) = match part.split_once('.') {
+                        Some((seconds, millis)) => {
+                            let seconds = match parse_i64(seconds) {
+                                Some(value) => value,
+                                None => return f64::NAN,
+                            };
+                            let millis_text = millis.chars().take(3).collect::<String>();
+                            let parsed = parse_i64(&millis_text).unwrap_or(0);
+                            let millis = match millis_text.len() {
+                                1 => parsed * 100,
+                                2 => parsed * 10,
+                                _ => parsed,
+                            };
+                            (seconds, millis)
+                        }
+                        None => match parse_i64(part) {
+                            Some(value) => (value, 0),
+                            None => return f64::NAN,
+                        },
+                    };
+                    (hours, minutes, seconds, millis)
+                }
+            }
+        };
+        let days = days_from_civil(year, month, day);
+        (days * 86_400_000 + hours * 3_600_000 + minutes * 60_000 + seconds * 1000 + millis)
+            as f64
     }
 
     /// Return one decomposed Date field by index (0=year .. 7=weekday).
@@ -6795,6 +6909,22 @@ impl Vm {
         }
     }
 
+    fn object_introspection_get_own_property_symbols(&mut self, value: &Value) -> Result<Value, VmError> {
+        if let Value::Object(object) = value {
+            let mut symbols = Vec::new();
+            if let Some(object_data) = self.heap.objects().get(*object) {
+                for key in object_data.properties.keys() {
+                    if let PropertyKey::Symbol(symbol) = key {
+                        symbols.push(Value::Symbol(*symbol));
+                    }
+                }
+            }
+            self.make_array_from_values(symbols)
+        } else {
+            self.make_array_from_values(Vec::new())
+        }
+    }
+
     fn object_introspection_get_own_property_descriptor(
         &mut self,
         value: &Value,
@@ -8726,6 +8856,11 @@ impl Vm {
                     "Object.keys",
                 )
             }
+            BuiltinId::ObjectGetOwnPropertySymbols => {
+                self.object_introspection_get_own_property_symbols(
+                    args.first().unwrap_or(&Value::Undefined),
+                )
+            }
             BuiltinId::ObjectValues => {
                 self.object_introspection_keys_like(
                     args.first().unwrap_or(&Value::Undefined),
@@ -10000,6 +10135,79 @@ impl Vm {
                 Ok(self.make_string_value(&format!("Symbol({description})")))
             }
             BuiltinId::DateNow => Ok(Value::Number(self.current_time_ms())),
+            BuiltinId::DateUTC => {
+                if args.len() < 2 {
+                    return Ok(Value::Number(f64::NAN));
+                }
+                let year_number = self.to_number(args.first().unwrap_or(&Value::Undefined));
+                let month_number = self.to_number(args.get(1).unwrap_or(&Value::Undefined));
+                if !year_number.is_finite() || !month_number.is_finite() {
+                    return Ok(Value::Number(f64::NAN));
+                }
+                let mut year = year_number as i64;
+                let month = month_number as i64;
+                if (0..=99).contains(&year) {
+                    year += 1900;
+                }
+                let (year, month0) = normalize_utc_month(year, month);
+                let day = if args.len() > 2 {
+                    let value = self.to_number(args.get(2).unwrap_or(&Value::Undefined));
+                    if !value.is_finite() {
+                        return Ok(Value::Number(f64::NAN));
+                    }
+                    value as i64
+                } else {
+                    1
+                };
+                let hours = if args.len() > 3 {
+                    let value = self.to_number(args.get(3).unwrap_or(&Value::Undefined));
+                    if !value.is_finite() {
+                        return Ok(Value::Number(f64::NAN));
+                    }
+                    value as i64
+                } else {
+                    0
+                };
+                let minutes = if args.len() > 4 {
+                    let value = self.to_number(args.get(4).unwrap_or(&Value::Undefined));
+                    if !value.is_finite() {
+                        return Ok(Value::Number(f64::NAN));
+                    }
+                    value as i64
+                } else {
+                    0
+                };
+                let seconds = if args.len() > 5 {
+                    let value = self.to_number(args.get(5).unwrap_or(&Value::Undefined));
+                    if !value.is_finite() {
+                        return Ok(Value::Number(f64::NAN));
+                    }
+                    value as i64
+                } else {
+                    0
+                };
+                let millis = if args.len() > 6 {
+                    let value = self.to_number(args.get(6).unwrap_or(&Value::Undefined));
+                    if !value.is_finite() {
+                        return Ok(Value::Number(f64::NAN));
+                    }
+                    value as i64
+                } else {
+                    0
+                };
+                let days = days_from_civil(year, month0 + 1, day);
+                Ok(Value::Number(
+                    (days * 86_400_000
+                        + hours * 3_600_000
+                        + minutes * 60_000
+                        + seconds * 1000
+                        + millis) as f64,
+                ))
+            }
+            BuiltinId::DateParse => {
+                let text = args.first().map(|value| self.to_string(value)).unwrap_or_default();
+                Ok(Value::Number(self.parse_date_utc_ms(&text)))
+            }
             BuiltinId::DateConstructor => {
                 let time = match args.len() {
                     0 => self.current_time_ms(),
@@ -10040,6 +10248,7 @@ impl Vm {
             BuiltinId::DateProtoGetSeconds => self.date_component(&this_value, 5),
             BuiltinId::DateProtoGetMilliseconds => self.date_component(&this_value, 6),
             BuiltinId::DateProtoGetDay => self.date_component(&this_value, 7),
+            BuiltinId::DateProtoGetTimezoneOffset => Ok(Value::Number(0.0)),
             BuiltinId::DateProtoToISOString | BuiltinId::DateProtoToString => {
                 let time = self.date_time_value(&this_value)?;
                 match Self::date_components(time) {
@@ -10769,6 +10978,13 @@ impl Vm {
                 args.first(),
                 Some(Value::Number(number)) if number.is_finite() && number.fract() == 0.0
             ))),
+            BuiltinId::NumberIsSafeInteger => Ok(Value::Bool(matches!(
+                args.first(),
+                Some(Value::Number(number))
+                    if number.is_finite()
+                        && number.fract() == 0.0
+                        && number.abs() <= 9_007_199_254_740_991.0
+            ))),
             BuiltinId::NumberParseInt | BuiltinId::GlobalParseInt => {
                 let text = args
                     .first()
@@ -10826,12 +11042,20 @@ impl Vm {
             )),
             BuiltinId::MathSqrt => Ok(Value::Number(self.number_arg(&args, 0).sqrt())),
             BuiltinId::MathCbrt => Ok(Value::Number(self.number_arg(&args, 0).cbrt())),
+            BuiltinId::MathExpm1 => Ok(Value::Number(self.number_arg(&args, 0).exp_m1())),
+            BuiltinId::MathFround => Ok(Value::Number((self.number_arg(&args, 0) as f32) as f64)),
             BuiltinId::MathSin => Ok(Value::Number(self.number_arg(&args, 0).sin())),
             BuiltinId::MathCos => Ok(Value::Number(self.number_arg(&args, 0).cos())),
             BuiltinId::MathTan => Ok(Value::Number(self.number_arg(&args, 0).tan())),
+            BuiltinId::MathSinh => Ok(Value::Number(self.number_arg(&args, 0).sinh())),
+            BuiltinId::MathCosh => Ok(Value::Number(self.number_arg(&args, 0).cosh())),
+            BuiltinId::MathTanh => Ok(Value::Number(self.number_arg(&args, 0).tanh())),
             BuiltinId::MathAsin => Ok(Value::Number(self.number_arg(&args, 0).asin())),
             BuiltinId::MathAcos => Ok(Value::Number(self.number_arg(&args, 0).acos())),
             BuiltinId::MathAtan => Ok(Value::Number(self.number_arg(&args, 0).atan())),
+            BuiltinId::MathAsinh => Ok(Value::Number(self.number_arg(&args, 0).asinh())),
+            BuiltinId::MathAcosh => Ok(Value::Number(self.number_arg(&args, 0).acosh())),
+            BuiltinId::MathAtanh => Ok(Value::Number(self.number_arg(&args, 0).atanh())),
             BuiltinId::MathAtan2 => Ok(Value::Number(
                 self.number_arg(&args, 0).atan2(self.number_arg(&args, 1)),
             )),
