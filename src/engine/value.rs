@@ -326,6 +326,10 @@ pub enum ObjectKind {
     Set(Vec<Value>),
     /// Ordered (name, value) pairs backing a `URLSearchParams`.
     UrlSearchParams(Vec<(String, String)>),
+    /// Ordered (name, value) pairs backing a `Headers`.
+    Headers(Vec<(String, String)>),
+    /// Ordered (name, value) pairs backing a `FormData`.
+    FormData(Vec<(String, String)>),
     /// Raw byte backing store for an `ArrayBuffer`.
     ArrayBuffer(Vec<u8>),
     /// A typed-array view over an `ArrayBuffer` object (`buffer`), interpreting
@@ -379,6 +383,8 @@ impl std::fmt::Debug for ObjectKind {
             Self::UrlSearchParams(pairs) => {
                 f.debug_tuple("UrlSearchParams").field(pairs).finish()
             }
+            Self::Headers(pairs) => f.debug_tuple("Headers").field(pairs).finish(),
+            Self::FormData(pairs) => f.debug_tuple("FormData").field(pairs).finish(),
             Self::ArrayBuffer(bytes) => {
                 f.debug_tuple("ArrayBuffer").field(&bytes.len()).finish()
             }

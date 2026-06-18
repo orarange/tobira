@@ -270,7 +270,6 @@ enum BuiltinId {
     Fetch,
     ResponseText,
     ResponseJson,
-    HeadersGet,
     // MutationObserver
     MutationObserverConstructor,
     MutationObserverObserve,
@@ -488,6 +487,27 @@ enum BuiltinId {
     StructuredClone,
     ProxyConstructor,
     UrlSearchParamsConstructor,
+    HeadersConstructor,
+    HeadersGet,
+    HeadersSet,
+    HeadersHas,
+    HeadersAppend,
+    HeadersDelete,
+    HeadersForEach,
+    HeadersEntries,
+    HeadersKeys,
+    HeadersValues,
+    FormDataConstructor,
+    FormDataGet,
+    FormDataGetAll,
+    FormDataHas,
+    FormDataSet,
+    FormDataAppend,
+    FormDataDelete,
+    FormDataForEach,
+    FormDataEntries,
+    FormDataKeys,
+    FormDataValues,
     UrlConstructor,
     UrlToString,
     UrlToPrimitive,
@@ -1351,6 +1371,8 @@ pub struct Vm {
     generator_prototype: Option<GcRef<JsObject>>,
     async_generator_prototype: Option<GcRef<JsObject>>,
     url_search_params_prototype: Option<GcRef<JsObject>>,
+    headers_prototype: Option<GcRef<JsObject>>,
+    form_data_prototype: Option<GcRef<JsObject>>,
     weak_ref_prototype: Option<GcRef<JsObject>>,
     text_encoder_prototype: Option<GcRef<JsObject>>,
     text_decoder_prototype: Option<GcRef<JsObject>>,
@@ -1500,6 +1522,8 @@ impl Vm {
             generator_prototype: None,
             async_generator_prototype: None,
             url_search_params_prototype: None,
+            headers_prototype: None,
+            form_data_prototype: None,
             weak_ref_prototype: None,
             text_encoder_prototype: None,
             text_decoder_prototype: None,
@@ -2754,6 +2778,8 @@ impl Vm {
         let generator_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let async_generator_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let url_search_params_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let headers_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let form_data_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let weak_ref_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let text_encoder_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let text_decoder_prototype = self.allocate_ordinary_object(Some(object_prototype));
@@ -2780,6 +2806,8 @@ impl Vm {
         self.generator_prototype = Some(generator_prototype);
         self.async_generator_prototype = Some(async_generator_prototype);
         self.url_search_params_prototype = Some(url_search_params_prototype);
+        self.headers_prototype = Some(headers_prototype);
+        self.form_data_prototype = Some(form_data_prototype);
         self.weak_ref_prototype = Some(weak_ref_prototype);
         self.text_encoder_prototype = Some(text_encoder_prototype);
         self.text_decoder_prototype = Some(text_decoder_prototype);
@@ -3481,6 +3509,53 @@ impl Vm {
             true,
         );
 
+        for (name, builtin) in [
+            ("get", BuiltinId::HeadersGet),
+            ("set", BuiltinId::HeadersSet),
+            ("has", BuiltinId::HeadersHas),
+            ("append", BuiltinId::HeadersAppend),
+            ("delete", BuiltinId::HeadersDelete),
+            ("forEach", BuiltinId::HeadersForEach),
+            ("entries", BuiltinId::HeadersEntries),
+            ("keys", BuiltinId::HeadersKeys),
+            ("values", BuiltinId::HeadersValues),
+        ] {
+            self.define_builtin_method(headers_prototype, name, builtin);
+        }
+        let headers_iterator = self.allocate_builtin_method(BuiltinId::HeadersEntries);
+        self.define_data_property(
+            headers_prototype,
+            PropertyKey::Symbol(SymbolId(SYMBOL_ITERATOR_ID)),
+            headers_iterator,
+            true,
+            false,
+            true,
+        );
+
+        for (name, builtin) in [
+            ("get", BuiltinId::FormDataGet),
+            ("getAll", BuiltinId::FormDataGetAll),
+            ("has", BuiltinId::FormDataHas),
+            ("set", BuiltinId::FormDataSet),
+            ("append", BuiltinId::FormDataAppend),
+            ("delete", BuiltinId::FormDataDelete),
+            ("forEach", BuiltinId::FormDataForEach),
+            ("entries", BuiltinId::FormDataEntries),
+            ("keys", BuiltinId::FormDataKeys),
+            ("values", BuiltinId::FormDataValues),
+        ] {
+            self.define_builtin_method(form_data_prototype, name, builtin);
+        }
+        let form_data_iterator = self.allocate_builtin_method(BuiltinId::FormDataEntries);
+        self.define_data_property(
+            form_data_prototype,
+            PropertyKey::Symbol(SymbolId(SYMBOL_ITERATOR_ID)),
+            form_data_iterator,
+            true,
+            false,
+            true,
+        );
+
         self.define_builtin_method(string_prototype, "match", BuiltinId::StringProtoMatch);
         self.define_builtin_method(string_prototype, "matchAll", BuiltinId::StringProtoMatchAll);
         self.define_builtin_method(string_prototype, "search", BuiltinId::StringProtoSearch);
@@ -3686,6 +3761,18 @@ impl Vm {
         );
         self.globals
             .insert("URLSearchParams".to_string(), usp_ctor);
+        let headers_ctor = self.allocate_builtin_value(
+            BuiltinId::HeadersConstructor,
+            true,
+            Some(headers_prototype),
+        );
+        self.globals.insert("Headers".to_string(), headers_ctor);
+        let form_data_ctor = self.allocate_builtin_value(
+            BuiltinId::FormDataConstructor,
+            true,
+            Some(form_data_prototype),
+        );
+        self.globals.insert("FormData".to_string(), form_data_ctor);
         let url_ctor = self.allocate_builtin_value(BuiltinId::UrlConstructor, true, Some(url_prototype));
         self.globals.insert("URL".to_string(), url_ctor);
 
@@ -5942,6 +6029,27 @@ impl Vm {
                 | BuiltinId::DateConstructor
                 | BuiltinId::ProxyConstructor
                 | BuiltinId::UrlSearchParamsConstructor
+                | BuiltinId::HeadersConstructor
+                | BuiltinId::HeadersGet
+                | BuiltinId::HeadersSet
+                | BuiltinId::HeadersHas
+                | BuiltinId::HeadersAppend
+                | BuiltinId::HeadersDelete
+                | BuiltinId::HeadersForEach
+                | BuiltinId::HeadersEntries
+                | BuiltinId::HeadersKeys
+                | BuiltinId::HeadersValues
+                | BuiltinId::FormDataConstructor
+                | BuiltinId::FormDataGet
+                | BuiltinId::FormDataGetAll
+                | BuiltinId::FormDataHas
+                | BuiltinId::FormDataSet
+                | BuiltinId::FormDataAppend
+                | BuiltinId::FormDataDelete
+                | BuiltinId::FormDataForEach
+                | BuiltinId::FormDataEntries
+                | BuiltinId::FormDataKeys
+                | BuiltinId::FormDataValues
                 | BuiltinId::WeakRefConstructor
                 | BuiltinId::TextEncoderConstructor
                 | BuiltinId::TextDecoderConstructor
@@ -8433,12 +8541,26 @@ impl Vm {
             .map(|value| self.to_string(value))
             .unwrap_or_default()
             .to_lowercase();
+        if let Value::Object(object) = this {
+            if let Some(JsObject {
+                kind: ObjectKind::Headers(pairs),
+                ..
+            }) = self.heap.objects().get(*object)
+            {
+                let values: Vec<String> = pairs
+                    .iter()
+                    .filter(|(k, _)| *k == name)
+                    .map(|(_, v)| v.clone())
+                    .collect();
+                return Ok(if values.is_empty() {
+                    Value::Null
+                } else {
+                    self.make_string_value(&values.join(", "))
+                });
+            }
+        }
         let value = self.get_property_value(this, &PropertyKey::from(name.as_str()))?;
-        Ok(if matches!(value, Value::Undefined) {
-            Value::Null
-        } else {
-            value
-        })
+        Ok(if matches!(value, Value::Undefined) { Value::Null } else { value })
     }
 
     fn response_text(&mut self, this: &Value) -> Result<Value, VmError> {
@@ -8493,6 +8615,17 @@ impl Vm {
                     ObjectKind::Set(values) | ObjectKind::WeakSet(values) => Ok(values),
                     ObjectKind::TypedArray { .. } => Ok(self.typed_array_to_values(value)),
                     ObjectKind::UrlSearchParams(pairs) => {
+                        let mut entries = Vec::with_capacity(pairs.len());
+                        for (name, value) in pairs {
+                            let name_value = self.make_string_value(&name);
+                            let value_value = self.make_string_value(&value);
+                            entries.push(
+                                self.make_array_from_values(vec![name_value, value_value])?,
+                            );
+                        }
+                        Ok(entries)
+                    }
+                    ObjectKind::Headers(pairs) | ObjectKind::FormData(pairs) => {
                         let mut entries = Vec::with_capacity(pairs.len());
                         for (name, value) in pairs {
                             let name_value = self.make_string_value(&name);
@@ -10682,6 +10815,23 @@ impl Vm {
                 });
                 Ok(Value::Object(object))
             }
+            BuiltinId::HeadersConstructor => {
+                let pairs = self.headers_init_pairs(args.first())?;
+                let object = self.heap.allocate_object(JsObject {
+                    kind: ObjectKind::Headers(pairs),
+                    prototype: Some(self.headers_prototype_ref()),
+                    ..JsObject::default()
+                });
+                Ok(Value::Object(object))
+            }
+            BuiltinId::FormDataConstructor => {
+                let object = self.heap.allocate_object(JsObject {
+                    kind: ObjectKind::FormData(Vec::new()),
+                    prototype: Some(self.form_data_prototype_ref()),
+                    ..JsObject::default()
+                });
+                Ok(Value::Object(object))
+            }
             BuiltinId::UrlConstructor => {
                 let input = args
                     .first()
@@ -10885,6 +11035,164 @@ impl Vm {
                 pairs.sort_by(|a, b| a.0.cmp(&b.0));
                 self.usp_set_pairs(&this_value, pairs);
                 Ok(Value::Undefined)
+            }
+            BuiltinId::HeadersSet => {
+                let mut pairs = self.headers_pairs(&this_value)?;
+                let name = self.headers_name_arg(&args, 0);
+                let value = self.string_arg(&args, 1);
+                pairs.retain(|(k, _)| *k != name);
+                pairs.push((name, value));
+                self.headers_set_pairs(&this_value, pairs);
+                Ok(Value::Undefined)
+            }
+            BuiltinId::HeadersHas => {
+                let pairs = self.headers_pairs(&this_value)?;
+                let name = self.headers_name_arg(&args, 0);
+                Ok(Value::Bool(pairs.iter().any(|(k, _)| *k == name)))
+            }
+            BuiltinId::HeadersAppend => {
+                let mut pairs = self.headers_pairs(&this_value)?;
+                let name = self.headers_name_arg(&args, 0);
+                let value = self.string_arg(&args, 1);
+                pairs.push((name, value));
+                self.headers_set_pairs(&this_value, pairs);
+                Ok(Value::Undefined)
+            }
+            BuiltinId::HeadersDelete => {
+                let mut pairs = self.headers_pairs(&this_value)?;
+                let name = self.headers_name_arg(&args, 0);
+                pairs.retain(|(k, _)| *k != name);
+                self.headers_set_pairs(&this_value, pairs);
+                Ok(Value::Undefined)
+            }
+            BuiltinId::HeadersForEach => {
+                let pairs = self.headers_pairs(&this_value)?;
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                for (name, value) in pairs {
+                    let name_value = self.make_string_value(&name);
+                    let value_value = self.make_string_value(&value);
+                    self.call_value_sync(
+                        callback.clone(),
+                        this_arg.clone(),
+                        vec![value_value, name_value, this_value.clone()],
+                    )?;
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::HeadersEntries => {
+                let pairs = self.headers_pairs(&this_value)?;
+                let mut entries = Vec::with_capacity(pairs.len());
+                for (name, value) in pairs {
+                    let name_value = self.make_string_value(&name);
+                    let value_value = self.make_string_value(&value);
+                    entries.push(self.make_array_from_values(vec![name_value, value_value])?);
+                }
+                Ok(self.make_for_of_iterator(entries))
+            }
+            BuiltinId::HeadersKeys => {
+                let pairs = self.headers_pairs(&this_value)?;
+                let keys = pairs
+                    .into_iter()
+                    .map(|(k, _)| self.make_string_value(&k))
+                    .collect();
+                Ok(self.make_for_of_iterator(keys))
+            }
+            BuiltinId::HeadersValues => {
+                let pairs = self.headers_pairs(&this_value)?;
+                let values = pairs
+                    .into_iter()
+                    .map(|(_, v)| self.make_string_value(&v))
+                    .collect();
+                Ok(self.make_for_of_iterator(values))
+            }
+            BuiltinId::FormDataGet => {
+                let pairs = self.form_data_pairs(&this_value)?;
+                let name = self.string_arg(&args, 0);
+                match pairs.iter().find(|(k, _)| *k == name) {
+                    Some((_, value)) => Ok(self.make_string_value(value)),
+                    None => Ok(Value::Null),
+                }
+            }
+            BuiltinId::FormDataGetAll => {
+                let pairs = self.form_data_pairs(&this_value)?;
+                let name = self.string_arg(&args, 0);
+                let values: Vec<Value> = pairs
+                    .into_iter()
+                    .filter(|(k, _)| *k == name)
+                    .map(|(_, v)| self.make_string_value(&v))
+                    .collect();
+                self.make_array_from_values(values)
+            }
+            BuiltinId::FormDataHas => {
+                let pairs = self.form_data_pairs(&this_value)?;
+                let name = self.string_arg(&args, 0);
+                Ok(Value::Bool(pairs.iter().any(|(k, _)| *k == name)))
+            }
+            BuiltinId::FormDataSet => {
+                let mut pairs = self.form_data_pairs(&this_value)?;
+                let name = self.string_arg(&args, 0);
+                let value = self.string_arg(&args, 1);
+                pairs.retain(|(k, _)| *k != name);
+                pairs.push((name, value));
+                self.form_data_set_pairs(&this_value, pairs);
+                Ok(Value::Undefined)
+            }
+            BuiltinId::FormDataAppend => {
+                let mut pairs = self.form_data_pairs(&this_value)?;
+                let name = self.string_arg(&args, 0);
+                let value = self.string_arg(&args, 1);
+                pairs.push((name, value));
+                self.form_data_set_pairs(&this_value, pairs);
+                Ok(Value::Undefined)
+            }
+            BuiltinId::FormDataDelete => {
+                let mut pairs = self.form_data_pairs(&this_value)?;
+                let name = self.string_arg(&args, 0);
+                pairs.retain(|(k, _)| *k != name);
+                self.form_data_set_pairs(&this_value, pairs);
+                Ok(Value::Undefined)
+            }
+            BuiltinId::FormDataForEach => {
+                let pairs = self.form_data_pairs(&this_value)?;
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                for (name, value) in pairs {
+                    let name_value = self.make_string_value(&name);
+                    let value_value = self.make_string_value(&value);
+                    self.call_value_sync(
+                        callback.clone(),
+                        this_arg.clone(),
+                        vec![value_value, name_value, this_value.clone()],
+                    )?;
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::FormDataEntries => {
+                let pairs = self.form_data_pairs(&this_value)?;
+                let mut entries = Vec::with_capacity(pairs.len());
+                for (name, value) in pairs {
+                    let name_value = self.make_string_value(&name);
+                    let value_value = self.make_string_value(&value);
+                    entries.push(self.make_array_from_values(vec![name_value, value_value])?);
+                }
+                Ok(self.make_for_of_iterator(entries))
+            }
+            BuiltinId::FormDataKeys => {
+                let pairs = self.form_data_pairs(&this_value)?;
+                let keys = pairs
+                    .into_iter()
+                    .map(|(k, _)| self.make_string_value(&k))
+                    .collect();
+                Ok(self.make_for_of_iterator(keys))
+            }
+            BuiltinId::FormDataValues => {
+                let pairs = self.form_data_pairs(&this_value)?;
+                let values = pairs
+                    .into_iter()
+                    .map(|(_, v)| self.make_string_value(&v))
+                    .collect();
+                Ok(self.make_for_of_iterator(values))
             }
             BuiltinId::ProxyConstructor => {
                 let target = self
@@ -12368,6 +12676,16 @@ impl Vm {
             .expect("URLSearchParams prototype should be installed")
     }
 
+    fn headers_prototype_ref(&self) -> GcRef<JsObject> {
+        self.headers_prototype
+            .expect("Headers prototype should be installed")
+    }
+
+    fn form_data_prototype_ref(&self) -> GcRef<JsObject> {
+        self.form_data_prototype
+            .expect("FormData prototype should be installed")
+    }
+
     fn url_prototype_ref(&self) -> GcRef<JsObject> {
         self.url_prototype.expect("URL prototype should be installed")
     }
@@ -12394,6 +12712,130 @@ impl Vm {
                 data.kind = ObjectKind::UrlSearchParams(pairs);
             }
         }
+    }
+
+    fn headers_name_arg(&self, args: &[Value], index: usize) -> String {
+        self.string_arg(args, index).to_lowercase()
+    }
+
+    fn headers_pairs(&self, this_value: &Value) -> Result<Vec<(String, String)>, VmError> {
+        if let Value::Object(object) = this_value {
+            if let Some(JsObject { kind: ObjectKind::Headers(pairs), .. }) =
+                self.heap.objects().get(*object)
+            {
+                return Ok(pairs.clone());
+            }
+        }
+        Err(VmError::TypeError(
+            "method called on a non-Headers object".to_string(),
+        ))
+    }
+
+    fn headers_set_pairs(&mut self, this_value: &Value, pairs: Vec<(String, String)>) {
+        if let Value::Object(object) = this_value {
+            if let Some(data) = self.heap.objects_mut().get_mut(*object) {
+                data.kind = ObjectKind::Headers(pairs);
+            }
+        }
+    }
+
+    fn headers_init_pairs(&mut self, init: Option<&Value>) -> Result<Vec<(String, String)>, VmError> {
+        match init {
+            None | Some(Value::Undefined) | Some(Value::Null) => Ok(Vec::new()),
+            Some(Value::Object(object)) => {
+                let object = *object;
+                let kind = self.heap.objects().get(object).map(|o| &o.kind);
+                let kind_is_headers = matches!(kind, Some(ObjectKind::Headers(_)));
+                let kind_is_usp = matches!(kind, Some(ObjectKind::UrlSearchParams(_)));
+                let is_array = matches!(kind, Some(ObjectKind::Array));
+                if kind_is_headers || kind_is_usp {
+                    let mut pairs = Vec::new();
+                    for (name, value) in self.headers_like_pairs(Value::Object(object))? {
+                        pairs.push((name.to_lowercase(), value));
+                    }
+                    Ok(pairs)
+                } else if is_array {
+                    let entries = self.for_of_values(&Value::Object(object))?;
+                    let mut pairs = Vec::with_capacity(entries.len());
+                    for entry in entries {
+                        let name = self.get_property_value(&entry, &PropertyKey::Index(0))?;
+                        let val = self.get_property_value(&entry, &PropertyKey::Index(1))?;
+                        pairs.push((self.to_lowercase_string(&name), self.to_string(&val)));
+                    }
+                    Ok(pairs)
+                } else {
+                    let mut pairs = Vec::new();
+                    for key in self.object_own_enumerable_keys(object) {
+                        let val = self.get_property_value(&Value::Object(object), &key)?;
+                        pairs.push((
+                            self.property_key_to_string(&key).to_lowercase(),
+                            self.to_string(&val),
+                        ));
+                    }
+                    Ok(pairs)
+                }
+            }
+            Some(other) => {
+                let text = self.to_string(other);
+                let mut pairs = Vec::new();
+                for (name, value) in parse_query_string(&text) {
+                    pairs.push((name.to_lowercase(), value));
+                }
+                Ok(pairs)
+            }
+        }
+    }
+
+    fn form_data_pairs(&self, this_value: &Value) -> Result<Vec<(String, String)>, VmError> {
+        if let Value::Object(object) = this_value {
+            if let Some(JsObject {
+                kind: ObjectKind::FormData(pairs),
+                ..
+            }) = self.heap.objects().get(*object)
+            {
+                return Ok(pairs.clone());
+            }
+        }
+        Err(VmError::TypeError(
+            "method called on a non-FormData object".to_string(),
+        ))
+    }
+
+    fn form_data_set_pairs(&mut self, this_value: &Value, pairs: Vec<(String, String)>) {
+        if let Value::Object(object) = this_value {
+            if let Some(data) = self.heap.objects_mut().get_mut(*object) {
+                data.kind = ObjectKind::FormData(pairs);
+            }
+        }
+    }
+
+    fn headers_like_pairs(&self, this_value: Value) -> Result<Vec<(String, String)>, VmError> {
+        match this_value {
+            Value::Object(object) => {
+                if let Some(JsObject { kind: ObjectKind::Headers(pairs), .. }) =
+                    self.heap.objects().get(object)
+                {
+                    return Ok(pairs.clone());
+                }
+                if let Some(JsObject {
+                    kind: ObjectKind::UrlSearchParams(pairs),
+                    ..
+                }) = self.heap.objects().get(object)
+                {
+                    return Ok(pairs.clone());
+                }
+                Err(VmError::TypeError(
+                    "method called on an unsupported headers init object".to_string(),
+                ))
+            }
+            _ => Err(VmError::TypeError(
+                "method called on an unsupported headers init value".to_string(),
+            )),
+        }
+    }
+
+    fn to_lowercase_string(&self, value: &Value) -> String {
+        self.to_string(value).to_lowercase()
     }
 
     /// Allocate a `ForOfIterator` object wrapping the given values. Used by
