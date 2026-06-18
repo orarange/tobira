@@ -1262,6 +1262,11 @@ impl Vm {
         vm
     }
 
+    /// Borrow the heap immutably for inspection in tests and diagnostics.
+    pub fn heap(&self) -> &Heap {
+        &self.heap
+    }
+
     /// Borrow the host mutably (for reading results after execution).
     pub fn host_mut(&mut self) -> &mut dyn Host {
         self.host.as_mut()
