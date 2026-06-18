@@ -205,6 +205,12 @@ git log --oneline -n 20
 
 ## Session Log
 
+### 2026-06-19 - Claude PM / Codex (compiler split + GC evidence)
+
+- Split the 4423-line `src/engine/compiler.rs` monolith into focused submodules under `src/engine/compiler/` (no logic change, 571 tests green at every step, each extraction its own commit): `mod.rs` 392 (core: structs/new/finish/emit/function compilation), `scope.rs` 267 (ScopeFrame/UpvalueState/OuterBindings + binding resolution), `modules.rs` 327 (import/export), `classes.rs` 465 (class/super), `patterns.rs` 363 (destructuring), `statements.rs` 1536 (control flow), `expressions.rs` 1124. Submodules are children of `compiler`, so they reach FunctionCompiler's private fields; moved methods are `pub(super)`.
+- Added GC evidence (read-only, no collector landed): `Vm::heap()` accessor + `tests/gc_heap_growth.rs`. Measured — fresh VM ≈ 380 builtin objects; a 2000-iteration loop of unreachable `{…}`+`[…]` literals leaves ≈ 4380 live (grew ≈ 4000 = 2/iter, zero reclaimed). Confirms the heap is monotonic within a run (no in-session collection). A reclaiming mark-sweep collector is intentionally deferred — it needs review because the `callables` side-table and closure-upvalue `Rc<RefCell>` cells are roots outside the arena. When it lands, `heap_grows_without_in_session_collection` flips to assert reclamation.
+- Context: these two items are debt paydown surfaced by an external code critique (compiler monolith + no in-session GC were its only landed points; its boa-GC and "200 tests" claims were stale).
+
 ### 2026-06-19 - Claude PM / Codex (real-page campaign: rust-lang, react.dev + doc refresh)
 
 - Fixed rust-lang.org crash: object literal `{__proto__: value}` now sets `[[Prototype]]` (Annex B.3.1) instead of creating an own `__proto__` property. Root cause was highlight.js's `Object.freeze({__proto__:null,...})` + `for...in` enumerating the bogus own property (`typeof null === "object"`) → `Object.getOwnPropertyNames(null)` threw. New opcode `SetObjectLiteralProto`; primitives ignored (no throw). Regression tests in `tests/proto_literal.rs`. (`bac4893`, `af64f1b`)
