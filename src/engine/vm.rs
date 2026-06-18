@@ -57,6 +57,7 @@ pub struct DomEventInit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BuiltinId {
     Assert,
+    Noop,
     CallSpread,
     ConstructSpread,
     PromiseConstructor,
@@ -11347,6 +11348,7 @@ impl Vm {
                 Ok(Value::Object(rect_obj))
             }
             BuiltinId::DomNodeScrollIntoView => Ok(Value::Undefined),
+            BuiltinId::Noop => Ok(Value::Undefined),
             BuiltinId::DomNodeFocus | BuiltinId::DomNodeBlur => {
                 // focus()/blur() dispatch the corresponding (non-bubbling)
                 // event; propagate_event moves document.activeElement.
@@ -11863,6 +11865,14 @@ impl Vm {
             BuiltinId::WindowMatchMedia => {
                 let result_obj = self.allocate_ordinary_object(None);
                 self.define_data_property(result_obj, PropertyKey::from("matches"), Value::Bool(false), true, true, true);
+                let media = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let media_value = self.make_string_value(&media);
+                self.define_data_property(result_obj, PropertyKey::from("media"), media_value, true, true, true);
+                self.define_data_property(result_obj, PropertyKey::from("onchange"), Value::Null, true, true, true);
+                self.define_builtin_method(result_obj, "addEventListener", BuiltinId::Noop);
+                self.define_builtin_method(result_obj, "removeEventListener", BuiltinId::Noop);
+                self.define_builtin_method(result_obj, "addListener", BuiltinId::Noop);
+                self.define_builtin_method(result_obj, "removeListener", BuiltinId::Noop);
                 Ok(Value::Object(result_obj))
             }
         }
