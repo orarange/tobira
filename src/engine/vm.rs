@@ -90,6 +90,7 @@ enum BuiltinId {
     ObjectFreeze,
     ObjectIsFrozen,
     ObjectProtoHasOwnProperty,
+    ObjectProtoPropertyIsEnumerable,
     ObjectProtoToString,
     ObjectProtoValueOf,
     ObjectProtoIsPrototypeOf,
@@ -3150,6 +3151,11 @@ impl Vm {
             object_prototype,
             "hasOwnProperty",
             BuiltinId::ObjectProtoHasOwnProperty,
+        );
+        self.define_builtin_method(
+            object_prototype,
+            "propertyIsEnumerable",
+            BuiltinId::ObjectProtoPropertyIsEnumerable,
         );
         self.define_builtin_method(object_prototype, "toString", BuiltinId::ObjectProtoToString);
         self.define_builtin_method(object_prototype, "valueOf", BuiltinId::ObjectProtoValueOf);
@@ -8799,6 +8805,16 @@ impl Vm {
                     self.get_own_property_descriptor(object, &key).is_some(),
                 ))
             }
+            BuiltinId::ObjectProtoPropertyIsEnumerable => {
+                let object = self.builtin_object_this(&this_value, "propertyIsEnumerable")?;
+                let key = self.to_property_key(args.first().unwrap_or(&Value::Undefined))?;
+                let enumerable = match self.get_own_property_descriptor(object, &key) {
+                    Some(JsPropertyDescriptor::Data { enumerable, .. })
+                    | Some(JsPropertyDescriptor::Accessor { enumerable, .. }) => enumerable,
+                    None => false,
+                };
+                Ok(Value::Bool(enumerable))
+            }
             BuiltinId::ObjectProtoToString => Ok(self.make_string_value("[object Object]")),
             BuiltinId::ObjectProtoValueOf => Ok(this_value),
             BuiltinId::ObjectProtoIsPrototypeOf => {
@@ -14401,6 +14417,9 @@ impl Vm {
             // during mount — without this it hit "attempted to call a non-function
             // value" and every <input> failed to render.
             "hasOwnProperty" => Ok(self.allocate_builtin_method(BuiltinId::ObjectProtoHasOwnProperty)),
+            "propertyIsEnumerable" => {
+                Ok(self.allocate_builtin_method(BuiltinId::ObjectProtoPropertyIsEnumerable))
+            }
             "isPrototypeOf" => Ok(self.allocate_builtin_method(BuiltinId::ObjectProtoIsPrototypeOf)),
             "valueOf" => Ok(self.allocate_builtin_method(BuiltinId::ObjectProtoValueOf)),
             "toString" => Ok(self.allocate_builtin_method(BuiltinId::ObjectProtoToString)),
