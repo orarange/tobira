@@ -601,7 +601,7 @@ impl std::fmt::Display for VmError {
             | Self::RangeError(message) => write!(f, "{message}"),
             Self::Thrown(value) => write!(f, "uncaught throw: {value:?}"),
             Self::InfiniteLoop => write!(f, "Maximum loop iteration limit exceeded"),
-            Self::StackOverflow => write!(f, "call stack exceeded the phase 3 limit"),
+            Self::StackOverflow => write!(f, "Maximum call stack size exceeded"),
             Self::Unimplemented(feature) => write!(f, "unimplemented in phase 3: {feature}"),
         }
     }
@@ -1421,6 +1421,14 @@ const SYMBOL_TO_PRIMITIVE_ID: u32 = 4;
 const SYMBOL_HAS_INSTANCE_ID: u32 = 3;
 /// First id available to user-created `Symbol(...)` values.
 const FIRST_USER_SYMBOL: u32 = 16;
+
+/// Maximum JS call-frame depth before a RangeError is thrown. JS→JS calls are
+/// iterative (frames live in a heap `Vec`, the interpreter loop drives them — no
+/// native Rust recursion per call), so this is an artificial guard against
+/// runaway recursion, not a native-stack limit. The JS worker thread has a 32 MB
+/// stack, and real engines allow ~10k frames; 1024 was far too low and tripped
+/// legitimately deep framework call chains (e.g. Vite's bundle).
+const MAX_CALL_FRAMES: usize = 10_000;
 
 impl Vm {
     /// Create a VM with a no-op host (for tests and scripts that don't need DOM/console).
@@ -4573,7 +4581,7 @@ impl Vm {
             ),
             VmError::StackOverflow => self.create_error_object(
                 "RangeError",
-                "call stack exceeded the phase 5 limit".to_string(),
+                "Maximum call stack size exceeded".to_string(),
             ),
             VmError::Unimplemented(feature) => {
                 self.create_error_object("Error", format!("unimplemented in phase 5: {feature}"))
@@ -5269,7 +5277,7 @@ impl Vm {
         this_value: Value,
         construct_fallback: Option<Value>,
     ) -> Result<(), VmError> {
-        if self.frames.len() >= 1024 {
+        if self.frames.len() >= MAX_CALL_FRAMES {
             return Err(VmError::StackOverflow);
         }
         let frame = self.make_call_frame(closure, args, this_value, construct_fallback)?;
@@ -5579,7 +5587,14 @@ impl Vm {
     fn handle_runtime_error(&mut self, error: VmError) -> Result<(), VmError> {
         match error {
             VmError::Thrown(value) => self.handle_thrown_value(value),
-            VmError::TypeError(_) | VmError::ReferenceError(_) | VmError::RangeError(_) => {
+            // StackOverflow is a catchable `RangeError` in real engines
+            // (`try { recurse() } catch (e) { … }`), so route it through the same
+            // handler-unwinding path. Unwinding to a `try` also frees the frames
+            // that hit the cap. With no handler, it still surfaces as uncaught.
+            VmError::TypeError(_)
+            | VmError::ReferenceError(_)
+            | VmError::RangeError(_)
+            | VmError::StackOverflow => {
                 let wrapped = self.wrap_vm_error_as_value(&error)?;
                 match self.handle_thrown_value(wrapped) {
                     Ok(()) => Ok(()),
