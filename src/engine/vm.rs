@@ -461,6 +461,9 @@ enum BuiltinId {
     StructuredClone,
     ProxyConstructor,
     UrlSearchParamsConstructor,
+    UrlConstructor,
+    UrlToString,
+    UrlToPrimitive,
     UspGet,
     UspGetAll,
     UspHas,
@@ -1012,6 +1015,223 @@ fn parse_query_string(input: &str) -> Vec<(String, String)> {
     pairs
 }
 
+#[derive(Debug, Clone)]
+struct UrlComponents {
+    href: String,
+    protocol: String,
+    username: String,
+    password: String,
+    host: String,
+    hostname: String,
+    port: String,
+    pathname: String,
+    search: String,
+    hash: String,
+    origin: String,
+}
+
+fn trim_url_input(input: &str) -> &str {
+    input.trim_matches(|c: char| c.is_ascii_whitespace() || c.is_ascii_control())
+}
+
+fn is_special_url_scheme(scheme: &str) -> bool {
+    matches!(scheme, "http" | "https" | "ws" | "wss" | "ftp" | "file")
+}
+
+fn normalize_url_path(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            _ => segments.push(segment),
+        }
+    }
+    let mut out = String::new();
+    if absolute {
+        out.push('/');
+    }
+    out.push_str(&segments.join("/"));
+    if path.ends_with('/') && !out.ends_with('/') {
+        out.push('/');
+    }
+    if out.is_empty() && absolute {
+        out.push('/');
+    }
+    out
+}
+
+fn parse_url_authority(authority: &str) -> Option<(String, String, String, String, String)> {
+    let (userinfo, hostport) = authority.rsplit_once('@').unwrap_or(("", authority));
+    let (username, password) = match userinfo.split_once(':') {
+        Some((username, password)) => (username.to_string(), password.to_string()),
+        None => (userinfo.to_string(), String::new()),
+    };
+    let (hostname, port) = match hostport.rsplit_once(':') {
+        Some((hostname, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+            (hostname.to_string(), port.to_string())
+        }
+        _ => (hostport.to_string(), String::new()),
+    };
+    let host = if port.is_empty() { hostname.clone() } else { format!("{hostname}:{port}") };
+    Some((username, password, hostname, port, host))
+}
+
+fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<UrlComponents> {
+    let input = trim_url_input(input);
+    if input.is_empty() {
+        return None;
+    }
+
+    let is_absolute = input
+        .find(':')
+        .map(|pos| {
+            let scheme = &input[..pos];
+            !scheme.is_empty()
+                && scheme.chars().enumerate().all(|(i, c)| {
+                    if i == 0 {
+                        c.is_ascii_alphabetic()
+                    } else {
+                        c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-')
+                    }
+                })
+        })
+        .unwrap_or(false);
+    let base_components = if is_absolute {
+        None
+    } else {
+        Some(parse_whatwg_url(base?, None)?)
+    };
+
+    let (scheme, rest) = if let Some(pos) = input.find(':') {
+        (input[..pos].to_ascii_lowercase(), &input[pos + 1..])
+    } else {
+        (base_components.as_ref()?.protocol.trim_end_matches(':').to_string(), input)
+    };
+    let protocol = format!("{scheme}:");
+    let mut username = String::new();
+    let mut password = String::new();
+    let mut host = String::new();
+    let mut hostname = String::new();
+    let mut port = String::new();
+    let mut pathname = String::new();
+    let mut search = String::new();
+    let mut hash = String::new();
+
+    if is_absolute {
+        let mut rest = rest;
+        let mut authority = "";
+        if let Some(after) = rest.strip_prefix("//") {
+            let end = after.find(['/', '?', '#']).unwrap_or(after.len());
+            authority = &after[..end];
+            rest = &after[end..];
+        }
+        if !authority.is_empty() || is_special_url_scheme(&scheme) {
+            let (u, p, hname, pport, h) = parse_url_authority(authority)?;
+            username = u;
+            password = p;
+            hostname = hname;
+            port = pport;
+            host = h;
+            if is_special_url_scheme(&scheme) && scheme != "file" && host.is_empty() {
+                return None;
+            }
+        }
+        let path_end = rest.find(['?', '#']).unwrap_or(rest.len());
+        pathname = rest[..path_end].to_string();
+        rest = &rest[path_end..];
+        if pathname.is_empty() && is_special_url_scheme(&scheme) {
+            pathname = "/".to_string();
+        }
+        if let Some(after) = rest.strip_prefix('?') {
+            let end = after.find('#').unwrap_or(after.len());
+            if end > 0 {
+                search = format!("?{}", &after[..end]);
+            }
+            rest = &after[end..];
+        }
+        if let Some(after) = rest.strip_prefix('#') {
+            if !after.is_empty() {
+                hash = format!("#{after}");
+            }
+        }
+    } else {
+        let base = base_components.as_ref()?;
+        username = base.username.clone();
+        password = base.password.clone();
+        host = base.host.clone();
+        hostname = base.hostname.clone();
+        port = base.port.clone();
+        let mut rest = rest;
+        if rest.starts_with('/') {
+            let path_end = rest.find(['?', '#']).unwrap_or(rest.len());
+            pathname = normalize_url_path(&rest[..path_end]);
+            rest = &rest[path_end..];
+        } else if rest.starts_with('?') {
+            pathname = base.pathname.clone();
+        } else if rest.starts_with('#') {
+            pathname = base.pathname.clone();
+            search = base.search.clone();
+        } else {
+            let base_dir = base
+                .pathname
+                .rsplit_once('/')
+                .map(|(dir, _)| format!("{dir}/"))
+                .unwrap_or_else(|| "/".to_string());
+            let path_end = rest.find(['?', '#']).unwrap_or(rest.len());
+            let joined = format!("{base_dir}{}", &rest[..path_end]);
+            pathname = normalize_url_path(&joined);
+            rest = &rest[path_end..];
+        }
+        if let Some(after) = rest.strip_prefix('?') {
+            let end = after.find('#').unwrap_or(after.len());
+            if end > 0 {
+                search = format!("?{}", &after[..end]);
+            }
+            rest = &after[end..];
+        }
+        if let Some(after) = rest.strip_prefix('#') {
+            if !after.is_empty() {
+                hash = format!("#{after}");
+            }
+        }
+    }
+
+    if pathname.is_empty() && is_special_url_scheme(&scheme) {
+        pathname = "/".to_string();
+    }
+    let origin = if matches!(scheme.as_str(), "http" | "https" | "ws" | "wss" | "ftp") && !hostname.is_empty() {
+        if port.is_empty() {
+            format!("{scheme}://{hostname}")
+        } else {
+            format!("{scheme}://{hostname}:{port}")
+        }
+    } else {
+        "null".to_string()
+    };
+    let mut href = String::new();
+    href.push_str(&protocol);
+    if !host.is_empty() || is_special_url_scheme(&scheme) {
+        href.push_str("//");
+        if !username.is_empty() || !password.is_empty() {
+            href.push_str(&username);
+            if !password.is_empty() {
+                href.push(':');
+                href.push_str(&password);
+            }
+            href.push('@');
+        }
+        href.push_str(&host);
+    }
+    href.push_str(&pathname);
+    href.push_str(&search);
+    href.push_str(&hash);
+    Some(UrlComponents { href, protocol, username, password, host, hostname, port, pathname, search, hash, origin })
+}
+
 fn is_uri_unreserved(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')')
 }
@@ -1098,6 +1318,7 @@ pub struct Vm {
     generator_prototype: Option<GcRef<JsObject>>,
     async_generator_prototype: Option<GcRef<JsObject>>,
     url_search_params_prototype: Option<GcRef<JsObject>>,
+    url_prototype: Option<GcRef<JsObject>>,
     error_prototype: Option<GcRef<JsObject>>,
     promise_prototype: Option<GcRef<JsObject>>,
     map_prototype: Option<GcRef<JsObject>>,
@@ -1235,6 +1456,7 @@ impl Vm {
             generator_prototype: None,
             async_generator_prototype: None,
             url_search_params_prototype: None,
+            url_prototype: None,
             error_prototype: None,
             promise_prototype: None,
             map_prototype: None,
@@ -2476,6 +2698,7 @@ impl Vm {
         let generator_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let async_generator_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let url_search_params_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let url_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let error_prototype = self.heap.allocate_object(JsObject {
             kind: ObjectKind::Error,
             prototype: Some(object_prototype),
@@ -2498,6 +2721,7 @@ impl Vm {
         self.generator_prototype = Some(generator_prototype);
         self.async_generator_prototype = Some(async_generator_prototype);
         self.url_search_params_prototype = Some(url_search_params_prototype);
+        self.url_prototype = Some(url_prototype);
         self.error_prototype = Some(error_prototype);
         self.promise_prototype = Some(promise_prototype);
         self.map_prototype = Some(map_prototype);
@@ -3142,6 +3366,19 @@ impl Vm {
         ] {
             self.define_builtin_method(url_search_params_prototype, name, builtin);
         }
+        for (name, builtin) in [("toString", BuiltinId::UrlToString), ("toJSON", BuiltinId::UrlToString)] {
+            self.define_builtin_method(url_prototype, name, builtin);
+        }
+        self.define_builtin_method(url_prototype, "valueOf", BuiltinId::UrlToPrimitive);
+        let url_to_primitive = self.allocate_builtin_method(BuiltinId::UrlToPrimitive);
+        self.define_data_property(
+            url_prototype,
+            PropertyKey::Symbol(SymbolId(SYMBOL_TO_PRIMITIVE_ID)),
+            url_to_primitive,
+            true,
+            false,
+            true,
+        );
         let usp_iterator = self.allocate_builtin_method(BuiltinId::UspEntries);
         self.define_data_property(
             url_search_params_prototype,
@@ -3347,6 +3584,8 @@ impl Vm {
         );
         self.globals
             .insert("URLSearchParams".to_string(), usp_ctor);
+        let url_ctor = self.allocate_builtin_value(BuiltinId::UrlConstructor, true, Some(url_prototype));
+        self.globals.insert("URL".to_string(), url_ctor);
 
         if let Some(date_ref) = self.value_object_ref(date_ctor) {
             self.define_builtin_method(date_ref, "now", BuiltinId::DateNow);
@@ -5493,6 +5732,7 @@ impl Vm {
                 | BuiltinId::DateConstructor
                 | BuiltinId::ProxyConstructor
                 | BuiltinId::UrlSearchParamsConstructor
+                | BuiltinId::UrlConstructor
                 | BuiltinId::ArrayBufferConstructor
                 | BuiltinId::TypedArrayConstructor(_)
                 | BuiltinId::EventConstructor
@@ -10065,6 +10305,87 @@ impl Vm {
                 });
                 Ok(Value::Object(object))
             }
+            BuiltinId::UrlConstructor => {
+                let input = args
+                    .first()
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default();
+                let base = args.get(1).map(|value| self.to_string(value));
+                let components = parse_whatwg_url(&input, base.as_deref())
+                    .ok_or_else(|| VmError::TypeError("Invalid URL".to_string()))?;
+                let object = self.allocate_ordinary_object(Some(self.url_prototype_ref()));
+                let UrlComponents {
+                    href,
+                    protocol,
+                    username,
+                    password,
+                    host,
+                    hostname,
+                    port,
+                    pathname,
+                    search,
+                    hash,
+                    origin,
+                } = components;
+                for (name, value) in [
+                    ("href", href),
+                    ("protocol", protocol),
+                    ("username", username),
+                    ("password", password),
+                    ("host", host),
+                    ("hostname", hostname),
+                    ("port", port),
+                    ("pathname", pathname),
+                    ("search", search),
+                    ("hash", hash),
+                    ("origin", origin),
+                ] {
+                    let value = self.make_string_value(&value);
+                    self.define_data_property(
+                        object,
+                        PropertyKey::from(name),
+                        value,
+                        true,
+                        true,
+                        true,
+                    );
+                }
+                let search_text = self
+                    .get_property_value(&Value::Object(object), &PropertyKey::from("search"))?;
+                let search_pairs = parse_query_string(&self.to_string(&search_text));
+                let search_params = self.heap.allocate_object(JsObject {
+                    kind: ObjectKind::UrlSearchParams(search_pairs),
+                    prototype: Some(self.url_search_params_prototype_ref()),
+                    ..JsObject::default()
+                });
+                self.define_data_property(
+                    object,
+                    PropertyKey::from("searchParams"),
+                    Value::Object(search_params),
+                    true,
+                    true,
+                    true,
+                );
+                Ok(Value::Object(object))
+            }
+            BuiltinId::UrlToString => {
+                let href = self
+                    .get_property_value(&this_value, &PropertyKey::from("href"))
+                    .unwrap_or(Value::Undefined);
+                Ok(match href {
+                    Value::Undefined => self.make_string_value(""),
+                    other => self.make_string_value(&self.to_string(&other)),
+                })
+            }
+            BuiltinId::UrlToPrimitive => {
+                let href = self
+                    .get_property_value(&this_value, &PropertyKey::from("href"))
+                    .unwrap_or(Value::Undefined);
+                Ok(match href {
+                    Value::Undefined => Value::Undefined,
+                    other => self.make_string_value(&self.to_string(&other)),
+                })
+            }
             BuiltinId::UspGet => {
                 let pairs = self.usp_pairs(&this_value)?;
                 let name = self.string_arg(&args, 0);
@@ -11502,6 +11823,10 @@ impl Vm {
     fn url_search_params_prototype_ref(&self) -> GcRef<JsObject> {
         self.url_search_params_prototype
             .expect("URLSearchParams prototype should be installed")
+    }
+
+    fn url_prototype_ref(&self) -> GcRef<JsObject> {
+        self.url_prototype.expect("URL prototype should be installed")
     }
 
     /// Read the (name, value) pairs of a URLSearchParams `this`.
