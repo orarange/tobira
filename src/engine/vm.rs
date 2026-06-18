@@ -8,6 +8,7 @@ use std::{
 
 use serde_json::Value as JsonValue;
 
+use super::js_regex::{JsCaptures, JsRegex};
 use super::chunk::{Chunk, Constant, FunctionProto, Opcode};
 use super::event_loop::{
     EventLoop, MicrotaskJob, RafEntry, TaskEntry, TaskSource, TickResult, TimerEntry,
@@ -809,39 +810,9 @@ fn json_to_pretty_string(value: &JsonValue, indent: &str, depth: usize) -> Strin
 
 /// Translate JS named capture groups `(?<name>...)` into the Rust regex crate's
 /// `(?P<name>...)` syntax, leaving lookbehind `(?<=` / `(?<!` untouched.
-fn translate_regex_named_groups(source: &str) -> String {
-    let mut out = String::with_capacity(source.len() + 8);
-    let mut chars = source.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            out.push(c);
-            if let Some(next) = chars.next() {
-                out.push(next);
-            }
-            continue;
-        }
-        if c == '(' && chars.peek() == Some(&'?') {
-            let mut lookahead = chars.clone();
-            lookahead.next(); // '?'
-            if lookahead.peek() == Some(&'<') {
-                lookahead.next(); // '<'
-                let after = lookahead.peek().copied();
-                if after != Some('=') && after != Some('!') {
-                    out.push_str("(?P<");
-                    chars.next(); // '?'
-                    chars.next(); // '<'
-                    continue;
-                }
-            }
-        }
-        out.push(c);
-    }
-    out
-}
-
 /// Expand a regex replacement template: `$$`→`$`, `$&`→whole match, `` $` ``→
 /// prefix, `$'`→suffix, `$<name>`→named group, `$1`..`$99`→numbered group.
-fn expand_replacement(template: &str, caps: &regex::Captures, full_text: &str) -> String {
+fn expand_replacement(template: &str, caps: &JsCaptures, full_text: &str) -> String {
     let mut out = String::new();
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
@@ -929,17 +900,10 @@ fn expand_string_replacement(template: &str, matched: &str) -> String {
     out
 }
 
-/// Compile a JS regex source + flag string into a Rust `regex::Regex`. Flags
-/// `g`/`y` are handled at the call site (global iteration / sticky), not here.
-fn compile_js_regex(source: &str, flags: &str) -> Result<regex::Regex, VmError> {
-    let translated = translate_regex_named_groups(source);
-    let mut builder = regex::RegexBuilder::new(&translated);
-    builder.case_insensitive(flags.contains('i'));
-    builder.multi_line(flags.contains('m'));
-    builder.dot_matches_new_line(flags.contains('s'));
-    builder.swap_greed(false);
-    builder
-        .build()
+/// JS の正規表現 source + flags を JS 互換エンジン(regress)でコンパイルする。
+/// `g`/`y` フラグは呼び出し側(グローバル反復/sticky)で処理する。
+fn compile_js_regex(source: &str, flags: &str) -> Result<JsRegex, VmError> {
+    JsRegex::compile(source, flags)
         .map_err(|error| VmError::TypeError(format!("invalid regular expression: {error}")))
 }
 
@@ -3842,7 +3806,7 @@ impl Vm {
     fn regex_replace(
         &mut self,
         text: &str,
-        regex: &regex::Regex,
+        regex: &JsRegex,
         replacement: &Value,
         global: bool,
     ) -> Result<Value, VmError> {
@@ -3852,8 +3816,8 @@ impl Vm {
         } else {
             self.to_string(replacement)
         };
-        let caps_list: Vec<regex::Captures> = if global {
-            regex.captures_iter(text).collect()
+        let caps_list: Vec<JsCaptures> = if global {
+            regex.captures_iter(text)
         } else {
             regex.captures(text).into_iter().collect()
         };
@@ -3974,8 +3938,7 @@ impl Vm {
     /// and `groups`) from a regex capture.
     fn build_match_result(
         &mut self,
-        regex: &regex::Regex,
-        caps: &regex::Captures,
+        caps: &JsCaptures,
         input: &str,
     ) -> Result<Value, VmError> {
         let mut items = Vec::with_capacity(caps.len());
@@ -4006,19 +3969,17 @@ impl Vm {
             true,
             true,
         );
-        let names: Vec<String> = regex
-            .capture_names()
-            .flatten()
-            .map(|name| name.to_string())
+        let named: Vec<(String, Option<String>)> = caps
+            .named_iter()
+            .map(|(name, value)| (name.to_string(), value.map(|m| m.as_str().to_string())))
             .collect();
-        let groups = if names.is_empty() {
+        let groups = if named.is_empty() {
             Value::Undefined
         } else {
             let groups = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
-            for name in names {
-                let value = caps
-                    .name(&name)
-                    .map(|m| self.make_string_value(m.as_str()))
+            for (name, value) in named {
+                let value = value
+                    .map(|s| self.make_string_value(&s))
                     .unwrap_or(Value::Undefined);
                 self.define_data_property(
                     groups,
@@ -9673,7 +9634,7 @@ impl Vm {
                                 self.require_object_ref(&this_value, "RegExp.prototype.exec")?;
                             self.set_regexp_last_index(object, end);
                         }
-                        self.build_match_result(&regex, &caps, &text)
+                        self.build_match_result(&caps, &text)
                     }
                     None => {
                         if sticky_or_global {
@@ -9701,6 +9662,7 @@ impl Vm {
                 if flags.contains('g') {
                     let matches: Vec<Value> = regex
                         .find_iter(&text)
+                        .into_iter()
                         .map(|m| m.as_str().to_string())
                         .collect::<Vec<_>>()
                         .into_iter()
@@ -9713,7 +9675,7 @@ impl Vm {
                     }
                 } else {
                     match regex.captures(&text) {
-                        Some(caps) => self.build_match_result(&regex, &caps, &text),
+                        Some(caps) => self.build_match_result(&caps, &text),
                         None => Ok(Value::Null),
                     }
                 }
@@ -9722,10 +9684,10 @@ impl Vm {
                 let text = self.builtin_string_this(&this_value)?;
                 let (source, flags) = self.coerce_regex_arg(args.first())?;
                 let regex = compile_js_regex(&source, &flags)?;
-                let captures: Vec<regex::Captures> = regex.captures_iter(&text).collect();
+                let captures: Vec<JsCaptures> = regex.captures_iter(&text);
                 let mut results = Vec::with_capacity(captures.len());
                 for caps in &captures {
-                    results.push(self.build_match_result(&regex, caps, &text)?);
+                    results.push(self.build_match_result(caps, &text)?);
                 }
                 Ok(self.make_for_of_iterator(results))
             }
@@ -10328,8 +10290,7 @@ impl Vm {
                 if let Some(value) = args.first() {
                     if let Some((source, flags)) = self.regexp_source_flags(value) {
                         let regex = compile_js_regex(&source, &flags)?;
-                        let segments: Vec<String> =
-                            regex.split(&text).map(|s| s.to_string()).collect();
+                        let segments: Vec<String> = regex.split(&text);
                         let values = segments
                             .into_iter()
                             .map(|s| self.make_string_value(&s))

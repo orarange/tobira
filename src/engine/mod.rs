@@ -5,6 +5,7 @@ pub mod chunk;
 pub mod compiler;
 pub mod event_loop;
 pub mod heap;
+pub mod js_regex;
 pub mod host;
 pub mod lexer;
 pub mod parser;
@@ -25,6 +26,7 @@ pub use heap::{
     Arena, ArenaItem, ArenaPage, GcColor, GcRef, Heap, HeapArena, HeapHeader, RawGcRef, RootHandle,
     RootSet,
 };
+pub use js_regex::{JsCaptures, JsMatch, JsRegex};
 pub use host::{
     AdjacentPosition,
     ConsoleLevel, ConsoleMessage, DomEventRequest, DomEventResult, DomMutation, DomMutationResult,

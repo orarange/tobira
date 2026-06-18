@@ -120,3 +120,34 @@ fn string_replace_function_with_offset() {
         assert(out === '012');
     "#);
 }
+
+#[test]
+fn regex_lookahead_lookbehind() {
+    run(r#"
+        assert('$123'.replace(/\$(?=\d)/, 'USD ') === 'USD 123');
+        assert('1.99'.replace(/(?<=\.)\d+/, '00') === '1.00');
+        assert(/foo(?=bar)/.test('foobar'));
+        assert(!/foo(?=bar)/.test('foobaz'));
+        assert(/(?<!a)b/.test('cb'));
+        assert(!/(?<!a)b/.test('ab'));
+    "#);
+}
+
+#[test]
+fn regex_backreference() {
+    run(r#"
+        assert(/(\w)\1/.test('hello'));
+        assert(!/(\w)\1/.test('abc'));
+        const m = /(\w+) \1/.exec('hi hi');
+        assert(m !== null);
+        assert(m[1] === 'hi');
+    "#);
+}
+
+#[test]
+fn regex_gtag_url_pattern() {
+    run(r#"
+        const re = /^(?:([^:\/?#.]+):)?(?:\/\/(?:([^\\/?#]*)@)?([^\\/?#]*?)(?::([0-9]+))?(?=[\\/?#]|$))?([^?#]+)?(?:\?([^#]*))?(?:#([\s\S]*))?$/;
+        assert(re.test('https://example.com/path?q=1#h'));
+    "#);
+}
