@@ -573,3 +573,8 @@ Implemented all Phase 5 CSS roadmap items across 6 batches on `claude/phase5-css
 - Added browser-level history tracking for full document loads.
 - Added back/forward chrome buttons and `Alt+Left` / `Alt+Right` shortcuts.
 - Kept same-document soft navigation in sync with the browser history entry for the current page.
+
+### 2026-06-19 - Claude PM / Codex (dynamic import())
+
+- Implemented dynamic `import()` (preload model, user-chosen Option A) end-to-end. Step 1 (compiler+VM): `ModuleContext.dynamic_imports` map + `Opcode::DynamicImport` wraps a module namespace (or undefined→reject) in a Promise; literal specifiers resolve from the map, computed/unknown reject gracefully. Step 2 (host): `load_module_graph` walks the full AST (boa_ast Visitor) for `import("literal")` calls and preloads those module graphs (non-fatal on failure), populating `dynamic_imports`. crates.io/rollupjs/webpack.js.org/svelte.dev all clear the old `Unimplemented("import() calls")` compile wall; vuejs.org still renders (no ESM regression). 599 tests green (tests/dynamic_import.rs). Not yet: computed `import(var)` (rejects — needs runtime specifier resolution in the VM).
+- New leads surfaced after the unblock: svelte.dev `Invalid URL` (our hand-rolled URL parser is too strict for some input — clean fix candidate); rollupjs `Object.create prototype must be an object or null`.
