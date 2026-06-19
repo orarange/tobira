@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::env;
 use std::rc::Rc;
 
 use boa_ast::declaration::ExportDeclaration as BoaExportDeclaration;
@@ -16,6 +17,7 @@ use super::ast::{
     VariableDeclaration, SourceType, statement_list_item_to_node,
 };
 use super::chunk::{Chunk, Constant, ExceptionHandler, FunctionProto, Opcode, UpvalueDescriptor};
+use super::verifier::verify_stack_balance;
 mod scope;
 mod classes;
 mod patterns;
@@ -135,7 +137,16 @@ impl<'a> Compiler<'a> {
         function.install_this_binding()?;
         function.compile_statements(self.program.body())?;
         function.emit_implicit_return();
-        Ok(Chunk::new(function.finish()))
+        let chunk = Chunk::new(function.finish());
+        if env::var_os("TOBIRA_VERIFY_BYTECODE").is_some()
+            && let Err(error) = verify_stack_balance(&chunk.top_level)
+        {
+            eprintln!(
+                "bytecode verification failed: function={:?} ip={} opcode={} message={}",
+                error.function_label, error.ip, error.opcode, error.message
+            );
+        }
+        Ok(chunk)
     }
 }
 
