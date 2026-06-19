@@ -6802,7 +6802,10 @@ impl Vm {
     fn require_object_ref(&self, value: &Value, context: &str) -> Result<GcRef<JsObject>, VmError> {
         match value {
             Value::Object(object) => Ok(*object),
-            _ => Err(VmError::TypeError(format!("{context} requires an object"))),
+            _ => Err(VmError::TypeError(format!(
+                "{context} requires an object (got {})",
+                self.typeof_name(value)
+            ))),
         }
     }
 
