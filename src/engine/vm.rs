@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     cell::RefCell,
     cmp::{Ordering, Reverse},
     collections::{HashMap, VecDeque},
@@ -2747,6 +2747,20 @@ impl Vm {
             Opcode::Throw => {
                 let thrown = self.pop_value()?;
                 return Err(VmError::Thrown(thrown));
+            }
+            Opcode::DynamicImport => {
+                let value = self.pop_value()?;
+                let promise = match value {
+                    Value::Undefined => {
+                        let err = self.create_error_object(
+                            "TypeError",
+                            "Failed to resolve dynamically imported module".to_string(),
+                        );
+                        self.promise_reject_value(err)?
+                    }
+                    other => self.promise_resolve_value(other)?,
+                };
+                self.stack.push(Value::Object(promise));
             }
             Opcode::Nop => {}
         }
@@ -16009,6 +16023,7 @@ mod tests {
             .with_module_context(ModuleContext {
                 self_key: self_key.clone(),
                 imports: Default::default(),
+                dynamic_imports: Default::default(),
             })
             .compile()
             .expect("module should compile");
@@ -16035,6 +16050,7 @@ mod tests {
             .with_module_context(ModuleContext {
                 self_key: self_key.clone(),
                 imports: Default::default(),
+                dynamic_imports: Default::default(),
             })
             .compile()
             .expect("module should compile");
@@ -16094,6 +16110,7 @@ mod tests {
             .with_module_context(ModuleContext {
                 self_key: self_key.clone(),
                 imports: Default::default(),
+                dynamic_imports: Default::default(),
             })
             .compile()
             .expect("module should compile");
@@ -16120,6 +16137,7 @@ mod tests {
             .with_module_context(ModuleContext {
                 self_key: self_key.clone(),
                 imports: std::iter::once(("./dep".to_string(), dep_key.clone())).collect(),
+                dynamic_imports: Default::default(),
             })
             .compile()
             .expect("module should compile");
@@ -16164,6 +16182,7 @@ mod tests {
             .with_module_context(ModuleContext {
                 self_key: self_key.clone(),
                 imports: std::iter::once(("./dep".to_string(), dep_key.clone())).collect(),
+                dynamic_imports: Default::default(),
             })
             .compile()
             .expect("module should compile");
@@ -16200,6 +16219,7 @@ mod tests {
             .with_module_context(ModuleContext {
                 self_key: self_key.clone(),
                 imports: std::iter::once(("./dep".to_string(), dep_key.clone())).collect(),
+                dynamic_imports: Default::default(),
             })
             .compile()
             .expect("module should compile");

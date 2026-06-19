@@ -125,7 +125,34 @@ impl<'a> super::FunctionCompiler<'a> {
             ExpressionNode::New(new_expression) => self.compile_new_expression(new_expression),
             ExpressionNode::Call(call) => self.compile_call_expression(call),
             ExpressionNode::SuperCall(call) => self.compile_super_call(call),
-            ExpressionNode::ImportCall(_) => Err(CompileError::Unimplemented("import() calls")),
+            ExpressionNode::ImportCall(call) => {
+                let literal_spec = match call.argument() {
+                    ExpressionNode::Literal(lit) => match lit.kind() {
+                        LiteralKindNode::String(sym) => Some(self.program.resolve_sym(*sym)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let resolved_key = literal_spec.as_ref().and_then(|spec| {
+                    self.module_context
+                        .as_ref()
+                        .and_then(|ctx| ctx.dynamic_imports.get(spec).cloned())
+                });
+                match resolved_key {
+                    Some(key) => {
+                        let const_idx = self.add_string_constant(key)?;
+                        self.emit(Opcode::GetGlobalOptional(const_idx));
+                        self.emit(Opcode::DynamicImport);
+                    }
+                    None => {
+                        self.compile_expression(call.argument())?;
+                        self.emit(Opcode::Pop);
+                        self.emit(Opcode::LoadUndefined);
+                        self.emit(Opcode::DynamicImport);
+                    }
+                }
+                Ok(())
+            }
             ExpressionNode::Optional(optional) => self.compile_optional_expression(optional),
             ExpressionNode::TaggedTemplate(template) => self.compile_tagged_template(template),
             ExpressionNode::NewTarget(_) => {

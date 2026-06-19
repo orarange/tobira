@@ -1,4 +1,4 @@
-//! Bridge between the self-built JS engine (`tobira_engine::engine`) and the
+﻿//! Bridge between the self-built JS engine (`tobira_engine::engine`) and the
 //! browser's DOM/host services.
 //!
 //! `BrowserHost` implements the engine's `Host` trait over an arena-backed DOM
@@ -2589,6 +2589,7 @@ impl EngineSession {
                     let module_ctx = ModuleContext {
                         self_key: record.key.clone(),
                         imports,
+                        dynamic_imports: HashMap::new(),
                     };
                     match Compiler::new(&record.program).with_module_context(module_ctx).compile() {
                         Ok(chunk) => {

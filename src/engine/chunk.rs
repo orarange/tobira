@@ -26,6 +26,7 @@ pub enum Opcode {
     /// Like GetGlobal but pushes `undefined` instead of throwing when the global
     /// is absent. Used for `typeof undeclaredName`.
     GetGlobalOptional(u16),
+    DynamicImport,
     /// Build an `arguments` array from the current frame's call arguments.
     LoadArguments,
 

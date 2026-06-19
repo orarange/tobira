@@ -86,6 +86,7 @@ struct FunctionCompileOptions {
 pub struct ModuleContext {
     pub self_key: String,
     pub imports: HashMap<String, String>,
+    pub dynamic_imports: HashMap<String, String>,
 }
 
 pub struct Compiler<'a> {
@@ -114,6 +115,7 @@ impl<'a> Compiler<'a> {
                 Some(ModuleContext {
                     self_key: "\u{0}module:test".to_string(),
                     imports: HashMap::new(),
+                    dynamic_imports: HashMap::new(),
                 })
             })
         } else {
