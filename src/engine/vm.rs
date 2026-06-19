@@ -2,6 +2,7 @@
     cell::RefCell,
     cmp::{Ordering, Reverse},
     collections::{HashMap, VecDeque},
+    env,
     rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -23,6 +24,7 @@ use super::host::{
     ObserverRecord, ObserverResult, SiblingDirection, StorageAreaKind, StorageAreaScope,
     StorageOp, StorageResult, WindowId,
 };
+use super::verifier::compute_stack_depths;
 use super::value::{
     AsyncContext, AsyncGeneratorRequest, GeneratorState, HostDispatch, HostObjectClass,
     HostObjectSlot, JsObject, JsPropertyDescriptor, JsString, ObjectKind, PromiseReaction,
@@ -613,6 +615,7 @@ pub struct CallFrame {
     proto: Rc<FunctionProto>,
     ip: usize,
     stack_base: usize,
+    stack_divergence_reported: bool,
     locals: Vec<ValueCell>,
     upvalues: Vec<ValueCell>,
     this_value: Value,
@@ -1359,6 +1362,8 @@ enum ObjectIntrospectionKind {
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
+    stack_depth_cache: HashMap<usize, Rc<Vec<Option<i64>>>>,
+    trace_stack_enabled: bool,
     last_backtrace: Option<String>,
     pending_call_name: Option<String>,
     current_script_src: Option<String>,
@@ -1511,6 +1516,8 @@ impl Vm {
         let mut vm = Self {
             stack: Vec::new(),
             frames: Vec::new(),
+            stack_depth_cache: HashMap::new(),
+            trace_stack_enabled: env::var_os("TOBIRA_TRACE_STACK").is_some(),
             last_backtrace: None,
             pending_call_name: None,
             current_script_src: None,
@@ -2146,6 +2153,40 @@ impl Vm {
                 let opcode = frame.proto.code.get(frame.ip).cloned().ok_or_else(|| {
                     VmError::RangeError("instruction pointer ran past bytecode".to_string())
                 })?;
+                if self.trace_stack_enabled {
+                    let proto_key = Rc::as_ptr(&frame.proto) as usize;
+                    let table = self
+                        .stack_depth_cache
+                        .entry(proto_key)
+                        .or_insert_with(|| Rc::new(compute_stack_depths(&frame.proto)));
+                    let expected = table.get(ip).copied().flatten();
+                    let actual = (self.stack.len() - frame.stack_base) as i64;
+                    if let Some(expected) = expected {
+                        if expected != actual && !frame.stack_divergence_reported {
+                            frame.stack_divergence_reported = true;
+                            let script = self.current_script_src.as_deref().map_or_else(
+                                || {
+                                    self.current_script_node
+                                        .map(|node| format!("node={node:?}"))
+                                },
+                                |src| Some(src.to_string()),
+                            );
+                            let script = script.as_deref().unwrap_or("<unknown>");
+                            let start = ip.saturating_sub(3);
+                            let end = (ip + 3).min(frame.proto.code.len().saturating_sub(1));
+                            let mut neighborhood = Vec::new();
+                            for idx in start..=end {
+                                if let Some(code) = frame.proto.code.get(idx) {
+                                    neighborhood.push(format!("{idx}:{code:?}"));
+                                }
+                            }
+                            eprintln!(
+                                "STACKDIVERGE func_ptr={proto_key:#x} ip={ip} opcode={opcode:?} expected={expected} actual={actual} script={script} neighborhood=[{}]",
+                                neighborhood.join(", ")
+                            );
+                        }
+                    }
+                }
                 frame.ip += 1;
                 (ip, opcode)
             };
@@ -5652,6 +5693,7 @@ impl Vm {
             proto: closure.proto,
             ip: 0,
             stack_base: self.stack.len(),
+            stack_divergence_reported: false,
             locals,
             upvalues: closure.upvalues,
             this_value,

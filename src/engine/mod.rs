@@ -42,7 +42,7 @@ pub use host::{
 };
 pub use lexer::{LexError, LexGoal, Lexer, SourceLocation, Token, TokenKind};
 pub use parser::{ParseError, Parser, ParserOptions};
-pub use verifier::{StackVerifyError, verify_stack_balance};
+pub use verifier::{StackVerifyError, compute_stack_depths, verify_stack_balance};
 pub use value::{
     AsyncContext, HostDispatch, HostObjectClass, HostObjectSlot, JsObject, JsPropertyDescriptor,
     JsString, ObjectKind, PromiseReaction, PromiseState, PropertyKey, SymbolId, Value,

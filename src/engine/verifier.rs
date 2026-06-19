@@ -26,6 +26,98 @@ pub fn verify_stack_balance(proto: &FunctionProto) -> Result<(), StackVerifyErro
     verify_function(proto, function_label(proto))
 }
 
+pub fn compute_stack_depths(proto: &FunctionProto) -> Vec<Option<i64>> {
+    let mut depth_at = vec![None; proto.code.len()];
+    if proto.code.is_empty() {
+        return depth_at;
+    }
+
+    let mut worklist = VecDeque::new();
+    let _ = seed_depth(
+        &mut depth_at,
+        &mut worklist,
+        0,
+        0,
+        "",
+        &proto.code,
+    );
+    for handler in &proto.handlers {
+        let _ = seed_handler_entries(proto, handler, "", &mut depth_at, &mut worklist);
+    }
+
+    while let Some(ip) = worklist.pop_front() {
+        let Some(depth) = depth_at[ip] else {
+            continue;
+        };
+        let opcode = &proto.code[ip];
+        let (pops, pushes, flow) = stack_effect(opcode);
+        if depth < pops {
+            continue;
+        }
+        let next_depth = depth - pops + pushes;
+
+        match flow {
+            ControlFlow::FallThrough => {
+                let _ = propagate_successor(
+                    proto,
+                    "",
+                    &mut depth_at,
+                    &mut worklist,
+                    ip + 1,
+                    next_depth,
+                    opcode,
+                );
+            }
+            ControlFlow::Jump(offset) => {
+                if let Ok(target) = jump_target(ip, offset) {
+                    let _ = propagate_successor(
+                        proto,
+                        "",
+                        &mut depth_at,
+                        &mut worklist,
+                        target,
+                        next_depth,
+                        opcode,
+                    );
+                }
+            }
+            ControlFlow::CondJump {
+                jump_offset,
+                jump_pops,
+                fallthrough_pops,
+            } => {
+                let jump_depth = depth - jump_pops + pushes;
+                let fallthrough_depth = depth - fallthrough_pops + pushes;
+                if let Ok(jump_target) = jump_target(ip, jump_offset) {
+                    let _ = propagate_successor(
+                        proto,
+                        "",
+                        &mut depth_at,
+                        &mut worklist,
+                        jump_target,
+                        jump_depth,
+                        opcode,
+                    );
+                }
+                let _ = propagate_successor(
+                    proto,
+                    "",
+                    &mut depth_at,
+                    &mut worklist,
+                    ip + 1,
+                    fallthrough_depth,
+                    opcode,
+                );
+            }
+            ControlFlow::Terminal => {}
+        }
+
+        let _ = seed_handlers_for_ip(proto, ip, "", &mut depth_at, &mut worklist);
+    }
+
+    depth_at
+}
+
 fn verify_function(proto: &FunctionProto, label: String) -> Result<(), StackVerifyError> {
     for (index, nested) in proto.nested_functions.iter().enumerate() {
         let nested_label = nested_label(&label, nested, index);
