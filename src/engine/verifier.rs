@@ -28,93 +28,9 @@ pub fn verify_stack_balance(proto: &FunctionProto) -> Result<(), StackVerifyErro
 
 pub fn compute_stack_depths(proto: &FunctionProto) -> Vec<Option<i64>> {
     let mut depth_at = vec![None; proto.code.len()];
-    if proto.code.is_empty() {
-        return depth_at;
-    }
-
+    let mut mode = StackDepthMode::Compute;
     let mut worklist = VecDeque::new();
-    let _ = seed_depth(
-        &mut depth_at,
-        &mut worklist,
-        0,
-        0,
-        "",
-        &proto.code,
-    );
-    for handler in &proto.handlers {
-        let _ = seed_handler_entries(proto, handler, "", &mut depth_at, &mut worklist);
-    }
-
-    while let Some(ip) = worklist.pop_front() {
-        let Some(depth) = depth_at[ip] else {
-            continue;
-        };
-        let opcode = &proto.code[ip];
-        let (pops, pushes, flow) = stack_effect(opcode);
-        if depth < pops {
-            continue;
-        }
-        let next_depth = depth - pops + pushes;
-
-        match flow {
-            ControlFlow::FallThrough => {
-                let _ = propagate_successor(
-                    proto,
-                    "",
-                    &mut depth_at,
-                    &mut worklist,
-                    ip + 1,
-                    next_depth,
-                    opcode,
-                );
-            }
-            ControlFlow::Jump(offset) => {
-                if let Ok(target) = jump_target(ip, offset) {
-                    let _ = propagate_successor(
-                        proto,
-                        "",
-                        &mut depth_at,
-                        &mut worklist,
-                        target,
-                        next_depth,
-                        opcode,
-                    );
-                }
-            }
-            ControlFlow::CondJump {
-                jump_offset,
-                jump_pops,
-                fallthrough_pops,
-            } => {
-                let jump_depth = depth - jump_pops + pushes;
-                let fallthrough_depth = depth - fallthrough_pops + pushes;
-                if let Ok(jump_target) = jump_target(ip, jump_offset) {
-                    let _ = propagate_successor(
-                        proto,
-                        "",
-                        &mut depth_at,
-                        &mut worklist,
-                        jump_target,
-                        jump_depth,
-                        opcode,
-                    );
-                }
-                let _ = propagate_successor(
-                    proto,
-                    "",
-                    &mut depth_at,
-                    &mut worklist,
-                    ip + 1,
-                    fallthrough_depth,
-                    opcode,
-                );
-            }
-            ControlFlow::Terminal => {}
-        }
-
-        let _ = seed_handlers_for_ip(proto, ip, "", &mut depth_at, &mut worklist);
-    }
-
+    let _ = analyze_stack_depths(proto, "", &mut depth_at, &mut worklist, &mut mode);
     depth_at
 }
 
@@ -131,17 +47,79 @@ fn verify_function(proto: &FunctionProto, label: String) -> Result<(), StackVeri
 
     let mut depth_at: Vec<Option<i64>> = vec![None; code_len];
     let mut worklist = VecDeque::new();
+    let mut mode = StackDepthMode::Verify;
+    analyze_stack_depths(proto, &label, &mut depth_at, &mut worklist, &mut mode)
+}
+
+enum StackDepthMode {
+    Verify,
+    Compute,
+}
+
+impl StackDepthMode {
+    fn underflow(
+        &mut self,
+        label: &str,
+        ip: usize,
+        opcode: &Opcode,
+        message: String,
+    ) -> Result<(), StackVerifyError> {
+        match self {
+            StackDepthMode::Verify => Err(error(label, ip, opcode, message)),
+            StackDepthMode::Compute => Ok(()),
+        }
+    }
+
+    fn mismatch(
+        &mut self,
+        label: &str,
+        ip: usize,
+        opcode: &Opcode,
+        message: String,
+    ) -> Result<(), StackVerifyError> {
+        match self {
+            StackDepthMode::Verify => Err(error(label, ip, opcode, message)),
+            StackDepthMode::Compute => Ok(()),
+        }
+    }
+
+    fn out_of_range(
+        &mut self,
+        label: &str,
+        ip: usize,
+        opcode: &Opcode,
+        message: String,
+    ) -> Result<(), StackVerifyError> {
+        match self {
+            StackDepthMode::Verify => Err(error(label, ip, opcode, message)),
+            StackDepthMode::Compute => Ok(()),
+        }
+    }
+}
+
+fn analyze_stack_depths(
+    proto: &FunctionProto,
+    label: &str,
+    depth_at: &mut [Option<i64>],
+    worklist: &mut VecDeque<usize>,
+    mode: &mut StackDepthMode,
+) -> Result<(), StackVerifyError> {
+    if proto.code.is_empty() {
+        return Ok(());
+    }
+
     seed_depth(
-        &mut depth_at,
-        &mut worklist,
+        depth_at,
+        worklist,
         0,
         0,
-        &label,
+        label,
         &proto.code,
+        mode,
     )?;
 
     for handler in &proto.handlers {
-        seed_handler_entries(proto, handler, &label, &mut depth_at, &mut worklist)?;
+        seed_handler_entries(proto, handler, label, depth_at, worklist, mode)?;
     }
 
     while let Some(ip) = worklist.pop_front() {
@@ -151,12 +129,8 @@ fn verify_function(proto: &FunctionProto, label: String) -> Result<(), StackVeri
         let opcode = &proto.code[ip];
         let (pops, pushes, flow) = stack_effect(opcode);
         if depth < pops {
-            return Err(error(
-                &label,
-                ip,
-                opcode,
-                format!("stack underflow: depth {depth} < pops {pops}"),
-            ));
+            mode.underflow(label, ip, opcode, format!("stack underflow: depth {depth} < pops {pops}"))?;
+            continue;
         }
         let next_depth = depth - pops + pushes;
 
@@ -164,24 +138,26 @@ fn verify_function(proto: &FunctionProto, label: String) -> Result<(), StackVeri
             ControlFlow::FallThrough => {
                 propagate_successor(
                     proto,
-                    &label,
-                    &mut depth_at,
-                    &mut worklist,
+                    label,
+                    depth_at,
+                    worklist,
                     ip + 1,
                     next_depth,
                     opcode,
+                    mode,
                 )?;
             }
             ControlFlow::Jump(offset) => {
                 let target = jump_target(ip, offset)?;
                 propagate_successor(
                     proto,
-                    &label,
-                    &mut depth_at,
-                    &mut worklist,
+                    label,
+                    depth_at,
+                    worklist,
                     target,
                     next_depth,
                     opcode,
+                    mode,
                 )?;
             }
             ControlFlow::CondJump {
@@ -194,27 +170,29 @@ fn verify_function(proto: &FunctionProto, label: String) -> Result<(), StackVeri
                 let jump_target = jump_target(ip, jump_offset)?;
                 propagate_successor(
                     proto,
-                    &label,
-                    &mut depth_at,
-                    &mut worklist,
+                    label,
+                    depth_at,
+                    worklist,
                     jump_target,
                     jump_depth,
                     opcode,
+                    mode,
                 )?;
                 propagate_successor(
                     proto,
-                    &label,
-                    &mut depth_at,
-                    &mut worklist,
+                    label,
+                    depth_at,
+                    worklist,
                     ip + 1,
                     fallthrough_depth,
                     opcode,
+                    mode,
                 )?;
             }
             ControlFlow::Terminal => {}
         }
 
-        seed_handlers_for_ip(proto, ip, &label, &mut depth_at, &mut worklist)?;
+        seed_handlers_for_ip(proto, ip, label, depth_at, worklist, mode)?;
     }
 
     Ok(())
@@ -226,6 +204,7 @@ fn seed_handler_entries(
     label: &str,
     depth_at: &mut [Option<i64>],
     worklist: &mut VecDeque<usize>,
+    mode: &mut StackDepthMode,
 ) -> Result<(), StackVerifyError> {
     let Some(&try_start_depth) = depth_at.get(handler.try_start as usize).and_then(|v| v.as_ref())
     else {
@@ -239,6 +218,7 @@ fn seed_handler_entries(
             try_start_depth,
             label,
             &proto.code,
+            mode,
         )?;
     }
     if handler.finally_ip != 0 {
@@ -249,6 +229,7 @@ fn seed_handler_entries(
             try_start_depth,
             label,
             &proto.code,
+            mode,
         )?;
     }
     Ok(())
@@ -260,15 +241,13 @@ fn seed_handlers_for_ip(
     label: &str,
     depth_at: &mut [Option<i64>],
     worklist: &mut VecDeque<usize>,
+    mode: &mut StackDepthMode,
 ) -> Result<(), StackVerifyError> {
-    let mut any = false;
     for handler in &proto.handlers {
         if handler.try_start as usize == ip {
-            any = true;
-            seed_handler_entries(proto, handler, label, depth_at, worklist)?;
+            seed_handler_entries(proto, handler, label, depth_at, worklist, mode)?;
         }
     }
-    let _ = any;
     Ok(())
 }
 
@@ -279,14 +258,15 @@ fn seed_depth(
     depth: i64,
     label: &str,
     code: &[Opcode],
+    mode: &mut StackDepthMode,
 ) -> Result<(), StackVerifyError> {
     if ip >= depth_at.len() {
-        return Err(error(
+        return mode.out_of_range(
             label,
             code.len().saturating_sub(1),
             code.last().unwrap_or(&Opcode::Nop),
             format!("entry target out of range: {ip}"),
-        ));
+        );
     }
     match depth_at[ip] {
         None => {
@@ -295,12 +275,12 @@ fn seed_depth(
         }
         Some(existing) if existing == depth => {}
         Some(existing) => {
-            return Err(error(
+            return mode.mismatch(
                 label,
                 ip,
                 &code[ip],
                 format!("stack depth mismatch at {ip}: {existing} vs {depth}"),
-            ));
+            );
         }
     }
     Ok(())
@@ -314,14 +294,15 @@ fn propagate_successor(
     ip: usize,
     depth: i64,
     opcode: &Opcode,
+    mode: &mut StackDepthMode,
 ) -> Result<(), StackVerifyError> {
     if ip >= proto.code.len() {
-        return Err(error(
+        return mode.out_of_range(
             label,
             proto.code.len().saturating_sub(1),
             opcode,
             format!("jump target out of range: {ip}"),
-        ));
+        );
     }
     match depth_at[ip] {
         None => {
@@ -330,12 +311,12 @@ fn propagate_successor(
         }
         Some(existing) if existing == depth => {}
         Some(existing) => {
-            return Err(error(
+            return mode.mismatch(
                 label,
                 ip,
                 &proto.code[ip],
                 format!("stack depth mismatch at {ip}: {existing} vs {depth}"),
-            ));
+            );
         }
     }
     Ok(())

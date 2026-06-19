@@ -1362,7 +1362,11 @@ enum ObjectIntrospectionKind {
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
-    stack_depth_cache: HashMap<usize, Rc<Vec<Option<i64>>>>,
+    // Keyed by `Rc::as_ptr(proto) as usize`. The value also holds a clone of the
+    // proto `Rc` so the FunctionProto stays alive while cached — otherwise a freed
+    // proto's address could be reused by a different proto, and this cache would
+    // hand back the wrong (stale) depth table. Debug-only (TOBIRA_TRACE_STACK).
+    stack_depth_cache: HashMap<usize, (Rc<FunctionProto>, Rc<Vec<Option<i64>>>)>,
     trace_stack_enabled: bool,
     last_backtrace: Option<String>,
     pending_call_name: Option<String>,
@@ -2155,10 +2159,13 @@ impl Vm {
                 })?;
                 if self.trace_stack_enabled {
                     let proto_key = Rc::as_ptr(&frame.proto) as usize;
-                    let table = self
+                    let table = &self
                         .stack_depth_cache
                         .entry(proto_key)
-                        .or_insert_with(|| Rc::new(compute_stack_depths(&frame.proto)));
+                        .or_insert_with(|| {
+                            (frame.proto.clone(), Rc::new(compute_stack_depths(&frame.proto)))
+                        })
+                        .1;
                     let expected = table.get(ip).copied().flatten();
                     let actual = (self.stack.len() - frame.stack_base) as i64;
                     if let Some(expected) = expected {
@@ -2172,17 +2179,22 @@ impl Vm {
                                 |src| Some(src.to_string()),
                             );
                             let script = script.as_deref().unwrap_or("<unknown>");
-                            let start = ip.saturating_sub(3);
-                            let end = (ip + 3).min(frame.proto.code.len().saturating_sub(1));
-                            let mut neighborhood = Vec::new();
-                            for idx in start..=end {
+                            let end = (40usize).min(frame.proto.code.len());
+                            let mut dump = Vec::new();
+                            for idx in 0..end {
                                 if let Some(code) = frame.proto.code.get(idx) {
-                                    neighborhood.push(format!("{idx}:{code:?}"));
+                                    let d = table
+                                        .get(idx)
+                                        .copied()
+                                        .flatten()
+                                        .map_or_else(|| "?".to_string(), |v| v.to_string());
+                                    dump.push(format!("{idx}[d={d}]:{code:?}"));
                                 }
                             }
                             eprintln!(
-                                "STACKDIVERGE func_ptr={proto_key:#x} ip={ip} opcode={opcode:?} expected={expected} actual={actual} script={script} neighborhood=[{}]",
-                                neighborhood.join(", ")
+                                "STACKDIVERGE func_ptr={proto_key:#x} ip={ip} opcode={opcode:?} expected={expected} actual={actual} handlers={} script={script}\n  DUMP[0..{end}]={}",
+                                frame.proto.handlers.len(),
+                                dump.join("  ")
                             );
                         }
                     }
