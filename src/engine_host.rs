@@ -1105,6 +1105,10 @@ impl BrowserHost {
                     self.collect_ordered_scripts(child, out);
                     continue;
                 }
+                // This host's `NodeId` IS the arena node index (see
+                // `collect_node_order` / `make_dom_node_value`), not the browser's
+                // `data-tobira-node-id` pre-order number — use the index directly.
+                let node_id = Some(child as u32);
                 let module = self.nodes[child]
                     .attrs
                     .get("type")
@@ -1123,12 +1127,17 @@ impl BrowserHost {
                         out.push(ScriptSource::External {
                             src: src.trim().to_string(),
                             module,
+                            node_id,
                         });
                     }
                     _ => {
                         let text = self.collect_text(child);
                         if !text.trim().is_empty() {
-                            out.push(ScriptSource::Inline { text, module });
+                            out.push(ScriptSource::Inline {
+                                text,
+                                module,
+                                node_id,
+                            });
                         }
                     }
                 }
@@ -2555,14 +2564,20 @@ pub struct EngineRunResult {
 /// external reference whose `src` must be resolved + fetched before execution.
 #[derive(Debug, Clone)]
 pub enum ScriptSource {
-    Inline { text: String, module: bool },
-    External { src: String, module: bool },
+    Inline { text: String, module: bool, node_id: Option<u32> },
+    External { src: String, module: bool, node_id: Option<u32> },
 }
 
 impl ScriptSource {
     fn is_module(&self) -> bool {
         match self {
             Self::Inline { module, .. } | Self::External { module, .. } => *module,
+        }
+    }
+
+    fn node_id(&self) -> Option<u32> {
+        match self {
+            Self::Inline { node_id, .. } | Self::External { node_id, .. } => *node_id,
         }
     }
 }
@@ -2642,10 +2657,12 @@ impl EngineSession {
         if let Ok(program) = Parser::new(RUNTIME_PRELUDE).parse() {
             if let Ok(chunk) = Compiler::new(&program).compile() {
                 vm.set_current_script_src(None);
+                vm.set_current_script_node(None);
                 let _ = vm.execute(&chunk);
             }
         }
         'scripts: for (script_index, script) in scripts.iter().enumerate() {
+            let script_node_id = script.node_id().map(NodeId);
             // Resolve the source: inline text is used directly; an external `src`
             // is resolved against the document URL and fetched over HTTP (just like
             // a real browser loading `<script src>`). A fetch failure aborts the
@@ -2711,6 +2728,7 @@ impl EngineSession {
                     match Compiler::new(&record.program).with_module_context(module_ctx).compile() {
                         Ok(chunk) => {
                             vm.set_current_script_src(Some(record.src_url.clone()));
+                            vm.set_current_script_node(script_node_id);
                             if let Err(e) = vm.execute_module(&chunk) {
                                 error = Some(format!("{e} (in module {url})"));
                                 break 'scripts;
@@ -2728,6 +2746,7 @@ impl EngineSession {
                     Ok(program) => match Compiler::new(&program).compile() {
                         Ok(chunk) => {
                             vm.set_current_script_src(current_script_src.clone());
+                            vm.set_current_script_node(script_node_id);
                             if let Err(e) = vm.execute(&chunk) {
                                 let script_label = match script {
                                     ScriptSource::External { src, .. } => {
@@ -3765,12 +3784,18 @@ mod tests {
     }
 
     #[test]
-    fn inline_script_sees_current_script_as_null() {
+    fn inline_script_sees_current_script_element() {
+        // A classic inline script's `document.currentScript` is the executing
+        // <script> element (a real node with a working parentElement), not null —
+        // matching browsers. This is what SvelteKit/crates.io bootstrap relies on
+        // (`document.currentScript.parentElement`).
         let html = r#"
             <html><body>
               <script>
                 document.body.setAttribute('data-document-type', typeof document);
-                document.body.setAttribute('data-current-script', String(document.currentScript === null));
+                document.body.setAttribute('data-current-script-null', String(document.currentScript === null));
+                document.body.setAttribute('data-current-script-tag', String(document.currentScript && document.currentScript.tagName));
+                document.body.setAttribute('data-current-script-has-parent', String(!!(document.currentScript && document.currentScript.parentElement)));
               </script>
             </body></html>
         "#;
@@ -3778,17 +3803,23 @@ mod tests {
         assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
         let snapshot = session.snapshot();
         assert!(
-            snapshot
-                .html
-                .contains("data-document-type=\"object\""),
+            snapshot.html.contains("data-document-type=\"object\""),
             "{:?}",
             snapshot.html
         );
         assert!(
-            snapshot
-                .html
-                .contains("data-current-script=\"true\""),
-            "{:?}",
+            snapshot.html.contains("data-current-script-null=\"false\""),
+            "currentScript should not be null for a classic inline script: {:?}",
+            snapshot.html
+        );
+        assert!(
+            snapshot.html.contains("data-current-script-tag=\"SCRIPT\""),
+            "currentScript should be the SCRIPT element: {:?}",
+            snapshot.html
+        );
+        assert!(
+            snapshot.html.contains("data-current-script-has-parent=\"true\""),
+            "currentScript should have a parentElement: {:?}",
             snapshot.html
         );
     }

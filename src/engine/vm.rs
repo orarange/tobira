@@ -1362,6 +1362,7 @@ pub struct Vm {
     last_backtrace: Option<String>,
     pending_call_name: Option<String>,
     current_script_src: Option<String>,
+    current_script_node: Option<NodeId>,
     heap: Heap,
     globals: HashMap<String, Value>,
     callables: HashMap<RawGcRef, Callable>,
@@ -1513,6 +1514,7 @@ impl Vm {
             last_backtrace: None,
             pending_call_name: None,
             current_script_src: None,
+            current_script_node: None,
             heap,
             globals: HashMap::new(),
             callables: HashMap::new(),
@@ -1594,6 +1596,10 @@ impl Vm {
 
     pub fn set_current_script_src(&mut self, src: Option<String>) {
         self.current_script_src = src;
+    }
+
+    pub fn set_current_script_node(&mut self, node: Option<NodeId>) {
+        self.current_script_node = node;
     }
 
     /// Fire a DOM event on a node handle, invoking all registered JS listeners.
@@ -14944,6 +14950,9 @@ impl Vm {
             "charset" | "characterSet" => Ok(self.make_string_value("UTF-8")),
             "location" => self.make_location_object(),
             "currentScript" => {
+                if let Some(node) = self.current_script_node {
+                    return Ok(self.make_dom_node_value(node));
+                }
                 if let Some(src) = self.current_script_src.clone() {
                     let object = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
                     let src_value = self.make_string_value(&src);
