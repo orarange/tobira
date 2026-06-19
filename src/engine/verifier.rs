@@ -374,10 +374,14 @@ fn stack_effect(op: &Opcode) -> (i64, i64, ControlFlow) {
         }
         Opcode::Call(argc) => ((i64::from(*argc) + 2), 1, ControlFlow::FallThrough),
         Opcode::CallSpread(argc) => ((i64::from(*argc) + 2), 1, ControlFlow::FallThrough),
-        Opcode::Return | Opcode::AsyncReturn | Opcode::Yield | Opcode::Throw => {
+        Opcode::Return | Opcode::AsyncReturn | Opcode::Throw => {
             (1, 0, ControlFlow::Terminal)
         }
-        Opcode::Await => (1, 0, ControlFlow::Terminal),
+        // Await/Yield suspend then resume at the next instruction: they pop the
+        // awaited/yielded value and the resume pushes the resolved/sent value
+        // (net 0), so execution continues — not terminal. Modelling them as
+        // Terminal would leave all post-await/yield code unverified.
+        Opcode::Await | Opcode::Yield => (1, 1, ControlFlow::FallThrough),
         Opcode::MakeArray(count) => (i64::from(*count), 1, ControlFlow::FallThrough),
         Opcode::SetProp | Opcode::SetIndex => (3, 0, ControlFlow::FallThrough),
         Opcode::CopyDataProperties => (2, 1, ControlFlow::FallThrough),
