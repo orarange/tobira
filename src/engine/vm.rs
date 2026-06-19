@@ -1108,7 +1108,14 @@ fn normalize_url_path(path: &str) -> String {
         out.push('/');
     }
     out.push_str(&segments.join("/"));
-    if path.ends_with('/') && !out.ends_with('/') {
+    // A trailing "/" — or a trailing "." / ".." segment, which denotes a
+    // directory (e.g. `new URL(".", base)`) — keeps the path ending in "/".
+    let ends_dir = path.ends_with('/')
+        || path.ends_with("/.")
+        || path.ends_with("/..")
+        || path == "."
+        || path == "..";
+    if ends_dir && !out.ends_with('/') {
         out.push('/');
     }
     if out.is_empty() && absolute {
@@ -6361,12 +6368,30 @@ impl Vm {
             Value::Object(object) => {
                 if self.callables.contains_key(&object.raw()) {
                     "function() { [native code] }".to_string()
+                } else if let Some(href) = self.location_href_for_stringify(*object) {
+                    // `String(location)` / ``${location}`` / `new URL(".", location)`
+                    // must yield the href, not the generic "[object Object]".
+                    href
                 } else {
                     "[object Object]".to_string()
                 }
             }
             Value::Symbol(_) => "Symbol()".to_string(),
         }
+    }
+
+    /// If `object` is the `Location` host object, return its `href` so it
+    /// stringifies like a real browser `Location` (whose string value is href).
+    fn location_href_for_stringify(&self, object: GcRef<JsObject>) -> Option<String> {
+        let is_location = self
+            .heap
+            .objects()
+            .get(object)
+            .is_some_and(|o| matches!(&o.kind, ObjectKind::Host(slot) if slot.class == HostObjectClass::Other("Location")));
+        if !is_location {
+            return None;
+        }
+        self.host.location(WindowId(0)).ok().map(|l| l.href)
     }
 
     /// ECMAScript `ToPrimitive`. `prefer`: `Some(true)` = string hint,

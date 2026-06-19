@@ -63,6 +63,10 @@ fn url_relative_resolution() {
         assert(b.pathname === '/a/z');
         assert(c.pathname === '/a/b');
         assert(c.search === '?q=1');
+        // "." / ".." directory segments keep the trailing slash.
+        assert(new URL('.', 'https://h.com/a/b').href === 'https://h.com/a/');
+        assert(new URL('..', 'https://h.com/a/b/c').href === 'https://h.com/a/');
+        assert(new URL('./d', 'https://h.com/a/b').href === 'https://h.com/a/d');
         "#,
     );
 }
