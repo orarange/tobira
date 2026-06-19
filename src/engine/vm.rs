@@ -2137,18 +2137,29 @@ impl Vm {
 
     fn run_until_frame_depth(&mut self, target_depth: usize) -> Result<(), VmError> {
         while self.frames.len() > target_depth {
-            let opcode = {
+            let (ip, opcode) = {
                 let frame = self
                     .frames
                     .last_mut()
                     .ok_or_else(|| VmError::RangeError("no call frame available".to_string()))?;
+                let ip = frame.ip;
                 let opcode = frame.proto.code.get(frame.ip).cloned().ok_or_else(|| {
                     VmError::RangeError("instruction pointer ran past bytecode".to_string())
                 })?;
                 frame.ip += 1;
-                opcode
+                (ip, opcode)
             };
-            if let Err(error) = self.execute_opcode(opcode) {
+            if let Err(error) = self.execute_opcode(opcode.clone()) {
+                // A raw operand-stack underflow is an internal VM/codegen invariant
+                // violation; name the offending opcode + ip so it can be pinpointed.
+                let error = match error {
+                    VmError::RangeError(msg) if msg == "operand stack underflow" => {
+                        VmError::RangeError(format!(
+                            "operand stack underflow at ip={ip} opcode={opcode:?}"
+                        ))
+                    }
+                    other => other,
+                };
                 self.handle_runtime_error(error)?;
             }
         }
@@ -5938,6 +5949,13 @@ impl Vm {
                         *cell.borrow_mut() = thrown.clone();
                     }
                 }
+                // The try body may have pushed operands before throwing; a
+                // catch/finally block is statement-level and runs with an empty
+                // operand stack (frame base), so discard those leftovers. Without
+                // this the operand depth stays inflated and a later opcode (e.g. a
+                // Call) underflows — the bytecode itself is statically balanced.
+                let base = self.frames[frame_index].stack_base;
+                self.stack.truncate(base);
                 if handler.catch_ip != 0 {
                     self.frames[frame_index].pending_exception = None;
                     self.frames[frame_index].ip = handler.catch_ip as usize;
