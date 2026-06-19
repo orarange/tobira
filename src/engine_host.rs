@@ -12,8 +12,10 @@
 #![allow(dead_code)]
 
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use boa_ast::expression::ImportCall;
+use boa_ast::visitor::{VisitWith, Visitor};
 use tobira_engine::engine::{
     AdjacentPosition, Compiler, ConsoleMessage, DomEventInit, DomEventRequest, DomEventResult,
     DomMutation, DomMutationResult, DomStructuralChange,
@@ -36,7 +38,118 @@ struct ModuleRecord {
     key: String,
     program: Program,
     imports: Vec<(String, String)>,
+    dyn_imports: Vec<(String, String)>,
     src_url: String,
+}
+
+struct DynImportCollector {
+    syms: Vec<boa_interner::Sym>,
+}
+
+impl DynImportCollector {
+    fn new() -> Self {
+        Self { syms: Vec::new() }
+    }
+}
+
+impl<'ast> Visitor<'ast> for DynImportCollector {
+    type BreakTy = core::convert::Infallible;
+
+    fn visit_import_call(
+        &mut self,
+        node: &'ast ImportCall,
+    ) -> core::ops::ControlFlow<Self::BreakTy> {
+        if let boa_ast::Expression::Literal(lit) = node.argument() {
+            if let Some(sym) = lit.as_string() {
+                self.syms.push(sym);
+            }
+        }
+        node.argument().visit_with(self)
+    }
+}
+
+fn collect_dyn_imports_from_stmt<'ast>(
+    stmt: &'ast StatementNode,
+    collector: &mut DynImportCollector,
+) {
+    match stmt {
+        StatementNode::VariableDeclaration(node) => {
+            if let Some(var) = node.as_var() {
+                let _ = var.visit_with(collector);
+            }
+            if let Some(lexical) = node.as_lexical() {
+                let _ = lexical.visit_with(collector);
+            }
+        }
+        StatementNode::FunctionDeclaration(node) => {
+            let _ = node.parameters().visit_with(collector);
+            let _ = node.body().visit_with(collector);
+        }
+        StatementNode::ClassDeclaration(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::BlockStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::IfStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::SwitchStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::ForStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::ForInStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::ForOfStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::WhileStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::DoWhileStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::TryStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::ThrowStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::ReturnStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::BreakStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::ContinueStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::LabeledStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::ExpressionStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::ImportDeclaration(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::ExportNamedDeclaration(node) => {
+            let _ = node.0.visit_with(collector);
+        }
+        StatementNode::ExportDefaultDeclaration(node) => {
+            let _ = node.0.visit_with(collector);
+        }
+        StatementNode::ExportAllDeclaration(node) => {
+            let _ = node.0.visit_with(collector);
+        }
+        StatementNode::WithStatement(node) => {
+            let _ = node.visit_with(collector);
+        }
+        StatementNode::EmptyStatement | StatementNode::DebuggerStatement => {}
+    }
 }
 
 fn resolve_specifier(specifier: &str, referrer_url: &str) -> Result<String, String> {
@@ -2585,11 +2698,15 @@ impl EngineSession {
                     for (specifier, dep_url) in &record.imports {
                         imports.insert(specifier.clone(), format!("\u{0}module:{dep_url}"));
                     }
+                    let mut dynamic_imports: HashMap<String, String> = HashMap::new();
+                    for (specifier, dep_url) in &record.dyn_imports {
+                        dynamic_imports.insert(specifier.clone(), format!("\u{0}module:{dep_url}"));
+                    }
                     vm.set_global_object(record.key.clone());
                     let module_ctx = ModuleContext {
                         self_key: record.key.clone(),
                         imports,
-                        dynamic_imports: HashMap::new(),
+                        dynamic_imports,
                     };
                     match Compiler::new(&record.program).with_module_context(module_ctx).compile() {
                         Ok(chunk) => {
@@ -2742,12 +2859,49 @@ impl EngineSession {
                 _ => {}
             }
         }
+        let mut collector = DynImportCollector::new();
+        for stmt in program.body() {
+            collect_dyn_imports_from_stmt(stmt, &mut collector);
+        }
+        let mut dyn_imports = Vec::new();
+        let mut seen_dyn_imports = HashSet::new();
+        for sym in collector.syms {
+            let spec = program.resolve_sym(sym);
+            if !seen_dyn_imports.insert(spec.clone()) {
+                continue;
+            }
+            match resolve_specifier(&spec, base_url) {
+                Ok(dep_url) => {
+                    if !registry.contains_key(&dep_url) {
+                        match crate::http::fetch(&Url::parse(&dep_url).map_err(|e| format!("{e:?}"))?) {
+                            Ok(dep_src) => {
+                                let dep_text = String::from_utf8_lossy(&dep_src.body).into_owned();
+                                if let Err(_e) = Self::load_module_graph(
+                                    &dep_url,
+                                    &dep_text,
+                                    &dep_url,
+                                    registry,
+                                    post_order,
+                                    in_progress,
+                                ) {
+                                    continue;
+                                }
+                            }
+                            Err(_e) => continue,
+                        }
+                    }
+                    dyn_imports.push((spec.clone(), dep_url.clone()));
+                }
+                Err(_e) => continue,
+            }
+        }
         registry.insert(
             url.to_string(),
             ModuleRecord {
                 key: format!("\u{0}module:{url}"),
                 program,
                 imports,
+                dyn_imports,
                 src_url: url.to_string(),
             },
         );
