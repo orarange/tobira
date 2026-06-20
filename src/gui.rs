@@ -124,7 +124,7 @@ struct BrowserApp {
     /// of calling `drag_window()`, which would hand control to the OS modal move
     /// loop and freeze our event loop (timers/animation) until the drag ends.
     window_drag_grab: Option<PhysicalPosition<f64>>,
-    address_bar: AddressBarState,
+    address_bar: TextEditorState,
     focused_page_input: Option<FocusedPageInput>,
     hovered_target: HitTarget,
     hovered_link_url: Option<String>,
@@ -225,7 +225,7 @@ impl BrowserApp {
         let initial_navigation = initial_url.clone();
         let (current_url, history, history_index, document, address_bar) = match initial_url {
             Some(url) => {
-                let mut address_bar = AddressBarState::new(url.to_string());
+                let mut address_bar = TextEditorState::new(url.to_string());
                 address_bar.focused = false;
                 (
                     Some(url.clone()),
@@ -236,7 +236,7 @@ impl BrowserApp {
                 )
             }
             None => {
-                let mut address_bar = AddressBarState::new(String::new());
+                let mut address_bar = TextEditorState::new(String::new());
                 address_bar.focus_at(0);
                 (None, Vec::new(), None, DocumentView::blank(), address_bar)
             }
@@ -1245,11 +1245,11 @@ impl BrowserApp {
                 KeyCode::Backspace => {
                     let changed = if control {
                         self.focused_page_editor_mut()
-                            .map(AddressBarState::delete_word_backward)
+                            .map(TextEditorState::delete_word_backward)
                             .unwrap_or(false)
                     } else {
                         self.focused_page_editor_mut()
-                            .map(AddressBarState::backspace)
+                            .map(TextEditorState::backspace)
                             .unwrap_or(false)
                     };
                     if changed {
@@ -1263,11 +1263,11 @@ impl BrowserApp {
                 KeyCode::Delete => {
                     let changed = if control {
                         self.focused_page_editor_mut()
-                            .map(AddressBarState::delete_word_forward)
+                            .map(TextEditorState::delete_word_forward)
                             .unwrap_or(false)
                     } else {
                         self.focused_page_editor_mut()
-                            .map(AddressBarState::delete_forward)
+                            .map(TextEditorState::delete_forward)
                             .unwrap_or(false)
                     };
                     if changed {
@@ -1335,7 +1335,7 @@ impl BrowserApp {
                 KeyCode::KeyA if control && !repeat => {
                     if self
                         .focused_page_editor_mut()
-                        .map(AddressBarState::select_all)
+                        .map(TextEditorState::select_all)
                         .unwrap_or(false)
                     {
                         self.sync_input_method();
@@ -1526,7 +1526,7 @@ impl BrowserApp {
             return;
         }
         self.blur_address_bar();
-        let mut editor = AddressBarState::new(self.control_current_value(control));
+        let mut editor = TextEditorState::new(self.control_current_value(control));
         editor.focus_at(char_index.unwrap_or_else(|| editor.char_len()));
         self.focused_page_input = Some(FocusedPageInput {
             control_id: control.id,
@@ -1662,7 +1662,7 @@ impl BrowserApp {
         ))
     }
 
-    fn focused_page_editor_mut(&mut self) -> Option<&mut AddressBarState> {
+    fn focused_page_editor_mut(&mut self) -> Option<&mut TextEditorState> {
         self.focused_page_input
             .as_mut()
             .map(|focused| &mut focused.editor)
@@ -1799,7 +1799,7 @@ impl BrowserApp {
 
         let changed = self
             .focused_page_editor_mut()
-            .and_then(AddressBarState::cut_selection_text)
+            .and_then(TextEditorState::cut_selection_text)
             .is_some();
         if changed {
             self.sync_page_input_value();
@@ -1948,7 +1948,7 @@ impl BrowserApp {
                         .x
                         .max((FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64)
                         - (FRAME_PADDING / 2 + control.x + CONTROL_PADDING_X) as f64;
-                    let mut editor = AddressBarState::new(self.control_current_value(&control));
+                    let mut editor = TextEditorState::new(self.control_current_value(&control));
                     editor.focus_at(editor.char_len());
                     let char_index = cursor_index_for_text_x(
                         &editor,
@@ -2609,7 +2609,7 @@ fn layout_error_document(
 }
 
 #[derive(Debug, Clone)]
-struct AddressBarState {
+struct TextEditorState {
     text: String,
     cursor_chars: usize,
     selection_anchor: Option<usize>,
@@ -2623,10 +2623,10 @@ struct FocusedPageInput {
     control_id: usize,
     node_id: Option<usize>,
     initial_value: String,
-    editor: AddressBarState,
+    editor: TextEditorState,
 }
 
-impl AddressBarState {
+impl TextEditorState {
     fn new(text: String) -> Self {
         let cursor_chars = text.chars().count();
         Self {
@@ -3053,7 +3053,7 @@ fn chrome_layout_metrics(fonts: &mut FontContext, window_width: u32) -> ChromeLa
 }
 
 fn text_editor_view(
-    state: &AddressBarState,
+    state: &TextEditorState,
     fonts: &mut FontContext,
     available_width: u32,
     font_size: u32,
@@ -3142,7 +3142,7 @@ fn text_editor_view(
 }
 
 fn address_bar_view(
-    state: &AddressBarState,
+    state: &TextEditorState,
     fonts: &mut FontContext,
     available_width: u32,
 ) -> AddressBarView {
@@ -3156,7 +3156,7 @@ fn address_bar_view(
 }
 
 fn cursor_index_for_text_x(
-    state: &AddressBarState,
+    state: &TextEditorState,
     fonts: &mut FontContext,
     available_width: u32,
     local_x: f64,
@@ -3181,7 +3181,7 @@ fn cursor_index_for_text_x(
 }
 
 fn cursor_index_for_address_x(
-    state: &AddressBarState,
+    state: &TextEditorState,
     fonts: &mut FontContext,
     available_width: u32,
     local_x: f64,
@@ -3525,7 +3525,7 @@ fn paint_chrome(
     height: u32,
     chrome: &ChromeLayoutMetrics,
     document: &DocumentView,
-    address_bar: &AddressBarState,
+    address_bar: &TextEditorState,
     hovered_target: HitTarget,
     can_go_back: bool,
     can_go_forward: bool,
@@ -4125,7 +4125,7 @@ fn paint_page_control(
             } else {
                 let mut editor = focused
                     .map(|focused| focused.editor.clone())
-                    .unwrap_or_else(|| AddressBarState::new(actual_value));
+                    .unwrap_or_else(|| TextEditorState::new(actual_value));
                 if focused.is_none() {
                     editor.focus_at(0);
                     editor.blur();
@@ -5173,7 +5173,7 @@ fn max_scroll(viewport_height: u32, content_height: u32) -> u32 {
 }
 
 fn resolve_text_input_value(
-    focused_editor: Option<&AddressBarState>,
+    focused_editor: Option<&TextEditorState>,
     control_value: &str,
 ) -> String {
     focused_editor
@@ -5663,7 +5663,7 @@ fn draw_scaled_image(
 #[cfg(test)]
 mod tests {
     use super::{
-        AddressBarState, build_get_form_submission_url, cursor_index_for_address_x,
+        TextEditorState, build_get_form_submission_url, cursor_index_for_address_x,
         layout_error_document, looks_like_local_address, max_scroll, parse_address_input,
         resolve_text_input_value,
     };
@@ -5836,7 +5836,7 @@ mod tests {
 
     #[test]
     fn address_bar_backspace_handles_unicode() {
-        let mut state = AddressBarState::new("阿部A".to_string());
+        let mut state = TextEditorState::new("阿部A".to_string());
         state.focus_at(state.char_len());
 
         assert!(state.backspace());
@@ -5847,7 +5847,7 @@ mod tests {
 
     #[test]
     fn address_bar_ignores_control_characters() {
-        let mut state = AddressBarState::new("https://google.com".to_string());
+        let mut state = TextEditorState::new("https://google.com".to_string());
         state.focus_at(state.char_len());
 
         assert!(!state.insert_text("\u{8}"));
@@ -5857,7 +5857,7 @@ mod tests {
 
     #[test]
     fn address_bar_select_all_replaces_text() {
-        let mut state = AddressBarState::new("https://google.com".to_string());
+        let mut state = TextEditorState::new("https://google.com".to_string());
 
         assert!(state.select_all());
         assert!(state.selection_range().is_some());
@@ -5868,7 +5868,7 @@ mod tests {
 
     #[test]
     fn text_input_value_prefers_live_editor_text() {
-        let mut editor = AddressBarState::new("live".to_string());
+        let mut editor = TextEditorState::new("live".to_string());
         editor.focus_at(editor.char_len());
 
         assert_eq!(resolve_text_input_value(Some(&editor), "dom"), "live");
@@ -5877,7 +5877,7 @@ mod tests {
 
     #[test]
     fn address_bar_shift_navigation_creates_selection() {
-        let mut state = AddressBarState::new("google.com".to_string());
+        let mut state = TextEditorState::new("google.com".to_string());
         state.focus_at(state.char_len());
 
         assert!(state.move_left(true));
@@ -5889,7 +5889,7 @@ mod tests {
 
     #[test]
     fn address_bar_selected_text_returns_current_selection() {
-        let mut state = AddressBarState::new("阿部寛 homepage".to_string());
+        let mut state = TextEditorState::new("阿部寛 homepage".to_string());
         state.focus_at(state.char_len());
 
         assert!(state.move_word_left(true));
@@ -5898,7 +5898,7 @@ mod tests {
 
     #[test]
     fn address_bar_cut_selection_returns_text_and_removes_it() {
-        let mut state = AddressBarState::new("https://google.com".to_string());
+        let mut state = TextEditorState::new("https://google.com".to_string());
         assert!(state.select_all());
 
         assert_eq!(
@@ -5912,7 +5912,7 @@ mod tests {
     #[test]
     fn clicking_text_x_resolves_cursor_position() {
         let mut fonts = FontContext::load();
-        let mut state = AddressBarState::new("google.com".to_string());
+        let mut state = TextEditorState::new("google.com".to_string());
         state.focus_at(state.char_len());
 
         let cursor = cursor_index_for_address_x(&state, &mut fonts, 300, 0.0);
