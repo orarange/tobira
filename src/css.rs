@@ -147,6 +147,9 @@ pub(crate) enum MediaCondition {
     Screen,
     Print,
     PrefersColorSchemeDark,
+    All(Vec<MediaCondition>),
+    Any(Vec<MediaCondition>),
+    Not(Box<MediaCondition>),
     Unknown,
 }
 
@@ -158,6 +161,9 @@ impl MediaCondition {
             MediaCondition::Screen => true,
             MediaCondition::Print => false,
             MediaCondition::PrefersColorSchemeDark => false,
+            MediaCondition::All(list) => list.iter().all(|cond| cond.matches(viewport_width)),
+            MediaCondition::Any(list) => list.iter().any(|cond| cond.matches(viewport_width)),
+            MediaCondition::Not(inner) => !inner.matches(viewport_width),
             MediaCondition::Unknown => true,
         }
     }
@@ -1145,10 +1151,94 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
 
 fn parse_media_condition(query: &str) -> MediaCondition {
     let q = query.trim().to_ascii_lowercase();
-    // Strip surrounding parens if present
+    let parts = split_at_top_level(&q, ',');
+    if parts.len() > 1 {
+        return MediaCondition::Any(parts.iter().map(|part| parse_media_condition(part)).collect());
+    }
+    parse_media_condition_part(&q)
+}
+
+fn parse_media_condition_part(query: &str) -> MediaCondition {
+    let q = query.trim();
+    if let Some(rest) = q.strip_prefix("not ") {
+        return MediaCondition::Not(Box::new(parse_media_condition_part(rest)));
+    }
+
+    let parts = split_media_and_conditions(q);
+    if parts.len() > 1 {
+        return MediaCondition::All(parts.iter().map(|part| parse_media_condition_part(part)).collect());
+    }
+
+    parse_media_atom(q)
+}
+
+fn split_media_and_conditions(input: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut depth_paren: u32 = 0;
+    let mut depth_bracket: u32 = 0;
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
+    let mut segment_start = 0;
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < input.len() {
+        let ch = input[index..].chars().next().unwrap();
+        let ch_len = ch.len_utf8();
+        if escaped {
+            escaped = false;
+            index += ch_len;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            q @ ('"' | '\'') if in_string.is_none() => in_string = Some(q),
+            q if in_string == Some(q) => in_string = None,
+            _ if in_string.is_some() => {}
+            '(' => depth_paren += 1,
+            ')' if depth_paren > 0 => depth_paren -= 1,
+            '[' => depth_bracket += 1,
+            ']' if depth_bracket > 0 => depth_bracket -= 1,
+            'a' if depth_paren == 0 && depth_bracket == 0 && in_string.is_none() => {
+                if index == 0 || bytes[index - 1].is_ascii_whitespace() {
+                    let rest = &input[index..];
+                    if rest.starts_with("and")
+                        && rest[3..].chars().next().is_some_and(|c| c.is_whitespace())
+                    {
+                        let before = input[segment_start..index].trim();
+                        if !before.is_empty() {
+                            result.push(before.to_string());
+                        }
+                        let mut next = index + 3;
+                        while next < input.len() {
+                            let mut chars = input[next..].chars();
+                            let Some(c) = chars.next() else { break };
+                            if !c.is_whitespace() {
+                                break;
+                            }
+                            next += c.len_utf8();
+                        }
+                        segment_start = next;
+                        index = next;
+                        continue;
+                    }
+                }
+            }
+            _ => {}
+        }
+        index += ch_len;
+    }
+    let tail = input[segment_start..].trim();
+    if !tail.is_empty() {
+        result.push(tail.to_string());
+    }
+    result
+}
+
+fn parse_media_atom(query: &str) -> MediaCondition {
+    let q = query.trim();
     let inner = q.trim_start_matches('(').trim_end_matches(')').trim();
 
-    if inner == "screen" || q == "screen" {
+    if inner == "screen" || q == "screen" || inner == "all" || q == "all" {
         return MediaCondition::Screen;
     }
     if inner == "print" || q == "print" {
@@ -5820,6 +5910,83 @@ mod tests {
     }
 
     // ── calc() tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn media_supports_and_conditions() {
+        let document = parse_document("<p>Hello</p>");
+        let stylesheet = parse_stylesheet(
+            "p { color: #0000ff; } @media screen and (max-width: 768px) { p { color: #ff0000; } }",
+        );
+
+        let styled_700 = build_styled_tree(&document, &stylesheet, 700, &super::InteractiveState::default());
+        assert_eq!(find_first_element(&styled_700, "p").unwrap().style.color, 0xFF0000);
+
+        let styled_800 = build_styled_tree(&document, &stylesheet, 800, &super::InteractiveState::default());
+        assert_eq!(find_first_element(&styled_800, "p").unwrap().style.color, 0x0000FF);
+    }
+
+    #[test]
+    fn media_supports_and_ranges() {
+        let document = parse_document("<p>Hello</p>");
+        let stylesheet = parse_stylesheet(
+            "@media (min-width: 768px) and (max-width: 1024px) { p { color: #ff0000; } }",
+        );
+
+        let styled_768 = build_styled_tree(&document, &stylesheet, 768, &super::InteractiveState::default());
+        assert_eq!(find_first_element(&styled_768, "p").unwrap().style.color, 0xFF0000);
+
+        let styled_900 = build_styled_tree(&document, &stylesheet, 900, &super::InteractiveState::default());
+        assert_eq!(find_first_element(&styled_900, "p").unwrap().style.color, 0xFF0000);
+
+        let styled_700 = build_styled_tree(&document, &stylesheet, 700, &super::InteractiveState::default());
+        assert_ne!(find_first_element(&styled_700, "p").unwrap().style.color, 0xFF0000);
+
+        let styled_1200 = build_styled_tree(&document, &stylesheet, 1200, &super::InteractiveState::default());
+        assert_ne!(find_first_element(&styled_1200, "p").unwrap().style.color, 0xFF0000);
+    }
+
+    #[test]
+    fn media_supports_comma_separated_or_conditions() {
+        let document = parse_document("<p>Hello</p>");
+        let stylesheet = parse_stylesheet(
+            "@media (max-width: 480px), (min-width: 1200px) { p { color: #ff0000; } }",
+        );
+
+        let styled_400 = build_styled_tree(&document, &stylesheet, 400, &super::InteractiveState::default());
+        assert_eq!(find_first_element(&styled_400, "p").unwrap().style.color, 0xFF0000);
+
+        let styled_800 = build_styled_tree(&document, &stylesheet, 800, &super::InteractiveState::default());
+        assert_ne!(find_first_element(&styled_800, "p").unwrap().style.color, 0xFF0000);
+
+        let styled_1300 = build_styled_tree(&document, &stylesheet, 1300, &super::InteractiveState::default());
+        assert_eq!(find_first_element(&styled_1300, "p").unwrap().style.color, 0xFF0000);
+    }
+
+    #[test]
+    fn media_supports_not_conditions() {
+        let document = parse_document("<p>Hello</p>");
+        let stylesheet = parse_stylesheet(
+            "@media not (max-width: 600px) { p { color: #ff0000; } }",
+        );
+
+        let styled_700 = build_styled_tree(&document, &stylesheet, 700, &super::InteractiveState::default());
+        assert_eq!(find_first_element(&styled_700, "p").unwrap().style.color, 0xFF0000);
+
+        let styled_500 = build_styled_tree(&document, &stylesheet, 500, &super::InteractiveState::default());
+        assert_ne!(find_first_element(&styled_500, "p").unwrap().style.color, 0xFF0000);
+    }
+
+    #[test]
+    fn media_single_condition_regression_still_works() {
+        let document = parse_document("<p>Hello</p>");
+        let stylesheet = parse_stylesheet("@media (max-width: 600px) { p { color: #ff0000; } }");
+
+        let styled_500 = build_styled_tree(&document, &stylesheet, 500, &super::InteractiveState::default());
+        assert_eq!(find_first_element(&styled_500, "p").unwrap().style.color, 0xFF0000);
+
+        let styled_700 = build_styled_tree(&document, &stylesheet, 700, &super::InteractiveState::default());
+        assert_ne!(find_first_element(&styled_700, "p").unwrap().style.color, 0xFF0000);
+    }
 
     #[test]
     fn calc_addition_and_subtraction() {
