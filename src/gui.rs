@@ -4285,6 +4285,60 @@ fn paint_layout(
             hovered_target,
         );
     }
+
+    const SCROLLBAR_WIDTH: u32 = 10;
+    const MIN_THUMB: u32 = 24;
+
+    let content_height = layout.content_height;
+    if viewport_height == 0 || content_height == 0 || content_height <= viewport_height {
+        return;
+    }
+
+    let track_x = width.saturating_sub(SCROLLBAR_WIDTH);
+    let track_y = offset_y;
+    let track_h = height.saturating_sub(offset_y).min(viewport_height);
+    if track_h == 0 {
+        return;
+    }
+
+    draw_rect(
+        buffer,
+        width,
+        height,
+        track_x,
+        track_y,
+        SCROLLBAR_WIDTH,
+        track_h,
+        0xEDEDED,
+    );
+
+    let max_scroll = content_height.saturating_sub(viewport_height);
+    let clamped_scroll_y = scroll_y.min(max_scroll);
+    let thumb_h = (viewport_height.saturating_mul(viewport_height) / content_height)
+        .max(MIN_THUMB)
+        .min(viewport_height)
+        .min(track_h);
+    let thumb_y = if max_scroll == 0 {
+        track_y
+    } else {
+        let travel = viewport_height.saturating_sub(thumb_h);
+        let thumb_offset = ((travel as u64) * (clamped_scroll_y as u64) / (max_scroll as u64)) as u32;
+        track_y.saturating_add(thumb_offset)
+    };
+    let thumb_x = track_x.saturating_add((SCROLLBAR_WIDTH.saturating_sub(6)) / 2);
+    let thumb_w = SCROLLBAR_WIDTH.saturating_sub(6);
+    if thumb_w > 0 && thumb_h > 0 {
+        draw_rect(
+            buffer,
+            width,
+            height,
+            thumb_x,
+            thumb_y,
+            thumb_w,
+            thumb_h,
+            0xB0B0B0,
+        );
+    }
 }
 
 fn render_commands(
