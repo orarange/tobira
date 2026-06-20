@@ -23,7 +23,9 @@ pub struct Stylesheet {
     /// Each entry is `(condition, vars)` and is only applied when the condition matches
     /// the current viewport width at style-computation time.
     pub media_root_vars: Vec<(MediaCondition, BTreeMap<String, String>)>,
-    #[cfg(test)]
+    /// Selector index (id/class/tag/universal buckets) built once from `rules`,
+    /// so style computation tests only candidate rules instead of every rule.
+    /// Rebuilt by `extend` so it stays in sync with the rule set.
     rule_index: RuleIndex,
 }
 
@@ -36,7 +38,6 @@ impl Stylesheet {
         self.root_vars = Rc::new(merged);
         // Merge media-conditional root vars
         self.media_root_vars.extend(other.media_root_vars);
-        #[cfg(test)]
         self.rule_index.rebuild(&self.rules);
     }
 }
@@ -50,7 +51,6 @@ struct RuleIndex {
 }
 
 impl RuleIndex {
-    #[cfg(test)]
     fn rebuild(&mut self, rules: &[Rule]) {
         *self = Self::build(rules);
     }
@@ -1075,13 +1075,11 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         }
     }
 
-    #[cfg(test)]
     let rule_index = RuleIndex::build(&rules);
     Stylesheet {
         rules,
         root_vars: Rc::new(root_vars),
         media_root_vars,
-        #[cfg(test)]
         rule_index,
     }
 }
@@ -1140,10 +1138,7 @@ pub fn build_styled_tree(
     interactive: &InteractiveState,
 ) -> StyledNode {
     let ancestors = Vec::new();
-    #[cfg(test)]
     let rule_index = &stylesheet.rule_index;
-    #[cfg(not(test))]
-    let rule_index = RuleIndex::build(&stylesheet.rules);
     build_node(
         document,
         stylesheet,
@@ -1211,7 +1206,7 @@ pub(crate) fn build_styled_tree_incremental(
     let mut result = build_node_incremental(
         document,
         stylesheet,
-        &RuleIndex::build(&stylesheet.rules),
+        &stylesheet.rule_index,
         None,
         &[],
         0,
