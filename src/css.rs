@@ -247,6 +247,7 @@ enum AttrOperator {
 pub struct Declaration {
     property: String,
     value: String,
+    important: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1119,11 +1120,15 @@ pub fn parse_inline_declarations(input: &str) -> Vec<Declaration> {
         .filter_map(|entry| {
             let (property, value) = entry.split_once(':')?;
             let property = property.trim().to_ascii_lowercase();
-            let value = value.trim().to_string();
+            let (value, important) = split_important(value);
             if property.is_empty() || value.is_empty() {
                 return None;
             }
-            Some(Declaration { property, value })
+            Some(Declaration {
+                property,
+                value,
+                important,
+            })
         })
         .collect()
 }
@@ -1794,7 +1799,7 @@ fn compute_style_with_rules(
             }
         }
     }
-    let mut applicable: Vec<(usize, usize, Declaration)> = Vec::new();
+    let mut applicable: Vec<(bool, usize, usize, Declaration)> = Vec::new();
 
     for rule_index in candidate_rule_indices {
         let rule = &stylesheet.rules[rule_index];
@@ -1833,6 +1838,7 @@ fn compute_style_with_rules(
                 applicable.extend(rule.declarations.iter().cloned().enumerate().map(
                     |(declaration_index, declaration)| {
                         (
+                            declaration.important,
                             selector.specificity(),
                             rule_index * 100 + declaration_index,
                             declaration,
@@ -1856,11 +1862,13 @@ fn compute_style_with_rules(
             inline_decls
                 .into_iter()
                 .enumerate()
-                .map(|(index, declaration)| (1_000, usize::MAX - 1_000 + index, declaration)),
+                .map(|(index, declaration)| {
+                    (declaration.important, 1_000, usize::MAX - 1_000 + index, declaration)
+                }),
         );
     }
 
-    applicable.sort_by_key(|(specificity, order, _)| (*specificity, *order));
+    applicable.sort_by_key(|(important, specificity, order, _)| (*important, *specificity, *order));
 
     // Merge root_vars into element_vars once, before the declaration loop.
     // element_vars (from matched rules + inline style) takes priority via or_insert_with.
@@ -1876,7 +1884,7 @@ fn compute_style_with_rules(
         &element_vars
     };
 
-    for (_, _, mut declaration) in applicable {
+    for (_, _, _, mut declaration) in applicable {
         // skip CSS custom properties
         if declaration.property.starts_with("--") {
             continue;
@@ -1959,7 +1967,22 @@ fn substitute_vars(value: &str, vars: &BTreeMap<String, String>) -> String {
             break;
         };
         let inner_start = start + 4;
-        let Some(end) = result[inner_start..].find(')') else {
+        let mut depth = 0usize;
+        let mut end = None;
+        for (offset, ch) in result[inner_start..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    if depth == 0 {
+                        end = Some(offset);
+                        break;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
             break;
         };
         let inner = &result[inner_start..inner_start + end];
@@ -1982,6 +2005,40 @@ fn substitute_vars(value: &str, vars: &BTreeMap<String, String>) -> String {
         );
     }
     result
+}
+
+fn split_important(value: &str) -> (String, bool) {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let mut idx = None;
+    for (pos, ch) in trimmed.char_indices().rev() {
+        if ch != '!' {
+            continue;
+        }
+        let mut after = pos + ch.len_utf8();
+        while after < trimmed.len() {
+            let mut chars = trimmed[after..].chars();
+            let Some(next) = chars.next() else {
+                break;
+            };
+            if !next.is_whitespace() {
+                break;
+            }
+            after += next.len_utf8();
+        }
+        if lower[after..].starts_with("important") {
+            let after_keyword = after + "important".len();
+            if trimmed[after_keyword..].trim().is_empty() {
+                idx = Some(pos);
+                break;
+            }
+        }
+    }
+    if let Some(idx) = idx {
+        (trimmed[..idx].trim_end().to_string(), true)
+    } else {
+        (trimmed.to_string(), false)
+    }
 }
 
 fn parse_filter_value(input: &str, style: &mut ComputedStyle) {
@@ -5043,13 +5100,14 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::rc::Rc;
 
     use super::{
         AlignItems, Display, FlexDirection, FlexWrap, JustifyContent, LengthValue,
         Position, RuleIndex, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
-        build_styled_tree, compute_style, parse_calc, parse_color, parse_length, parse_stylesheet,
-        split_at_top_level,
+        build_styled_tree, compute_style, parse_calc, parse_color, parse_inline_declarations,
+        parse_length, parse_stylesheet, split_at_top_level,
     };
     use crate::html::{Element, Node, parse_document};
 
@@ -5195,6 +5253,64 @@ mod tests {
         assert_eq!(paragraph.style.font_size_px, 24);
         assert_eq!(paragraph.style.margin.top, 6);
         assert_eq!(paragraph.style.white_space, WhiteSpaceMode::Pre);
+    }
+
+    #[test]
+    fn important_overrides_higher_specificity_normal_rule() {
+        let document = parse_document("<div class=\"a\" id=\"x\">Hello</div>");
+        let stylesheet = parse_stylesheet("#x { color: red; } .a { color: green !important; }");
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").expect("div should exist");
+
+        assert_eq!(div.style.color, 0x008000);
+        let parsed = parse_inline_declarations("color: green !important;");
+        assert_eq!(parsed[0].value, "green");
+        assert!(parsed[0].important);
+    }
+
+    #[test]
+    fn inline_important_beats_author_important() {
+        let document = parse_document(
+            "<div id=\"x\" style=\"color: blue !important;\">Hello</div>",
+        );
+        let stylesheet = parse_stylesheet("#x { color: red !important; }");
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").expect("div should exist");
+
+        assert_eq!(div.style.color, 0x0000FF);
+    }
+
+    #[test]
+    fn higher_specificity_normal_rule_still_wins_without_important() {
+        let document = parse_document("<div class=\"a\" id=\"x\">Hello</div>");
+        let stylesheet = parse_stylesheet("#x { color: red; } .a { color: green; }");
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").expect("div should exist");
+
+        assert_eq!(div.style.color, 0xFF0000);
+    }
+
+    #[test]
+    fn parses_important_with_spaces_and_case_insensitive_keyword() {
+        let decls = parse_inline_declarations("color: rgb(1, 2, 3) ! IMPORTANT ;");
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].value, "rgb(1, 2, 3)");
+        assert!(decls[0].important);
+    }
+
+    #[test]
+    fn substitutes_var_with_nested_fallback_parentheses() {
+        let mut vars = BTreeMap::new();
+        vars.insert("--x".to_string(), "teal".to_string());
+        assert_eq!(super::substitute_vars("var(--x, rgb(1,2,3))", &vars), "teal");
+
+        let empty = BTreeMap::new();
+        assert_eq!(super::substitute_vars("var(--x, rgb(1,2,3))", &empty), "rgb(1,2,3)");
+        assert_eq!(super::substitute_vars("var(--y)", &empty), "");
+        assert_eq!(super::substitute_vars("var(--y, blue)", &empty), "blue");
     }
 
     #[test]
