@@ -5942,7 +5942,16 @@ impl Vm {
             return Ok(value);
         }
         self.run_until_frame_depth(base_depth)?;
-        self.pop_value()
+        // A synchronously-invoked function that returns leaves its result on the
+        // operand stack. If nothing is there, the call/return path dropped the
+        // value (a VM bug, not a missing operand in the *caller*) — name it so the
+        // underflow isn't misattributed to the calling opcode. gatsby.com hits
+        // this: a plain closure invoked here returns with an empty stack.
+        self.pop_value().map_err(|_| {
+            VmError::RangeError(
+                "operand stack underflow: synchronous call returned no value".to_string(),
+            )
+        })
     }
 
     fn construct_value_sync(
@@ -5955,7 +5964,11 @@ impl Vm {
             return Ok(value);
         }
         self.run_until_frame_depth(base_depth)?;
-        self.pop_value()
+        self.pop_value().map_err(|_| {
+            VmError::RangeError(
+                "operand stack underflow: synchronous construct returned no value".to_string(),
+            )
+        })
     }
 
     fn handle_runtime_error(&mut self, error: VmError) -> Result<(), VmError> {
