@@ -2,7 +2,7 @@ use crate::css::{
     BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
     FontFamilyKind, GridTrackSize, LengthValue, ObjectFit, Overflow, Position, FlexDirection,
     FlexWrap, AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
-    VerticalAlign, WhiteSpaceMode, apply_text_transform,
+    VerticalAlign, WhiteSpaceMode, apply_text_transform, ClearSide, FloatSide,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
@@ -2833,6 +2833,51 @@ fn cell_span_height(heights: &[u32], start: usize, span: usize) -> u32 {
     heights.iter().skip(start).take(span).sum()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ActiveFloat {
+    side: FloatSide,
+    x: u32,
+    top: u32,
+    bottom: u32,
+    width: u32,
+}
+
+fn active_float_edges(active_floats: &[ActiveFloat], cursor_y: u32, x: u32, width: u32) -> (u32, u32) {
+    let mut left_edge = x;
+    let mut right_edge = x.saturating_add(width);
+    for float in active_floats.iter().filter(|f| f.top <= cursor_y && cursor_y < f.bottom) {
+        match float.side {
+            FloatSide::Left => left_edge = left_edge.max(float.x.saturating_add(float.width)),
+            FloatSide::Right => right_edge = right_edge.min(float.x),
+            FloatSide::None => {}
+        }
+    }
+    if right_edge <= left_edge {
+        right_edge = left_edge.saturating_add(1);
+    }
+    (left_edge, right_edge)
+}
+
+fn clear_cursor_y(cursor_y: u32, clear: ClearSide, active_floats: &[ActiveFloat]) -> u32 {
+    let mut target = cursor_y;
+    for float in active_floats {
+        let affects = match clear {
+            ClearSide::Left => matches!(float.side, FloatSide::Left),
+            ClearSide::Right => matches!(float.side, FloatSide::Right),
+            ClearSide::Both => matches!(float.side, FloatSide::Left | FloatSide::Right),
+            ClearSide::None => false,
+        };
+        if affects {
+            target = target.max(float.bottom);
+        }
+    }
+    target
+}
+
+fn max_float_bottom(active_floats: &[ActiveFloat]) -> u32 {
+    active_floats.iter().map(|f| f.bottom).max().unwrap_or(0)
+}
+
 fn layout_mixed_children(
     element: &StyledElement,
     x: u32,
@@ -2846,42 +2891,150 @@ fn layout_mixed_children(
 ) {
     let mut inline_fragments = Vec::new();
     let mut bullet_pending = needs_bullet;
+    let mut active_floats: Vec<ActiveFloat> = Vec::new();
+
+    let flush_inline = |inline_fragments: &mut Vec<InlineFragment>,
+                        bullet_pending: &mut bool,
+                        cursor_y: &mut u32,
+                        context: &mut LayoutContext,
+                        fonts: &mut FontContext,
+                        x: u32,
+                        width: u32,
+                        element_style: &ComputedStyle,
+                        active_floats: &[ActiveFloat]| {
+        if inline_fragments.is_empty() && !*bullet_pending {
+            return;
+        }
+        if *bullet_pending {
+            inline_fragments.insert(
+                0,
+                InlineFragment::Text {
+                    text: "- ".to_string(),
+                    style: element_style.clone(),
+                    link_href: None,
+                    link_node_id: None,
+                },
+            );
+        }
+        let (avail_x, avail_right) = active_float_edges(active_floats, *cursor_y, x, width);
+        layout_inline_fragments(
+            inline_fragments,
+            element_style,
+            avail_x,
+            avail_right.saturating_sub(avail_x).max(1),
+            cursor_y,
+            context,
+            fonts,
+        );
+        inline_fragments.clear();
+        *bullet_pending = false;
+    };
 
     for child in &element.children {
         if is_hidden(child) {
             continue;
         }
 
-        if is_block_level(child) {
-            if !inline_fragments.is_empty() || bullet_pending {
-                if bullet_pending {
-                    inline_fragments.insert(
-                        0,
-                        InlineFragment::Text {
-                            text: "- ".to_string(),
-                            style: element.style.clone(),
-                            link_href: None,
-                            link_node_id: None,
-                        },
-                    );
-                }
-                layout_inline_fragments(
-                    &inline_fragments,
-                    &element.style,
-                    x,
-                    width,
-                    cursor_y,
-                    context,
-                    fonts,
-                );
-                inline_fragments.clear();
-                bullet_pending = false;
-            }
+        let child_style = match child {
+            StyledNode::Element(element) => Some(&element.style),
+            _ => None,
+        };
+        let child_float = child_style.map(|s| s.float).unwrap_or(FloatSide::None);
+        let child_clear = child_style.map(|s| s.clear).unwrap_or(ClearSide::None);
+        let child_is_block = is_block_level(child);
 
-            layout_node(
-                child,
+        if child_is_block && child_float != FloatSide::None {
+            flush_inline(
+                &mut inline_fragments,
+                &mut bullet_pending,
+                cursor_y,
+                context,
+                fonts,
                 x,
                 width,
+                &element.style,
+                &active_floats,
+            );
+
+            let Some(style) = child_style else {
+                layout_node(child, x, width, cursor_y, context, images, fonts, current_form.clone());
+                continue;
+            };
+
+            let fw = match style.width {
+                Some(LengthValue::Pixels(px)) => px.min(width).max(1),
+                Some(LengthValue::Percent(pct)) => (width as u64 * pct as u64 / 100).min(width as u64) as u32,
+                Some(LengthValue::MinContent) | Some(LengthValue::MaxContent) | Some(LengthValue::FitContent(_)) => width.max(1),
+                None => {
+                    if matches!(child, StyledNode::Element(StyledElement { tag_name, .. }) if tag_name == "img") {
+                        width.max(1)
+                    } else {
+                        layout_node(child, x, width, cursor_y, context, images, fonts, current_form.clone());
+                        continue;
+                    }
+                }
+            }
+            .min(width.max(1));
+
+            let mut top = *cursor_y;
+            loop {
+                let (left_edge, right_edge) = active_float_edges(&active_floats, top, x, width);
+                let slot_width = right_edge.saturating_sub(left_edge);
+                if slot_width >= fw.max(1) {
+                    let fx = match style.float {
+                        FloatSide::Left => left_edge,
+                        FloatSide::Right => right_edge.saturating_sub(fw.max(1)),
+                        FloatSide::None => left_edge,
+                    };
+                    let mut f_y = top;
+                    layout_node(
+                        child,
+                        fx,
+                        fw.max(1),
+                        &mut f_y,
+                        context,
+                        images,
+                        fonts,
+                        current_form.clone(),
+                    );
+                    let bottom = f_y.max(top + 1);
+                    active_floats.push(ActiveFloat {
+                        side: style.float,
+                        x: fx,
+                        top,
+                        bottom,
+                        width: fw.max(1),
+                    });
+                    break;
+                }
+                top = active_floats
+                    .iter()
+                    .filter(|f| f.top <= top && top < f.bottom)
+                    .map(|f| f.bottom)
+                    .max()
+                    .unwrap_or_else(|| top.saturating_add(1));
+            }
+            continue;
+        }
+
+        if child_is_block {
+            flush_inline(
+                &mut inline_fragments,
+                &mut bullet_pending,
+                cursor_y,
+                context,
+                fonts,
+                x,
+                width,
+                &element.style,
+                &active_floats,
+            );
+            *cursor_y = clear_cursor_y(*cursor_y, child_clear, &active_floats);
+            let (avail_x, avail_right) = active_float_edges(&active_floats, *cursor_y, x, width);
+            layout_node(
+                child,
+                avail_x,
+                avail_right.saturating_sub(avail_x).max(1),
                 cursor_y,
                 context,
                 images,
@@ -2909,25 +3062,18 @@ fn layout_mixed_children(
         }
     }
 
-    if !inline_fragments.is_empty() || bullet_pending {
-        if bullet_pending {
-            inline_fragments.push(InlineFragment::Text {
-                text: "- ".to_string(),
-                style: element.style.clone(),
-                link_href: None,
-                link_node_id: None,
-            });
-        }
-        layout_inline_fragments(
-            &inline_fragments,
-            &element.style,
-            x,
-            width,
-            cursor_y,
-            context,
-            fonts,
-        );
-    }
+    flush_inline(
+        &mut inline_fragments,
+        &mut bullet_pending,
+        cursor_y,
+        context,
+        fonts,
+        x,
+        width,
+        &element.style,
+        &active_floats,
+    );
+    *cursor_y = (*cursor_y).max(max_float_bottom(&active_floats));
 }
 
 fn collect_inline_fragments(
@@ -4981,6 +5127,56 @@ mod tests {
             .into_iter()
             .find(|r| r.color == color)
             .ok_or_else(|| format!("rect #{color:06x} not found"))
+    }
+
+    #[test]
+    fn float_left_pushes_following_block_right() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="float:left;width:100px;height:40px;background:#aa0001"></div><div style="background:#aa0002;height:20px"></div></body></html>"#,
+            320,
+        );
+        let float_box = probe_rect(&l, 0xAA0001).expect("float rect");
+        let flow_box = probe_rect(&l, 0xAA0002).expect("flow rect");
+        assert_eq!(float_box.x, 0);
+        assert_eq!(float_box.y, 0);
+        assert!(flow_box.x >= 100, "flow box not shortened by float: x={}", flow_box.x);
+        assert!(flow_box.y <= float_box.height, "flow box should stay in the float band or just below it");
+    }
+
+    #[test]
+    fn clear_both_drops_below_floats() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="float:left;width:100px;height:40px;background:#aa0003"></div><div style="clear:both;background:#aa0004;height:20px"></div></body></html>"#,
+            320,
+        );
+        let float_box = probe_rect(&l, 0xAA0003).expect("float rect");
+        let cleared = probe_rect(&l, 0xAA0004).expect("cleared rect");
+        assert!(cleared.y >= float_box.y.saturating_add(float_box.height), "clear:both did not move below float");
+    }
+
+    #[test]
+    fn block_stack_without_floats_is_unchanged() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="background:#aa0005;height:20px"></div><div style="background:#aa0006;height:30px"></div></body></html>"#,
+            320,
+        );
+        let a = probe_rect(&l, 0xAA0005).expect("first rect");
+        let b = probe_rect(&l, 0xAA0006).expect("second rect");
+        assert!(b.y >= a.y.saturating_add(a.height), "blocks no longer stack vertically");
+        assert_eq!(a.x, 0);
+        assert_eq!(b.x, 0);
+    }
+
+    #[test]
+    fn auto_width_non_img_float_degrades_to_block() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="float:left;background:#aa0007;height:20px">auto width float?</div><div style="background:#aa0008;height:20px"></div></body></html>"#,
+            320,
+        );
+        let degraded = probe_rect(&l, 0xAA0007).expect("degraded rect");
+        let next = probe_rect(&l, 0xAA0008).expect("next rect");
+        assert_eq!(degraded.x, 0, "auto-width non-img float should fall back to normal block flow");
+        assert!(next.y >= degraded.y.saturating_add(degraded.height), "fallback block should keep vertical flow");
     }
 
     #[test]

@@ -578,6 +578,33 @@ impl Default for GridPlacement {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatSide {
+    None,
+    Left,
+    Right,
+}
+
+impl Default for FloatSide {
+    fn default() -> Self {
+        FloatSide::None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClearSide {
+    None,
+    Left,
+    Right,
+    Both,
+}
+
+impl Default for ClearSide {
+    fn default() -> Self {
+        ClearSide::None
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ComputedStyle
 // ─────────────────────────────────────────────────────────────────────────────
@@ -610,6 +637,8 @@ pub struct ComputedStyle {
     pub background_position_x: u32,
     pub background_position_y: u32,
     // ── new fields ──
+    pub float: FloatSide,
+    pub clear: ClearSide,
     pub border: EdgeSizes,
     pub border_color: Color,
     pub border_style_none: bool,
@@ -727,6 +756,8 @@ impl ComputedStyle {
             background_position_x: 50,
             background_position_y: 50,
             // new fields – most not inherited
+            float: FloatSide::None,
+            clear: ClearSide::None,
             border: EdgeSizes::default(),
             border_color: parent.map(|s| s.color).unwrap_or(DEFAULT_TEXT_COLOR),
             border_style_none: false,
@@ -2314,6 +2345,25 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if let Some(display) = parse_display(value) {
                 style.display = display;
             }
+        }
+        "float" => {
+            let v = value.trim().to_ascii_lowercase();
+            style.float = match v.as_str() {
+                "left" => FloatSide::Left,
+                "right" => FloatSide::Right,
+                "none" => FloatSide::None,
+                _ => FloatSide::None,
+            };
+        }
+        "clear" => {
+            let v = value.trim().to_ascii_lowercase();
+            style.clear = match v.as_str() {
+                "left" => ClearSide::Left,
+                "right" => ClearSide::Right,
+                "both" => ClearSide::Both,
+                "none" => ClearSide::None,
+                _ => ClearSide::None,
+            };
         }
         "font-size" => {
             if let Some(font_size) = parse_font_size(value, parent_font_size) {
