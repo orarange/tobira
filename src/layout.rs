@@ -5119,6 +5119,105 @@ mod tests {
         assert_eq!(ghost.text_color, 0x3457D5, "ghost text from CSS");
     }
 
+    #[test]
+    fn block_stack_with_padding_places_children_below_padding() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="padding:10px;background:#bb0001"><div style="height:20px;background:#bb0002"></div><div style="height:20px;background:#bb0003"></div></div></body></html>"#,
+            400,
+        );
+        let first = probe_rect(&l, 0xBB0002).expect("first rect");
+        let second = probe_rect(&l, 0xBB0003).expect("second rect");
+        assert_eq!(first.y, 10, "first child should start after 10px padding");
+        assert!(second.y >= first.y + first.height, "second child should stack below the first");
+    }
+
+    #[test]
+    fn block_width_percent_resolves_against_parent_width() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="width:400px"><div style="width:50%;height:20px;background:#bb0004"></div></div></body></html>"#,
+            400,
+        );
+        let box_ = probe_rect(&l, 0xBB0004).expect("percent-width rect");
+        assert!((box_.width as i32 - 200).abs() <= 2, "50% of 400px should be about 200px, got {}", box_.width);
+    }
+
+    #[test]
+    fn padding_left_offsets_child_content_start() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="padding-left:20px;background:#bb0005"><div style="width:30px;height:20px;background:#bb0006"></div></div></body></html>"#,
+            400,
+        );
+        let child = probe_rect(&l, 0xBB0006).expect("child rect");
+        assert_eq!(child.x, 20, "padding-left should shift child content start");
+    }
+
+    #[test]
+    fn flex_row_places_items_side_by_side() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="display:flex;background:#bb0007"><div style="width:80px;height:20px;background:#bb0008"></div><div style="width:80px;height:20px;background:#bb0009"></div></div></body></html>"#,
+            400,
+        );
+        let a = probe_rect(&l, 0xBB0008).expect("first flex item");
+        let b = probe_rect(&l, 0xBB0009).expect("second flex item");
+        assert_eq!(a.x, 0, "flex row should start at x=0");
+        assert!((b.x as i32 - (a.x + 80) as i32).abs() <= 2, "second item should follow the first horizontally");
+    }
+
+    #[test]
+    fn flex_gap_is_reflected_between_items() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="display:flex;gap:10px;background:#bb000a"><div style="width:60px;height:20px;background:#bb000b"></div><div style="width:60px;height:20px;background:#bb000c"></div></div></body></html>"#,
+            400,
+        );
+        let a = probe_rect(&l, 0xBB000B).expect("first flex item");
+        let b = probe_rect(&l, 0xBB000C).expect("second flex item");
+        assert!((b.x as i32 - (a.x + a.width + 10) as i32).abs() <= 2, "flex gap should add 10px between items");
+    }
+
+    #[test]
+    fn grid_template_columns_places_cells_on_expected_tracks() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="display:grid;width:200px;grid-template-columns:100px 100px;background:#bb000d"><div style="height:20px;background:#bb000e"></div><div style="height:20px;background:#bb000f"></div></div></body></html>"#,
+            400,
+        );
+        let a = probe_rect(&l, 0xBB000E).expect("first grid cell");
+        let b = probe_rect(&l, 0xBB000F).expect("second grid cell");
+        assert_eq!(a.x, 0, "first grid cell should start at x=0");
+        assert!((b.x as i32 - 100).abs() <= 2, "second grid cell should start at x=100, got {}", b.x);
+    }
+
+    #[test]
+    fn position_absolute_is_placed_relative_to_nearest_positioned_parent() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="position:relative;width:200px;height:120px;background:#bb0010"><div style="position:absolute;left:30px;top:40px;width:40px;height:20px;background:#bb0011"></div></div></body></html>"#,
+            400,
+        );
+        let child = probe_rect(&l, 0xBB0011).expect("absolute child");
+        assert_eq!(child.x, 30, "absolute child x should be relative to parent");
+        assert_eq!(child.y, 40, "absolute child y should be relative to parent");
+    }
+
+    #[test]
+    fn position_relative_shifts_box_from_normal_flow() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="height:10px"></div><div style="position:relative;left:15px;width:40px;height:20px;background:#bb0012"></div></body></html>"#,
+            400,
+        );
+        let shifted = probe_rect(&l, 0xBB0012).expect("relative box");
+        assert!(shifted.x >= 15, "relative left offset should shift box right, got x={}", shifted.x);
+    }
+
+    #[test]
+    fn adjacent_block_margins_are_added_without_collapsing() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="height:20px;margin-bottom:30px;background:#bb0013"></div><div style="height:20px;margin-top:20px;background:#bb0014"></div></body></html>"#,
+            400,
+        );
+        let first = probe_rect(&l, 0xBB0013).expect("first block");
+        let second = probe_rect(&l, 0xBB0014).expect("second block");
+        assert_eq!(second.y, first.y + first.height + 50, "adjacent margins should add, not collapse");
+    }
+
     fn probe_layout(html: &str, width: u32) -> super::LayoutDocument {
         let document = parse_document(html);
         let styled = build_styled_tree(
