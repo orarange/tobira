@@ -1011,8 +1011,24 @@ fn split_at_top_level(input: &str, delimiter: char) -> Vec<String> {
 
 fn find_matching_close_brace(source: &str) -> Option<usize> {
     let mut depth: u32 = 1;
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
     for (i, ch) in source.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match ch {
+            '\\' => {
+                escaped = true;
+            }
+            q @ ('"' | '\'') if in_string.is_none() => {
+                in_string = Some(q);
+            }
+            q if in_string == Some(q) => {
+                in_string = None;
+            }
+            _ if in_string.is_some() => {}
             '{' => depth += 1,
             '}' => {
                 depth -= 1;
@@ -1026,6 +1042,32 @@ fn find_matching_close_brace(source: &str) -> Option<usize> {
     None
 }
 
+fn find_block_open(source: &str) -> Option<usize> {
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
+    for (i, ch) in source.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                escaped = true;
+            }
+            q @ ('"' | '\'') if in_string.is_none() => {
+                in_string = Some(q);
+            }
+            q if in_string == Some(q) => {
+                in_string = None;
+            }
+            _ if in_string.is_some() => {}
+            '{' => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
 pub fn parse_stylesheet(input: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut root_vars = BTreeMap::new();
@@ -1033,7 +1075,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
     let source = strip_comments(input);
     let mut cursor = 0;
 
-    while let Some(open_offset) = source[cursor..].find('{') {
+    while let Some(open_offset) = find_block_open(&source[cursor..]) {
         let selector_start = cursor;
         let selector_end = cursor + open_offset;
         let block_start = selector_end + 1;
@@ -6079,6 +6121,49 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].trim(), "color: red");
         assert_eq!(result[1].trim(), r#"content: "a; b""#);
+    }
+
+    #[test]
+    fn parse_stylesheet_ignores_closing_brace_inside_string() {
+        let stylesheet = parse_stylesheet(r#".a::after { content: "}"; color: #ff0000; }"#);
+        assert_eq!(stylesheet.rules.len(), 1);
+        assert_eq!(stylesheet.rules[0].selectors.len(), 1);
+        assert_eq!(stylesheet.rules[0].declarations.len(), 2);
+        assert_eq!(stylesheet.rules[0].declarations[1].property, "color");
+        assert_eq!(stylesheet.rules[0].declarations[1].value, "#ff0000");
+    }
+
+    #[test]
+    fn parse_stylesheet_ignores_opening_brace_inside_string() {
+        let stylesheet = parse_stylesheet(r#".b { content: "{"; color: #00ff00; } .c { color: #0000ff; }"#);
+        assert_eq!(stylesheet.rules.len(), 2);
+        assert_eq!(
+            stylesheet.rules[0]
+                .declarations
+                .iter()
+                .find(|decl| decl.property == "color")
+                .unwrap()
+                .value,
+            "#00ff00"
+        );
+        assert_eq!(
+            stylesheet.rules[1]
+                .declarations
+                .iter()
+                .find(|decl| decl.property == "color")
+                .unwrap()
+                .value,
+            "#0000ff"
+        );
+    }
+
+    #[test]
+    fn parse_stylesheet_still_handles_normal_rules() {
+        let stylesheet = parse_stylesheet("p { color: #123456; }");
+        assert_eq!(stylesheet.rules.len(), 1);
+        assert_eq!(stylesheet.rules[0].declarations.len(), 1);
+        assert_eq!(stylesheet.rules[0].declarations[0].property, "color");
+        assert_eq!(stylesheet.rules[0].declarations[0].value, "#123456");
     }
 
     #[test]
