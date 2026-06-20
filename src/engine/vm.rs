@@ -2213,7 +2213,7 @@ impl Vm {
                     }
                     other => other,
                 };
-                self.handle_runtime_error(error)?;
+                self.handle_runtime_error(error, target_depth)?;
             }
         }
         Ok(())
@@ -5329,7 +5329,7 @@ impl Vm {
         self.frames.push(frame);
         self.stack.extend(context.stack_snapshot);
         if is_throw {
-            self.handle_runtime_error(VmError::Thrown(value))?;
+            self.handle_runtime_error(VmError::Thrown(value), base_depth)?;
         } else {
             self.stack.push(value);
         }
@@ -5971,9 +5971,9 @@ impl Vm {
         })
     }
 
-    fn handle_runtime_error(&mut self, error: VmError) -> Result<(), VmError> {
+    fn handle_runtime_error(&mut self, error: VmError, floor: usize) -> Result<(), VmError> {
         match error {
-            VmError::Thrown(value) => self.handle_thrown_value(value),
+            VmError::Thrown(value) => self.handle_thrown_value(value, floor),
             // StackOverflow is a catchable `RangeError` in real engines
             // (`try { recurse() } catch (e) { … }`), so route it through the same
             // handler-unwinding path. Unwinding to a `try` also frees the frames
@@ -5983,7 +5983,7 @@ impl Vm {
             | VmError::RangeError(_)
             | VmError::StackOverflow => {
                 let wrapped = self.wrap_vm_error_as_value(&error)?;
-                match self.handle_thrown_value(wrapped) {
+                match self.handle_thrown_value(wrapped, floor) {
                     Ok(()) => Ok(()),
                     Err(_) => Err(error),
                 }
@@ -5992,7 +5992,7 @@ impl Vm {
         }
     }
 
-    fn handle_thrown_value(&mut self, value: Value) -> Result<(), VmError> {
+    fn handle_thrown_value(&mut self, value: Value, floor: usize) -> Result<(), VmError> {
         let mut thrown = value;
         self.last_backtrace = Some(self.capture_backtrace());
         loop {
@@ -6002,6 +6002,15 @@ impl Vm {
                     self.describe_thrown_value(&thrown)
                 )));
             };
+            // Respect the synchronous-call boundary: frames below `floor` belong to
+            // the caller of this run (e.g. the JS code that called a builtin which
+            // re-entered the VM via call_value_sync). If the throw escapes the
+            // frames at/above `floor` without a handler, propagate it as Thrown so
+            // the OUTER run loop finds the caller's try/catch — instead of unwinding
+            // across the boundary and leaving call_value_sync with no return value.
+            if frame_index < floor {
+                return Err(VmError::Thrown(thrown));
+            }
             let ip = self.frames[frame_index].ip.saturating_sub(1) as u32;
             let handler = self.frames[frame_index]
                 .proto
