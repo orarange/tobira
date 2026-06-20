@@ -578,6 +578,34 @@ impl Default for GridPlacement {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SignedEdgeSizes {
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub left: i32,
+}
+
+impl SignedEdgeSizes {
+    pub fn all(value: i32) -> Self {
+        Self {
+            top: value,
+            right: value,
+            bottom: value,
+            left: value,
+        }
+    }
+
+    pub fn vertical(top: i32, bottom: i32) -> Self {
+        Self {
+            top,
+            right: 0,
+            bottom,
+            left: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FloatSide {
     None,
@@ -614,7 +642,7 @@ pub struct ComputedStyle {
     pub display: Display,
     pub color: Color,
     pub background_color: Option<Color>,
-    pub margin: EdgeSizes,
+    pub margin: SignedEdgeSizes,
     pub margin_left_auto: bool,
     pub margin_right_auto: bool,
     pub padding: EdgeSizes,
@@ -832,37 +860,37 @@ impl ComputedStyle {
 
         match tag_name {
             "body" => {
-                style.margin = EdgeSizes::all(8);
+                style.margin = SignedEdgeSizes::all(8);
             }
             "h1" => {
                 style.font_size_px = 32;
                 style.font_weight = true;
-                style.margin = EdgeSizes::vertical(18, 12);
+                style.margin = SignedEdgeSizes::vertical(18, 12);
             }
             "h2" => {
                 style.font_size_px = 28;
                 style.font_weight = true;
-                style.margin = EdgeSizes::vertical(16, 10);
+                style.margin = SignedEdgeSizes::vertical(16, 10);
             }
             "h3" => {
                 style.font_size_px = 24;
                 style.font_weight = true;
-                style.margin = EdgeSizes::vertical(14, 8);
+                style.margin = SignedEdgeSizes::vertical(14, 8);
             }
             "h4" => {
                 style.font_size_px = 20;
                 style.font_weight = true;
-                style.margin = EdgeSizes::vertical(12, 8);
+                style.margin = SignedEdgeSizes::vertical(12, 8);
             }
             "h5" => {
                 style.font_size_px = 18;
                 style.font_weight = true;
-                style.margin = EdgeSizes::vertical(10, 6);
+                style.margin = SignedEdgeSizes::vertical(10, 6);
             }
             "h6" => {
                 style.font_size_px = 16;
                 style.font_weight = true;
-                style.margin = EdgeSizes::vertical(10, 6);
+                style.margin = SignedEdgeSizes::vertical(10, 6);
             }
             "a" => {
                 style.color = DEFAULT_LINK_COLOR;
@@ -871,7 +899,7 @@ impl ComputedStyle {
             "pre" => {
                 style.font_family = FontFamilyKind::Monospace;
                 style.white_space = WhiteSpaceMode::Pre;
-                style.margin = EdgeSizes::vertical(12, 12);
+                style.margin = SignedEdgeSizes::vertical(12, 12);
                 style.padding = EdgeSizes::all(8);
                 style.background_color = Some(0xF2EEE7);
             }
@@ -2483,7 +2511,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "margin-top" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            if let Some(v) = parse_length_signed(value, parent_font_size) {
                 style.margin.top = v;
             }
         }
@@ -2492,13 +2520,13 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if v == "auto" {
                 style.margin_right_auto = true;
                 style.margin.right = 0;
-            } else if let Some(v) = parse_length(value, parent_font_size) {
+            } else if let Some(v) = parse_length_signed(value, parent_font_size) {
                 style.margin_right_auto = false;
                 style.margin.right = v;
             }
         }
         "margin-bottom" => {
-            if let Some(v) = parse_length(value, parent_font_size) {
+            if let Some(v) = parse_length_signed(value, parent_font_size) {
                 style.margin.bottom = v;
             }
         }
@@ -2507,7 +2535,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if v == "auto" {
                 style.margin_left_auto = true;
                 style.margin.left = 0;
-            } else if let Some(v) = parse_length(value, parent_font_size) {
+            } else if let Some(v) = parse_length_signed(value, parent_font_size) {
                 style.margin_left_auto = false;
                 style.margin.left = v;
             }
@@ -2978,21 +3006,21 @@ fn default_display(tag_name: &str) -> Display {
     }
 }
 
-fn default_margin(tag_name: &str) -> EdgeSizes {
+fn default_margin(tag_name: &str) -> SignedEdgeSizes {
     match tag_name {
-        "p" => EdgeSizes::vertical(0, 12),
-        "ul" | "ol" => EdgeSizes::vertical(0, 12),
-        "li" => EdgeSizes::vertical(0, 4),
-        "table" | "tr" => EdgeSizes::vertical(0, 8),
-        "td" | "th" => EdgeSizes::vertical(0, 6),
-        "hr" => EdgeSizes::vertical(10, 10),
-        "blockquote" => EdgeSizes {
+        "p" => SignedEdgeSizes::vertical(0, 12),
+        "ul" | "ol" => SignedEdgeSizes::vertical(0, 12),
+        "li" => SignedEdgeSizes::vertical(0, 4),
+        "table" | "tr" => SignedEdgeSizes::vertical(0, 8),
+        "td" | "th" => SignedEdgeSizes::vertical(0, 6),
+        "hr" => SignedEdgeSizes::vertical(10, 10),
+        "blockquote" => SignedEdgeSizes {
             top: 0,
             right: 0,
             bottom: 12,
             left: 18,
         },
-        _ => EdgeSizes::default(),
+        _ => SignedEdgeSizes::default(),
     }
 }
 
@@ -4188,23 +4216,23 @@ fn parse_margin_shorthand(style: &mut ComputedStyle, input: &str, parent_font_si
 
     let tokens: Vec<&str> = input.split_whitespace().collect();
     // Parse each token as length or auto (None means auto)
-    let parsed: Vec<Option<u32>> = tokens.iter()
+    let parsed: Vec<Option<i32>> = tokens.iter()
         .map(|t| {
             if t.to_ascii_lowercase() == "auto" {
                 None // auto
             } else {
-                parse_length(t, parent_font_size)
+                parse_length_signed(t, parent_font_size)
             }
         })
         .collect();
 
     // Apply CSS box shorthand rules (1/2/3/4 values)
     // None means "auto" (0px, flag set separately)
-    let resolve = |v: Option<u32>| v.unwrap_or(0);
+    let resolve = |v: Option<i32>| v.unwrap_or(0);
     match parsed.as_slice() {
         [all] => {
             let v = resolve(*all);
-            style.margin = EdgeSizes::all(v);
+            style.margin = SignedEdgeSizes::all(v);
             if all.is_none() {
                 style.margin_left_auto = true;
                 style.margin_right_auto = true;
@@ -4421,10 +4449,7 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
     parse_float(&value).map(|p| p.round().max(0.0) as u32)
 }
 
-/// Like parse_length but allows negative values; returns i32.
-/// Using i32 rather than i16 avoids silent truncation for large offsets
-/// (e.g. box-shadow offsets > 32767px which are legal in CSS).
-fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i32> {
+fn parse_length_signed(input: &str, parent_font_size: u32) -> Option<i32> {
     let value = input.trim().to_ascii_lowercase();
     if value == "0" {
         return Some(0);
@@ -4438,6 +4463,10 @@ fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i32> {
 
     // Clamp to i32::MAX before casting so pathological lengths (>= 2^31 px) don't wrap.
     parse_length(input, parent_font_size).map(|v| v.min(i32::MAX as u32) as i32)
+}
+
+fn parse_signed_length(input: &str, parent_font_size: u32) -> Option<i32> {
+    parse_length_signed(input, parent_font_size)
 }
 
 /// Simple calc() evaluator: left-to-right, no precedence.

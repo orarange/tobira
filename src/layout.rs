@@ -7,6 +7,18 @@ use crate::css::{
 use crate::font::FontContext;
 use crate::image::ImageStore;
 
+fn advance_by_margin(cursor: u32, m: i32) -> u32 {
+    (cursor as i64 + m as i64).max(0) as u32
+}
+
+fn offset_x_by_margin(x: u32, m: i32) -> u32 {
+    (x as i64 + m as i64).max(0) as u32
+}
+
+fn outer_width_with_margins(width: u32, ml: i32, mr: i32) -> u32 {
+    (width as i64 - (ml as i64 + mr as i64)).max(1) as u32
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GradientStop {
     pub color: u32,
@@ -1129,8 +1141,8 @@ fn layout_block_element(
                 return;
             }
             let (ctrl_w, ctrl_h) = measure_form_control(&spec, fonts);
-            *cursor_y = cursor_y.saturating_add(element.style.margin.top);
-            let control_x = x.saturating_add(element.style.margin.left);
+            *cursor_y = advance_by_margin(*cursor_y, element.style.margin.top);
+            let control_x = offset_x_by_margin(x, element.style.margin.left);
             // Shrink-to-fit the control, but never exceed the slot width.
             let final_w = ctrl_w.min(width.max(1)).max(1);
             let (background_color, border_color, native_chrome) = control_colors(&spec);
@@ -1160,16 +1172,15 @@ fn layout_block_element(
                 border_color,
                 native_chrome,
             });
-            *cursor_y = cursor_y
-                .saturating_add(ctrl_h)
-                .saturating_add(element.style.margin.bottom);
+            *cursor_y = advance_by_margin(*cursor_y, ctrl_h as i32);
+            *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
             return;
         }
     }
 
     let block_cmd_start = context.commands.len();
 
-    *cursor_y = cursor_y.saturating_add(element.style.margin.top);
+    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.top);
 
     // Resolve explicit width from style.width (LengthValue → px)
     let explicit_width: Option<u32> = element.style.width.map(|w| match w {
@@ -1184,7 +1195,7 @@ fn layout_block_element(
     let container_derived_width = {
         let ml = if element.style.margin_left_auto { 0 } else { element.style.margin.left };
         let mr = if element.style.margin_right_auto { 0 } else { element.style.margin.right };
-        width.saturating_sub(ml + mr)
+        outer_width_with_margins(width, ml, mr)
              .min(element.style.max_width.unwrap_or(u32::MAX))
              .max(element.style.min_width)
     };
@@ -1208,9 +1219,9 @@ fn layout_block_element(
         let total_margin = width.saturating_sub(outer_width);
         x.saturating_add(total_margin / 2)
     } else if element.style.margin_right_auto && !element.style.margin_left_auto {
-        x.saturating_add(element.style.margin.left)
+        offset_x_by_margin(x, element.style.margin.left)
     } else {
-        x.saturating_add(element.style.margin.left)
+        offset_x_by_margin(x, element.style.margin.left)
     };
 
     let background_top = *cursor_y;
@@ -1226,7 +1237,7 @@ fn layout_block_element(
         layout_block_element_as_layer(
             element, outer_x, outer_width, background_top, cursor_y, context, images, fonts, current_form,
         );
-        *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+        *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
         return;
     }
 
@@ -1565,7 +1576,7 @@ fn layout_block_element(
         }
     }
 
-    *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
 }
 
 /// Remove or clamp draw commands (from index `start`) to the given clip box.
@@ -2021,7 +2032,7 @@ fn layout_image_element(
     images: &ImageStore,
     fonts: &mut FontContext,
 ) {
-    *cursor_y = cursor_y.saturating_add(element.style.margin.top);
+    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.top);
 
     let Some(src) = resolved_image_source(element) else {
         layout_image_fallback(element, x, width, cursor_y, context, fonts);
@@ -2084,7 +2095,7 @@ fn layout_image_element(
     }
 
     *cursor_y = cursor_y.saturating_add(draw_height);
-    *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
 }
 
 fn layout_image_fallback(
@@ -2116,7 +2127,7 @@ fn layout_image_fallback(
         context,
         fonts,
     );
-    *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
 }
 
 fn resolved_image_source(element: &StyledElement) -> Option<&str> {
@@ -2186,11 +2197,11 @@ fn layout_table_element(
     fonts: &mut FontContext,
     current_form: Option<FormContext>,
 ) {
-    *cursor_y = cursor_y.saturating_add(element.style.margin.top);
+    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.top);
 
     let rows = collect_table_rows(element);
     if rows.is_empty() {
-        *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+        *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
         return;
     }
 
@@ -2201,7 +2212,7 @@ fn layout_table_element(
         .max()
         .unwrap_or(0);
     if column_count == 0 {
-        *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+        *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
         return;
     }
 
@@ -2466,7 +2477,7 @@ fn layout_table_element(
     context.next_control_id = next_control_id;
     context.next_form_id = next_form_id;
     *cursor_y = cursor_y.saturating_add(table_height);
-    *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
 }
 
 #[derive(Debug, Clone)]
@@ -4113,10 +4124,9 @@ fn layout_grid_container(
     fonts: &mut FontContext,
     current_form: Option<FormContext>,
 ) {
-    *cursor_y = cursor_y.saturating_add(element.style.margin.top);
-    let outer_x = x.saturating_add(element.style.margin.left);
-    let outer_width = available_width
-        .saturating_sub(element.style.margin.left + element.style.margin.right);
+    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.top);
+    let outer_x = offset_x_by_margin(x, element.style.margin.left);
+    let outer_width = outer_width_with_margins(available_width, element.style.margin.left, element.style.margin.right);
     let background_top = *cursor_y;
 
     let border_h = if !element.style.border_style_none {
@@ -4438,7 +4448,7 @@ fn layout_grid_container(
         }
     }
 
-    *cursor_y = background_bottom + element.style.margin.bottom;
+    *cursor_y = advance_by_margin(background_bottom, element.style.margin.bottom);
 }
 
 /// Resolve grid track sizes into pixel widths, distributing fr units.
@@ -4549,7 +4559,7 @@ fn flex_item_content_width(
     // doesn't cover margin.right — add it, or the item's slot is too narrow and a
     // later height-measure at that width wraps the content (a one-line span
     // ballooned to two lines, pushing every other flex item down).
-    w.saturating_add(child.style.margin.right).max(1)
+    (w as i64 + child.style.margin.right as i64).max(1) as u32
 }
 
 fn layout_flex_container(
@@ -4562,9 +4572,9 @@ fn layout_flex_container(
     fonts: &mut FontContext,
     current_form: Option<FormContext>,
 ) {
-    *cursor_y = cursor_y.saturating_add(element.style.margin.top);
-    let outer_x = x.saturating_add(element.style.margin.left);
-    let avail_width = width.saturating_sub(element.style.margin.left + element.style.margin.right);
+    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.top);
+    let outer_x = offset_x_by_margin(x, element.style.margin.left);
+    let avail_width = outer_width_with_margins(width, element.style.margin.left, element.style.margin.right);
     // Honor an explicit width on the flex container (needed for flex-wrap to know
     // where lines break); otherwise take the available width.
     let outer_width = match element.style.width {
@@ -4665,14 +4675,14 @@ fn layout_flex_container(
                 })
                 .collect();
 
-            let margins_total: u32 = children
+            let margins_total: i64 = children
                 .iter()
-                .map(|c| c.style.margin.left + c.style.margin.right)
+                .map(|c| c.style.margin.left as i64 + c.style.margin.right as i64)
                 .sum();
             let base_sum: u32 = base_widths.iter().sum();
             let mut item_widths = base_widths.clone();
             if base_sum
-                .saturating_add(margins_total)
+                .saturating_add(margins_total.max(0) as u32)
                 .saturating_add(total_gap)
                 > content_width
                 && element.style.flex_wrap == FlexWrap::NoWrap
@@ -4681,7 +4691,7 @@ fn layout_flex_container(
                 // Single-line overflow: shrink items proportionally to fit.
                 let avail = content_width
                     .saturating_sub(total_gap)
-                    .saturating_sub(margins_total)
+                    .saturating_sub(margins_total.max(0) as u32)
                     .max(1);
                 for w in item_widths.iter_mut() {
                     *w = (((*w as u64) * (avail as u64)) / base_sum as u64).max(1) as u32;
@@ -4690,7 +4700,7 @@ fn layout_flex_container(
                 // Distribute free space to growers (flex-grow), proportionally.
                 let free = content_width
                     .saturating_sub(base_sum)
-                    .saturating_sub(margins_total)
+                    .saturating_sub(margins_total.max(0) as u32)
                     .saturating_sub(total_gap);
                 let total_grow: u32 = children.iter().map(|c| c.style.flex_grow).sum();
                 if free > 0 && total_grow > 0 {
@@ -4703,7 +4713,7 @@ fn layout_flex_container(
                     }
                 }
             }
-            let total_fixed: u32 = item_widths.iter().sum::<u32>() + margins_total;
+            let total_fixed: i64 = item_widths.iter().map(|w| *w as i64).sum::<i64>() + margins_total;
 
             // Measure heights at the final item widths (wrapping depends on width).
             let item_heights: Vec<u32> = children
@@ -4764,7 +4774,7 @@ fn layout_flex_container(
             if element.style.flex_wrap == FlexWrap::NoWrap {
                 // Single line: honor justify-content + cross-axis alignment.
                 let (start_offset, item_gap) = justify_content_offsets(
-                    element.style.justify_content, content_width, total_fixed, total_gap, n as u32
+                    element.style.justify_content, content_width, total_fixed.max(0) as u32, total_gap, n as u32
                 );
                 let mut cursor_x = content_x.saturating_add(start_offset);
                 for (i, child) in children.iter().enumerate() {
@@ -4880,7 +4890,7 @@ fn layout_flex_container(
         }
     }
 
-    *cursor_y = cursor_y.saturating_add(element.style.margin.bottom);
+    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
 }
 
 fn justify_content_offsets(
@@ -5165,6 +5175,50 @@ mod tests {
         assert!(b.y >= a.y.saturating_add(a.height), "blocks no longer stack vertically");
         assert_eq!(a.x, 0);
         assert_eq!(b.x, 0);
+    }
+
+    #[test]
+    fn negative_margin_top_pulls_element_up() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="background:#aa0009;height:20px"></div><div style="margin-top:-20px;background:#aa000a;height:20px"></div></body></html>"#,
+            320,
+        );
+        let first = probe_rect(&l, 0xAA0009).expect("first rect");
+        let second = probe_rect(&l, 0xAA000A).expect("second rect");
+        assert!(second.y < first.y.saturating_add(first.height), "negative top margin did not pull the second block up");
+        assert_eq!(second.y, first.y, "expected the second block to overlap the first by 20px");
+    }
+
+    #[test]
+    fn negative_margin_left_shifts_left_with_clamp() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="margin-left:-10px;width:40px;height:20px;background:#aa000b"></div></body></html>"#,
+            320,
+        );
+        let box_ = probe_rect(&l, 0xAA000B).expect("box rect");
+        assert_eq!(box_.x, 0, "negative left margin should clamp at the viewport edge");
+    }
+
+    #[test]
+    fn positive_margin_top_still_adds_spacing() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="background:#aa000c;height:20px"></div><div style="margin-top:30px;background:#aa000d;height:20px"></div></body></html>"#,
+            320,
+        );
+        let first = probe_rect(&l, 0xAA000C).expect("first rect");
+        let second = probe_rect(&l, 0xAA000D).expect("second rect");
+        assert_eq!(second.y, first.y.saturating_add(first.height).saturating_add(30), "positive margin-top changed");
+    }
+
+    #[test]
+    fn negative_horizontal_margin_does_not_overflow_left_of_zero() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="display:flex;width:100px"><div style="margin-left:-30px;margin-right:-10px;width:40px;height:20px;background:#aa000e"></div></div></body></html>"#,
+            320,
+        );
+        let box_ = probe_rect(&l, 0xAA000E).expect("box rect");
+        assert_eq!(box_.x, 0, "negative horizontal margin should clamp x at zero");
+        assert!(box_.width >= 40, "negative margins should not shrink the available width");
     }
 
     #[test]
