@@ -5660,15 +5660,22 @@ mod tests {
     }
 
     #[test]
-    fn rgba_half_transparent_blends_with_white() {
-        // rgba(0, 0, 0, 0.5) should blend 50% black with white → rgb(128, 128, 128)
+    fn rgba_half_transparent_encodes_alpha_in_high_byte() {
         let color = parse_color("rgba(0, 0, 0, 0.5)").expect("should return a color");
-        let r = (color >> 16) & 0xFF;
-        let g = (color >> 8) & 0xFF;
-        let b = color & 0xFF;
-        assert!((r as i32 - 128).abs() <= 1, "r should be ~128, got {r}");
-        assert!((g as i32 - 128).abs() <= 1, "g should be ~128, got {g}");
-        assert!((b as i32 - 128).abs() <= 1, "b should be ~128, got {b}");
+        let alpha = (color >> 24) & 0xFF;
+        assert!((alpha as i32 - 128).abs() <= 1, "alpha should be ~128, got {alpha}");
+        assert_eq!(color & 0x00FF_FFFF, 0x0000_0000);
+    }
+
+    #[test]
+    fn rgba_hex_with_alpha_uses_high_byte() {
+        assert_eq!(parse_color("#1234"), Some(0x4411_2233));
+        assert_eq!(parse_color("#11223344"), Some(0x4411_2233));
+    }
+
+    #[test]
+    fn rgba_hex_with_zero_alpha_returns_none() {
+        assert_eq!(parse_color("#1230"), None);
     }
 
     // ── split_at_top_level tests ──────────────────────────────────────────────

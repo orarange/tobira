@@ -5258,13 +5258,44 @@ fn draw_rect(
 ) {
     let max_x = x.saturating_add(rect_width).min(width);
     let max_y = y.saturating_add(rect_height).min(height);
+    let alpha = (color >> 24) & 0xFF;
 
-    for row in y..max_y {
-        let row_offset = row as usize * width as usize;
-        for column in x..max_x {
-            buffer[row_offset + column as usize] = color;
+    if alpha == 0 {
+        let color = color & 0x00FF_FFFF;
+        for row in y..max_y {
+            let row_offset = row as usize * width as usize;
+            for column in x..max_x {
+                buffer[row_offset + column as usize] = color;
+            }
+        }
+    } else {
+        for row in y..max_y {
+            let row_offset = row as usize * width as usize;
+            for column in x..max_x {
+                let idx = row_offset + column as usize;
+                buffer[idx] = blend_pixel(buffer[idx], color);
+            }
         }
     }
+}
+
+#[inline]
+fn blend_pixel(dst: u32, src: u32) -> u32 {
+    let a = (src >> 24) & 0xFF;
+    if a == 0 {
+        return src & 0x00FF_FFFF;
+    }
+    let inv = 255 - a;
+    let sr = (src >> 16) & 0xFF;
+    let sg = (src >> 8) & 0xFF;
+    let sb = src & 0xFF;
+    let dr = (dst >> 16) & 0xFF;
+    let dg = (dst >> 8) & 0xFF;
+    let db = dst & 0xFF;
+    let r = (sr * a + dr * inv) / 255;
+    let g = (sg * a + dg * inv) / 255;
+    let b = (sb * a + db * inv) / 255;
+    (r << 16) | (g << 8) | b
 }
 
 fn draw_rounded_rect(
@@ -5322,7 +5353,7 @@ fn draw_rounded_rect(
             if dx * dx + dy * dy <= r_sq {
                 let idx = py * buf_w as usize + px;
                 if idx < buffer.len() {
-                    buffer[idx] = color;
+                    buffer[idx] = blend_pixel(buffer[idx], color);
                 }
             }
         }
@@ -5347,7 +5378,7 @@ fn draw_rounded_rect(
             if dx * dx + dy * dy <= r_sq {
                 let idx = py * buf_w as usize + px;
                 if idx < buffer.len() {
-                    buffer[idx] = color;
+                    buffer[idx] = blend_pixel(buffer[idx], color);
                 }
             }
         }
@@ -5366,7 +5397,7 @@ fn draw_rounded_rect(
             if dx * dx + dy * dy <= r_sq {
                 let idx = py * buf_w as usize + px;
                 if idx < buffer.len() {
-                    buffer[idx] = color;
+                    buffer[idx] = blend_pixel(buffer[idx], color);
                 }
             }
         }
@@ -5391,7 +5422,7 @@ fn draw_rounded_rect(
             if dx * dx + dy * dy <= r_sq {
                 let idx = py * buf_w as usize + px;
                 if idx < buffer.len() {
-                    buffer[idx] = color;
+                    buffer[idx] = blend_pixel(buffer[idx], color);
                 }
             }
         }
@@ -5717,7 +5748,7 @@ fn draw_scaled_image(
 #[cfg(test)]
 mod tests {
     use super::{
-        TextEditorState, build_get_form_submission_url, cursor_index_for_address_x,
+        TextEditorState, blend_pixel, build_get_form_submission_url, cursor_index_for_address_x,
         layout_error_document, looks_like_local_address, max_scroll, parse_address_input,
         resolve_text_input_value,
     };
@@ -6025,5 +6056,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(target, "https://example.com/find?q=hello+world#results");
+    }
+
+    #[test]
+    fn blend_pixel_opaque_source_overwrites_destination() {
+        assert_eq!(blend_pixel(0x0000_FF00, 0x00FF_0000), 0x00FF_0000);
+    }
+
+    #[test]
+    fn blend_pixel_transparent_source_returns_rgb() {
+        assert_eq!(blend_pixel(0x00FF_FF00, 0x0000_0000), 0x0000_0000);
+    }
+
+    #[test]
+    fn blend_pixel_half_alpha_produces_mid_gray() {
+        let color = blend_pixel(0x00FF_FFFF, 0x8000_0000);
+        let r = (color >> 16) & 0xFF;
+        let g = (color >> 8) & 0xFF;
+        let b = color & 0xFF;
+        assert!((r as i32 - 127).abs() <= 1, "r should be ~127, got {r}");
+        assert!((g as i32 - 127).abs() <= 1, "g should be ~127, got {g}");
+        assert!((b as i32 - 127).abs() <= 1, "b should be ~127, got {b}");
     }
 }

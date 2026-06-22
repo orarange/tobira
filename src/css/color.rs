@@ -28,7 +28,8 @@ pub fn parse_color(input: &str) -> Option<Color> {
             if a == 0.0 {
                 return None;
             }
-            return Some(blend_with_white(r, g, b, a));
+            let alpha = (a * 255.0).round() as u8;
+            return Some(rgba(r, g, b, alpha));
         }
     }
 
@@ -59,7 +60,8 @@ pub fn parse_color(input: &str) -> Option<Color> {
                 return None;
             }
             let (r, g, b) = hsl_to_rgb(h, s, l);
-            return Some(blend_with_white(r, g, b, a));
+            let alpha = (a * 255.0).round() as u8;
+            return Some(rgba(r, g, b, alpha));
         }
     }
 
@@ -115,10 +117,10 @@ fn parse_hex_color(value: &str) -> Option<Color> {
             let green = u8::from_str_radix(&value[1..2].repeat(2), 16).ok()?;
             let blue = u8::from_str_radix(&value[2..3].repeat(2), 16).ok()?;
             let alpha = u8::from_str_radix(&value[3..4].repeat(2), 16).ok()?;
-            if alpha < 128 {
+            if alpha == 0 {
                 None
             } else {
-                Some(rgb(red, green, blue))
+                Some(rgba(red, green, blue, alpha))
             }
         }
         6 => {
@@ -132,24 +134,23 @@ fn parse_hex_color(value: &str) -> Option<Color> {
             let green = u8::from_str_radix(&value[2..4], 16).ok()?;
             let blue = u8::from_str_radix(&value[4..6], 16).ok()?;
             let alpha = u8::from_str_radix(&value[6..8], 16).ok()?;
-            if alpha < 128 {
+            if alpha == 0 {
                 None
             } else {
-                Some(rgb(red, green, blue))
+                Some(rgba(red, green, blue, alpha))
             }
         }
         _ => None,
     }
 }
 
-fn blend_with_white(r: u8, g: u8, b: u8, alpha: f32) -> Color {
-    let blend =
-        |channel: u8| -> u8 { (channel as f32 * alpha + 255.0 * (1.0 - alpha)).round() as u8 };
-    rgb(blend(r), blend(g), blend(b))
-}
-
 fn rgb(red: u8, green: u8, blue: u8) -> Color {
     (red as u32) << 16 | (green as u32) << 8 | blue as u32
+}
+
+fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> Color {
+    let a = if alpha == 255 { 0 } else { alpha };
+    (a as u32) << 24 | rgb(red, green, blue)
 }
 
 fn parse_named_color(name: &str) -> Option<Color> {
