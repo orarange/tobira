@@ -217,6 +217,7 @@ enum BuiltinId {
     DomDocCreateTextNode,
     DomDocCreateFragment,
     DomDocWrite,
+    DomInterfaceConstructor,
     // DOM Node/Element methods
     DomNodeAppendChild,
     DomNodeInsertBefore,
@@ -3294,11 +3295,32 @@ impl Vm {
         // DOM interface constructors so `node instanceof Element` (and friends)
         // works. Host DOM nodes don't have prototype chains linked to these, so
         // `instanceof_value` recognizes them by interface name; here we just make
-        // each constructor exist as an object with a `.prototype`, register it as
-        // a global, and remember its ref→interface mapping.
+        // each constructor exist as a callable object with a `.prototype`, register
+        // it as a global, and remember its ref→interface mapping.
         for &iface in DOM_INTERFACE_NAMES {
-            let ctor = self.allocate_ordinary_object(Some(object_prototype));
             let proto = self.allocate_ordinary_object(Some(object_prototype));
+            let ctor = self.allocate_callable_object(
+                Callable::Builtin(BuiltinId::DomInterfaceConstructor),
+                true,
+                Some(proto),
+            );
+            let name = self.make_string_value(iface);
+            self.define_data_property(
+                ctor,
+                PropertyKey::from("name"),
+                name,
+                false,
+                false,
+                true,
+            );
+            self.define_data_property(
+                proto,
+                PropertyKey::from("constructor"),
+                Value::Object(ctor),
+                true,
+                false,
+                true,
+            );
             self.define_data_property(
                 ctor,
                 PropertyKey::from("prototype"),
@@ -6143,6 +6165,9 @@ impl Vm {
                         "attempted to construct a non-constructor value".to_string(),
                     ));
                 }
+                if builtin == BuiltinId::DomInterfaceConstructor {
+                    return self.construct_this_value(&constructor).map(Some);
+                }
                 Ok(Some(self.invoke_builtin(
                     builtin,
                     Value::Undefined,
@@ -6233,6 +6258,7 @@ impl Vm {
                 | BuiltinId::UrlConstructor
                 | BuiltinId::ArrayBufferConstructor
                 | BuiltinId::TypedArrayConstructor(_)
+                | BuiltinId::DomInterfaceConstructor
                 | BuiltinId::EventConstructor
                 | BuiltinId::CustomEventConstructor
                 | BuiltinId::KeyboardEventConstructor
@@ -6266,7 +6292,7 @@ impl Vm {
 
     fn resolve_callable(&self, value: &Value) -> Result<Callable, VmError> {
         let object = match value {
-            Value::Object(object) => object.raw(),
+            Value::Object(object) => *object,
             _ => {
                 let described = match value {
                     Value::Undefined => "undefined".to_string(),
@@ -6288,9 +6314,72 @@ impl Vm {
         };
 
         self.callables
-            .get(&object)
+            .get(&object.raw())
             .cloned()
-            .ok_or_else(|| VmError::TypeError("object is not callable".to_string()))
+            .ok_or_else(|| {
+                VmError::TypeError(format!(
+                    "object is not callable ({})",
+                    self.describe_non_callable_object(object)
+                ))
+            })
+    }
+
+    fn describe_non_callable_object(&self, object: GcRef<JsObject>) -> String {
+        let kind = self
+            .heap
+            .objects()
+            .get(object)
+            .map(|object_data| Self::object_kind_label(&object_data.kind))
+            .unwrap_or("missing object");
+        if let Some(name) = self.own_data_string_property(object, "name") {
+            return format!("name {name}, kind {kind}");
+        }
+        if let Some((_, JsPropertyDescriptor::Data {
+            value: Value::Object(constructor),
+            ..
+        })) = self.lookup_property_descriptor(object, &PropertyKey::from("constructor"))
+            && let Some(name) = self.own_data_string_property(constructor, "name")
+        {
+            return format!("constructor {name}, kind {kind}");
+        }
+        format!("kind {kind}")
+    }
+
+    fn own_data_string_property(&self, object: GcRef<JsObject>, name: &str) -> Option<String> {
+        match self.get_own_property_descriptor(object, &PropertyKey::from(name)) {
+            Some(JsPropertyDescriptor::Data {
+                value: Value::String(string),
+                ..
+            }) => Some(self.string_text(string)),
+            _ => None,
+        }
+    }
+
+    fn object_kind_label(kind: &ObjectKind) -> &'static str {
+        match kind {
+            ObjectKind::Ordinary => "Ordinary",
+            ObjectKind::Array => "Array",
+            ObjectKind::Function => "Function",
+            ObjectKind::Error => "Error",
+            ObjectKind::Promise(_) => "Promise",
+            ObjectKind::AsyncResumer(_) => "AsyncResumer",
+            ObjectKind::AsyncGenerator { .. } => "AsyncGenerator",
+            ObjectKind::Generator(_) => "Generator",
+            ObjectKind::Proxy { .. } => "Proxy",
+            ObjectKind::RegExp { .. } => "RegExp",
+            ObjectKind::Map(_) => "Map",
+            ObjectKind::Set(_) => "Set",
+            ObjectKind::UrlSearchParams(_) => "UrlSearchParams",
+            ObjectKind::Headers(_) => "Headers",
+            ObjectKind::FormData(_) => "FormData",
+            ObjectKind::ArrayBuffer(_) => "ArrayBuffer",
+            ObjectKind::TypedArray { .. } => "TypedArray",
+            ObjectKind::WeakMap(_) => "WeakMap",
+            ObjectKind::WeakSet(_) => "WeakSet",
+            ObjectKind::ForOfIterator { .. } => "ForOfIterator",
+            ObjectKind::Host(_) => "Host",
+            ObjectKind::Exotic(_) => "Exotic",
+        }
     }
 
     fn current_proto(&self) -> Result<&FunctionProto, VmError> {
@@ -8972,11 +9061,15 @@ impl Vm {
         };
         let ctor = self.require_object_ref(constructor, "instanceof right-hand side")?;
         // DOM interface constructors (`Element`, `Node`, …): host nodes satisfy
-        // them by interface name rather than by JS prototype chain.
+        // them by interface name rather than by JS prototype chain. JS-created
+        // instances still use the ordinary prototype-chain check below.
         if let Some(iface) = self.dom_interface_ctors.get(&ctor.raw()) {
-            return Ok(self
+            if self
                 .host_node_interfaces(*object)
-                .is_some_and(|set| set.iter().any(|name| name == iface)));
+                .is_some_and(|set| set.iter().any(|name| name == iface))
+            {
+                return Ok(true);
+            }
         }
         let prototype =
             match self.get_own_property_descriptor(ctor, &PropertyKey::from("prototype")) {
@@ -11981,6 +12074,10 @@ impl Vm {
             // ----------------------------------------------------------------
             // DOM — document-level methods (this = Document host object)
             // ----------------------------------------------------------------
+            BuiltinId::DomInterfaceConstructor => match this_value {
+                Value::Object(_) => Ok(this_value),
+                _ => Err(VmError::TypeError("Illegal constructor".to_string())),
+            },
             BuiltinId::DomDocQuerySelector | BuiltinId::DomNodeQuerySelector => {
                 let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 // Root at the document node itself (boa parity): documentElement

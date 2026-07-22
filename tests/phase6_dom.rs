@@ -734,6 +734,21 @@ fn document_create_element() {
     "#);
 }
 
+#[test]
+fn dom_nodes_instanceof_interface_constructors() {
+    let mut vm = make_vm();
+    run(&mut vm, r#"
+        assert(document instanceof Document);
+        assert(document instanceof Node);
+        assert(document instanceof EventTarget);
+
+        assert(document.body instanceof HTMLElement);
+        assert(document.body instanceof Element);
+        assert(document.body instanceof Node);
+        assert(document.body instanceof EventTarget);
+    "#);
+}
+
 /// 2. Setting innerHTML on an element parses HTML and the text is accessible.
 #[test]
 fn set_inner_html() {
