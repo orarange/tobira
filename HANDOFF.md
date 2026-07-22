@@ -19,14 +19,14 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-06-19`
+- Date: `2026-07-22`
 - Repo / package name: `tobira`
 - Working branch: `master`
 - Workflow:
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `599` passing tests on `2026-06-19`
+- `cargo test`: `645` passing tests on `2026-07-22` (Linux checkout)
 - `cargo build`: success on `2026-06-19` (release; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks)
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
@@ -578,3 +578,9 @@ Implemented all Phase 5 CSS roadmap items across 6 batches on `claude/phase5-css
 
 - Implemented dynamic `import()` (preload model, user-chosen Option A) end-to-end. Step 1 (compiler+VM): `ModuleContext.dynamic_imports` map + `Opcode::DynamicImport` wraps a module namespace (or undefined→reject) in a Promise; literal specifiers resolve from the map, computed/unknown reject gracefully. Step 2 (host): `load_module_graph` walks the full AST (boa_ast Visitor) for `import("literal")` calls and preloads those module graphs (non-fatal on failure), populating `dynamic_imports`. crates.io/rollupjs/webpack.js.org/svelte.dev all clear the old `Unimplemented("import() calls")` compile wall; vuejs.org still renders (no ESM regression). 599 tests green (tests/dynamic_import.rs). Not yet: computed `import(var)` (rejects — needs runtime specifier resolution in the VM).
 - New leads surfaced after the unblock: svelte.dev `Invalid URL` (our hand-rolled URL parser is too strict for some input — clean fix candidate); rollupjs `Object.create prototype must be an object or null`.
+
+### 2026-07-22 - Claude (Object.defineProperty descriptor merge)
+
+- Root-caused the rollupjs.org `Object.create prototype must be an object or null` lead: `Object.defineProperty` (and `Reflect.defineProperty` / `Object.defineProperties`) replaced the existing own property with the parsed descriptor wholesale, so Babel's per-class `Object.defineProperty(fn, "prototype", {writable:false})` clobbered `fn.prototype` to `undefined`, and the next `class B extends A` died inside `_inherits`.
+- Implemented spec-style ValidateAndApplyPropertyDefinition merging (`value_to_property_descriptor_merged`): fields absent from the descriptor object inherit the existing property's attributes; accessor/data kind switches follow the spec; mixed accessor+value descriptors now throw TypeError. `Object.create` errors now report the received type, with an optional backtrace dump under `TOBIRA_DEBUG_CONSOLE`.
+- Verified headless via `--cli`: rollupjs.org clears the Algolia module crash (next lead: `object is not callable` in `theme.DwJmkNlp.js`); svelte.dev now loads with meaningful content and no `Invalid URL` in the current checkout. `645` tests green including new `tests/define_property_merge.rs` (9 cases).

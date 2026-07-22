@@ -9214,10 +9214,18 @@ impl Vm {
                 let prototype = match args.first().cloned().unwrap_or(Value::Null) {
                     Value::Null => None,
                     Value::Object(object) => Some(object),
-                    _ => {
-                        return Err(VmError::TypeError(
-                            "Object.create prototype must be an object or null".to_string(),
-                        ));
+                    other => {
+                        if std::env::var("TOBIRA_DEBUG_CONSOLE").is_ok() {
+                            eprintln!(
+                                "[debug] Object.create got {} — backtrace:\n{}",
+                                other.type_name(),
+                                self.capture_backtrace()
+                            );
+                        }
+                        return Err(VmError::TypeError(format!(
+                            "Object.create prototype must be an object or null (got {})",
+                            other.type_name()
+                        )));
                     }
                 };
                 Ok(Value::Object(self.allocate_ordinary_object(prototype)))
@@ -9228,8 +9236,11 @@ impl Vm {
                     "Object.defineProperty",
                 )?;
                 let name = self.to_property_key(args.get(1).unwrap_or(&Value::Undefined))?;
-                let descriptor =
-                    self.value_to_property_descriptor(args.get(2).unwrap_or(&Value::Undefined))?;
+                let existing = self.get_own_property_descriptor(object, &name);
+                let descriptor = self.value_to_property_descriptor_merged(
+                    existing.as_ref(),
+                    args.get(2).unwrap_or(&Value::Undefined),
+                )?;
                 if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
                     object_data.properties.insert(name.clone(), descriptor);
                 }
@@ -10771,7 +10782,9 @@ impl Vm {
                     for key in self.object_own_enumerable_keys(props) {
                         let descriptor_value =
                             self.get_property_value(&Value::Object(props), &key)?;
-                        let descriptor = self.value_to_property_descriptor(&descriptor_value)?;
+                        let existing = self.get_own_property_descriptor(object, &key);
+                        let descriptor = self
+                            .value_to_property_descriptor_merged(existing.as_ref(), &descriptor_value)?;
                         if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
                             object_data.properties.insert(key.clone(), descriptor);
                         }
@@ -10874,8 +10887,11 @@ impl Vm {
                     "Reflect.defineProperty",
                 )?;
                 let name = self.to_property_key(args.get(1).unwrap_or(&Value::Undefined))?;
-                let descriptor =
-                    self.value_to_property_descriptor(args.get(2).unwrap_or(&Value::Undefined))?;
+                let existing = self.get_own_property_descriptor(object, &name);
+                let descriptor = self.value_to_property_descriptor_merged(
+                    existing.as_ref(),
+                    args.get(2).unwrap_or(&Value::Undefined),
+                )?;
                 if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
                     object_data.properties.insert(name.clone(), descriptor);
                 }
@@ -13192,38 +13208,99 @@ impl Vm {
                 })
     }
 
-    fn value_to_property_descriptor(
+    /// Convert a descriptor object into a `JsPropertyDescriptor`, merging with
+    /// the target's `existing` own property per the spec
+    /// (ValidateAndApplyPropertyDefinition): fields absent from the descriptor
+    /// object inherit the existing property's attributes instead of resetting
+    /// to defaults. Babel's class transform relies on this —
+    /// `Object.defineProperty(fn, "prototype", {writable: false})` must keep
+    /// the function's current prototype object rather than clobber it with
+    /// `undefined` (rollupjs.org's Algolia search box died on exactly that).
+    fn value_to_property_descriptor_merged(
         &mut self,
+        existing: Option<&JsPropertyDescriptor>,
         value: &Value,
     ) -> Result<JsPropertyDescriptor, VmError> {
         let object = self.require_object_ref(value, "property descriptor")?;
-        let get = self.get_property_value(&Value::Object(object), &PropertyKey::from("get"))?;
-        let set = self.get_property_value(&Value::Object(object), &PropertyKey::from("set"))?;
-        if !matches!(get, Value::Undefined) || !matches!(set, Value::Undefined) {
-            let get = match get {
-                Value::Object(object) => Some(object),
-                Value::Undefined => None,
-                _ => {
-                    return Err(VmError::TypeError(
-                        "descriptor getter must be a function".to_string(),
-                    ));
+        let has_field = |vm: &Self, name: &str| {
+            vm.lookup_property_descriptor(object, &PropertyKey::from(name))
+                .is_some()
+        };
+        let has_get = has_field(self, "get");
+        let has_set = has_field(self, "set");
+        let has_value = has_field(self, "value");
+        let has_writable = has_field(self, "writable");
+        let has_enumerable = has_field(self, "enumerable");
+        let has_configurable = has_field(self, "configurable");
+
+        if (has_get || has_set) && (has_value || has_writable) {
+            return Err(VmError::TypeError(
+                "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute".to_string(),
+            ));
+        }
+
+        // Attributes shared by both descriptor kinds: absent fields inherit
+        // from the existing property; on a fresh property they default to false.
+        let (existing_enumerable, existing_configurable) = match existing {
+            Some(
+                JsPropertyDescriptor::Data {
+                    enumerable,
+                    configurable,
+                    ..
                 }
-            };
-            let set = match set {
-                Value::Object(object) => Some(object),
-                Value::Undefined => None,
-                _ => {
-                    return Err(VmError::TypeError(
-                        "descriptor setter must be a function".to_string(),
-                    ));
-                }
-            };
-            let enumerable_value =
-                self.get_property_value(&Value::Object(object), &PropertyKey::from("enumerable"))?;
-            let configurable_value = self
+                | JsPropertyDescriptor::Accessor {
+                    enumerable,
+                    configurable,
+                    ..
+                },
+            ) => (*enumerable, *configurable),
+            None => (false, false),
+        };
+        let enumerable = if has_enumerable {
+            let v = self.get_property_value(&Value::Object(object), &PropertyKey::from("enumerable"))?;
+            self.is_truthy(&v)
+        } else {
+            existing_enumerable
+        };
+        let configurable = if has_configurable {
+            let v = self
                 .get_property_value(&Value::Object(object), &PropertyKey::from("configurable"))?;
-            let enumerable = self.is_truthy(&enumerable_value);
-            let configurable = self.is_truthy(&configurable_value);
+            self.is_truthy(&v)
+        } else {
+            existing_configurable
+        };
+
+        if has_get || has_set {
+            let (existing_get, existing_set) = match existing {
+                Some(JsPropertyDescriptor::Accessor { get, set, .. }) => (*get, *set),
+                _ => (None, None),
+            };
+            let get = if has_get {
+                match self.get_property_value(&Value::Object(object), &PropertyKey::from("get"))? {
+                    Value::Object(object) => Some(object),
+                    Value::Undefined => None,
+                    _ => {
+                        return Err(VmError::TypeError(
+                            "descriptor getter must be a function".to_string(),
+                        ));
+                    }
+                }
+            } else {
+                existing_get
+            };
+            let set = if has_set {
+                match self.get_property_value(&Value::Object(object), &PropertyKey::from("set"))? {
+                    Value::Object(object) => Some(object),
+                    Value::Undefined => None,
+                    _ => {
+                        return Err(VmError::TypeError(
+                            "descriptor setter must be a function".to_string(),
+                        ));
+                    }
+                }
+            } else {
+                existing_set
+            };
             return Ok(JsPropertyDescriptor::Accessor {
                 get,
                 set,
@@ -13232,22 +13309,46 @@ impl Vm {
             });
         }
 
-        let value = self.get_property_value(&Value::Object(object), &PropertyKey::from("value"))?;
-        let writable_value =
-            self.get_property_value(&Value::Object(object), &PropertyKey::from("writable"))?;
-        let enumerable_value =
-            self.get_property_value(&Value::Object(object), &PropertyKey::from("enumerable"))?;
-        let configurable_value =
-            self.get_property_value(&Value::Object(object), &PropertyKey::from("configurable"))?;
-        let writable = self.is_truthy(&writable_value);
-        let enumerable = self.is_truthy(&enumerable_value);
-        let configurable = self.is_truthy(&configurable_value);
-        Ok(JsPropertyDescriptor::Data {
-            value,
-            writable,
-            enumerable,
-            configurable,
-        })
+        // Data descriptor (or generic attribute-only update).
+        match existing {
+            // Attribute-only update on an existing accessor keeps it an accessor.
+            Some(JsPropertyDescriptor::Accessor { get, set, .. })
+                if !has_value && !has_writable =>
+            {
+                Ok(JsPropertyDescriptor::Accessor {
+                    get: *get,
+                    set: *set,
+                    enumerable,
+                    configurable,
+                })
+            }
+            _ => {
+                let (existing_value, existing_writable) = match existing {
+                    Some(JsPropertyDescriptor::Data {
+                        value, writable, ..
+                    }) => (value.clone(), *writable),
+                    _ => (Value::Undefined, false),
+                };
+                let value = if has_value {
+                    self.get_property_value(&Value::Object(object), &PropertyKey::from("value"))?
+                } else {
+                    existing_value
+                };
+                let writable = if has_writable {
+                    let v = self
+                        .get_property_value(&Value::Object(object), &PropertyKey::from("writable"))?;
+                    self.is_truthy(&v)
+                } else {
+                    existing_writable
+                };
+                Ok(JsPropertyDescriptor::Data {
+                    value,
+                    writable,
+                    enumerable,
+                    configurable,
+                })
+            }
+        }
     }
 
     fn property_descriptor_to_value(
