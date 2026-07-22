@@ -155,6 +155,7 @@ enum BuiltinId {
     StringProtoPadStart,
     StringProtoPadEnd,
     StringProtoRepeat,
+    StringProtoIterator,
     NumberIsNaN,
     NumberIsFinite,
     NumberIsInteger,
@@ -386,6 +387,7 @@ enum BuiltinId {
     TypedArrayProtoMap,
     TypedArrayProtoReduce,
     TypedArrayProtoReverse,
+    TypedArrayProtoValues,
     // Added in the feature-completeness pass.
     ArrayProtoSplice,
     ArrayProtoFlatMap,
@@ -1385,6 +1387,7 @@ pub struct Vm {
     boolean_prototype: Option<GcRef<JsObject>>,
     regexp_prototype: Option<GcRef<JsObject>>,
     date_prototype: Option<GcRef<JsObject>>,
+    iterator_prototype: Option<GcRef<JsObject>>,
     generator_prototype: Option<GcRef<JsObject>>,
     async_generator_prototype: Option<GcRef<JsObject>>,
     url_search_params_prototype: Option<GcRef<JsObject>>,
@@ -1539,6 +1542,7 @@ impl Vm {
             boolean_prototype: None,
             regexp_prototype: None,
             date_prototype: None,
+            iterator_prototype: None,
             generator_prototype: None,
             async_generator_prototype: None,
             url_search_params_prototype: None,
@@ -2866,7 +2870,8 @@ impl Vm {
         let boolean_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let regexp_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let date_prototype = self.allocate_ordinary_object(Some(object_prototype));
-        let generator_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let iterator_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        let generator_prototype = self.allocate_ordinary_object(Some(iterator_prototype));
         let async_generator_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let url_search_params_prototype = self.allocate_ordinary_object(Some(object_prototype));
         let headers_prototype = self.allocate_ordinary_object(Some(object_prototype));
@@ -2894,6 +2899,7 @@ impl Vm {
         self.boolean_prototype = Some(boolean_prototype);
         self.regexp_prototype = Some(regexp_prototype);
         self.date_prototype = Some(date_prototype);
+        self.iterator_prototype = Some(iterator_prototype);
         self.generator_prototype = Some(generator_prototype);
         self.async_generator_prototype = Some(async_generator_prototype);
         self.url_search_params_prototype = Some(url_search_params_prototype);
@@ -3092,6 +3098,12 @@ impl Vm {
             "reverse",
             BuiltinId::TypedArrayProtoReverse,
         );
+        self.define_builtin_method(
+            typed_array_prototype,
+            "values",
+            BuiltinId::TypedArrayProtoValues,
+        );
+        self.define_symbol_iterator_alias(typed_array_prototype, "values");
 
         self.define_builtin_method(weak_ref_prototype, "deref", BuiltinId::WeakRefDeref);
         let weak_ref_ctor =
@@ -3364,6 +3376,7 @@ impl Vm {
         self.define_builtin_method(map_prototype, "entries", BuiltinId::MapProtoEntries);
         self.define_builtin_method(map_prototype, "keys", BuiltinId::MapProtoKeys);
         self.define_builtin_method(map_prototype, "values", BuiltinId::MapProtoValues);
+        self.define_symbol_iterator_alias(map_prototype, "entries");
 
         self.define_builtin_method(set_prototype, "add", BuiltinId::SetProtoAdd);
         self.define_builtin_method(set_prototype, "has", BuiltinId::SetProtoHas);
@@ -3371,6 +3384,7 @@ impl Vm {
         self.define_builtin_method(set_prototype, "clear", BuiltinId::SetProtoClear);
         self.define_builtin_method(set_prototype, "forEach", BuiltinId::SetProtoForEach);
         self.define_builtin_method(set_prototype, "values", BuiltinId::SetProtoValues);
+        self.define_symbol_iterator_alias(set_prototype, "values");
 
         self.define_builtin_method(array_prototype, "push", BuiltinId::ArrayProtoPush);
         self.define_builtin_method(array_prototype, "pop", BuiltinId::ArrayProtoPop);
@@ -3409,6 +3423,7 @@ impl Vm {
         self.define_builtin_method(array_prototype, "keys", BuiltinId::ArrayProtoKeys);
         self.define_builtin_method(array_prototype, "values", BuiltinId::ArrayProtoValues);
         self.define_builtin_method(array_prototype, "entries", BuiltinId::ArrayProtoEntries);
+        self.define_symbol_iterator_alias(array_prototype, "values");
         self.define_builtin_method(array_prototype, "reduceRight", BuiltinId::ArrayProtoReduceRight);
         self.define_builtin_method(array_prototype, "findLast", BuiltinId::ArrayProtoFindLast);
         self.define_builtin_method(
@@ -3487,6 +3502,15 @@ impl Vm {
         self.define_builtin_method(string_prototype, "concat", BuiltinId::StringProtoConcat);
         self.define_builtin_method(string_prototype, "toString", BuiltinId::StringProtoNormalize);
         self.define_builtin_method(string_prototype, "valueOf", BuiltinId::StringProtoNormalize);
+        let string_iterator = self.allocate_builtin_method(BuiltinId::StringProtoIterator);
+        self.define_data_property(
+            string_prototype,
+            PropertyKey::Symbol(SymbolId(SYMBOL_ITERATOR_ID)),
+            string_iterator,
+            true,
+            false,
+            true,
+        );
 
         self.define_builtin_method(number_prototype, "toFixed", BuiltinId::NumberProtoToFixed);
         self.define_builtin_method(number_prototype, "toString", BuiltinId::NumberProtoToString);
@@ -3528,18 +3552,26 @@ impl Vm {
             self.define_builtin_method(date_prototype, name, builtin);
         }
 
-        self.define_builtin_method(generator_prototype, "next", BuiltinId::GeneratorProtoNext);
-        self.define_builtin_method(generator_prototype, "return", BuiltinId::GeneratorProtoReturn);
-        // A generator is its own iterator.
-        let generator_iterator = self.allocate_builtin_method(BuiltinId::GeneratorProtoIterator);
+        let iterator_next = self.allocate_builtin_method(BuiltinId::ForOfIteratorAdapterNext);
         self.define_data_property(
-            generator_prototype,
-            PropertyKey::Symbol(SymbolId(SYMBOL_ITERATOR_ID)),
-            generator_iterator,
+            iterator_prototype,
+            PropertyKey::from("next"),
+            iterator_next,
             true,
             false,
             true,
         );
+        let iterator_iterator = self.allocate_builtin_method(BuiltinId::GeneratorProtoIterator);
+        self.define_data_property(
+            iterator_prototype,
+            PropertyKey::Symbol(SymbolId(SYMBOL_ITERATOR_ID)),
+            iterator_iterator,
+            true,
+            false,
+            true,
+        );
+        self.define_builtin_method(generator_prototype, "next", BuiltinId::GeneratorProtoNext);
+        self.define_builtin_method(generator_prototype, "return", BuiltinId::GeneratorProtoReturn);
         self.define_builtin_method(
             async_generator_prototype,
             "next",
@@ -3976,6 +4008,11 @@ impl Vm {
     fn date_prototype_ref(&self) -> GcRef<JsObject> {
         self.date_prototype
             .expect("date prototype should be installed")
+    }
+
+    fn iterator_prototype_ref(&self) -> GcRef<JsObject> {
+        self.iterator_prototype
+            .expect("iterator prototype should be installed")
     }
 
     fn generator_prototype_ref(&self) -> GcRef<JsObject> {
@@ -4885,6 +4922,25 @@ impl Vm {
     fn define_builtin_method(&mut self, object: GcRef<JsObject>, name: &str, builtin: BuiltinId) {
         let value = self.allocate_builtin_value(builtin, false, None);
         self.define_data_property(object, PropertyKey::from(name), value, true, false, true);
+    }
+
+    fn define_symbol_iterator_alias(&mut self, object: GcRef<JsObject>, method_name: &str) {
+        let key = PropertyKey::from(method_name);
+        let value = self
+            .get_own_property_descriptor(object, &key)
+            .and_then(|descriptor| match descriptor {
+                JsPropertyDescriptor::Data { value, .. } => Some(value),
+                JsPropertyDescriptor::Accessor { .. } => None,
+            })
+            .unwrap_or(Value::Undefined);
+        self.define_data_property(
+            object,
+            PropertyKey::Symbol(SymbolId(SYMBOL_ITERATOR_ID)),
+            value,
+            true,
+            false,
+            true,
+        );
     }
 
     fn define_data_property(
@@ -8855,18 +8911,9 @@ impl Vm {
         let values = self.for_of_values(value)?;
         let iterator = self.heap.allocate_object(JsObject {
             kind: ObjectKind::ForOfIterator { values, index: 0 },
-            prototype: Some(self.object_prototype_ref()),
+            prototype: Some(self.iterator_prototype_ref()),
             ..JsObject::default()
         });
-        let next = self.allocate_builtin_method(BuiltinId::ForOfIteratorAdapterNext);
-        self.define_data_property(
-            iterator,
-            PropertyKey::from("next"),
-            next,
-            true,
-            true,
-            true,
-        );
         Ok(iterator)
     }
 
@@ -9508,6 +9555,10 @@ impl Vm {
             BuiltinId::TypedArrayProtoMap => self.typed_array_map(&this_value, &args),
             BuiltinId::TypedArrayProtoReduce => self.typed_array_reduce(&this_value, &args),
             BuiltinId::TypedArrayProtoReverse => self.typed_array_reverse(&this_value),
+            BuiltinId::TypedArrayProtoValues => {
+                let values = self.typed_array_to_values(&this_value);
+                Ok(self.make_for_of_iterator(values))
+            }
             BuiltinId::EventConstructor => {
                 let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 self.make_event_object(&event_type, args.get(1).cloned(), false)
@@ -10189,6 +10240,14 @@ impl Vm {
                     }
                 }
                 Ok(if return_index { Value::Number(-1.0) } else { Value::Undefined })
+            }
+            BuiltinId::StringProtoIterator => {
+                let text = self.builtin_string_this(&this_value)?;
+                let values = text
+                    .chars()
+                    .map(|character| self.make_string_value(&character.to_string()))
+                    .collect();
+                Ok(self.make_for_of_iterator(values))
             }
             BuiltinId::StringProtoAt => {
                 let text = self.builtin_string_this(&this_value)?;
@@ -11836,7 +11895,7 @@ impl Vm {
                 for (key, value) in entries {
                     pairs.push(self.make_array_from_values(vec![key, value])?);
                 }
-                self.make_array_from_values(pairs)
+                Ok(self.make_for_of_iterator(pairs))
             }
             BuiltinId::MapProtoKeys => {
                 let object = self.builtin_object_this(&this_value, "Map.prototype.keys")?;
@@ -11849,7 +11908,7 @@ impl Vm {
                     },
                     None => Vec::new(),
                 };
-                self.make_array_from_values(keys)
+                Ok(self.make_for_of_iterator(keys))
             }
             BuiltinId::MapProtoValues => {
                 let object = self.builtin_object_this(&this_value, "Map.prototype.values")?;
@@ -11862,7 +11921,7 @@ impl Vm {
                     },
                     None => Vec::new(),
                 };
-                self.make_array_from_values(values)
+                Ok(self.make_for_of_iterator(values))
             }
             BuiltinId::SetProtoAdd => {
                 let object = self.builtin_object_this(&this_value, "Set.prototype.add")?;
@@ -11917,7 +11976,7 @@ impl Vm {
                     },
                     None => Vec::new(),
                 };
-                self.make_array_from_values(values)
+                Ok(self.make_for_of_iterator(values))
             }
             // ----------------------------------------------------------------
             // DOM — document-level methods (this = Document host object)
@@ -13001,7 +13060,7 @@ impl Vm {
     fn make_for_of_iterator(&mut self, values: Vec<Value>) -> Value {
         let iterator = self.heap.allocate_object(JsObject {
             kind: ObjectKind::ForOfIterator { values, index: 0 },
-            prototype: Some(self.object_prototype_ref()),
+            prototype: Some(self.iterator_prototype_ref()),
             ..JsObject::default()
         });
         Value::Object(iterator)
