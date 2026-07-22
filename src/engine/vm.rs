@@ -6037,8 +6037,17 @@ impl Vm {
         constructor: Value,
         args: Vec<Value>,
     ) -> Result<Value, VmError> {
+        self.construct_value_with_new_target_sync(constructor.clone(), args, constructor)
+    }
+
+    fn construct_value_with_new_target_sync(
+        &mut self,
+        constructor: Value,
+        args: Vec<Value>,
+        new_target: Value,
+    ) -> Result<Value, VmError> {
         let base_depth = self.frames.len();
-        if let Some(value) = self.construct_value(constructor, args)? {
+        if let Some(value) = self.construct_value_with_new_target(constructor, args, new_target)? {
             return Ok(value);
         }
         self.run_until_frame_depth(base_depth)?;
@@ -6158,6 +6167,15 @@ impl Vm {
         constructor: Value,
         args: Vec<Value>,
     ) -> Result<Option<Value>, VmError> {
+        self.construct_value_with_new_target(constructor.clone(), args, constructor)
+    }
+
+    fn construct_value_with_new_target(
+        &mut self,
+        constructor: Value,
+        args: Vec<Value>,
+        new_target: Value,
+    ) -> Result<Option<Value>, VmError> {
         match self.resolve_callable(&constructor)? {
             Callable::Builtin(builtin) => {
                 if !self.builtin_constructable(builtin) {
@@ -6166,7 +6184,7 @@ impl Vm {
                     ));
                 }
                 if builtin == BuiltinId::DomInterfaceConstructor {
-                    return self.construct_this_value(&constructor).map(Some);
+                    return self.construct_this_value(&new_target).map(Some);
                 }
                 Ok(Some(self.invoke_builtin(
                     builtin,
@@ -6180,17 +6198,17 @@ impl Vm {
                         "attempted to construct a non-constructor value".to_string(),
                     ));
                 }
-                let this_value = self.construct_this_value(&constructor)?;
+                let this_value = self.construct_this_value(&new_target)?;
                 self.push_call_frame(closure, args, this_value.clone(), Some(this_value))?;
                 if let Some(frame) = self.frames.last_mut() {
-                    frame.new_target = constructor.clone();
+                    frame.new_target = new_target;
                 }
                 Ok(None)
             }
             Callable::Bound(bound) => {
                 let mut merged_args = bound.bound_args.clone();
                 merged_args.extend(args);
-                self.construct_value(bound.target, merged_args)
+                self.construct_value_with_new_target(bound.target, merged_args, new_target)
             }
             Callable::PromiseCapability { .. }
             | Callable::PromiseFinally { .. }
@@ -6274,8 +6292,28 @@ impl Vm {
         )
     }
 
-    fn construct_this_value(&mut self, constructor: &Value) -> Result<Value, VmError> {
-        let prototype = match constructor {
+    fn is_constructor_value(&self, value: &Value) -> bool {
+        match self.resolve_callable(value) {
+            Ok(Callable::Builtin(builtin)) => self.builtin_constructable(builtin),
+            Ok(Callable::Closure(closure)) => !closure.proto.is_async && !closure.proto.is_generator,
+            Ok(Callable::Bound(bound)) => self.is_constructor_value(&bound.target),
+            Ok(
+                Callable::PromiseCapability { .. }
+                | Callable::PromiseFinally { .. }
+                | Callable::PromiseAllResolveElement(_)
+                | Callable::PromiseAllReject { .. }
+                | Callable::PromiseRaceResolve { .. }
+                | Callable::PromiseRaceReject { .. }
+                | Callable::PromiseAllSettledElement(_)
+                | Callable::PromiseAnyResolve { .. }
+                | Callable::PromiseAnyRejectElement(_),
+            )
+            | Err(_) => false,
+        }
+    }
+
+    fn construct_this_value(&mut self, new_target: &Value) -> Result<Value, VmError> {
+        let prototype = match new_target {
             Value::Object(object) => {
                 match self.get_own_property_descriptor(*object, &PropertyKey::from("prototype")) {
                     Some(JsPropertyDescriptor::Data {
@@ -9368,7 +9406,21 @@ impl Vm {
                         )));
                     }
                 };
-                Ok(Value::Object(self.allocate_ordinary_object(prototype)))
+                let object = self.allocate_ordinary_object(prototype);
+                if let Some(Value::Object(props)) = args.get(1) {
+                    let props = *props;
+                    for key in self.object_own_enumerable_keys(props) {
+                        let descriptor_value =
+                            self.get_property_value(&Value::Object(props), &key)?;
+                        let descriptor =
+                            self.value_to_property_descriptor_merged(None, &descriptor_value)?;
+                        if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
+                            object_data.properties.insert(key.clone(), descriptor);
+                        }
+                        self.update_array_length_for_key(object, &key)?;
+                    }
+                }
+                Ok(Value::Object(object))
             }
             BuiltinId::ObjectDefineProperty => {
                 let object = self.require_object_ref(
@@ -11069,7 +11121,19 @@ impl Vm {
                     }
                     _ => Vec::new(),
                 };
-                self.construct_value_sync(target, arg_list)
+                let explicit_new_target = args
+                    .get(2)
+                    .filter(|value| !matches!(value, Value::Undefined));
+                let new_target = match explicit_new_target {
+                    Some(value) => value.clone(),
+                    _ => target.clone(),
+                };
+                if explicit_new_target.is_some() && !self.is_constructor_value(&new_target) {
+                    return Err(VmError::TypeError(
+                        "Reflect.construct: The last argument is not a constructor".to_string(),
+                    ));
+                }
+                self.construct_value_with_new_target_sync(target, arg_list, new_target)
             }
             BuiltinId::StructuredClone => {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
