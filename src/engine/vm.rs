@@ -6411,6 +6411,26 @@ impl Vm {
             .get(object)
             .map(|object_data| Self::object_kind_label(&object_data.kind))
             .unwrap_or("missing object");
+        if kind == "Array" {
+            let len = self.array_length(object);
+            let mut preview = Vec::new();
+            for i in 0..len.min(8) {
+                let item = match self.get_own_property_descriptor(object, &PropertyKey::from(i.to_string().as_str())) {
+                    Some(JsPropertyDescriptor::Data { value, .. }) => match value {
+                        Value::String(s) => format!("{:?}", self.string_text(s)),
+                        Value::Number(n) => n.to_string(),
+                        Value::Bool(b) => b.to_string(),
+                        Value::Null => "null".to_string(),
+                        Value::Undefined => "undefined".to_string(),
+                        Value::Symbol(_) => "Symbol()".to_string(),
+                        Value::Object(o) => self.heap.objects().get(o).map(|d| format!("<{}>", Self::object_kind_label(&d.kind))).unwrap_or_else(|| "<obj>".to_string()),
+                    },
+                    _ => "<hole>".to_string(),
+                };
+                preview.push(item);
+            }
+            return format!("kind Array, length {len}, [{}]", preview.join(", "));
+        }
         if let Some(name) = self.own_data_string_property(object, "name") {
             return format!("name {name}, kind {kind}");
         }

@@ -2730,7 +2730,13 @@ impl EngineSession {
                             vm.set_current_script_src(Some(record.src_url.clone()));
                             vm.set_current_script_node(script_node_id);
                             if let Err(e) = vm.execute_module(&chunk) {
-                                error = Some(format!("{e} (in module {url})"));
+                                let backtrace = vm.take_last_backtrace();
+                                error = Some(match backtrace {
+                                    Some(backtrace) if !backtrace.is_empty() => {
+                                        format!("{e} (in module {url})\n{backtrace}")
+                                    }
+                                    _ => format!("{e} (in module {url})"),
+                                });
                                 break 'scripts;
                             }
                         }
