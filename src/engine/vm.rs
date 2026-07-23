@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     cell::RefCell,
     cmp::{Ordering, Reverse},
     collections::{HashMap, VecDeque},

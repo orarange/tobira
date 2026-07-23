@@ -1,4 +1,4 @@
-﻿//! Bridge between the self-built JS engine (`tobira_engine::engine`) and the
+//! Bridge between the self-built JS engine (`tobira_engine::engine`) and the
 //! browser's DOM/host services.
 //!
 //! `BrowserHost` implements the engine's `Host` trait over an arena-backed DOM
