@@ -112,6 +112,14 @@ impl<'a> Compiler<'a> {
     }
 
     pub fn compile(&self) -> Result<Chunk, CompileError> {
+        self.compile_internal(false)
+    }
+
+    pub fn compile_for_eval_completion(&self) -> Result<Chunk, CompileError> {
+        self.compile_internal(true)
+    }
+
+    fn compile_internal(&self, preserve_eval_completion: bool) -> Result<Chunk, CompileError> {
         let module_context = if self.program.source_type() == SourceType::Module {
             self.module_context.clone().or_else(|| {
                 Some(ModuleContext {
@@ -135,8 +143,15 @@ impl<'a> Compiler<'a> {
             HashMap::new(),
         );
         function.install_this_binding()?;
-        function.compile_statements(self.program.body())?;
-        function.emit_implicit_return();
+        let has_eval_completion_value = preserve_eval_completion
+            && matches!(self.program.body().last(), Some(StatementNode::ExpressionStatement(_)));
+        if has_eval_completion_value {
+            function.compile_statements_preserving_final_expression(self.program.body())?;
+            function.emit(Opcode::Return);
+        } else {
+            function.compile_statements(self.program.body())?;
+            function.emit_implicit_return();
+        }
         let chunk = Chunk::new(function.finish());
         if env::var_os("TOBIRA_VERIFY_BYTECODE").is_some()
             && let Err(error) = verify_stack_balance(&chunk.top_level)

@@ -26,7 +26,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `670` passing tests on `2026-07-22` (Windows checkout)
+- `cargo test`: `679` passing tests on `2026-07-23` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
 - `cargo build`: success on `2026-06-19` (release; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks)
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
@@ -622,3 +622,17 @@ Headless sweep via `--cli` with `TOBIRA_DEBUG_CONSOLE=1`, after `Symbol.iterator
 - **crates.io — still title-only** (122 B: just `# crates.io: Rust Package Registry`, no errors reported). Unchanged by this work; it is an Ember SPA and the gap is elsewhere. Needs its own investigation.
 
 Recommended next targets, in order: (1) `TransformStream` / Web Streams globals for webpack.js.org — smallest and well-defined; (2) the rollupjs `kind Array` callee — now much cheaper to chase with the improved diagnostic; (3) native `super()` `new.target` propagation (compiler lowering change); (4) crates.io's empty render.
+
+### 2026-07-23 - (separate local session) strip leftover BOMs
+
+- `src/engine/vm.rs` and `src/engine_host.rs` still carried a leading UTF-8 BOM from the old encoding accident. Removed both (commit `527c55c`); no code change. All tracked `*.rs` are now BOM-free.
+
+### 2026-07-23 - Claude PM / Codex (global `eval`)
+
+- Implemented the global `eval` function. It was entirely absent (`typeof eval === "undefined"`); Google Search's inline script #2 died on `eval is not defined` and collapsed the results page to a 407-byte fallback.
+- **Indirect eval only.** The evaluated code runs at global scope, reusing the existing `eval_source` machinery (originally built for `document.write`'d `<script>`). Global reads/writes and `var`/`function` declarations leaking to the global object all work; the completion value is returned (`eval("1+1") === 2`). Non-string arguments are returned unchanged. Parse/compile failures throw a `SyntaxError` (the `document.write` path still uses its old `TypeError` mapping — the two now share `eval_source_with_errors` with an error-kind flag). New `BuiltinId::GlobalEval`; `window.eval`/`globalThis.eval` resolve to the same function.
+- Completion value needed a compiler path: `compile_for_eval_completion` / `compile_statements_preserving_final_expression` leave the final expression-statement on the stack instead of `Pop`-ing it. Verified stack balance under `TOBIRA_VERIFY_BYTECODE=1` (full suite green with it on).
+- **Explicitly out of scope — direct eval.** `function f(){ var local = 1; return eval("local"); }` cannot see `local` (throws ReferenceError); direct eval would need the compiler to special-case `eval(...)` call sites and keep local scopes reifiable. If a real site relies on direct eval, this will not help it.
+- **Completion-value limitation:** only a final *expression statement* is returned. `eval("if (true) 5")` yields `undefined`, not `5` (spec would give `5`). Acceptable for now.
+- Adjacent gap noticed while testing (NOT fixed): `new String("x")` returns a primitive string, not a wrapper object — `typeof new String("x") === "string"`. Unrelated to eval; flag for later.
+- `679` tests green (new `tests/global_eval.rs`, 9 cases). Codex left the working tree with 28 line-ending-only dirtied files again (real changes were only the 3 source files + the new test); restored as before. This has happened on every Codex run this session — the agent writes LF into CRLF files. Not harmful (committed blobs are LF via `core.autocrlf`), but check `git diff --numstat` before staging.

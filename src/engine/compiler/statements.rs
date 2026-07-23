@@ -968,6 +968,36 @@ impl<'a> super::FunctionCompiler<'a> {
         Ok(())
     }
 
+    pub(super) fn compile_statements_preserving_final_expression(
+        &mut self,
+        statements: &[StatementNode],
+    ) -> Result<(), CompileError> {
+        // Same hoisting behavior as `compile_statements`, but leave the final
+        // expression statement on the stack for eval's completion value.
+        self.predeclare_hoisted(statements)?;
+        if self.is_top_level {
+            self.predeclare_imports(statements)?;
+        }
+        for statement in statements {
+            if let StatementNode::FunctionDeclaration(declaration) = statement {
+                self.compile_function_declaration_statement(declaration)?;
+            }
+        }
+        for (index, statement) in statements.iter().enumerate() {
+            if matches!(statement, StatementNode::FunctionDeclaration(_)) {
+                continue;
+            }
+            if index == statements.len() - 1
+                && let StatementNode::ExpressionStatement(expression) = statement
+            {
+                self.compile_expression(expression)?;
+                continue;
+            }
+            self.compile_statement(statement)?;
+        }
+        Ok(())
+    }
+
     /// Allocate slots for the function/var/let/const names declared directly in
     /// this statement list, so hoisted function bodies see them in scope.
     pub(super) fn predeclare_hoisted(&mut self, statements: &[StatementNode]) -> Result<(), CompileError> {

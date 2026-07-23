@@ -111,6 +111,7 @@ enum BuiltinId {
     ArrayConstructor,
     ArrayIsArray,
     ArrayFrom,
+    GlobalEval,
     GlobalEscape,
     GlobalUnescape,
     ArrayProtoPush,
@@ -1996,14 +1997,54 @@ impl Vm {
     /// stack/frames — `document.write`'d <script> elements run nested inside
     /// the writing script's execution.
     pub fn eval_source(&mut self, source: &str) -> Result<Value, VmError> {
+        self.eval_source_with_errors(source, "TypeError", false)
+    }
+
+    fn eval_source_as_global_eval(&mut self, source: &str) -> Result<Value, VmError> {
+        self.eval_source_with_errors(source, "SyntaxError", true)
+    }
+
+    fn eval_compile_error(
+        &mut self,
+        name: &str,
+        message: String,
+        throw_as_value: bool,
+    ) -> VmError {
+        if throw_as_value {
+            VmError::Thrown(self.create_error_object(name, message))
+        } else {
+            VmError::TypeError(message)
+        }
+    }
+
+    fn eval_source_with_errors(
+        &mut self,
+        source: &str,
+        error_name: &str,
+        throw_as_value: bool,
+    ) -> Result<Value, VmError> {
         use super::compiler::Compiler;
         use super::parser::Parser;
-        let program = Parser::new(source)
-            .parse()
-            .map_err(|e| VmError::TypeError(format!("parse: {e:?}")))?;
-        let chunk = Compiler::new(&program)
-            .compile()
-            .map_err(|e| VmError::TypeError(format!("compile: {e:?}")))?;
+        let program = match Parser::new(source).parse() {
+            Ok(program) => program,
+            Err(error) => {
+                return Err(self.eval_compile_error(
+                    error_name,
+                    format!("parse: {error:?}"),
+                    throw_as_value,
+                ));
+            }
+        };
+        let chunk = match Compiler::new(&program).compile_for_eval_completion() {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                return Err(self.eval_compile_error(
+                    error_name,
+                    format!("compile: {error:?}"),
+                    throw_as_value,
+                ));
+            }
+        };
         let closure = RuntimeClosure {
             proto: Rc::new(chunk.top_level.clone()),
             upvalues: Vec::new(),
@@ -3982,6 +4023,7 @@ impl Vm {
 
         // Global functions.
         for (name, builtin) in [
+            ("eval", BuiltinId::GlobalEval),
             ("parseInt", BuiltinId::GlobalParseInt),
             ("parseFloat", BuiltinId::GlobalParseFloat),
             ("isNaN", BuiltinId::GlobalIsNaN),
@@ -12822,6 +12864,14 @@ impl Vm {
                 Ok(Value::Number(0.0))
             }
             BuiltinId::CancelIdleCallback => Ok(Value::Undefined),
+            BuiltinId::GlobalEval => {
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                let Value::String(source) = value else {
+                    return Ok(value);
+                };
+                let source = self.string_text(source);
+                self.eval_source_as_global_eval(&source)
+            }
             BuiltinId::GlobalEscape => {
                 let s = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 Ok(self.make_string_value(&self.escape_legacy(s)))
