@@ -246,7 +246,7 @@ impl<'a> FunctionCompiler<'a> {
         Ok(match storage {
             BindingStorage::Assignment => self.resolve_binding(name),
             BindingStorage::Var => {
-                if self.is_top_level {
+                if self.is_top_level && !self.is_module_top_level() {
                     ResolvedBinding::Global
                 } else {
                     ResolvedBinding::Local(self.declare_function_scoped(name)?)
@@ -254,6 +254,7 @@ impl<'a> FunctionCompiler<'a> {
             }
             BindingStorage::Let | BindingStorage::Const => {
                 if self.is_top_level
+                    && !self.is_module_top_level()
                     && context == DeclarationContext::Statement
                     && self.scopes.len() == 1
                 {

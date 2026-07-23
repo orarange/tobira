@@ -26,7 +26,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `679` passing tests on `2026-07-23` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
+- `cargo test`: `691` passing tests on `2026-07-23` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
 - `cargo build`: success on `2026-06-19` (release; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks)
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
@@ -204,6 +204,40 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-07-23 - Claude PM / Codex (module top-level scope isolation — rollupjs.org CLEAN)
+
+- Root-caused the rollupjs.org `object is not callable (kind Array, ["items"])` crash:
+  module top-level `let`/`const`/`var`/`function` bindings were compiled as **shared flat
+  globals keyed by name** (`resolve_declaration_binding` returned `Global` at top level even
+  for modules), and closure references compiled to call-time `GetGlobal(name)`. With minified
+  multi-chunk bundles, a later-executed module's same-named top-level binding clobbers the
+  first module's value. Exact real-site chain: VPAlgoliaSearchBox chunk declares
+  `var $i=["items"]` → overwrites framework's `$i` (Vue `withCtx`) → framework's exported
+  `L = $u = e => $i` returns the array → theme's `vs=_o(); vs(renderFn)` throws.
+  (The source-position backtrace `at <script> (2:40706)` from 33ab431 is what made this findable.)
+- Minimal repro: module A `const inner=()=>"real"; export const outer=()=>inner;`, module B
+  imports `outer`, declares its own `const inner=["items"]`, and `outer()` returned B's array.
+- Fix (Codex, spec by Claude): when compiling a module (`module_context.is_some()`), top-level
+  declarations become **frame locals** (`Rc<RefCell>` cells) like function bodies, so closures
+  capture cells via the existing upvalue machinery instead of falling through to `GetGlobal`.
+  Import live-bindings (per-use namespace `GetProp`) and export emission (`resolve_binding` →
+  `SetProp`) work unchanged. Script (non-module) behavior untouched (window sharing).
+  - `compiler/mod.rs`: `is_module_top_level()` helper.
+  - `compiler/scope.rs`: Var/Let/Const storage arms gated with it.
+  - `compiler/statements.rs`: function-decl hoist + switch-case hoist + block-nested `var`
+    collection enabled at module top level; `predeclare_hoisted` extended to cover
+    destructuring pattern names, class declarations, and export-wrapped declarations.
+  - `compiler/patterns.rs`: `collect_binding_names` / `collect_pattern_names` helpers.
+- New `tests/module_scope_isolation.rs` (6 tests): cross-module name collision, mutual
+  recursion, forward reference, destructuring capture, block-`var` capture, and
+  no-globalThis-leak. `cargo test` 691 green; `TOBIRA_VERIFY_BYTECODE=1` green.
+- **rollupjs.org now renders CLEAN end-to-end** (nav, hero, feature cards, footer; no
+  uncaught errors). This closes the module-scope arc that source-position backtraces opened.
+- Note for later: `load_module_graph` eagerly executes dynamically-imported chunks (they land
+  in `post_order` before their importer) and each `<script type="module">` tag builds its own
+  registry (a shared dep imported by two tags would re-execute and its namespace object be
+  recreated). Both are latent correctness leads, not urgent.
 
 ### 2026-06-19 - Claude PM / Codex (compiler split + GC evidence)
 

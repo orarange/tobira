@@ -339,6 +339,10 @@ impl<'a> FunctionCompiler<'a> {
         self.program.resolve_sym(identifier.sym())
     }
 
+    fn is_module_top_level(&self) -> bool {
+        self.is_top_level && self.module_context.is_some()
+    }
+
     fn binding_name(&self, binding: &BindingNode) -> Result<String, CompileError> {
         match binding {
             BindingNode::Identifier(identifier) => Ok(self.identifier_name(identifier)),

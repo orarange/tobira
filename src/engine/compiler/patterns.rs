@@ -13,6 +13,50 @@ pub(super) struct PendingPatternInit {
 }
 
 impl<'a> super::FunctionCompiler<'a> {
+    pub(super) fn collect_binding_names(&self, binding: &BindingNode, out: &mut Vec<String>) {
+        match binding {
+            BindingNode::Identifier(identifier) => out.push(self.identifier_name(identifier)),
+            BindingNode::Pattern(pattern) => self.collect_pattern_names(pattern, out),
+        }
+    }
+
+    pub(super) fn collect_pattern_names(&self, pattern: &PatternNode, out: &mut Vec<String>) {
+        match pattern {
+            PatternNode::Object(pattern) => {
+                for property in pattern.bindings() {
+                    match property {
+                        ObjectPatternElementNode::SingleName { ident, .. }
+                        | ObjectPatternElementNode::RestProperty { ident } => {
+                            out.push(self.identifier_name(ident));
+                        }
+                        ObjectPatternElementNode::Pattern { pattern, .. } => {
+                            self.collect_pattern_names(pattern, out);
+                        }
+                        ObjectPatternElementNode::AssignmentPropertyAccess { .. }
+                        | ObjectPatternElementNode::AssignmentRestPropertyAccess { .. } => {}
+                    }
+                }
+            }
+            PatternNode::Array(pattern) => {
+                for element in pattern.bindings() {
+                    match element {
+                        ArrayPatternElementNode::SingleName { ident, .. }
+                        | ArrayPatternElementNode::SingleNameRest { ident } => {
+                            out.push(self.identifier_name(ident));
+                        }
+                        ArrayPatternElementNode::Pattern { pattern, .. }
+                        | ArrayPatternElementNode::PatternRest { pattern } => {
+                            self.collect_pattern_names(pattern, out);
+                        }
+                        ArrayPatternElementNode::Elision
+                        | ArrayPatternElementNode::PropertyAccess { .. }
+                        | ArrayPatternElementNode::PropertyAccessRest { .. } => {}
+                    }
+                }
+            }
+        }
+    }
+
     pub(super) fn compile_binding_store(
         &mut self,
         binding: &BindingNode,

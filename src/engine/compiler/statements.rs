@@ -375,7 +375,7 @@ impl<'a> super::FunctionCompiler<'a> {
                     .map(|item| statement_list_item_to_node(item.clone()))
             })
             .collect();
-        if !self.is_top_level {
+        if !self.is_top_level || self.is_module_top_level() {
             for stmt in &case_statements {
                 if let StatementNode::FunctionDeclaration(declaration) = stmt {
                     let name = self.identifier_name(&declaration.name());
@@ -946,6 +946,13 @@ impl<'a> super::FunctionCompiler<'a> {
     }
 
     pub(super) fn compile_statements(&mut self, statements: &[StatementNode]) -> Result<(), CompileError> {
+        if self.is_module_top_level() {
+            let mut var_names = Vec::new();
+            Self::collect_var_names(self.program, statements, &mut var_names);
+            for name in var_names {
+                self.declare_function_scoped(&name)?;
+            }
+        }
         // Pre-declare hoistable bindings so that function declarations compiled
         // ahead of their textual position still resolve the variables they
         // capture (and so calling a function before its definition works).
@@ -972,6 +979,13 @@ impl<'a> super::FunctionCompiler<'a> {
         &mut self,
         statements: &[StatementNode],
     ) -> Result<(), CompileError> {
+        if self.is_module_top_level() {
+            let mut var_names = Vec::new();
+            Self::collect_var_names(self.program, statements, &mut var_names);
+            for name in var_names {
+                self.declare_function_scoped(&name)?;
+            }
+        }
         // Same hoisting behavior as `compile_statements`, but leave the final
         // expression statement on the stack for eval's completion value.
         self.predeclare_hoisted(statements)?;
@@ -1004,32 +1018,127 @@ impl<'a> super::FunctionCompiler<'a> {
         for statement in statements {
             match statement {
                 StatementNode::FunctionDeclaration(declaration) => {
-                    if !self.is_top_level {
+                    if !self.is_top_level || self.is_module_top_level() {
                         let name = self.identifier_name(&declaration.name());
                         self.declare_function_scoped(&name)?;
                     }
                 }
+                StatementNode::ClassDeclaration(class_decl) if self.is_module_top_level() => {
+                    let name = self.identifier_name(&class_decl.name());
+                    self.declare_block_scoped(&name)?;
+                }
                 StatementNode::VariableDeclaration(declaration) => {
-                    let storage = if declaration.is_var() {
-                        BindingStorage::Var
-                    } else if declaration.is_const() {
-                        BindingStorage::Const
-                    } else {
-                        BindingStorage::Let
-                    };
-                    for variable in declaration.variables() {
-                        if let BindingNode::Identifier(identifier) = variable.binding() {
-                            let name = self.identifier_name(&identifier);
-                            self.resolve_declaration_binding(
-                                &name,
-                                storage,
-                                DeclarationContext::Statement,
-                            )?;
-                        }
-                    }
+                    self.predeclare_variable_declaration(declaration)?;
+                }
+                StatementNode::ExportNamedDeclaration(export) if self.is_module_top_level() => {
+                    self.predeclare_export_named_declaration(export)?;
+                }
+                StatementNode::ExportDefaultDeclaration(export) if self.is_module_top_level() => {
+                    self.predeclare_export_default_declaration(export)?;
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    fn predeclare_variable_declaration(
+        &mut self,
+        declaration: &VariableDeclaration,
+    ) -> Result<(), CompileError> {
+        let storage = if declaration.is_var() {
+            BindingStorage::Var
+        } else if declaration.is_const() {
+            BindingStorage::Const
+        } else {
+            BindingStorage::Let
+        };
+        for variable in declaration.variables() {
+            let mut names = Vec::new();
+            self.collect_binding_names(variable.binding(), &mut names);
+            for name in names {
+                self.resolve_declaration_binding(
+                    &name,
+                    storage,
+                    DeclarationContext::Statement,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn predeclare_export_named_declaration(
+        &mut self,
+        export: &ExportNamedDeclaration,
+    ) -> Result<(), CompileError> {
+        match export.0.clone() {
+            boa_ast::declaration::ExportDeclaration::Declaration(declaration) => match declaration {
+                boa_ast::declaration::Declaration::FunctionDeclaration(function) => {
+                    let name = self.identifier_name(&function.name());
+                    self.declare_function_scoped(&name)?;
+                }
+                boa_ast::declaration::Declaration::GeneratorDeclaration(function) => {
+                    let name = self.identifier_name(&function.name());
+                    self.declare_function_scoped(&name)?;
+                }
+                boa_ast::declaration::Declaration::AsyncFunctionDeclaration(function) => {
+                    let name = self.identifier_name(&function.name());
+                    self.declare_function_scoped(&name)?;
+                }
+                boa_ast::declaration::Declaration::AsyncGeneratorDeclaration(function) => {
+                    let name = self.identifier_name(&function.name());
+                    self.declare_function_scoped(&name)?;
+                }
+                boa_ast::declaration::Declaration::ClassDeclaration(class_decl) => {
+                    let name = self.identifier_name(&class_decl.name());
+                    self.declare_block_scoped(&name)?;
+                }
+                boa_ast::declaration::Declaration::Lexical(lexical) => {
+                    let declaration = match lexical {
+                        boa_ast::declaration::LexicalDeclaration::Let(_) => {
+                            VariableDeclaration::Let(lexical)
+                        }
+                        boa_ast::declaration::LexicalDeclaration::Const(_) => {
+                            VariableDeclaration::Const(lexical)
+                        }
+                    };
+                    self.predeclare_variable_declaration(&declaration)?;
+                }
+            },
+            boa_ast::declaration::ExportDeclaration::VarStatement(var) => {
+                self.predeclare_variable_declaration(&VariableDeclaration::Var(var))?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn predeclare_export_default_declaration(
+        &mut self,
+        export: &ExportDefaultDeclaration,
+    ) -> Result<(), CompileError> {
+        match export.0.clone() {
+            boa_ast::declaration::ExportDeclaration::DefaultFunctionDeclaration(function) => {
+                let name = self.identifier_name(&function.name());
+                self.declare_function_scoped(&name)?;
+            }
+            boa_ast::declaration::ExportDeclaration::DefaultGeneratorDeclaration(function) => {
+                let name = self.identifier_name(&function.name());
+                self.declare_function_scoped(&name)?;
+            }
+            boa_ast::declaration::ExportDeclaration::DefaultAsyncFunctionDeclaration(function) => {
+                let name = self.identifier_name(&function.name());
+                self.declare_function_scoped(&name)?;
+            }
+            boa_ast::declaration::ExportDeclaration::DefaultAsyncGeneratorDeclaration(function) => {
+                let name = self.identifier_name(&function.name());
+                self.declare_function_scoped(&name)?;
+            }
+            boa_ast::declaration::ExportDeclaration::DefaultClassDeclaration(class_decl) => {
+                let name = self.identifier_name(&class_decl.name());
+                self.declare_block_scoped(&name)?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -1049,7 +1158,7 @@ impl<'a> super::FunctionCompiler<'a> {
         // resolves it as a global → "X is not defined" at call time. Minified code
         // (Terser) routinely places `var`s inside blocks while closures above them
         // capture them, which is exactly how real React tripped this.
-        if !self.is_top_level {
+        if !self.is_top_level || self.is_module_top_level() {
             let mut var_names = Vec::new();
             Self::collect_var_names(self.program, &statements, &mut var_names);
             for name in var_names {
@@ -1542,7 +1651,7 @@ impl<'a> super::FunctionCompiler<'a> {
         declaration: &FunctionDeclaration,
     ) -> Result<(), CompileError> {
         let name = self.identifier_name(&declaration.name());
-        let resolved = if self.is_top_level {
+        let resolved = if self.is_top_level && !self.is_module_top_level() {
             ResolvedBinding::Global
         } else {
             ResolvedBinding::Local(self.declare_function_scoped(&name)?)
