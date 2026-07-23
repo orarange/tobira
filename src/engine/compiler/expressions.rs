@@ -1,4 +1,4 @@
-use boa_ast::function::PrivateName;
+use boa_ast::{Spanned, function::PrivateName};
 
 use crate::engine::ast;
 use crate::engine::{ast::{
@@ -529,7 +529,9 @@ impl<'a> super::FunctionCompiler<'a> {
         }
         let argc = u8::try_from(1 + exprs.len())
             .map_err(|_| CompileError::message("tagged template argument count exceeded u8"))?;
-        self.emit(Opcode::Call(argc));
+        let call_index = self.emit(Opcode::Call(argc));
+        let position = template.span().start();
+        self.record_call_position(call_index, position.line_number(), position.column_number());
         Ok(())
     }
 
@@ -642,7 +644,9 @@ impl<'a> super::FunctionCompiler<'a> {
         for argument in call.args() {
             self.compile_expression(argument)?;
         }
-        self.emit(Opcode::Call(argc));
+        let call_index = self.emit(Opcode::Call(argc));
+        let position = call.span().start();
+        self.record_call_position(call_index, position.line_number(), position.column_number());
         Ok(())
     }
 
@@ -695,7 +699,9 @@ impl<'a> super::FunctionCompiler<'a> {
         for argument in new_expression.arguments() {
             self.compile_expression(argument)?;
         }
-        self.emit(Opcode::New(argc));
+        let call_index = self.emit(Opcode::New(argc));
+        let position = new_expression.span().start();
+        self.record_call_position(call_index, position.line_number(), position.column_number());
         Ok(())
     }
 

@@ -134,6 +134,13 @@ pub struct ExceptionHandler {
     pub finally_ip: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallSitePosition {
+    pub code_index: u32,
+    pub line: u32,
+    pub column: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionProto {
     pub name: Option<String>,
@@ -143,6 +150,7 @@ pub struct FunctionProto {
     pub is_async: bool,
     pub is_generator: bool,
     pub code: Vec<Opcode>,
+    pub call_positions: Vec<CallSitePosition>,
     pub constants: Vec<Constant>,
     pub upvalue_descriptors: Vec<UpvalueDescriptor>,
     pub nested_functions: Vec<FunctionProto>,
@@ -165,6 +173,7 @@ impl FunctionProto {
             is_async: false,
             is_generator: false,
             code: Vec::new(),
+            call_positions: Vec::new(),
             constants: Vec::new(),
             upvalue_descriptors: Vec::new(),
             nested_functions: Vec::new(),

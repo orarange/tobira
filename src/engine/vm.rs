@@ -1602,7 +1602,11 @@ impl Vm {
                     _ => "<anonymous>",
                 }
             };
-            lines.push(format!("    at {name}"));
+            if let Some(position) = frame.proto.call_positions.binary_search_by_key(&(frame.ip.saturating_sub(1) as u32), |position| position.code_index).ok().and_then(|index| frame.proto.call_positions.get(index)) {
+                lines.push(format!("    at {name} ({}:{})", position.line, position.column));
+            } else {
+                lines.push(format!("    at {name}"));
+            }
         }
         lines.join("\n")
     }

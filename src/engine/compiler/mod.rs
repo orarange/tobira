@@ -16,7 +16,7 @@ use super::ast::{
     SuperPropertyAccessNode, TemplateElementNode, UnaryOpNode, UpdateOpNode, UpdateTargetNode,
     VariableDeclaration, SourceType, statement_list_item_to_node,
 };
-use super::chunk::{Chunk, Constant, ExceptionHandler, FunctionProto, Opcode, UpvalueDescriptor};
+use super::chunk::{CallSitePosition, Chunk, Constant, ExceptionHandler, FunctionProto, Opcode, UpvalueDescriptor};
 use super::verifier::verify_stack_balance;
 mod scope;
 mod classes;
@@ -176,6 +176,7 @@ struct FunctionCompiler<'a> {
     is_strict: bool,
     is_top_level: bool,
     code: Vec<Opcode>,
+    call_positions: Vec<CallSitePosition>,
     constants: Vec<Constant>,
     upvalues: Rc<RefCell<UpvalueState>>,
     nested_functions: Vec<FunctionProto>,
@@ -219,6 +220,7 @@ impl<'a> FunctionCompiler<'a> {
             is_strict,
             is_top_level,
             code: Vec::new(),
+            call_positions: Vec::new(),
             constants: Vec::new(),
             upvalues: Rc::new(RefCell::new(UpvalueState::default())),
             nested_functions: Vec::new(),
@@ -250,6 +252,7 @@ impl<'a> FunctionCompiler<'a> {
             is_async: self.is_async,
             is_generator: self.is_generator,
             code: self.code,
+            call_positions: self.call_positions,
             constants: self.constants,
             upvalue_descriptors: self.upvalues.borrow().descriptors.clone(),
             nested_functions: self.nested_functions,
@@ -273,6 +276,12 @@ impl<'a> FunctionCompiler<'a> {
         let index = self.code.len();
         self.code.push(opcode);
         index
+    }
+
+    fn record_call_position(&mut self, code_index: usize, line: u32, column: u32) {
+        if let Ok(code_index) = u32::try_from(code_index) {
+            self.call_positions.push(CallSitePosition { code_index, line, column });
+        }
     }
 
     fn emit_jump(&mut self, opcode: Opcode) -> usize {
