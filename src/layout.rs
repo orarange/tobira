@@ -487,8 +487,26 @@ enum InlineFragment {
         link_href: Option<String>,
         link_node_id: Option<usize>,
     },
+    Image {
+        src: String,
+        draw_width: u32,
+        draw_height: u32,
+        style: ComputedStyle,
+        link_href: Option<String>,
+        link_node_id: Option<usize>,
+    },
     Control(FormControlSpec),
     LineBreak,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InlineImageSpec {
+    src: String,
+    draw_width: u32,
+    draw_height: u32,
+    style: ComputedStyle,
+    link_href: Option<String>,
+    link_node_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,6 +518,7 @@ struct LineSpan {
     link_href: Option<String>,
     link_node_id: Option<usize>,
     control: Option<FormControlSpec>,
+    image: Option<InlineImageSpec>,
 }
 
 #[derive(Debug, Default)]
@@ -561,6 +580,7 @@ impl LineBuilder {
 
         if let Some(last) = self.spans.last_mut() {
             if last.control.is_none()
+                && last.image.is_none()
                 && last.style == *style
                 && last.link_href.as_deref() == link_href
                 && last.link_node_id == link_node_id
@@ -579,6 +599,7 @@ impl LineBuilder {
             link_href: link_href.map(str::to_string),
             link_node_id,
             control: None,
+            image: None,
         });
     }
 
@@ -594,6 +615,38 @@ impl LineBuilder {
             link_href: None,
             link_node_id: None,
             control: Some(control.clone()),
+            image: None,
+        });
+    }
+
+    fn push_image(
+        &mut self,
+        src: &str,
+        draw_width: u32,
+        draw_height: u32,
+        style: &ComputedStyle,
+        link_href: Option<&str>,
+        link_node_id: Option<usize>,
+    ) {
+        self.width = self.width.saturating_add(draw_width);
+        self.line_height = self.line_height.max(draw_height);
+        let image = InlineImageSpec {
+            src: src.to_string(),
+            draw_width,
+            draw_height,
+            style: style.clone(),
+            link_href: link_href.map(str::to_string),
+            link_node_id,
+        };
+        self.spans.push(LineSpan {
+            text: String::new(),
+            width: draw_width,
+            height: draw_height,
+            style: style.clone(),
+            link_href: link_href.map(str::to_string),
+            link_node_id,
+            control: None,
+            image: Some(image),
         });
     }
 }
@@ -918,7 +971,8 @@ fn layout_node(
             match element.style.display {
                 Display::None => {}
                 Display::Inline => {
-                    let fragments = flatten_inline_fragments(node, context, current_form.clone());
+                    let fragments =
+                        flatten_inline_fragments(node, context, current_form.clone(), images, width);
                     layout_inline_fragments(
                         &fragments,
                         &element.style,
@@ -3069,6 +3123,8 @@ fn layout_mixed_children(
                 None,
                 current_form.clone(),
                 context,
+                images,
+                width,
             );
         }
     }
@@ -3094,6 +3150,8 @@ fn collect_inline_fragments(
     link_node_id: Option<usize>,
     current_form: Option<FormContext>,
     context: &mut LayoutContext,
+    images: &ImageStore,
+    available_width: u32,
 ) {
     match node {
         StyledNode::Text(text) => {
@@ -3137,6 +3195,22 @@ fn collect_inline_fragments(
                     }
 
                     if element.tag_name == "img" {
+                        if let Some(src) = resolved_image_source(element) {
+                            if let Some(image) = images.get(src) {
+                                let (draw_width, draw_height) =
+                                    image_dimensions(element, image.width, image.height, available_width.max(1));
+                                output.push(InlineFragment::Image {
+                                    src: src.to_string(),
+                                    draw_width,
+                                    draw_height,
+                                    style: element.style.clone(),
+                                    link_href: current_link.map(str::to_string),
+                                    link_node_id: current_link_node_id,
+                                });
+                                return;
+                            }
+                        }
+
                         let alt = element
                             .attributes
                             .get("alt")
@@ -3160,6 +3234,8 @@ fn collect_inline_fragments(
                             current_link_node_id,
                             current_form.clone(),
                             context,
+                            images,
+                            available_width,
                         );
                     }
                 }
@@ -3178,9 +3254,20 @@ fn flatten_inline_fragments(
     node: &StyledNode,
     context: &mut LayoutContext,
     current_form: Option<FormContext>,
+    images: &ImageStore,
+    available_width: u32,
 ) -> Vec<InlineFragment> {
     let mut fragments = Vec::new();
-    collect_inline_fragments(node, &mut fragments, None, None, current_form, context);
+    collect_inline_fragments(
+        node,
+        &mut fragments,
+        None,
+        None,
+        current_form,
+        context,
+        images,
+        available_width,
+    );
     fragments
 }
 
@@ -3254,6 +3341,27 @@ fn layout_nowrap_fragments(
                     line.push_span(" ", &control.style, fonts, None, None);
                 }
                 line.push_control(control, fonts);
+                pending_space = true;
+            }
+            InlineFragment::Image {
+                src,
+                draw_width,
+                draw_height,
+                style,
+                link_href,
+                link_node_id,
+            } => {
+                if pending_space && !line.is_empty() {
+                    line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
+                }
+                line.push_image(
+                    src,
+                    *draw_width,
+                    *draw_height,
+                    style,
+                    link_href.as_deref(),
+                    *link_node_id,
+                );
                 pending_space = true;
             }
             InlineFragment::Text { text, style, link_href, link_node_id } => {
@@ -3382,6 +3490,77 @@ fn layout_normal_fragments(
                     first_line = false;
                 }
                 line.push_control(control, fonts);
+                pending_space = true;
+            }
+            InlineFragment::Image {
+                src,
+                draw_width,
+                draw_height,
+                style,
+                link_href,
+                link_node_id,
+            } => {
+                let effective_width = if first_line && line.is_empty() {
+                    width.saturating_sub(text_indent)
+                } else {
+                    width
+                };
+
+                if pending_space && !line.is_empty() {
+                    let space_width = char_width(style, ' ', fonts);
+                    if line.width.saturating_add(space_width) > effective_width {
+                        if ellipsis_mode {
+                            apply_ellipsis_to_line(&mut line, effective_width, container_style, fonts);
+                            ellipsis_done = true;
+                            break 'outer;
+                        }
+                        emit_line_with_indent(
+                            &mut line,
+                            container_style,
+                            x,
+                            width,
+                            cursor_y,
+                            context,
+                            fonts,
+                            if first_line { text_indent } else { 0 },
+                        );
+                        first_line = false;
+                    } else {
+                        line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
+                    }
+                }
+
+                let effective_width = if first_line && line.is_empty() {
+                    width.saturating_sub(text_indent)
+                } else {
+                    width
+                };
+                if !line.is_empty() && line.width.saturating_add(*draw_width) > effective_width {
+                    if ellipsis_mode {
+                        apply_ellipsis_to_line(&mut line, effective_width, container_style, fonts);
+                        ellipsis_done = true;
+                        break 'outer;
+                    }
+                    emit_line_with_indent(
+                        &mut line,
+                        container_style,
+                        x,
+                        width,
+                        cursor_y,
+                        context,
+                        fonts,
+                        if first_line { text_indent } else { 0 },
+                    );
+                    first_line = false;
+                }
+                line.push_image(
+                    src,
+                    *draw_width,
+                    *draw_height,
+                    style,
+                    link_href.as_deref(),
+                    *link_node_id,
+                );
                 pending_space = true;
             }
             InlineFragment::Text {
@@ -3538,7 +3717,8 @@ fn apply_ellipsis_to_line(
         }
     }
     // Remove empty trailing spans
-    line.spans.retain(|s| !s.text.is_empty() || s.control.is_some());
+    line.spans
+        .retain(|s| !s.text.is_empty() || s.control.is_some() || s.image.is_some());
     // Append ellipsis as a new span
     let mut ellipsis_span = LineSpan {
         text: ellipsis.to_string(),
@@ -3548,6 +3728,7 @@ fn apply_ellipsis_to_line(
         link_href: None,
         link_node_id: None,
         control: None,
+        image: None,
     };
     line.spans.push(ellipsis_span);
     // Recompute line width
@@ -3592,6 +3773,23 @@ fn layout_preformatted_fragments(
                     first_line = false;
                 }
                 line.push_control(control, fonts);
+            }
+            InlineFragment::Image {
+                src,
+                draw_width,
+                draw_height,
+                style,
+                link_href,
+                link_node_id,
+            } => {
+                line.push_image(
+                    src,
+                    *draw_width,
+                    *draw_height,
+                    style,
+                    link_href.as_deref(),
+                    *link_node_id,
+                );
             }
             InlineFragment::Text {
                 text,
@@ -3784,6 +3982,69 @@ fn emit_line_impl(
                 border_color,
                 native_chrome,
             });
+
+            cursor_x = cursor_x.saturating_add(span.width);
+            continue;
+        }
+
+        if let Some(image) = &span.image {
+            let image_y = cursor_y.saturating_add(line_height.saturating_sub(span.height));
+            if image.style.opacity < 255
+                || image.style.filter_blur_px > 0
+                || image.style.filter_brightness != 10000
+            {
+                let img_cmd = DrawCommand::Image(ImageCommand {
+                    x: 0,
+                    y: 0,
+                    width: image.draw_width,
+                    height: image.draw_height,
+                    src: image.src.clone(),
+                    object_fit: image.style.object_fit,
+                    object_position_x: image.style.object_position_x,
+                    object_position_y: image.style.object_position_y,
+                    tile: false,
+                });
+                context.commands.push(DrawCommand::Layer(LayerCommand {
+                    x: cursor_x,
+                    y: image_y,
+                    width: image.draw_width,
+                    height: image.draw_height,
+                    opacity: image.style.opacity,
+                    blur_px: image.style.filter_blur_px,
+                    brightness: image.style.filter_brightness,
+                    scale_x: image.style.transform_scale_x,
+                    scale_y: image.style.transform_scale_y,
+                    rotate_millideg: image.style.transform_rotate_millideg,
+                    origin_x: image.style.transform_origin_x,
+                    origin_y: image.style.transform_origin_y,
+                    commands: vec![img_cmd],
+                }));
+            } else {
+                context.commands.push(DrawCommand::Image(ImageCommand {
+                    x: cursor_x,
+                    y: image_y,
+                    width: image.draw_width,
+                    height: image.draw_height,
+                    src: image.src.clone(),
+                    object_fit: image.style.object_fit,
+                    object_position_x: image.style.object_position_x,
+                    object_position_y: image.style.object_position_y,
+                    tile: false,
+                }));
+            }
+
+            if let Some(href) = &image.link_href {
+                if !image.style.pointer_events_none {
+                    context.links.push(LinkCommand {
+                        node_id: image.link_node_id,
+                        x: cursor_x,
+                        y: image_y,
+                        width: image.draw_width,
+                        height: image.draw_height,
+                        href: href.clone(),
+                    });
+                }
+            }
 
             cursor_x = cursor_x.saturating_add(span.width);
             continue;
@@ -5219,6 +5480,14 @@ mod tests {
     }
 
     fn probe_layout(html: &str, width: u32) -> super::LayoutDocument {
+        probe_layout_with_images(html, width, &ImageStore::default())
+    }
+
+    fn probe_layout_with_images(
+        html: &str,
+        width: u32,
+        images: &ImageStore,
+    ) -> super::LayoutDocument {
         let document = parse_document(html);
         let styled = build_styled_tree(
             &document,
@@ -5227,7 +5496,7 @@ mod tests {
             &crate::css::InteractiveState::default(),
         );
         let mut fonts = FontContext::load();
-        layout_styled_document(&styled, &ImageStore::default(), width, &mut fonts)
+        layout_styled_document(&styled, images, width, &mut fonts)
     }
 
     fn probe_rect(layout: &super::LayoutDocument, color: u32) -> Result<super::RectCommand, String> {
@@ -5761,6 +6030,93 @@ mod tests {
         assert_eq!(images_list.len(), 1);
         assert_eq!(images_list[0].width, 40);
         assert_eq!(images_list[0].height, 20);
+    }
+
+    #[test]
+    fn inline_linked_image_emits_image_command_and_link_hitbox() {
+        let mut images = ImageStore::default();
+        images.insert(
+            "https://example.com/a.jpg".to_string(),
+            DecodedImage {
+                width: 4,
+                height: 4,
+                rgba: vec![255; 4 * 4 * 4],
+            },
+        );
+        let layout = probe_layout_with_images(
+            r#"<html><body style="margin:0"><div><a href="https://example.com/x"><img src="https://example.com/a.jpg" width="100" height="140"></a> No.1</div></body></html>"#,
+            320,
+            &images,
+        );
+
+        let images_list = layout.images();
+        let image = images_list
+            .iter()
+            .find(|image| image.src == "https://example.com/a.jpg")
+            .expect("inline linked image should emit ImageCommand");
+        assert_eq!(image.width, 100);
+        assert_eq!(image.height, 140);
+        assert!(
+            !layout.texts().iter().any(|text| text.text.contains("[image]")),
+            "loaded inline image should not fall back to [image] text"
+        );
+        assert!(
+            layout.links.iter().any(|link| {
+                link.href == "https://example.com/x"
+                    && link.x == image.x
+                    && link.y == image.y
+                    && link.width == image.width
+                    && link.height == image.height
+            }),
+            "linked inline image should register an image-sized link hitbox"
+        );
+    }
+
+    #[test]
+    fn missing_inline_image_keeps_alt_text_fallback() {
+        let layout = probe_layout(
+            r#"<html><body style="margin:0"><div><a href="https://example.com/x"><img src="https://example.com/missing.jpg"></a></div></body></html>"#,
+            320,
+        );
+
+        assert!(layout.images().is_empty());
+        assert!(
+            layout.texts().iter().any(|text| text.text.contains("[image]")),
+            "missing inline image should keep the [image] fallback"
+        );
+    }
+
+    #[test]
+    fn inline_image_advances_line_by_image_height() {
+        let mut images = ImageStore::default();
+        images.insert(
+            "https://example.com/tall.jpg".to_string(),
+            DecodedImage {
+                width: 4,
+                height: 4,
+                rgba: vec![255; 4 * 4 * 4],
+            },
+        );
+        let layout = probe_layout_with_images(
+            r#"<html><body style="margin:0"><div><span><img src="https://example.com/tall.jpg" width="30" height="140"></span> No.1</div><div>Next</div></body></html>"#,
+            320,
+            &images,
+        );
+
+        let image = layout
+            .images()
+            .into_iter()
+            .find(|image| image.src == "https://example.com/tall.jpg")
+            .expect("inline image should be drawn");
+        let next = layout
+            .texts()
+            .into_iter()
+            .find(|text| text.text.contains("Next"))
+            .expect("following line should be drawn");
+        assert!(
+            next.y >= image.y.saturating_add(image.height),
+            "following block should start after the inline image height"
+        );
     }
 
     #[test]

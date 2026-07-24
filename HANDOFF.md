@@ -26,7 +26,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `697` passing tests on `2026-07-24` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
+- `cargo test`: `700` passing tests on `2026-07-24` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
 - `cargo build`: success on `2026-06-19` (release; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks)
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
@@ -204,6 +204,26 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-07-24 - Claude PM / Codex (inline image rendering — InlineFragment::Image)
+
+- User report: abehiroshi.la.coocan.jp/nonno/nonno.htm showed "[image]" text links where
+  Chrome shows magazine covers. Diagnosis: fetch/decode/ImageStore were all fine (verified
+  with a temporary probe — every cover JPEG decoded); the gap was purely in layout.
+  `collect_inline_fragments()` unconditionally replaced inline-context `<img>` with its
+  alt text / "[image]" — `InlineFragment` had no image variant, so any `<a><img></a>` or
+  text-mixed image (this page is `<td><a><img></a><br>No.N</td>`) never drew. Only the
+  block path (`layout_image_element`) could draw images.
+- Fix (Codex, spec by Claude): new `InlineFragment::Image` + `InlineImageSpec` +
+  `LineBuilder::push_image()`, modeled on the existing `Control` inline-box pattern.
+  Store-hit images become sized fragments (`image_dimensions` against available width);
+  store-miss keeps the alt/"[image]" fallback. All three white-space paths handle images
+  (normal wraps like a word); emit is bottom-aligned in the line box, honors
+  opacity/filter via LayerCommand, and emits a LinkCommand hitbox for `<a>`-wrapped
+  images (gated on pointer-events). `ImageStore` + available width now thread through
+  `flatten/collect_inline_fragments`.
+- Tests: linked inline image emits ImageCommand + link hitbox and no "[image]" text;
+  store-miss falls back to alt; image raises the line advance. `cargo test` 700 green.
 
 ### 2026-07-24 - Claude PM / Codex (HTML tokenizer char-boundary panic + non-HTML Content-Type)
 
