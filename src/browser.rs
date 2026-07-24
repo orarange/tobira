@@ -1210,6 +1210,24 @@ fn parse_frame_tracks(input: &str, count: usize) -> Vec<FrameTrack> {
         .collect()
 }
 
+/// RFC 3986 scheme: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":".
+/// `mailto:`/`tel:`/`javascript:` などは相対解決してはいけない。
+/// HTMLのURL属性は解釈前に前後のASCII空白を剥がすため、先頭空白は無視する。
+fn has_url_scheme(href: &str) -> bool {
+    let mut chars = href.trim_ascii_start().chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    for c in chars {
+        match c {
+            ':' => return true,
+            c if c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.') => {}
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn annotate_resource_urls(document: &mut Node, base_url: &Url) {
     match document {
         Node::Text(_) => {}
@@ -1235,6 +1253,7 @@ fn annotate_resource_urls(document: &mut Node, base_url: &Url) {
             if element.tag_name == "a"
                 && let Some(href) = element.attribute("href")
                 && !href.starts_with('#')
+                && !has_url_scheme(href)
                 && let Ok(url) = base_url.resolve(href)
             {
                 element
@@ -3346,7 +3365,7 @@ mod tests {
         collect_frame_specs, collect_stylesheet, document_has_meaningful_body, document_title,
         extract_body_children, rebuild_page_from_html, should_follow_script_navigation,
         synthetic_document, annotate_node_ids, set_incremental_restyle_override,
-        synthesize_non_html_document,
+        synthesize_non_html_document, annotate_resource_urls,
     };
     use crate::css::{InteractiveState, StyledNode, build_styled_tree};
     use crate::html::{Node, parse_document};
@@ -3393,6 +3412,50 @@ mod tests {
 
         assert!(synthesize_non_html_document(Some("text/html"), &url, "<p>x</p>").is_none());
         assert!(synthesize_non_html_document(None, &url, "<p>x</p>").is_none());
+    }
+
+    fn collect_anchor_hrefs(node: &Node, hrefs: &mut Vec<String>) {
+        if let Node::Element(element) = node {
+            if element.tag_name == "a"
+                && let Some(href) = element.attribute("href")
+            {
+                hrefs.push(href.to_string());
+            }
+            for child in &element.children {
+                collect_anchor_hrefs(child, hrefs);
+            }
+        }
+    }
+
+    #[test]
+    fn annotate_resource_urls_keeps_scheme_hrefs_unresolved() {
+        let base = Url::parse("https://abehiroshi.la.coocan.jp/top.htm").unwrap();
+        let mut document = parse_document(
+            "<a href=\"mailto:info@office-a2023.co.jp\">mail</a>\
+             <a href=\"tel:+81-3-0000-0000\">tel</a>\
+             <a href=\"javascript:void(0)\">js</a>\
+             <a href=\" mailto:pad@example.com\">padded</a>\
+             <a href=\"https://other.example/x\">abs</a>\
+             <a href=\"foo/bar:baz\">colon-path</a>\
+             <a href=\"page2.htm\">next</a>",
+        );
+
+        annotate_resource_urls(&mut document, &base);
+
+        let mut hrefs = Vec::new();
+        collect_anchor_hrefs(&document, &mut hrefs);
+        assert_eq!(
+            hrefs,
+            vec![
+                "mailto:info@office-a2023.co.jp".to_string(),
+                "tel:+81-3-0000-0000".to_string(),
+                "javascript:void(0)".to_string(),
+                " mailto:pad@example.com".to_string(),
+                "https://other.example/x".to_string(),
+                "https://abehiroshi.la.coocan.jp/foo/bar:baz".to_string(),
+                "https://abehiroshi.la.coocan.jp/page2.htm".to_string(),
+            ]
+        );
     }
 
     const HEAVY_CLASS_POOL: &[&str] = &[
