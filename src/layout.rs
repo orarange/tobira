@@ -2720,22 +2720,17 @@ fn layout_table_cell(
     };
     let mut cursor_y = 0_u32;
 
-    for child in &cell.children {
-        if is_hidden(child) {
-            continue;
-        }
-
-        layout_node(
-            child,
-            0,
-            width,
-            &mut cursor_y,
-            &mut context,
-            images,
-            fonts,
-            current_form.clone(),
-        );
-    }
+    layout_mixed_children(
+        cell,
+        0,
+        width,
+        &mut cursor_y,
+        &mut context,
+        false,
+        images,
+        fonts,
+        current_form,
+    );
 
     FragmentLayout {
         content_height: cursor_y.max(1),
@@ -3365,17 +3360,18 @@ fn layout_nowrap_fragments(
                 pending_space = true;
             }
             InlineFragment::Text { text, style, link_href, link_node_id } => {
-                let had_whitespace = text.chars().any(char::is_whitespace);
-                for word in text.split_whitespace() {
-                    if pending_space && !line.is_empty() {
+                let starts_with_whitespace = text.chars().next().map(char::is_whitespace).unwrap_or(false);
+                let ends_with_whitespace = text.chars().last().map(char::is_whitespace).unwrap_or(false);
+                let words: Vec<&str> = text.split_whitespace().collect();
+                let mut needs_space = pending_space || starts_with_whitespace;
+                for word in words {
+                    if needs_space && !line.is_empty() {
                         line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
                     }
                     line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
-                    pending_space = true;
+                    needs_space = true;
                 }
-                if had_whitespace {
-                    pending_space = true;
-                }
+                pending_space = ends_with_whitespace || (text.chars().any(char::is_whitespace) && line.is_empty());
             }
         }
     }
@@ -3569,9 +3565,12 @@ fn layout_normal_fragments(
                 link_href,
                 link_node_id,
             } => {
-                let had_whitespace = text.chars().any(char::is_whitespace);
+                let starts_with_whitespace = text.chars().next().map(char::is_whitespace).unwrap_or(false);
+                let ends_with_whitespace = text.chars().last().map(char::is_whitespace).unwrap_or(false);
+                let words: Vec<&str> = text.split_whitespace().collect();
+                let mut needs_space = pending_space || starts_with_whitespace;
 
-                for word in text.split_whitespace() {
+                for word in words {
                     if ellipsis_mode && ellipsis_done {
                         break;
                     }
@@ -3581,7 +3580,7 @@ fn layout_normal_fragments(
                         width
                     };
 
-                    if pending_space && !line.is_empty() {
+                    if needs_space && !line.is_empty() {
                         let space_width = char_width(style, ' ', fonts);
                         if line.width.saturating_add(space_width) > effective_width {
                             if ellipsis_mode {
@@ -3625,10 +3624,10 @@ fn layout_normal_fragments(
                         } else if line.width.saturating_add(word_width).saturating_add(ellipsis_width) > effective_width2 {
                             // Word fits but we can't guarantee another word will fit - add it
                             line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
-                            pending_space = true;
+                            needs_space = true;
                         } else {
                             line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
-                            pending_space = true;
+                            needs_space = true;
                         }
                     } else {
                         push_wrapped_word(
@@ -3644,13 +3643,11 @@ fn layout_normal_fragments(
                             &mut line,
                             fonts,
                         );
-                        pending_space = true;
+                        needs_space = true;
                     }
                 }
 
-                if had_whitespace {
-                    pending_space = true;
-                }
+                pending_space = ends_with_whitespace || (text.chars().any(char::is_whitespace) && line.is_empty());
             }
         }
     }
@@ -4207,9 +4204,27 @@ fn measure_cell_preferred_width(
     }
 
     let mut max_width = 1_u32;
+    let mut inline_width = 0_u32;
     for child in &cell.children {
-        max_width = max_width.max(measure_node_preferred_width(child, images, fonts));
+        if is_hidden(child) {
+            continue;
+        }
+
+        if matches!(child, StyledNode::Element(StyledElement { tag_name, .. }) if tag_name == "br") {
+            max_width = max_width.max(inline_width);
+            inline_width = 0;
+            continue;
+        }
+
+        let child_width = measure_node_preferred_width(child, images, fonts);
+        if is_block_level(child) {
+            max_width = max_width.max(inline_width).max(child_width);
+            inline_width = 0;
+        } else {
+            inline_width = inline_width.saturating_add(child_width);
+        }
     }
+    max_width = max_width.max(inline_width);
 
     max_width.saturating_add(padding.saturating_mul(2))
 }
@@ -6005,6 +6020,79 @@ mod tests {
 
         assert_eq!(left.y, right.y);
         assert!(right.x > left.x);
+    }
+
+    #[test]
+    fn table_cell_br_line_spacing_matches_div() {
+        let div_layout = probe_layout(
+            r#"<html><body style="margin:0"><div>L1<br>L2<br>L3</div></body></html>"#,
+            1570,
+        );
+        let table_layout = probe_layout(
+            r#"<html><body style="margin:0"><table><tr><td>L1<br>L2<br>L3</td></tr></table></body></html>"#,
+            1570,
+        );
+
+        let line_gaps = |layout: &super::LayoutDocument| -> Vec<u32> {
+            let mut ys: Vec<u32> = ["L1", "L2", "L3"]
+                .iter()
+                .map(|label| {
+                    layout
+                        .texts()
+                        .into_iter()
+                        .find(|text| text.text == *label)
+                        .unwrap_or_else(|| panic!("missing text {label}"))
+                        .y
+                })
+                .collect();
+            ys.sort_unstable();
+            ys.windows(2).map(|pair| pair[1] - pair[0]).collect()
+        };
+
+        assert_eq!(line_gaps(&table_layout), line_gaps(&div_layout));
+    }
+
+    #[test]
+    fn table_cell_inline_children_share_line() {
+        let layout = probe_layout(
+            r#"<html><body style="margin:0"><table><tr><td>Left<strong>:</strong></td></tr></table></body></html>"#,
+            1570,
+        );
+        let texts = layout.texts();
+        let left = texts
+            .iter()
+            .find(|text| text.text == "Left")
+            .expect("Left text should exist");
+        let colon = texts
+            .iter()
+            .find(|text| text.text == ":")
+            .expect("colon text should exist");
+
+        assert_eq!(left.y, colon.y, "texts: {texts:?}");
+    }
+
+    #[test]
+    fn table_cell_mixed_block_children_stack_vertically() {
+        let layout = probe_layout(
+            r#"<html><body style="margin:0"><table><tr><td>text<table><tr><td>X</td></tr></table><div>after</div></td></tr></table></body></html>"#,
+            1570,
+        );
+        let texts = layout.texts();
+        let text = texts
+            .iter()
+            .find(|text| text.text == "text")
+            .expect("cell text should exist");
+        let nested = texts
+            .iter()
+            .find(|text| text.text == "X")
+            .expect("nested table text should exist");
+        let after = texts
+            .iter()
+            .find(|text| text.text == "after")
+            .expect("block text should exist");
+
+        assert!(nested.y > text.y, "nested table should stack below inline text");
+        assert!(after.y > nested.y, "following block should stack below nested table");
     }
 
     #[test]

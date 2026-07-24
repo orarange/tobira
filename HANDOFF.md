@@ -26,7 +26,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `703` passing tests on `2026-07-24` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
+- `cargo test`: `707` passing tests on `2026-07-24` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
 - `cargo build`: success on `2026-06-19` (release; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks)
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
@@ -204,6 +204,27 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-07-24 - Claude PM / Codex (table-cell inline flow — 3x line spacing fix)
+
+- User report: the abehiroshi frameset page rendered with ~3x vertical line spacing and
+  inline runs split across lines (aspect totally off vs Chrome). Probe (temporary layout
+  test) quantified it: `<br>`-separated lines are 23px apart in a `<div>` but 69px apart in
+  a `<td>`, and `Left<strong>:</strong>` in a td put ":" on its own line.
+- Root cause: `layout_table_cell()` laid out each cell child individually via
+  `layout_node`, so every text run / inline element became its own paragraph-like block
+  (with margins), instead of grouping consecutive inline children into one inline flow the
+  way `layout_mixed_children()` does for divs.
+- Fix (Codex, spec by Claude): `layout_table_cell` now delegates to
+  `layout_mixed_children`. Also: `measure_cell_preferred_width` sums consecutive inline
+  children (with `<br>` as line separator) instead of max-per-child, and the inline text
+  whitespace model was tightened — `pending_space` now follows actual leading/trailing
+  whitespace of text fragments, so `Left<strong>:</strong>` no longer gains a phantom space
+  (this improves inline text joins globally, not just tables).
+- Tests: td `<br>` line gaps == div line gaps; inline children share a line in a td;
+  block children (nested table/div) still stack. `cargo test` 707 green.
+- Note: a parallel session landed `0ad0f34` (mailto:/tel:/javascript: hrefs skip relative
+  resolution via `has_url_scheme()`), which bumped the suite past 703 before this fix.
 
 ### 2026-07-24 - Claude PM / Codex (frameset loss — engine VOID_ELEMENTS + stray end tags)
 
