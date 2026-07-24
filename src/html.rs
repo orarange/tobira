@@ -261,7 +261,7 @@ fn tokenize(input: &str) -> Vec<Token> {
         }
 
         if name_start == index {
-            index += 1;
+            index += input[index..].chars().next().map_or(1, |c| c.len_utf8());
             continue;
         }
 
@@ -605,5 +605,29 @@ mod tests {
 
         assert!(source.contains("</' + 'script>"));
         assert!(source.contains("<p>Nested</p>"));
+    }
+
+    #[test]
+    fn handles_invalid_tag_start_before_replacement_characters() {
+        let document = parse_document("<\u{FFFD}\u{FFFD}abc");
+        let Node::Element(root) = document else {
+            panic!("root should be an element");
+        };
+
+        assert_eq!(root.tag_name, "document");
+    }
+
+    #[test]
+    fn handles_lossy_binary_with_non_ascii_after_less_than() {
+        let input = String::from_utf8_lossy(&[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x3C, 0xEF, 0xA0,
+            0x80, 0x3C, 0x80, 0x81,
+        ]);
+        let document = parse_document(&input);
+        let Node::Element(root) = document else {
+            panic!("root should be an element");
+        };
+
+        assert_eq!(root.tag_name, "document");
     }
 }

@@ -26,7 +26,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `691` passing tests on `2026-07-23` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
+- `cargo test`: `697` passing tests on `2026-07-24` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
 - `cargo build`: success on `2026-06-19` (release; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks)
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
@@ -204,6 +204,22 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-07-24 - Claude PM / Codex (HTML tokenizer char-boundary panic + non-HTML Content-Type)
+
+- Fixed a crash reported from a GUI session: navigating to a JPEG URL panicked at
+  `src/html.rs:219` ("byte index is not a char boundary"). Root cause: in `tokenize()`,
+  when `<` is followed by a non-tag-name character, the recovery path advanced `index += 1`
+  (one byte), landing inside a multi-byte UTF-8 char (U+FFFD from lossy-decoding binary).
+  Fix: advance by the char's `len_utf8()`. Regression tests with `\u{FFFD}` and a
+  JPEG-like lossy byte string.
+- Added Content-Type awareness to the document load path (`browser.rs`):
+  new `synthesize_non_html_document()` — `image/*` responses become a synthetic
+  `<html><body><img src="{final_url}"></body></html>` viewer document (like real browsers),
+  `text/plain` gets HTML-escaped and wrapped in `<pre>`. `text/html` / missing
+  content-type unchanged. Unit tests for both paths + escaping.
+- Verified: `cargo test` 697 green; `--cli https://httpbin.org/image/jpeg` no longer
+  panics (renders the img document); rollupjs.org still CLEAN.
 
 ### 2026-07-23 - Claude PM / Codex (module top-level scope isolation — rollupjs.org CLEAN)
 

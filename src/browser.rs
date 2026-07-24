@@ -565,7 +565,13 @@ fn load_document_source_with_script_navigation(
 ) -> Result<LoadedDocumentSource> {
     let response = fetch(url)?;
     let content_type = response.header("content-type").map(str::to_string);
-    let text = decode_text_response(&response.body, response.header("content-type"));
+    let decoded_text = decode_text_response(&response.body, response.header("content-type"));
+    let text = synthesize_non_html_document(
+        response.header("content-type"),
+        &response.final_url,
+        &decoded_text,
+    )
+    .unwrap_or(decoded_text);
     let (scripted, javascript_session) = start_document_script_session(&text, &response.final_url);
     if let Some(target) = scripted.navigation_target.as_deref()
         && target != response.final_url.to_string()
@@ -610,6 +616,56 @@ fn load_document_source_with_script_navigation(
         processed_html: scripted,
         javascript_session,
     })
+}
+
+fn synthesize_non_html_document(
+    content_type: Option<&str>,
+    final_url: &Url,
+    body_text: &str,
+) -> Option<String> {
+    let media_type = content_type?
+        .split(';')
+        .next()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if media_type.starts_with("image/") {
+        let src = escape_html_attribute(&final_url.to_string());
+        return Some(format!("<html><body><img src=\"{src}\" alt=\"\"></body></html>"));
+    }
+
+    if media_type == "text/plain" {
+        let escaped = escape_html_text(body_text);
+        return Some(format!("<html><body><pre>{escaped}</pre></body></html>"));
+    }
+
+    None
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => output.push_str("&amp;"),
+            '"' => output.push_str("&quot;"),
+            _ => output.push(ch),
+        }
+    }
+    output
+}
+
+fn escape_html_text(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            _ => output.push(ch),
+        }
+    }
+    output
 }
 
 pub(crate) fn annotate_node_ids(document: &mut Node) {
@@ -3290,12 +3346,54 @@ mod tests {
         collect_frame_specs, collect_stylesheet, document_has_meaningful_body, document_title,
         extract_body_children, rebuild_page_from_html, should_follow_script_navigation,
         synthetic_document, annotate_node_ids, set_incremental_restyle_override,
+        synthesize_non_html_document,
     };
     use crate::css::{InteractiveState, StyledNode, build_styled_tree};
     use crate::html::{Node, parse_document};
     use tobira_engine::engine::NodeId;
     use crate::js::start_document_script_session;
     use crate::url::Url;
+
+    #[test]
+    fn synthesizes_image_document_for_image_content_type() {
+        let url = Url::parse("https://example.com/image.jpg?x=1&name=\"cat\"").unwrap();
+        let html = synthesize_non_html_document(Some("image/jpeg"), &url, "").unwrap();
+
+        assert!(
+            html.contains("<img src=\"https://example.com/image.jpg?x=1&amp;name=&quot;cat&quot;\"")
+        );
+        assert!(html.contains("alt=\"\""));
+    }
+
+    #[test]
+    fn synthesizes_image_document_with_content_type_parameters() {
+        let url = Url::parse("https://example.com/image.png").unwrap();
+        let html =
+            synthesize_non_html_document(Some("image/png; charset=binary"), &url, "").unwrap();
+
+        assert!(html.contains("<img src=\"https://example.com/image.png\""));
+    }
+
+    #[test]
+    fn synthesizes_plain_text_document_with_escaped_body() {
+        let url = Url::parse("https://example.com/log.txt").unwrap();
+        let html = synthesize_non_html_document(
+            Some("text/plain; charset=utf-8"),
+            &url,
+            "before <script>alert(1)</script> & after",
+        )
+        .unwrap();
+
+        assert!(html.contains("<pre>before &lt;script&gt;alert(1)&lt;/script&gt; &amp; after</pre>"));
+    }
+
+    #[test]
+    fn leaves_html_and_missing_content_type_unchanged() {
+        let url = Url::parse("https://example.com/").unwrap();
+
+        assert!(synthesize_non_html_document(Some("text/html"), &url, "<p>x</p>").is_none());
+        assert!(synthesize_non_html_document(None, &url, "<p>x</p>").is_none());
+    }
 
     const HEAVY_CLASS_POOL: &[&str] = &[
         "page",
