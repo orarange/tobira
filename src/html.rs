@@ -97,6 +97,10 @@ pub fn parse_document(input: &str) -> Node {
 }
 
 fn close_element(stack: &mut Vec<Element>, target: &str) {
+    if !stack[1..].iter().any(|element| element.tag_name == target) {
+        return;
+    }
+
     while stack.len() > 1 {
         let element = stack.pop().expect("stack is not empty");
         let matched = element.tag_name == target;
@@ -581,6 +585,55 @@ mod tests {
 
         assert_eq!(frameset.tag_name, "frameset");
         assert_eq!(frameset.children.len(), 2);
+    }
+
+    #[test]
+    fn ignores_closing_tags_for_void_frames() {
+        let document = parse_document(
+            "<frameset cols=\"18,82\"><frame src=\"a.htm\"></frame><frame src=\"b.htm\"></frame></frameset>",
+        );
+        let Node::Element(root) = document else {
+            panic!("root should be an element");
+        };
+
+        let Node::Element(frameset) = &root.children[0] else {
+            panic!("first child should be a frameset");
+        };
+
+        assert_eq!(frameset.tag_name, "frameset");
+        assert_eq!(frameset.children.len(), 2);
+
+        let Node::Element(first_frame) = &frameset.children[0] else {
+            panic!("first frameset child should be a frame");
+        };
+        let Node::Element(second_frame) = &frameset.children[1] else {
+            panic!("second frameset child should be a frame");
+        };
+
+        assert_eq!(first_frame.tag_name, "frame");
+        assert_eq!(second_frame.tag_name, "frame");
+    }
+
+    #[test]
+    fn ignores_unmatched_end_tags() {
+        let document = parse_document("<div><span></b>text</span></div>");
+        let Node::Element(root) = document else {
+            panic!("root should be an element");
+        };
+
+        let Node::Element(div) = &root.children[0] else {
+            panic!("first child should be a div");
+        };
+        let Node::Element(span) = &div.children[0] else {
+            panic!("div child should be a span");
+        };
+        let Node::Text(text) = &span.children[0] else {
+            panic!("span should contain text");
+        };
+
+        assert_eq!(div.tag_name, "div");
+        assert_eq!(span.tag_name, "span");
+        assert_eq!(text, "text");
     }
 
     #[test]

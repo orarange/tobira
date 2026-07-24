@@ -26,7 +26,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `700` passing tests on `2026-07-24` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
+- `cargo test`: `703` passing tests on `2026-07-24` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
 - `cargo build`: success on `2026-06-19` (release; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks)
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
@@ -204,6 +204,27 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-07-24 - Claude PM / Codex (frameset loss — engine VOID_ELEMENTS + stray end tags)
+
+- User report: abehiroshi.la.coocan.jp (a `<frameset cols=18,82>` page) rendered only the
+  left menu frame; the right content frame vanished. Probe showed `expand_frameset` received
+  a frameset with just ONE frame child.
+- Two stacked defects, both fixed:
+  1. The engine-side `VOID_ELEMENTS` list (engine_host.rs) was missing `"frame"` (html.rs's
+     `is_void_element` has it). The load path round-trips HTML through the engine DOM
+     (`serialize_node`), so `<frame>` re-serialized as `<frame ...></frame>`.
+  2. html.rs `close_element` unwound the ENTIRE open stack when an end tag had no matching
+     open element. On re-parse, the void `<frame>`'s stray `</frame>` closed `frameset`+`html`,
+     dropping the second frame out of the frameset. Per HTML5, unmatched end tags are now
+     ignored (pre-scan the stack; return if no match). This also protects legacy pages with
+     stray `</td>` / `</font>` etc. from tree destruction.
+- Tests: frameset with `</frame>` close tags keeps 2 sibling frames; stray `</b>` is ignored;
+  engine snapshot serializes frame as void (no `</frame>`, `<frame ` x2). `cargo test` 703
+  green. Real site verified: both frames render (menu + profile content).
+- Flagged separately (task chip): `annotate_resource_urls` resolves `mailto:` hrefs against
+  the base URL, producing `https://host/mailto:...` — scheme-qualified hrefs should skip
+  relative resolution.
 
 ### 2026-07-24 - Claude PM / Codex (inline image rendering — InlineFragment::Image)
 

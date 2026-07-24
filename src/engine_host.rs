@@ -231,8 +231,8 @@ impl DomNode {
 
 /// Void (self-closing) HTML elements that have no closing tag / children.
 const VOID_ELEMENTS: &[&str] = &[
-    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
-    "track", "wbr",
+    "area", "base", "br", "col", "embed", "frame", "hr", "img", "input", "link", "meta",
+    "param", "source", "track", "wbr",
 ];
 
 /// Raw-text elements whose text content must be serialized verbatim (HTML
@@ -3366,6 +3366,18 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.console_logs, vec!["hello 3".to_string()]);
+    }
+
+    #[test]
+    fn snapshot_serializes_frame_as_void_element() {
+        let (_session, initial) = EngineSession::start(
+            "<html><frameset cols=\"18,82\"><frame src=\"a.htm\"><frame src=\"b.htm\"></frameset></html>",
+            "http://localhost/",
+        );
+
+        assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
+        assert!(!initial.html.contains("</frame>"), "html: {}", initial.html);
+        assert_eq!(initial.html.matches("<frame ").count(), 2);
     }
 
     #[test]
