@@ -2283,10 +2283,11 @@ fn layout_table_element(
         .max(1);
     let table_width = resolve_table_width(element, available_width, preferred_table_width);
     let target_content_width = table_width.saturating_sub(track_total_spacing).max(1);
-    expand_column_widths(
-        &mut sizing,
-        target_content_width.saturating_sub(preferred_content_width),
-    );
+    if preferred_content_width > target_content_width {
+        shrink_column_widths(&mut sizing, preferred_content_width - target_content_width);
+    } else {
+        expand_column_widths(&mut sizing, target_content_width - preferred_content_width);
+    }
     let column_widths = sizing.widths;
     let table_width = column_widths
         .iter()
@@ -2557,6 +2558,7 @@ struct FragmentLayout {
 #[derive(Debug, Clone)]
 struct TableColumnSizing {
     widths: Vec<u32>,
+    mins: Vec<u32>,
     locked: Vec<bool>,
 }
 
@@ -2645,6 +2647,7 @@ fn compute_column_widths(
         .max()
         .unwrap_or(0);
     let mut widths = vec![0_u32; column_count];
+    let mut mins = vec![0_u32; column_count];
     let mut locked = vec![false; column_count];
 
     for placement in placements {
@@ -2653,6 +2656,8 @@ fn compute_column_widths(
         }
 
         let column = placement.column_index;
+        let min_width = measure_cell_min_width(placement.cell, padding, images, fonts);
+        mins[column] = mins[column].max(min_width);
         if let Some(length) = specified_length(placement.cell, placement.cell.style.width, "width")
         {
             let resolved = resolve_length_value(length, available_width);
@@ -2667,6 +2672,7 @@ fn compute_column_widths(
 
     TableColumnSizing {
         widths: widths.into_iter().map(|value| value.max(1)).collect(),
+        mins: mins.into_iter().map(|value| value.max(1)).collect(),
         locked,
     }
 }
@@ -2697,6 +2703,75 @@ fn expand_column_widths(sizing: &mut TableColumnSizing, extra: u32) {
             .unwrap_or(sizing.widths.len() - 1);
         sizing.widths[target_index] = sizing.widths[target_index].saturating_add(remaining);
     }
+}
+
+fn shrink_column_widths(sizing: &mut TableColumnSizing, overflow: u32) {
+    if overflow == 0 || sizing.widths.is_empty() {
+        return;
+    }
+
+    let remaining = shrink_column_widths_for_lock_state(sizing, overflow, false);
+    if remaining > 0 {
+        shrink_column_widths_for_lock_state(sizing, remaining, true);
+    }
+}
+
+fn shrink_column_widths_for_lock_state(
+    sizing: &mut TableColumnSizing,
+    overflow: u32,
+    locked: bool,
+) -> u32 {
+    if overflow == 0 {
+        return 0;
+    }
+
+    let candidates = sizing
+        .widths
+        .iter()
+        .enumerate()
+        .filter(|(index, width)| sizing.locked[*index] == locked && **width > sizing.mins[*index])
+        .map(|(index, width)| (index, width.saturating_sub(sizing.mins[index])))
+        .collect::<Vec<_>>();
+    let total_capacity = candidates
+        .iter()
+        .map(|(_, capacity)| *capacity)
+        .sum::<u32>();
+    if total_capacity == 0 {
+        return overflow;
+    }
+
+    let target = overflow.min(total_capacity);
+    let mut reductions = vec![0_u32; sizing.widths.len()];
+    let mut applied = 0_u32;
+    for (index, capacity) in &candidates {
+        let reduce = ((*capacity as u64 * target as u64) / total_capacity as u64) as u32;
+        reductions[*index] = reduce.min(*capacity);
+        applied = applied.saturating_add(reductions[*index]);
+    }
+
+    let mut remainder = target.saturating_sub(applied);
+    while remainder > 0 {
+        let Some((index, _)) = candidates
+            .iter()
+            .filter_map(|(index, capacity)| {
+                let spare = capacity.saturating_sub(reductions[*index]);
+                (spare > 0).then_some((*index, spare))
+            })
+            .max_by_key(|(_, spare)| *spare)
+        else {
+            break;
+        };
+        reductions[index] = reductions[index].saturating_add(1);
+        remainder -= 1;
+    }
+
+    for (index, reduction) in reductions.into_iter().enumerate() {
+        if reduction > 0 {
+            sizing.widths[index] = sizing.widths[index].saturating_sub(reduction);
+        }
+    }
+
+    overflow.saturating_sub(target)
 }
 
 fn layout_table_cell(
@@ -4229,6 +4304,24 @@ fn measure_cell_preferred_width(
     max_width.saturating_add(padding.saturating_mul(2))
 }
 
+fn measure_cell_min_width(
+    cell: &StyledElement,
+    padding: u32,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) -> u32 {
+    let mut max_width = 1_u32;
+    for child in &cell.children {
+        if is_hidden(child) {
+            continue;
+        }
+
+        max_width = max_width.max(measure_node_min_width(child, images, fonts));
+    }
+
+    max_width.saturating_add(padding.saturating_mul(2)).max(1)
+}
+
 fn measure_node_preferred_width(
     node: &StyledNode,
     images: &ImageStore,
@@ -4277,6 +4370,89 @@ fn measure_node_preferred_width(
                     .children
                     .iter()
                     .map(|child| measure_node_preferred_width(child, images, fonts))
+                    .max()
+                    .unwrap_or(1)
+            };
+
+            child_width
+                .saturating_add(element.style.padding.left + element.style.padding.right)
+                .max(1)
+        }
+    }
+}
+
+fn measure_node_min_width(
+    node: &StyledNode,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) -> u32 {
+    match node {
+        StyledNode::Text(text) => text
+            .text
+            .chars()
+            .find(|ch| !ch.is_whitespace())
+            .map(|ch| char_width(&text.style, ch, fonts))
+            .unwrap_or(1)
+            .max(1),
+        StyledNode::Element(element) => {
+            if element.tag_name == "img"
+                && let Some(src) = resolved_image_source(element)
+                && let Some(image) = images.get(src)
+            {
+                return image_dimensions(element, image.width, image.height, u32::MAX / 2).0;
+            }
+
+            let mut form_context = LayoutContext::default();
+            if let Some(spec) = build_form_control_spec(element, None, &mut form_context) {
+                return measure_form_control(&spec, fonts).0.max(1);
+            }
+
+            if element.tag_name == "table" {
+                return specified_length(element, element.style.width, "width")
+                    .and_then(|length| match length {
+                        LengthValue::Pixels(value) => Some(value),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        let rows = collect_table_rows(element);
+                        let placements = build_table_placements(&rows);
+                        let spacing =
+                            parse_dimension_attribute(element.attributes.get("cellspacing"))
+                                .unwrap_or(0);
+                        let padding =
+                            parse_dimension_attribute(element.attributes.get("cellpadding"))
+                                .unwrap_or(0);
+                        let sizing = compute_column_widths(
+                            element,
+                            &placements,
+                            u32::MAX / 2,
+                            padding,
+                            images,
+                            fonts,
+                        );
+                        sizing
+                            .mins
+                            .iter()
+                            .sum::<u32>()
+                            .saturating_add(
+                                spacing.saturating_mul(sizing.mins.len().saturating_sub(1) as u32),
+                            )
+                            .max(1)
+                    });
+            }
+
+            let child_width = if element.style.display == Display::Inline {
+                element
+                    .children
+                    .iter()
+                    .map(|child| measure_node_min_width(child, images, fonts))
+                    .max()
+                    .unwrap_or(1)
+            } else {
+                element
+                    .children
+                    .iter()
+                    .map(|child| measure_node_min_width(child, images, fonts))
                     .max()
                     .unwrap_or(1)
             };
@@ -5520,6 +5696,90 @@ mod tests {
             .into_iter()
             .find(|r| r.color == color)
             .ok_or_else(|| format!("rect #{color:06x} not found"))
+    }
+
+    fn assert_drawn_commands_within(layout: &super::LayoutDocument, width: u32) {
+        for text in layout.texts() {
+            assert!(
+                text.x.saturating_add(text.width) <= width,
+                "text overflows: {:?} x={} width={} limit={}",
+                text.text,
+                text.x,
+                text.width,
+                width
+            );
+        }
+        for rect in layout.rects() {
+            assert!(
+                rect.x.saturating_add(rect.width) <= width,
+                "rect overflows: x={} width={} limit={}",
+                rect.x,
+                rect.width,
+                width
+            );
+        }
+        for image in layout.images() {
+            assert!(
+                image.x.saturating_add(image.width) <= width,
+                "image overflows: {} x={} width={} limit={}",
+                image.src,
+                image.x,
+                image.width,
+                width
+            );
+        }
+    }
+
+    #[test]
+    fn table_columns_shrink_and_wrap_long_cell_text() {
+        let long_text = "LONGTEXT".repeat(90);
+        let html = format!(
+            r#"<html><body style="margin:0"><table cellspacing="0" cellpadding="0"><tr><td>{}</td></tr></table></body></html>"#,
+            long_text
+        );
+        let layout = probe_layout(&html, 400);
+
+        assert_drawn_commands_within(&layout, 400);
+        let ys = layout
+            .texts()
+            .into_iter()
+            .map(|text| text.y)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(ys.len() > 1, "table text should wrap to multiple lines");
+    }
+
+    #[test]
+    fn table_column_shrink_preserves_loaded_image_floor() {
+        let mut images = ImageStore::default();
+        images.insert(
+            "https://example.com/table.jpg".to_string(),
+            DecodedImage {
+                width: 600,
+                height: 200,
+                rgba: vec![255; 600 * 200 * 4],
+            },
+        );
+        let long_text = "TEXTCOLUMN".repeat(60);
+        let html = format!(
+            r#"<html><body style="margin:0"><table cellspacing="0" cellpadding="0"><tr><td><img src="https://example.com/table.jpg" width="300" height="100"></td><td>{}</td></tr></table></body></html>"#,
+            long_text
+        );
+        let layout = probe_layout_with_images(&html, 400, &images);
+        let image = layout
+            .images()
+            .into_iter()
+            .find(|image| image.src == "https://example.com/table.jpg")
+            .expect("table image should be drawn");
+
+        assert_eq!(image.width, 300);
+        assert_drawn_commands_within(&layout, 400);
+        assert!(
+            layout
+                .texts()
+                .into_iter()
+                .any(|text| text.x >= image.x.saturating_add(image.width)),
+            "text column should remain after the image column"
+        );
     }
 
     #[test]

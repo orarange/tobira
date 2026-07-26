@@ -26,7 +26,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
 - Verification status:
-- `cargo test`: `707` passing tests on `2026-07-24` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
+- `cargo test`: `709` passing tests on `2026-07-24` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
 - `cargo build`: success on `2026-06-19` (release; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks)
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
@@ -204,6 +204,25 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-07-24 - Claude PM / Codex (table column shrink — no more horizontal overflow)
+
+- Follow-up to the table-cell inline-flow fix: the abehiroshi page still overflowed
+  horizontally (long bold text ran past the viewport, clipped at the right edge).
+  Root cause: column sizing had an expand path only. `compute_column_widths` hands each
+  column its max-content width, and when the sum exceeded the available width the
+  `saturating_sub` fed 0 to `expand_column_widths` — no shrink pass existed, and the table
+  width was then recomputed FROM the oversized columns.
+- Fix (Codex, spec by Claude): added a shrink pass mirroring browser auto table layout.
+  `TableColumnSizing` now carries per-column `mins` (unbreakable floor: loaded image draw
+  width, form controls, nested-table min sum; text floors at ~one char since
+  `push_wrapped_word` breaks long words char-by-char). `shrink_column_widths` distributes
+  the overflow proportionally to each column's (width - min), unlocked columns first, then
+  width-attr-locked columns; never below the floor. Cells re-wrap naturally at the
+  narrower widths.
+- Tests: long CJK cell text stays within a 400px container and wraps to multiple lines;
+  a 300px image column keeps its floor while the text column absorbs the shrink.
+  `cargo test` 709 green.
 
 ### 2026-07-24 - Claude PM / Codex (table-cell inline flow — 3x line spacing fix)
 
