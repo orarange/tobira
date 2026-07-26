@@ -6263,6 +6263,57 @@ mod tests {
     }
 
     #[test]
+    fn table_align_centers_box_without_centering_cell_text() {
+        let layout = probe_layout(
+            r##"<html><body style="margin:0"><table align="center" width="200" cellspacing="0" cellpadding="0"><tr><td bgcolor="#bb0020">text</td></tr></table></body></html>"##,
+            500,
+        );
+        let cell = probe_rect(&layout, 0xBB0020).expect("cell rect should exist");
+        let text = layout
+            .texts()
+            .into_iter()
+            .find(|text| text.text == "text")
+            .expect("text should exist");
+
+        assert_eq!(cell.x, 150);
+        assert_eq!(cell.width, 200);
+        assert_eq!(text.x, cell.x);
+    }
+
+    #[test]
+    fn legacy_div_align_still_centers_text() {
+        let layout = probe_layout(
+            r#"<html><body style="margin:0"><div align="center">text</div></body></html>"#,
+            200,
+        );
+        let text = layout
+            .texts()
+            .into_iter()
+            .find(|text| text.text == "text")
+            .expect("text should exist");
+
+        assert_eq!(text.x, (200 - text.width) / 2);
+    }
+
+    #[test]
+    fn legacy_td_align_still_centers_cell_text() {
+        let layout = probe_layout(
+            r##"<html><body style="margin:0"><table width="200" cellspacing="0" cellpadding="0"><tr><td align="center" bgcolor="#bb0021">text</td></tr></table></body></html>"##,
+            500,
+        );
+        let cell = probe_rect(&layout, 0xBB0021).expect("cell rect should exist");
+        let text = layout
+            .texts()
+            .into_iter()
+            .find(|text| text.text == "text")
+            .expect("text should exist");
+
+        assert_eq!(cell.x, 0);
+        assert_eq!(cell.width, 200);
+        assert_eq!(text.x, cell.x + (cell.width - text.width) / 2);
+    }
+
+    #[test]
     fn places_table_cells_side_by_side() {
         let document = parse_document("<table><tr><td>Left</td><td>Right</td></tr></table>");
         let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
@@ -6503,6 +6554,49 @@ mod tests {
             .expect("short text should exist");
 
         assert!(short.y > 0);
+    }
+
+    #[test]
+    fn table_cells_default_to_middle_vertical_alignment() {
+        let layout = probe_layout(
+            r#"<html><body style="margin:0"><table cellspacing="0" cellpadding="0"><tr><td>A<br>B<br>C</td><td>short</td></tr></table></body></html>"#,
+            320,
+        );
+        let texts = layout.texts();
+        let a = texts
+            .iter()
+            .find(|text| text.text == "A")
+            .expect("A should exist");
+        let c = texts
+            .iter()
+            .find(|text| text.text == "C")
+            .expect("C should exist");
+        let short = texts
+            .iter()
+            .find(|text| text.text == "short")
+            .expect("short should exist");
+
+        assert!(short.y > a.y, "short should not be top-aligned: {texts:?}");
+        assert!(short.y < c.y, "short should be within the tall cell middle band: {texts:?}");
+    }
+
+    #[test]
+    fn td_valign_top_keeps_cell_content_top_aligned() {
+        let layout = probe_layout(
+            r#"<html><body style="margin:0"><table cellspacing="0" cellpadding="0"><tr><td>A<br>B<br>C</td><td valign="top">short</td></tr></table></body></html>"#,
+            320,
+        );
+        let texts = layout.texts();
+        let a = texts
+            .iter()
+            .find(|text| text.text == "A")
+            .expect("A should exist");
+        let short = texts
+            .iter()
+            .find(|text| text.text == "short")
+            .expect("short should exist");
+
+        assert_eq!(short.y, a.y);
     }
 
     #[test]

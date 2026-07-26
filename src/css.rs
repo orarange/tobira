@@ -899,6 +899,9 @@ impl ComputedStyle {
             "big" => {
                 style.font_size_px = parent_font_size.saturating_add(2);
             }
+            "td" | "th" => {
+                style.vertical_align = VerticalAlign::Middle;
+            }
             _ => {}
         }
 
@@ -3040,7 +3043,9 @@ fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_
         style.height = Some(height);
     }
 
-    if let Some(text_align) = element.attribute("align").and_then(parse_text_align) {
+    if element.tag_name != "table"
+        && let Some(text_align) = element.attribute("align").and_then(parse_text_align)
+    {
         style.text_align = text_align;
     }
 
@@ -5201,6 +5206,35 @@ mod tests {
         assert_eq!(body.style.background_color, Some(0xF0F0FF));
         assert_eq!(heading.style.text_align, super::TextAlign::Center);
         assert_eq!(font.style.color, 0xFF0000);
+    }
+
+    #[test]
+    fn table_align_does_not_inherit_as_text_align() {
+        let document = parse_document(
+            "<table align=\"center\"><tr><td>text</td></tr></table><div align=\"center\">div</div><table><tr><td id=\"cell\" align=\"center\">cell</td></tr></table>",
+        );
+        let styled = build_styled_tree(&document, &super::Stylesheet::default(), 1280, &super::InteractiveState::default());
+        let table = find_first_element(&styled, "table").expect("table should exist");
+        let div = find_first_element(&styled, "div").expect("div should exist");
+        let cell = find_element_by_id(&styled, "cell").expect("centered cell should exist");
+
+        assert_eq!(table.style.text_align, super::TextAlign::Left);
+        assert_eq!(div.style.text_align, super::TextAlign::Center);
+        assert_eq!(cell.style.text_align, super::TextAlign::Center);
+    }
+
+    #[test]
+    fn table_cells_default_to_middle_valign_but_attribute_can_override() {
+        let document =
+            parse_document("<table><tr><td>middle</td><th>head</th><td id=\"top\" valign=\"top\">top</td></tr></table>");
+        let styled = build_styled_tree(&document, &super::Stylesheet::default(), 1280, &super::InteractiveState::default());
+        let first_cell = find_first_element(&styled, "td").expect("td should exist");
+        let header_cell = find_first_element(&styled, "th").expect("th should exist");
+        let top_cell = find_element_by_id(&styled, "top").expect("top cell should exist");
+
+        assert_eq!(first_cell.style.vertical_align, VerticalAlign::Middle);
+        assert_eq!(header_cell.style.vertical_align, VerticalAlign::Middle);
+        assert_eq!(top_cell.style.vertical_align, VerticalAlign::Top);
     }
 
     #[test]
