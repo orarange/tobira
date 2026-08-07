@@ -19,14 +19,16 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-07-22`
+- Date: `2026-08-07`
 - Repo / package name: `tobira`
 - Working branch: `master`
 - Workflow:
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
+  - **this checkout is a normal git repo as of 2026-08-07. Do NOT convert it back to a worktree** (see the 2026-08-07 session log entry — the parent repo was deleted and took the object database with it)
+  - **push after every work cluster.** The last push is `91291ea` (2026-06-22); everything since then exists only locally and on the `Z:` archive.
 - Verification status:
-- `cargo test`: `716` passing tests on `2026-07-26` (Windows checkout; also green under `TOBIRA_VERIFY_BYTECODE=1`)
+- `cargo test`: `716` passing tests across `52` suites on `2026-08-07` (Windows checkout)
 - `cargo build`: success on `2026-06-19` (release; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks)
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
@@ -800,3 +802,17 @@ Recommended next targets, in order: (1) `TransformStream` / Web Streams globals 
 - **Process hazards hit this session (for the next agent):**
   - **Codex ran `cargo fmt`** at the end of the first source-position run, reformatting the ENTIRE codebase (38 files, thousands of whitespace-only lines). Unshippable. Recovered via `git checkout -- .` and re-ran Codex with an explicit "DO NOT run cargo fmt / minimal diff / list only the 4 target files" banner — the redo produced a clean 4-file diff. Always forbid `cargo fmt` in Codex prompts and check `git diff --numstat` before staging.
   - **Disk filled up** (`target/` reached 28.8 GB; C: hit 0.01 GB free) mid-session from repeated rebuilds, causing spurious `autocfg`/`os error 112` build panics that look like test failures but are not. `cargo clean` freed it (→ 22 GB). If builds panic in build scripts, check free space first.
+
+### 2026-08-07 - Claude (git history loss + recovery)
+
+- **The repo's git history was destroyed and has been reconstructed.** This checkout used to be a git *worktree* whose parent repo (`vscode/browser`, holding the object database) was deleted around 2026-07-27 by a bulk cleanup script that used `rmdir /s /q` with a `robocopy /MIR` fallback — a method that bypasses the Recycle Bin. Every git command failed with `fatal: not a git repository: .../vscode/browser/.git/worktrees/browser-js-engine`. Working files were untouched.
+- **Nothing was lost.** The user keeps an archive of `vscode/` on the `Z:` drive, and `Z:\vscode\browser\.git` was copied on 2026-07-27 — after the last commit (`44e9fe1`, 2026-07-26). The full object database and all 47 refs survived there. Everything below is now back in this repo.
+- **Order of investigation, for the next time this happens**: local Recycle Bin (empty — the `robocopy /MIR` method bypasses it), VSS shadow copies (need admin), `Temp\tobira-fix-backup` (empty), OneDrive's *online* Recycle Bin (30-day retention, untried), **and any external/archive drive** — the last one is what actually had it. Ask about archives before concluding a loss.
+- **Recovery performed**:
+  1. Backed up the working tree first (`robocopy /E /XD target`, 4.8 MB) to `C:\Users\user\AppData\Local\tobira-backup-20260807`, including the broken `.git` pointer file.
+  2. As an interim measure (before the archive was known), re-cloned the remote `--no-checkout`, moved the fresh `.git` in, set `core.autocrlf true` (matching the old config — without it every file shows as a whole-file CRLF rewrite), and `git reset` mixed (*not* checkout, which would overwrite the working files) to rebuild the index from `91291ea`. Those squashed recovery commits are kept on the branch `recovery-squash-20260807` and are redundant; delete it whenever.
+  3. Once the `Z:` archive was found, verified it byte-for-byte: `git archive 44e9fe1 | tar -x` into a temp dir, then `diff -r --strip-trailing-cr` against the working tree. **Identical** apart from this HANDOFF note and two gitignored react fixtures. (So `src/layout.rs`'s 2026-08-07 mtime was an OneDrive touch, not an uncommitted edit.)
+  4. Added the archive as the remote `archive` (`Z:/vscode/browser/.git`), fetched all 47 refs into `refs/remotes/archive/*` plus tags, and reset `master` to the real `44e9fe1`.
+- **The 18 recovered commits** (`91291ea..44e9fe1`) cover: defineProperty descriptor merge, `Symbol.iterator` as a real property, DOM interfaces as real constructors, `new.target` propagation, BOM removal, global `eval`, not-callable/module-error diagnostics, source-position backtraces, module top-level bindings made frame-local (**rollupjs.org fully working** — the `["items"]` bug from the previous entry is fixed), HTML tokenizer char-boundary panic, inline image rendering, frameset loss, scheme-prefixed href resolution, table cell inline flow, table column shrinking, and legacy `align`/`valign`.
+- **Verified**: `cargo test` → `716` passed, `0` failed, 52 suites.
+- **Not yet pushed** — `master` is 18 commits ahead of `origin/master`, plus 46 other refs that exist only on the archive. Pending the user's go-ahead.
