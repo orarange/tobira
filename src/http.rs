@@ -17,6 +17,12 @@ use crate::url::Url;
 const MAX_REDIRECTS: usize = 5;
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Tobira/0.1";
 const RESPONSE_HEADER_SLACK_BYTES: usize = 64 * 1024;
+/// Cap on a single decoded response body. Applied by [`fetch`] so that no call
+/// site can pull an unbounded response into memory, and so a small gzip/brotli
+/// payload cannot expand without limit — `read_all` checks this while it
+/// decompresses, not after, so a bomb is abandoned early. Callers that want a
+/// tighter budget use [`fetch_with_limits`].
+pub const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
@@ -36,7 +42,7 @@ impl HttpResponse {
 }
 
 pub fn fetch(url: &Url) -> Result<HttpResponse> {
-    fetch_inner(url, 0, None, None)
+    fetch_inner(url, 0, Some(DEFAULT_MAX_BODY_BYTES), None)
 }
 
 pub fn fetch_with_limits(url: &Url, max_body_bytes: usize) -> Result<HttpResponse> {
@@ -354,7 +360,7 @@ mod tests {
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
-    use super::{decode_chunked, parse_response, parse_response_with_limits};
+    use super::{DEFAULT_MAX_BODY_BYTES, decode_chunked, parse_response, parse_response_with_limits};
     use crate::url::Url;
 
     #[test]
@@ -394,6 +400,35 @@ mod tests {
         let response = parse_response(&url, &response_bytes).unwrap();
 
         assert_eq!(response.body, b"hello gzip");
+    }
+
+    /// A compressed payload that expands far past the limit must be rejected
+    /// while it decompresses. `fetch` passes `DEFAULT_MAX_BODY_BYTES`, so this
+    /// bound is what stands between a decompression bomb and the heap.
+    #[test]
+    fn rejects_compressed_bodies_that_expand_past_the_limit() {
+        let url = Url::parse("https://example.com").unwrap();
+        // 4 MiB of zeroes gzips down to a few KiB.
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&vec![0_u8; 4 * 1024 * 1024]).unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert!(
+            compressed.len() < 64 * 1024,
+            "the bomb should be small on the wire, got {} bytes",
+            compressed.len()
+        );
+
+        let mut response_bytes =
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\n\r\n"
+                .to_vec();
+        response_bytes.extend_from_slice(&compressed);
+
+        // Under a small cap the expansion is abandoned...
+        assert!(parse_response_with_limits(&url, &response_bytes, Some(64 * 1024)).is_err());
+        // ...and under the default it decodes normally.
+        let ok = parse_response_with_limits(&url, &response_bytes, Some(DEFAULT_MAX_BODY_BYTES))
+            .expect("4 MiB is well under the default cap");
+        assert_eq!(ok.body.len(), 4 * 1024 * 1024);
     }
 
     #[test]
