@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
 use std::net::TcpStream;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use brotli::Decompressor;
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
@@ -67,28 +67,15 @@ fn fetch_inner(
         return Err(BrowserError::message("too many redirects"));
     }
 
-    let address = format!("{}:{}", url.host, url.port);
-    let tcp_stream = TcpStream::connect(address)?;
-    tcp_stream.set_read_timeout(Some(Duration::from_secs(20)))?;
-    tcp_stream.set_write_timeout(Some(Duration::from_secs(20)))?;
-    let mut stream = open_stream(url, tcp_stream)?;
-    let cookie_header = site_state::cookie_header_for_url(url)
-        .map(|value| format!("Cookie: {value}\r\n"))
-        .unwrap_or_default();
-
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8\r\nAccept-Language: ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: gzip, deflate, br\r\nCache-Control: no-cache\r\nPragma: no-cache\r\nConnection: close\r\nUpgrade-Insecure-Requests: 1\r\nSec-CH-UA: \"Chromium\";v=\"136\", \"Google Chrome\";v=\"136\", \"Not/A)Brand\";v=\"99\"\r\nSec-CH-UA-Mobile: ?0\r\nSec-CH-UA-Platform: \"Windows\"\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\n{cookie_header}\r\n",
-        url.path,
-        url.host_header(),
-        USER_AGENT
-    );
-
-    stream.write_all(request.as_bytes())?;
-
-    let response_bytes = read_response_bytes(
-        &mut stream,
-        max_body_bytes.map(|limit| limit.saturating_add(RESPONSE_HEADER_SLACK_BYTES)),
-    )?;
+    // A pooled connection may have been closed by the peer since we parked it,
+    // and we only find that out when the write or read fails. That is expected,
+    // not an error: fall back to a fresh connection once before giving up.
+    let pooled_available = has_pooled(url);
+    let response_bytes = match exchange(url, max_body_bytes, true) {
+        Ok(bytes) => bytes,
+        Err(_) if pooled_available => exchange(url, max_body_bytes, false)?,
+        Err(error) => return Err(error),
+    };
 
     let response = parse_response_with_limits(url, &response_bytes, max_body_bytes)?;
     site_state::apply_response_set_cookie_headers(url, &response.set_cookie_headers);
@@ -108,6 +95,60 @@ fn fetch_inner(
     }
 
     Ok(response)
+}
+
+/// Send one request and read one response, reusing a parked connection when
+/// `allow_pooled` is set. The connection returns to the pool only when the
+/// response was framed well enough to know we consumed exactly it and no more.
+fn exchange(url: &Url, max_body_bytes: Option<usize>, allow_pooled: bool) -> Result<Vec<u8>> {
+    let mut connection = match allow_pooled.then(|| take_pooled(url)).flatten() {
+        Some(connection) => connection,
+        None => {
+            let address = format!("{}:{}", url.host, url.port);
+            let tcp_stream = TcpStream::connect(address)?;
+            tcp_stream.set_read_timeout(Some(Duration::from_secs(20)))?;
+            tcp_stream.set_write_timeout(Some(Duration::from_secs(20)))?;
+            Connection {
+                stream: open_stream(url, tcp_stream)?,
+                leftover: Vec::new(),
+            }
+        }
+    };
+
+    let cookie_header = site_state::cookie_header_for_url(url)
+        .map(|value| format!("Cookie: {value}\r\n"))
+        .unwrap_or_default();
+
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8\r\nAccept-Language: ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7\r\nAccept-Encoding: gzip, deflate, br\r\nCache-Control: no-cache\r\nPragma: no-cache\r\nConnection: keep-alive\r\nUpgrade-Insecure-Requests: 1\r\nSec-CH-UA: \"Chromium\";v=\"136\", \"Google Chrome\";v=\"136\", \"Not/A)Brand\";v=\"99\"\r\nSec-CH-UA-Mobile: ?0\r\nSec-CH-UA-Platform: \"Windows\"\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Site: none\r\nSec-Fetch-User: ?1\r\n{cookie_header}\r\n",
+        url.path,
+        url.host_header(),
+        USER_AGENT
+    );
+
+    connection.stream.write_all(request.as_bytes())?;
+    connection.stream.flush()?;
+
+    let carried = std::mem::take(&mut connection.leftover);
+    let (bytes, leftover, reusable) = read_response_bytes(
+        &mut *connection.stream,
+        carried,
+        max_body_bytes.map(|limit| limit.saturating_add(RESPONSE_HEADER_SLACK_BYTES)),
+    )?;
+
+    if reusable {
+        connection.leftover = leftover;
+        return_to_pool(url, connection);
+    }
+    Ok(bytes)
+}
+
+fn has_pooled(url: &Url) -> bool {
+    connection_pool()
+        .lock()
+        .ok()
+        .and_then(|pool| pool.get(&pool_key(url)).map(|entries| !entries.is_empty()))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -204,7 +245,7 @@ fn tls_config() -> Result<Arc<ClientConfig>> {
     Ok(config)
 }
 
-fn open_stream(url: &Url, tcp_stream: TcpStream) -> Result<Box<dyn ReadWrite>> {
+fn open_stream(url: &Url, tcp_stream: TcpStream) -> Result<Box<dyn ReadWrite + Send>> {
     match url.scheme.as_str() {
         "http" => Ok(Box::new(tcp_stream)),
         "https" => {
@@ -277,32 +318,233 @@ fn read_all(reader: impl Read, max_output_bytes: Option<usize>) -> Result<Vec<u8
     Ok(output)
 }
 
-fn read_response_bytes(
-    stream: &mut dyn ReadWrite,
-    max_response_bytes: Option<usize>,
-) -> Result<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut chunk = [0_u8; 8192];
+/// How the peer told us the body ends.
+enum BodyFraming {
+    /// `Content-Length: n`
+    Length(usize),
+    /// `Transfer-Encoding: chunked`
+    Chunked,
+    /// Neither: the body runs until the connection closes, so the connection
+    /// cannot be reused.
+    UntilClose,
+}
 
-    loop {
-        match stream.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(read) => {
-                output.extend_from_slice(&chunk[..read]);
-                if let Some(limit) = max_response_bytes
-                    && output.len() > limit
+/// Minimal header scan over an already-complete header block: just the fields
+/// that decide framing and reuse. Full parsing happens later in
+/// `parse_response_with_limits`.
+fn scan_framing(header_block: &[u8]) -> (BodyFraming, bool) {
+    let text = String::from_utf8_lossy(header_block);
+    let mut framing = BodyFraming::UntilClose;
+    let mut wants_close = false;
+    let mut status_is_bodyless = false;
+
+    for (index, line) in text.split("\r\n").enumerate() {
+        if index == 0 {
+            // 204 and 304 never carry a body regardless of headers.
+            if let Some(code) = line.split(' ').nth(1) {
+                status_is_bodyless = matches!(code, "204" | "304");
+            }
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        match name.as_str() {
+            "transfer-encoding" if value.to_ascii_lowercase().contains("chunked") => {
+                framing = BodyFraming::Chunked;
+            }
+            "content-length" => {
+                if !matches!(framing, BodyFraming::Chunked)
+                    && let Ok(length) = value.parse::<usize>()
                 {
-                    return Err(BrowserError::message(format!(
-                        "raw response exceeded limit of {limit} bytes"
-                    )));
+                    framing = BodyFraming::Length(length);
                 }
             }
-            Err(error) if is_tls_close_without_notify(&error) => break,
-            Err(error) => return Err(error.into()),
+            "connection" if value.to_ascii_lowercase().contains("close") => {
+                wants_close = true;
+            }
+            _ => {}
         }
     }
 
-    Ok(output)
+    if status_is_bodyless {
+        framing = BodyFraming::Length(0);
+    }
+    let reusable = !wants_close && !matches!(framing, BodyFraming::UntilClose);
+    (framing, reusable)
+}
+
+/// Total length of a complete chunked stream starting at `body`, or `None` if
+/// more bytes are still needed.
+fn chunked_stream_len(body: &[u8]) -> Option<usize> {
+    let mut offset = 0usize;
+    loop {
+        let line_end = find_bytes(&body[offset..], b"\r\n")? + offset;
+        let size_line = &body[offset..line_end];
+        let size_text = String::from_utf8_lossy(size_line);
+        let size_text = size_text.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_text, 16).ok()?;
+        offset = line_end + 2;
+        if size == 0 {
+            // Trailer section, ended by a blank line.
+            let end = find_bytes(&body[offset..], b"\r\n")?;
+            return Some(offset + end + 2);
+        }
+        offset = offset.checked_add(size)?;
+        if body.len() < offset + 2 {
+            return None;
+        }
+        offset += 2; // CRLF after the chunk data
+    }
+}
+
+/// Read exactly one HTTP/1.1 response. Returns the raw bytes and whether the
+/// connection is still in a known-good state afterwards, i.e. whether the body
+/// was framed by `Content-Length` or chunked encoding and the peer did not ask
+/// to close. Reading to EOF instead would consume the connection.
+fn read_response_bytes(
+    stream: &mut dyn ReadWrite,
+    prefix: Vec<u8>,
+    max_response_bytes: Option<usize>,
+) -> Result<(Vec<u8>, Vec<u8>, bool)> {
+    let mut output = prefix;
+    let mut chunk = [0_u8; 8192];
+    let mut eof = false;
+
+    let over_limit = |len: usize| -> Result<()> {
+        if let Some(limit) = max_response_bytes
+            && len > limit
+        {
+            return Err(BrowserError::message(format!(
+                "raw response exceeded limit of {limit} bytes"
+            )));
+        }
+        Ok(())
+    };
+
+    let mut fill = |output: &mut Vec<u8>, eof: &mut bool| -> Result<()> {
+        match stream.read(&mut chunk) {
+            Ok(0) => *eof = true,
+            Ok(read) => output.extend_from_slice(&chunk[..read]),
+            Err(error) if is_tls_close_without_notify(&error) => *eof = true,
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    };
+
+    // 1. headers
+    let header_end = loop {
+        if let Some(at) = find_bytes(&output, b"\r\n\r\n") {
+            break at + 4;
+        }
+        if eof {
+            return Err(BrowserError::message(
+                "invalid HTTP response: missing header separator",
+            ));
+        }
+        fill(&mut output, &mut eof)?;
+        over_limit(output.len())?;
+    };
+
+    let (framing, reusable) = scan_framing(&output[..header_end.saturating_sub(4)]);
+
+    // 2. body, bounded by whatever framing the peer chose
+    match framing {
+        BodyFraming::Length(length) => {
+            let target = header_end.saturating_add(length);
+            while output.len() < target && !eof {
+                fill(&mut output, &mut eof)?;
+                over_limit(output.len())?;
+            }
+            if output.len() < target {
+                return Err(BrowserError::message(
+                    "connection closed before the declared Content-Length was received",
+                ));
+            }
+            let leftover = output.split_off(target);
+            return Ok((output, leftover, reusable));
+        }
+        BodyFraming::Chunked => {
+            while chunked_stream_len(&output[header_end..]).is_none() {
+                if eof {
+                    return Err(BrowserError::message(
+                        "connection closed inside a chunked response",
+                    ));
+                }
+                fill(&mut output, &mut eof)?;
+                over_limit(output.len())?;
+            }
+            let body_len = chunked_stream_len(&output[header_end..]).unwrap_or(0);
+            let leftover = output.split_off(header_end + body_len);
+            return Ok((output, leftover, reusable));
+        }
+        BodyFraming::UntilClose => {
+            while !eof {
+                fill(&mut output, &mut eof)?;
+                over_limit(output.len())?;
+            }
+        }
+    }
+
+    Ok((output, Vec::new(), reusable))
+}
+
+/// A live connection parked for reuse, with the moment it went idle so that
+/// long-dead ones are dropped rather than handed out.
+struct Connection {
+    stream: Box<dyn ReadWrite + Send>,
+    /// Bytes already pulled off the socket that belong to a later response.
+    /// Reading is buffered, so finishing one response can over-read into the
+    /// next; dropping those bytes would corrupt whatever comes after.
+    leftover: Vec<u8>,
+}
+
+struct PooledConnection {
+    connection: Connection,
+    idle_since: Instant,
+}
+
+/// Servers close idle keep-alive connections on their own schedule; anything
+/// older than this is assumed gone. A stale one that slips through is still
+/// handled by the single retry in `fetch_inner`.
+const MAX_IDLE: Duration = Duration::from_secs(5);
+const MAX_POOLED_PER_HOST: usize = 6;
+
+static CONNECTION_POOL: OnceLock<Mutex<HashMap<String, Vec<PooledConnection>>>> = OnceLock::new();
+
+fn connection_pool() -> &'static Mutex<HashMap<String, Vec<PooledConnection>>> {
+    CONNECTION_POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pool_key(url: &Url) -> String {
+    format!("{}://{}:{}", url.scheme, url.host, url.port)
+}
+
+fn take_pooled(url: &Url) -> Option<Connection> {
+    let mut pool = connection_pool().lock().ok()?;
+    let entries = pool.get_mut(&pool_key(url))?;
+    while let Some(entry) = entries.pop() {
+        if entry.idle_since.elapsed() < MAX_IDLE {
+            return Some(entry.connection);
+        }
+    }
+    None
+}
+
+fn return_to_pool(url: &Url, connection: Connection) {
+    let Ok(mut pool) = connection_pool().lock() else {
+        return;
+    };
+    let entries = pool.entry(pool_key(url)).or_default();
+    if entries.len() >= MAX_POOLED_PER_HOST {
+        return;
+    }
+    entries.push(PooledConnection {
+        connection,
+        idle_since: Instant::now(),
+    });
 }
 
 fn is_tls_close_without_notify(error: &std::io::Error) -> bool {
@@ -378,8 +620,166 @@ mod tests {
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
-    use super::{DEFAULT_MAX_BODY_BYTES, decode_chunked, parse_response, parse_response_with_limits};
+    use super::{
+        BodyFraming, DEFAULT_MAX_BODY_BYTES, chunked_stream_len, decode_chunked, parse_response,
+        parse_response_with_limits, read_response_bytes, scan_framing,
+    };
     use crate::url::Url;
+
+    /// A keep-alive connection is only safe to reuse if we consumed exactly one
+    /// response, so framing detection is the load-bearing part of the pool.
+    #[test]
+    fn scans_content_length_framing() {
+        let headers = b"HTTP/1.1 200 OK@@Content-Type: text/plain@@Content-Length: 42";
+        let (framing, reusable) = scan_framing(&crlf(headers));
+        assert!(matches!(framing, BodyFraming::Length(42)));
+        assert!(reusable);
+    }
+
+    #[test]
+    fn scans_chunked_framing_and_wins_over_content_length() {
+        let headers = b"HTTP/1.1 200 OK@@Content-Length: 9@@Transfer-Encoding: chunked";
+        let (framing, reusable) = scan_framing(&crlf(headers));
+        assert!(matches!(framing, BodyFraming::Chunked));
+        assert!(reusable);
+    }
+
+    #[test]
+    fn connection_close_makes_a_response_non_reusable() {
+        let headers = b"HTTP/1.1 200 OK@@Content-Length: 3@@Connection: close";
+        let (_, reusable) = scan_framing(&crlf(headers));
+        assert!(!reusable);
+    }
+
+    /// Without framing the body runs to EOF, so the socket is spent.
+    #[test]
+    fn missing_framing_is_read_until_close() {
+        let headers = b"HTTP/1.1 200 OK@@Content-Type: text/plain";
+        let (framing, reusable) = scan_framing(&crlf(headers));
+        assert!(matches!(framing, BodyFraming::UntilClose));
+        assert!(!reusable);
+    }
+
+    /// 204 and 304 carry no body even if a Content-Length says otherwise.
+    #[test]
+    fn bodyless_statuses_have_no_body() {
+        for status in ["204 No Content", "304 Not Modified"] {
+            let raw = format!("HTTP/1.1 {status}@@Content-Length: 100");
+            let (framing, reusable) = scan_framing(&crlf(raw.as_bytes()));
+            assert!(matches!(framing, BodyFraming::Length(0)), "{status}");
+            assert!(reusable, "{status}");
+        }
+    }
+
+    #[test]
+    fn chunked_length_needs_the_terminating_chunk() {
+        assert_eq!(chunked_stream_len(&crlf(b"4@@Wiki@@5@@pedia@@0@@@@")), Some(24));
+        // Same stream with the trailer missing: not complete yet.
+        assert_eq!(chunked_stream_len(&crlf(b"4@@Wiki@@5@@pedia@@0@@")), None);
+        // Cut mid-chunk.
+        assert_eq!(chunked_stream_len(&crlf(b"4@@Wi")), None);
+    }
+
+    /// The whole point of the framing work: read exactly one response and leave
+    /// anything after it untouched, so the connection can serve the next one.
+    #[test]
+    fn reads_exactly_one_response_off_a_shared_stream() {
+        let first = crlf(b"HTTP/1.1 200 OK@@Content-Length: 5@@@@hello");
+        let second = crlf(b"HTTP/1.1 200 OK@@Content-Length: 5@@@@world");
+        let mut both = first.clone();
+        both.extend_from_slice(&second);
+
+        let mut stream = MockStream::new(both);
+        let (bytes, leftover, reusable) =
+            read_response_bytes(&mut stream, Vec::new(), None).unwrap();
+        assert_eq!(bytes, first, "must not swallow the following response");
+        assert!(reusable);
+
+        // Whatever was over-read has to come back so the next read can use it;
+        // dropping it would corrupt the following response on this connection.
+        let (bytes, _, _) = read_response_bytes(&mut stream, leftover, None).unwrap();
+        assert_eq!(bytes, second, "the next response should still be there");
+    }
+
+    #[test]
+    fn reads_exactly_one_chunked_response() {
+        let body = crlf(b"HTTP/1.1 200 OK@@Transfer-Encoding: chunked@@@@4@@Wiki@@5@@pedia@@0@@@@");
+        let mut trailing = body.clone();
+        trailing.extend_from_slice(b"LEFTOVER");
+        let mut stream = MockStream::new(trailing);
+
+        let (bytes, leftover, reusable) =
+            read_response_bytes(&mut stream, Vec::new(), None).unwrap();
+        assert_eq!(bytes, body);
+        assert!(reusable);
+
+        // Over-read bytes come back rather than being dropped; anything not yet
+        // pulled off the socket is still there. Together they must reconstruct
+        // exactly what followed the response.
+        let mut rest = leftover;
+        std::io::Read::read_to_end(&mut stream, &mut rest).unwrap();
+        assert_eq!(rest, b"LEFTOVER");
+    }
+
+    /// A truncated body must be an error rather than a silently short read that
+    /// then gets parsed as if it were complete.
+    #[test]
+    fn a_short_body_is_an_error() {
+        let raw = crlf(b"HTTP/1.1 200 OK@@Content-Length: 50@@@@only-a-little");
+        let mut stream = MockStream::new(raw);
+        assert!(read_response_bytes(&mut stream, Vec::new(), None).is_err());
+    }
+
+    /// Replace `@@` with CRLF so the fixtures above stay readable.
+    fn crlf(input: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(input.len());
+        let mut i = 0;
+        while i < input.len() {
+            if input[i] == b'@' && i + 1 < input.len() && input[i + 1] == b'@' {
+                out.extend_from_slice(b"\r\n");
+                i += 2;
+            } else {
+                out.push(input[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// An in-memory socket: hands out a few bytes at a time so the read loops
+    /// have to reassemble, the way a real stream behaves.
+    struct MockStream {
+        data: Vec<u8>,
+        position: usize,
+    }
+
+    impl MockStream {
+        fn new(data: Vec<u8>) -> Self {
+            Self { data, position: 0 }
+        }
+    }
+
+    impl std::io::Read for MockStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let remaining = self.data.len() - self.position;
+            if remaining == 0 {
+                return Ok(0);
+            }
+            let take = remaining.min(buffer.len()).min(7);
+            buffer[..take].copy_from_slice(&self.data[self.position..self.position + take]);
+            self.position += take;
+            Ok(take)
+        }
+    }
+
+    impl std::io::Write for MockStream {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn decodes_chunked_bodies() {
