@@ -6,6 +6,7 @@ use crate::css::{
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
+use std::rc::Rc;
 
 fn advance_by_margin(cursor: u32, m: i32) -> u32 {
     (cursor as i64 + m as i64).max(0) as u32
@@ -483,7 +484,7 @@ impl LayoutContext {
 enum InlineFragment {
     Text {
         text: String,
-        style: ComputedStyle,
+        style: Rc<ComputedStyle>,
         link_href: Option<String>,
         link_node_id: Option<usize>,
     },
@@ -491,11 +492,11 @@ enum InlineFragment {
         src: String,
         draw_width: u32,
         draw_height: u32,
-        style: ComputedStyle,
+        style: Rc<ComputedStyle>,
         link_href: Option<String>,
         link_node_id: Option<usize>,
     },
-    Control(FormControlSpec),
+    Control(Box<FormControlSpec>),
     LineBreak,
 }
 
@@ -514,11 +515,17 @@ struct LineSpan {
     text: String,
     width: u32,
     height: u32,
-    style: ComputedStyle,
+    /// Shared with the fragment this span was cut from. Inline, a `ComputedStyle`
+    /// is 520 bytes and one span is produced per word, so copying it per word
+    /// dominated both layout allocation and memory for text-heavy pages.
+    style: Rc<ComputedStyle>,
     link_href: Option<String>,
     link_node_id: Option<usize>,
-    control: Option<FormControlSpec>,
-    image: Option<InlineImageSpec>,
+    /// Boxed: both carry a full `ComputedStyle`, and inline they made every
+    /// plain text span pay ~1.3 KB for cases it never uses. Controls and inline
+    /// images are rare enough that one allocation each is the better trade.
+    control: Option<Box<FormControlSpec>>,
+    image: Option<Box<InlineImageSpec>>,
 }
 
 #[derive(Debug, Default)]
@@ -564,7 +571,7 @@ impl LineBuilder {
     fn push_span(
         &mut self,
         text: &str,
-        style: &ComputedStyle,
+        style: &Rc<ComputedStyle>,
         fonts: &mut FontContext,
         link_href: Option<&str>,
         link_node_id: Option<usize>,
@@ -611,10 +618,10 @@ impl LineBuilder {
             text: control.label.clone(),
             width,
             height,
-            style: control.style.clone(),
+            style: Rc::new(control.style.clone()),
             link_href: None,
             link_node_id: None,
-            control: Some(control.clone()),
+            control: Some(Box::new(control.clone())),
             image: None,
         });
     }
@@ -624,7 +631,7 @@ impl LineBuilder {
         src: &str,
         draw_width: u32,
         draw_height: u32,
-        style: &ComputedStyle,
+        style: &Rc<ComputedStyle>,
         link_href: Option<&str>,
         link_node_id: Option<usize>,
     ) {
@@ -634,7 +641,7 @@ impl LineBuilder {
             src: src.to_string(),
             draw_width,
             draw_height,
-            style: style.clone(),
+            style: (**style).clone(),
             link_href: link_href.map(str::to_string),
             link_node_id,
         };
@@ -646,7 +653,7 @@ impl LineBuilder {
             link_href: link_href.map(str::to_string),
             link_node_id,
             control: None,
-            image: Some(image),
+            image: Some(Box::new(image)),
         });
     }
 }
@@ -950,7 +957,7 @@ fn layout_node(
         StyledNode::Text(text) => {
             let fragments = [InlineFragment::Text {
                 text: text.text.clone(),
-                style: text.style.clone(),
+                style: Rc::new(text.style.clone()),
                 link_href: None,
                 link_node_id: None,
             }];
@@ -2168,7 +2175,7 @@ fn layout_image_fallback(
         .unwrap_or_else(|| "[image]".to_string());
     let fragments = [InlineFragment::Text {
         text: alt,
-        style: element.style.clone(),
+        style: Rc::new(element.style.clone()),
         link_href: None,
         link_node_id: None,
     }];
@@ -3045,7 +3052,7 @@ fn layout_mixed_children(
                 0,
                 InlineFragment::Text {
                     text: "- ".to_string(),
-                    style: element_style.clone(),
+                    style: Rc::new(element_style.clone()),
                     link_href: None,
                     link_node_id: None,
                 },
@@ -3180,7 +3187,7 @@ fn layout_mixed_children(
             if bullet_pending {
                 inline_fragments.push(InlineFragment::Text {
                     text: "- ".to_string(),
-                    style: element.style.clone(),
+                    style: Rc::new(element.style.clone()),
                     link_href: None,
                     link_node_id: None,
                 });
@@ -3227,7 +3234,7 @@ fn collect_inline_fragments(
         StyledNode::Text(text) => {
             output.push(InlineFragment::Text {
                 text: text.text.clone(),
-                style: text.style.clone(),
+                style: Rc::new(text.style.clone()),
                 link_href: link_href.map(str::to_string),
                 link_node_id,
             });
@@ -3260,7 +3267,7 @@ fn collect_inline_fragments(
                     if let Some(control) =
                         build_form_control_spec(element, current_form.as_ref(), context)
                     {
-                        output.push(InlineFragment::Control(control));
+                        output.push(InlineFragment::Control(Box::new(control)));
                         return;
                     }
 
@@ -3273,7 +3280,7 @@ fn collect_inline_fragments(
                                     src: src.to_string(),
                                     draw_width,
                                     draw_height,
-                                    style: element.style.clone(),
+                                    style: Rc::new(element.style.clone()),
                                     link_href: current_link.map(str::to_string),
                                     link_node_id: current_link_node_id,
                                 });
@@ -3289,7 +3296,7 @@ fn collect_inline_fragments(
                             .unwrap_or_else(|| "[image]".to_string());
                         output.push(InlineFragment::Text {
                             text: alt,
-                            style: element.style.clone(),
+                            style: Rc::new(element.style.clone()),
                             link_href: current_link.map(str::to_string),
                             link_node_id: current_link_node_id,
                         });
@@ -3407,7 +3414,7 @@ fn layout_nowrap_fragments(
             }
             InlineFragment::Control(control) => {
                 if pending_space && !line.is_empty() {
-                    line.push_span(" ", &control.style, fonts, None, None);
+                    line.push_span(" ", &Rc::new(control.style.clone()), fonts, None, None);
                 }
                 line.push_control(control, fonts);
                 pending_space = true;
@@ -3532,7 +3539,7 @@ fn layout_normal_fragments(
                         );
                         first_line = false;
                     } else {
-                        line.push_span(" ", &control.style, fonts, None, None);
+                        line.push_span(" ", &Rc::new(control.style.clone()), fonts, None, None);
                     }
                 }
 
@@ -3752,7 +3759,11 @@ fn apply_ellipsis_to_line(
 ) {
     let ellipsis = "...";
     // Find a style to use for ellipsis (last span or container style)
-    let ellipsis_style = line.spans.last().map(|s| s.style.clone()).unwrap_or_else(|| container_style.clone());
+    let ellipsis_style = line
+        .spans
+        .last()
+        .map(|s| Rc::clone(&s.style))
+        .unwrap_or_else(|| Rc::new(container_style.clone()));
     let ellipsis_width = text_width(&ellipsis_style, ellipsis, fonts);
     let target = max_width.saturating_sub(ellipsis_width);
 
@@ -3912,7 +3923,7 @@ fn layout_preformatted_fragments(
 
 fn push_wrapped_word(
     word: &str,
-    style: &ComputedStyle,
+    style: &Rc<ComputedStyle>,
     link_href: Option<&str>,
     link_node_id: Option<usize>,
     container_style: &ComputedStyle,
@@ -6838,6 +6849,29 @@ mod tests {
         assert!(right.x > left.x, "Right item should have a larger x than Left item");
         // They should be on the same row (same y)
         assert_eq!(left.y, right.y, "Grid children in the same row should have the same y");
+    }
+
+    /// One `LineSpan` is produced per word and one `InlineFragment` per inline
+    /// run, so anything inlined into them is paid for by the whole page. Both
+    /// used to carry a `ComputedStyle` (520 bytes) plus inline `FormControlSpec`
+    /// and `InlineImageSpec` variants, putting `LineSpan` at ~1.9 KB. The style
+    /// is shared through an `Rc` now and the rare variants are boxed. This guard
+    /// exists so a future field does not quietly re-inline something large.
+    #[test]
+    fn inline_layout_structs_stay_small() {
+        use super::{InlineFragment, LineSpan};
+        use std::mem::size_of;
+
+        let span = size_of::<LineSpan>();
+        let fragment = size_of::<InlineFragment>();
+        assert!(
+            span <= 128,
+            "LineSpan grew to {span} bytes; box or share whatever was added"
+        );
+        assert!(
+            fragment <= 128,
+            "InlineFragment grew to {fragment} bytes; box or share whatever was added"
+        );
     }
 
     #[test]
