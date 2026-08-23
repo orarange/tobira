@@ -226,6 +226,23 @@ impl<'a> FunctionCompiler<'a> {
         Ok(())
     }
 
+    /// Materialise the call's `arguments` object into a real local.
+    ///
+    /// Arrow functions have no `arguments` of their own and resolve the name
+    /// lexically, so it has to live in a slot the ordinary upvalue machinery can
+    /// capture rather than being rebuilt at each read. Doing it once per call
+    /// also gives `arguments` a stable identity, so `arguments === arguments`
+    /// holds and writes through it are visible to later reads.
+    pub(super) fn install_arguments_binding(&mut self) -> Result<(), CompileError> {
+        let slot = self.allocate_hidden_local()?;
+        self.root_scope_mut()
+            .bindings
+            .insert("arguments".to_string(), LocalBinding { slot });
+        self.emit(super::Opcode::LoadArguments);
+        self.emit(super::Opcode::SetLocal(slot));
+        Ok(())
+    }
+
     pub(super) fn declare_named_hidden_local(
         &mut self,
         name: impl Into<String>,

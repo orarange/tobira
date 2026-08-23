@@ -42,6 +42,7 @@ impl<'a> super::FunctionCompiler<'a> {
     pub(super) fn compile_function_parameters(
         &mut self,
         parameters: &FormalParameterListNode,
+        install_arguments: bool,
     ) -> Result<(), CompileError> {
         let parameter_entries: Vec<_> = parameters.as_ref().iter().cloned().collect();
         let mut raw_slots = Vec::with_capacity(parameter_entries.len());
@@ -55,6 +56,13 @@ impl<'a> super::FunctionCompiler<'a> {
             if parameter.is_rest_param() {
                 self.has_rest_param = true;
             }
+        }
+
+        // Between the two loops on purpose: the raw parameter slots are taken
+        // (so `arguments` cannot displace them), but no default initializer has
+        // been compiled yet, so an arrow inside one can still capture it.
+        if install_arguments {
+            self.install_arguments_binding()?;
         }
 
         let mut pending = Vec::new();
@@ -472,6 +480,7 @@ impl<'a> super::FunctionCompiler<'a> {
         self.emit(Opcode::GetIndex);
         self.emit(Opcode::SetLocal(value_slot));
         self.compile_iterable_initializer_store(statement.initializer(), value_slot)?;
+        let loop_slots = self.per_iteration_loop_slots(statement.initializer());
         self.push_control_context(true);
         let body = statement_to_node(statement.body().clone());
         self.compile_statement(&body)?;
@@ -482,6 +491,12 @@ impl<'a> super::FunctionCompiler<'a> {
             .expect("for-in control context should exist");
         for jump in context.continue_jumps {
             self.patch_jump(jump, increment_start)?;
+        }
+        // Per-iteration binding, as in the classic `for (let …)` loop: give the
+        // loop variable a fresh cell so a closure made in the body keeps the key
+        // it actually saw instead of the last one.
+        for &slot in &loop_slots {
+            self.emit(Opcode::FreshenLocal(slot));
         }
         let one = self.add_number_constant(1.0)?;
         self.emit(Opcode::GetLocal(index_slot));
@@ -540,6 +555,7 @@ impl<'a> super::FunctionCompiler<'a> {
             self.emit(Opcode::Await);
             self.emit(Opcode::SetLocal(value_slot));
             self.compile_iterable_initializer_store(statement.initializer(), value_slot)?;
+            let loop_slots = self.per_iteration_loop_slots(statement.initializer());
             self.push_control_context(true);
             let body = statement_to_node(statement.body().clone());
             self.compile_statement(&body)?;
@@ -550,6 +566,9 @@ impl<'a> super::FunctionCompiler<'a> {
                 .expect("for-of control context should exist");
             for jump in context.continue_jumps {
                 self.patch_jump(jump, increment_start)?;
+            }
+            for &slot in &loop_slots {
+                self.emit(Opcode::FreshenLocal(slot));
             }
             self.emit_back_jump(loop_start)?;
             let loop_end = self.code.len();
@@ -567,6 +586,7 @@ impl<'a> super::FunctionCompiler<'a> {
             self.emit(Opcode::GetLocal(done_slot));
             let exit_jump = self.emit_jump(Opcode::JumpIfTruePop(0));
             self.compile_iterable_initializer_store(statement.initializer(), value_slot)?;
+            let loop_slots = self.per_iteration_loop_slots(statement.initializer());
             self.push_control_context(true);
             let body = statement_to_node(statement.body().clone());
             self.compile_statement(&body)?;
@@ -578,6 +598,10 @@ impl<'a> super::FunctionCompiler<'a> {
             for jump in context.continue_jumps {
                 self.patch_jump(jump, increment_start)?;
             }
+            // Per-iteration binding, matching the classic `for (let …)` loop.
+            for &slot in &loop_slots {
+                self.emit(Opcode::FreshenLocal(slot));
+            }
             self.emit_back_jump(loop_start)?;
             let loop_end = self.code.len();
             self.patch_jump(exit_jump, loop_end)?;
@@ -587,6 +611,23 @@ impl<'a> super::FunctionCompiler<'a> {
             self.pop_scope();
             Ok(())
         }
+    }
+
+    /// Slots of the loop variables declared by a `for (let … of/in …)` head.
+    ///
+    /// `var` and plain assignment targets share one binding across the whole
+    /// loop by design, so they get an empty list and no freshening.
+    fn per_iteration_loop_slots(&self, initializer: &IterableLoopInitializerNode) -> Vec<u16> {
+        if !matches!(
+            initializer,
+            IterableLoopInitializerNode::Let(_) | IterableLoopInitializerNode::Const(_)
+        ) {
+            return Vec::new();
+        }
+        self.scopes
+            .last()
+            .map(|scope| scope.bindings.values().map(|binding| binding.slot).collect())
+            .unwrap_or_default()
     }
 
     pub(super) fn compile_iterable_initializer_store(

@@ -410,7 +410,17 @@ impl<'a> FunctionCompiler<'a> {
         child.is_async = is_async;
         child.is_generator = is_generator;
         child.is_arrow = is_arrow;
-        child.compile_function_parameters(parameters)?;
+        // `contains_arguments` is the spec's ContainsArguments operation: it
+        // descends into arrow functions, which borrow this one, but stops at
+        // nested non-arrow functions, which get their own. Functions that never
+        // mention it pay nothing -- each local slot costs a heap cell per call.
+        let needs_arguments = !is_arrow
+            && (boa_ast::operations::contains_arguments(parameters)
+                || boa_ast::operations::contains_arguments(body));
+        if needs_arguments {
+            child.uses_arguments = true;
+        }
+        child.compile_function_parameters(parameters, needs_arguments)?;
         if !is_arrow {
             child.install_this_binding()?;
         }
