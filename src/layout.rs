@@ -4707,7 +4707,6 @@ fn layout_grid_container(
         element: &'a StyledElement,
         col: usize,
         row: usize,
-        col_span: usize,
         row_span: usize,
         measured_height: u32,
         cell_width: u32,
@@ -4756,11 +4755,43 @@ fn layout_grid_container(
             element: item.element,
             col: item.col,
             row: item.row,
-            col_span: item.col_span,
             row_span: item.row_span,
             measured_height: h,
             cell_width,
         });
+    }
+
+    // Items spanning several rows still have to make those rows tall enough to
+    // hold them (CSS Grid Â§12.5). The measure pass above only folded in
+    // single-row items, so any shortfall left by a spanning item is spread over
+    // the rows it covers. Explicit track sizes below still win.
+    for item in &measured {
+        if item.row_span <= 1 {
+            continue;
+        }
+        let end_row = (item.row + item.row_span).min(row_heights.len());
+        if end_row <= item.row {
+            continue;
+        }
+        let spanned = end_row - item.row;
+        let gaps = gap * (spanned.saturating_sub(1)) as u32;
+        let current = row_heights[item.row..end_row]
+            .iter()
+            .sum::<u32>()
+            .saturating_add(gaps);
+        let deficit = item.measured_height.saturating_sub(current);
+        if deficit == 0 {
+            continue;
+        }
+        let share = deficit / spanned as u32;
+        let mut remainder = deficit % spanned as u32;
+        for height in &mut row_heights[item.row..end_row] {
+            *height = height.saturating_add(share);
+            if remainder > 0 {
+                *height = height.saturating_add(1);
+                remainder -= 1;
+            }
+        }
     }
 
     // Override with explicit row track sizes
@@ -6807,6 +6838,35 @@ mod tests {
         assert!(right.x > left.x, "Right item should have a larger x than Left item");
         // They should be on the same row (same y)
         assert_eq!(left.y, right.y, "Grid children in the same row should have the same y");
+    }
+
+    #[test]
+    fn grid_row_spanning_item_grows_the_rows_it_covers() {
+        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::html::parse_document;
+
+        // Column 1 holds a 200px item spanning both rows; column 2 holds two
+        // short items. The spanning item has to push the two rows apart, so C
+        // (row 2) ends up far below B (row 1). Before rows grew for spanning
+        // items, C sat directly under B and the tall item overflowed the grid.
+        let html = r#"<div style="display:grid;grid-template-columns:100px 100px;gap:0px;"><div style="grid-row:span 2;height:200px;">TALL</div><div>B</div><div>C</div></div>"#;
+        let doc = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &stylesheet, 400, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 400, &mut fonts);
+
+        let texts = layout.texts();
+        let b = texts.iter().find(|t| t.text.contains('B')).expect("B should be rendered");
+        let c = texts.iter().find(|t| t.text.contains('C')).expect("C should be rendered");
+
+        assert!(c.y > b.y, "C should be on the row below B");
+        let row_gap = c.y - b.y;
+        assert!(
+            row_gap >= 80,
+            "the 200px row-spanning item should have grown both rows, but C is only {row_gap}px below B"
+        );
     }
 
     #[test]
