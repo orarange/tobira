@@ -91,7 +91,6 @@ pub struct EventLoop {
     pub raf_callbacks: IndexMap<u32, RafEntry>,
     pub next_timer_id: u32,
     pub next_raf_id: u32,
-    pub resize_observer_depth: u32,
     pub cancelled_timers: HashSet<u32>,
     pub current_time_ms: u64,
 }

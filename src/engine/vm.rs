@@ -1184,7 +1184,7 @@ fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<UrlComponents> {
     let mut host = String::new();
     let mut hostname = String::new();
     let mut port = String::new();
-    let mut pathname = String::new();
+    let mut pathname;
     let mut search = String::new();
     let mut hash = String::new();
 
@@ -2095,11 +2095,6 @@ impl Vm {
                 self.drain_microtasks();
             }
 
-            self.event_loop.resize_observer_depth = 0;
-            while self.event_loop.resize_observer_depth <= 10 {
-                break;
-            }
-            self.event_loop.resize_observer_depth = 0;
         }
 
         if needs_render {
@@ -12953,11 +12948,18 @@ impl Vm {
             }
             BuiltinId::TextDecoderConstructor => {
                 let label = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let encoding = if label.is_empty() || label.eq_ignore_ascii_case("utf-8") || label.eq_ignore_ascii_case("utf8") {
-                    "utf-8"
-                } else {
-                    "utf-8"
-                };
+                let trimmed = label.trim();
+                // WHATWG Encoding labels for utf-8; it is the only encoding we decode.
+                const UTF8_LABELS: [&str; 6] = [
+                    "unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8",
+                    "utf-8", "utf8", "x-unicode20utf8",
+                ];
+                if !trimmed.is_empty() && !UTF8_LABELS.iter().any(|l| trimmed.eq_ignore_ascii_case(l)) {
+                    return Err(VmError::RangeError(format!(
+                        "TextDecoder: unsupported encoding label '{label}'"
+                    )));
+                }
+                let encoding = "utf-8";
                 let decoder = self.allocate_ordinary_object(Some(self.text_decoder_prototype_ref()));
                 let encoding_value = self.make_string_value(encoding);
                 self.define_data_property(

@@ -60,6 +60,27 @@ fn text_decoder() {
 }
 
 #[test]
+fn text_decoder_labels() {
+    run(
+        r#"
+        // utf-8 is the only encoding we decode; its WHATWG labels are accepted
+        // and all normalise to 'utf-8'.
+        for (const label of ['utf-8', 'UTF-8', 'utf8', ' utf-8 ', 'unicode-1-1-utf-8']) {
+            assert(new TextDecoder(label).encoding === 'utf-8');
+        }
+        assert(new TextDecoder().encoding === 'utf-8');
+
+        // An unsupported label must throw rather than silently claiming utf-8.
+        for (const label of ['shift-jis', 'euc-jp', 'windows-1252', 'nonsense']) {
+            let threw = false;
+            try { new TextDecoder(label); } catch (e) { threw = e instanceof RangeError; }
+            assert(threw);
+        }
+    "#,
+    );
+}
+
+#[test]
 fn round_trip() {
     run(
         r#"

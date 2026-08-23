@@ -3369,7 +3369,6 @@ mod tests {
     };
     use crate::css::{InteractiveState, StyledNode, build_styled_tree};
     use crate::html::{Node, parse_document};
-    use tobira_engine::engine::NodeId;
     use crate::js::start_document_script_session;
     use crate::url::Url;
 

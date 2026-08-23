@@ -3398,7 +3398,6 @@ fn layout_nowrap_fragments(
 ) {
     let mut line = LineBuilder::default();
     let text_indent = container_style.text_indent;
-    let mut first_line = true;
     let mut pending_space = false;
 
     for fragment in fragments {
@@ -3459,9 +3458,9 @@ fn layout_nowrap_fragments(
         cursor_y,
         context,
         fonts,
-        if first_line { text_indent } else { 0 },
+        // nowrap emits a single line, so the indent always applies
+        text_indent,
     );
-    let _ = first_line; // suppress unused warning
 }
 
 fn layout_normal_fragments(
@@ -3759,12 +3758,10 @@ fn apply_ellipsis_to_line(
 
     // Trim spans to fit within `target` width
     let mut used = 0u32;
-    let mut truncated = false;
     for span in &mut line.spans {
         if used >= target {
             span.text.clear();
             span.width = 0;
-            truncated = true;
         } else {
             let available = target.saturating_sub(used);
             if span.width <= available {
@@ -3784,7 +3781,6 @@ fn apply_ellipsis_to_line(
                 span.text = truncated_text;
                 span.width = tw;
                 used = used.saturating_add(tw);
-                truncated = true;
             }
         }
     }
@@ -3792,7 +3788,7 @@ fn apply_ellipsis_to_line(
     line.spans
         .retain(|s| !s.text.is_empty() || s.control.is_some() || s.image.is_some());
     // Append ellipsis as a new span
-    let mut ellipsis_span = LineSpan {
+    let ellipsis_span = LineSpan {
         text: ellipsis.to_string(),
         width: ellipsis_width,
         height: text_line_height(&ellipsis_style, fonts),

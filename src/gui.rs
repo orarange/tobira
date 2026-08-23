@@ -4587,7 +4587,6 @@ fn render_commands(
                 let gx = g.x;
                 let gy = g.y;
                 let gw_u = g.width;
-                let gh_u = g.height;
 
                 let py_start = g.y.max(scroll_y);
                 let py_end = grad_bottom.min(viewport_bottom);
