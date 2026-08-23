@@ -1502,6 +1502,7 @@ const SYMBOL_ASYNC_ITERATOR_ID: u32 = 2;
 const SYMBOL_TO_PRIMITIVE_ID: u32 = 4;
 /// Well-known symbol id for `Symbol.hasInstance` (custom `instanceof`).
 const SYMBOL_HAS_INSTANCE_ID: u32 = 3;
+const SYMBOL_TO_STRING_TAG_ID: u32 = 5;
 /// First id available to user-created `Symbol(...)` values.
 const FIRST_USER_SYMBOL: u32 = 16;
 
@@ -5010,6 +5011,78 @@ impl Vm {
         self.callables
             .insert(object_ref.raw(), Callable::Bound(bound));
         Value::Object(object_ref)
+    }
+
+    /// The tag `Object.prototype.toString` reports, per ES2023 20.1.3.6.
+    ///
+    /// This used to be hardcoded to `Object` for every value, which quietly
+    /// broke the single most common type-detection idiom on the web:
+    /// `Object.prototype.toString.call(x) === '[object RegExp]'` and friends.
+    /// core-js's `RegExp.prototype.sticky` getter uses exactly that check and
+    /// threw "Incompatible receiver" when it failed, killing whole bundles.
+    fn object_to_string_tag(&mut self, value: &Value) -> String {
+        // Steps 1-2: the two values that never reach ToObject.
+        let object = match value {
+            Value::Undefined => return "Undefined".to_string(),
+            Value::Null => return "Null".to_string(),
+            // Primitives report their wrapper's tag.
+            Value::Number(_) => return "Number".to_string(),
+            Value::String(_) => return "String".to_string(),
+            Value::Bool(_) => return "Boolean".to_string(),
+            Value::Symbol(_) => return "Symbol".to_string(),
+            Value::Object(object) => *object,
+        };
+
+        // Step 15: an explicit `Symbol.toStringTag` string wins over the
+        // built-in tag, which is how user classes and most modern built-ins
+        // (Map, Set, Promise, ...) name themselves.
+        let tag_key = PropertyKey::Symbol(SymbolId(SYMBOL_TO_STRING_TAG_ID));
+        if let Ok(Value::String(tag)) = self.get_property_value(&Value::Object(object), &tag_key) {
+            return self.string_text(tag);
+        }
+
+        let builtin = self.heap.objects().get(object).map(|data| match &data.kind {
+            ObjectKind::Array => "Array",
+            ObjectKind::Function => "Function",
+            ObjectKind::Error => "Error",
+            ObjectKind::RegExp { .. } => "RegExp",
+            ObjectKind::Map(_) => "Map",
+            ObjectKind::Set(_) => "Set",
+            ObjectKind::WeakMap(_) => "WeakMap",
+            ObjectKind::WeakSet(_) => "WeakSet",
+            ObjectKind::Promise(_) => "Promise",
+            ObjectKind::ArrayBuffer(_) => "ArrayBuffer",
+            ObjectKind::TypedArray { kind, .. } => kind.constructor_name(),
+            ObjectKind::Generator(_) => "Generator",
+            ObjectKind::AsyncGenerator { .. } => "AsyncGenerator",
+            ObjectKind::UrlSearchParams(_) => "URLSearchParams",
+            ObjectKind::Headers(_) => "Headers",
+            ObjectKind::FormData(_) => "FormData",
+            ObjectKind::Host(slot) => slot.interface_name,
+            ObjectKind::Exotic(name) => name,
+            _ => "Object",
+        });
+
+        match builtin {
+            Some("Object") | None::<&'static str> => {
+                // Dates carry no distinct object kind, so they are recognised by
+                // their prototype instead.
+                if self.date_prototype.is_some_and(|date_prototype| {
+                    self.heap
+                        .objects()
+                        .get(object)
+                        .and_then(|data| data.prototype)
+                        .is_some_and(|prototype| prototype == date_prototype)
+                }) {
+                    return "Date".to_string();
+                }
+                if self.is_callable_value(&Value::Object(object)) {
+                    return "Function".to_string();
+                }
+                "Object".to_string()
+            }
+            Some(tag) => tag.to_string(),
+        }
     }
 
     fn define_builtin_method(&mut self, object: GcRef<JsObject>, name: &str, builtin: BuiltinId) {
@@ -9654,7 +9727,10 @@ impl Vm {
                 };
                 Ok(Value::Bool(enumerable))
             }
-            BuiltinId::ObjectProtoToString => Ok(self.make_string_value("[object Object]")),
+            BuiltinId::ObjectProtoToString => {
+                let tag = self.object_to_string_tag(&this_value);
+                Ok(self.make_string_value(&format!("[object {tag}]")))
+            }
             BuiltinId::ObjectProtoValueOf => Ok(this_value),
             BuiltinId::ObjectProtoIsPrototypeOf => {
                 let prototype = self.builtin_object_this(&this_value, "isPrototypeOf")?;
