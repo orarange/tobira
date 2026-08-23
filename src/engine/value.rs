@@ -346,6 +346,16 @@ pub enum ObjectKind {
         values: Vec<Value>,
         index: usize,
     },
+    /// A lazy view over a user-level iterator (a generator, or any object with
+    /// a callable `Symbol.iterator`). `next` is invoked one step at a time so
+    /// the producer stays suspended between pulls: `for (const x of endless())`
+    /// with a `break` must not run the producer to exhaustion first, and side
+    /// effects have to interleave with the loop body.
+    LazyIterator {
+        iterator: Value,
+        next_fn: Value,
+        done: bool,
+    },
     Host(HostObjectSlot),
     Exotic(&'static str),
 }
@@ -401,6 +411,10 @@ impl std::fmt::Debug for ObjectKind {
                 .finish(),
             Self::WeakMap(entries) => f.debug_tuple("WeakMap").field(entries).finish(),
             Self::WeakSet(values) => f.debug_tuple("WeakSet").field(values).finish(),
+            Self::LazyIterator { done, .. } => f
+                .debug_struct("LazyIterator")
+                .field("done", done)
+                .finish(),
             Self::ForOfIterator { values, index } => f
                 .debug_struct("ForOfIterator")
                 .field("values", values)

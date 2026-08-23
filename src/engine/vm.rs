@@ -467,6 +467,7 @@ enum BuiltinId {
     DateProtoValueOf,
     GeneratorProtoNext,
     GeneratorProtoReturn,
+    GeneratorProtoThrow,
     GeneratorProtoIterator,
     ForOfIteratorAdapterNext,
     AsyncGeneratorProtoNext,
@@ -2600,9 +2601,9 @@ impl Vm {
             }
             Opcode::GetForOfIterator => {
                 let value = self.pop_value()?;
-                let values = self.for_of_values(&value)?;
+                let kind = self.iteration_source(&value)?;
                 let iterator = self.heap.allocate_object(JsObject {
-                    kind: ObjectKind::ForOfIterator { values, index: 0 },
+                    kind,
                     prototype: Some(self.object_prototype_ref()),
                     ..JsObject::default()
                 });
@@ -3655,6 +3656,7 @@ impl Vm {
         );
         self.define_builtin_method(generator_prototype, "next", BuiltinId::GeneratorProtoNext);
         self.define_builtin_method(generator_prototype, "return", BuiltinId::GeneratorProtoReturn);
+        self.define_builtin_method(generator_prototype, "throw", BuiltinId::GeneratorProtoThrow);
         self.define_builtin_method(
             async_generator_prototype,
             "next",
@@ -4241,12 +4243,30 @@ impl Vm {
         generator: GcRef<JsObject>,
         sent: Value,
     ) -> Result<Value, VmError> {
+        self.generator_resume_with(generator, sent, false)
+    }
+
+    /// Resume a generator, either by handing `value` back as the result of the
+    /// paused `yield` or -- when `is_throw` -- by raising it at that point so
+    /// the generator's own `try`/`catch` can see it. The throwing path mirrors
+    /// the async resumer: restore the frame, then run the value through the
+    /// normal handler-unwinding machinery.
+    fn generator_resume_with(
+        &mut self,
+        generator: GcRef<JsObject>,
+        value: Value,
+        is_throw: bool,
+    ) -> Result<Value, VmError> {
         match self.take_generator_state(generator) {
             None => Err(VmError::TypeError(
                 "next called on a non-generator".to_string(),
             )),
             Some(GeneratorState::Completed) => {
                 self.set_generator_state(generator, GeneratorState::Completed);
+                if is_throw {
+                    // Nothing is suspended to catch it, so it escapes to the caller.
+                    return Err(VmError::Thrown(value));
+                }
                 self.make_iter_result(Value::Undefined, true)
             }
             Some(GeneratorState::Running) => {
@@ -4258,15 +4278,31 @@ impl Vm {
                 stack,
                 started,
             }) => {
+                // Throwing into a generator that has not run yet cannot be
+                // caught by it -- there is no active `try` -- so it completes
+                // and the value propagates out.
+                if is_throw && !started {
+                    self.set_generator_state(generator, GeneratorState::Completed);
+                    return Err(VmError::Thrown(value));
+                }
                 self.set_generator_state(generator, GeneratorState::Running);
                 let base_depth = self.frames.len();
                 let mut frame = *frame;
                 frame.stack_base = self.stack.len();
                 self.frames.push(frame);
                 self.stack.extend(stack);
-                if started {
+                if is_throw {
+                    // Unwinds to the generator's own handler when it has one;
+                    // otherwise this returns Err and the throw escapes, leaving
+                    // the generator completed.
+                    if let Err(error) = self.handle_runtime_error(VmError::Thrown(value), base_depth)
+                    {
+                        self.set_generator_state(generator, GeneratorState::Completed);
+                        return Err(error);
+                    }
+                } else if started {
                     // The sent value becomes the result of the paused `yield`.
-                    self.stack.push(sent);
+                    self.stack.push(value);
                 }
                 self.generator_outcome = None;
                 self.run_until_frame_depth(base_depth)?;
@@ -6593,6 +6629,7 @@ impl Vm {
             ObjectKind::WeakMap(_) => "WeakMap",
             ObjectKind::WeakSet(_) => "WeakSet",
             ObjectKind::ForOfIterator { .. } => "ForOfIterator",
+            ObjectKind::LazyIterator { .. } => "LazyIterator",
             ObjectKind::Host(_) => "Host",
             ObjectKind::Exotic(_) => "Exotic",
         }
@@ -9092,6 +9129,74 @@ impl Vm {
         }
     }
 
+    /// Decide how a `for...of` should walk `value`.
+    ///
+    /// Built-in collections are snapshotted: they cannot suspend, and copying
+    /// the elements once is cheaper than a call per step. Anything driven by
+    /// user code -- a generator, or any object with a callable
+    /// `Symbol.iterator` -- gets a lazy view instead, because draining it up
+    /// front is observable: `break` would not stop the producer, side effects
+    /// would not interleave with the loop body, and an endless producer would
+    /// never return.
+    fn iteration_source(&mut self, value: &Value) -> Result<ObjectKind, VmError> {
+        let snapshot_kind = match value {
+            Value::Object(object) => self
+                .heap
+                .objects()
+                .get(*object)
+                .map(|data| {
+                    matches!(
+                        data.kind,
+                        ObjectKind::Array
+                            | ObjectKind::Map(_)
+                            | ObjectKind::WeakMap(_)
+                            | ObjectKind::Set(_)
+                            | ObjectKind::WeakSet(_)
+                            | ObjectKind::TypedArray { .. }
+                            | ObjectKind::UrlSearchParams(_)
+                            | ObjectKind::Headers(_)
+                            | ObjectKind::FormData(_)
+                            | ObjectKind::ForOfIterator { .. }
+                    )
+                })
+                .unwrap_or(false),
+            // Strings iterate by code point and cannot suspend.
+            Value::String(_) => true,
+            _ => false,
+        };
+
+        if !snapshot_kind
+            && let Some(kind) = self.lazy_iteration_source(value)?
+        {
+            return Ok(kind);
+        }
+
+        let values = self.for_of_values(value)?;
+        Ok(ObjectKind::ForOfIterator { values, index: 0 })
+    }
+
+    /// A lazy view over `value` if it exposes a callable `Symbol.iterator`
+    /// whose result has a callable `next`.
+    fn lazy_iteration_source(&mut self, value: &Value) -> Result<Option<ObjectKind>, VmError> {
+        let iterator_key = PropertyKey::Symbol(SymbolId(SYMBOL_ITERATOR_ID));
+        let iterator_fn = self.get_property_value(value, &iterator_key)?;
+        if !self.is_callable_value(&iterator_fn) {
+            return Ok(None);
+        }
+        let iterator = self.call_value_sync(iterator_fn, value.clone(), Vec::new())?;
+        let next_fn = self.get_property_value(&iterator, &PropertyKey::from("next"))?;
+        if !self.is_callable_value(&next_fn) {
+            return Err(VmError::TypeError(
+                "iterator.next is not a function".to_string(),
+            ));
+        }
+        Ok(Some(ObjectKind::LazyIterator {
+            iterator,
+            next_fn,
+            done: false,
+        }))
+    }
+
     fn for_of_values(&mut self, value: &Value) -> Result<Vec<Value>, VmError> {
         match value {
             Value::String(string) => Ok(self
@@ -9140,6 +9245,18 @@ impl Vm {
                         Ok(entries)
                     }
                     ObjectKind::ForOfIterator { values, index } => Ok(values[index.min(values.len())..].to_vec()),
+                    // Spread and friends genuinely want every element, so step
+                    // the lazy view to exhaustion.
+                    ObjectKind::LazyIterator { .. } => {
+                        let mut values = Vec::new();
+                        for _ in 0..1_000_000 {
+                            match self.for_of_next(*object)? {
+                                Some(value) => values.push(value),
+                                None => break,
+                            }
+                        }
+                        Ok(values)
+                    }
                     _ => {
                         // Custom iterable: drain via its Symbol.iterator method.
                         if let Some(values) = self.iterate_via_symbol_iterator(value)? {
@@ -9202,6 +9319,33 @@ impl Vm {
                     *index += 1;
                     Ok(Some(value))
                 }
+            }
+            ObjectKind::LazyIterator {
+                iterator: inner,
+                next_fn,
+                done,
+            } => {
+                if *done {
+                    return Ok(None);
+                }
+                let (receiver, step) = (inner.clone(), next_fn.clone());
+                // Stepping re-enters the VM, so the borrow has to be released
+                // before the call and `done` written back afterwards.
+                let result = self.call_value_sync(step, receiver, Vec::new())?;
+                let finished = {
+                    let flag = self.get_property_value(&result, &PropertyKey::from("done"))?;
+                    self.is_truthy(&flag)
+                };
+                if finished {
+                    if let Some(data) = self.heap.objects_mut().get_mut(iterator)
+                        && let ObjectKind::LazyIterator { done, .. } = &mut data.kind
+                    {
+                        *done = true;
+                    }
+                    return Ok(None);
+                }
+                let value = self.get_property_value(&result, &PropertyKey::from("value"))?;
+                Ok(Some(value))
             }
             _ => Err(VmError::TypeError(
                 "object is not a for...of iterator".to_string(),
@@ -11085,6 +11229,12 @@ impl Vm {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
                 self.set_generator_state(generator, GeneratorState::Completed);
                 self.make_iter_result(value, true)
+            }
+            BuiltinId::GeneratorProtoThrow => {
+                let generator =
+                    self.require_object_ref(&this_value, "Generator.prototype.throw")?;
+                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                self.generator_resume_with(generator, value, true)
             }
             BuiltinId::GeneratorProtoIterator => Ok(this_value),
             BuiltinId::AsyncGeneratorProtoNext => {
