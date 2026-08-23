@@ -79,6 +79,19 @@ pub fn storage_length(kind: StorageKind, url: &Url) -> usize {
         .unwrap_or(0)
 }
 
+/// Keys of the origin's bucket in insertion order, matching the ordering the
+/// Web Storage API exposes through `key(n)`.
+pub fn storage_keys(kind: StorageKind, url: &Url) -> Vec<String> {
+    let Ok(state) = global_state().lock() else {
+        return Vec::new();
+    };
+    state
+        .storages
+        .get(&(url.origin(), kind))
+        .map(|bucket| bucket.order.clone())
+        .unwrap_or_default()
+}
+
 pub fn storage_key(kind: StorageKind, url: &Url, index: usize) -> Option<String> {
     let state = global_state().lock().ok()?;
     state

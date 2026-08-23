@@ -15504,7 +15504,21 @@ impl Vm {
                 Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener))
             }
             // Common document properties
-            "cookie" => Ok(self.make_string_value("")),
+            "cookie" => {
+                // Non-HttpOnly cookies for this document's origin, as
+                // "name=value; name2=value2". The jar itself lives host-side
+                // and is shared with the HTTP layer's Cookie/Set-Cookie
+                // handling, so cookies set over the wire are visible here.
+                let res = self.host.storage(StorageOp::Get {
+                    kind: StorageAreaKind::Cookie,
+                    scope: StorageAreaScope::Window(WindowId(0)),
+                    key: String::new(),
+                });
+                Ok(match res {
+                    Ok(StorageResult::Value(Some(v))) => self.make_string_value(&v),
+                    _ => self.make_string_value(""),
+                })
+            }
             "referrer" => Ok(self.make_string_value("")),
             "hidden" => Ok(Value::Bool(false)),
             "visibilityState" => Ok(self.make_string_value("visible")),
@@ -16157,6 +16171,18 @@ impl Vm {
                 });
             }
             HostObjectClass::Document => {
+                // `document.cookie = "name=value; path=/"` appends one cookie
+                // to the shared jar (it does not replace the whole string).
+                if name == "cookie" {
+                    let line = self.to_string(&value);
+                    let _ = self.host.storage(StorageOp::Set {
+                        kind: StorageAreaKind::Cookie,
+                        scope: StorageAreaScope::Window(WindowId(0)),
+                        key: String::new(),
+                        value: line,
+                    });
+                    return Ok(());
+                }
                 // `document.title = …` writes the <head><title> text, creating
                 // the element if the document has none.
                 if name == "title" {

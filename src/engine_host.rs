@@ -25,7 +25,7 @@ use tobira_engine::engine::{
     NavigationAction,
     NavigationOutcome, NetworkRequestId, NodeId, NodeKind, ObserverId, ObserverKind,
     ObserverOptions, ObserverOp, ObserverRecord, ObserverResult, Parser, Program, SourceType,
-    ScrollMetrics, SiblingDirection, StatementNode, StorageOp, StorageResult, TimerId, TimerRequest, Vm, WindowId,
+    ScrollMetrics, SiblingDirection, StatementNode, StorageAreaKind, StorageOp, StorageResult, TimerId, TimerRequest, Vm, WindowId,
     WindowMetrics,
 };
 use tobira_engine::engine::compiler::ModuleContext;
@@ -2444,8 +2444,73 @@ impl Host for BrowserHost {
     fn abort_fetch(&mut self, _id: NetworkRequestId) -> HostResult<bool> {
         Ok(false)
     }
-    fn storage(&mut self, _op: StorageOp) -> HostResult<StorageResult> {
-        Ok(StorageResult::None)
+    /// `localStorage` / `sessionStorage` / `document.cookie`, all backed by the
+    /// process-wide store in `site_state` and keyed by the document's origin.
+    /// `StorageAreaKind::Cookie` carries the whole `document.cookie` string in
+    /// one value, so `Get` ignores the key and `Set` takes a cookie line.
+    fn storage(&mut self, op: StorageOp) -> HostResult<StorageResult> {
+        use crate::site_state;
+
+        // An unparseable document URL (about:blank, a synthetic test page) has
+        // no origin to key on, so it gets no persistent storage.
+        let Ok(url) = Url::parse(&self.location.href) else {
+            return Ok(StorageResult::None);
+        };
+
+        // Cookies are a separate namespace with a string-blob API.
+        fn cookie_kind(kind: StorageAreaKind) -> bool {
+            matches!(kind, StorageAreaKind::Cookie)
+        }
+        fn area(kind: StorageAreaKind) -> site_state::StorageKind {
+            match kind {
+                StorageAreaKind::Session => site_state::StorageKind::Session,
+                _ => site_state::StorageKind::Local,
+            }
+        }
+
+        Ok(match op {
+            StorageOp::Get { kind, key, .. } => {
+                if cookie_kind(kind) {
+                    StorageResult::Value(Some(site_state::document_cookie_get(&url)))
+                } else {
+                    StorageResult::Value(site_state::storage_get_item(area(kind), &url, &key))
+                }
+            }
+            StorageOp::Set { kind, key, value, .. } => {
+                if cookie_kind(kind) {
+                    site_state::document_cookie_set(&url, &value);
+                } else {
+                    site_state::storage_set_item(area(kind), &url, key, value);
+                }
+                StorageResult::None
+            }
+            StorageOp::Remove { kind, key, .. } => {
+                if !cookie_kind(kind) {
+                    site_state::storage_remove_item(area(kind), &url, &key);
+                }
+                StorageResult::None
+            }
+            StorageOp::Clear { kind, .. } => {
+                if !cookie_kind(kind) {
+                    site_state::storage_clear(area(kind), &url);
+                }
+                StorageResult::None
+            }
+            StorageOp::Keys { kind, .. } => {
+                if cookie_kind(kind) {
+                    StorageResult::Keys(Vec::new())
+                } else {
+                    StorageResult::Keys(site_state::storage_keys(area(kind), &url))
+                }
+            }
+            StorageOp::Len { kind, .. } => {
+                if cookie_kind(kind) {
+                    StorageResult::Len(0)
+                } else {
+                    StorageResult::Len(site_state::storage_length(area(kind), &url))
+                }
+            }
+        })
     }
     fn observer(&mut self, op: ObserverOp) -> HostResult<ObserverResult> {
         match op {
@@ -3119,6 +3184,53 @@ impl EngineSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `localStorage` / `sessionStorage` / `document.cookie` end to end through
+    /// a real `BrowserHost`. Before the host implemented `Host::storage`, every
+    /// one of these was a silent no-op: writes were dropped and reads returned
+    /// null / "". `site_state` is process-wide, so this test uses an origin of
+    /// its own to stay independent of the other tests in this binary.
+    #[test]
+    fn storage_and_cookies_round_trip() {
+        let (mut session, initial) =
+            EngineSession::start("<html><body></body></html>", "http://storage-roundtrip.test/app/");
+        assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
+        let result = session.eval_for_test(
+            r#"
+            // localStorage and sessionStorage are separate areas on one origin.
+            localStorage.setItem('k', 'local-value');
+            sessionStorage.setItem('k', 'session-value');
+            assert(localStorage.getItem('k') === 'local-value');
+            assert(sessionStorage.getItem('k') === 'session-value');
+
+            // length / key(n) follow insertion order.
+            assert(localStorage.length === 1);
+            assert(localStorage.key(0) === 'k');
+            localStorage.setItem('second', '2');
+            assert(localStorage.length === 2);
+            assert(localStorage.key(1) === 'second');
+
+            // A miss is null, and removal only touches the area asked for.
+            assert(localStorage.getItem('absent') === null);
+            localStorage.removeItem('k');
+            assert(localStorage.getItem('k') === null);
+            assert(sessionStorage.getItem('k') === 'session-value');
+
+            localStorage.clear();
+            assert(localStorage.length === 0);
+            assert(sessionStorage.getItem('k') === 'session-value');
+
+            // document.cookie appends rather than replacing, and reads back the
+            // jar the HTTP layer also writes Set-Cookie into.
+            assert(document.cookie === '');
+            document.cookie = 'first=one; path=/';
+            document.cookie = 'second=two; path=/';
+            assert(document.cookie.indexOf('first=one') !== -1);
+            assert(document.cookie.indexOf('second=two') !== -1);
+        "#,
+        );
+        assert!(result.error.is_none(), "script error: {:?}", result.error);
+    }
 
     fn run_structural_changes(html: &str, script: &str) -> Vec<DomStructuralChange> {
         let (mut session, initial) = EngineSession::start(html, "http://localhost/");

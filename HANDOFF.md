@@ -27,7 +27,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
   - keep the handoff notes current when switching between sessions or collaborating agents
   - **this checkout is a normal git repo as of 2026-08-07. Do NOT convert it back to a worktree** (see the 2026-08-07 session log entry — the parent repo was deleted and took the object database with it)
-  - **push after every work cluster.** The last push is `91291ea` (2026-06-22); everything since then exists only locally and on the `Z:` archive.
+  - **push after every work cluster.** As of 2026-08-23 `origin/master` is current.
 - Verification status:
 - `cargo test`: `716` passing tests across `52` suites on `2026-08-07` (Windows checkout)
 - `cargo build`: success on `2026-06-19` (release; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks)
@@ -207,6 +207,46 @@ git log --oneline -n 20
 ```
 
 ## Session Log
+
+### 2026-08-23 - Claude (repo tidy; Web Storage and document.cookie actually wired)
+
+Started as a cleanup pass over the repo root, but the compiler warnings led to
+two real gaps.
+
+- **Repo root** — 12 root markdown files down to 4. Roadmaps and design notes
+  moved to `docs/`, external reviews to `docs/reviews/`, index in `docs/README.md`.
+  Five throwaway scripts from the 2026-05-16 `codex/codex` merge (`fix_layout.py`,
+  `resolve_gui_regex.py`, `dump_gui_marker.py`, `dump_pull_conflicts.py`,
+  `pull_conflicts.md`) deleted — they had that merge's conflict text hardcoded.
+- **`.gitignore` now matches what this file claimed.** The Handoff Rules said
+  `.claude/`, `.repomix/`, `copilot.md`, `gemini.md` and
+  `repomix-output.xmlbrowser.xml` were untracked; all five were in fact tracked
+  and `.gitignore` only listed `/target` and `scroll_debug.txt`. Generated
+  artifacts are untracked and ignored now (-12,570 lines).
+- **`Host::storage` was a stub.** `BrowserHost::storage()` returned
+  `StorageResult::None` for every op, so `localStorage`/`sessionStorage` silently
+  dropped writes and read back null — while `site_state.rs` held a complete,
+  working per-origin store that nothing called. `demo/storage-demo.html` exercised
+  all of it and did nothing. Implemented the bridge; `storage_keys()` added to
+  `site_state` for `key(n)`/`length` ordering.
+- **`document.cookie` returned `""`.** Hardcoded in `vm.rs`, with no setter at
+  all, even though the HTTP layer already fed `Set-Cookie` into `site_state`'s
+  jar and sent `Cookie` headers from it. `StorageAreaKind::Cookie` already
+  existed in the host protocol and was unused — the getter and setter now route
+  through it, so cookies set over the wire are visible to JS and vice versa.
+  HttpOnly cookies stay hidden from script, per spec.
+- **`TextDecoder` label bug** — `if ... { "utf-8" } else { "utf-8" }`, so
+  `new TextDecoder('shift-jis')` reported `encoding === 'utf-8'` instead of
+  throwing. Now accepts the WHATWG utf-8 labels and throws `RangeError` otherwise.
+- Dead scaffolding removed: a `while depth <= 10 { break; }` ResizeObserver loop
+  (clippy `never_loop`, a deny-level lint) plus the `EventLoop` field that existed
+  only for it; a `let _ = first_line; // suppress unused warning` in
+  `layout_nowrap_fragments` covering a variable that was always true.
+
+Verification: `cargo test` 718 passed / 0 failed. Compiler warnings 18 -> 10.
+The remaining ones are `dead_code` and still need case-by-case judgement — the
+storage half of the earlier audit turned out to be a missing wire, not dead code,
+so the rest deserve the same scrutiny before deleting anything.
 
 ### 2026-07-26 - Claude PM / Codex (legacy align/valign semantics)
 
