@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
 use std::net::TcpStream;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use brotli::Decompressor;
@@ -185,15 +185,33 @@ fn is_redirect(status_code: u16) -> bool {
     matches!(status_code, 301 | 302 | 303 | 307 | 308)
 }
 
+/// Built once per process. `ClientConfig::with_platform_verifier()` enumerates
+/// the OS certificate store, which costs seconds on Windows -- and this used to
+/// run on *every* HTTPS request, so a page with a few dozen subresources spent
+/// almost all of its load time rebuilding the same trust store.
+static TLS_CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+
+fn tls_config() -> Result<Arc<ClientConfig>> {
+    if let Some(config) = TLS_CONFIG.get() {
+        return Ok(Arc::clone(config));
+    }
+    let config = Arc::new(
+        ClientConfig::with_platform_verifier()
+            .map_err(|error| BrowserError::message(error.to_string()))?,
+    );
+    // A racing thread may have installed one first; either is equally valid.
+    let _ = TLS_CONFIG.set(Arc::clone(&config));
+    Ok(config)
+}
+
 fn open_stream(url: &Url, tcp_stream: TcpStream) -> Result<Box<dyn ReadWrite>> {
     match url.scheme.as_str() {
         "http" => Ok(Box::new(tcp_stream)),
         "https" => {
-            let config = ClientConfig::with_platform_verifier()
-                .map_err(|error| BrowserError::message(error.to_string()))?;
+            let config = tls_config()?;
             let server_name = ServerName::try_from(url.host.clone())
                 .map_err(|_| BrowserError::message("invalid https host name"))?;
-            let connection = ClientConnection::new(Arc::new(config), server_name)
+            let connection = ClientConnection::new(config, server_name)
                 .map_err(|error| BrowserError::message(error.to_string()))?;
             Ok(Box::new(StreamOwned::new(connection, tcp_stream)))
         }

@@ -54,6 +54,16 @@ impl Url {
             return Self::parse(location);
         }
 
+        // A network-path reference (RFC 3986 §4.2): `//host/path` keeps the
+        // current scheme but replaces the authority. Without this it fell into
+        // the absolute-path branch below and became `/upload.example.com/...`
+        // on the *current* host, so every CDN-hosted subresource 404'd.
+        if let Some(authority_and_path) = location.strip_prefix("//") {
+            if !authority_and_path.is_empty() {
+                return Self::parse(&format!("{}://{authority_and_path}", self.scheme));
+            }
+        }
+
         let current_without_fragment = self.path.split('#').next().unwrap_or(&self.path);
         let current_path = current_without_fragment
             .split('?')
@@ -176,6 +186,41 @@ fn normalize_path(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::Url;
+
+    /// `//host/path` inherits the scheme and replaces the host (RFC 3986 §4.2).
+    /// Real pages use protocol-relative URLs for CDN assets constantly; treating
+    /// them as paths sent every one of them to the wrong server.
+    #[test]
+    fn resolves_protocol_relative_urls_against_the_new_host() {
+        let base = Url::parse("https://en.wikipedia.org/wiki/Rust").unwrap();
+
+        let resolved = base
+            .resolve("//upload.wikimedia.org/wikipedia/commons/thumb/a/b/x.png")
+            .unwrap();
+        assert_eq!(resolved.scheme, "https");
+        assert_eq!(resolved.host, "upload.wikimedia.org");
+        assert_eq!(resolved.path, "/wikipedia/commons/thumb/a/b/x.png");
+
+        // The scheme is inherited, not hardcoded.
+        let insecure = Url::parse("http://example.com/a/b").unwrap();
+        let resolved = insecure.resolve("//cdn.example.net/x.js").unwrap();
+        assert_eq!(resolved.scheme, "http");
+        assert_eq!(resolved.host, "cdn.example.net");
+
+        // An explicit port on the referenced authority survives.
+        let resolved = base.resolve("//cdn.example.net:8443/x.css").unwrap();
+        assert_eq!(resolved.host, "cdn.example.net");
+        assert_eq!(resolved.port, 8443);
+    }
+
+    /// A single leading slash is still an absolute path on the same host.
+    #[test]
+    fn single_slash_stays_on_the_current_host() {
+        let base = Url::parse("https://en.wikipedia.org/wiki/Rust").unwrap();
+        let resolved = base.resolve("/w/load.php?modules=startup").unwrap();
+        assert_eq!(resolved.host, "en.wikipedia.org");
+        assert_eq!(resolved.path, "/w/load.php?modules=startup");
+    }
 
     #[test]
     fn parses_basic_http_url() {
