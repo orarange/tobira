@@ -92,14 +92,6 @@ pub fn storage_keys(kind: StorageKind, url: &Url) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn storage_key(kind: StorageKind, url: &Url, index: usize) -> Option<String> {
-    let state = global_state().lock().ok()?;
-    state
-        .storages
-        .get(&(url.origin(), kind))
-        .and_then(|bucket| bucket.order.get(index).cloned())
-}
-
 pub fn document_cookie_get(url: &Url) -> String {
     cookie_pairs_for_url(url, false)
         .into_iter()
@@ -343,7 +335,7 @@ impl CookieEntry {
 mod tests {
     use super::{
         StorageKind, apply_response_set_cookie_headers, cookie_header_for_url, document_cookie_get,
-        document_cookie_set, storage_clear, storage_get_item, storage_key, storage_length,
+        document_cookie_set, storage_clear, storage_get_item, storage_keys, storage_length,
         storage_remove_item, storage_set_item,
     };
     use crate::url::Url;
@@ -366,10 +358,8 @@ mod tests {
             Some("dark".to_string())
         );
         assert_eq!(storage_length(StorageKind::Local, &origin), 1);
-        assert_eq!(
-            storage_key(StorageKind::Local, &origin, 0),
-            Some("theme".to_string())
-        );
+        // `storage_keys` is what the host bridge calls to back `Storage.key(n)`.
+        assert_eq!(storage_keys(StorageKind::Local, &origin), vec!["theme".to_string()]);
         assert_eq!(
             storage_get_item(StorageKind::Local, &other_origin, "theme"),
             None
