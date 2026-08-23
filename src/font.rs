@@ -101,28 +101,19 @@ struct CachedLineMetrics {
 }
 
 impl FontContext {
+    /// No font file is read here. `fontdue` expands a font into roughly 40x its
+    /// file size when it parses one (measured: `segoeui.ttf` 960 KB -> 40.5 MB),
+    /// so eagerly loading sans + monospace + serif cost ~64 MB before a single
+    /// page was drawn. Each family is now read the first time something actually
+    /// asks for it, via [`Self::ensure_family_loaded`].
     pub fn load() -> Self {
-        let mut sans_pending = VecDeque::from(font_candidates(FontFamilyKind::Sans));
-        let sans_fonts = load_initial_fonts(&mut sans_pending, 1);
-        let mut monospace_pending = VecDeque::from(font_candidates(FontFamilyKind::Monospace));
-        let mut monospace_fonts = load_initial_fonts(&mut monospace_pending, 1);
-        let mut serif_pending = VecDeque::from(font_candidates(FontFamilyKind::Serif));
-        let mut serif_fonts = load_initial_fonts(&mut serif_pending, 1);
-
-        if monospace_fonts.is_empty() {
-            monospace_fonts = sans_fonts.clone();
-        }
-        if serif_fonts.is_empty() {
-            serif_fonts = sans_fonts.clone();
-        }
-
         Self {
-            sans_fonts,
-            monospace_fonts,
-            serif_fonts,
-            sans_pending,
-            monospace_pending,
-            serif_pending,
+            sans_fonts: Vec::new(),
+            monospace_fonts: Vec::new(),
+            serif_fonts: Vec::new(),
+            sans_pending: VecDeque::from(font_candidates(FontFamilyKind::Sans)),
+            monospace_pending: VecDeque::from(font_candidates(FontFamilyKind::Monospace)),
+            serif_pending: VecDeque::from(font_candidates(FontFamilyKind::Serif)),
             glyph_cache: HashMap::new(),
             line_metrics_cache: HashMap::new(),
         }
@@ -276,6 +267,7 @@ impl FontContext {
             return *metrics;
         }
 
+        self.ensure_family_loaded(font_family);
         let metrics = self
             .fonts_for(font_family)
             .iter()
@@ -399,10 +391,62 @@ impl FontContext {
     }
 
     fn fonts_for(&self, font_family: FontFamilyKind) -> &[Font] {
-        match font_family {
+        let fonts = match font_family {
             FontFamilyKind::Sans => &self.sans_fonts,
             FontFamilyKind::Serif => &self.serif_fonts,
             FontFamilyKind::Monospace => &self.monospace_fonts,
+        };
+        // A family with no installed candidate borrows sans rather than holding
+        // a copy of it: cloning a `fontdue::Font` would duplicate tens of MB.
+        if fonts.is_empty() {
+            &self.sans_fonts
+        } else {
+            fonts
+        }
+    }
+
+    /// Read this family's first available font if it has none yet. Callers that
+    /// only need metrics (rather than a specific glyph) go through here.
+    fn ensure_family_loaded(&mut self, font_family: FontFamilyKind) {
+        let (fonts, pending) = Self::family_slots(
+            font_family,
+            &mut self.sans_fonts,
+            &mut self.monospace_fonts,
+            &mut self.serif_fonts,
+            &mut self.sans_pending,
+            &mut self.monospace_pending,
+            &mut self.serif_pending,
+        );
+        if !fonts.is_empty() {
+            return;
+        }
+        while let Some(path) = pending.pop_front() {
+            if let Some(font) = load_font_file(&path) {
+                fonts.push(font);
+                return;
+            }
+        }
+        // Nothing installed for this family: fall back to sans, which
+        // `fonts_for` will hand out.
+        if font_family != FontFamilyKind::Sans {
+            self.ensure_family_loaded(FontFamilyKind::Sans);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn family_slots<'a>(
+        font_family: FontFamilyKind,
+        sans: &'a mut Vec<Font>,
+        monospace: &'a mut Vec<Font>,
+        serif: &'a mut Vec<Font>,
+        sans_pending: &'a mut VecDeque<PathBuf>,
+        monospace_pending: &'a mut VecDeque<PathBuf>,
+        serif_pending: &'a mut VecDeque<PathBuf>,
+    ) -> (&'a mut Vec<Font>, &'a mut VecDeque<PathBuf>) {
+        match font_family {
+            FontFamilyKind::Sans => (sans, sans_pending),
+            FontFamilyKind::Serif => (serif, serif_pending),
+            FontFamilyKind::Monospace => (monospace, monospace_pending),
         }
     }
 
@@ -417,6 +461,7 @@ impl FontContext {
             return;
         }
 
+        let mut found = false;
         while let Some(path) = pending.pop_front() {
             let Some(font) = load_font_file(&path) else {
                 continue;
@@ -424,8 +469,14 @@ impl FontContext {
             let supports_glyph = font.has_glyph(character);
             fonts.push(font);
             if supports_glyph {
+                found = true;
                 break;
             }
+        }
+
+        // This family cannot draw the character; sans is the shared fallback.
+        if !found && font_family != FontFamilyKind::Sans {
+            self.ensure_font_for(character, FontFamilyKind::Sans);
         }
     }
 }
@@ -457,19 +508,6 @@ pub fn estimated_glyph_advance_px(
             base.saturating_mul(cells)
         }
     }
-}
-
-fn load_initial_fonts(paths: &mut VecDeque<PathBuf>, limit: usize) -> Vec<Font> {
-    let mut fonts = Vec::new();
-    while fonts.len() < limit {
-        let Some(candidate) = paths.pop_front() else {
-            break;
-        };
-        if let Some(font) = load_font_file(&candidate) {
-            fonts.push(font);
-        }
-    }
-    fonts
 }
 
 fn font_candidates(font_family: FontFamilyKind) -> Vec<PathBuf> {
@@ -787,5 +825,78 @@ mod tests {
         );
 
         assert!(buffer.iter().any(|pixel| *pixel != 0));
+    }
+}
+
+#[cfg(test)]
+mod lazy_loading_tests {
+    use super::*;
+
+    /// `fontdue` expands a font to roughly 40x its file size when it parses one,
+    /// so `FontContext::load` must not touch the disk. Loading sans, monospace
+    /// and serif up front cost ~64 MB before anything was drawn.
+    #[test]
+    fn load_reads_no_font_files() {
+        let fonts = FontContext::load();
+        assert!(fonts.sans_fonts.is_empty(), "sans should load on first use");
+        assert!(fonts.monospace_fonts.is_empty(), "monospace should load on first use");
+        assert!(fonts.serif_fonts.is_empty(), "serif should load on first use");
+        assert!(
+            !fonts.sans_pending.is_empty(),
+            "the candidate list should still be queued for lazy loading"
+        );
+    }
+
+    /// Asking one family for metrics must not drag the other two in with it.
+    #[test]
+    fn using_one_family_loads_only_that_family() {
+        let mut fonts = FontContext::load();
+        let _ = fonts.line_metrics(16, FontFamilyKind::Monospace);
+        assert!(
+            !fonts.monospace_fonts.is_empty(),
+            "monospace should have been loaded on demand"
+        );
+        assert!(
+            fonts.serif_fonts.is_empty(),
+            "serif was never asked for and must stay unloaded"
+        );
+    }
+
+    /// Deferring the load must not change what gets measured: a lazily loaded
+    /// family has to report the font's real ascent, not the rough fallback the
+    /// code uses when no font is available at all.
+    #[test]
+    fn lazy_metrics_come_from_a_real_font() {
+        let mut fonts = FontContext::load();
+        let has_any_candidate = font_candidates(FontFamilyKind::Sans)
+            .iter()
+            .any(|path| path.is_file());
+        if !has_any_candidate {
+            return; // no system fonts on this machine; nothing to compare against
+        }
+        let metrics = fonts.line_metrics(16, FontFamilyKind::Sans);
+        assert!(
+            metrics.ascent_px != 16,
+            "ascent equal to the font size means the no-font fallback was used"
+        );
+        assert!(metrics.ascent_px > 0 && metrics.ascent_px < 64);
+    }
+
+    /// A family with no installed candidate borrows sans rather than cloning it;
+    /// cloning a `fontdue::Font` would duplicate tens of megabytes.
+    #[test]
+    fn empty_family_borrows_sans_without_copying() {
+        let mut fonts = FontContext::load();
+        fonts.ensure_family_loaded(FontFamilyKind::Sans);
+        if fonts.sans_fonts.is_empty() {
+            return; // no system fonts available
+        }
+        fonts.serif_pending.clear();
+        assert!(fonts.serif_fonts.is_empty());
+        assert_eq!(
+            fonts.fonts_for(FontFamilyKind::Serif).len(),
+            fonts.sans_fonts.len(),
+            "an empty family should hand out the sans list"
+        );
     }
 }
