@@ -1274,16 +1274,14 @@ fn collect_image_resources(document: &Node) -> ImageStore {
 
     let mut images = ImageStore::default();
     for source in sources {
-        let Ok(url) = Url::parse(&source) else {
-            continue;
-        };
-        let Ok(response) = fetch(&url) else {
-            continue;
-        };
-        let Ok(image) = decode_image(&response.body) else {
-            continue;
-        };
-        images.insert(source, image);
+        let decoded = Url::parse(&source)
+            .ok()
+            .and_then(|url| fetch(&url).ok())
+            .and_then(|response| decode_image(&response.body).ok());
+        match decoded {
+            Some(image) => images.insert(source, image),
+            None => images.mark_failed(source),
+        }
     }
 
     images
@@ -1294,19 +1292,23 @@ fn collect_styled_background_images(styled: &StyledNode, base_url: &Url, images:
         StyledNode::Text(_) => {}
         StyledNode::Element(element) => {
             if let Some(ref url_str) = element.style.background_image_url {
-                if images.get(url_str).is_none() {
+                // `was_attempted`, not `get`: a URL that failed to fetch or
+                // decode must not be retried for every other element that
+                // references it. One undecodable SVG icon used to cost 274
+                // repeat requests on a single Wikipedia article.
+                if !images.was_attempted(url_str) {
                     let resolved =
                         if url_str.starts_with("http://") || url_str.starts_with("https://") {
                             Url::parse(url_str).ok()
                         } else {
                             base_url.resolve(url_str).ok()
                         };
-                    if let Some(resolved_url) = resolved {
-                        if let Ok(response) = fetch(&resolved_url) {
-                            if let Ok(image) = decode_image(&response.body) {
-                                images.insert(url_str.clone(), image);
-                            }
-                        }
+                    let decoded = resolved
+                        .and_then(|resolved_url| fetch(&resolved_url).ok())
+                        .and_then(|response| decode_image(&response.body).ok());
+                    match decoded {
+                        Some(image) => images.insert(url_str.clone(), image),
+                        None => images.mark_failed(url_str.clone()),
                     }
                 }
             }
