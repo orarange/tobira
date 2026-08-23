@@ -372,6 +372,7 @@ enum BuiltinId {
     SetProtoClear,
     SetProtoForEach,
     SetProtoValues,
+    SetProtoEntries,
     // ArrayBuffer + typed arrays.
     ArrayBufferConstructor,
     ArrayBufferProtoSlice,
@@ -428,6 +429,8 @@ enum BuiltinId {
     MathSign,
     MathHypot,
     MathClz32,
+    MathImul,
+    MathLog1p,
     GlobalParseInt,
     GlobalParseFloat,
     GlobalIsNaN,
@@ -3052,8 +3055,19 @@ impl Vm {
         );
         let regexp_ctor =
             self.allocate_builtin_value(BuiltinId::RegExpConstructor, true, Some(regexp_prototype));
-        // Symbol is callable but not constructable.
-        let symbol_ctor = self.allocate_builtin_value(BuiltinId::SymbolConstructor, false, None);
+        // Symbol is callable but not constructable. It still needs a real
+        // `.prototype`: feature-detection code in polyfill bundles routinely
+        // does `Object.prototype.isPrototypeOf.call(Symbol.prototype, Object(v))`
+        // to test for symbol support, and a missing prototype made that throw
+        // rather than return false -- which took down every page whose polyfill
+        // bundle ran that check.
+        let symbol_prototype = self.allocate_ordinary_object(Some(object_prototype));
+        self.define_builtin_method(symbol_prototype, "toString", BuiltinId::SymbolProtoToString);
+        let symbol_ctor = self.allocate_builtin_value(
+            BuiltinId::SymbolConstructor,
+            false,
+            Some(symbol_prototype),
+        );
         let date_ctor =
             self.allocate_builtin_value(BuiltinId::DateConstructor, true, Some(date_prototype));
         let math_object = self.allocate_ordinary_object(Some(object_prototype));
@@ -3446,6 +3460,12 @@ impl Vm {
         self.define_builtin_method(set_prototype, "clear", BuiltinId::SetProtoClear);
         self.define_builtin_method(set_prototype, "forEach", BuiltinId::SetProtoForEach);
         self.define_builtin_method(set_prototype, "values", BuiltinId::SetProtoValues);
+        // `Set.prototype.keys` is the same function as `values` (a Set's keys
+        // and values are one and the same); `entries` yields `[v, v]` pairs.
+        // Their absence broke Next.js's polyfill bundle outright, which took
+        // every page built on it down with it.
+        self.define_method_alias(set_prototype, "values", "keys");
+        self.define_builtin_method(set_prototype, "entries", BuiltinId::SetProtoEntries);
         self.define_symbol_iterator_alias(set_prototype, "values");
 
         self.define_builtin_method(array_prototype, "push", BuiltinId::ArrayProtoPush);
@@ -4000,6 +4020,8 @@ impl Vm {
         self.define_builtin_method(math_object, "sign", BuiltinId::MathSign);
         self.define_builtin_method(math_object, "hypot", BuiltinId::MathHypot);
         self.define_builtin_method(math_object, "clz32", BuiltinId::MathClz32);
+        self.define_builtin_method(math_object, "imul", BuiltinId::MathImul);
+        self.define_builtin_method(math_object, "log1p", BuiltinId::MathLog1p);
         self.define_data_property(
             math_object,
             PropertyKey::from("PI"),
@@ -4792,8 +4814,16 @@ impl Vm {
         });
         self.callables
             .insert(object_ref.raw(), Callable::Builtin(builtin));
-        if constructable {
-            let prototype = construct_prototype.unwrap_or_else(|| self.object_prototype_ref());
+        // A `.prototype` is not tied to constructability: `Symbol` cannot be
+        // called with `new`, yet `Symbol.prototype` exists and feature detection
+        // relies on it. Attach one whenever the caller supplies it, keeping the
+        // old default of `Object.prototype` for constructors that do not.
+        let prototype = match construct_prototype {
+            Some(prototype) => Some(prototype),
+            None if constructable => Some(self.object_prototype_ref()),
+            None => None,
+        };
+        if let Some(prototype) = prototype {
             self.define_data_property(
                 object_ref,
                 PropertyKey::from("prototype"),
@@ -4985,6 +5015,20 @@ impl Vm {
     fn define_builtin_method(&mut self, object: GcRef<JsObject>, name: &str, builtin: BuiltinId) {
         let value = self.allocate_builtin_value(builtin, false, None);
         self.define_data_property(object, PropertyKey::from(name), value, true, false, true);
+    }
+
+    /// Define `alias` as the *same function object* already stored under
+    /// `method_name`. Some pairs are required to be identical rather than merely
+    /// equivalent — `Set.prototype.keys === Set.prototype.values` is observable,
+    /// and library code compares them.
+    fn define_method_alias(&mut self, object: GcRef<JsObject>, method_name: &str, alias: &str) {
+        let key = PropertyKey::from(method_name);
+        let Some(JsPropertyDescriptor::Data { value, .. }) =
+            self.get_own_property_descriptor(object, &key)
+        else {
+            return;
+        };
+        self.define_data_property(object, PropertyKey::from(alias), value, true, false, true);
     }
 
     fn define_symbol_iterator_alias(&mut self, object: GcRef<JsObject>, method_name: &str) {
@@ -10656,6 +10700,26 @@ impl Vm {
                 }).sum();
                 Ok(Value::Number(sum.sqrt()))
             }
+            BuiltinId::MathImul => {
+                // C-style 32-bit integer multiply, wrapping on overflow. Minified
+                // bundles lean on it for hashing and asm.js-style arithmetic.
+                let left = self.number_arg(&args, 0);
+                let right = self.number_arg(&args, 1);
+                let to_i32 = |value: f64| -> i32 {
+                    if value.is_finite() {
+                        value as i64 as u32 as i32
+                    } else {
+                        0
+                    }
+                };
+                Ok(Value::Number(
+                    to_i32(left).wrapping_mul(to_i32(right)) as f64
+                ))
+            }
+            BuiltinId::MathLog1p => {
+                let number = self.number_arg(&args, 0);
+                Ok(Value::Number(number.ln_1p()))
+            }
             BuiltinId::MathClz32 => {
                 let number = self.number_arg(&args, 0);
                 let int = if number.is_finite() { number as i64 as u32 } else { 0 };
@@ -12184,6 +12248,22 @@ impl Vm {
                     )?;
                 }
                 Ok(Value::Undefined)
+            }
+            BuiltinId::SetProtoEntries => {
+                let object = self.builtin_object_this(&this_value, "Set.prototype.entries")?;
+                let values: Vec<Value> = match self.heap.objects().get(object) {
+                    Some(data) => match &data.kind {
+                        ObjectKind::Set(values) | ObjectKind::WeakSet(values) => values.clone(),
+                        _ => Vec::new(),
+                    },
+                    None => Vec::new(),
+                };
+                // Each entry is `[value, value]`, mirroring Map's `[key, value]`.
+                let mut pairs = Vec::with_capacity(values.len());
+                for value in values {
+                    pairs.push(self.make_array_from_values(vec![value.clone(), value])?);
+                }
+                Ok(self.make_for_of_iterator(pairs))
             }
             BuiltinId::SetProtoValues => {
                 let object = self.builtin_object_this(&this_value, "Set.prototype.values")?;
