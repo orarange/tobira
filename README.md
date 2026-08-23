@@ -216,7 +216,7 @@ cargo run -- http://127.0.0.1:8765/demo/storage-demo.html
 
 ## Next Steps
 
-The living JavaScript roadmap is in [JS_ROADMAP.md](JS_ROADMAP.md).
+The living JavaScript roadmap is in [docs/JS_ROADMAP.md](docs/JS_ROADMAP.md).
 
 Short version:
 

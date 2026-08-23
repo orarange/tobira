@@ -4,7 +4,7 @@
 //! `BrowserHost` implements the engine's `Host` trait over an arena-backed DOM
 //! built from the parsed HTML tree, so the engine's `document`/`window` bindings
 //! operate on a real page. This is the foundation of the "boa removal" work
-//! (see `ENGINE_INTEGRATION_PLAN.md`): it lets the engine run a document's
+//! (see `docs/ENGINE_INTEGRATION_PLAN.md`): it lets the engine run a document's
 //! inline scripts and produce an updated HTML snapshot, behind a flag, without
 //! disturbing the existing boa runtime in `js.rs`.
 //!

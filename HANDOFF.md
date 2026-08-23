@@ -12,8 +12,9 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - Update the `Current Snapshot` section whenever the high-level state changes.
 - Append a short entry to `Session Log` whenever meaningful work is handed off or resumed.
 - Do not stage unrelated local helper artifacts unless the user explicitly asks for them.
-  Current local artifacts that are present but not part of the tracked repo are:
-  `.claude/`, `.repomix/`, `copilot.md`, `gemini.md`, `repomix-output.xmlbrowser.xml`
+  Local-only artifacts are now actually enforced by `.gitignore`:
+  `target/`, `.claude/`, `.repomix/`, `.vscode/`, `repomix-output*.xml`.
+  (Until 2026-08-23 this list claimed those paths were untracked while they were in fact tracked.)
 - **PR title** — When opening a pull request, always include the agent's name in the title.
   Example: `[Claude] fix CSS calc() precedence` / `[Codex] add image lazy-loading`
 
@@ -117,7 +118,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     - legacy frame/table-heavy pages such as the Abe Hiroshi site
   - generic YouTube home / non-watch pages now take a synthetic fast path before the heavy JS session so the app does not spin on the full app shell
   - generic `google.com` and `youtube.com` now try the real JS/HTML path before synthetic fallback
-  - living JS roadmap tracked in `JS_ROADMAP.md`
+  - living JS roadmap tracked in `docs/JS_ROADMAP.md`
 
 ## Important Modules
 
@@ -828,4 +829,4 @@ The project name is `tobira`; the old `browser` naming is being retired. Package
   - `Z:\vscode\tobira-specs` — unrelated spec cache, untouched.
 - **Still to delete** (verified redundant, but the tool refused the recursive delete — do it by hand): `Z:\vscode\browser-claude`, `Z:\vscode\browser-codex`, `Z:\vscode\browser-content-thread`. These are worktree remnants whose `.git` is a dangling pointer into the deleted OneDrive path. Each was diffed against its branch tip (`feat/outline-text-decoration`, `codex/make-js-engine`, `codex/content-thread`) and matches exactly — no uncommitted work.
 - **Deliberately not renamed**: `src/browser.rs`. "The browser itself" is an accurate module name, and `tobira/src/tobira.rs` would be redundant. Left alone.
-- **Known leftover**: `repomix-output.xmlbrowser.xml` is tracked but is a generated artifact with a mangled filename. Untangle whenever convenient.
+- ~~**Known leftover**: `repomix-output.xmlbrowser.xml` is tracked but is a generated artifact with a mangled filename.~~ Resolved 2026-08-23: untracked and gitignored.
