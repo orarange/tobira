@@ -6,7 +6,7 @@ use crate::css::{
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
-use std::rc::Rc;
+use std::sync::Arc;
 
 fn advance_by_margin(cursor: u32, m: i32) -> u32 {
     (cursor as i64 + m as i64).max(0) as u32
@@ -484,7 +484,7 @@ impl LayoutContext {
 enum InlineFragment {
     Text {
         text: String,
-        style: Rc<ComputedStyle>,
+        style: Arc<ComputedStyle>,
         link_href: Option<String>,
         link_node_id: Option<usize>,
     },
@@ -492,7 +492,7 @@ enum InlineFragment {
         src: String,
         draw_width: u32,
         draw_height: u32,
-        style: Rc<ComputedStyle>,
+        style: Arc<ComputedStyle>,
         link_href: Option<String>,
         link_node_id: Option<usize>,
     },
@@ -518,7 +518,7 @@ struct LineSpan {
     /// Shared with the fragment this span was cut from. Inline, a `ComputedStyle`
     /// is 520 bytes and one span is produced per word, so copying it per word
     /// dominated both layout allocation and memory for text-heavy pages.
-    style: Rc<ComputedStyle>,
+    style: Arc<ComputedStyle>,
     link_href: Option<String>,
     link_node_id: Option<usize>,
     /// Boxed: both carry a full `ComputedStyle`, and inline they made every
@@ -549,7 +549,7 @@ struct FormControlSpec {
     node_id: Option<usize>,
     form_node_id: Option<usize>,
     kind: FormControlKind,
-    style: ComputedStyle,
+    style: Arc<ComputedStyle>,
     name: Option<String>,
     value: String,
     placeholder: Option<String>,
@@ -571,7 +571,7 @@ impl LineBuilder {
     fn push_span(
         &mut self,
         text: &str,
-        style: &Rc<ComputedStyle>,
+        style: &Arc<ComputedStyle>,
         fonts: &mut FontContext,
         link_href: Option<&str>,
         link_node_id: Option<usize>,
@@ -618,7 +618,7 @@ impl LineBuilder {
             text: control.label.clone(),
             width,
             height,
-            style: Rc::new(control.style.clone()),
+            style: control.style.clone(),
             link_href: None,
             link_node_id: None,
             control: Some(Box::new(control.clone())),
@@ -631,7 +631,7 @@ impl LineBuilder {
         src: &str,
         draw_width: u32,
         draw_height: u32,
-        style: &Rc<ComputedStyle>,
+        style: &Arc<ComputedStyle>,
         link_href: Option<&str>,
         link_node_id: Option<usize>,
     ) {
@@ -957,7 +957,7 @@ fn layout_node(
         StyledNode::Text(text) => {
             let fragments = [InlineFragment::Text {
                 text: text.text.clone(),
-                style: Rc::new(text.style.clone()),
+                style: text.style.clone(),
                 link_href: None,
                 link_node_id: None,
             }];
@@ -2175,7 +2175,7 @@ fn layout_image_fallback(
         .unwrap_or_else(|| "[image]".to_string());
     let fragments = [InlineFragment::Text {
         text: alt,
-        style: Rc::new(element.style.clone()),
+        style: element.style.clone(),
         link_href: None,
         link_node_id: None,
     }];
@@ -3042,7 +3042,7 @@ fn layout_mixed_children(
                         fonts: &mut FontContext,
                         x: u32,
                         width: u32,
-                        element_style: &ComputedStyle,
+                        element_style: &Arc<ComputedStyle>,
                         active_floats: &[ActiveFloat]| {
         if inline_fragments.is_empty() && !*bullet_pending {
             return;
@@ -3052,7 +3052,7 @@ fn layout_mixed_children(
                 0,
                 InlineFragment::Text {
                     text: "- ".to_string(),
-                    style: Rc::new(element_style.clone()),
+                    style: element_style.clone(),
                     link_href: None,
                     link_node_id: None,
                 },
@@ -3187,7 +3187,7 @@ fn layout_mixed_children(
             if bullet_pending {
                 inline_fragments.push(InlineFragment::Text {
                     text: "- ".to_string(),
-                    style: Rc::new(element.style.clone()),
+                    style: element.style.clone(),
                     link_href: None,
                     link_node_id: None,
                 });
@@ -3234,7 +3234,7 @@ fn collect_inline_fragments(
         StyledNode::Text(text) => {
             output.push(InlineFragment::Text {
                 text: text.text.clone(),
-                style: Rc::new(text.style.clone()),
+                style: text.style.clone(),
                 link_href: link_href.map(str::to_string),
                 link_node_id,
             });
@@ -3280,7 +3280,7 @@ fn collect_inline_fragments(
                                     src: src.to_string(),
                                     draw_width,
                                     draw_height,
-                                    style: Rc::new(element.style.clone()),
+                                    style: element.style.clone(),
                                     link_href: current_link.map(str::to_string),
                                     link_node_id: current_link_node_id,
                                 });
@@ -3296,7 +3296,7 @@ fn collect_inline_fragments(
                             .unwrap_or_else(|| "[image]".to_string());
                         output.push(InlineFragment::Text {
                             text: alt,
-                            style: Rc::new(element.style.clone()),
+                            style: element.style.clone(),
                             link_href: current_link.map(str::to_string),
                             link_node_id: current_link_node_id,
                         });
@@ -3414,7 +3414,7 @@ fn layout_nowrap_fragments(
             }
             InlineFragment::Control(control) => {
                 if pending_space && !line.is_empty() {
-                    line.push_span(" ", &Rc::new(control.style.clone()), fonts, None, None);
+                    line.push_span(" ", &control.style, fonts, None, None);
                 }
                 line.push_control(control, fonts);
                 pending_space = true;
@@ -3539,7 +3539,7 @@ fn layout_normal_fragments(
                         );
                         first_line = false;
                     } else {
-                        line.push_span(" ", &Rc::new(control.style.clone()), fonts, None, None);
+                        line.push_span(" ", &control.style, fonts, None, None);
                     }
                 }
 
@@ -3762,8 +3762,8 @@ fn apply_ellipsis_to_line(
     let ellipsis_style = line
         .spans
         .last()
-        .map(|s| Rc::clone(&s.style))
-        .unwrap_or_else(|| Rc::new(container_style.clone()));
+        .map(|s| Arc::clone(&s.style))
+        .unwrap_or_else(|| Arc::new(container_style.clone()));
     let ellipsis_width = text_width(&ellipsis_style, ellipsis, fonts);
     let target = max_width.saturating_sub(ellipsis_width);
 
@@ -3923,7 +3923,7 @@ fn layout_preformatted_fragments(
 
 fn push_wrapped_word(
     word: &str,
-    style: &Rc<ComputedStyle>,
+    style: &Arc<ComputedStyle>,
     link_href: Option<&str>,
     link_node_id: Option<usize>,
     container_style: &ComputedStyle,
@@ -4201,34 +4201,25 @@ fn is_block_level(node: &StyledNode) -> bool {
         return true;
     }
 
-    matches!(
-        node,
-        StyledNode::Element(StyledElement {
-            style: ComputedStyle {
-                display: Display::Block
-                    | Display::ListItem
-                    | Display::Flex
-                    | Display::InlineFlex
-                    | Display::Grid
-                    | Display::InlineGrid,
-                ..
-            },
-            ..
-        })
-    )
+    match node {
+        StyledNode::Element(element) => matches!(
+            element.style.display,
+            Display::Block
+                | Display::ListItem
+                | Display::Flex
+                | Display::InlineFlex
+                | Display::Grid
+                | Display::InlineGrid
+        ),
+        StyledNode::Text(_) => false,
+    }
 }
 
 fn is_hidden(node: &StyledNode) -> bool {
-    matches!(
-        node,
-        StyledNode::Element(StyledElement {
-            style: ComputedStyle {
-                display: Display::None,
-                ..
-            },
-            ..
-        })
-    )
+    match node {
+        StyledNode::Element(element) => element.style.display == Display::None,
+        StyledNode::Text(_) => false,
+    }
 }
 
 fn char_width(style: &ComputedStyle, character: char, fonts: &mut FontContext) -> u32 {

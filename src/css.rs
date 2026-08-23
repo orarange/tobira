@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::html::{Element, Node};
 
@@ -286,7 +288,7 @@ pub struct InteractiveState {
 // Enums used in ComputedStyle
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Display {
     Block,
     Inline,
@@ -298,21 +300,21 @@ pub enum Display {
     InlineGrid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextAlign {
     Left,
     Center,
     Right,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VerticalAlign {
     Top,
     Middle,
     Bottom,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WhiteSpaceMode {
     Normal,
     Pre,
@@ -330,7 +332,7 @@ pub enum FontFamilyKind {
 // TextShadow
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TextShadow {
     pub offset_x: i32,
     pub offset_y: i32,
@@ -342,7 +344,7 @@ pub struct TextShadow {
 // LinearGradient
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LinearGradient {
     pub angle_deg_x1000: i32,
     pub stops: Vec<(u32, u32)>, // (color, position 0-1000)
@@ -352,7 +354,7 @@ pub struct LinearGradient {
 // BackgroundSize / BackgroundRepeat
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BackgroundSize {
     Auto,
     Cover,
@@ -365,7 +367,7 @@ impl Default for BackgroundSize {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackgroundRepeat {
     Repeat,
     NoRepeat,
@@ -379,7 +381,7 @@ impl Default for BackgroundRepeat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LengthValue {
     Pixels(u32),
     Percent(u32),
@@ -388,7 +390,7 @@ pub enum LengthValue {
     FitContent(u32), // argument in pixels
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct EdgeSizes {
     pub top: u32,
     pub right: u32,
@@ -416,7 +418,7 @@ impl EdgeSizes {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextTransform {
     None,
     Uppercase,
@@ -424,13 +426,13 @@ pub enum TextTransform {
     Capitalize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BoxSizing {
     ContentBox,
     BorderBox,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BoxShadow {
     pub offset_x: i32,
     pub offset_y: i32,
@@ -438,7 +440,7 @@ pub struct BoxShadow {
     pub color: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Overflow {
     Visible,
     Hidden,
@@ -446,7 +448,7 @@ pub enum Overflow {
     Scroll,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Position {
     Static,
     Relative,
@@ -459,27 +461,27 @@ impl Default for Position {
     fn default() -> Self { Position::Static }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlexDirection { Row, Column, RowReverse, ColumnReverse }
 impl Default for FlexDirection { fn default() -> Self { FlexDirection::Row } }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlexWrap { NoWrap, Wrap, WrapReverse }
 impl Default for FlexWrap { fn default() -> Self { FlexWrap::NoWrap } }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlignItems { Stretch, FlexStart, FlexEnd, Center, Baseline }
 impl Default for AlignItems { fn default() -> Self { AlignItems::Stretch } }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JustifyContent { FlexStart, FlexEnd, Center, SpaceBetween, SpaceAround, SpaceEvenly }
 impl Default for JustifyContent { fn default() -> Self { JustifyContent::FlexStart } }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlignSelf { Auto, Stretch, FlexStart, FlexEnd, Center, Baseline }
 impl Default for AlignSelf { fn default() -> Self { AlignSelf::Auto } }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlignContent {
     FlexStart,
     FlexEnd,
@@ -490,7 +492,7 @@ pub enum AlignContent {
 }
 impl Default for AlignContent { fn default() -> Self { AlignContent::Stretch } }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum CursorKind {
     #[default]
     Auto,
@@ -509,7 +511,7 @@ pub enum CursorKind {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum ObjectFit {
     #[default]
     Fill,
@@ -519,7 +521,7 @@ pub enum ObjectFit {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ListStyleType {
     Disc,
     Circle,
@@ -533,7 +535,7 @@ pub enum ListStyleType {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A single grid track definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GridTrackSize {
     Pixels(u32),
     /// Stored as percent * 100 to keep Eq (e.g. 50% → 5000)
@@ -545,7 +547,7 @@ pub enum GridTrackSize {
     MaxContent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GridPlacement {
     pub start: Option<i32>, // grid line number (1-based), None = auto
     pub span: Option<u32>,  // span count, None = 1
@@ -560,7 +562,7 @@ impl Default for GridPlacement {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct SignedEdgeSizes {
     pub top: i32,
     pub right: i32,
@@ -588,7 +590,7 @@ impl SignedEdgeSizes {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FloatSide {
     None,
     Left,
@@ -601,7 +603,7 @@ impl Default for FloatSide {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClearSide {
     None,
     Left,
@@ -619,7 +621,7 @@ impl Default for ClearSide {
 // ComputedStyle
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComputedStyle {
     pub display: Display,
     pub color: Color,
@@ -923,14 +925,17 @@ pub enum StyledNode {
 pub struct StyledElement {
     pub tag_name: String,
     pub attributes: BTreeMap<String, String>,
-    pub style: ComputedStyle,
+    /// Shared through [`intern_style`]: pages repeat a handful of computed
+    /// styles across many nodes, so holding one inline per node cost 520 bytes
+    /// each for values that are overwhelmingly duplicates.
+    pub style: Arc<ComputedStyle>,
     pub children: Vec<StyledNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyledText {
     pub text: String,
-    pub style: ComputedStyle,
+    pub style: Arc<ComputedStyle>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1190,12 +1195,52 @@ pub fn parse_inline_declarations(input: &str) -> Vec<Declaration> {
         .collect()
 }
 
+thread_local! {
+    /// Every distinct `ComputedStyle` currently reachable from a styled tree,
+    /// held once. Layout is single-threaded, so a thread-local avoids threading
+    /// an interner argument through the recursive builders.
+    static STYLE_INTERNER: RefCell<HashSet<Arc<ComputedStyle>>> =
+        RefCell::new(HashSet::new());
+}
+
+/// Return the shared handle for `style`, allocating only the first time a given
+/// value is seen. `Arc<ComputedStyle>` borrows as `ComputedStyle`, so a repeat
+/// lookup costs a hash and no allocation. `Arc` rather than `Rc` because the
+/// finished tree is handed to the render worker thread.
+fn intern_style(style: ComputedStyle) -> Arc<ComputedStyle> {
+    STYLE_INTERNER.with(|cell| {
+        let mut set = cell.borrow_mut();
+        if let Some(existing) = set.get(&style) {
+            return Arc::clone(existing);
+        }
+        let shared = Arc::new(style);
+        set.insert(Arc::clone(&shared));
+        shared
+    })
+}
+
+/// Drop interned styles that no live tree references any more. Called when a
+/// tree is rebuilt so the table tracks the current page rather than every style
+/// ever computed in this process.
+fn prune_style_interner() {
+    STYLE_INTERNER.with(|cell| {
+        cell.borrow_mut().retain(|shared| Arc::strong_count(shared) > 1);
+    });
+}
+
+/// Number of distinct styles currently shared. Test-only introspection.
+#[cfg(test)]
+pub(crate) fn interned_style_count() -> usize {
+    STYLE_INTERNER.with(|cell| cell.borrow().len())
+}
+
 pub fn build_styled_tree(
     document: &Node,
     stylesheet: &Stylesheet,
     viewport_width: u32,
     interactive: &InteractiveState,
 ) -> StyledNode {
+    prune_style_interner();
     let ancestors = Vec::new();
     let rule_index = &stylesheet.rule_index;
     build_node(
@@ -1339,7 +1384,7 @@ fn build_node(
             }
             StyledNode::Text(StyledText {
                 text: text.clone(),
-                style,
+                style: intern_style(style),
             })
         }
         Node::Element(element) => {
@@ -1426,7 +1471,7 @@ fn build_node(
             ) {
                 children.insert(0, StyledNode::Text(StyledText {
                     text: before_text,
-                    style: pseudo_style,
+                    style: intern_style(pseudo_style),
                 }));
             }
             if let Some((after_text, pseudo_style)) = collect_pseudo_content(
@@ -1443,14 +1488,14 @@ fn build_node(
             ) {
                 children.push(StyledNode::Text(StyledText {
                     text: after_text,
-                    style: pseudo_style,
+                    style: intern_style(pseudo_style),
                 }));
             }
 
             StyledNode::Element(StyledElement {
                 tag_name: element.tag_name.clone(),
                 attributes: element.attributes.clone(),
-                style,
+                style: intern_style(style),
                 children,
             })
         }
@@ -1507,7 +1552,7 @@ fn build_node_incremental(
             }
             Some(StyledNode::Text(StyledText {
                 text: text.clone(),
-                style,
+                style: intern_style(style),
             }))
         }
         Node::Element(element) => {
@@ -1602,7 +1647,7 @@ fn build_node_incremental(
             ) {
                 children.insert(0, StyledNode::Text(StyledText {
                     text: before_text,
-                    style: pseudo_style,
+                    style: intern_style(pseudo_style),
                 }));
             }
             if let Some((after_text, pseudo_style)) = collect_pseudo_content(
@@ -1619,14 +1664,14 @@ fn build_node_incremental(
             ) {
                 children.push(StyledNode::Text(StyledText {
                     text: after_text,
-                    style: pseudo_style,
+                    style: intern_style(pseudo_style),
                 }));
             }
 
             Some(StyledNode::Element(StyledElement {
                 tag_name: element.tag_name.clone(),
                 attributes: element.attributes.clone(),
-                style,
+                style: intern_style(style),
                 children,
             }))
         }
@@ -4956,7 +5001,7 @@ mod tests {
                 );
                 assert_eq!(
                     naive,
-                    styled_element.style,
+                    *styled_element.style,
                     "style mismatch for <{} id={:?}>",
                     element.tag_name,
                     element.attributes.get("id")
@@ -6212,5 +6257,99 @@ mod tests {
         assert_eq!(div.style.margin.right, 0, "auto resolves to 0 in parsed value");
         assert!(div.style.margin_left_auto, "margin-left should be auto");
         assert!(div.style.margin_right_auto, "margin-right should be auto");
+    }
+}
+
+#[cfg(test)]
+mod style_sharing {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn walk(node: &StyledNode, nodes: &mut usize, uniq: &mut HashSet<ComputedStyle>) {
+        *nodes += 1;
+        match node {
+            StyledNode::Element(e) => {
+                uniq.insert((*e.style).clone());
+                for c in &e.children {
+                    walk(c, nodes, uniq);
+                }
+            }
+            StyledNode::Text(t) => {
+                uniq.insert((*t.style).clone());
+            }
+        }
+    }
+
+    fn build(html: &str) -> StyledNode {
+        let doc = crate::html::parse_document(html);
+        let sheet = parse_stylesheet("");
+        build_styled_tree(&doc, &sheet, 1280, &InteractiveState::default())
+    }
+
+    /// A `ComputedStyle` is 520 bytes and pages reuse a handful of them across
+    /// many nodes, so the styled tree holds shared handles rather than a copy
+    /// per node. Guard the node structs against re-inlining anything large.
+    #[test]
+    fn styled_nodes_hold_a_handle_not_a_copy() {
+        use std::mem::size_of;
+        assert!(
+            size_of::<StyledNode>() <= 96,
+            "StyledNode grew to {} bytes; it should hold Arc<ComputedStyle>, not a copy",
+            size_of::<StyledNode>()
+        );
+        assert!(size_of::<Arc<ComputedStyle>>() == 8);
+    }
+
+    /// Repeated markup must collapse to one style allocation, and the interner
+    /// must end up holding exactly the styles the tree actually references --
+    /// no leftovers from previous builds, nothing missing.
+    #[test]
+    fn repeated_markup_shares_one_style_allocation() {
+        let rows: String = (0..200)
+            .map(|i| format!("<li class=\"row\">item {i}</li>"))
+            .collect();
+        let styled = build(&format!("<html><body><ul>{rows}</ul></body></html>"));
+
+        let mut nodes = 0usize;
+        let mut uniq = HashSet::new();
+        walk(&styled, &mut nodes, &mut uniq);
+
+        assert!(nodes >= 400, "expected the 200 <li> plus their text, got {nodes}");
+        assert!(
+            nodes / uniq.len().max(1) >= 10,
+            "200 identical rows should share styles heavily: {nodes} nodes but {} distinct styles",
+            uniq.len()
+        );
+        assert_eq!(
+            uniq.len(),
+            super::interned_style_count(),
+            "the interner should hold exactly the styles this tree references"
+        );
+    }
+
+    /// Two nodes with the same computed style must be the *same* allocation,
+    /// which is what turns the sharing into a memory win rather than just a
+    /// pointer indirection.
+    #[test]
+    fn identical_styles_are_one_allocation() {
+        let styled = build("<html><body><p>one</p><p>two</p></body></html>");
+        let mut paragraphs = Vec::new();
+        fn collect<'a>(node: &'a StyledNode, out: &mut Vec<&'a StyledElement>) {
+            if let StyledNode::Element(e) = node {
+                if e.tag_name == "p" {
+                    out.push(e);
+                }
+                for c in &e.children {
+                    collect(c, out);
+                }
+            }
+        }
+        collect(&styled, &mut paragraphs);
+
+        assert_eq!(paragraphs.len(), 2);
+        assert!(
+            Arc::ptr_eq(&paragraphs[0].style, &paragraphs[1].style),
+            "two <p> with identical computed styles should share one allocation"
+        );
     }
 }

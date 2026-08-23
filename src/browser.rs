@@ -3972,7 +3972,7 @@ mod tests {
             html_source: String::new(),
             styled_document: StyledNode::Text(crate::css::StyledText {
                 text: String::new(),
-                style: crate::css::ComputedStyle {
+                style: std::sync::Arc::new(crate::css::ComputedStyle {
                     display: crate::css::Display::Inline,
                     color: crate::css::DEFAULT_TEXT_COLOR,
                     background_color: None,
@@ -4063,7 +4063,7 @@ mod tests {
                     transform_rotate_millideg: 0,
                     transform_origin_x: 500,
                     transform_origin_y: 500,
-                },
+                }),
             }),
             raw_document: Node::Text(String::new()),
             main_stylesheet: crate::css::Stylesheet::default(),
@@ -4142,7 +4142,7 @@ mod tests {
             html_source: "<html><body>Hello</body></html>".to_string(),
             styled_document: StyledNode::Text(crate::css::StyledText {
                 text: "Hello".to_string(),
-                style: crate::css::ComputedStyle {
+                style: std::sync::Arc::new(crate::css::ComputedStyle {
                     display: crate::css::Display::Inline,
                     color: crate::css::DEFAULT_TEXT_COLOR,
                     background_color: None,
@@ -4233,7 +4233,7 @@ mod tests {
                     transform_rotate_millideg: 0,
                     transform_origin_x: 500,
                     transform_origin_y: 500,
-                },
+                }),
             }),
             raw_document: Node::Text(String::new()),
             main_stylesheet: crate::css::Stylesheet::default(),
@@ -4662,7 +4662,7 @@ mod tests {
     fn parse_styled_text(text: &str) -> StyledNode {
         crate::css::StyledNode::Text(crate::css::StyledText {
             text: text.to_string(),
-            style: crate::css::ComputedStyle {
+            style: std::sync::Arc::new(crate::css::ComputedStyle {
                 display: crate::css::Display::Inline,
                 color: crate::css::DEFAULT_TEXT_COLOR,
                 background_color: None,
@@ -4753,7 +4753,7 @@ mod tests {
                 transform_rotate_millideg: 0,
                 transform_origin_x: 500,
                 transform_origin_y: 500,
-            },
+            }),
         })
     }
 }
