@@ -4076,6 +4076,43 @@ impl Vm {
             .insert("Infinity".to_string(), Value::Number(f64::INFINITY));
         self.globals
             .insert("undefined".to_string(), Value::Undefined);
+
+        self.name_global_functions();
+    }
+
+    /// Give every global function its `name`, using the name it is registered
+    /// under. User functions already carry one; the built-ins are allocated
+    /// generically and had none, so `Object.name`, `Array.name` and the rest
+    /// read `undefined` -- which breaks the `x.constructor.name` idiom that
+    /// libraries use for type dispatch and diagnostics.
+    fn name_global_functions(&mut self) {
+        let named: Vec<(String, GcRef<JsObject>)> = self
+            .globals
+            .iter()
+            .filter_map(|(name, value)| match value {
+                Value::Object(object) if self.callables.contains_key(&object.raw()) => {
+                    Some((name.clone(), *object))
+                }
+                _ => None,
+            })
+            .collect();
+        for (name, object) in named {
+            if self
+                .get_own_property_descriptor(object, &PropertyKey::from("name"))
+                .is_some()
+            {
+                continue;
+            }
+            let value = self.make_string_value(&name);
+            self.define_data_property(
+                object,
+                PropertyKey::from("name"),
+                value,
+                false,
+                false,
+                true,
+            );
+        }
     }
 
     fn number_prototype_ref(&self) -> GcRef<JsObject> {
@@ -4855,6 +4892,7 @@ impl Vm {
         // called with `new`, yet `Symbol.prototype` exists and feature detection
         // relies on it. Attach one whenever the caller supplies it, keeping the
         // old default of `Object.prototype` for constructors that do not.
+        let owns_prototype = construct_prototype.is_some();
         let prototype = match construct_prototype {
             Some(prototype) => Some(prototype),
             None if constructable => Some(self.object_prototype_ref()),
@@ -4869,8 +4907,38 @@ impl Vm {
                 false,
                 false,
             );
+            if owns_prototype {
+                self.link_constructor(prototype, object_ref);
+            }
         }
         Value::Object(object_ref)
+    }
+
+    /// Point a prototype back at its constructor.
+    ///
+    /// `x.constructor` is how a great deal of library code identifies a value:
+    /// plain-object checks (`x.constructor === Object`), cloning
+    /// (`new x.constructor()`), and logging (`x.constructor.name`). Every
+    /// built-in prototype was missing it, so all of those read `undefined`.
+    /// Non-enumerable and configurable, per the spec's attributes for it.
+    fn link_constructor(&mut self, prototype: GcRef<JsObject>, constructor: GcRef<JsObject>) {
+        // Several constructors share one prototype in this engine (WeakMap reuses
+        // Map's, the error subclasses reuse Error's). The first one to claim it
+        // is the general one, so later claims are ignored rather than clobbering.
+        if self
+            .get_own_property_descriptor(prototype, &PropertyKey::from("constructor"))
+            .is_some()
+        {
+            return;
+        }
+        self.define_data_property(
+            prototype,
+            PropertyKey::from("constructor"),
+            Value::Object(constructor),
+            true,
+            false,
+            true,
+        );
     }
 
     /// Cached version of allocate_builtin_value for stateless methods (constructable=false, prototype=None).
@@ -4907,6 +4975,9 @@ impl Vm {
                 false,
                 false,
             );
+            if construct_prototype.is_some() {
+                self.link_constructor(prototype, object_ref);
+            }
         }
         object_ref
     }
@@ -5018,6 +5089,9 @@ impl Vm {
             false,
             false,
         );
+        // `new F().constructor === F` and `C.prototype.constructor === C` hold
+        // for user functions and classes too, not just built-ins.
+        self.link_constructor(function_prototype, object_ref);
         let name_value = self.make_string_value(&name);
         self.define_data_property(
             object_ref,
