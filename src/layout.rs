@@ -5613,6 +5613,30 @@ mod percentage_sizing_tests {
         }
     }
 
+    /// Comment stripping used to copy a stylesheet one byte at a time via
+    /// `byte as char`, reading each byte as a Latin-1 code point. That explodes
+    /// every multi-byte character into one bogus character per byte, and the
+    /// stripper runs twice over a stylesheet, so the damage compounded: Yahoo!
+    /// JAPAN's news separators reached the screen as six garbage characters
+    /// instead of one middle dot.
+    #[test]
+    fn non_ascii_survives_comment_stripping() {
+        for text in ["\u{30fb}", "\u{5bfe}", "\u{30e1}\u{30a4}\u{30ea}\u{30aa}"] {
+            let runs = text_runs(&format!("p::before{{content:\"{text}\"}}"), "<p>x</p>");
+            let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
+            assert_eq!(shown, format!("{text}x"));
+        }
+    }
+
+    /// Comments still go away, and one sitting next to a multi-byte character
+    /// must not take part of that character with it.
+    #[test]
+    fn comments_are_stripped_around_multibyte_text() {
+        let runs = text_runs("p::before{/* a */content:\"\u{30fb}\"/* b */}", "<p>x</p>");
+        let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(shown, "\u{30fb}x");
+    }
+
     /// Clipping trims a run rather than discarding it: a box narrower than its
     /// text keeps the glyphs that fit and drops only the ones that spill.
     #[test]

@@ -4824,25 +4824,39 @@ fn parse_float(input: &str) -> Option<f32> {
 // Comment stripping
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Remove `/* ... */` comments, leaving everything else byte-for-byte.
+///
+/// Scanning by byte is safe here because UTF-8 is self-synchronizing: `/` and
+/// `*` are ASCII, and no continuation byte of a multi-byte character can equal
+/// an ASCII one, so a match is always a real comment delimiter sitting on a
+/// character boundary. Copying by byte is *not* safe, and this used to do it:
+/// `bytes[index] as char` reads a byte as a Latin-1 code point, which explodes
+/// every multi-byte character into one bogus character per byte. Because the
+/// stripper runs twice over a stylesheet, the damage compounded -- Yahoo!
+/// JAPAN's `content: "\u{30fb}"` separators reached the screen as `Ã£Â\u{83}Â»`,
+/// and every non-ASCII font-family name and selector value was mangled the
+/// same way. Copy whole slices instead.
 fn strip_comments(input: &str) -> String {
     let bytes = input.as_bytes();
-    let mut result = String::new();
+    let mut result = String::with_capacity(input.len());
     let mut index = 0;
+    let mut copied = 0;
 
-    while index < bytes.len() {
-        if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'/' && bytes[index + 1] == b'*' {
+            result.push_str(&input[copied..index]);
             index += 2;
             while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
                 index += 1;
             }
             index = (index + 2).min(bytes.len());
+            copied = index;
             continue;
         }
-
-        result.push(bytes[index] as char);
         index += 1;
     }
 
+    result.push_str(&input[copied..]);
     result
 }
 
