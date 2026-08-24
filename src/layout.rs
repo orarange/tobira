@@ -1573,6 +1573,7 @@ fn layout_block_element(
             background_top,
             outer_width,
             clip_height,
+            fonts,
         );
     }
 
@@ -1695,6 +1696,56 @@ fn layout_block_element(
 /// crop would be needed.
 /// Note: Layer clamping adjusts width/height but does not rebase inner commands; the
 /// compositor clips at the layer's new dimensions.
+/// Trim a text run to the part of it that survives a clip box.
+///
+/// Returns `None` when nothing of the run is left. Keeping a run whole because
+/// it merely *touches* the clip box is how the visually-hidden idiom leaked on
+/// screen: `position:absolute; width:1px; height:1px; overflow:hidden` is on
+/// almost every real page to expose label text to screen readers only, and a
+/// full-width word intersects that 1px box, so the word was painted in full.
+fn clip_text_to_box(
+    text: TextCommand,
+    clip_x: u32,
+    clip_x2: u32,
+    fonts: &mut FontContext,
+) -> Option<TextCommand> {
+    if text.x >= clip_x && text.x.saturating_add(text.width) <= clip_x2 {
+        return Some(text);
+    }
+
+    let mut kept = String::new();
+    let mut kept_x = text.x;
+    let mut pen = text.x;
+    let mut started = false;
+    for character in text.text.chars() {
+        let advance = fonts.glyph_advance_px(character, text.font_size_px, text.font_family);
+        let next = pen.saturating_add(advance);
+        // A glyph counts as visible only if it fits entirely inside the box:
+        // the renderer draws whole glyphs, so a partly-covered one would spill.
+        if pen >= clip_x && next <= clip_x2 {
+            if !started {
+                kept_x = pen;
+                started = true;
+            }
+            kept.push(character);
+        } else if started {
+            break;
+        }
+        pen = next;
+    }
+
+    if kept.is_empty() {
+        return None;
+    }
+    let width = fonts.text_width_px(&kept, text.font_size_px, text.font_family);
+    Some(TextCommand {
+        text: kept,
+        x: kept_x,
+        width,
+        ..text
+    })
+}
+
 fn clip_commands_to_box(
     commands: &mut Vec<DrawCommand>,
     start: usize,
@@ -1702,12 +1753,14 @@ fn clip_commands_to_box(
     clip_y: u32,
     clip_w: u32,
     clip_h: u32,
+    fonts: &mut FontContext,
 ) {
     let clip_x2 = clip_x.saturating_add(clip_w);
     let clip_y2 = clip_y.saturating_add(clip_h);
 
     let tail = commands.split_off(start);
     let clamped: Vec<DrawCommand> = tail.into_iter().filter_map(|cmd| {
+        let fonts = &mut *fonts;
         match cmd {
             DrawCommand::Rect(mut r) => {
                 let rx2 = r.x.saturating_add(r.width);
@@ -1759,7 +1812,7 @@ fn clip_commands_to_box(
                 if t.x >= clip_x2 || t.y >= clip_y2 || tx2 <= clip_x || ty2 <= clip_y {
                     None
                 } else {
-                    Some(DrawCommand::Text(t))
+                    clip_text_to_box(t, clip_x, clip_x2, fonts).map(DrawCommand::Text)
                 }
             }
             DrawCommand::Gradient(mut g) => {
@@ -2095,6 +2148,7 @@ fn layout_block_element_as_layer(
             background_top,
             outer_width,
             clip_height,
+            fonts,
         );
     }
 
@@ -5549,12 +5603,34 @@ mod percentage_sizing_tests {
                 "<div style=\"width:600px\"><{tag} class=\"vh\">キーワード入力補助を開く</{tag}></div>"
             );
             let runs = text_runs(VH, &html);
-            let shown: usize = runs.iter().map(|r| r.text.chars().count()).sum();
+            // Nothing at all: the renderer draws whole glyphs, so a 1px-wide box
+            // has room for none of them. Keeping the run because it merely
+            // touched the box is what put stray characters at the page origin.
             assert!(
-                shown <= 2,
-                "<{tag}> should be clipped to about one glyph, showed {shown}: {runs:?}"
+                runs.is_empty(),
+                "<{tag}> should be clipped away entirely, got {runs:?}"
             );
         }
+    }
+
+    /// Clipping trims a run rather than discarding it: a box narrower than its
+    /// text keeps the glyphs that fit and drops only the ones that spill.
+    #[test]
+    fn a_partly_covered_run_is_truncated_not_dropped() {
+        let runs = text_runs(
+            ".narrow{width:40px;height:20px;overflow:hidden}",
+            "<div style=\"width:600px\"><div class=\"narrow\">キーワード入力補助を開く</div></div>",
+        );
+        let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert!(!shown.is_empty(), "some text must survive: {runs:?}");
+        assert!(
+            "キーワード入力補助を開く".starts_with(&shown),
+            "what survives must be a prefix of the original, got {shown:?}"
+        );
+        assert!(
+            shown.chars().count() < 12,
+            "a 40px box cannot show the whole string, got {shown:?}"
+        );
     }
 
     /// Floats blockify too, and an inline box with no out-of-flow positioning
