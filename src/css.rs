@@ -293,6 +293,12 @@ pub struct InteractiveState {
 pub enum Display {
     Block,
     Inline,
+    /// Inline-level on the outside, a block container on the inside.
+    ///
+    /// Collapsing this to plain `Inline` looked harmless but silently deleted
+    /// content: an inline formatting context drops block-level children, so
+    /// everything nested inside an `inline-block` wrapper vanished.
+    InlineBlock,
     ListItem,
     None,
     Flex,
@@ -2119,7 +2125,7 @@ fn blockify_out_of_flow(style: &mut ComputedStyle) {
         return;
     }
     style.display = match style.display {
-        Display::Inline | Display::ListItem => Display::Block,
+        Display::Inline | Display::InlineBlock | Display::ListItem => Display::Block,
         Display::InlineFlex => Display::Flex,
         Display::InlineGrid => Display::Grid,
         // `none` stays hidden; everything else is already block-level.
@@ -3979,7 +3985,8 @@ fn parse_display(input: &str) -> Option<Display> {
         "inline-flex" => Some(Display::InlineFlex),
         "grid" => Some(Display::Grid),
         "inline-grid" => Some(Display::InlineGrid),
-        "inline" | "inline-block" | "table-cell" | "contents" => Some(Display::Inline),
+        "inline-block" => Some(Display::InlineBlock),
+        "inline" | "table-cell" | "contents" => Some(Display::Inline),
         "list-item" => Some(Display::ListItem),
         "none" => Some(Display::None),
         _ => None,

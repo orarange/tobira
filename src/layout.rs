@@ -507,8 +507,25 @@ impl LayoutContext {
     }
 }
 
+/// An `inline-block` box, laid out into its own coordinate space.
+///
+/// It is inline-level on the outside -- it sits on a line beside text -- but a
+/// block container on the inside, so its contents cannot be flattened into
+/// inline fragments. Laying it out up front and carrying the result lets the
+/// line breaker treat it as one indivisible box, like an image.
+#[derive(Debug, Clone)]
+struct AtomicInline {
+    commands: Vec<DrawCommand>,
+    links: Vec<LinkCommand>,
+    controls: Vec<FormControlCommand>,
+    hitboxes: Vec<ElementHitbox>,
+    width: u32,
+    height: u32,
+}
+
 #[derive(Debug, Clone)]
 enum InlineFragment {
+    Atomic(Box<AtomicInline>),
     Text {
         text: String,
         style: Arc<ComputedStyle>,
@@ -537,7 +554,7 @@ struct InlineImageSpec {
     link_node_id: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct LineSpan {
     text: String,
     width: u32,
@@ -553,6 +570,7 @@ struct LineSpan {
     /// images are rare enough that one allocation each is the better trade.
     control: Option<Box<FormControlSpec>>,
     image: Option<Box<InlineImageSpec>>,
+    atomic: Option<Box<AtomicInline>>,
 }
 
 #[derive(Debug, Default)]
@@ -615,6 +633,7 @@ impl LineBuilder {
         if let Some(last) = self.spans.last_mut() {
             if last.control.is_none()
                 && last.image.is_none()
+                && last.atomic.is_none()
                 && last.style == *style
                 && last.link_href.as_deref() == link_href
                 && last.link_node_id == link_node_id
@@ -634,6 +653,7 @@ impl LineBuilder {
             link_node_id,
             control: None,
             image: None,
+            atomic: None,
         });
     }
 
@@ -650,6 +670,7 @@ impl LineBuilder {
             link_node_id: None,
             control: Some(Box::new(control.clone())),
             image: None,
+            atomic: None,
         });
     }
 
@@ -681,6 +702,23 @@ impl LineBuilder {
             link_node_id,
             control: None,
             image: Some(Box::new(image)),
+            atomic: None,
+        });
+    }
+
+    fn push_atomic(&mut self, atomic: Box<AtomicInline>, style: &ComputedStyle) {
+        self.width = self.width.saturating_add(atomic.width);
+        self.line_height = self.line_height.max(atomic.height);
+        self.spans.push(LineSpan {
+            text: String::new(),
+            width: atomic.width,
+            height: atomic.height,
+            style: Arc::new(style.clone()),
+            link_href: None,
+            link_node_id: None,
+            control: None,
+            image: None,
+            atomic: Some(atomic),
         });
     }
 }
@@ -1024,7 +1062,10 @@ fn layout_node(
                         fonts,
                     );
                 }
-                Display::Block | Display::ListItem => {
+                // Reached only when a container lays its children out
+                // directly (a flex or grid item, say); in an inline formatting
+                // context an `inline-block` becomes an atomic inline instead.
+                Display::Block | Display::ListItem | Display::InlineBlock => {
                     let current_form = form_context_for_element(element, context, current_form);
                     let link_href = if element.tag_name == "a" {
                         element.attributes.get("href").cloned()
@@ -1868,6 +1909,95 @@ fn clip_commands_to_box(
         }
     }).collect();
     commands.extend(clamped);
+}
+
+/// Lay an `inline-block` out into its own coordinate space.
+///
+/// The box is measured shrink-to-fit -- an `inline-block` is only as wide as
+/// its content unless it says otherwise -- and rendered from (0, 0) so the line
+/// breaker can place the finished result anywhere.
+fn layout_atomic_inline(
+    element: &StyledElement,
+    available_width: u32,
+    context: &mut LayoutContext,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+    current_form: Option<FormContext>,
+) -> Option<AtomicInline> {
+    let width = match element.style.width {
+        Some(length) => resolve_length_value(length, available_width),
+        None => measure_cell_preferred_width(element, 0, images, fonts).min(available_width),
+    }
+    .min(available_width)
+    .max(1);
+
+    let mut sub_context = LayoutContext {
+        background_color: context.background_color,
+        next_control_id: context.next_control_id,
+        next_form_id: context.next_form_id,
+        ..LayoutContext::default()
+    };
+    let mut cursor_y = 0;
+    layout_block_element(
+        element,
+        0,
+        width,
+        &mut cursor_y,
+        &mut sub_context,
+        images,
+        fonts,
+        current_form,
+    );
+    context.next_control_id = sub_context.next_control_id;
+    context.next_form_id = sub_context.next_form_id;
+    // Out-of-flow descendants were collected against the page, not this box;
+    // they are already positioned and must not be shifted with it.
+    for (_, commands) in sub_context.positioned_commands {
+        context.positioned_commands.push((0, commands));
+    }
+
+    Some(AtomicInline {
+        commands: sub_context.commands,
+        links: sub_context.links,
+        controls: sub_context.controls,
+        hitboxes: sub_context.element_hitboxes,
+        width,
+        height: cursor_y.max(1),
+    })
+}
+
+/// Shift already-laid-out commands to a new origin -- the inverse of
+/// `rebase_commands`.
+fn offset_commands(commands: &mut [DrawCommand], dx: u32, dy: u32) {
+    for command in commands.iter_mut() {
+        match command {
+            DrawCommand::Rect(r) => {
+                r.x = r.x.saturating_add(dx);
+                r.y = r.y.saturating_add(dy);
+            }
+            DrawCommand::Text(t) => {
+                t.x = t.x.saturating_add(dx);
+                t.y = t.y.saturating_add(dy);
+            }
+            DrawCommand::Image(i) => {
+                i.x = i.x.saturating_add(dx);
+                i.y = i.y.saturating_add(dy);
+            }
+            DrawCommand::Layer(l) => {
+                l.x = l.x.saturating_add(dx);
+                l.y = l.y.saturating_add(dy);
+                // Inner commands are layer-relative already.
+            }
+            DrawCommand::Gradient(g) => {
+                g.x = g.x.saturating_add(dx);
+                g.y = g.y.saturating_add(dy);
+            }
+            DrawCommand::Sticky(s) => {
+                s.layer.x = s.layer.x.saturating_add(dx);
+                s.layer.y = s.layer.y.saturating_add(dy);
+            }
+        }
+    }
 }
 
 fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32) {
@@ -3492,6 +3622,18 @@ fn collect_inline_fragments(
                         );
                     }
                 }
+                Display::InlineBlock => {
+                    if let Some(atomic) = layout_atomic_inline(
+                        element,
+                        available_width,
+                        context,
+                        images,
+                        fonts,
+                        current_form,
+                    ) {
+                        output.push(InlineFragment::Atomic(Box::new(atomic)));
+                    }
+                }
                 Display::Block
                 | Display::ListItem
                 | Display::Flex
@@ -3587,6 +3729,10 @@ fn layout_nowrap_fragments(
 
     for fragment in fragments {
         match fragment {
+            InlineFragment::Atomic(atomic) => {
+                line.push_atomic(atomic.clone(), container_style);
+                pending_space = true;
+            }
             InlineFragment::LineBreak => {
                 // nowrap: ignore line breaks
             }
@@ -3669,6 +3815,9 @@ fn layout_normal_fragments(
             break;
         }
         match fragment {
+            InlineFragment::Atomic(atomic) => {
+                line.push_atomic(atomic.clone(), container_style);
+            }
             InlineFragment::LineBreak => {
                 if ellipsis_mode {
                     // In ellipsis mode, ignore line breaks
@@ -3986,6 +4135,7 @@ fn apply_ellipsis_to_line(
         link_node_id: None,
         control: None,
         image: None,
+        atomic: None,
     };
     line.spans.push(ellipsis_span);
     // Recompute line width
@@ -4007,6 +4157,18 @@ fn layout_preformatted_fragments(
 
     for fragment in fragments {
         match fragment {
+            InlineFragment::Atomic(atomic) => {
+                // An atomic inline never splits, so it moves to the next line
+                // whole rather than overflowing the current one.
+                if !line.is_empty() && line.width.saturating_add(atomic.width) > width {
+                    emit_line_with_indent(
+                        &mut line, container_style, x, width, cursor_y, context, fonts,
+                        if first_line { text_indent } else { 0 },
+                    );
+                    first_line = false;
+                }
+                line.push_atomic(atomic.clone(), container_style);
+            }
             InlineFragment::LineBreak => {
                 emit_line_with_indent(
                     &mut line, container_style, x, width, cursor_y, context, fonts,
@@ -4240,6 +4402,32 @@ fn emit_line_impl(
                 native_chrome,
             });
 
+            cursor_x = cursor_x.saturating_add(span.width);
+            continue;
+        }
+
+        if let Some(atomic) = &span.atomic {
+            // The box was laid out from its own origin, so shift the whole
+            // result to where the line breaker put it.
+            let box_y = cursor_y.saturating_add(line_height.saturating_sub(span.height));
+            let mut commands = atomic.commands.clone();
+            offset_commands(&mut commands, cursor_x, box_y);
+            context.commands.append(&mut commands);
+            for mut link in atomic.links.iter().cloned() {
+                link.x = link.x.saturating_add(cursor_x);
+                link.y = link.y.saturating_add(box_y);
+                context.links.push(link);
+            }
+            for mut control in atomic.controls.iter().cloned() {
+                control.x = control.x.saturating_add(cursor_x);
+                control.y = control.y.saturating_add(box_y);
+                context.controls.push(control);
+            }
+            for mut hitbox in atomic.hitboxes.iter().cloned() {
+                hitbox.x = hitbox.x.saturating_add(cursor_x);
+                hitbox.y = hitbox.y.saturating_add(box_y);
+                context.element_hitboxes.push(hitbox);
+            }
             cursor_x = cursor_x.saturating_add(span.width);
             continue;
         }
@@ -5833,6 +6021,47 @@ mod percentage_sizing_tests {
             "<div style=\"width:600px\"><div>ホームページに設定する</div></div>",
         );
         assert!(runs.len() > 1, "first-child should still apply: {runs:?}");
+    }
+
+    /// `display: inline-block` was collapsed to plain `inline`. An inline
+    /// formatting context drops block-level children, so everything nested
+    /// inside such a wrapper was deleted outright -- which is how Yahoo!
+    /// JAPAN's news headlines went missing: each sits under an
+    /// `<article style="display:inline-block">`.
+    #[test]
+    fn an_inline_block_keeps_its_block_children() {
+        let runs = text_runs(
+            ".card{display:inline-block}.body{display:block}",
+            "<span class=\"card\"><div class=\"body\">見出し</div></span>",
+        );
+        let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(shown, "見出し", "got {runs:?}");
+    }
+
+    /// It stays inline-level on the outside: two of them sit on one line.
+    #[test]
+    fn inline_blocks_sit_side_by_side() {
+        let runs = text_runs(
+            ".card{display:inline-block}",
+            "<div style=\"width:600px\">\
+             <span class=\"card\">左</span><span class=\"card\">右</span></div>",
+        );
+        let left = runs.iter().find(|run| run.text == "左").expect("left");
+        let right = runs.iter().find(|run| run.text == "右").expect("right");
+        assert_eq!(left.y, right.y, "both belong on the same line: {runs:?}");
+        assert!(right.x > left.x, "the second follows the first: {runs:?}");
+    }
+
+    /// Its children still lay out as blocks, one under the next.
+    #[test]
+    fn blocks_inside_an_inline_block_stack() {
+        let runs = text_runs(
+            ".card{display:inline-block}",
+            "<span class=\"card\"><div>上</div><div>下</div></span>",
+        );
+        let top = runs.iter().find(|run| run.text == "上").expect("top");
+        let bottom = runs.iter().find(|run| run.text == "下").expect("bottom");
+        assert!(bottom.y > top.y, "the second block goes below: {runs:?}");
     }
 
     /// A percentage inside `calc()` resolves against the containing block, like
