@@ -1379,6 +1379,11 @@ pub struct Vm {
     trace_stack_enabled: bool,
     last_backtrace: Option<String>,
     pending_call_name: Option<String>,
+    /// What the pending call was reached through, e.g. `Promise` in
+    /// `p.catch(...)`. Without it a `catch is not a function` says nothing
+    /// about which object came up short, which is most of the work when the
+    /// call site is minified.
+    pending_call_receiver: Option<String>,
     current_script_src: Option<String>,
     current_script_node: Option<NodeId>,
     heap: Heap,
@@ -1535,6 +1540,7 @@ impl Vm {
             trace_stack_enabled: env::var_os("TOBIRA_TRACE_STACK").is_some(),
             last_backtrace: None,
             pending_call_name: None,
+            pending_call_receiver: None,
             current_script_src: None,
             current_script_node: None,
             heap,
@@ -2847,6 +2853,7 @@ impl Vm {
                     self.pending_call_name = Some(name.clone());
                     PropertyKey::from(name)
                 };
+                self.pending_call_receiver = Some(self.describe_receiver(&object));
                 let callee = self.get_property_value(&object, &key)?;
                 self.stack.push(callee);
                 self.stack.push(object);
@@ -2859,6 +2866,7 @@ impl Vm {
                     Value::Number(number) => Some(self.to_string(&Value::Number(*number))),
                     _ => None,
                 };
+                self.pending_call_receiver = Some(self.describe_receiver(&object));
                 let callee = self.get_property_value(&object, &self.to_property_key(&key)?)?;
                 self.stack.push(callee);
                 self.stack.push(object);
@@ -5167,6 +5175,38 @@ impl Vm {
         Value::Object(object_ref)
     }
 
+    /// A short description of a call's receiver for error messages: its tag plus
+    /// the own property names it does have, which is usually enough to see what
+    /// it actually is when the call site has been minified.
+    fn describe_receiver(&mut self, value: &Value) -> String {
+        let tag = self.object_to_string_tag(value);
+        let Value::Object(object) = value else {
+            return tag;
+        };
+        let mut keys: Vec<String> = self
+            .heap
+            .objects()
+            .get(*object)
+            .map(|data| {
+                data.properties
+                    .keys()
+                    .filter_map(|key| match key {
+                        PropertyKey::String(name) => Some(name.clone()),
+                        PropertyKey::Index(index) => Some(index.to_string()),
+                        PropertyKey::Symbol(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        keys.sort();
+        keys.truncate(8);
+        if keys.is_empty() {
+            tag
+        } else {
+            format!("{tag} with own keys [{}]", keys.join(", "))
+        }
+    }
+
     /// The tag `Object.prototype.toString` reports, per ES2023 20.1.3.6.
     ///
     /// This used to be hardcoded to `Object` for every value, which quietly
@@ -6653,9 +6693,12 @@ impl Vm {
                     Value::Object(_) => "object".to_string(),
                     Value::Symbol(_) => "symbol".to_string(),
                 };
-                let message = match &self.pending_call_name {
-                    Some(name) => format!("{name} is not a function ({described})"),
-                    None => format!("attempted to call a non-function value ({described})"),
+                let message = match (&self.pending_call_name, &self.pending_call_receiver) {
+                    (Some(name), Some(receiver)) => {
+                        format!("{name} is not a function ({described}) on {receiver}")
+                    }
+                    (Some(name), None) => format!("{name} is not a function ({described})"),
+                    (None, _) => format!("attempted to call a non-function value ({described})"),
                 };
                 return Err(VmError::TypeError(
                     message,
