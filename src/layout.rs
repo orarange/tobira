@@ -1076,6 +1076,7 @@ fn layout_node(
                             LengthValue::MinContent => 0,
                             LengthValue::MaxContent => width,
                             LengthValue::FitContent(max_px) => width.min(max_px),
+                            LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
                         })
                         .unwrap_or(width);
                     layout_flex_container(element, x, inline_width, cursor_y, context, images, fonts, current_form.clone());
@@ -1093,6 +1094,7 @@ fn layout_node(
                             LengthValue::MinContent => 0,
                             LengthValue::MaxContent => width,
                             LengthValue::FitContent(max_px) => width.min(max_px),
+                            LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
                         })
                         .unwrap_or(width);
                     layout_grid_container(element, x, inline_width, cursor_y, context, images, fonts, current_form);
@@ -1284,6 +1286,7 @@ fn layout_block_element(
         LengthValue::MinContent => 0,
         LengthValue::MaxContent => width,
         LengthValue::FitContent(max_px) => width.min(max_px),
+        LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
     });
 
     // Container-derived width (what the element would be without explicit width)
@@ -1584,6 +1587,7 @@ fn layout_block_element(
                 LengthValue::Pixels(px) => px,
                 LengthValue::Percent(_) => background_height, // can't resolve % without context
                 LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => background_height,
+                LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, background_height),
             })
             .unwrap_or(background_height);
         clip_commands_to_box(
@@ -2172,6 +2176,7 @@ fn layout_block_element_as_layer(
                 LengthValue::Pixels(px) => px,
                 LengthValue::Percent(_) => final_height,
                 LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => final_height,
+                LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, final_height),
             })
             .unwrap_or(final_height);
         clip_commands_to_box(
@@ -3237,6 +3242,7 @@ fn layout_mixed_children(
                 Some(LengthValue::Pixels(px)) => px.min(width).max(1),
                 Some(LengthValue::Percent(pct)) => (width as u64 * pct as u64 / 100).min(width as u64) as u32,
                 Some(LengthValue::MinContent) | Some(LengthValue::MaxContent) | Some(LengthValue::FitContent(_)) => width.max(1),
+                Some(LengthValue::Calc { percent_hundredths, px }) => crate::css::resolve_calc(percent_hundredths, px, width).max(1),
                 None => {
                     if matches!(child, StyledNode::Element(StyledElement { tag_name, .. }) if tag_name == "img") {
                         width.max(1)
@@ -4514,6 +4520,7 @@ fn measure_node_preferred_width(
                         LengthValue::Percent(value) => value.saturating_mul(8),
                         LengthValue::MinContent => 0,
                         LengthValue::MaxContent | LengthValue::FitContent(_) => u32::MAX / 2,
+                        LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, u32::MAX / 2),
                     })
                     .unwrap_or_else(|| {
                         collect_table_rows(element)
@@ -4658,6 +4665,7 @@ fn resolve_length_value(length: LengthValue, available_width: u32) -> u32 {
         LengthValue::MinContent => 0,
         LengthValue::MaxContent => available_width,
         LengthValue::FitContent(max_px) => available_width.min(max_px),
+        LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, available_width),
     }
 }
 
@@ -4712,6 +4720,7 @@ fn layout_positioned_element(
         LengthValue::MinContent => 0,
         LengthValue::MaxContent => container_width,
         LengthValue::FitContent(max_px) => container_width.min(*max_px),
+        LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(*percent_hundredths, *px, container_width),
     });
 
     let elem_width = match (specified_width, element.style.left, element.style.right) {
@@ -5353,6 +5362,7 @@ fn layout_flex_container(
                     LengthValue::MinContent => 0,
                     LengthValue::MaxContent => content_width,
                     LengthValue::FitContent(max_px) => content_width.min(*max_px),
+                    LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(*percent_hundredths, *px, content_width),
                 }
             };
 
@@ -5366,10 +5376,10 @@ fn layout_flex_container(
             let base_widths: Vec<u32> = children
                 .iter()
                 .map(|child| {
-                    if let Some(w) = child.style.width.as_ref() {
-                        resolve(w).max(1)
+                    let base = if let Some(w) = child.style.width.as_ref() {
+                        resolve(w)
                     } else if let Some(b) = child.style.flex_basis.as_ref() {
-                        resolve(b).max(1)
+                        resolve(b)
                     } else {
                         flex_item_content_width(
                             child,
@@ -5379,8 +5389,25 @@ fn layout_flex_container(
                             context.background_color,
                         )
                         .min(content_width)
-                        .max(1)
-                    }
+                    };
+                    // `min-width` / `max-width` bound a flex item's base size
+                    // just as they bound any other box. Skipping them let a
+                    // column that asks for `calc(47.47475% - 20px)` but insists
+                    // on `min-width: 450px` collapse to nothing, and the column
+                    // after it was then drawn on top of it.
+                    let min = child
+                        .style
+                        .min_width
+                        .as_ref()
+                        .map(|length| resolve(length))
+                        .unwrap_or(0);
+                    let max = child
+                        .style
+                        .max_width
+                        .as_ref()
+                        .map(|length| resolve(length))
+                        .unwrap_or(u32::MAX);
+                    base.min(max).max(min.min(max)).max(1)
                 })
                 .collect();
 
@@ -5806,6 +5833,57 @@ mod percentage_sizing_tests {
             "<div style=\"width:600px\"><div>ホームページに設定する</div></div>",
         );
         assert!(runs.len() > 1, "first-child should still apply: {runs:?}");
+    }
+
+    /// A percentage inside `calc()` resolves against the containing block, like
+    /// any other percentage. It used to be resolved at parse time against the
+    /// font size, so `calc(47.47475% - 20px)` -- the width of Yahoo! JAPAN's
+    /// centre column -- came out as a single pixel and the column to its right
+    /// was drawn on top of it.
+    #[test]
+    fn calc_percentages_resolve_against_the_containing_block() {
+        let runs = text_runs(
+            ".col{width:calc(50% - 20px)}",
+            "<div style=\"width:600px\"><div class=\"col\">\
+             ホームページに設定する</div></div>",
+        );
+        // 280px fits the 198px string on one line; a font-size-relative
+        // resolution would give single digits and wrap it to one glyph a line.
+        assert_eq!(runs.len(), 1, "expected one line, got {runs:?}");
+    }
+
+    /// The offset really is subtracted -- the percentage is not just passed
+    /// through on its own.
+    #[test]
+    fn a_calc_offset_narrows_the_box() {
+        let runs = text_runs(
+            ".col{width:calc(100% - 480px)}",
+            "<div style=\"width:600px\"><div class=\"col\">\
+             ホームページに設定する</div></div>",
+        );
+        assert!(
+            runs.len() > 1,
+            "120px must wrap the 198px string, got {runs:?}"
+        );
+    }
+
+    /// A flex item is bounded by `min-width` like any other box. Yahoo! JAPAN's
+    /// centre column asks for `calc(47.47475% - 20px)` but insists on
+    /// `min-width: 450px`; without the clamp it collapsed.
+    #[test]
+    fn flex_items_are_bounded_by_min_width() {
+        let runs = text_runs(
+            ".row{display:flex}.narrow{width:10px;min-width:300px}",
+            "<div class=\"row\" style=\"width:600px\">\
+             <div class=\"narrow\">ホームページに設定する</div>\
+             <div>後</div></div>",
+        );
+        let after = runs.iter().find(|run| run.text == "後").expect("second item");
+        assert!(
+            after.x >= 300,
+            "the second item must start past the clamped first one, got x={}",
+            after.x
+        );
     }
 
     /// An absolutely positioned box is placed against its nearest *positioned*

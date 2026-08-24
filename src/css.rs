@@ -389,6 +389,17 @@ pub enum LengthValue {
     MinContent,
     MaxContent,
     FitContent(u32), // argument in pixels
+    /// `calc()` reduced to "a share of the containing block, plus an offset".
+    ///
+    /// The percentage has to survive until layout, when the containing block is
+    /// known; resolving it at parse time against the font size turned the very
+    /// common `calc(100% - 20px)` into a handful of pixels. `percent_hundredths`
+    /// keeps two decimal places, because real stylesheets write column widths
+    /// like `calc(47.47475% - 20px)`.
+    Calc {
+        percent_hundredths: i32,
+        px: i32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -4797,6 +4808,61 @@ fn resolve_calc_operand_f32(token: &str, parent_font_size: u32) -> Option<f32> {
     None
 }
 
+/// Resolve a `calc()` length against the containing block it applies to.
+pub fn resolve_calc(percent_hundredths: i32, px: i32, basis: u32) -> u32 {
+    ((basis as i64 * percent_hundredths as i64) / 10_000 + px as i64).max(0) as u32
+}
+
+/// Reduce a `calc()` body to a percentage plus a pixel offset.
+///
+/// Returns `None` for anything that does not fit that shape -- other units,
+/// multiplication, nesting -- leaving those to the font-size-relative evaluator
+/// that handles the general case.
+fn parse_calc_length_value(expr: &str) -> Option<LengthValue> {
+    if expr.contains('*') || expr.contains('/') || expr.contains('(') {
+        return None;
+    }
+
+    let mut percent_hundredths = 0_i32;
+    let mut px = 0_i32;
+    let mut sign = 1_i32;
+    let mut expect_operator = false;
+
+    for token in expr.split_whitespace() {
+        if expect_operator {
+            sign = match token {
+                "+" => 1,
+                "-" => -1,
+                _ => return None,
+            };
+            expect_operator = false;
+            continue;
+        }
+        if let Some(number) = token.strip_suffix('%') {
+            percent_hundredths += sign * (parse_float(number)? * 100.0).round() as i32;
+        } else if let Some(number) = token.strip_suffix("px") {
+            px += sign * parse_float(number)?.round() as i32;
+        } else if let Some(number) = parse_float(token) {
+            // A bare number is only valid as zero, which costs nothing either way.
+            px += sign * number.round() as i32;
+        } else {
+            return None;
+        }
+        expect_operator = true;
+    }
+
+    if !expect_operator {
+        return None;
+    }
+    if percent_hundredths == 0 {
+        return Some(LengthValue::Pixels(px.max(0) as u32));
+    }
+    Some(LengthValue::Calc {
+        percent_hundredths,
+        px,
+    })
+}
+
 fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue> {
     let value = input.trim().to_ascii_lowercase();
     match value.as_str() {
@@ -4804,6 +4870,11 @@ fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue>
         "max-content" => return Some(LengthValue::MaxContent),
         "auto" => return None,
         _ => {}
+    }
+    if let Some(inner) = value.strip_prefix("calc(").and_then(|s| s.strip_suffix(')'))
+        && let Some(length) = parse_calc_length_value(inner)
+    {
+        return Some(length);
     }
     if let Some(inner) = value.strip_prefix("fit-content(").and_then(|s| s.strip_suffix(')')) {
         if let Some(px) = parse_length(inner, parent_font_size) {
