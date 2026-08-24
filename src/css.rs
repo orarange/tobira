@@ -2027,7 +2027,33 @@ fn compute_style_with_rules(
         style.effective_opacity = 255;
     }
 
+    blockify_out_of_flow(&mut style);
+
     style
+}
+
+/// Taking a box out of flow makes it block-level (CSS Display 3, "blockification").
+///
+/// An absolutely positioned or floated `<span>` is a block box, not an inline
+/// one, and that matters beyond boxing: only the block path clips
+/// `overflow: hidden`. The visually-hidden idiom
+/// `position:absolute; width:1px; height:1px; overflow:hidden` is on almost
+/// every real page to hide text from sight but not from screen readers — left
+/// inline it was never clipped, so the text rendered in a 1px column, one
+/// character per line.
+fn blockify_out_of_flow(style: &mut ComputedStyle) {
+    let out_of_flow = matches!(style.position, Position::Absolute | Position::Fixed)
+        || !matches!(style.float, FloatSide::None);
+    if !out_of_flow {
+        return;
+    }
+    style.display = match style.display {
+        Display::Inline | Display::ListItem => Display::Block,
+        Display::InlineFlex => Display::Flex,
+        Display::InlineGrid => Display::Grid,
+        // `none` stays hidden; everything else is already block-level.
+        other => other,
+    };
 }
 
 #[cfg(test)]

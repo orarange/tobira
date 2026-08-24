@@ -5502,6 +5502,49 @@ mod percentage_sizing_tests {
         assert_eq!(runs.len(), 1);
     }
 
+    /// The visually-hidden idiom is on almost every real page: it hides text
+    /// from sight while leaving it for screen readers. Only block-level boxes
+    /// clip `overflow: hidden`, and `position: absolute` is supposed to make a
+    /// `<span>` block-level. Without that blockification the text was never
+    /// clipped and rendered as a 1px-wide column, one character per line.
+    #[test]
+    fn the_visually_hidden_idiom_is_clipped() {
+        const VH: &str = ".vh{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(1px,1px,1px,1px);border:0}";
+        for tag in ["div", "span", "p"] {
+            let html = format!(
+                "<div style=\"width:600px\"><{tag} class=\"vh\">キーワード入力補助を開く</{tag}></div>"
+            );
+            let runs = text_runs(VH, &html);
+            let shown: usize = runs.iter().map(|r| r.text.chars().count()).sum();
+            assert!(
+                shown <= 2,
+                "<{tag}> should be clipped to about one glyph, showed {shown}: {runs:?}"
+            );
+        }
+    }
+
+    /// Floats blockify too, and an inline box with no out-of-flow positioning
+    /// must stay inline -- clipping does not apply to it.
+    #[test]
+    fn only_out_of_flow_boxes_are_blockified() {
+        let floated = text_runs(
+            ".f{float:left;width:1px;height:1px;overflow:hidden}",
+            "<div style=\"width:600px\"><span class=\"f\">キーワード入力補助を開く</span></div>",
+        );
+        let shown: usize = floated.iter().map(|r| r.text.chars().count()).sum();
+        assert!(shown <= 2, "a floated span should clip, showed {shown}");
+
+        let inline = text_runs(
+            ".i{display:inline;width:1px;height:1px;overflow:hidden}",
+            "<div style=\"width:600px\"><span class=\"i\">キーワード入力補助を開く</span></div>",
+        );
+        assert_eq!(
+            inline.iter().map(|r| r.text.chars().count()).sum::<usize>(),
+            12,
+            "a plain inline box is not clipped"
+        );
+    }
+
     /// A real pseudo-class on the same shape must keep working.
     #[test]
     fn pseudo_classes_still_match_the_host() {
