@@ -4720,10 +4720,18 @@ fn measure_node_preferred_width(
                     });
             }
 
-            // Inline elements place children side-by-side on the same line, so the preferred
-            // width is the SUM of children (e.g. "「link」" = 「+link+」 widths combined).
-            // Block elements place children on separate lines, so we take the MAX.
-            let child_width = if element.style.display == Display::Inline {
+            // Anything that puts all its children on one axis measures as the
+            // sum of them: inline boxes, `inline-block`, and a flex row.
+            let lays_children_out_in_a_row = match element.style.display {
+                Display::Inline | Display::InlineBlock => true,
+                Display::Flex | Display::InlineFlex => matches!(
+                    element.style.flex_direction,
+                    FlexDirection::Row | FlexDirection::RowReverse
+                ),
+                _ => false,
+            };
+
+            let child_width = if lays_children_out_in_a_row {
                 element
                     .children
                     .iter()
@@ -4731,12 +4739,34 @@ fn measure_node_preferred_width(
                     .sum::<u32>()
                     .max(1)
             } else {
-                element
-                    .children
-                    .iter()
-                    .map(|child| measure_node_preferred_width(child, images, fonts))
-                    .max()
-                    .unwrap_or(1)
+                // A block box breaks a line only at a block-level child, so its
+                // max-content width is the widest *line*, not the widest child.
+                // Taking a plain maximum reported the widest word instead: a box
+                // holding `38` and `℃` measured 10px, and shrink-to-fit sizing
+                // then laid its contents out one character to a line.
+                let mut widest = 1_u32;
+                let mut line = 0_u32;
+                for child in &element.children {
+                    if is_hidden(child) {
+                        continue;
+                    }
+                    if matches!(
+                        child,
+                        StyledNode::Element(StyledElement { tag_name, .. }) if tag_name == "br"
+                    ) {
+                        widest = widest.max(line);
+                        line = 0;
+                        continue;
+                    }
+                    let width = measure_node_preferred_width(child, images, fonts);
+                    if is_block_level(child) {
+                        widest = widest.max(line).max(width);
+                        line = 0;
+                    } else {
+                        line = line.saturating_add(width);
+                    }
+                }
+                widest.max(line)
             };
 
             child_width
@@ -6021,6 +6051,26 @@ mod percentage_sizing_tests {
             "<div style=\"width:600px\"><div>ホームページに設定する</div></div>",
         );
         assert!(runs.len() > 1, "first-child should still apply: {runs:?}");
+    }
+
+    /// A block box breaks a line only at a block-level child, so its max-content
+    /// width is that of its widest *line*. Measuring it as the widest single
+    /// child reported the widest word instead: Yahoo! JAPAN's weather panel puts
+    /// `38` and the degree sign in one block, which measured 10px, so
+    /// shrink-to-fit laid the temperatures out one character to a line.
+    #[test]
+    fn max_content_width_measures_whole_lines() {
+        let runs = text_runs(
+            ".card{display:inline-block}",
+            "<div style=\"width:600px\"><span class=\"card\">\
+             <div><span>38</span><span>\u{2103}</span></div></span></div>",
+        );
+        let value = runs.iter().find(|run| run.text.contains("38")).expect("value");
+        let unit = runs
+            .iter()
+            .find(|run| run.text.contains('\u{2103}'))
+            .expect("unit");
+        assert_eq!(value.y, unit.y, "both belong on one line: {runs:?}");
     }
 
     /// `display: inline-block` was collapsed to plain `inline`. An inline
