@@ -146,6 +146,9 @@ enum BuiltinId {
     StringProtoEndsWith,
     StringProtoSlice,
     StringProtoSubstring,
+    StringProtoSubstr,
+    NumberProtoToExponential,
+    ToLocaleStringAlias,
     StringProtoSplit,
     StringProtoReplace,
     StringProtoReplaceAll,
@@ -521,6 +524,9 @@ enum BuiltinId {
     FormDataValues,
     UrlConstructor,
     UrlToString,
+    LocationAssign,
+    LocationReplace,
+    LocationReload,
     UrlToPrimitive,
     UspGet,
     UspGetAll,
@@ -1502,6 +1508,32 @@ const DOM_INTERFACE_NAMES: &[&str] = &[
     "Comment",
     "SVGElement",
     "Window",
+    // Structural interfaces that scripts name for `instanceof` and feature
+    // detection. They are constructor objects with a prototype; host values are
+    // not wired into their chains, so a check answers false rather than
+    // throwing, which is the honest outcome for a shape we do not model.
+    "NodeList",
+    "HTMLCollection",
+    "DOMTokenList",
+    "NamedNodeMap",
+    "Attr",
+    "CSSStyleDeclaration",
+    "CSSRule",
+    "CSSStyleSheet",
+    "StyleSheet",
+    "DOMException",
+    "DOMRect",
+    "DOMRectReadOnly",
+    "Navigator",
+    "History",
+    "Location",
+    "Screen",
+    "Range",
+    "Selection",
+    "ShadowRoot",
+    "XMLDocument",
+    "MediaQueryList",
+    "PerformanceEntry",
     // The per-tag interfaces. Scripts reference these by name for feature
     // detection and for `instanceof` guards, and a missing one is a bare
     // `ReferenceError` that takes the whole bundle down -- Yahoo! JAPAN died on
@@ -3408,11 +3440,37 @@ impl Vm {
             self.allocate_builtin_value(BuiltinId::KeyboardEventConstructor, true, None);
         self.globals
             .insert("KeyboardEvent".to_string(), keyboard_event_ctor);
-        for name in ["MouseEvent", "PointerEvent"] {
+        for name in ["MouseEvent", "PointerEvent", "DragEvent", "WheelEvent"] {
             let ctor = self.allocate_builtin_value(BuiltinId::MouseEventConstructor, true, None);
             self.globals.insert(name.to_string(), ctor);
         }
-        for name in ["UIEvent", "FocusEvent", "InputEvent"] {
+        // The remaining event interfaces carry init members this engine does not
+        // model, so the plain Event shape stands in. What matters is that the
+        // name exists: scripts reference them for `instanceof` and feature
+        // detection, and a missing one is a bare `ReferenceError` that stops the
+        // whole bundle -- Yahoo! JAPAN died on `MessageEvent is not defined`.
+        for name in [
+            "UIEvent",
+            "FocusEvent",
+            "InputEvent",
+            "MessageEvent",
+            "ErrorEvent",
+            "ProgressEvent",
+            "StorageEvent",
+            "PopStateEvent",
+            "HashChangeEvent",
+            "PageTransitionEvent",
+            "CloseEvent",
+            "BeforeUnloadEvent",
+            "SubmitEvent",
+            "AnimationEvent",
+            "TransitionEvent",
+            "CompositionEvent",
+            "ClipboardEvent",
+            "TouchEvent",
+            "SecurityPolicyViolationEvent",
+            "PromiseRejectionEvent",
+        ] {
             let ctor = self.allocate_builtin_value(BuiltinId::EventConstructor, true, None);
             self.globals.insert(name.to_string(), ctor);
         }
@@ -3734,6 +3792,17 @@ impl Vm {
         );
         self.define_builtin_method(string_prototype, "split", BuiltinId::StringProtoSplit);
         self.define_builtin_method(string_prototype, "replace", BuiltinId::StringProtoReplace);
+        self.define_builtin_method(string_prototype, "substr", BuiltinId::StringProtoSubstr);
+        self.define_builtin_method(
+            object_prototype,
+            "toLocaleString",
+            BuiltinId::ToLocaleStringAlias,
+        );
+        self.define_builtin_method(
+            array_prototype,
+            "toLocaleString",
+            BuiltinId::ToLocaleStringAlias,
+        );
         self.define_builtin_method(
             string_prototype,
             "replaceAll",
@@ -3756,6 +3825,10 @@ impl Vm {
             "toLowerCase",
             BuiltinId::StringProtoToLowerCase,
         );
+        // Locale-insensitive aliases: this engine carries no locale data, and
+        // the spec permits falling back to the non-locale behaviour.
+        self.define_method_alias(string_prototype, "toLowerCase", "toLocaleLowerCase");
+        self.define_method_alias(string_prototype, "toUpperCase", "toLocaleUpperCase");
         self.define_builtin_method(string_prototype, "padStart", BuiltinId::StringProtoPadStart);
         self.define_builtin_method(string_prototype, "padEnd", BuiltinId::StringProtoPadEnd);
         self.define_builtin_method(string_prototype, "repeat", BuiltinId::StringProtoRepeat);
@@ -3780,6 +3853,11 @@ impl Vm {
         );
 
         self.define_builtin_method(number_prototype, "toFixed", BuiltinId::NumberProtoToFixed);
+        self.define_builtin_method(
+            number_prototype,
+            "toExponential",
+            BuiltinId::NumberProtoToExponential,
+        );
         self.define_builtin_method(number_prototype, "toString", BuiltinId::NumberProtoToString);
         self.define_builtin_method(
             number_prototype,
@@ -11974,6 +12052,29 @@ impl Vm {
                 );
                 Ok(Value::Object(object))
             }
+            BuiltinId::LocationAssign | BuiltinId::LocationReplace => {
+                let url = args.first().map(|value| self.to_string(value)).unwrap_or_default();
+                let replace = matches!(builtin, BuiltinId::LocationReplace);
+                let _ = self.host.navigate(NavigationAction::Navigate {
+                    window: WindowId(0),
+                    url,
+                    replace,
+                });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::LocationReload => {
+                let url = self
+                    .host
+                    .location(WindowId(0))
+                    .map(|location| location.href)
+                    .unwrap_or_default();
+                let _ = self.host.navigate(NavigationAction::Navigate {
+                    window: WindowId(0),
+                    url,
+                    replace: true,
+                });
+                Ok(Value::Undefined)
+            }
             BuiltinId::UrlToString => {
                 let href = self
                     .get_property_value(&this_value, &PropertyKey::from("href"))
@@ -12353,6 +12454,59 @@ impl Vm {
                     self.normalize_slice_bounds(chars.len(), args.first(), args.get(1));
                 let slice = chars[start..end].iter().collect::<String>();
                 Ok(self.make_string_value(&slice))
+            }
+            // Legacy but still everywhere in shipped bundles. Unlike `substring`
+            // it takes a length, and a negative start counts back from the end.
+            BuiltinId::StringProtoSubstr => {
+                let text = self.builtin_string_this(&this_value)?;
+                let chars = text.chars().collect::<Vec<_>>();
+                let length = chars.len() as f64;
+                let raw_start = args.first().map(|value| self.to_number(value)).unwrap_or(0.0);
+                let start = if raw_start.is_nan() {
+                    0.0
+                } else if raw_start < 0.0 {
+                    (length + raw_start).max(0.0)
+                } else {
+                    raw_start.min(length)
+                } as usize;
+                let count = match args.get(1) {
+                    None | Some(Value::Undefined) => chars.len() - start,
+                    Some(value) => {
+                        let n = self.to_number(value);
+                        if n.is_nan() || n <= 0.0 {
+                            0
+                        } else {
+                            (n as usize).min(chars.len() - start)
+                        }
+                    }
+                };
+                let slice: String = chars[start..start + count].iter().collect();
+                Ok(self.make_string_value(&slice))
+            }
+            BuiltinId::NumberProtoToExponential => {
+                let number = self.to_number(&this_value);
+                let digits = match args.first() {
+                    None | Some(Value::Undefined) => None,
+                    Some(value) => Some((self.to_number(value).max(0.0) as usize).min(100)),
+                };
+                let formatted = match digits {
+                    Some(d) => format!("{number:.d$e}"),
+                    None => format!("{number:e}"),
+                };
+                // Rust writes `1.5e2`; JavaScript wants `1.5e+2`.
+                let formatted = match formatted.split_once('e') {
+                    Some((mantissa, exponent)) if !exponent.starts_with('-') => {
+                        format!("{mantissa}e+{exponent}")
+                    }
+                    _ => formatted,
+                };
+                Ok(self.make_string_value(&formatted))
+            }
+            // `toLocaleString` with no locale support behaves as `toString`,
+            // which is what the spec allows and what callers actually rely on.
+            BuiltinId::ToLocaleStringAlias => {
+                let text = self.to_string_coerced(&this_value)?;
+                Ok(self.make_string_value(&text))
             }
             BuiltinId::StringProtoSubstring => {
                 let text = self.builtin_string_this(&this_value)?;
@@ -16025,6 +16179,18 @@ impl Vm {
             "pathname" => Some(l.pathname.clone()),
             "search" => Some(l.search.clone()),
             "hash" => Some(l.hash.clone()),
+            // `String(location)` and `location.toString()` both have to yield
+            // the href. `UrlToString` reads `this.href`, which Location has.
+            "toString" | "toJSON" => {
+                return Ok(self.allocate_builtin_method(BuiltinId::UrlToString));
+            }
+            "assign" => return Ok(self.allocate_builtin_method(BuiltinId::LocationAssign)),
+            "replace" => return Ok(self.allocate_builtin_method(BuiltinId::LocationReplace)),
+            "reload" => return Ok(self.allocate_builtin_method(BuiltinId::LocationReload)),
+            "ancestorOrigins" => {
+                // Always empty: this engine has no nested browsing contexts.
+                return self.make_array_from_values(Vec::new());
+            }
             _ => None,
         };
         Ok(value

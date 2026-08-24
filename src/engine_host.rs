@@ -3317,6 +3317,34 @@ mod tests {
         assert!(result.error.is_none(), "script error: {:?}", result.error);
     }
 
+    /// `location` has to stringify to its href and expose the navigation
+    /// methods; scripts routinely do `String(location)` and `location.reload()`.
+    #[test]
+    fn location_stringifies_and_exposes_its_methods() {
+        let (mut session, initial) =
+            EngineSession::start("<html><body></body></html>", "https://host.test/page/?q=1#f");
+        assert!(initial.error.is_none(), "initial: {:?}", initial.error);
+        let result = session.eval_for_test(
+            r#"
+            assert(typeof location.toString === 'function');
+            assert(location.toString() === location.href);
+            assert(String(location) === location.href);
+            assert(`${location}` === location.href);
+
+            assert(typeof location.assign === 'function');
+            assert(typeof location.replace === 'function');
+            assert(typeof location.reload === 'function');
+
+            // The URL parts still read correctly alongside the new members.
+            assert(location.pathname === '/page/');
+            assert(location.search === '?q=1');
+            assert(location.hash === '#f');
+            assert(location.host === 'host.test');
+        "#,
+        );
+        assert!(result.error.is_none(), "script error: {:?}", result.error);
+    }
+
     fn run_structural_changes(html: &str, script: &str) -> Vec<DomStructuralChange> {
         let (mut session, initial) = EngineSession::start(html, "http://localhost/");
         assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
