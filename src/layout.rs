@@ -1002,11 +1002,18 @@ fn layout_node(
                 return;
             }
 
+            // An absolutely positioned box is placed relative to the padding
+            // box of its nearest *positioned* ancestor, so every box that is
+            // not `position: static` becomes the containing block for the
+            // subtree beneath it. Nothing ever set this, leaving it at the page
+            // origin: every `position: absolute` element on every page was laid
+            // out against (0, 0). On Yahoo! JAPAN that dropped the ranking
+            // badges of its trending-keyword list onto the masthead.
             match element.style.display {
                 Display::None => {}
                 Display::Inline => {
                     let fragments =
-                        flatten_inline_fragments(node, context, current_form.clone(), images, width);
+                        flatten_inline_fragments(node, context, current_form.clone(), images, fonts, width);
                     layout_inline_fragments(
                         &fragments,
                         &element.style,
@@ -1443,6 +1450,18 @@ fn layout_block_element(
         0
     };
 
+    // An absolutely positioned box is placed against the padding box of its
+    // nearest *positioned* ancestor, so any box that is not `position: static`
+    // becomes the containing block for the subtree under it. Nothing ever set
+    // this, leaving it at the page origin: every `position: absolute` element
+    // on every page was laid out against (0, 0). Yahoo! JAPAN's trending list
+    // wraps each rank badge in a `position: relative` inline span, so all five
+    // badges piled up on the masthead instead of sitting beside their entries.
+    let saved_origin = context.containing_block_origin;
+    if element.style.position != Position::Static {
+        context.containing_block_origin = (outer_x, background_top);
+    }
+
     let content_x = outer_x
         .saturating_add(border_left)
         .saturating_add(element.style.padding.left)
@@ -1491,6 +1510,7 @@ fn layout_block_element(
             current_form,
         );
     }
+    context.containing_block_origin = saved_origin;
     context.container_height = saved_container_height;
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
@@ -1971,6 +1991,18 @@ fn layout_block_element_as_layer(
         0
     };
 
+    // An absolutely positioned box is placed against the padding box of its
+    // nearest *positioned* ancestor, so any box that is not `position: static`
+    // becomes the containing block for the subtree under it. Nothing ever set
+    // this, leaving it at the page origin: every `position: absolute` element
+    // on every page was laid out against (0, 0). Yahoo! JAPAN's trending list
+    // wraps each rank badge in a `position: relative` inline span, so all five
+    // badges piled up on the masthead instead of sitting beside their entries.
+    let saved_origin = context.containing_block_origin;
+    if element.style.position != Position::Static {
+        context.containing_block_origin = (outer_x, background_top);
+    }
+
     let content_x = outer_x
         .saturating_add(border_left)
         .saturating_add(element.style.padding.left)
@@ -2014,6 +2046,7 @@ fn layout_block_element_as_layer(
             current_form,
         );
     }
+    context.containing_block_origin = saved_origin;
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     let content_height = cursor_y.saturating_sub(background_top).max(1);
@@ -3310,6 +3343,7 @@ fn layout_mixed_children(
                 current_form.clone(),
                 context,
                 images,
+                fonts,
                 width,
             );
         }
@@ -3329,6 +3363,7 @@ fn layout_mixed_children(
     *cursor_y = (*cursor_y).max(max_float_bottom(&active_floats));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_inline_fragments(
     node: &StyledNode,
     output: &mut Vec<InlineFragment>,
@@ -3337,6 +3372,7 @@ fn collect_inline_fragments(
     current_form: Option<FormContext>,
     context: &mut LayoutContext,
     images: &ImageStore,
+    fonts: &mut FontContext,
     available_width: u32,
 ) {
     match node {
@@ -3364,6 +3400,30 @@ fn collect_inline_fragments(
             } else {
                 link_node_id
             };
+
+            // An out-of-flow box takes no part in the inline flow, but it does
+            // have to be laid out. The arms below drop every block-level box
+            // inside an inline formatting context, and blockification makes
+            // every absolutely positioned box block-level -- so a positioned
+            // element nested in an inline one vanished from the page entirely.
+            // (An *in-flow* block inside an inline box is still skipped;
+            // splitting the inline around it is a separate feature.)
+            if matches!(element.style.position, Position::Absolute | Position::Fixed)
+                && element.style.display != Display::None
+            {
+                let mut cursor_y = 0;
+                layout_positioned_element(
+                    element,
+                    0,
+                    available_width,
+                    &mut cursor_y,
+                    context,
+                    images,
+                    fonts,
+                    current_form.clone(),
+                );
+                return;
+            }
 
             match element.style.display {
                 Display::None => {}
@@ -3421,6 +3481,7 @@ fn collect_inline_fragments(
                             current_form.clone(),
                             context,
                             images,
+                            fonts,
                             available_width,
                         );
                     }
@@ -3441,6 +3502,7 @@ fn flatten_inline_fragments(
     context: &mut LayoutContext,
     current_form: Option<FormContext>,
     images: &ImageStore,
+    fonts: &mut FontContext,
     available_width: u32,
 ) -> Vec<InlineFragment> {
     let mut fragments = Vec::new();
@@ -3452,6 +3514,7 @@ fn flatten_inline_fragments(
         current_form,
         context,
         images,
+        fonts,
         available_width,
     );
     fragments
@@ -4636,24 +4699,80 @@ fn layout_positioned_element(
         context.containing_block_origin
     };
 
-    let elem_width = element.style.width
-        .as_ref()
-        .and_then(|lv| match lv {
-            LengthValue::Pixels(px) => Some(*px),
-            LengthValue::Percent(p) => Some((container_width as f32 * (*p as f32) / 100.0) as u32),
-            LengthValue::MinContent => Some(0),
-            LengthValue::MaxContent => Some(container_width),
-            LengthValue::FitContent(max_px) => Some(container_width.min(*max_px)),
-        })
-        .unwrap_or(container_width);
+    let border_x = if element.style.border_style_none {
+        0
+    } else {
+        element.style.border.left + element.style.border.right
+    };
+    let surround = element.style.padding.left + element.style.padding.right + border_x;
 
-    let x = (base_x as i64 + element.style.left.unwrap_or(0) as i64).max(0) as u32;
+    let specified_width = element.style.width.as_ref().map(|lv| match lv {
+        LengthValue::Pixels(px) => *px,
+        LengthValue::Percent(p) => (container_width as f32 * (*p as f32) / 100.0) as u32,
+        LengthValue::MinContent => 0,
+        LengthValue::MaxContent => container_width,
+        LengthValue::FitContent(max_px) => container_width.min(*max_px),
+    });
+
+    let elem_width = match (specified_width, element.style.left, element.style.right) {
+        (Some(width), _, _) => width,
+        // Both edges pinned: the offsets themselves determine the width.
+        (None, Some(left), Some(right)) => container_width
+            .saturating_sub(left.max(0) as u32)
+            .saturating_sub(right.max(0) as u32),
+        // CSS 2.1 10.3.7: with `width: auto` an absolutely positioned box
+        // shrinks to fit its content -- it does not fill its containing block.
+        // Filling it made `text-align: center` inside such a box centre against
+        // the whole page. Yahoo! JAPAN's trending-list rank badges are
+        // `position:absolute; min-width:16px; text-align:center`, so their
+        // digits were flung a hundred pixels from the number they label.
+        (None, _, _) => measure_cell_preferred_width(element, 0, images, fonts)
+            .saturating_add(surround)
+            .min(container_width),
+    };
+    let min_width = element
+        .style
+        .min_width
+        .map(|length| resolve_length_value(length, container_width))
+        .unwrap_or(0);
+    let max_width = element
+        .style
+        .max_width
+        .map(|length| resolve_length_value(length, container_width))
+        .unwrap_or(u32::MAX);
+    let elem_width = elem_width.min(max_width).max(min_width.min(max_width)).max(1);
+
+    let x = match (element.style.left, element.style.right) {
+        (Some(left), _) => (base_x as i64 + left as i64).max(0) as u32,
+        // Only `right` is given, so it is the box's *right* edge that is placed,
+        // that far in from the containing block's right edge. Ignoring `right`
+        // pinned every such box to the left edge instead.
+        (None, Some(right)) => (base_x as i64 + container_width as i64
+            - right as i64
+            - elem_width as i64)
+            .max(0) as u32,
+        (None, None) => base_x,
+    };
     let mut cursor_y = (base_y as i64 + element.style.top.unwrap_or(0) as i64).max(0) as u32;
+    if std::env::var_os("TOBIRA_DEBUG_POS").is_some() {
+        eprintln!(
+            "abspos <{}> class={:?} base=({base_x},{base_y}) left={:?} top={:?} -> {x},{cursor_y}",
+            element.tag_name,
+            element.attributes.get("class").map(|c| c.chars().take(30).collect::<String>()),
+            element.style.left,
+            element.style.top,
+        );
+    }
 
     let mut sub_context = LayoutContext {
         background_color: context.background_color,
         next_control_id: context.next_control_id,
         next_form_id: context.next_form_id,
+        // A positioned box is itself the containing block for anything
+        // positioned inside it, and its subtree is laid out in absolute page
+        // coordinates -- so hand the descendants this box's own origin rather
+        // than the default (0, 0).
+        containing_block_origin: (x, cursor_y),
         ..LayoutContext::default()
     };
     // Use sub_context for form allocation so next_form_id counter stays consistent
@@ -5687,6 +5806,84 @@ mod percentage_sizing_tests {
             "<div style=\"width:600px\"><div>ホームページに設定する</div></div>",
         );
         assert!(runs.len() > 1, "first-child should still apply: {runs:?}");
+    }
+
+    /// An absolutely positioned box is placed against its nearest *positioned*
+    /// ancestor. Nothing established that containing block, so every such box
+    /// on every page was laid out from the page origin: Yahoo! JAPAN's
+    /// trending-list rank badges all landed on the masthead at y = 0.
+    #[test]
+    fn absolute_boxes_are_placed_against_their_positioned_ancestor() {
+        let runs = text_runs(
+            ".host{position:relative}.pin{position:absolute;top:0;left:0}",
+            "<div style=\"height:50px\">spacer</div>\
+             <div class=\"host\"><span class=\"pin\">badge</span></div>",
+        );
+        let badge = runs.iter().find(|run| run.text == "badge").expect("badge");
+        assert!(
+            badge.y >= 50,
+            "the badge belongs below the spacer, not at the page origin: {badge:?}"
+        );
+    }
+
+    /// An out-of-flow box nested inside an inline box used to disappear: every
+    /// block-level box in an inline formatting context is dropped, and
+    /// blockification makes absolutely positioned boxes block-level, so the two
+    /// rules combined to delete the content outright.
+    ///
+    /// Where such a box *lands* is a separate matter. An inline box has no
+    /// position until line breaking has run, and out-of-flow boxes are laid out
+    /// during fragment collection, before that -- so an inline
+    /// `position: relative` ancestor does not yet act as the containing block,
+    /// and the box falls back to the nearest block-level positioned one.
+    #[test]
+    fn an_out_of_flow_box_inside_an_inline_box_is_not_dropped() {
+        let runs = text_runs(
+            ".host{position:relative}.pin{position:absolute;top:0}",
+            "<div style=\"height:40px\">spacer</div>\
+             <span class=\"host\"><span class=\"pin\">badge</span></span>",
+        );
+        assert!(
+            runs.iter().any(|run| run.text == "badge"),
+            "the positioned box must still be drawn: {runs:?}"
+        );
+    }
+
+    /// CSS 2.1 10.3.7: with `width: auto` an absolutely positioned box shrinks
+    /// to fit. Filling the containing block instead made `text-align: center`
+    /// centre the content against the whole page.
+    #[test]
+    fn an_auto_width_absolute_box_shrinks_to_fit() {
+        let runs = text_runs(
+            ".host{position:relative}\
+             .pin{position:absolute;top:0;left:0;min-width:16px;text-align:center}",
+            "<div style=\"width:600px\" class=\"host\"><span class=\"pin\">1</span></div>",
+        );
+        let digit = runs.iter().find(|run| run.text == "1").expect("digit");
+        assert!(
+            digit.x < 16,
+            "a shrink-to-fit box is 16px wide, so its centred digit stays near \
+             its left edge, got x={}",
+            digit.x
+        );
+    }
+
+    /// `right` places the box's right edge. It was ignored outright, which
+    /// pinned every right-anchored box to the left edge instead.
+    #[test]
+    fn the_right_offset_places_the_right_edge() {
+        let runs = text_runs(
+            ".host{position:relative}.pin{position:absolute;top:0;right:0}",
+            "<div style=\"width:600px\" class=\"host\"><span class=\"pin\">edge</span></div>",
+        );
+        let pinned = runs.iter().find(|run| run.text == "edge").expect("edge");
+        assert!(
+            pinned.x + pinned.width >= 560,
+            "expected the box against the right edge of a 600px block, got \
+             x={} width={}",
+            pinned.x,
+            pinned.width
+        );
     }
 
     /// `rem` is relative to the root element's computed font size, not to a

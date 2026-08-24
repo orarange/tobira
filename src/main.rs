@@ -129,7 +129,7 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                 if matches!(e.style.display, Display::None) {
                     stats.1 += 1;
                 }
-                if depth <= 4 {
+                if depth <= dump_depth() {
                     let cls: String = e
                         .attributes
                         .get("class")
@@ -141,11 +141,12 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                         .map(|c| c.chars().take(70).collect())
                         .unwrap_or_default();
                     println!(
-                        "{}<{} class=\"{}\" display={:?} opacity={} style=\"{}\">{}",
+                        "{}<{} class=\"{}\" display={:?} position={:?} opacity={} style=\"{}\">{}",
                         "  ".repeat(depth),
                         e.tag_name,
                         cls,
                         e.style.display,
+                        e.style.position,
                         e.style.opacity,
                         inline,
                         if matches!(e.style.display, Display::None) { "  [none]" } else if e.style.opacity == 0 { "  [OPACITY:0]" } else { "" },
@@ -156,6 +157,13 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                 }
             }
         }
+    }
+
+    fn dump_depth() -> usize {
+        std::env::var("TOBIRA_DUMP_DEPTH")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(4)
     }
 
     let mut stats = (0usize, 0usize, 0usize, 0usize);
