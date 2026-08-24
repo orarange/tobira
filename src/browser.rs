@@ -527,6 +527,7 @@ fn rebuild_page_from_html_incremental(
 
 fn incremental_restyle_enabled() -> bool {
     #[cfg(test)]
+#[cfg(test)]
     if INCREMENTAL_RESTYLE_OVERRIDE_SET.load(std::sync::atomic::Ordering::Relaxed) {
         return INCREMENTAL_RESTYLE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
     }
@@ -747,6 +748,16 @@ fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<
 
     let mut frames = collect_frame_specs(document);
     if frames.is_empty() {
+        return Ok(None);
+    }
+
+    // Replacing the page with its frames' contents is only right for a document
+    // that is *only* a frame holder — the old `<frameset>` shape, or a shell
+    // whose body is otherwise empty. Modern pages embed iframes for ads,
+    // players and analytics while carrying the real content themselves, and
+    // swapping them out threw that content away: Yahoo! JAPAN went from 1380
+    // elements to 13, replaced by an ad frame.
+    if document_has_meaningful_body(document) {
         return Ok(None);
     }
 
@@ -3355,6 +3366,39 @@ fn collect_raw_text_into(node: &Node, output: &mut String) {
         }
     }
 }
+
+#[cfg(test)]
+mod frame_expansion_tests {
+    use super::{expand_frames, parse_document};
+    use crate::url::Url;
+
+    /// Frame expansion replaces the page with its frames' contents, which is
+    /// right only for the old `<frameset>` shape where the outer document is
+    /// nothing but a frame holder. It used to fire for any document containing
+    /// an `<iframe src>`, so a modern page carrying an ad or player frame had
+    /// its whole body thrown away -- Yahoo! JAPAN rendered 13 elements instead
+    /// of 1380, replaced by an ad frame.
+    #[test]
+    fn a_page_with_its_own_content_is_left_alone() {
+        let html = concat!(
+            "<html><head><title>Real page</title></head><body>",
+            "<h1>Headline</h1><p>Body copy that must survive.</p>",
+            "<iframe src=\"https://ads.example/frame.html\"></iframe>",
+            "<p>More copy.</p></body></html>",
+        );
+        let document = parse_document(html);
+        let base = Url::parse("https://example.com/").unwrap();
+
+        // `None` means "keep the document as parsed". Reaching the replacement
+        // path would also try to fetch the frame, which this must not do.
+        let expanded = expand_frames(&document, &base, 1).expect("expansion should not error");
+        assert!(
+            expanded.is_none(),
+            "a page with real content must not be replaced by its iframe"
+        );
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
