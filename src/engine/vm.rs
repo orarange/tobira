@@ -1158,6 +1158,21 @@ fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<UrlComponents> {
         return None;
     }
 
+    // A network-path reference (RFC 3986 4.2): `//host/path` keeps the base's
+    // scheme but replaces the authority. Without this it fell through to the
+    // relative branch and became a *path* on the base's host, so a
+    // protocol-relative `src` pointed at the wrong server entirely.
+    if let Some(authority_and_path) = input.strip_prefix("//")
+        && !authority_and_path.is_empty()
+        && !authority_and_path.starts_with('/')
+    {
+        let scheme = base
+            .and_then(|base| parse_whatwg_url(base, None))
+            .map(|components| components.protocol.trim_end_matches(':').to_string())
+            .unwrap_or_else(|| "https".to_string());
+        return parse_whatwg_url(&format!("{scheme}://{authority_and_path}"), None);
+    }
+
     let is_absolute = input
         .find(':')
         .map(|pos| {
@@ -1552,6 +1567,32 @@ const DOM_INTERFACE_NAMES: &[&str] = &[
     "HTMLUListElement",
     "HTMLVideoElement",
 ];
+
+/// Whether `attribute` on `tag` is a URL-valued IDL attribute, which reflects
+/// the resolved absolute URL rather than the raw markup.
+fn url_reflecting_attribute(tag: &str, attribute: &str) -> bool {
+    match attribute {
+        "src" => matches!(
+            tag,
+            "SCRIPT"
+                | "IMG"
+                | "IFRAME"
+                | "AUDIO"
+                | "VIDEO"
+                | "SOURCE"
+                | "TRACK"
+                | "EMBED"
+                | "INPUT"
+                | "FRAME"
+        ),
+        "href" => matches!(tag, "A" | "AREA" | "LINK" | "BASE"),
+        "action" => tag == "FORM",
+        "formAction" => matches!(tag, "BUTTON" | "INPUT"),
+        "poster" => tag == "VIDEO",
+        "cite" => matches!(tag, "BLOCKQUOTE" | "Q" | "DEL" | "INS"),
+        _ => false,
+    }
+}
 
 /// The interface a tag name corresponds to. Used both for `node.constructor`
 /// and for `instanceof`, so the two cannot disagree.
@@ -11093,7 +11134,15 @@ impl Vm {
             BuiltinId::StringConstructor => {
                 let text = match args.first() {
                     None => String::new(),
-                    Some(value) => self.to_string(value),
+                    // `String(sym)` describes the symbol instead of throwing,
+                    // unlike ordinary ToString.
+                    Some(value @ Value::Symbol(_)) => self.to_string(value),
+                    // Full ToString: an object's own `toString` / `valueOf` /
+                    // `Symbol.toPrimitive` has to run. Template literals and `+`
+                    // already did this; `String(x)` used the non-coercing helper
+                    // and answered "[object Object]" for everything, so even
+                    // `String([1, 2])` was wrong.
+                    Some(value) => self.to_string_coerced(&value.clone())?,
                 };
                 Ok(self.make_string_value(&text))
             }
@@ -16167,6 +16216,40 @@ impl Vm {
             "nodeName" | "tagName" => {
                 let tag = self.get_node_name(node_id);
                 Ok(self.make_string_value(&tag))
+            }
+            // URL-valued IDL attributes reflect the *resolved* URL, not the raw
+            // attribute: `script.src` and `a.href` are absolute even when the
+            // markup wrote a relative or protocol-relative one. These read as
+            // `undefined` before, so `new URL(script.src)` threw `Invalid URL`
+            // and any script inspecting its own tag died there.
+            "src" | "href" | "action" | "poster" | "cite" | "formAction"
+                if url_reflecting_attribute(&self.get_node_name(node_id).to_ascii_uppercase(), &name) =>
+            {
+                let attribute = match name.as_str() {
+                    "formAction" => "formaction",
+                    other => other,
+                };
+                let raw = match self.host.read_dom(DomRead::Attribute {
+                    node: node_id,
+                    name: attribute.to_string(),
+                }) {
+                    Ok(DomReadResult::String(value)) => value,
+                    _ => String::new(),
+                };
+                // An absent or empty attribute reflects as the empty string,
+                // matching what a browser reports.
+                if raw.is_empty() {
+                    return Ok(self.make_string_value(""));
+                }
+                let base = self
+                    .host
+                    .location(WindowId(0))
+                    .map(|location| location.href)
+                    .unwrap_or_default();
+                let resolved = parse_whatwg_url(&raw, Some(base.as_str()))
+                    .map(|components| components.href)
+                    .unwrap_or(raw);
+                Ok(self.make_string_value(&resolved))
             }
             "constructor" => {
                 // Return the node's DOM interface constructor so libraries can read

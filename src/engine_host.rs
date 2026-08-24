@@ -3272,6 +3272,51 @@ mod tests {
         assert!(result.error.is_none(), "script error: {:?}", result.error);
     }
 
+    /// URL-valued IDL attributes reflect the *resolved* URL, not the raw
+    /// markup. These read as `undefined` before, so a script inspecting its own
+    /// tag with `new URL(script.src)` died on `Invalid URL`.
+    #[test]
+    fn url_attributes_reflect_absolute_urls() {
+        let (mut session, initial) =
+            EngineSession::start("<html><body></body></html>", "https://host.test/page/");
+        assert!(initial.error.is_none(), "initial: {:?}", initial.error);
+        let result = session.eval_for_test(
+            r#"
+            const mk = (tag, attr, value) => {
+                const el = document.createElement(tag);
+                el.setAttribute(attr, value);
+                document.body.appendChild(el);
+                return el;
+            };
+
+            // Already absolute: reflected unchanged.
+            assert(mk('script', 'src', 'https://cdn.test/x.js?tk=1').src === 'https://cdn.test/x.js?tk=1');
+
+            // Root-relative and protocol-relative resolve against the document.
+            assert(mk('script', 'src', '/rel.js').src === 'https://host.test/rel.js');
+            assert(mk('script', 'src', '//other.test/y.js').src === 'https://other.test/y.js',
+                   'a protocol-relative src must change host, not become a path');
+
+            // The same reflection on the other URL attributes.
+            assert(mk('img', 'src', '/pic.png').src === 'https://host.test/pic.png');
+            assert(mk('a', 'href', '/deep/p?q=1').href === 'https://host.test/deep/p?q=1');
+            assert(mk('link', 'href', '/style.css').href === 'https://host.test/style.css');
+            assert(mk('form', 'action', '/submit').action === 'https://host.test/submit');
+
+            // An absent attribute reflects as the empty string, not undefined.
+            assert(document.createElement('script').src === '');
+
+            // The raw attribute is still readable through getAttribute.
+            const el = mk('script', 'src', '/rel.js');
+            assert(el.getAttribute('src') === '/rel.js');
+
+            // Which is the whole point: this used to throw.
+            assert(new URL(el.src).pathname === '/rel.js');
+        "#,
+        );
+        assert!(result.error.is_none(), "script error: {:?}", result.error);
+    }
+
     fn run_structural_changes(html: &str, script: &str) -> Vec<DomStructuralChange> {
         let (mut session, initial) = EngineSession::start(html, "http://localhost/");
         assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
