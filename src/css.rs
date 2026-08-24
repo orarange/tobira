@@ -1,7 +1,8 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 
 use crate::html::{Element, Node};
 
@@ -1234,6 +1235,63 @@ pub(crate) fn interned_style_count() -> usize {
     STYLE_INTERNER.with(|cell| cell.borrow().len())
 }
 
+/// Font size a document starts from, and the basis for `rem` until the root
+/// element says otherwise.
+pub const INITIAL_FONT_SIZE: u32 = 16;
+
+thread_local! {
+    /// Computed `font-size` of the root element -- what `rem` is relative to.
+    static ROOT_FONT_SIZE: Cell<u32> = const { Cell::new(INITIAL_FONT_SIZE) };
+}
+
+fn root_font_size() -> u32 {
+    ROOT_FONT_SIZE.with(|size| size.get())
+}
+
+/// Work out what `rem` means for this document, before anything is styled.
+///
+/// `rem` is relative to the *root element's* computed font size, not to a
+/// constant. `html { font-size: 62.5% }` -- chosen so that `1.4rem` reads as
+/// "14px" -- is one of the most widespread idioms in production CSS, and
+/// resolving `rem` against a hardcoded 16px inflates every length on such a
+/// page by 1.6x. On Yahoo! JAPAN that turned 12px navigation labels into 19px
+/// ones, which is why the words in its tab bar were drawn on top of each other.
+fn establish_root_font_size(
+    document: &Node,
+    stylesheet: &Stylesheet,
+    viewport_width: u32,
+    interactive: &InteractiveState,
+) {
+    ROOT_FONT_SIZE.with(|size| size.set(INITIAL_FONT_SIZE));
+    let Some(root) = root_element(document) else {
+        return;
+    };
+    // The root's own font size cannot itself depend on `rem` -- there is no
+    // outer root -- so computing it against the initial 16px is well-defined.
+    let style = compute_style(
+        root,
+        stylesheet,
+        &stylesheet.rule_index,
+        None,
+        &[],
+        0,
+        1,
+        &[],
+        viewport_width,
+        interactive,
+    );
+    ROOT_FONT_SIZE.with(|size| size.set(style.font_size_px));
+}
+
+/// The `<html>` element, however deeply the parser nested it.
+fn root_element(node: &Node) -> Option<&Element> {
+    match node {
+        Node::Element(element) if element.tag_name == "html" => Some(element),
+        Node::Element(element) => element.children.iter().find_map(root_element),
+        Node::Text(_) => None,
+    }
+}
+
 pub fn build_styled_tree(
     document: &Node,
     stylesheet: &Stylesheet,
@@ -1241,6 +1299,7 @@ pub fn build_styled_tree(
     interactive: &InteractiveState,
 ) -> StyledNode {
     prune_style_interner();
+    establish_root_font_size(document, stylesheet, viewport_width, interactive);
     let ancestors = Vec::new();
     let rule_index = &stylesheet.rule_index;
     build_node(
@@ -1274,6 +1333,7 @@ pub(crate) fn build_styled_tree_incremental(
     if dirty_roots.contains(&new_node_order[0]) {
         return None;
     }
+    establish_root_font_size(document, stylesheet, viewport_width, interactive);
 
     let mut old_map = HashMap::new();
     let mut old_iter = old_node_order.iter();
@@ -3052,8 +3112,51 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 _ => {}
             }
         }
-        _ => {}
+        other => record_unsupported_property(other),
     }
+}
+
+/// Tally of declarations that reached `apply_declaration` and fell through it.
+///
+/// Guessing which CSS the engine is missing does not scale: a real page's
+/// stylesheet carries thousands of declarations, and only the ones that both
+/// appear often *and* change layout are worth implementing. `TOBIRA_DEBUG_CSS=1`
+/// makes the engine report exactly what it dropped, ranked by how often, so the
+/// worklist comes from measurement rather than a hunch.
+static UNSUPPORTED_PROPERTIES: Mutex<Option<BTreeMap<String, u32>>> = Mutex::new(None);
+
+fn css_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("TOBIRA_DEBUG_CSS").is_some())
+}
+
+fn record_unsupported_property(property: &str) {
+    if !css_debug_enabled() || property.is_empty() {
+        return;
+    }
+    let Ok(mut guard) = UNSUPPORTED_PROPERTIES.lock() else {
+        return;
+    };
+    *guard
+        .get_or_insert_with(BTreeMap::new)
+        .entry(property.to_string())
+        .or_insert(0) += 1;
+}
+
+/// Unsupported declarations seen so far, most frequent first.
+pub fn unsupported_property_report() -> Vec<(String, u32)> {
+    let Ok(guard) = UNSUPPORTED_PROPERTIES.lock() else {
+        return Vec::new();
+    };
+    let Some(counts) = guard.as_ref() else {
+        return Vec::new();
+    };
+    let mut ranked: Vec<(String, u32)> = counts
+        .iter()
+        .map(|(name, count)| (name.clone(), *count))
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4542,7 +4645,8 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
 
     // rem must be checked before em
     if let Some(number) = value.strip_suffix("rem") {
-        return parse_float(number).map(|p| (p * 16.0).round() as u32);
+        let root = root_font_size() as f32;
+        return parse_float(number).map(|p| (p * root).round() as u32);
     }
 
     if let Some(number) = value.strip_suffix("em") {

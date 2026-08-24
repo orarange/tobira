@@ -5589,6 +5589,46 @@ mod percentage_sizing_tests {
         assert!(runs.len() > 1, "first-child should still apply: {runs:?}");
     }
 
+    /// `rem` is relative to the root element's computed font size, not to a
+    /// constant. `html { font-size: 62.5% }` -- so that `1.4rem` reads as
+    /// "14px" -- is one of the most widespread idioms in production CSS, and a
+    /// hardcoded 16px basis inflated every length on such a page by 1.6x. On
+    /// Yahoo! JAPAN it turned 12px tab labels into 19px ones that overlapped.
+    #[test]
+    fn rem_resolves_against_the_root_font_size() {
+        let runs = text_runs(
+            "html { font-size: 62.5%; } p { font-size: 1.2rem; }",
+            "<html><body><p>hello</p></body></html>",
+        );
+        assert_eq!(runs[0].font_size_px, 12);
+    }
+
+    /// A page that leaves the root alone still gets the initial 16px basis.
+    #[test]
+    fn rem_falls_back_to_the_initial_font_size() {
+        let runs = text_runs(
+            "p { font-size: 1.5rem; }",
+            "<html><body><p>hello</p></body></html>",
+        );
+        assert_eq!(runs[0].font_size_px, 24);
+    }
+
+    /// The basis must not leak from one document into the next: these run on
+    /// the same thread, and the root font size lives in thread-local state.
+    #[test]
+    fn the_rem_basis_does_not_leak_between_documents() {
+        let shrunk = text_runs(
+            "html { font-size: 50%; } p { font-size: 2rem; }",
+            "<html><body><p>hello</p></body></html>",
+        );
+        assert_eq!(shrunk[0].font_size_px, 16);
+        let plain = text_runs(
+            "p { font-size: 2rem; }",
+            "<html><body><p>hello</p></body></html>",
+        );
+        assert_eq!(plain[0].font_size_px, 32, "the previous root leaked");
+    }
+
     /// `list-style: none` is how every navigation menu on the web keeps `<ul>`
     /// markup for structure while dropping the bullets on screen. The computed
     /// `list-style-type` was parsed but never read by layout, so each item got a

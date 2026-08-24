@@ -166,6 +166,21 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
     println!("visible text bytes  = {}", stats.2);
     println!("hidden  text bytes  = {}", stats.3);
 
+    // Under TOBIRA_DEBUG_CSS this is the ranked list of declarations the engine
+    // parsed out of the page's stylesheets and then threw away, which is the
+    // worklist for closing the gap against a real browser.
+    let unsupported = css::unsupported_property_report();
+    if !unsupported.is_empty() {
+        let total: u32 = unsupported.iter().map(|(_, count)| count).sum();
+        println!(
+            "\n=== unsupported declarations ({total} across {} properties) ===",
+            unsupported.len()
+        );
+        for (property, count) in &unsupported {
+            println!("{count:8} : {property}");
+        }
+    }
+
     // For each display:none *root* (ancestor not already hidden), report how much
     // text it hides and why, so we can tell script/style/head from real content.
     fn subtree_text(node: &StyledNode) -> usize {
@@ -237,6 +252,50 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
     println!("largest boxes (node: WxH @ x,y):");
     for b in boxes.iter().take(10) {
         println!("  node {} : {}x{} @ {},{}", b.node_id, b.width, b.height, b.x, b.y);
+    }
+
+    // Two runs of text drawn over each other is the loudest rendering defect a
+    // page can have and the hardest to spot by reading a command list, so count
+    // it directly. Text boxes in a correct layout never intersect: the line
+    // breaker gives each run its own strip, and boxes that share a strip are
+    // laid out side by side. Any intersection is a positioning bug.
+    let texts = layout.texts();
+    if std::env::var_os("TOBIRA_DUMP_TEXT").is_some() {
+        println!("
+=== all text runs (x,y wxh size) ===");
+        for t in &texts {
+            println!(
+                "  {:5},{:5} {:4}x{:<3} {:2}px : {:?}",
+                t.x, t.y, t.width, t.line_height_px, t.font_size_px, t.text
+            );
+        }
+    }
+    let mut collisions: Vec<(usize, usize, u32)> = Vec::new();
+    for (i, a) in texts.iter().enumerate() {
+        for (j, b) in texts.iter().enumerate().skip(i + 1) {
+            let overlap_w = (a.x + a.width).min(b.x + b.width).saturating_sub(a.x.max(b.x));
+            let a_bottom = a.y + a.line_height_px;
+            let b_bottom = b.y + b.line_height_px;
+            let overlap_h = a_bottom.min(b_bottom).saturating_sub(a.y.max(b.y));
+            if overlap_w > 0 && overlap_h > 0 {
+                collisions.push((i, j, overlap_w * overlap_h));
+            }
+        }
+    }
+    collisions.sort_by_key(|(_, _, area)| std::cmp::Reverse(*area));
+    println!(
+        "\n=== overlapping text runs ({} of {} runs collide) ===",
+        collisions.len(),
+        texts.len()
+    );
+    for (i, j, area) in collisions.iter().take(15) {
+        let (a, b) = (&texts[*i], &texts[*j]);
+        let clip = |t: &str| t.chars().take(24).collect::<String>();
+        println!(
+            "  {area:7}px^2 : {:?} @ {},{} {}x{}  X  {:?} @ {},{} {}x{}",
+            clip(&a.text), a.x, a.y, a.width, a.line_height_px,
+            clip(&b.text), b.x, b.y, b.width, b.line_height_px,
+        );
     }
     Ok(())
 }
