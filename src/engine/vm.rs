@@ -1485,15 +1485,143 @@ const DOM_INTERFACE_NAMES: &[&str] = &[
     "CharacterData",
     "Text",
     "Comment",
-    "HTMLIFrameElement",
-    "HTMLInputElement",
-    "HTMLTextAreaElement",
-    "HTMLSelectElement",
-    "HTMLButtonElement",
-    "HTMLAnchorElement",
     "SVGElement",
     "Window",
+    // The per-tag interfaces. Scripts reference these by name for feature
+    // detection and for `instanceof` guards, and a missing one is a bare
+    // `ReferenceError` that takes the whole bundle down -- Yahoo! JAPAN died on
+    // `HTMLScriptElement is not defined`.
+    "HTMLAnchorElement",
+    "HTMLAreaElement",
+    "HTMLAudioElement",
+    "HTMLBRElement",
+    "HTMLBaseElement",
+    "HTMLBodyElement",
+    "HTMLButtonElement",
+    "HTMLCanvasElement",
+    "HTMLDListElement",
+    "HTMLDataListElement",
+    "HTMLDetailsElement",
+    "HTMLDialogElement",
+    "HTMLDivElement",
+    "HTMLEmbedElement",
+    "HTMLFieldSetElement",
+    "HTMLFormElement",
+    "HTMLHRElement",
+    "HTMLHeadElement",
+    "HTMLHeadingElement",
+    "HTMLHtmlElement",
+    "HTMLIFrameElement",
+    "HTMLImageElement",
+    "HTMLInputElement",
+    "HTMLLIElement",
+    "HTMLLabelElement",
+    "HTMLLegendElement",
+    "HTMLLinkElement",
+    "HTMLMapElement",
+    "HTMLMetaElement",
+    "HTMLMeterElement",
+    "HTMLModElement",
+    "HTMLOListElement",
+    "HTMLObjectElement",
+    "HTMLOptGroupElement",
+    "HTMLOptionElement",
+    "HTMLOutputElement",
+    "HTMLParagraphElement",
+    "HTMLPictureElement",
+    "HTMLPreElement",
+    "HTMLProgressElement",
+    "HTMLQuoteElement",
+    "HTMLScriptElement",
+    "HTMLSelectElement",
+    "HTMLSlotElement",
+    "HTMLSourceElement",
+    "HTMLSpanElement",
+    "HTMLStyleElement",
+    "HTMLTableCaptionElement",
+    "HTMLTableCellElement",
+    "HTMLTableColElement",
+    "HTMLTableElement",
+    "HTMLTableRowElement",
+    "HTMLTableSectionElement",
+    "HTMLTemplateElement",
+    "HTMLTextAreaElement",
+    "HTMLTimeElement",
+    "HTMLTitleElement",
+    "HTMLTrackElement",
+    "HTMLUListElement",
+    "HTMLVideoElement",
 ];
+
+/// The interface a tag name corresponds to. Used both for `node.constructor`
+/// and for `instanceof`, so the two cannot disagree.
+fn dom_interface_for_tag(tag: &str) -> &'static str {
+    match tag {
+        "A" => "HTMLAnchorElement",
+        "AREA" => "HTMLAreaElement",
+        "AUDIO" => "HTMLAudioElement",
+        "BASE" => "HTMLBaseElement",
+        "BLOCKQUOTE" | "Q" => "HTMLQuoteElement",
+        "BODY" => "HTMLBodyElement",
+        "BR" => "HTMLBRElement",
+        "BUTTON" => "HTMLButtonElement",
+        "CANVAS" => "HTMLCanvasElement",
+        "CAPTION" => "HTMLTableCaptionElement",
+        "COL" | "COLGROUP" => "HTMLTableColElement",
+        "DATALIST" => "HTMLDataListElement",
+        "DEL" | "INS" => "HTMLModElement",
+        "DETAILS" => "HTMLDetailsElement",
+        "DIALOG" => "HTMLDialogElement",
+        "DIV" => "HTMLDivElement",
+        "DL" => "HTMLDListElement",
+        "EMBED" => "HTMLEmbedElement",
+        "FIELDSET" => "HTMLFieldSetElement",
+        "FORM" => "HTMLFormElement",
+        "H1" | "H2" | "H3" | "H4" | "H5" | "H6" => "HTMLHeadingElement",
+        "HEAD" => "HTMLHeadElement",
+        "HR" => "HTMLHRElement",
+        "HTML" => "HTMLHtmlElement",
+        "IFRAME" => "HTMLIFrameElement",
+        "IMG" => "HTMLImageElement",
+        "INPUT" => "HTMLInputElement",
+        "LABEL" => "HTMLLabelElement",
+        "LEGEND" => "HTMLLegendElement",
+        "LI" => "HTMLLIElement",
+        "LINK" => "HTMLLinkElement",
+        "MAP" => "HTMLMapElement",
+        "META" => "HTMLMetaElement",
+        "METER" => "HTMLMeterElement",
+        "OBJECT" => "HTMLObjectElement",
+        "OL" => "HTMLOListElement",
+        "OPTGROUP" => "HTMLOptGroupElement",
+        "OPTION" => "HTMLOptionElement",
+        "OUTPUT" => "HTMLOutputElement",
+        "P" => "HTMLParagraphElement",
+        "PICTURE" => "HTMLPictureElement",
+        "PRE" => "HTMLPreElement",
+        "PROGRESS" => "HTMLProgressElement",
+        "SCRIPT" => "HTMLScriptElement",
+        "SELECT" => "HTMLSelectElement",
+        "SLOT" => "HTMLSlotElement",
+        "SOURCE" => "HTMLSourceElement",
+        "SPAN" => "HTMLSpanElement",
+        "STYLE" => "HTMLStyleElement",
+        "TABLE" => "HTMLTableElement",
+        "TBODY" | "TFOOT" | "THEAD" => "HTMLTableSectionElement",
+        "TD" | "TH" => "HTMLTableCellElement",
+        "TEMPLATE" => "HTMLTemplateElement",
+        "TEXTAREA" => "HTMLTextAreaElement",
+        "TIME" => "HTMLTimeElement",
+        "TITLE" => "HTMLTitleElement",
+        "TR" => "HTMLTableRowElement",
+        "TRACK" => "HTMLTrackElement",
+        "UL" => "HTMLUListElement",
+        "VIDEO" => "HTMLVideoElement",
+        "#TEXT" => "Text",
+        "#COMMENT" => "Comment",
+        _ => "HTMLElement",
+    }
+}
 
 /// How a generator step ended.
 enum GeneratorOutcome {
@@ -9530,22 +9658,35 @@ impl Vm {
     /// The DOM interfaces a host node value satisfies, for `instanceof`. Host DOM
     /// nodes are not wired into the JS prototype chain of the interface
     /// constructors, so membership is decided structurally by the host class.
-    fn host_node_interfaces(&self, object: GcRef<JsObject>) -> Option<&'static [&'static str]> {
-        let data = self.heap.objects().get(object)?;
-        if let ObjectKind::Host(slot) = &data.kind {
-            return Some(match slot.class {
-                // Element nodes (our generic node wrapper) — treat as the element
-                // interface chain. Text/Comment also use this class today; the
-                // distinction rarely matters for the libraries that gate on these.
-                HostObjectClass::Node | HostObjectClass::EventTarget => {
-                    &["EventTarget", "Node", "Element", "HTMLElement"]
+    fn host_node_interfaces(&self, object: GcRef<JsObject>) -> Option<Vec<&'static str>> {
+        let (class, handle) = match &self.heap.objects().get(object)?.kind {
+            ObjectKind::Host(slot) => (slot.class, slot.handle),
+            _ => return None,
+        };
+        Some(match class {
+            HostObjectClass::Node | HostObjectClass::EventTarget => {
+                let mut chain = vec!["EventTarget", "Node"];
+                // The concrete interface comes from the tag, so
+                // `script instanceof HTMLScriptElement` answers truthfully
+                // rather than only matching the generic HTMLElement.
+                let tag = self.get_node_name(NodeId(handle as u32)).to_ascii_uppercase();
+                let specific = dom_interface_for_tag(&tag);
+                match specific {
+                    "Text" | "Comment" => chain.push("CharacterData"),
+                    _ => {
+                        chain.push("Element");
+                        chain.push("HTMLElement");
+                    }
                 }
-                HostObjectClass::Document => &["EventTarget", "Node", "Document"],
-                HostObjectClass::Window => &["EventTarget", "Window"],
-                _ => return None,
-            });
-        }
-        None
+                if !chain.contains(&specific) {
+                    chain.push(specific);
+                }
+                chain
+            }
+            HostObjectClass::Document => vec!["EventTarget", "Node", "Document"],
+            HostObjectClass::Window => vec!["EventTarget", "Window"],
+            _ => return None,
+        })
     }
 
     /// Whether `key` is an event-handler IDL attribute (`onclick`, `oninput`, …)
@@ -9584,13 +9725,12 @@ impl Vm {
         // DOM interface constructors (`Element`, `Node`, …): host nodes satisfy
         // them by interface name rather than by JS prototype chain. JS-created
         // instances still use the ordinary prototype-chain check below.
-        if let Some(iface) = self.dom_interface_ctors.get(&ctor.raw()) {
-            if self
+        if let Some(iface) = self.dom_interface_ctors.get(&ctor.raw()).copied()
+            && self
                 .host_node_interfaces(*object)
-                .is_some_and(|set| set.iter().any(|name| name == iface))
-            {
-                return Ok(true);
-            }
+                .is_some_and(|set| set.iter().any(|name| *name == iface))
+        {
+            return Ok(true);
         }
         let prototype =
             match self.get_own_property_descriptor(ctor, &PropertyKey::from("prototype")) {
@@ -16036,16 +16176,7 @@ impl Vm {
                 // accessor, so React's tracker bails gracefully and falls back to
                 // firing change on every input event.
                 let tag = self.get_node_name(node_id).to_ascii_uppercase();
-                let iface = match tag.as_str() {
-                    "INPUT" => "HTMLInputElement",
-                    "TEXTAREA" => "HTMLTextAreaElement",
-                    "SELECT" => "HTMLSelectElement",
-                    "BUTTON" => "HTMLButtonElement",
-                    "A" => "HTMLAnchorElement",
-                    "#TEXT" => "Text",
-                    "#COMMENT" => "Comment",
-                    _ => "HTMLElement",
-                };
+                let iface = dom_interface_for_tag(&tag);
                 Ok(self
                     .globals
                     .get(iface)

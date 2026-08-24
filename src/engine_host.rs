@@ -3232,6 +3232,46 @@ mod tests {
         assert!(result.error.is_none(), "script error: {:?}", result.error);
     }
 
+    /// `instanceof` on a host node uses the element's tag, so a script element
+    /// satisfies `HTMLScriptElement` and not just the generic `HTMLElement`.
+    /// The interface a node reports through `.constructor` has to agree.
+    #[test]
+    fn nodes_match_their_tag_specific_interface() {
+        let (mut session, initial) = EngineSession::start(
+            "<html><body><script id=\"s\"></script><img id=\"i\"><div id=\"d\"></div></body></html>",
+            "http://interfaces.test/",
+        );
+        assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
+        let result = session.eval_for_test(
+            r#"
+            const s = document.getElementById('s');
+            const i = document.getElementById('i');
+            const d = document.getElementById('d');
+
+            assert(s instanceof HTMLScriptElement, 'script should be an HTMLScriptElement');
+            assert(i instanceof HTMLImageElement, 'img should be an HTMLImageElement');
+            assert(d instanceof HTMLDivElement, 'div should be an HTMLDivElement');
+
+            // A tag must not satisfy some other tag's interface.
+            assert(!(d instanceof HTMLScriptElement), 'div is not a script element');
+            assert(!(s instanceof HTMLImageElement), 'script is not an image element');
+
+            // The general chain still holds for every one of them.
+            for (const node of [s, i, d]) {
+                assert(node instanceof HTMLElement);
+                assert(node instanceof Element);
+                assert(node instanceof Node);
+                assert(node instanceof EventTarget);
+            }
+
+            // `.constructor` agrees with `instanceof`.
+            assert(s.constructor === HTMLScriptElement);
+            assert(d.constructor === HTMLDivElement);
+        "#,
+        );
+        assert!(result.error.is_none(), "script error: {:?}", result.error);
+    }
+
     fn run_structural_changes(html: &str, script: &str) -> Vec<DomStructuralChange> {
         let (mut session, initial) = EngineSession::start(html, "http://localhost/");
         assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
