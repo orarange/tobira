@@ -310,6 +310,10 @@ enum BuiltinId {
     DomClassListItem,
     DomClassListToString,
     DomNodeInsertAdjacentHtml,
+    DomNodeIsSameNode,
+    DomNodeIsEqualNode,
+    DomNodeNormalize,
+    DomNodeScrollTo,
     DomNodeReplaceChildren,
     DomNodeSplitText,
     // Shadow DOM
@@ -13574,6 +13578,44 @@ impl Vm {
                     None => Value::Null,
                 })
             }
+            BuiltinId::DomNodeIsSameNode => {
+                let node_id = self.this_node_id(&this_value);
+                let other = match args.first() {
+                    Some(value @ Value::Object(_)) => Some(self.this_node_id(value)),
+                    _ => None,
+                };
+                Ok(Value::Bool(other == Some(node_id)))
+            }
+            BuiltinId::DomNodeIsEqualNode => {
+                // Structural equality is approximated by comparing the serialised
+                // subtrees, which is what callers are really asking about.
+                let node_id = self.this_node_id(&this_value);
+                let other = match args.first() {
+                    Some(value @ Value::Object(_)) => self.this_node_id(value),
+                    _ => return Ok(Value::Bool(false)),
+                };
+                if other == node_id {
+                    return Ok(Value::Bool(true));
+                }
+                let outer = |vm: &mut Self, node| {
+                    match vm.host.read_dom(DomRead::OuterHtml { node }) {
+                        Ok(DomReadResult::String(html)) => Some(html),
+                        _ => None,
+                    }
+                };
+                let (a, b) = (outer(self, node_id), outer(self, other));
+                Ok(Value::Bool(a.is_some() && a == b))
+            }
+            BuiltinId::DomNodeNormalize => {
+                // No adjacent-text-node merging is modelled; the call is a no-op
+                // rather than an error so callers can keep going.
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomNodeScrollTo => {
+                // Element-level scrolling is not modelled, but the methods have
+                // to exist: pages call them unconditionally after layout.
+                Ok(Value::Undefined)
+            }
             BuiltinId::DomNodeInsertAdjacentHtml => {
                 let node_id = self.this_node_id(&this_value);
                 let position_str = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -16658,6 +16700,21 @@ impl Vm {
             "remove" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemove)),
             "querySelector" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeQuerySelector)),
             "querySelectorAll" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeQuerySelectorAll)),
+            // These search a subtree rooted at the receiver, so the document's
+            // implementations serve elements unchanged -- they were simply not
+            // exposed here, and `element.getElementsByTagName(...)` threw.
+            "getElementsByTagName" | "getElementsByTagNameNS" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementsByTagName))
+            }
+            "getElementsByClassName" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementsByClassName))
+            }
+            "isSameNode" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeIsSameNode)),
+            "isEqualNode" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeIsEqualNode)),
+            "normalize" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeNormalize)),
+            "scroll" | "scrollTo" | "scrollBy" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomNodeScrollTo))
+            }
             "closest" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeClosest)),
             "matches" | "webkitMatchesSelector" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeMatches)),
             "contains" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeContains)),

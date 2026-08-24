@@ -3345,6 +3345,46 @@ mod tests {
         assert!(result.error.is_none(), "script error: {:?}", result.error);
     }
 
+    /// The subtree queries root at their receiver, so the same implementations
+    /// serve `document` and an element. They were only exposed on `document`,
+    /// and `element.getElementsByTagName(...)` threw.
+    #[test]
+    fn elements_expose_the_subtree_queries() {
+        let (mut session, initial) = EngineSession::start(
+            "<html><body><div id=\"outer\"><span class=\"c\">a</span><p class=\"c\">b</p></div><span>outside</span></body></html>",
+            "https://host.test/",
+        );
+        assert!(initial.error.is_none(), "initial: {:?}", initial.error);
+        let result = session.eval_for_test(
+            r#"
+            const outer = document.getElementById('outer');
+
+            assert(typeof outer.getElementsByTagName === 'function');
+            assert(typeof outer.getElementsByClassName === 'function');
+
+            // Scoped to the receiver: the <span> outside must not be found.
+            const spans = outer.getElementsByTagName('span');
+            assert(spans.length === 1, 'expected one span inside, got ' + spans.length);
+            assert(document.getElementsByTagName('span').length === 2, 'document sees both');
+
+            const byClass = outer.getElementsByClassName('c');
+            assert(byClass.length === 2);
+
+            // Identity helpers.
+            assert(outer.isSameNode(outer) === true);
+            assert(outer.isSameNode(document.body) === false);
+            assert(outer.isEqualNode(outer) === true);
+
+            // Present and harmless.
+            assert(typeof outer.normalize === 'function');
+            outer.normalize();
+            assert(typeof outer.scrollTo === 'function');
+            outer.scrollTo(0, 0);
+        "#,
+        );
+        assert!(result.error.is_none(), "script error: {:?}", result.error);
+    }
+
     fn run_structural_changes(html: &str, script: &str) -> Vec<DomStructuralChange> {
         let (mut session, initial) = EngineSession::start(html, "http://localhost/");
         assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
