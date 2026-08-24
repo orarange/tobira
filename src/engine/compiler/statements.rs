@@ -1064,9 +1064,25 @@ impl<'a> super::FunctionCompiler<'a> {
                         self.declare_function_scoped(&name)?;
                     }
                 }
-                StatementNode::ClassDeclaration(class_decl) if self.is_module_top_level() => {
+                // A class declaration binds its name for the whole enclosing
+                // scope, so functions written *above* it still capture it --
+                // bundlers emit exactly that shape, a `function make() { return
+                // new C() }` ahead of `class C {}`. This used to be predeclared
+                // only at a module's top level, so inside any function body --
+                // which is where a webpack module lives -- the name fell through
+                // to a global lookup and threw `C is not defined` at run time.
+                StatementNode::ClassDeclaration(class_decl) => {
+                    // Go through the same resolution the class statement itself
+                    // will use, so the two cannot disagree: at a script's top
+                    // level a lexical declaration is a global (late-bound, so
+                    // forward references still work), and anywhere else it is a
+                    // block-scoped local that earlier functions can capture.
                     let name = self.identifier_name(&class_decl.name());
-                    self.declare_block_scoped(&name)?;
+                    self.resolve_declaration_binding(
+                        &name,
+                        BindingStorage::Let,
+                        DeclarationContext::Statement,
+                    )?;
                 }
                 StatementNode::VariableDeclaration(declaration) => {
                     self.predeclare_variable_declaration(declaration)?;
