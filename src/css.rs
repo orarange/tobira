@@ -666,8 +666,8 @@ pub struct ComputedStyle {
     pub text_transform: TextTransform,
     pub text_indent: u32,
     pub letter_spacing: i32,
-    pub max_width: Option<u32>,
-    pub min_width: u32,
+    pub max_width: Option<LengthValue>,
+    pub min_width: Option<LengthValue>,
     pub max_height: Option<u32>,
     pub min_height: u32,
     pub box_sizing: BoxSizing,
@@ -786,7 +786,7 @@ impl ComputedStyle {
             text_indent: 0,
             letter_spacing: parent.map(|s| s.letter_spacing).unwrap_or(0),
             max_width: None,
-            min_width: 0,
+            min_width: None,
             max_height: None,
             min_height: 0,
             box_sizing: BoxSizing::ContentBox,
@@ -2479,15 +2479,15 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if v == "none" {
                 style.max_width = None;
             } else {
-                style.max_width = parse_length(value, parent_font_size);
+                style.max_width = parse_length_value(value, parent_font_size);
             }
         }
         "min-width" => {
             let v = value.trim().to_ascii_lowercase();
             if v == "auto" {
-                style.min_width = 0;
+                style.min_width = None;
             } else {
-                style.min_width = parse_length(value, parent_font_size).unwrap_or(0);
+                style.min_width = parse_length_value(value, parent_font_size);
             }
         }
         "max-height" => {
@@ -3335,6 +3335,28 @@ fn parse_simple_selector(input: &str) -> Option<SimpleSelector> {
                 {
                     pseudo_name.push(chars[i]);
                     i += 1;
+                }
+                // `:before` / `:after` with one colon are the legacy spelling of
+                // the pseudo-elements, and minifiers emit it because it is a byte
+                // shorter. Falling through to the pseudo-class path meant they
+                // were dropped as "unknown", so `.x:after { width: 0 }` matched
+                // `.x` itself -- collapsing the element to nothing.
+                match pseudo_name.to_ascii_lowercase().as_str() {
+                    "before" => {
+                        selector.pseudo_element = Some(PseudoElement::Before);
+                        continue;
+                    }
+                    "after" => {
+                        selector.pseudo_element = Some(PseudoElement::After);
+                        continue;
+                    }
+                    // Not modelled, but they must not style the host element
+                    // either, so the selector matches nothing.
+                    "first-line" | "first-letter" => {
+                        selector.never_match = true;
+                        continue;
+                    }
+                    _ => {}
                 }
                 // function args?
                 let mut args = None;

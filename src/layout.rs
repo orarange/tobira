@@ -1256,16 +1256,37 @@ fn layout_block_element(
     let container_derived_width = {
         let ml = if element.style.margin_left_auto { 0 } else { element.style.margin.left };
         let mr = if element.style.margin_right_auto { 0 } else { element.style.margin.right };
-        outer_width_with_margins(width, ml, mr)
-             .min(element.style.max_width.unwrap_or(u32::MAX))
-             .max(element.style.min_width)
+        // `max-width` / `min-width` percentages resolve against the containing
+        // block, not the font size. Resolving them at parse time against the
+        // font size turned the extremely common `max-width: 100%` into 16px,
+        // which squeezed text down to one character per line.
+        let max = element
+            .style
+            .max_width
+            .map(|length| resolve_length_value(length, width))
+            .unwrap_or(u32::MAX);
+        let min = element
+            .style
+            .min_width
+            .map(|length| resolve_length_value(length, width))
+            .unwrap_or(0);
+        outer_width_with_margins(width, ml, mr).min(max).max(min)
     };
 
     // Compute outer_width: only use explicit width when it actually constrains (is narrower).
     // This prevents HTML width="" attributes from incorrectly shrinking table-allocated cells.
     let (outer_width, width_is_constrained) = if let Some(ew) = explicit_width {
-        let clamped = ew.min(element.style.max_width.unwrap_or(u32::MAX))
-                        .max(element.style.min_width);
+        let max = element
+            .style
+            .max_width
+            .map(|length| resolve_length_value(length, width))
+            .unwrap_or(u32::MAX);
+        let min = element
+            .style
+            .min_width
+            .map(|length| resolve_length_value(length, width))
+            .unwrap_or(0);
+        let clamped = ew.min(max).max(min);
         if clamped < container_derived_width {
             (clamped, true)
         } else {
@@ -5399,6 +5420,99 @@ fn justify_content_offsets(
         }
     }
 }
+
+
+
+#[cfg(test)]
+mod percentage_sizing_tests {
+    use super::*;
+    use crate::css::{InteractiveState, build_styled_tree, parse_stylesheet};
+    use crate::html::parse_document;
+
+    fn text_runs(css: &str, html: &str) -> Vec<TextCommand> {
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        layout_styled_document(&styled, &images, 1280, &mut fonts).texts()
+    }
+
+    /// `max-width` percentages resolve against the containing block. They used
+    /// to be resolved at parse time against the *font size*, so the extremely
+    /// common `max-width: 100%` became 16px and squeezed text down to one
+    /// character per line -- which is how Yahoo! JAPAN rendered.
+    #[test]
+    fn max_width_percent_resolves_against_the_container() {
+        let runs = text_runs(
+            ".wide { max-width: 100%; }",
+            "<div style=\"width:600px\"><div class=\"wide\">ホームページに設定する</div></div>",
+        );
+        assert_eq!(runs.len(), 1, "the line must not be broken up: {runs:?}");
+        assert_eq!(runs[0].text, "ホームページに設定する");
+    }
+
+    /// A percentage that genuinely constrains still does.
+    #[test]
+    fn a_constraining_max_width_percent_still_applies() {
+        let narrow = text_runs(
+            ".half { max-width: 10%; }",
+            "<div style=\"width:600px\"><div class=\"half\">ホームページに設定する</div></div>",
+        );
+        assert!(
+            narrow.len() > 1,
+            "10% of 600px should force a wrap, got {narrow:?}"
+        );
+    }
+
+    /// `min-width` percentages resolve the same way.
+    #[test]
+    fn min_width_percent_resolves_against_the_container() {
+        let runs = text_runs(
+            ".w { min-width: 100%; }",
+            "<div style=\"width:600px\"><div class=\"w\">ホームページに設定する</div></div>",
+        );
+        assert_eq!(runs.len(), 1);
+    }
+
+    /// `:before` / `:after` with a single colon are the legacy spelling of the
+    /// pseudo-elements. Treated as unknown pseudo-classes they were dropped, so
+    /// the rule applied to the host and `width: 0` collapsed it.
+    #[test]
+    fn single_colon_pseudo_elements_do_not_style_the_host() {
+        let runs = text_runs(
+            ".x:after, .x:before { display: block; width: 0; height: 0; content: \"\"; }",
+            "<div style=\"width:600px\"><div class=\"x\">ホームページに設定する</div></div>",
+        );
+        assert_eq!(
+            runs.len(),
+            1,
+            "an :after rule must not shrink the element itself: {runs:?}"
+        );
+        assert_eq!(runs[0].text, "ホームページに設定する");
+    }
+
+    /// The double-colon form was already excluded and must stay that way.
+    #[test]
+    fn double_colon_pseudo_elements_still_do_not_style_the_host() {
+        let runs = text_runs(
+            ".x::after { width: 0; content: \"\"; }",
+            "<div style=\"width:600px\"><div class=\"x\">ホームページに設定する</div></div>",
+        );
+        assert_eq!(runs.len(), 1);
+    }
+
+    /// A real pseudo-class on the same shape must keep working.
+    #[test]
+    fn pseudo_classes_still_match_the_host() {
+        let runs = text_runs(
+            "div:first-child { max-width: 10%; }",
+            "<div style=\"width:600px\"><div>ホームページに設定する</div></div>",
+        );
+        assert!(runs.len() > 1, "first-child should still apply: {runs:?}");
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
