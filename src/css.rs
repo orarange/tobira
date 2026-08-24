@@ -791,7 +791,7 @@ impl ComputedStyle {
             min_height: 0,
             box_sizing: BoxSizing::ContentBox,
             overflow: Overflow::Visible,
-            list_style_type: ListStyleType::Disc,
+            list_style_type: default_list_style_type(tag_name, parent),
             cursor_pointer: false,
             cursor_kind: CursorKind::Auto,
             pointer_events_none: false,
@@ -4060,6 +4060,18 @@ fn parse_overflow(input: &str) -> Overflow {
         "auto" => Overflow::Auto,
         "scroll" => Overflow::Scroll,
         _ => Overflow::Visible,
+    }
+}
+
+/// The UA stylesheet sets `list-style-type` on the list container and lets it
+/// inherit down to the items; everything else simply inherits.
+fn default_list_style_type(tag_name: &str, parent: Option<&ComputedStyle>) -> ListStyleType {
+    match tag_name {
+        "ol" => ListStyleType::Decimal,
+        "ul" | "menu" | "dir" => ListStyleType::Disc,
+        _ => parent
+            .map(|style| style.list_style_type)
+            .unwrap_or(ListStyleType::Disc),
     }
 }
 

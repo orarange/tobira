@@ -1,12 +1,35 @@
 use crate::css::{
     BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
-    FontFamilyKind, GridTrackSize, LengthValue, ObjectFit, Overflow, Position, FlexDirection,
+    FontFamilyKind, GridTrackSize, LengthValue, ListStyleType, ObjectFit, Overflow, Position, FlexDirection,
     FlexWrap, AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
     VerticalAlign, WhiteSpaceMode, apply_text_transform, ClearSide, FloatSide,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
 use std::sync::Arc;
+
+/// Width reserved to the left of a list item's content for its marker.
+const MARKER_INDENT: u32 = 16;
+
+/// The marker string for a list item, or `None` when it renders without one.
+///
+/// `list-style-type` was parsed into the computed style but never read back
+/// here: every `display: list-item` box got a hardcoded `"- "`. That is wrong
+/// in both directions. Navigation menus are `<ul>` markup with
+/// `list-style: none` -- structure for assistive tech, no bullets on screen --
+/// and rendered as a column of stray dashes; ordered lists lost their numbers.
+fn list_marker_text(style: &ComputedStyle, ordinal: u32) -> Option<String> {
+    if style.display != Display::ListItem {
+        return None;
+    }
+    Some(match style.list_style_type {
+        ListStyleType::None => return None,
+        ListStyleType::Disc => "\u{2022} ".to_string(),
+        ListStyleType::Circle => "\u{25e6} ".to_string(),
+        ListStyleType::Square => "\u{25aa} ".to_string(),
+        ListStyleType::Decimal => format!("{ordinal}. "),
+    })
+}
 
 fn advance_by_margin(cursor: u32, m: i32) -> u32 {
     (cursor as i64 + m as i64).max(0) as u32
@@ -440,6 +463,9 @@ struct LayoutContext {
     /// used to resolve a child's `height: <percent>`. `None` when no ancestor
     /// has a definite height (then percentage heights are treated as auto).
     container_height: Option<u32>,
+    /// Ordinal of the list item about to be laid out, set by its container.
+    /// `None` for anything that is not a numbered item.
+    list_ordinal: Option<u32>,
 }
 
 impl Default for LayoutContext {
@@ -456,6 +482,7 @@ impl Default for LayoutContext {
             scroll_y_for_fixed: 0,
             positioned_commands: Vec::new(),
             container_height: None,
+            list_ordinal: None,
         }
     }
 }
@@ -1402,11 +1429,8 @@ fn layout_block_element(
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.top);
 
-    let bullet_indent = if element.style.display == Display::ListItem {
-        16
-    } else {
-        0
-    };
+    let marker = list_marker_text(&element.style, context.list_ordinal.unwrap_or(1));
+    let bullet_indent = if marker.is_some() { MARKER_INDENT } else { 0 };
 
     let border_left = if !element.style.border_style_none {
         element.style.border.left
@@ -1461,7 +1485,7 @@ fn layout_block_element(
             content_width,
             cursor_y,
             context,
-            bullet_indent > 0,
+            marker,
             images,
             fonts,
             current_form,
@@ -1880,11 +1904,8 @@ fn layout_block_element_as_layer(
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.top);
 
-    let bullet_indent = if element.style.display == Display::ListItem {
-        16
-    } else {
-        0
-    };
+    let marker = list_marker_text(&element.style, context.list_ordinal.unwrap_or(1));
+    let bullet_indent = if marker.is_some() { MARKER_INDENT } else { 0 };
 
     let border_left = if !element.style.border_style_none {
         element.style.border.left
@@ -1934,7 +1955,7 @@ fn layout_block_element_as_layer(
             content_width,
             cursor_y,
             &mut sub_context,
-            bullet_indent > 0,
+            marker,
             images,
             fonts,
             current_form,
@@ -2829,7 +2850,7 @@ fn layout_table_cell(
         width,
         &mut cursor_y,
         &mut context,
-        false,
+        None,
         images,
         fonts,
         current_form,
@@ -3047,17 +3068,18 @@ fn layout_mixed_children(
     width: u32,
     cursor_y: &mut u32,
     context: &mut LayoutContext,
-    needs_bullet: bool,
+    marker: Option<String>,
     images: &ImageStore,
     fonts: &mut FontContext,
     current_form: Option<FormContext>,
 ) {
     let mut inline_fragments = Vec::new();
-    let mut bullet_pending = needs_bullet;
+    let mut bullet_pending = marker;
+    let mut list_ordinal = 0_u32;
     let mut active_floats: Vec<ActiveFloat> = Vec::new();
 
     let flush_inline = |inline_fragments: &mut Vec<InlineFragment>,
-                        bullet_pending: &mut bool,
+                        bullet_pending: &mut Option<String>,
                         cursor_y: &mut u32,
                         context: &mut LayoutContext,
                         fonts: &mut FontContext,
@@ -3065,14 +3087,14 @@ fn layout_mixed_children(
                         width: u32,
                         element_style: &Arc<ComputedStyle>,
                         active_floats: &[ActiveFloat]| {
-        if inline_fragments.is_empty() && !*bullet_pending {
+        if inline_fragments.is_empty() && bullet_pending.is_none() {
             return;
         }
-        if *bullet_pending {
+        if let Some(marker) = bullet_pending.take() {
             inline_fragments.insert(
                 0,
                 InlineFragment::Text {
-                    text: "- ".to_string(),
+                    text: marker,
                     style: element_style.clone(),
                     link_href: None,
                     link_node_id: None,
@@ -3090,7 +3112,7 @@ fn layout_mixed_children(
             fonts,
         );
         inline_fragments.clear();
-        *bullet_pending = false;
+        *bullet_pending = None;
     };
 
     for child in &element.children {
@@ -3194,6 +3216,18 @@ fn layout_mixed_children(
             );
             *cursor_y = clear_cursor_y(*cursor_y, child_clear, &active_floats);
             let (avail_x, avail_right) = active_float_edges(&active_floats, *cursor_y, x, width);
+            // Number this container's list items so `list-style-type: decimal`
+            // has an ordinal to render. Counting here keeps nested lists
+            // independent: each container runs its own pass over its children.
+            context.list_ordinal = if matches!(
+                child,
+                StyledNode::Element(child) if child.style.display == Display::ListItem
+            ) {
+                list_ordinal = list_ordinal.saturating_add(1);
+                Some(list_ordinal)
+            } else {
+                None
+            };
             layout_node(
                 child,
                 avail_x,
@@ -3204,15 +3238,15 @@ fn layout_mixed_children(
                 fonts,
                 current_form.clone(),
             );
+            context.list_ordinal = None;
         } else {
-            if bullet_pending {
+            if let Some(marker) = bullet_pending.take() {
                 inline_fragments.push(InlineFragment::Text {
-                    text: "- ".to_string(),
+                    text: marker,
                     style: element.style.clone(),
                     link_href: None,
                     link_node_id: None,
                 });
-                bullet_pending = false;
             }
             collect_inline_fragments(
                 child,
@@ -5554,6 +5588,54 @@ mod percentage_sizing_tests {
         );
         assert!(runs.len() > 1, "first-child should still apply: {runs:?}");
     }
+
+    /// `list-style: none` is how every navigation menu on the web keeps `<ul>`
+    /// markup for structure while dropping the bullets on screen. The computed
+    /// `list-style-type` was parsed but never read by layout, so each item got a
+    /// hardcoded `"- "` and Yahoo! JAPAN's nav rendered as a column of dashes.
+    #[test]
+    fn list_style_none_suppresses_the_marker() {
+        let runs = text_runs(
+            "ul { list-style: none; }",
+            "<ul><li>Home</li><li>Help</li></ul>",
+        );
+        let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts, vec!["Home", "Help"], "no marker may be drawn");
+    }
+
+    /// A list that does not opt out still gets its bullet -- and it is the disc
+    /// the spec asks for, not a hyphen.
+    #[test]
+    fn a_default_list_item_keeps_its_disc() {
+        let runs = text_runs("", "<ul><li>plain</li></ul>");
+        let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts, vec!["\u{2022} plain"], "expected a disc marker");
+    }
+
+    /// `list-style-type: decimal` numbers the items of its own container, so a
+    /// nested list restarts at 1 rather than continuing the outer count.
+    #[test]
+    fn decimal_markers_are_numbered_per_container() {
+        let runs = text_runs(
+            "ol { list-style-type: decimal; }",
+            "<ol><li>a</li><li>b<ol><li>inner</li></ol></li><li>c</li></ol>",
+        );
+        let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts, vec!["1. a", "2. b", "1. inner", "3. c"]);
+    }
+
+    /// The marker only indents content when there is a marker to make room for.
+    #[test]
+    fn a_markerless_item_does_not_reserve_marker_space() {
+        let with_marker = text_runs("", "<ul><li>plain</li></ul>");
+        let without = text_runs("ul { list-style: none; }", "<ul><li>plain</li></ul>");
+        assert_eq!(
+            without[0].x + MARKER_INDENT,
+            with_marker[0].x,
+            "suppressing the marker must also drop its indent"
+        );
+    }
+
 }
 
 
