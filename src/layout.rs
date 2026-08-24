@@ -5540,11 +5540,26 @@ fn layout_flex_container(
     let is_row = matches!(element.style.flex_direction, FlexDirection::Row | FlexDirection::RowReverse);
 
     // Collect visible flex items (only element children, not text nodes)
-    let children: Vec<&StyledElement> = element.children.iter().filter_map(|child| {
+    let mut children: Vec<&StyledElement> = element.children.iter().filter_map(|child| {
         if let StyledNode::Element(el) = child {
             if el.style.display != Display::None { Some(el) } else { None }
         } else { None }
     }).collect();
+
+    // `order` re-sequences the items without touching the document, and a
+    // reverse direction lays them out from the far end. Neither was
+    // implemented, so `flex-direction: row-reverse` -- which Yahoo! JAPAN uses
+    // to put the icon before the label in its service list -- came out in
+    // document order and, with `justify-content: flex-end` also unflipped,
+    // packed against the wrong edge: the whole left rail read right-aligned.
+    children.sort_by_key(|child| child.style.order);
+    if matches!(
+        element.style.flex_direction,
+        FlexDirection::RowReverse | FlexDirection::ColumnReverse
+    ) {
+        children.reverse();
+    }
+    let children = children;
 
     // Reserve a slot for background rect — insert placeholder now, update height later
     let bg_cmd_index = if let Some(background_color) = element.style.background_color {
@@ -5728,7 +5743,14 @@ fn layout_flex_container(
             if element.style.flex_wrap == FlexWrap::NoWrap {
                 // Single line: honor justify-content + cross-axis alignment.
                 let (start_offset, item_gap) = justify_content_offsets(
-                    element.style.justify_content, content_width, total_fixed.max(0) as u32, total_gap, n as u32
+                    justify_for_direction(
+                        element.style.justify_content,
+                        element.style.flex_direction,
+                    ),
+                    content_width,
+                    total_fixed.max(0) as u32,
+                    total_gap,
+                    n as u32,
                 );
                 let mut cursor_x = content_x.saturating_add(start_offset);
                 for (i, child) in children.iter().enumerate() {
@@ -5845,6 +5867,23 @@ fn layout_flex_container(
     }
 
     *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
+}
+
+/// In a reverse direction the main axis starts at the far edge, so
+/// `flex-start` and `flex-end` swap. The distributed values are symmetric and
+/// need no adjustment.
+fn justify_for_direction(justify: JustifyContent, direction: FlexDirection) -> JustifyContent {
+    if !matches!(
+        direction,
+        FlexDirection::RowReverse | FlexDirection::ColumnReverse
+    ) {
+        return justify;
+    }
+    match justify {
+        JustifyContent::FlexStart => JustifyContent::FlexEnd,
+        JustifyContent::FlexEnd => JustifyContent::FlexStart,
+        other => other,
+    }
 }
 
 fn justify_content_offsets(
@@ -6051,6 +6090,46 @@ mod percentage_sizing_tests {
             "<div style=\"width:600px\"><div>ホームページに設定する</div></div>",
         );
         assert!(runs.len() > 1, "first-child should still apply: {runs:?}");
+    }
+
+    /// `flex-direction: row-reverse` lays items out from the far edge, which
+    /// also swaps what `flex-start` and `flex-end` mean. Neither was
+    /// implemented: Yahoo! JAPAN uses `row-reverse` with `justify-content:
+    /// flex-end` to put the icon before the label in its service list, and
+    /// without the flip the whole left rail came out right-aligned.
+    #[test]
+    fn a_reverse_row_runs_from_the_far_edge() {
+        let runs = text_runs(
+            ".row{display:flex;flex-direction:row-reverse;justify-content:flex-end}",
+            "<div class=\"row\" style=\"width:600px\">\
+             <span>\u{4e00}</span><span>\u{4e8c}</span></div>",
+        );
+        let first = runs.iter().find(|run| run.text == "\u{4e00}").expect("first");
+        let second = runs.iter().find(|run| run.text == "\u{4e8c}").expect("second");
+        assert!(
+            second.x < first.x,
+            "document order is reversed on screen: {runs:?}"
+        );
+        assert!(
+            second.x < 60,
+            "flex-end packs against the left edge in a reverse row: {runs:?}"
+        );
+    }
+
+    /// `order` re-sequences flex items without touching the document.
+    #[test]
+    fn the_order_property_resequences_flex_items() {
+        let runs = text_runs(
+            ".row{display:flex}.a{order:2}.b{order:1}",
+            "<div class=\"row\" style=\"width:600px\">\
+             <span class=\"a\">\u{5f8c}</span><span class=\"b\">\u{5148}</span></div>",
+        );
+        let later = runs.iter().find(|run| run.text == "\u{5f8c}").expect("a");
+        let earlier = runs.iter().find(|run| run.text == "\u{5148}").expect("b");
+        assert!(
+            earlier.x < later.x,
+            "the lower `order` comes first: {runs:?}"
+        );
     }
 
     /// A block box breaks a line only at a block-level child, so its max-content
