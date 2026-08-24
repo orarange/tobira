@@ -100,6 +100,7 @@ enum BuiltinId {
     FunctionProtoCall,
     FunctionProtoApply,
     FunctionProtoBind,
+    FunctionProtoToString,
     FunctionConstructor,
     ErrorConstructor,
     TypeErrorConstructor,
@@ -3440,6 +3441,11 @@ impl Vm {
         self.define_builtin_method(function_prototype, "call", BuiltinId::FunctionProtoCall);
         self.define_builtin_method(function_prototype, "apply", BuiltinId::FunctionProtoApply);
         self.define_builtin_method(function_prototype, "bind", BuiltinId::FunctionProtoBind);
+        self.define_builtin_method(
+            function_prototype,
+            "toString",
+            BuiltinId::FunctionProtoToString,
+        );
 
         self.define_builtin_method(promise_prototype, "then", BuiltinId::PromiseProtoThen);
         self.define_builtin_method(promise_prototype, "catch", BuiltinId::PromiseProtoCatch);
@@ -4912,6 +4918,44 @@ impl Vm {
             }
         }
         Value::Object(object_ref)
+    }
+
+    /// What `Function.prototype.toString` reports for `value`.
+    ///
+    /// Engine-provided functions get the canonical NativeFunction form, which is
+    /// what feature detection compares against -- `Function.prototype.toString
+    /// .call(Object)` is used to recognise the real `Object`, and libraries test
+    /// for `[native code]` to decide whether a native implementation exists or
+    /// their polyfill is needed.
+    ///
+    /// Functions written in JS deliberately do *not* claim to be native. This
+    /// engine does not retain source text, so their body cannot be reproduced;
+    /// reporting them as native would be the more damaging lie, because a
+    /// library would then skip the polyfill it actually needs.
+    fn function_source_text(&mut self, value: &Value) -> Result<String, VmError> {
+        let Value::Object(object) = value else {
+            return Err(VmError::TypeError(
+                "Function.prototype.toString requires a function".to_string(),
+            ));
+        };
+        let Some(callable) = self.callables.get(&object.raw()) else {
+            return Err(VmError::TypeError(
+                "Function.prototype.toString requires a function".to_string(),
+            ));
+        };
+        let is_native = !matches!(callable, Callable::Closure(_));
+        let name = match self.get_own_property_descriptor(*object, &PropertyKey::from("name")) {
+            Some(JsPropertyDescriptor::Data {
+                value: Value::String(name),
+                ..
+            }) => self.string_text(name),
+            _ => String::new(),
+        };
+        Ok(if is_native {
+            format!("function {name}() {{ [native code] }}")
+        } else {
+            format!("function {name}() {{ /* source not retained */ }}")
+        })
     }
 
     /// Point a prototype back at its constructor.
@@ -9986,6 +10030,10 @@ impl Vm {
                     Some(value) => self.array_like_to_vec(value)?,
                 };
                 self.call_value_sync(target, this_arg, call_args)
+            }
+            BuiltinId::FunctionProtoToString => {
+                let text = self.function_source_text(&this_value)?;
+                Ok(self.make_string_value(&text))
             }
             BuiltinId::FunctionProtoBind => {
                 let target = this_value;
