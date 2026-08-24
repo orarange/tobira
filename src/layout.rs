@@ -1219,6 +1219,25 @@ fn layout_block_element(
         return;
     }
 
+    // A box that is itself a flex or grid container must not be laid out as a
+    // plain block. Only `layout_node` dispatched on `display`; every caller that
+    // places children itself -- a flex container sizing its items, a grid, a
+    // table cell, an absolutely positioned box -- came straight here and so
+    // ignored the box's own `display`. Yahoo! JAPAN's masthead is a flex row
+    // nested inside another flex row, and the inner one stacked its two service
+    // groups vertically instead of putting them side by side.
+    match element.style.display {
+        Display::Flex | Display::InlineFlex => {
+            layout_flex_container(element, x, width, cursor_y, context, images, fonts, current_form);
+            return;
+        }
+        Display::Grid | Display::InlineGrid => {
+            layout_grid_container(element, x, width, cursor_y, context, images, fonts, current_form);
+            return;
+        }
+        _ => {}
+    }
+
     if element.tag_name == "table" {
         let needs_layer = element.style.opacity < 255
             || element.style.filter_blur_px > 0
@@ -5561,6 +5580,10 @@ fn layout_flex_container(
     }
     let children = children;
 
+    // Everything drawn from here on belongs to this container's subtree, which
+    // is what `overflow: hidden` has to clip.
+    let clip_start_idx = context.commands.len();
+
     // Reserve a slot for background rect — insert placeholder now, update height later
     let bg_cmd_index = if let Some(background_color) = element.style.background_color {
         let blended = apply_opacity(background_color, context.background_color, element.style.effective_opacity);
@@ -5753,6 +5776,18 @@ fn layout_flex_container(
                     n as u32,
                 );
                 let mut cursor_x = content_x.saturating_add(start_offset);
+                if std::env::var_os("TOBIRA_DEBUG_FLEX").is_some() {
+                    eprintln!(
+                        "flexrow <{}> class={:?} content_x={content_x} w={content_width} items={:?}",
+                        element.tag_name,
+                        element.attributes.get("class").map(|c| c.chars().take(28).collect::<String>()),
+                        children.iter().zip(item_widths.iter()).map(|(c, w)| (
+                            c.tag_name.clone(),
+                            c.attributes.get("class").map(|s| s.chars().take(16).collect::<String>()).unwrap_or_default(),
+                            *w,
+                        )).collect::<Vec<_>>(),
+                    );
+                }
                 for (i, child) in children.iter().enumerate() {
                     let child_w = item_widths[i];
                     let child_y_offset = child_cross_offset(child, max_height, item_heights[i]);
@@ -5831,6 +5866,34 @@ fn layout_flex_container(
     }
 
     context.background_color = saved_bg;
+
+    // Only the block path clipped `overflow: hidden`, so a flex container never
+    // did. That was invisible while a nested flex box was mistakenly laid out as
+    // a block; once it dispatches on its own `display`, the gap shows. It
+    // matters for the same reason it does on the block path: the
+    // visually-hidden idiom (`position:absolute; width:1px; height:1px;
+    // overflow:hidden`) is on almost every page, and several of Yahoo! JAPAN's
+    // screen-reader headings are flex containers -- unclipped they printed down
+    // the left edge, one character to a line.
+    if element.style.overflow == Overflow::Hidden {
+        let clip_height = element
+            .style
+            .height
+            .map(|length| match length {
+                LengthValue::Pixels(px) => px,
+                other => resolve_length_value(other, background_height),
+            })
+            .unwrap_or(background_height);
+        clip_commands_to_box(
+            &mut context.commands,
+            clip_start_idx,
+            outer_x,
+            background_top,
+            outer_width,
+            clip_height,
+            fonts,
+        );
+    }
 
     // Draw borders
     if !element.style.border_style_none {
@@ -6090,6 +6153,42 @@ mod percentage_sizing_tests {
             "<div style=\"width:600px\"><div>ホームページに設定する</div></div>",
         );
         assert!(runs.len() > 1, "first-child should still apply: {runs:?}");
+    }
+
+    /// Only `layout_node` dispatched on `display`; a flex container placed its
+    /// items by calling the block path directly, so a flex box nested inside
+    /// another was laid out as a plain block and stacked its children. Yahoo!
+    /// JAPAN's masthead is exactly that shape, and its two service groups sat
+    /// one above the other instead of side by side.
+    #[test]
+    fn a_flex_container_nested_in_a_flex_row_still_lays_out_as_flex() {
+        let runs = text_runs(
+            ".outer{display:flex}.inner{display:flex}",
+            "<div class=\"outer\" style=\"width:600px\"><div class=\"inner\">\
+             <span>\u{4e00}</span><span>\u{4e8c}</span></div></div>",
+        );
+        let first = runs.iter().find(|run| run.text == "\u{4e00}").expect("first");
+        let second = runs.iter().find(|run| run.text == "\u{4e8c}").expect("second");
+        assert_eq!(
+            first.y, second.y,
+            "the inner container is a flex row, not a block: {runs:?}"
+        );
+    }
+
+    /// `overflow: hidden` was only ever clipped on the block path. Several of
+    /// Yahoo! JAPAN's screen-reader-only headings are flex containers, so once
+    /// they stopped being mistaken for blocks they printed down the left edge.
+    #[test]
+    fn a_flex_container_clips_overflow_hidden() {
+        let runs = text_runs(
+            ".vh{display:flex;position:absolute;width:1px;height:1px;overflow:hidden}",
+            "<div style=\"width:600px\"><div class=\"vh\">\
+             <span>\u{30ad}\u{30fc}\u{30ef}\u{30fc}\u{30c9}\u{5165}\u{529b}\u{88dc}\u{52a9}</span></div></div>",
+        );
+        assert!(
+            runs.is_empty(),
+            "a 1px box has room for no glyph at all: {runs:?}"
+        );
     }
 
     /// `flex-direction: row-reverse` lays items out from the far edge, which
