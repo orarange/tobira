@@ -2023,8 +2023,14 @@ fn layout_atomic_inline(
     // the content short by exactly the padding, so Yahoo! JAPAN's weather badge
     // -- 60px of text in a box with 6px of padding either side -- got 48px and
     // wrapped its last character onto a second line.
+    // Margins count too: the width handed to `layout_block_element` is the
+    // margin box, and it subtracts them before anything else. Yahoo! JAPAN's
+    // weather section headings carry 12px of side margins, so the heading text
+    // lost twelve pixels and dropped its last character to a second line.
     let surround = element.style.padding.left
         + element.style.padding.right
+        + element.style.margin.left.max(0) as u32
+        + element.style.margin.right.max(0) as u32
         + if element.style.border_style_none {
             0
         } else {
@@ -7027,6 +7033,21 @@ mod percentage_sizing_tests {
             vec!["\u{6975}\u{3081}\u{3066}\u{5371}\u{967a}"],
             "the badge must not wrap"
         );
+    }
+
+    /// Margins count towards an `inline-block`'s width for the same reason its
+    /// padding does: the width it is laid out at is the margin box. Yahoo!
+    /// JAPAN's weather headings carry 12px of side margins, and without them
+    /// the heading lost twelve pixels and dropped its last character.
+    #[test]
+    fn an_inline_block_reserves_room_for_its_own_margins() {
+        let runs = text_runs(
+            ".head{display:inline-block;margin-left:7px;margin-right:5px}",
+            "<div style=\"width:600px\"><span class=\"head\">\
+             \u{5730}\u{57df}\u{60c5}\u{5831}</span></div>",
+        );
+        let texts: Vec<&str> = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(texts, vec!["\u{5730}\u{57df}\u{60c5}\u{5831}"], "must not wrap");
     }
 
     /// It stays inline-level on the outside: two of them sit on one line.
