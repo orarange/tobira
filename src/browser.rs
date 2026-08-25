@@ -11,7 +11,7 @@ use crate::css::{
 use crate::error::Result;
 use crate::html::{Element, Node, parse_document};
 use crate::http::fetch;
-use crate::image::{ImageStore, decode_image};
+use crate::image::{ImageStore, decode_data_url, decode_image};
 use crate::js::{
     DomEventDispatchResult, DomEventRequest, JavaScriptSession, ProcessedScriptHtml,
     start_document_script_session,
@@ -1279,16 +1279,32 @@ fn annotate_resource_urls(document: &mut Node, base_url: &Url) {
     }
 }
 
+/// Fetch the bytes behind an image reference.
+///
+/// A `data:` URL carries its own payload and must not go anywhere near the
+/// network: nothing here understood them, so an inlined icon was resolved as a
+/// relative path and fetched from the site's own host, which of course 404s.
+/// Yahoo! JAPAN inlines all but three of the 59 images on its front page.
+fn image_bytes(reference: &str, base_url: Option<&Url>) -> Option<Vec<u8>> {
+    if reference.starts_with("data:") || reference.starts_with("DATA:") {
+        return decode_data_url(reference);
+    }
+    let url = match base_url {
+        Some(base) if !reference.starts_with("http://") && !reference.starts_with("https://") => {
+            base.resolve(reference).ok()?
+        }
+        _ => Url::parse(reference).ok()?,
+    };
+    fetch(&url).ok().map(|response| response.body)
+}
+
 fn collect_image_resources(document: &Node) -> ImageStore {
     let mut sources = Vec::new();
     collect_image_sources_into(document, &mut sources);
 
     let mut images = ImageStore::default();
     for source in sources {
-        let decoded = Url::parse(&source)
-            .ok()
-            .and_then(|url| fetch(&url).ok())
-            .and_then(|response| decode_image(&response.body).ok());
+        let decoded = image_bytes(&source, None).and_then(|bytes| decode_image(&bytes).ok());
         match decoded {
             Some(image) => images.insert(source, image),
             None => images.mark_failed(source),
@@ -1308,15 +1324,8 @@ fn collect_styled_background_images(styled: &StyledNode, base_url: &Url, images:
                 // references it. One undecodable SVG icon used to cost 274
                 // repeat requests on a single Wikipedia article.
                 if !images.was_attempted(url_str) {
-                    let resolved =
-                        if url_str.starts_with("http://") || url_str.starts_with("https://") {
-                            Url::parse(url_str).ok()
-                        } else {
-                            base_url.resolve(url_str).ok()
-                        };
-                    let decoded = resolved
-                        .and_then(|resolved_url| fetch(&resolved_url).ok())
-                        .and_then(|response| decode_image(&response.body).ok());
+                    let decoded = image_bytes(url_str, Some(base_url))
+                        .and_then(|bytes| decode_image(&bytes).ok());
                     match decoded {
                         Some(image) => images.insert(url_str.clone(), image),
                         None => images.mark_failed(url_str.clone()),

@@ -10,6 +10,7 @@ mod image;
 mod js;
 mod layout;
 mod render;
+mod svg;
 mod site_state;
 mod text;
 mod url;
@@ -255,6 +256,38 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
         println!("  cmd[{i}] = {}", s.chars().take(160).collect::<String>());
     }
     println!("element hitboxes    = {}", layout.element_hitboxes.len());
+
+    // What kinds of command the page actually produced, and how many images
+    // are formats the decoder cannot read.
+    {
+        use std::collections::BTreeMap;
+        fn tally(cmds: &[layout::DrawCommand], counts: &mut BTreeMap<&'static str, u32>, svg: &mut u32, other: &mut u32) {
+            for cmd in cmds {
+                let name = match cmd {
+                    layout::DrawCommand::Rect(_) => "rect",
+                    layout::DrawCommand::Text(_) => "text",
+                    layout::DrawCommand::Image(i) => {
+                        let is_svg = i.src.contains("image/svg") || i.src.trim_end().ends_with(".svg");
+                        if is_svg { *svg += 1 } else { *other += 1 }
+                        "image"
+                    }
+                    layout::DrawCommand::Gradient(_) => "gradient",
+                    layout::DrawCommand::Sticky(_) => "sticky",
+                    layout::DrawCommand::Layer(l) => {
+                        tally(&l.commands, counts, svg, other);
+                        "layer"
+                    }
+                };
+                *counts.entry(name).or_insert(0) += 1;
+            }
+        }
+        let mut counts = BTreeMap::new();
+        let (mut svg, mut other) = (0, 0);
+        tally(&layout.commands, &mut counts, &mut svg, &mut other);
+        let summary: Vec<String> = counts.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        println!("command mix         = {}", summary.join(" "));
+        println!("images              = {svg} svg / {other} raster");
+    }
     let mut boxes = layout.element_hitboxes.clone();
     boxes.sort_by_key(|b| std::cmp::Reverse(u64::from(b.width) * u64::from(b.height)));
     println!("largest boxes (node: WxH @ x,y):");
