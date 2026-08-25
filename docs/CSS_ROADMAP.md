@@ -42,7 +42,7 @@ Branch: `claude/phase2-css` (commit `fe18b04`)
 | `justify-content` | ✅ | `flex-start`, `flex-end`, `center`, `space-between`, `space-around`, `space-evenly` |
 | `align-items` | ✅ | `flex-start`, `flex-end`, `center`, `stretch`, `baseline` |
 | `align-self` | ✅ | Per-item override of `align-items` |
-| `flex-grow` / `flex-shrink` | ✅ | Space distribution |
+| `flex-grow` / `flex-shrink` | ✅ | Space distribution. **Correction (2026-08-25)**: `flex-shrink` was marked done here but only genuinely landed on 2026-08-25 (`620811c`). Treat older ✅ marks in this file as claims to spot-check, not facts. |
 | `flex-basis` | ✅ | Initial size before grow/shrink |
 | `flex` shorthand | ✅ | Expands to grow/shrink/basis |
 | `gap` / `row-gap` / `column-gap` | ✅ | Flex and grid gap |
@@ -152,7 +152,7 @@ Branch: `claude/phase5-css` (PR #49)
 | CSS `animation` / `@keyframes` | Low | Requires animation runtime and repaint loop |
 | `transition` interpolation | Low | Requires repaint loop and state diffing |
 | `position: sticky` scroll tracking | Medium | Requires scroll-offset propagation into layout |
-| `grid-template-areas` | Low | Named area placement |
+| `grid-template-areas` / `grid-area` | **High** | Named area placement. **Raised from Low on 2026-08-25**: this is not cosmetic, it breaks real pages. MDN's home page nests two grids laid out entirely with named areas; because we drop both properties the items auto-place, the `h1` lands in a narrow track, and the CJK heading renders one character per line. |
 | `grid-auto-flow` | Low | Dense packing auto-placement |
 | `counter()` / `counters()` | Low | CSS counters for lists |
 | `clip-path` | Low | Shape clipping |
@@ -163,6 +163,23 @@ Branch: `claude/phase5-css` (PR #49)
 | `::placeholder` GUI wiring | Low | Apply `::placeholder` style to input placeholder text |
 | `background-repeat` tiling | Low | Full tiling (repeat-x/y across element) |
 | `text-shadow` with blur | Low | Blur pass for text shadow (offset-only works now) |
+
+### Measured gaps (added 2026-08-25)
+
+`TOBIRA_DEBUG_CSS=1 tobira --dump-styled <url>` ranks the declarations the engine parsed and then discarded (`css::unsupported_property_report()`). This is the empirical worklist - prefer it over guessing. Recurring across Wikipedia / MDN / Google:
+
+| Gap | Why it is cheap | Seen |
+|---|---|---|
+| Logical properties (`margin-inline*`, `padding-inline`/`block`, `inset`, `inset-block-start`) | For LTR this is a direct map onto the physical properties we already have | All three sites |
+| Individual corner radii (`border-top-left-radius` etc.) | Only the `border-radius` shorthand is wired | 388 each on MDN |
+| `-webkit-text-decoration` | Pure alias for `text-decoration` | 3431 on MDN |
+| `word-wrap` / `overflow-wrap` / `word-break` | Line-breaking already exists; these select the policy | 966 on Wikipedia |
+| `counter-increment` / `counter-reset` | Pairs with the existing `list-style-type` work | 167 on Wikipedia |
+| `border-collapse` / `border-spacing` / `caption-side` | Table rendering already exists | Wikipedia |
+| `mask-image` family, `fill` (painting SVG from CSS), `clip-path` | Larger, mostly cosmetic | MDN / Google |
+
+**Do not rank by raw count.** `transition-*` and `animation-*` alone account for ~44,000 dropped declarations on a single Wikipedia article, but they are the known "no animation runtime" gap, not cheap wins.
+
 
 ---
 

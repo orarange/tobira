@@ -274,7 +274,7 @@ Whenever a phase lands or a new blocker shows up:
 | Phase 2: DOM Fidelity | 🟡 Partially done |
 | Phase 3: Storage & Cookies | ❌ Not started |
 | Phase 4: Networking | 🟡 Minimal implementation only |
-| Phase 5: Layout Reflow | ❌ Not started — **architectural blocker** |
+| Phase 5: Layout Reflow | ✅ **Done** — see the correction below (this row said "Not started — architectural blocker" until 2026-08-25) |
 | Phase 6: Framework Compat | ❌ Not started |
 | Phase 7: Media & APIs | ❌ Not started |
 
@@ -291,6 +291,10 @@ The current architecture computes layout **once** at page load and never again. 
 3. A hybrid: re-layout only the subtree that changed.
 
 None of these are small. Option 2 is the simplest to implement but will be slow on large pages. Option 1 is what real browsers do but takes months to build correctly. This is not a "Tasks: 4 bullet points" problem — it is an **architectural redesign** of the rendering pipeline, and it must be planned before Phase 3 and 4 work is finished, or the project will stall.
+
+> **⚠ Resolved — correction added 2026-08-25.** Everything above is preserved as the 2026-05-16 assessment, but it no > longer describes the code. Layout is **not** computed once and frozen: incremental restyle is implemented and **on by > default**. See `incremental_restyle_enabled()` in `src/browser.rs`, whose comment records that the incremental path is > byte-for-byte equivalent to a full rebuild (proven by the heavy-DOM equivalence tests) and falls back to a full rebuild > for anything it cannot handle. Supporting pieces: `compute_dirty_roots()`, `relayout()`, and the test > `apply_script_snapshot_uses_incremental_restyle_for_dom_mutations`. Landed in `7f7c890`. Set > `TOBIRA_INCREMENTAL_RESTYLE=0` to force the old always-full-rebuild path.
+>
+> What genuinely remains is **depth of invalidation**, not the architecture: more DOM/style mutation kinds need to be > recognised so they take the incremental path instead of falling back. Do not use this section as evidence that reflow > is unimplemented.
 
 
 

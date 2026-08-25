@@ -20,7 +20,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## Current Snapshot
 
-- Date: `2026-08-07`
+- Date: `2026-08-25`
 - Repo / package name: `tobira`
 - Working branch: `master`
 - Workflow:
@@ -29,8 +29,8 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   - **this checkout is a normal git repo as of 2026-08-07. Do NOT convert it back to a worktree** (see the 2026-08-07 session log entry — the parent repo was deleted and took the object database with it)
   - **push after every work cluster.** As of 2026-08-23 `origin/master` is current.
 - Verification status:
-- `cargo test`: `716` passing tests across `52` suites on `2026-08-07` (Windows checkout)
-- `cargo build`: success on `2026-06-19` (release; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks)
+- `cargo test`: `867` passing / `0` failed / `9` ignored across `64` suites on `2026-08-25` (Windows checkout). All 9 ignored are deliberate, not disabled failures: 6 React UMD printf diagnostics, 1 needing a local static server, 1 heavy-DOM benchmark, 1 manual large-bundle parse.
+- `cargo build`: success on `2026-08-25` (release, 1m57s; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks). 16 warnings, all dead-code.
 - North star / current goal:
   - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
   - Scope caveat: "閲覧・操作" means rendering the page's DOM/CSS and running its JS — **not** video playback. The `softbuffer` CPU renderer has no GPU compositing or media decode, so smooth YouTube *video* is out of scope for the current rendering backend (a separate, much larger effort: codecs + GPU).
@@ -185,7 +185,9 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
 - Actual media playback and a true YouTube watch experience are still incomplete.
 - CSS Phase 5 baseline is already part of the shared codebase; remaining CSS work is mostly the Phase 6 visual-effects / advanced-rendering surface.
-- CSS Phase 6 items remain: `transform: scale/rotate` rendering, `animation`/`@keyframes`, `transition`, `filter: blur()` rendering, `grid-template-areas`, RTL text.
+- CSS Phase 6 items remain: `transform: scale/rotate` rendering, `animation`/`@keyframes`, `transition`, `grid-template-areas` / `grid-area` (named areas), RTL text. (`filter: blur()` is **done** - see the CSS roadmap's Phase 6 Batch 1; this line used to list it as outstanding.)
+- **Named grid areas break real pages.** MDN's home page nests two grids (`.homepage` / `.homepage-header`) laid out with `grid-template-areas` + `grid-area: <name>`. We drop both, the items fall back to auto-placement, the `h1` lands in a narrow track, and the CJK heading renders one character per line. The CSS roadmap still files this under "Low" priority; it should be higher.
+- **The CSS worklist is now measurable.** `TOBIRA_DEBUG_CSS=1 tobira --dump-styled <url>` prints a ranked list of the declarations the engine parsed and then threw away (`css::unsupported_property_report()`). Recurring cheap wins across real sites: logical properties (`margin-inline*`, `padding-inline/block`, `inset`), individual corner radii (`border-top-left-radius` and friends - only the shorthand works today), the `-webkit-text-decoration` alias, wrapping (`word-wrap` / `overflow-wrap` / `word-break`), `counter-increment` / `counter-reset`, and table `border-collapse` / `border-spacing`. `transition-*` / `animation-*` dominate the counts but are the known no-animation-runtime gap - do not let the raw numbers set the priority.
 - JS support still needs storage/cookies, richer history/back-forward, and more DOM depth for app-shell sites.
 - text node `characterData` mutation notifications and `splitText(...)` are now in place for common DOM edit flows.
 
@@ -870,3 +872,40 @@ The project name is `tobira`; the old `browser` naming is being retired. Package
 - **Still to delete** (verified redundant, but the tool refused the recursive delete — do it by hand): `Z:\vscode\browser-claude`, `Z:\vscode\browser-codex`, `Z:\vscode\browser-content-thread`. These are worktree remnants whose `.git` is a dangling pointer into the deleted OneDrive path. Each was diffed against its branch tip (`feat/outline-text-decoration`, `codex/make-js-engine`, `codex/content-thread`) and matches exactly — no uncommitted work.
 - **Deliberately not renamed**: `src/browser.rs`. "The browser itself" is an accurate module name, and `tobira/src/tobira.rs` would be redundant. Left alone.
 - ~~**Known leftover**: `repomix-output.xmlbrowser.xml` is tracked but is a generated artifact with a mangled filename.~~ Resolved 2026-08-23: untracked and gitignored.
+
+### 2026-08-23..25 - Claude (CSS/layout conformance sprint; verified and merged)
+
+49 commits landed across three days (12 on 08-23, 20 on 08-24, 17 on 08-25). The last 21 were developed on the branch
+`worktree-css-html-conformance` in a dedicated worktree and have now been fast-forwarded into `master` (`ef607f2`) and pushed.
+Both `master` and that branch exist on `origin`; the branch is kept as a backup ref.
+
+- **What the sprint covered** (only 6 source files, +3681/-128, incl. the new `src/svg.rs` at 1299 lines):
+  - flex: reverse direction + `order`, `flex-shrink`, widths unified on the margin box, item content-width measurement,
+    nested containers that were ignoring their own `display`
+  - absolute positioning: spec-correct placement, `top`/`left: auto` keeping the static position, `bottom` pinning to the
+    bottom edge, plus four foundational fixes in one commit
+  - `inline-block` as an atomic inline, then its padding, then margins counted into its width (three successive commits)
+  - intrinsic width measured as "the widest line", and an element counting its own dimensions
+  - `calc()` percentages resolved against the containing block, `rem` against the root font size, `overflow: hidden`
+    actually clipping, SVG + `data:` URL images, a crash on large `viewBox`, and a comment-stripper that was corrupting UTF-8
+  - 49 new tests came with it (40 in `layout.rs`, 9 in `svg.rs`)
+- **Verified after the merge**: `cargo test` 867 passed / 0 failed / 9 ignored / 64 suites; `cargo build --release` clean in 1m57s.
+- **Real-page measurements** (release binary at `ef607f2`, via `TOBIRA_DEBUG_CSS=1 --dump-styled`):
+  - Wikipedia (ja, "HTML") - **healthy**: 3707 elements, 35 KB visible text, 1091 hitboxes, content laid out at the correct 1192px width
+  - MDN (ja) - content is all there but the layout collapses; cause traced to named grid areas, see Known Gaps
+  - Google top - 406 elements but only **188 bytes** of visible text against 82 KB hidden; still the known JS wall
+- **Tooling gained this sprint**: `--dump-styled` now also takes `TOBIRA_DUMP_DEPTH=<n>`, `TOBIRA_DUMP_IMAGES`, and
+  `TOBIRA_DUMP_TEXT`, and prints the command mix plus an svg/raster image split.
+- **Two roadmap documents were wrong and have been corrected** (details in each file):
+  - `docs/JS_ROADMAP.md` called Phase 5 (Layout Reflow) an unstarted "architectural blocker". It is implemented and on by
+    default - `incremental_restyle_enabled()` in `src/browser.rs`, with `compute_dirty_roots()` / `relayout()` and a
+    dedicated test. `TOBIRA_INCREMENTAL_RESTYLE=0` forces the old full-rebuild path.
+  - `docs/CSS_ROADMAP.md` marked `flex-shrink` complete back in Phase 2, yet it was genuinely implemented on 08-25.
+- **Housekeeping done in the same pass**: the redundant `.claude/worktrees/css-html-conformance` worktree was removed
+  (identical commit, nothing unique, 5.3 GB of `target/` reclaimed; its stale lock named a dead session whose PID had already
+  been recycled). The NAS copy at `Z:\vscode\tobira` was 50 commits stale at `c766553` and has been fast-forwarded to
+  `ef607f2`. Session transcripts and memory now back up to `Z:\vscode\claude-sessions` via
+  `~/.claude/scripts/backup-sessions.ps1` (run by hand; uses robocopy `/E`, never `/MIR`).
+- **Note for whoever writes here next**: this log had gone silent between 08-07 and 08-25 while 49 commits landed. The entries
+  above were reconstructed from `git log` and fresh measurements, so they are thinner on "what we tried and rejected" than the
+  older entries. Keep appending as you go.
