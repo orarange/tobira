@@ -5514,7 +5514,18 @@ fn flex_item_content_width(
     // doesn't cover margin.right — add it, or the item's slot is too narrow and a
     // later height-measure at that width wraps the content (a one-line span
     // ballooned to two lines, pushing every other flex item down).
-    (w as i64 + child.style.margin.right as i64).max(1) as u32
+    let result = (w as i64 + child.style.margin.right as i64).max(1) as u32;
+    if std::env::var_os("TOBIRA_DEBUG_ITEM").is_some() {
+        eprintln!(
+            "item <{}> class={:?} avail={avail_width} painted={w} -> {result} pad=({},{}) border=({},{}) margin=({},{})",
+            child.tag_name,
+            child.attributes.get("class").map(|c| c.chars().take(24).collect::<String>()),
+            child.style.padding.left, child.style.padding.right,
+            child.style.border.left, child.style.border.right,
+            child.style.margin.left, child.style.margin.right,
+        );
+    }
+    result
 }
 
 fn layout_flex_container(
@@ -5632,6 +5643,15 @@ fn layout_flex_container(
             let base_widths: Vec<u32> = children
                 .iter()
                 .map(|child| {
+                    // Flex arithmetic works in margin boxes: the placement loop
+                    // advances the cursor by the slot width, and the child then
+                    // carves its own margins out of that slot. The intrinsic
+                    // measurement already reports a margin box, so strip the
+                    // margins off it here -- the min/max clamps below apply to
+                    // the box itself -- and add them back at the end. An
+                    // explicit `width` is not a margin box and needs them added.
+                    let margins = child.style.margin.left.max(0) as u32
+                        + child.style.margin.right.max(0) as u32;
                     let base = if let Some(w) = child.style.width.as_ref() {
                         resolve(w)
                     } else if let Some(b) = child.style.flex_basis.as_ref() {
@@ -5645,6 +5665,7 @@ fn layout_flex_container(
                             context.background_color,
                         )
                         .min(content_width)
+                        .saturating_sub(margins)
                     };
                     // `min-width` / `max-width` bound a flex item's base size
                     // just as they bound any other box. Skipping them let a
@@ -5663,28 +5684,22 @@ fn layout_flex_container(
                         .as_ref()
                         .map(|length| resolve(length))
                         .unwrap_or(u32::MAX);
-                    base.min(max).max(min.min(max)).max(1)
+                    base.min(max).max(min.min(max)).max(1).saturating_add(margins)
                 })
                 .collect();
 
-            let margins_total: i64 = children
-                .iter()
-                .map(|c| c.style.margin.left as i64 + c.style.margin.right as i64)
-                .sum();
+            // Every width below is a margin box, so margins must not be
+            // subtracted again. Counting them twice shrank rows that already
+            // fitted: Yahoo! JAPAN's top-right navigation lost 25px this way and
+            // wrapped "ホームページに設定する" onto two lines.
             let base_sum: u32 = base_widths.iter().sum();
             let mut item_widths = base_widths.clone();
-            if base_sum
-                .saturating_add(margins_total.max(0) as u32)
-                .saturating_add(total_gap)
-                > content_width
+            if base_sum.saturating_add(total_gap) > content_width
                 && element.style.flex_wrap == FlexWrap::NoWrap
                 && base_sum > 0
             {
                 // Single-line overflow: shrink items proportionally to fit.
-                let avail = content_width
-                    .saturating_sub(total_gap)
-                    .saturating_sub(margins_total.max(0) as u32)
-                    .max(1);
+                let avail = content_width.saturating_sub(total_gap).max(1);
                 for w in item_widths.iter_mut() {
                     *w = (((*w as u64) * (avail as u64)) / base_sum as u64).max(1) as u32;
                 }
@@ -5692,7 +5707,6 @@ fn layout_flex_container(
                 // Distribute free space to growers (flex-grow), proportionally.
                 let free = content_width
                     .saturating_sub(base_sum)
-                    .saturating_sub(margins_total.max(0) as u32)
                     .saturating_sub(total_gap);
                 let total_grow: u32 = children.iter().map(|c| c.style.flex_grow).sum();
                 if free > 0 && total_grow > 0 {
@@ -5705,7 +5719,7 @@ fn layout_flex_container(
                     }
                 }
             }
-            let total_fixed: i64 = item_widths.iter().map(|w| *w as i64).sum::<i64>() + margins_total;
+            let total_fixed: i64 = item_widths.iter().map(|w| *w as i64).sum::<i64>();
 
             // Measure heights at the final item widths (wrapping depends on width).
             let item_heights: Vec<u32> = children
@@ -6153,6 +6167,27 @@ mod percentage_sizing_tests {
             "<div style=\"width:600px\"><div>ホームページに設定する</div></div>",
         );
         assert!(runs.len() > 1, "first-child should still apply: {runs:?}");
+    }
+
+    /// Flex arithmetic works in margin boxes, and an item's margins were counted
+    /// twice: once inside its measured base size and again in the row's total.
+    /// A row that fitted was shrunk anyway -- Yahoo! JAPAN's top-right
+    /// navigation lost 25px that way and wrapped its first label onto a second
+    /// line.
+    #[test]
+    fn flex_item_margins_are_counted_once() {
+        let runs = text_runs(
+            ".row{display:flex}.b{margin-left:40px}",
+            "<div class=\"row\" style=\"width:280px\">\
+             <span class=\"a\">\u{30db}\u{30fc}\u{30e0}\u{30da}\u{30fc}\u{30b8}\u{306b}\u{8a2d}\u{5b9a}\u{3059}\u{308b}</span>\
+             <span class=\"b\">\u{30d8}\u{30eb}\u{30d7}</span></div>",
+        );
+        let texts: Vec<&str> = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["\u{30db}\u{30fc}\u{30e0}\u{30da}\u{30fc}\u{30b8}\u{306b}\u{8a2d}\u{5b9a}\u{3059}\u{308b}", "\u{30d8}\u{30eb}\u{30d7}"],
+            "the row fits in 280px, so nothing may wrap"
+        );
     }
 
     /// Only `layout_node` dispatched on `display`; a flex container placed its
