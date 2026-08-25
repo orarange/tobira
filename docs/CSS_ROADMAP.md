@@ -144,6 +144,23 @@ Branch: `claude/phase5-css` (PR #49)
 | `background-repeat` | ✅ | `Repeat`, `NoRepeat`, `RepeatX`, `RepeatY` (single-tile for now) |
 | `background-position` | ✅ | x/y as 0–100 percent |
 
+### Phase 6 Batch 3 ✅ (2026-08-26) — grid
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `grid-template-areas` / `grid-area` | ✅ | Named areas parsed into rectangles at parse time, with the spec's validity rules (equal token counts, each area a filled rectangle); an invalid template is dropped whole. A period run is one null cell. |
+| Named grid lines | ✅ | `[name]` groups in a track list, and `<custom-ident>` placement (`grid-column: content`). A bare name fills both edges and falls back to `name-start` / `name-end`. |
+| `minmax()` | ✅ | Resolves to its maximum. Previously unparseable, which dropped the track and shifted later items a column left. |
+| `grid-template` shorthand | ✅ | `<rows> / <columns>`, including the form where the rows are area strings with sizes between them. |
+| Content-sized track measurement | ✅ | `min-content` / `max-content` sized from their contents and left there; `auto` measured as a floor then stretched. Measurement is clamped to the container. |
+
+Verified against real pages at viewport 1280: MDN's hero heading went from one CJK character per line
+(40px × 7 runs) to a single 280px run, `content_height` 25695 → 4915; Wikipedia's article column moved
+from a full-width x=44 block to x=240 / 996px wide, whose inner 948px matches its `minmax(0,59.25rem)`.
+
+Still open: `grid-auto-flow: dense`, `fit-content()`, `repeat()` with line names inside, subgrid, and the
+full `grid` shorthand (implicit tracks + auto-flow).
+
 ### Phase 6 Remaining ❌
 
 | Feature | Priority | Notes |
@@ -152,7 +169,6 @@ Branch: `claude/phase5-css` (PR #49)
 | CSS `animation` / `@keyframes` | Low | Requires animation runtime and repaint loop |
 | `transition` interpolation | Low | Requires repaint loop and state diffing |
 | `position: sticky` scroll tracking | Medium | Requires scroll-offset propagation into layout |
-| `grid-template-areas` / `grid-area` | **High** | Named area placement. **Raised from Low on 2026-08-25**: this is not cosmetic, it breaks real pages. MDN's home page nests two grids laid out entirely with named areas; because we drop both properties the items auto-place, the `h1` lands in a narrow track, and the CJK heading renders one character per line. |
 | `grid-auto-flow` | Low | Dense packing auto-placement |
 | `counter()` / `counters()` | Low | CSS counters for lists |
 | `clip-path` | Low | Shape clipping |
