@@ -4938,9 +4938,9 @@ fn apply_opacity(color: Color, background: Color, opacity: u8) -> Color {
 
 fn layout_positioned_element(
     element: &StyledElement,
-    _x: u32,
+    static_x: u32,
     container_width: u32,
-    _cursor_y: &mut u32,
+    static_y: &mut u32,
     context: &mut LayoutContext,
     images: &ImageStore,
     fonts: &mut FontContext,
@@ -4951,6 +4951,12 @@ fn layout_positioned_element(
     } else {
         context.containing_block_origin
     };
+    // With `top`/`left` auto the box keeps its *static position* -- where it
+    // would have sat in flow -- rather than jumping to the containing block's
+    // corner. Yahoo! JAPAN marks each headline with an absolutely positioned
+    // `::before` dot that sets only `left`, so pinning it to the top of the
+    // article drew the dot a line above the headline it belongs to.
+    let static_y = *static_y;
 
     let border_x = if element.style.border_style_none {
         0
@@ -5005,9 +5011,12 @@ fn layout_positioned_element(
             - right as i64
             - elem_width as i64)
             .max(0) as u32,
-        (None, None) => base_x,
+        (None, None) => static_x.max(base_x),
     };
-    let mut cursor_y = (base_y as i64 + element.style.top.unwrap_or(0) as i64).max(0) as u32;
+    let mut cursor_y = match element.style.top {
+        Some(top) => (base_y as i64 + top as i64).max(0) as u32,
+        None => static_y.max(base_y),
+    };
     if std::env::var_os("TOBIRA_DEBUG_POS").is_some() {
         eprintln!(
             "abspos <{}> class={:?} base=({base_x},{base_y}) left={:?} top={:?} -> {x},{cursor_y}",
@@ -6194,6 +6203,24 @@ mod percentage_sizing_tests {
             "<div style=\"width:600px\"><div>ホームページに設定する</div></div>",
         );
         assert!(runs.len() > 1, "first-child should still apply: {runs:?}");
+    }
+
+    /// With `top` / `left` auto an absolutely positioned box keeps its *static
+    /// position* -- where it would have sat in flow -- instead of jumping to the
+    /// corner of its containing block.
+    #[test]
+    fn an_auto_offset_keeps_the_static_position() {
+        let runs = text_runs(
+            ".host{position:relative}.pin{position:absolute;left:0}",
+            "<div class=\"host\" style=\"width:600px\">\
+             <div style=\"height:40px\">\u{4e0a}</div>\
+             <div class=\"pin\">\u{5370}</div></div>",
+        );
+        let pin = runs.iter().find(|run| run.text == "\u{5370}").expect("pin");
+        assert!(
+            pin.y >= 40,
+            "the box stays below the block it follows: {pin:?}"
+        );
     }
 
     /// `flex-shrink` was parsed and then never read: an overflowing row shrank
