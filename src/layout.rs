@@ -2017,9 +2017,31 @@ fn layout_atomic_inline(
     fonts: &mut FontContext,
     current_form: Option<FormContext>,
 ) -> Option<AtomicInline> {
+    // The box has to hold its content *and* its own padding and borders: the
+    // width handed to `layout_block_element` is an outer width, and it carves
+    // those out again. Sizing the box to the bare content width therefore left
+    // the content short by exactly the padding, so Yahoo! JAPAN's weather badge
+    // -- 60px of text in a box with 6px of padding either side -- got 48px and
+    // wrapped its last character onto a second line.
+    let surround = element.style.padding.left
+        + element.style.padding.right
+        + if element.style.border_style_none {
+            0
+        } else {
+            element.style.border.left + element.style.border.right
+        };
     let width = match element.style.width {
-        Some(length) => resolve_length_value(length, available_width),
-        None => measure_cell_preferred_width(element, 0, images, fonts).min(available_width),
+        // An explicit width is the content box unless `box-sizing` says
+        // otherwise, so the surround is added on top of it.
+        Some(length) => {
+            let width = resolve_length_value(length, available_width);
+            if element.style.box_sizing == BoxSizing::BorderBox {
+                width
+            } else {
+                width.saturating_add(surround)
+            }
+        }
+        None => measure_cell_preferred_width(element, 0, images, fonts).saturating_add(surround),
     }
     .min(available_width)
     .max(1);
@@ -6984,6 +7006,27 @@ mod percentage_sizing_tests {
         );
         let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
         assert_eq!(shown, "見出し", "got {runs:?}");
+    }
+
+    /// An `inline-block` has to hold its content *and* its own padding: the
+    /// width it is laid out at is an outer width, and the block path carves the
+    /// padding out of it again. Sizing the box to the bare content width left
+    /// the content short by exactly the padding -- Yahoo! JAPAN's weather badge
+    /// is 60px of text in a box with 6px either side, got 48px, and wrapped its
+    /// last character onto a second line.
+    #[test]
+    fn an_inline_block_reserves_room_for_its_own_padding() {
+        let runs = text_runs(
+            ".badge{display:inline-block;padding:0 6px}",
+            "<div style=\"width:600px\"><span class=\"badge\">\
+             \u{6975}\u{3081}\u{3066}\u{5371}\u{967a}</span></div>",
+        );
+        let texts: Vec<&str> = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["\u{6975}\u{3081}\u{3066}\u{5371}\u{967a}"],
+            "the badge must not wrap"
+        );
     }
 
     /// It stays inline-level on the outside: two of them sit on one line.
