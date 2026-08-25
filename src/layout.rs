@@ -492,6 +492,30 @@ struct LayoutContext {
     /// The height is only known when an ancestor states one, so a percentage
     /// `top` falls back to zero rather than to a guess.
     containing_block_size: (u32, u32),
+    /// Boxes placed by `bottom` with `top` auto, waiting for the height of the
+    /// block that contains them.
+    pending_bottom: Vec<PendingBottom>,
+}
+
+/// A box anchored to the bottom of its containing block.
+///
+/// `bottom` cannot be resolved when the box is laid out: the containing block's
+/// height is not known until its own children are done, and the box is one of
+/// them. So the box is drawn at its static position, its output is remembered,
+/// and the containing block moves it once it knows how tall it turned out.
+#[derive(Debug, Clone)]
+struct PendingBottom {
+    /// Index into `positioned_commands` of this box's drawing.
+    slot: usize,
+    /// Where the box's links, controls and hitboxes start in the context, so
+    /// they move with it.
+    links_from: usize,
+    controls_from: usize,
+    hitboxes_from: usize,
+    /// Where the box was drawn, and how tall it is.
+    drawn_top: u32,
+    height: u32,
+    offset: LengthValue,
 }
 
 impl Default for LayoutContext {
@@ -510,6 +534,7 @@ impl Default for LayoutContext {
             container_height: None,
             list_ordinal: None,
             containing_block_size: (0, 0),
+            pending_bottom: Vec::new(),
         }
     }
 }
@@ -1549,7 +1574,11 @@ fn layout_block_element(
     // badges piled up on the masthead instead of sitting beside their entries.
     let saved_origin = context.containing_block_origin;
     let saved_cb_size = context.containing_block_size;
-    if element.style.position != Position::Static {
+    // Anything anchored to this block's bottom edge is recorded from here on,
+    // and settled below once the block's height is known.
+    let pending_mark = context.pending_bottom.len();
+    let establishes_containing_block = element.style.position != Position::Static;
+    if establishes_containing_block {
         context.containing_block_origin = (outer_x, background_top);
         context.containing_block_size = (outer_width, definite_height(&element.style));
     }
@@ -1616,6 +1645,13 @@ fn layout_block_element(
         cursor_y,
         parent_container_height,
     );
+
+    // The block's own bottom padding is part of its height, and it is exactly
+    // the room a page reserves for a box anchored there -- so settle against
+    // the finished box height, not against the content height.
+    if establishes_containing_block {
+        settle_bottom_anchored(context, pending_mark, background_top, background_height);
+    }
 
     // Emit element hitbox for interactive state (hover/focus) detection
     if let Some(node_id) = element_node_id(element) {
@@ -2199,7 +2235,11 @@ fn layout_block_element_as_layer(
     // badges piled up on the masthead instead of sitting beside their entries.
     let saved_origin = context.containing_block_origin;
     let saved_cb_size = context.containing_block_size;
-    if element.style.position != Position::Static {
+    // Anything anchored to this block's bottom edge is recorded from here on,
+    // and settled below once the block's height is known.
+    let pending_mark = context.pending_bottom.len();
+    let establishes_containing_block = element.style.position != Position::Static;
+    if establishes_containing_block {
         context.containing_block_origin = (outer_x, background_top);
         context.containing_block_size = (outer_width, definite_height(&element.style));
     }
@@ -2260,6 +2300,13 @@ fn layout_block_element_as_layer(
         cursor_y,
         parent_container_height,
     );
+
+    // The block's own bottom padding is part of its height, and it is exactly
+    // the room a page reserves for a box anchored there -- so settle against
+    // the finished box height, not against the content height.
+    if establishes_containing_block {
+        settle_bottom_anchored(context, pending_mark, background_top, final_height);
+    }
 
     if let Some(shadow_idx) = shadow_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(shadow_idx) {
@@ -4760,6 +4807,48 @@ fn measure_cell_min_width(
     max_width.saturating_add(padding.saturating_mul(2)).max(1)
 }
 
+/// Move the boxes anchored to this block's bottom edge, now that its height is
+/// known. Anything recorded before `mark` belongs to an outer block.
+fn settle_bottom_anchored(
+    context: &mut LayoutContext,
+    mark: usize,
+    block_top: u32,
+    block_height: u32,
+) {
+    if context.pending_bottom.len() <= mark {
+        return;
+    }
+    let pending: Vec<PendingBottom> = context.pending_bottom.drain(mark..).collect();
+    for box_ in pending {
+        let offset = resolve_offset(box_.offset, block_height);
+        let target = (block_top as i64 + block_height as i64)
+            .saturating_sub(offset as i64)
+            .saturating_sub(box_.height as i64)
+            .max(0) as u32;
+        let dy = target as i64 - box_.drawn_top as i64;
+        if dy == 0 {
+            continue;
+        }
+        if let Some((_, commands)) = context.positioned_commands.get_mut(box_.slot) {
+            for command in commands.iter_mut() {
+                shift_command_signed(command, 0, dy as i32);
+            }
+        }
+        let shift = |value: &mut u32| {
+            *value = (*value as i64 + dy).max(0) as u32;
+        };
+        for link in context.links.iter_mut().skip(box_.links_from) {
+            shift(&mut link.y);
+        }
+        for control in context.controls.iter_mut().skip(box_.controls_from) {
+            shift(&mut control.y);
+        }
+        for hitbox in context.element_hitboxes.iter_mut().skip(box_.hitboxes_from) {
+            shift(&mut hitbox.y);
+        }
+    }
+}
+
 /// The height a box states outright, if it states one in pixels.
 ///
 /// A percentage `top` needs a definite containing-block height; when no
@@ -5145,9 +5234,10 @@ fn layout_positioned_element(
     };
     if std::env::var_os("TOBIRA_DEBUG_POS").is_some() {
         eprintln!(
-            "abspos <{}> class={:?} base=({base_x},{base_y}) cb=({cb_width},{cb_height}) left={left:?} top={top:?} -> {x},{cursor_y}",
+            "abspos <{}> class={:?} base=({base_x},{base_y}) cb=({cb_width},{cb_height}) left={left:?} top={top:?} right={right:?} bottom={:?} -> {x},{cursor_y}",
             element.tag_name,
             element.attributes.get("class").map(|c| c.chars().take(30).collect::<String>()),
+            element.style.bottom,
         );
     }
 
@@ -5166,12 +5256,34 @@ fn layout_positioned_element(
     // Use sub_context for form allocation so next_form_id counter stays consistent
     // when propagated back — avoids form_id going backwards if element is a <form>
     let current_form = form_context_for_element(element, &mut sub_context, current_form);
+    let box_top = cursor_y;
     layout_block_element(element, x, elem_width, &mut cursor_y, &mut sub_context, images, fonts, current_form);
     let z = element.style.z_index.unwrap_or(0);
+    let slot = context.positioned_commands.len();
+    let links_from = context.links.len();
+    let controls_from = context.controls.len();
+    let hitboxes_from = context.element_hitboxes.len();
     context.positioned_commands.push((z, sub_context.commands));
     context.links.extend(sub_context.links);
     context.controls.extend(sub_context.controls);
     context.element_hitboxes.extend(sub_context.element_hitboxes);
+
+    // Anchored to the bottom: hand it to the containing block to finish once it
+    // knows its own height.
+    if top.is_none()
+        && let Some(offset) = element.style.bottom
+        && element.style.position != Position::Fixed
+    {
+        context.pending_bottom.push(PendingBottom {
+            slot,
+            links_from,
+            controls_from,
+            hitboxes_from,
+            drawn_top: box_top,
+            height: cursor_y.saturating_sub(box_top),
+            offset,
+        });
+    }
     context.next_control_id = sub_context.next_control_id;
     context.next_form_id = sub_context.next_form_id;
 }
@@ -5814,7 +5926,11 @@ fn layout_flex_container(
     // far left.
     let saved_origin = context.containing_block_origin;
     let saved_cb_size = context.containing_block_size;
-    if element.style.position != Position::Static {
+    // Anything anchored to this block's bottom edge is recorded from here on,
+    // and settled below once the block's height is known.
+    let pending_mark = context.pending_bottom.len();
+    let establishes_containing_block = element.style.position != Position::Static;
+    if establishes_containing_block {
         context.containing_block_origin = (outer_x, background_top);
         context.containing_block_size = (outer_width, definite_height(&element.style));
     }
@@ -6213,6 +6329,14 @@ fn layout_flex_container(
         );
     }
 
+    if establishes_containing_block {
+        settle_bottom_anchored(
+            context,
+            pending_mark,
+            background_top,
+            cursor_y.saturating_sub(background_top),
+        );
+    }
     context.containing_block_origin = saved_origin;
     context.containing_block_size = saved_cb_size;
 
@@ -6472,6 +6596,27 @@ mod percentage_sizing_tests {
         let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
         assert!(shown.contains('\u{88f8}'), "the bare text must survive: {runs:?}");
         assert!(shown.contains('\u{4ed8}'));
+    }
+
+    /// `bottom` anchors a box to the bottom edge of its containing block. It
+    /// cannot be resolved while the box is laid out -- the containing block's
+    /// height is not known until its children are done, and the box is one of
+    /// them -- so the box is drawn at its static position and moved once the
+    /// block knows how tall it turned out. Ignoring `bottom` outright left
+    /// Yahoo! JAPAN's "more" links at the top of its topics box.
+    #[test]
+    fn bottom_anchors_a_box_to_the_bottom_of_its_containing_block() {
+        let runs = text_runs(
+            ".host{position:relative}.pin{position:absolute;bottom:0;left:0}",
+            "<div class=\"host\"><div style=\"height:200px\">\u{4e2d}</div>\
+             <div class=\"pin\">\u{4e0b}</div></div>",
+        );
+        let pinned = runs.iter().find(|run| run.text == "\u{4e0b}").expect("pinned");
+        let above = runs.iter().find(|run| run.text == "\u{4e2d}").expect("above");
+        assert!(
+            pinned.y > above.y + 100,
+            "the box belongs at the foot of a 200px block: {runs:?}"
+        );
     }
 
     /// A percentage offset resolves against the containing block -- `left` and
