@@ -31,6 +31,28 @@ fn list_marker_text(style: &ComputedStyle, ordinal: u32) -> Option<String> {
     })
 }
 
+/// Where a box's border edge sits, honouring `margin-left/right: auto`.
+///
+/// Two auto margins share the leftover space equally -- the idiom that centres
+/// a fixed-width band on the page. Only the block path did this; a flex or grid
+/// container with `width: 990px; margin: 0 auto` was pinned to the left edge,
+/// which on Yahoo! JAPAN put the masthead band 145px off and dragged the logo
+/// pinned inside it along with it.
+fn outer_x_with_auto_margins(
+    style: &ComputedStyle,
+    container_x: u32,
+    container_width: u32,
+    outer_width: u32,
+) -> u32 {
+    if style.margin_left_auto && style.margin_right_auto && outer_width < container_width {
+        return container_x.saturating_add(container_width.saturating_sub(outer_width) / 2);
+    }
+    if style.margin_left_auto && !style.margin_right_auto && outer_width < container_width {
+        return container_x.saturating_add(container_width.saturating_sub(outer_width));
+    }
+    offset_x_by_margin(container_x, style.margin.left)
+}
+
 fn advance_by_margin(cursor: u32, m: i32) -> u32 {
     (cursor as i64 + m as i64).max(0) as u32
 }
@@ -466,6 +488,10 @@ struct LayoutContext {
     /// Ordinal of the list item about to be laid out, set by its container.
     /// `None` for anything that is not a numbered item.
     list_ordinal: Option<u32>,
+    /// Size of the containing block, which percentage offsets resolve against.
+    /// The height is only known when an ancestor states one, so a percentage
+    /// `top` falls back to zero rather than to a guess.
+    containing_block_size: (u32, u32),
 }
 
 impl Default for LayoutContext {
@@ -483,6 +509,7 @@ impl Default for LayoutContext {
             positioned_commands: Vec::new(),
             container_height: None,
             list_ordinal: None,
+            containing_block_size: (0, 0),
         }
     }
 }
@@ -1521,8 +1548,10 @@ fn layout_block_element(
     // wraps each rank badge in a `position: relative` inline span, so all five
     // badges piled up on the masthead instead of sitting beside their entries.
     let saved_origin = context.containing_block_origin;
+    let saved_cb_size = context.containing_block_size;
     if element.style.position != Position::Static {
         context.containing_block_origin = (outer_x, background_top);
+        context.containing_block_size = (outer_width, definite_height(&element.style));
     }
 
     let content_x = outer_x
@@ -1574,6 +1603,7 @@ fn layout_block_element(
         );
     }
     context.containing_block_origin = saved_origin;
+    context.containing_block_size = saved_cb_size;
     context.container_height = saved_container_height;
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
@@ -1719,8 +1749,12 @@ fn layout_block_element(
 
     // position: relative — apply visual offset without affecting flow
     if element.style.position == Position::Relative {
-        let dx = element.style.left.unwrap_or(0) as i32 - element.style.right.unwrap_or(0) as i32;
-        let dy = element.style.top.unwrap_or(0) as i32 - element.style.bottom.unwrap_or(0) as i32;
+        let (cb_width, cb_height) = context.containing_block_size;
+        let offset = |length: Option<LengthValue>, basis: u32| {
+            length.map_or(0, |length| resolve_offset(length, basis))
+        };
+        let dx = offset(element.style.left, cb_width) - offset(element.style.right, cb_width);
+        let dy = offset(element.style.top, cb_height) - offset(element.style.bottom, cb_height);
         if dx != 0 || dy != 0 {
             for cmd in &mut context.commands[block_cmd_start..] {
                 shift_command_signed(cmd, dx, dy);
@@ -1730,7 +1764,11 @@ fn layout_block_element(
 
     // position: sticky — wrap commands in a StickyCommand for scroll-aware rendering
     if element.style.position == Position::Sticky {
-        if let Some(top_px) = element.style.top {
+        if let Some(top_px) = element
+            .style
+            .top
+            .map(|length| resolve_offset(length, context.containing_block_size.1))
+        {
             let height = cursor_y.saturating_sub(background_top).max(1);
             let mut sticky_cmds: Vec<DrawCommand> = context.commands.drain(block_cmd_start..).collect();
             rebase_commands(&mut sticky_cmds, outer_x, background_top);
@@ -2160,8 +2198,10 @@ fn layout_block_element_as_layer(
     // wraps each rank badge in a `position: relative` inline span, so all five
     // badges piled up on the masthead instead of sitting beside their entries.
     let saved_origin = context.containing_block_origin;
+    let saved_cb_size = context.containing_block_size;
     if element.style.position != Position::Static {
         context.containing_block_origin = (outer_x, background_top);
+        context.containing_block_size = (outer_width, definite_height(&element.style));
     }
 
     let content_x = outer_x
@@ -2208,6 +2248,7 @@ fn layout_block_element_as_layer(
         );
     }
     context.containing_block_origin = saved_origin;
+    context.containing_block_size = saved_cb_size;
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     let content_height = cursor_y.saturating_sub(background_top).max(1);
@@ -4719,6 +4760,18 @@ fn measure_cell_min_width(
     max_width.saturating_add(padding.saturating_mul(2)).max(1)
 }
 
+/// The height a box states outright, if it states one in pixels.
+///
+/// A percentage `top` needs a definite containing-block height; when no
+/// ancestor gives one there is nothing honest to resolve against, so callers
+/// fall back to zero rather than guessing.
+fn definite_height(style: &ComputedStyle) -> u32 {
+    match style.height {
+        Some(LengthValue::Pixels(px)) => px,
+        _ => 0,
+    }
+}
+
 /// Whether this box puts all of its children on one axis, so that its
 /// max-content width is the sum of theirs rather than the widest of them.
 fn lays_children_out_in_a_row(style: &ComputedStyle) -> bool {
@@ -4946,6 +4999,25 @@ fn parse_attribute_length_value(value: Option<&String>) -> Option<LengthValue> {
     raw.parse::<u32>().ok().map(LengthValue::Pixels)
 }
 
+/// Resolve a box offset against its containing block.
+///
+/// Signed, unlike a width: `left: -20px` and `top: -1px` are everyday values,
+/// and so is `left: 50%`, whose percentage is of the containing block and not
+/// of the font size.
+fn resolve_offset(length: LengthValue, basis: u32) -> i32 {
+    match length {
+        LengthValue::Pixels(px) => px.min(i32::MAX as u32) as i32,
+        LengthValue::Percent(percent) => ((basis as i64 * percent as i64) / 100) as i32,
+        LengthValue::Calc { percent_hundredths, px } => {
+            ((basis as i64 * percent_hundredths as i64) / 10_000 + px as i64)
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32
+        }
+        LengthValue::MinContent => 0,
+        LengthValue::MaxContent => basis.min(i32::MAX as u32) as i32,
+        LengthValue::FitContent(px) => basis.min(px).min(i32::MAX as u32) as i32,
+    }
+}
+
 fn resolve_length_value(length: LengthValue, available_width: u32) -> u32 {
     match length {
         LengthValue::Pixels(value) => value,
@@ -5017,7 +5089,18 @@ fn layout_positioned_element(
         LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(*percent_hundredths, *px, container_width),
     });
 
-    let elem_width = match (specified_width, element.style.left, element.style.right) {
+    // `left` / `right` resolve against the containing block's width, `top` /
+    // `bottom` against its height. The height is only known when an ancestor
+    // states one, so a percentage `top` falls back to zero.
+    let (cb_width, cb_height) = {
+        let (width, height) = context.containing_block_size;
+        (if width == 0 { container_width } else { width }, height)
+    };
+    let left = element.style.left.map(|length| resolve_offset(length, cb_width));
+    let right = element.style.right.map(|length| resolve_offset(length, cb_width));
+    let top = element.style.top.map(|length| resolve_offset(length, cb_height));
+
+    let elem_width = match (specified_width, left, right) {
         (Some(width), _, _) => width,
         // Both edges pinned: the offsets themselves determine the width.
         (None, Some(left), Some(right)) => container_width
@@ -5045,7 +5128,7 @@ fn layout_positioned_element(
         .unwrap_or(u32::MAX);
     let elem_width = elem_width.min(max_width).max(min_width.min(max_width)).max(1);
 
-    let x = match (element.style.left, element.style.right) {
+    let x = match (left, right) {
         (Some(left), _) => (base_x as i64 + left as i64).max(0) as u32,
         // Only `right` is given, so it is the box's *right* edge that is placed,
         // that far in from the containing block's right edge. Ignoring `right`
@@ -5056,17 +5139,15 @@ fn layout_positioned_element(
             .max(0) as u32,
         (None, None) => static_x.max(base_x),
     };
-    let mut cursor_y = match element.style.top {
+    let mut cursor_y = match top {
         Some(top) => (base_y as i64 + top as i64).max(0) as u32,
         None => static_y.max(base_y),
     };
     if std::env::var_os("TOBIRA_DEBUG_POS").is_some() {
         eprintln!(
-            "abspos <{}> class={:?} base=({base_x},{base_y}) left={:?} top={:?} -> {x},{cursor_y}",
+            "abspos <{}> class={:?} base=({base_x},{base_y}) cb=({cb_width},{cb_height}) left={left:?} top={top:?} -> {x},{cursor_y}",
             element.tag_name,
             element.attributes.get("class").map(|c| c.chars().take(30).collect::<String>()),
-            element.style.left,
-            element.style.top,
         );
     }
 
@@ -5079,6 +5160,7 @@ fn layout_positioned_element(
         // coordinates -- so hand the descendants this box's own origin rather
         // than the default (0, 0).
         containing_block_origin: (x, cursor_y),
+        containing_block_size: (elem_width, definite_height(&element.style)),
         ..LayoutContext::default()
     };
     // Use sub_context for form allocation so next_form_id counter stays consistent
@@ -5622,7 +5704,6 @@ fn layout_flex_container(
     current_form: Option<FormContext>,
 ) {
     *cursor_y = advance_by_margin(*cursor_y, element.style.margin.top);
-    let outer_x = offset_x_by_margin(x, element.style.margin.left);
     let avail_width = outer_width_with_margins(width, element.style.margin.left, element.style.margin.right);
     // Honor an explicit width on the flex container (needed for flex-wrap to know
     // where lines break); otherwise take the available width.
@@ -5632,6 +5713,7 @@ fn layout_flex_container(
         _ => avail_width,
     }
     .max(1);
+    let outer_x = outer_x_with_auto_margins(&element.style, x, width, outer_width);
     let background_top = *cursor_y;
 
     let border_left = if !element.style.border_style_none { element.style.border.left } else { 0 };
@@ -5652,11 +5734,55 @@ fn layout_flex_container(
     let gap = element.style.gap;
     let is_row = matches!(element.style.flex_direction, FlexDirection::Row | FlexDirection::RowReverse);
 
-    // Collect visible flex items (only element children, not text nodes)
+    // Collect visible flex items (only element children, not text nodes).
+    // An out-of-flow child is not a flex item -- it takes no space on the line
+    // and no share of the free space -- but it still has to be drawn, so it is
+    // set aside and positioned after the line is laid out. Counting one as an
+    // item gave it a slot: Yahoo! JAPAN's masthead pins its logo with
+    // `position: absolute`, and the logo's 213px slot pushed the two groups of
+    // service shortcuts apart and sat between them.
+    // Text sitting directly inside a flex container is a flex item too -- an
+    // anonymous one. Collecting only element children dropped such text
+    // outright, so `<div style="display:flex">hello</div>` rendered empty.
+    let anonymous: Vec<StyledElement> = element
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            StyledNode::Text(text) if !text.text.trim().is_empty() => {
+                // The wrapper is a block container, not another flex one: a
+                // text node carries its parent's computed style, so copying it
+                // verbatim would make the wrapper a flex container that wraps
+                // its own text again, for ever.
+                let mut style = (*text.style).clone();
+                style.display = Display::Block;
+                Some(StyledElement {
+                    tag_name: String::new(),
+                    attributes: std::collections::BTreeMap::new(),
+                    style: Arc::new(style),
+                    children: vec![child.clone()],
+                })
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut out_of_flow: Vec<&StyledElement> = Vec::new();
+    let mut anonymous_next = anonymous.iter();
     let mut children: Vec<&StyledElement> = element.children.iter().filter_map(|child| {
-        if let StyledNode::Element(el) = child {
-            if el.style.display != Display::None { Some(el) } else { None }
-        } else { None }
+        let StyledNode::Element(el) = child else {
+            return match child {
+                StyledNode::Text(text) if !text.text.trim().is_empty() => anonymous_next.next(),
+                _ => None,
+            };
+        };
+        if el.style.display == Display::None {
+            return None;
+        }
+        if matches!(el.style.position, Position::Absolute | Position::Fixed) {
+            out_of_flow.push(el);
+            return None;
+        }
+        Some(el)
     }).collect();
 
     // `order` re-sequences the items without touching the document, and a
@@ -5677,6 +5803,21 @@ fn layout_flex_container(
     // Everything drawn from here on belongs to this container's subtree, which
     // is what `overflow: hidden` has to clip.
     let clip_start_idx = context.commands.len();
+
+    // A flex container that is not `position: static` is the containing block
+    // for the positioned boxes under it, exactly as a block one is. Only the
+    // block path established this, which was invisible while every positioned
+    // child of a flex container was mistakenly laid out as a flex item; now
+    // that they are positioned properly, the gap shows -- Yahoo! JAPAN's
+    // masthead logo is pinned inside a `position: relative` flex row, and
+    // without this it resolved its offsets against the page and flew to the
+    // far left.
+    let saved_origin = context.containing_block_origin;
+    let saved_cb_size = context.containing_block_size;
+    if element.style.position != Position::Static {
+        context.containing_block_origin = (outer_x, background_top);
+        context.containing_block_size = (outer_width, definite_height(&element.style));
+    }
 
     // Reserve a slot for background rect — insert placeholder now, update height later
     let bg_cmd_index = if let Some(background_color) = element.style.background_color {
@@ -5894,9 +6035,11 @@ fn layout_flex_container(
                 let mut cursor_x = content_x.saturating_add(start_offset);
                 if std::env::var_os("TOBIRA_DEBUG_FLEX").is_some() {
                     eprintln!(
-                        "flexrow <{}> class={:?} content_x={content_x} w={content_width} items={:?}",
+                        "flexrow <{}> class={:?} x={x} avail={width} outer_x={outer_x} outer_w={outer_width} auto=({},{}) content_x={content_x} w={content_width} items={:?}",
                         element.tag_name,
                         element.attributes.get("class").map(|c| c.chars().take(28).collect::<String>()),
+                        element.style.margin_left_auto,
+                        element.style.margin_right_auto,
                         children.iter().zip(item_widths.iter()).map(|(c, w)| (
                             c.tag_name.clone(),
                             c.attributes.get("class").map(|s| s.chars().take(16).collect::<String>()).unwrap_or_default(),
@@ -6051,6 +6194,27 @@ fn layout_flex_container(
             }));
         }
     }
+
+    // Out-of-flow children take their static position from where the container's
+    // content begins; `layout_positioned_element` resolves the rest. This runs
+    // before the containing block is restored, because for these children this
+    // container *is* it.
+    for child in out_of_flow {
+        let mut static_y = content_y;
+        layout_positioned_element(
+            child,
+            content_x,
+            content_width,
+            &mut static_y,
+            context,
+            images,
+            fonts,
+            current_form.clone(),
+        );
+    }
+
+    context.containing_block_origin = saved_origin;
+    context.containing_block_size = saved_cb_size;
 
     *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
 }
@@ -6293,6 +6457,93 @@ mod percentage_sizing_tests {
         assert!(
             pin.y >= 40,
             "the box stays below the block it follows: {pin:?}"
+        );
+    }
+
+    /// Text sitting directly inside a flex container is a flex item too -- an
+    /// anonymous one. Collecting only element children dropped it outright, so
+    /// `<div style="display:flex">hello</div>` rendered empty.
+    #[test]
+    fn text_directly_inside_a_flex_container_is_not_dropped() {
+        let runs = text_runs(
+            ".row{display:flex}",
+            "<div class=\"row\" style=\"width:600px\">\u{88f8}<span>\u{4ed8}</span></div>",
+        );
+        let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert!(shown.contains('\u{88f8}'), "the bare text must survive: {runs:?}");
+        assert!(shown.contains('\u{4ed8}'));
+    }
+
+    /// A percentage offset resolves against the containing block -- `left` and
+    /// `right` against its width -- not against the font size. The oldest way to
+    /// centre a fixed-width box is `left: 50%` with a negative margin of half
+    /// its width; resolved against a 14px font that read as `left: 7px`, and
+    /// Yahoo! JAPAN's masthead logo sat against the left edge of the page with
+    /// its -106px margin still applied.
+    #[test]
+    fn a_percentage_offset_resolves_against_the_containing_block() {
+        let runs = text_runs(
+            ".host{position:relative;width:400px}.pin{position:absolute;left:50%}",
+            "<div class=\"host\"><span class=\"pin\">\u{5370}</span></div>",
+        );
+        let pin = runs.iter().find(|run| run.text == "\u{5370}").expect("pin");
+        assert!(
+            (190..=210).contains(&pin.x),
+            "50% of a 400px block is 200px, got x={}",
+            pin.x
+        );
+    }
+
+    /// A negative offset still works -- it is an everyday value here, and the
+    /// type that carries the percentage has to hold one.
+    #[test]
+    fn a_negative_offset_moves_the_box_back() {
+        let runs = text_runs(
+            ".host{position:relative;width:400px}.pin{position:absolute;left:50%;margin-left:-40px}",
+            "<div class=\"host\"><span class=\"pin\">\u{5370}</span></div>",
+        );
+        let pin = runs.iter().find(|run| run.text == "\u{5370}").expect("pin");
+        assert!(
+            (150..=170).contains(&pin.x),
+            "200px less a 40px margin, got x={}",
+            pin.x
+        );
+    }
+
+    /// An out-of-flow child is not a flex item: it takes no slot on the line and
+    /// no share of the free space. Counting one gave it a slot -- Yahoo! JAPAN
+    /// pins its masthead logo with `position: absolute`, and the logo's slot
+    /// pushed the two groups of service shortcuts apart and sat between them.
+    #[test]
+    fn an_out_of_flow_child_takes_no_slot_in_a_flex_row() {
+        let runs = text_runs(
+            ".row{display:flex;position:relative}.pin{position:absolute;left:0;top:0}",
+            "<div class=\"row\" style=\"width:600px\">\
+             <div>\u{4e00}</div><div class=\"pin\">\u{5370}</div><div>\u{4e8c}</div></div>",
+        );
+        let first = runs.iter().find(|run| run.text == "\u{4e00}").expect("first");
+        let second = runs.iter().find(|run| run.text == "\u{4e8c}").expect("second");
+        assert!(
+            second.x.saturating_sub(first.x) < 40,
+            "the two items sit next to each other: {runs:?}"
+        );
+    }
+
+    /// `margin-left: auto; margin-right: auto` centres a fixed-width box. Only
+    /// the block path did this, so a flex container with `width: 990px;
+    /// margin: 0 auto` -- Yahoo! JAPAN's masthead band -- was pinned to the left
+    /// edge, 145px from where it belongs.
+    #[test]
+    fn a_flex_container_with_auto_margins_is_centred() {
+        let runs = text_runs(
+            ".band{display:flex;width:200px;margin-left:auto;margin-right:auto}",
+            "<div style=\"width:600px\"><div class=\"band\">\u{5e2f}</div></div>",
+        );
+        let band = runs.iter().find(|run| run.text == "\u{5e2f}").expect("band");
+        assert!(
+            (190..=210).contains(&band.x),
+            "a 200px band in 600px starts at 200px, got x={}",
+            band.x
         );
     }
 

@@ -287,6 +287,23 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
         let summary: Vec<String> = counts.iter().map(|(k, v)| format!("{k}={v}")).collect();
         println!("command mix         = {}", summary.join(" "));
         println!("images              = {svg} svg / {other} raster");
+        if std::env::var_os("TOBIRA_DUMP_IMAGES").is_some() {
+            fn walk(cmds: &[layout::DrawCommand]) {
+                for cmd in cmds {
+                    match cmd {
+                        layout::DrawCommand::Image(i) => println!(
+                            "  {:5},{:5} {:4}x{:<4} {}",
+                            i.x, i.y, i.width, i.height,
+                            i.src.chars().take(60).collect::<String>()
+                        ),
+                        layout::DrawCommand::Layer(l) => walk(&l.commands),
+                        _ => {}
+                    }
+                }
+            }
+            println!("=== image commands ===");
+            walk(&layout.commands);
+        }
     }
     let mut boxes = layout.element_hitboxes.clone();
     boxes.sort_by_key(|b| std::cmp::Reverse(u64::from(b.width) * u64::from(b.height)));

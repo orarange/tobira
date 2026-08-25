@@ -700,10 +700,14 @@ pub struct ComputedStyle {
     // Position
     pub position: Position,
     pub z_index: Option<i32>,
-    pub top: Option<i32>,
-    pub right: Option<i32>,
-    pub bottom: Option<i32>,
-    pub left: Option<i32>,
+    /// Box offsets. These keep their percentage until layout, because it
+    /// resolves against the containing block -- `left`/`right` against its
+    /// width, `top`/`bottom` against its height -- and not against the font
+    /// size, which is what a plain pixel value here forced.
+    pub top: Option<LengthValue>,
+    pub right: Option<LengthValue>,
+    pub bottom: Option<LengthValue>,
+    pub left: Option<LengthValue>,
     // Flexbox
     pub flex_direction: FlexDirection,
     pub flex_wrap: FlexWrap,
@@ -2870,10 +2874,10 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.z_index = Some(n);
             }
         }
-        "top" => { style.top = parse_signed_length(value, parent_font_size); }
-        "right" => { style.right = parse_signed_length(value, parent_font_size); }
-        "bottom" => { style.bottom = parse_signed_length(value, parent_font_size); }
-        "left" => { style.left = parse_signed_length(value, parent_font_size); }
+        "top" => { style.top = parse_offset(value, parent_font_size); }
+        "right" => { style.right = parse_offset(value, parent_font_size); }
+        "bottom" => { style.bottom = parse_offset(value, parent_font_size); }
+        "left" => { style.left = parse_offset(value, parent_font_size); }
         "flex-direction" => {
             style.flex_direction = match value.trim().to_ascii_lowercase().as_str() {
                 "column" => FlexDirection::Column,
@@ -4870,6 +4874,40 @@ fn parse_calc_length_value(expr: &str) -> Option<LengthValue> {
     })
 }
 
+/// Parse a box offset (`top` / `right` / `bottom` / `left`).
+///
+/// Unlike a width these are routinely negative, and routinely percentages: the
+/// oldest way to centre a fixed-width box is `left: 50%` with a negative margin
+/// of half its width. Resolving that percentage here against the font size made
+/// Yahoo! JAPAN's masthead logo `left: 7px` instead of `left: 495px`, so it sat
+/// against the left edge of the page with its negative margin still applied.
+fn parse_offset(input: &str, parent_font_size: u32) -> Option<LengthValue> {
+    let value = input.trim().to_ascii_lowercase();
+    if value == "auto" {
+        return None;
+    }
+    if let Some(inner) = value.strip_prefix("calc(").and_then(|s| s.strip_suffix(')'))
+        && let Some(length) = parse_calc_length_value(inner)
+    {
+        return Some(length);
+    }
+    if let Some(number) = value.strip_suffix('%') {
+        let percent = parse_float(number)?;
+        return Some(LengthValue::Calc {
+            percent_hundredths: (percent * 100.0).round() as i32,
+            px: 0,
+        });
+    }
+    let pixels = parse_length_signed(&value, parent_font_size)?;
+    Some(if pixels >= 0 {
+        LengthValue::Pixels(pixels as u32)
+    } else {
+        // `LengthValue::Pixels` cannot hold a negative length, and a negative
+        // offset is ordinary here.
+        LengthValue::Calc { percent_hundredths: 0, px: pixels }
+    })
+}
+
 fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue> {
     let value = input.trim().to_ascii_lowercase();
     match value.as_str() {
@@ -6182,8 +6220,8 @@ mod tests {
         let rule_index = RuleIndex::build(&ss.rules);
         let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
         assert_eq!(style.position, Position::Relative);
-        assert_eq!(style.top, Some(10));
-        assert_eq!(style.left, Some(20));
+        assert_eq!(style.top, Some(LengthValue::Pixels(10)));
+        assert_eq!(style.left, Some(LengthValue::Pixels(20)));
     }
 
     #[test]
