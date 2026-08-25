@@ -174,8 +174,13 @@ impl Document {
 
     fn raster_size(&self) -> (u32, u32) {
         let (_, _, w, h) = self.view_box;
-        let longest = w.max(h);
-        let scale = (TARGET_EDGE / longest).clamp(1.0, MAX_EDGE / longest);
+        let longest = w.max(h).max(1.0);
+        // Small drawings are scaled up to a usable resolution and large ones are
+        // scaled down to the ceiling. `clamp` is wrong here: a drawing longer
+        // than the ceiling wants a factor below 1, so the lower bound would
+        // exceed the upper one and it panics -- which is what rust-lang.org's
+        // 600px logo did.
+        let scale = (TARGET_EDGE / longest).max(1.0).min(MAX_EDGE / longest);
         (
             (w * scale).round().max(1.0) as u32,
             (h * scale).round().max(1.0) as u32,
@@ -1270,6 +1275,21 @@ mod tests {
         )
         .expect("rasterized");
         assert!(pixel(&image, image.width / 2, image.height / 2)[3] > 0);
+    }
+
+    /// A drawing longer than the raster ceiling has to be scaled *down*. The
+    /// bounds were passed to `clamp` in the order "at least 1, at most the
+    /// ceiling", which for such a drawing puts the lower bound above the upper
+    /// one and panics -- taking the whole browser down on rust-lang.org, whose
+    /// logo declares a 600-unit viewBox.
+    #[test]
+    fn a_view_box_larger_than_the_ceiling_is_scaled_down() {
+        let image = rasterize(
+            "<svg viewBox='0 0 600 600'><rect width='600' height='600' fill='#000'/></svg>",
+        )
+        .expect("rasterized");
+        assert!(image.width <= 512, "got {}", image.width);
+        assert!(image.width > 0);
     }
 
     #[test]
