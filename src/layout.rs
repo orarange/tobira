@@ -1,5 +1,5 @@
 use crate::css::{
-    BackgroundRepeat, BackgroundSize, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
+    BackgroundRepeat, BackgroundSize, BoxSizing, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
     FontFamilyKind, GridTrackSize, LengthValue, ListStyleType, ObjectFit, Overflow, Position, FlexDirection,
     FlexWrap, AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
     VerticalAlign, WhiteSpaceMode, apply_text_transform, ClearSide, FloatSide,
@@ -4740,6 +4740,20 @@ fn measure_node_preferred_width(
     match node {
         StyledNode::Text(text) => text_width(&text.style, text.text.trim(), fonts).max(1),
         StyledNode::Element(element) => {
+            // A box that states its own width is that wide whatever is inside
+            // it -- including when nothing is. An icon is an empty span sized by
+            // CSS and painted with a background image; measuring only its
+            // children reported one pixel, so every icon collapsed and the label
+            // beside it wrapped for want of the space the icon should have held.
+            if let Some(LengthValue::Pixels(width)) = element.style.width {
+                let extra = if element.style.box_sizing == BoxSizing::BorderBox {
+                    0
+                } else {
+                    element.style.padding.left + element.style.padding.right
+                };
+                return width.saturating_add(extra).max(1);
+            }
+
             if element.tag_name == "img"
                 && let Some(src) = resolved_image_source(element)
                 && let Some(image) = images.get(src)
@@ -4804,8 +4818,29 @@ fn measure_node_preferred_width(
                 widest.max(line)
             };
 
+            // `min-width` is a floor on the box, so it is a floor on the
+            // width it reports as well.
+            let minimum = match element.style.min_width {
+                Some(LengthValue::Pixels(px)) => px,
+                _ => 0,
+            };
+            // The box takes up its borders and margins too. Reporting only the
+            // content plus padding left each item a few pixels short, and a row
+            // of them added up to enough that the row no longer fitted: Yahoo!
+            // JAPAN's top-right navigation separates its items with a 1px rule
+            // and an 8px margin, and lost 27px across four of them.
+            let border = if element.style.border_style_none {
+                0
+            } else {
+                element.style.border.left + element.style.border.right
+            };
+            let margins =
+                element.style.margin.left.max(0) as u32 + element.style.margin.right.max(0) as u32;
             child_width
                 .saturating_add(element.style.padding.left + element.style.padding.right)
+                .max(minimum)
+                .saturating_add(border)
+                .saturating_add(margins)
                 .max(1)
         }
     }
@@ -6258,6 +6293,50 @@ mod percentage_sizing_tests {
         assert!(
             pin.y >= 40,
             "the box stays below the block it follows: {pin:?}"
+        );
+    }
+
+    /// A box that states its own width is that wide whatever is inside it --
+    /// including when nothing is. An icon is an empty element sized by CSS and
+    /// painted with a background image; measuring only its children reported one
+    /// pixel, so every icon in Yahoo! JAPAN's service list collapsed and the
+    /// label beside it wrapped for want of the space the icon should have held.
+    #[test]
+    fn an_empty_box_with_a_width_is_measured_by_that_width() {
+        let runs = text_runs(
+            ".row{display:flex}.icon{width:120px;height:20px}",
+            "<div class=\"row\" style=\"width:600px\">\
+             <div><span class=\"icon\"></span></div><div>\u{5f8c}</div></div>",
+        );
+        let after = runs.iter().find(|run| run.text == "\u{5f8c}").expect("label");
+        assert!(
+            after.x >= 120,
+            "the empty icon holds its 120px, so the label starts past it: {after:?}"
+        );
+    }
+
+    /// A box takes up its borders and margins as well as its padding. Reporting
+    /// only content plus padding left each item a few pixels short, and a row of
+    /// them added up to enough that the row no longer fitted -- Yahoo! JAPAN's
+    /// top-right navigation separates items with a 1px rule and an 8px margin
+    /// and lost 27px across four of them, which wrapped the first label.
+    #[test]
+    fn intrinsic_width_includes_borders_and_margins() {
+        let runs = text_runs(
+            ".row{display:flex}.sep{margin-left:20px;border-left:5px solid #000}",
+            "<div class=\"row\" style=\"width:200px\">\
+             <div>\u{4e00}</div><div class=\"sep\">\u{4e8c}</div>\
+             <div class=\"sep\">\u{4e09}</div></div>",
+        );
+        let ys: Vec<u32> = runs.iter().map(|run| run.y).collect();
+        assert!(
+            ys.windows(2).all(|pair| pair[0] == pair[1]),
+            "16 + 25 + 16 + 25 + 16 fits in 200px: {runs:?}"
+        );
+        let last = runs.iter().find(|run| run.text == "\u{4e09}").expect("third");
+        assert!(
+            last.x >= 82,
+            "each separator contributes its margin and border: {last:?}"
         );
     }
 
