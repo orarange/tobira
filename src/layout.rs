@@ -6598,6 +6598,60 @@ mod percentage_sizing_tests {
         assert!(shown.contains('\u{4ed8}'));
     }
 
+    /// A pseudo-class narrows what a selector matches, so dropping one that is
+    /// not modelled *widens* it -- the opposite of what it says. Wikipedia
+    /// scopes its edit-link brackets with `a:has(+ a.mw-editsection-visualeditor)`
+    /// and, with `:has()` discarded, that became "every link on the page": a
+    /// stray `]` was drawn after every menu entry and every row of the contents.
+    #[test]
+    fn an_unmodelled_pseudo_class_matches_nothing() {
+        let runs = text_runs(
+            "a:has(+ b)::after{content:\"X\"}",
+            "<div><a>L</a></div>",
+        );
+        let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(shown, "L", "the rule must not apply: {runs:?}");
+    }
+
+    /// `:is()` and `:where()` are grouping constructs; skipping over them keeps
+    /// the rest of the compound selector doing its work.
+    #[test]
+    fn grouping_pseudo_classes_are_skipped_not_failed() {
+        let runs = text_runs(
+            "a:is(.x, .y)::after{content:\"X\"}",
+            "<div><a>L</a></div>",
+        );
+        let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(shown, "LX", "{runs:?}");
+    }
+
+    /// The `content` value is a list that may end with `/ <string>`, which is
+    /// alternative text for speech and is never drawn. Wikipedia writes its
+    /// brackets as `content: ']' / ''`; stripping the outer quotes and keeping
+    /// the rest drew `]' / '` after every one of them.
+    #[test]
+    fn content_alternative_text_is_not_drawn() {
+        let runs = text_runs(
+            "a::after{content:']' / 'closing bracket'}",
+            "<div><a>L</a></div>",
+        );
+        let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(shown, "L]", "{runs:?}");
+    }
+
+    /// Stylesheets write separators as escapes rather than embedding the
+    /// characters: `\a0` is a non-breaking space.
+    #[test]
+    fn content_escapes_are_resolved() {
+        let runs = text_runs(
+            "a::after{content:\"\\a0 \\2022 \"}",
+            "<div><a>L</a></div>",
+        );
+        let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert!(shown.contains('\u{2022}'), "expected a bullet, got {shown:?}");
+        assert!(!shown.contains('\\'), "no backslash survives: {shown:?}");
+    }
+
     /// `bottom` anchors a box to the bottom edge of its containing block. It
     /// cannot be resolved while the box is laid out -- the containing block's
     /// height is not known until its children are done, and the box is one of

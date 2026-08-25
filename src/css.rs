@@ -1800,6 +1800,127 @@ fn skip_element_ids(node: &Node, node_order: &mut std::slice::Iter<'_, u32>) -> 
 /// Strip a matched pair of surrounding CSS string quotes (`"..."` or `'...'`).
 /// Only removes quotes when the same quote character opens and closes the string.
 /// Unbalanced quotes (e.g. `"foo'`) are left intact.
+/// Parse a `content` value into the text it actually renders.
+///
+/// The value is a list -- quoted strings, `attr()`, `counter()`, `url()` -- and
+/// it may end with `/ <string>`, which is *alternative text for speech* and is
+/// never drawn. Stripping the outer quotes and keeping the rest wholesale drew
+/// that alternative text as if it were content: Wikipedia writes its edit-link
+/// brackets as `content: ']' / ''`, so every menu entry and every table-of-
+/// contents row on the page ended with a stray `]' / '`.
+///
+/// Functions are skipped rather than guessed at -- there is no element in hand
+/// to resolve `attr()` against, and no counter state here -- so a value made
+/// only of them yields nothing, which is the same as having no content.
+fn parse_content(value: &str) -> Option<String> {
+    parse_content_for(value, None)
+}
+
+fn parse_content_for(value: &str, element: Option<&Element>) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let lower = value.to_ascii_lowercase();
+    if lower == "none" || lower == "normal" {
+        return None;
+    }
+
+    let mut text = String::new();
+    let mut chars = value.chars().peekable();
+    let mut produced = false;
+
+    while let Some(character) = chars.next() {
+        match character {
+            // Everything from here on is the speech alternative.
+            '/' => break,
+            '"' | '\'' => {
+                produced = true;
+                let quote = character;
+                while let Some(inner) = chars.next() {
+                    match inner {
+                        c if c == quote => break,
+                        '\\' => text.push(unescape_css_char(&mut chars)),
+                        c => text.push(c),
+                    }
+                }
+            }
+            c if c.is_whitespace() || c == ',' => {}
+            _ => {
+                // A keyword or a function: consume it, balancing parentheses.
+                let mut token = String::from(character);
+                let mut depth = 0usize;
+                let mut current = character;
+                loop {
+                    match current {
+                        '(' => depth += 1,
+                        ')' => depth = depth.saturating_sub(1),
+                        c if depth == 0 && (c.is_whitespace() || c == ',') => break,
+                        c if depth == 0 && c == '/' => break,
+                        _ => {}
+                    }
+                    match chars.next() {
+                        Some(next) => {
+                            current = next;
+                            token.push(next);
+                        }
+                        None => break,
+                    }
+                }
+                // `attr()` is the one function resolvable here, and only when
+                // the originating element is at hand.
+                if let Some(element) = element
+                    && let Some(name) = token
+                        .trim_end_matches(|c: char| c.is_whitespace() || c == ',' || c == '/')
+                        .strip_prefix("attr(")
+                        .and_then(|rest| rest.strip_suffix(')'))
+                {
+                    produced = true;
+                    let name = name.trim().trim_matches(|c| c == '"' || c == '\'');
+                    text.push_str(element.attribute(name).unwrap_or(""));
+                }
+                if current == '/' && depth == 0 {
+                    break;
+                }
+            }
+        }
+    }
+
+    if !produced && text.is_empty() {
+        return None;
+    }
+    Some(text)
+}
+
+/// Resolve one CSS escape sequence, the backslash already consumed.
+///
+/// `\a0` is a non-breaking space and `\2019` a right quote; stylesheets write
+/// separators and punctuation this way rather than embedding the characters.
+fn unescape_css_char(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> char {
+    let mut hex = String::new();
+    while hex.len() < 6 {
+        match chars.peek() {
+            Some(c) if c.is_ascii_hexdigit() => {
+                hex.push(*c);
+                chars.next();
+            }
+            _ => break,
+        }
+    }
+    if hex.is_empty() {
+        // A backslash before anything else escapes that character itself.
+        return chars.next().unwrap_or('\\');
+    }
+    // One optional whitespace terminates the escape and is not part of the text.
+    if chars.peek().is_some_and(|c| c.is_whitespace()) {
+        chars.next();
+    }
+    u32::from_str_radix(&hex, 16)
+        .ok()
+        .and_then(char::from_u32)
+        .unwrap_or('\u{fffd}')
+}
+
 fn strip_css_string_quotes(s: &str) -> &str {
     let s = s.trim();
     if s.len() >= 2 {
@@ -1866,19 +1987,7 @@ fn collect_pseudo_content(
         // the final (text, pseudo_style) pair is only constructed once at the end.
         for decl in &rule.declarations {
             if decl.property == "content" {
-                let raw = decl.value.trim();
-                if raw == "none" || raw == "normal" {
-                    content_text = None;
-                } else if let Some(inner) = raw.strip_prefix("attr(").and_then(|s| s.strip_suffix(')')) {
-                    // attr(name) — resolve from element attributes
-                    let attr_name = inner.trim();
-                    content_text = Some(element.attribute(attr_name).unwrap_or("").to_string());
-                } else {
-                    let v = strip_css_string_quotes(raw);
-                    if !v.is_empty() {
-                        content_text = Some(v.to_string());
-                    }
-                }
+                content_text = parse_content_for(&decl.value, Some(element));
             } else {
                 // Use host_style.font_size_px so em/% units in pseudo-element rules
                 // resolve against the originating element's font size (not a hardcoded 16px).
@@ -2823,12 +2932,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.list_style_type = parse_list_style_type(value);
         }
         "content" => {
-            let v = strip_css_string_quotes(value.trim());
-            if v == "none" || v == "normal" || v.is_empty() {
-                style.content = None;
-            } else {
-                style.content = Some(v.to_string());
-            }
+            style.content = parse_content(value);
         }
         "box-shadow" => {
             let v = value.trim().to_ascii_lowercase();
@@ -3530,8 +3634,19 @@ fn parse_simple_selector(input: &str) -> Option<SimpleSelector> {
                 }
                 if let Some(pc) = parse_pseudo_class(&pseudo_name, args.as_deref()) {
                     selector.pseudo_classes.push(pc);
+                } else if !pseudo_class_is_ignorable(&pseudo_name) {
+                    // A pseudo-class narrows what a selector matches. Dropping
+                    // one that is not modelled *widens* it instead, which is the
+                    // opposite of what it says. Wikipedia scopes its edit-link
+                    // brackets with
+                    //
+                    //   .client-nojs a:has(+ a.mw-editsection-visualeditor…)::after
+                    //
+                    // and with `:has()` discarded that became "every link on the
+                    // page", so a stray `]` was drawn after every menu entry and
+                    // every row of the table of contents.
+                    selector.never_match = true;
                 }
-                // ignore unknown pseudo-classes (hover, focus, etc.)
             }
             _ => {
                 buffer.push(ch);
@@ -3555,6 +3670,30 @@ fn parse_simple_selector(input: &str) -> Option<SimpleSelector> {
     } else {
         Some(selector)
     }
+}
+
+/// Pseudo-classes that are safe to skip over rather than to fail on.
+///
+/// These either match nearly everything (`:is()` and `:where()` are grouping
+/// constructs, and treating them as satisfied keeps the rest of the compound
+/// selector doing its work) or describe a document-wide condition that holds
+/// for ordinary rendering.
+fn pseudo_class_is_ignorable(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "is" | "where"
+            | "matches"
+            | "any"
+            | "any-link"
+            | "scope"
+            | "dir"
+            | "lang"
+            | "read-write"
+            | "optional"
+            | "defined"
+            | "host"
+            | "first-of-type"
+    )
 }
 
 fn parse_pseudo_class(name: &str, args: Option<&str>) -> Option<PseudoClass> {

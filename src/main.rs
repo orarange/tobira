@@ -117,6 +117,13 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
     ) {
         match node {
             StyledNode::Text(t) => {
+                if depth <= dump_depth() && !t.text.trim().is_empty() {
+                    println!(
+                        "{}#text {:?}",
+                        "  ".repeat(depth),
+                        t.text.chars().take(60).collect::<String>()
+                    );
+                }
                 let len = t.text.split_whitespace().collect::<Vec<_>>().join(" ").len();
                 if hidden {
                     stats.3 += len;
