@@ -580,6 +580,103 @@ impl Default for GridPlacement {
     }
 }
 
+/// Which edge of a grid area a `<custom-ident>` placement refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GridEdge {
+    Start,
+    End,
+}
+
+/// The names attached to grid lines by a track list, as `(name, line index)`.
+///
+/// Line indices are 0-based and count lines, not tracks, so the line before the
+/// first track is 0 and a list of N tracks has lines 0..=N.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct GridLineNames {
+    pub columns: Vec<(Box<str>, usize)>,
+    pub rows: Vec<(Box<str>, usize)>,
+}
+
+fn lookup_grid_line(list: &[(Box<str>, usize)], name: &str, edge: GridEdge) -> Option<usize> {
+    if let Some(&(_, index)) = list.iter().find(|(n, _)| &**n == name) {
+        return Some(index);
+    }
+    // A bare `foo` also reaches the `foo-start` / `foo-end` pair, which is how
+    // both a named area's implicit lines and an explicitly named line pair are
+    // addressed by a single identifier.
+    let suffixed = match edge {
+        GridEdge::Start => format!("{name}-start"),
+        GridEdge::End => format!("{name}-end"),
+    };
+    list.iter()
+        .find(|(n, _)| &**n == suffixed.as_str())
+        .map(|&(_, index)| index)
+}
+
+impl GridLineNames {
+    pub fn column_line(&self, name: &str, edge: GridEdge) -> Option<usize> {
+        lookup_grid_line(&self.columns, name, edge)
+    }
+
+    pub fn row_line(&self, name: &str, edge: GridEdge) -> Option<usize> {
+        lookup_grid_line(&self.rows, name, edge)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty() && self.rows.is_empty()
+    }
+}
+
+/// `<custom-ident>` line references an item asked for, kept until layout can
+/// look them up in the container's track list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct GridPlacementNames {
+    pub row_start: Option<Box<str>>,
+    pub row_end: Option<Box<str>>,
+    pub column_start: Option<Box<str>>,
+    pub column_end: Option<Box<str>>,
+}
+
+impl GridPlacementNames {
+    pub fn is_empty(&self) -> bool {
+        self.row_start.is_none()
+            && self.row_end.is_none()
+            && self.column_start.is_none()
+            && self.column_end.is_none()
+    }
+}
+
+/// One `<grid-line>` value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GridLineRef {
+    Auto,
+    Line(i32),
+    Named(Box<str>),
+    Span(u32),
+}
+
+fn parse_grid_line_ref(s: &str) -> GridLineRef {
+    let s = s.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("auto") {
+        return GridLineRef::Auto;
+    }
+    if let Some(rest) = s.strip_prefix("span") {
+        return GridLineRef::Span(rest.trim().parse().unwrap_or(1));
+    }
+    if let Ok(n) = s.parse::<i32>() {
+        // `0` is not a valid line number.
+        return if n == 0 {
+            GridLineRef::Auto
+        } else {
+            GridLineRef::Line(n)
+        };
+    }
+    if is_grid_area_ident(s) {
+        return GridLineRef::Named(s.to_string().into_boxed_str());
+    }
+    GridLineRef::Auto
+}
+
 /// A parsed `grid-template-areas` value: the size of the explicit grid the
 /// strings describe, plus one rectangle per named area.
 ///
@@ -761,6 +858,9 @@ pub struct ComputedStyle {
     pub grid_template_rows: Vec<GridTrackSize>,
     pub grid_auto_rows: GridTrackSize,
     pub grid_auto_columns: GridTrackSize,
+    /// Line names from `grid-template-columns` / `grid-template-rows`. Boxed
+    /// for the same reason as the areas below: most pages never name a line.
+    pub grid_line_names: Option<Box<GridLineNames>>,
     /// `grid-template-areas`. Boxed because it is rare and `ComputedStyle` is
     /// ~520 bytes shared through `Arc` + interning -- cold fields stay behind a
     /// pointer so the common style pays 8 bytes, not the whole table.
@@ -772,6 +872,9 @@ pub struct ComputedStyle {
     /// areas at layout time (the item cannot see them from here). Boxed for
     /// the same reason as `grid_template_areas`.
     pub grid_area_name: Option<Box<str>>,
+    /// `<custom-ident>` line references on this item, resolved against the
+    /// container's line names at layout time.
+    pub grid_placement_names: Option<Box<GridPlacementNames>>,
     // Filter effects
     pub filter_blur_px: u32,       // blur() value in pixels, 0 = no blur
     pub filter_brightness: u32,    // brightness() in percent * 100 (10000 = 100% = no change)
@@ -885,10 +988,12 @@ impl ComputedStyle {
             grid_template_rows: Vec::new(),
             grid_auto_rows: GridTrackSize::Auto,
             grid_auto_columns: GridTrackSize::Auto,
+            grid_line_names: None,
             grid_template_areas: None,
             grid_column: GridPlacement::default(),
             grid_row: GridPlacement::default(),
             grid_area_name: None,
+            grid_placement_names: None,
             // Filter effects
             filter_blur_px: 0,
             filter_brightness: 10000,
@@ -3136,11 +3241,18 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         }
         "column-gap" => {}
         // ── Grid properties ──────────────────────────────────────────────────
+        "grid-template" => {
+            apply_grid_template(style, value, parent_font_size);
+        }
         "grid-template-columns" => {
-            style.grid_template_columns = parse_grid_track_list(value, parent_font_size);
+            let (tracks, line_names) = parse_grid_track_list(value, parent_font_size);
+            style.grid_template_columns = tracks;
+            set_grid_line_names(style, line_names, false);
         }
         "grid-template-rows" => {
-            style.grid_template_rows = parse_grid_track_list(value, parent_font_size);
+            let (tracks, line_names) = parse_grid_track_list(value, parent_font_size);
+            style.grid_template_rows = tracks;
+            set_grid_line_names(style, line_names, true);
         }
         "grid-auto-rows" => {
             style.grid_auto_rows = parse_grid_track_size(value.trim(), parent_font_size)
@@ -3157,39 +3269,26 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             apply_grid_area(style, value);
         }
         "grid-column" => {
-            style.grid_column = parse_grid_placement(value);
+            apply_grid_axis(style, value, false);
         }
         "grid-row" => {
-            style.grid_row = parse_grid_placement(value);
+            apply_grid_axis(style, value, true);
         }
         "grid-column-start" => {
-            style.grid_column.start = parse_grid_line(value);
+            apply_grid_edge(style, value, false, GridEdge::Start);
         }
         "grid-column-end" => {
-            if let Some(end) = parse_grid_line(value) {
-                if let Some(start) = style.grid_column.start {
-                    let span = (end - start).max(1) as u32;
-                    style.grid_column.span = Some(span);
-                } else {
-                    style.grid_column.start = Some(end);
-                }
-            }
+            apply_grid_edge(style, value, false, GridEdge::End);
         }
         "grid-row-start" => {
-            style.grid_row.start = parse_grid_line(value);
+            apply_grid_edge(style, value, true, GridEdge::Start);
         }
         "grid-row-end" => {
-            if let Some(end) = parse_grid_line(value) {
-                if let Some(start) = style.grid_row.start {
-                    let span = (end - start).max(1) as u32;
-                    style.grid_row.span = Some(span);
-                } else {
-                    style.grid_row.start = Some(end);
-                }
-            }
+            apply_grid_edge(style, value, true, GridEdge::End);
         }
-        "grid-template" | "grid" => {
-            // Simplified: skip complex shorthand
+        "grid" => {
+            // The full `grid` shorthand also carries the implicit-track and
+            // auto-flow settings; `grid-template` is handled above.
         }
         "order" => {
             if let Ok(n) = value.trim().parse::<i32>() {
@@ -4186,15 +4285,51 @@ fn parse_display(input: &str) -> Option<Display> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Parse a grid track list like "100px 1fr auto repeat(3, 200px)".
-fn parse_grid_track_list(input: &str, parent_font_size: u32) -> Vec<GridTrackSize> {
-    let mut tracks = Vec::new();
-    let input = input.trim();
-    let chars: Vec<char> = input.chars().collect();
+/// Parse a track list, returning the tracks and any names its `[bracket]`
+/// groups attach to grid lines.
+///
+/// Line indices count lines rather than tracks, so a name sitting before the
+/// first track is line 0 and a list of N tracks ends at line N.
+fn parse_grid_track_list(
+    input: &str,
+    parent_font_size: u32,
+) -> (Vec<GridTrackSize>, Vec<(Box<str>, usize)>) {
+    fn push_token(token: &str, tracks: &mut Vec<GridTrackSize>, parent_font_size: u32) {
+        let token = token.trim();
+        if token.is_empty() {
+            return;
+        }
+        if token.starts_with("repeat(") {
+            tracks.extend(expand_grid_repeat(token, parent_font_size));
+        } else if let Some(size) = parse_grid_track_size(token, parent_font_size) {
+            tracks.push(size);
+        }
+    }
+
+    let mut tracks: Vec<GridTrackSize> = Vec::new();
+    let mut names: Vec<(Box<str>, usize)> = Vec::new();
     let mut buf = String::new();
     let mut depth = 0usize;
+    let chars: Vec<char> = input.trim().chars().collect();
+    let mut i = 0usize;
 
-    for &ch in &chars {
+    while i < chars.len() {
+        let ch = chars[i];
         match ch {
+            '[' if depth == 0 => {
+                push_token(&buf, &mut tracks, parent_font_size);
+                buf.clear();
+                let mut inner = String::new();
+                i += 1;
+                while i < chars.len() && chars[i] != ']' {
+                    inner.push(chars[i]);
+                    i += 1;
+                }
+                // One bracket group may name the same line several times.
+                for name in inner.split_whitespace() {
+                    names.push((name.to_string().into_boxed_str(), tracks.len()));
+                }
+            }
             '(' => {
                 depth += 1;
                 buf.push(ch);
@@ -4203,32 +4338,19 @@ fn parse_grid_track_list(input: &str, parent_font_size: u32) -> Vec<GridTrackSiz
                 depth = depth.saturating_sub(1);
                 buf.push(ch);
             }
-            ' ' | '\t' if depth == 0 => {
-                let token = buf.trim().to_string();
-                if !token.is_empty() {
-                    if token.starts_with("repeat(") {
-                        tracks.extend(expand_grid_repeat(&token, parent_font_size));
-                    } else if let Some(size) = parse_grid_track_size(&token, parent_font_size) {
-                        tracks.push(size);
-                    }
-                }
+            ' ' | '\t' | '\n' | '\r' if depth == 0 => {
+                push_token(&buf, &mut tracks, parent_font_size);
                 buf.clear();
             }
             _ => buf.push(ch),
         }
+        i += 1;
     }
-    let token = buf.trim().to_string();
-    if !token.is_empty() {
-        if token.starts_with("repeat(") {
-            tracks.extend(expand_grid_repeat(&token, parent_font_size));
-        } else if let Some(size) = parse_grid_track_size(&token, parent_font_size) {
-            tracks.push(size);
-        }
-    }
-    tracks
+    push_token(&buf, &mut tracks, parent_font_size);
+
+    (tracks, names)
 }
 
-/// Expand `repeat(N, track-list)` into N copies.
 fn expand_grid_repeat(token: &str, parent_font_size: u32) -> Vec<GridTrackSize> {
     let inner = token
         .strip_prefix("repeat(")
@@ -4246,7 +4368,9 @@ fn expand_grid_repeat(token: &str, parent_font_size: u32) -> Vec<GridTrackSize> 
         Ok(n) if n > 0 => n,
         _ => 1, // auto-fill/auto-fit: treat as 1
     };
-    let track_sizes = parse_grid_track_list(track_str.trim(), parent_font_size);
+    // Names inside a `repeat()` are dropped: repeating a line name would need
+    // per-repetition indices, and no page has needed it yet.
+    let (track_sizes, _line_names) = parse_grid_track_list(track_str.trim(), parent_font_size);
     if track_sizes.is_empty() {
         return Vec::new();
     }
@@ -4259,6 +4383,37 @@ fn expand_grid_repeat(token: &str, parent_font_size: u32) -> Vec<GridTrackSize> 
 
 fn parse_grid_track_size(token: &str, parent_font_size: u32) -> Option<GridTrackSize> {
     let t = token.trim().to_ascii_lowercase();
+
+    // `minmax(min, max)`. We do not model a two-sided track, so take the max:
+    // that is the size the track wants when there is room, and the resolver
+    // already shrinks `fr` and `auto` tracks when there is not. So
+    // `minmax(0, 1fr)` behaves like `1fr` and `minmax(0, 40rem)` like `40rem`.
+    // Dropping the whole token instead -- which is what used to happen -- makes
+    // the track vanish and shifts every item after it into the wrong column.
+    if let Some(inner) = t
+        .strip_prefix("minmax(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let mut depth = 0usize;
+        let mut comma = None;
+        for (index, c) in inner.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    comma = Some(index);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        return match comma {
+            Some(index) => parse_grid_track_size(&inner[index + 1..], parent_font_size)
+                .or_else(|| parse_grid_track_size(&inner[..index], parent_font_size)),
+            None => parse_grid_track_size(inner, parent_font_size),
+        };
+    }
+
     if t == "auto" {
         return Some(GridTrackSize::Auto);
     }
@@ -4277,36 +4432,107 @@ fn parse_grid_track_size(token: &str, parent_font_size: u32) -> Option<GridTrack
     parse_length(&t, parent_font_size).map(GridTrackSize::Pixels)
 }
 
-fn parse_grid_placement(value: &str) -> GridPlacement {
-    let parts: Vec<&str> = value.split('/').collect();
-    match parts.as_slice() {
-        [start_str, end_str] => {
-            let start = parse_grid_line(start_str.trim());
-            let end_val = end_str.trim();
-            let span = if let Some(rest) = end_val.strip_prefix("span") {
-                rest.trim().parse::<u32>().ok()
-            } else if let Some(end_line) = parse_grid_line(end_val) {
-                start.map(|s| (end_line - s).max(1) as u32)
-            } else {
-                None
-            };
-            GridPlacement { start, span }
-        }
-        [single] => {
-            let s = single.trim();
-            if let Some(rest) = s.strip_prefix("span") {
-                GridPlacement {
-                    start: None,
-                    span: rest.trim().parse().ok(),
+/// Record the line names one axis' track list produced.
+fn set_grid_line_names(style: &mut ComputedStyle, names: Vec<(Box<str>, usize)>, rows: bool) {
+    if names.is_empty() {
+        return;
+    }
+    let mut current = style
+        .grid_line_names
+        .take()
+        .map(|boxed| *boxed)
+        .unwrap_or_default();
+    if rows {
+        current.rows = names;
+    } else {
+        current.columns = names;
+    }
+    style.grid_line_names = Some(Box::new(current));
+}
+
+/// Everything outside the quoted strings, so the row sizes written between an
+/// area template's rows can be read as an ordinary track list.
+fn strip_quoted_strings(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut quote: Option<char> = None;
+    for c in input.chars() {
+        match quote {
+            Some(open) => {
+                if c == open {
+                    quote = None;
                 }
-            } else {
-                GridPlacement {
-                    start: parse_grid_line(s),
-                    span: None,
+            }
+            None => {
+                if c == '"' || c == '\'' {
+                    quote = Some(c);
+                } else {
+                    out.push(c);
                 }
             }
         }
-        _ => GridPlacement::default(),
+    }
+    out
+}
+
+/// The `grid-template` shorthand: `<rows> / <columns>`, where the row side may
+/// instead be an area template written as strings with optional row sizes
+/// between them.
+///
+/// Wikipedia's article grid is defined entirely through this shorthand
+/// (`grid-template: min-content 1fr min-content / 12.25rem minmax(0,1fr)`), so
+/// without it the areas resolve but every column is the same width and the
+/// article lands in the sidebar's half of the page.
+fn apply_grid_template(style: &mut ComputedStyle, value: &str, parent_font_size: u32) {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return;
+    }
+
+    // The rows/columns separator is the first `/` that is not inside a quoted
+    // string, a function, or a line-name bracket.
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut separator = None;
+    for (index, c) in value.char_indices() {
+        if let Some(open) = quote {
+            if c == open {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            '/' if depth == 0 => {
+                separator = Some(index);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let (rows_src, cols_src) = match separator {
+        Some(index) => (&value[..index], Some(&value[index + 1..])),
+        None => (value, None),
+    };
+
+    if rows_src.contains('"') || rows_src.contains('\'') {
+        style.grid_template_areas = parse_grid_template_areas(rows_src).map(Box::new);
+        let sizes = strip_quoted_strings(rows_src);
+        let (tracks, names) = parse_grid_track_list(&sizes, parent_font_size);
+        style.grid_template_rows = tracks;
+        set_grid_line_names(style, names, true);
+    } else {
+        let (tracks, names) = parse_grid_track_list(rows_src, parent_font_size);
+        style.grid_template_rows = tracks;
+        set_grid_line_names(style, names, true);
+    }
+
+    if let Some(cols_src) = cols_src {
+        let (tracks, names) = parse_grid_track_list(cols_src, parent_font_size);
+        style.grid_template_columns = tracks;
+        set_grid_line_names(style, names, false);
     }
 }
 
@@ -4407,6 +4633,116 @@ fn parse_grid_template_areas(value: &str) -> Option<GridTemplateAreas> {
     })
 }
 
+/// Apply one `<grid-line>` pair to an axis, recording any names for layout.
+fn apply_grid_line_pair(
+    start: GridLineRef,
+    end: Option<GridLineRef>,
+    placement: &mut GridPlacement,
+    start_name: &mut Option<Box<str>>,
+    end_name: &mut Option<Box<str>>,
+) {
+    // An omitted end copies a named start. That is what makes
+    // `grid-column: content` span content-start..content-end instead of
+    // collapsing onto a single line.
+    let end = match end {
+        Some(end) => end,
+        None => match &start {
+            GridLineRef::Named(name) => GridLineRef::Named(name.clone()),
+            _ => GridLineRef::Auto,
+        },
+    };
+
+    match start {
+        GridLineRef::Line(n) => placement.start = Some(n),
+        GridLineRef::Named(name) => *start_name = Some(name),
+        GridLineRef::Span(n) => placement.span = Some(n),
+        GridLineRef::Auto => {}
+    }
+    match end {
+        GridLineRef::Line(n) => {
+            if let Some(start) = placement.start {
+                placement.span = Some((n - start).max(1) as u32);
+            } else {
+                placement.start = Some(n);
+            }
+        }
+        GridLineRef::Named(name) => *end_name = Some(name),
+        GridLineRef::Span(n) => placement.span = Some(n),
+        GridLineRef::Auto => {}
+    }
+}
+
+/// Apply `grid-row` / `grid-column` to one axis.
+fn apply_grid_axis(
+    style: &mut ComputedStyle,
+    value: &str,
+    rows: bool,
+) {
+    let parts: Vec<&str> = value.split('/').collect();
+    let start = parse_grid_line_ref(parts.first().copied().unwrap_or(""));
+    let end = parts.get(1).map(|part| parse_grid_line_ref(part));
+
+    let mut names = style
+        .grid_placement_names
+        .take()
+        .map(|boxed| *boxed)
+        .unwrap_or_default();
+    if rows {
+        apply_grid_line_pair(
+            start,
+            end,
+            &mut style.grid_row,
+            &mut names.row_start,
+            &mut names.row_end,
+        );
+    } else {
+        apply_grid_line_pair(
+            start,
+            end,
+            &mut style.grid_column,
+            &mut names.column_start,
+            &mut names.column_end,
+        );
+    }
+    if !names.is_empty() {
+        style.grid_placement_names = Some(Box::new(names));
+    }
+}
+
+/// Apply a single-edge longhand (`grid-row-start` and friends).
+fn apply_grid_edge(style: &mut ComputedStyle, value: &str, rows: bool, edge: GridEdge) {
+    let line = parse_grid_line_ref(value);
+    let mut names = style
+        .grid_placement_names
+        .take()
+        .map(|boxed| *boxed)
+        .unwrap_or_default();
+    let (placement, name_slot) = match (rows, edge) {
+        (true, GridEdge::Start) => (&mut style.grid_row, &mut names.row_start),
+        (true, GridEdge::End) => (&mut style.grid_row, &mut names.row_end),
+        (false, GridEdge::Start) => (&mut style.grid_column, &mut names.column_start),
+        (false, GridEdge::End) => (&mut style.grid_column, &mut names.column_end),
+    };
+    match line {
+        GridLineRef::Named(name) => *name_slot = Some(name),
+        GridLineRef::Span(n) => placement.span = Some(n),
+        GridLineRef::Line(n) => match edge {
+            GridEdge::Start => placement.start = Some(n),
+            GridEdge::End => {
+                if let Some(start) = placement.start {
+                    placement.span = Some((n - start).max(1) as u32);
+                } else {
+                    placement.start = Some(n);
+                }
+            }
+        },
+        GridLineRef::Auto => {}
+    }
+    if !names.is_empty() {
+        style.grid_placement_names = Some(Box::new(names));
+    }
+}
+
 /// Apply the `grid-area` shorthand.
 ///
 /// The positional order is row-start / column-start / row-end / column-end,
@@ -4415,33 +4751,51 @@ fn parse_grid_template_areas(value: &str) -> Option<GridTemplateAreas> {
 /// named rectangle. We record the name and let layout do that lookup, since
 /// the item cannot see its container's template from here.
 fn apply_grid_area(style: &mut ComputedStyle, value: &str) {
-    let parts: Vec<&str> = value.split('/').map(str::trim).collect();
+    let refs: Vec<GridLineRef> = value
+        .split('/')
+        .map(|part| parse_grid_line_ref(part))
+        .collect();
 
-    if let [single] = parts.as_slice() {
-        if is_grid_area_ident(single) {
-            style.grid_area_name = Some((*single).to_string().into_boxed_str());
-            return;
-        }
+    // A lone name is also kept as an *area* name: if the container's template
+    // defines an area by that name, layout uses its rectangle directly instead
+    // of going through lines.
+    if let [GridLineRef::Named(name)] = refs.as_slice() {
+        style.grid_area_name = Some(name.clone());
     }
 
-    let line = |index: usize| parts.get(index).and_then(|s| parse_grid_line(s));
-    let span_between = |start: Option<i32>, end: Option<i32>| {
-        match (start, end) {
-            (Some(start), Some(end)) => Some((end - start).max(1) as u32),
-            _ => None,
-        }
+    let row_start = refs.first().cloned().unwrap_or(GridLineRef::Auto);
+    // Order is row-start / column-start / row-end / column-end, and an omitted
+    // column-start copies a named row-start into all four longhands.
+    let col_start = match refs.get(1).cloned() {
+        Some(value) => value,
+        None => match &row_start {
+            GridLineRef::Named(name) => GridLineRef::Named(name.clone()),
+            _ => GridLineRef::Auto,
+        },
     };
 
-    let row_start = line(0);
-    let col_start = line(1);
-    style.grid_row = GridPlacement {
-        start: row_start,
-        span: span_between(row_start, line(2)),
-    };
-    style.grid_column = GridPlacement {
-        start: col_start,
-        span: span_between(col_start, line(3)),
-    };
+    let mut names = style
+        .grid_placement_names
+        .take()
+        .map(|boxed| *boxed)
+        .unwrap_or_default();
+    apply_grid_line_pair(
+        row_start,
+        refs.get(2).cloned(),
+        &mut style.grid_row,
+        &mut names.row_start,
+        &mut names.row_end,
+    );
+    apply_grid_line_pair(
+        col_start,
+        refs.get(3).cloned(),
+        &mut style.grid_column,
+        &mut names.column_start,
+        &mut names.column_end,
+    );
+    if !names.is_empty() {
+        style.grid_placement_names = Some(Box::new(names));
+    }
 }
 
 /// Is this `grid-area` value a bare area name rather than a line number?
@@ -4454,14 +4808,6 @@ fn is_grid_area_ident(s: &str) -> bool {
         && s.chars()
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
         && !s.starts_with(|c: char| c.is_ascii_digit())
-}
-
-fn parse_grid_line(s: &str) -> Option<i32> {
-    let s = s.trim();
-    if s == "auto" {
-        return None;
-    }
-    s.parse::<i32>().ok()
 }
 
 fn parse_font_weight(input: &str) -> Option<bool> {
@@ -5550,7 +5896,8 @@ mod tests {
     use std::rc::Rc;
 
     use super::{
-        AlignItems, Display, FlexDirection, FlexWrap, JustifyContent, LengthValue,
+        AlignItems, Display, FlexDirection, FlexWrap, GridEdge, GridTrackSize, JustifyContent,
+        LengthValue,
         Position, RuleIndex, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
         build_styled_tree, compute_style, parse_calc, parse_color, parse_inline_declarations,
         parse_length, parse_stylesheet, split_at_top_level,
@@ -6811,6 +7158,108 @@ mod tests {
         assert_eq!(div.style.grid_column.start, Some(1));
         assert_eq!(div.style.grid_column.span, Some(2));
         assert_eq!(div.style.grid_area_name, None);
+    }
+
+    /// `minmax(min, max)` used to fail to parse, which dropped the track
+    /// entirely and shifted every later item one column to the left.
+    #[test]
+    fn minmax_track_resolves_to_its_maximum() {
+        let html = r#"<div></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(
+            r#"div { grid-template-columns: 200px minmax(0,1fr) minmax(0,40px); }"#,
+        );
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(
+            div.style.grid_template_columns,
+            vec![
+                GridTrackSize::Pixels(200),
+                GridTrackSize::Fr(1000),
+                GridTrackSize::Pixels(40),
+            ]
+        );
+    }
+
+    /// `[name]` groups name the line at the current boundary, counted in lines
+    /// rather than tracks.
+    #[test]
+    fn track_list_records_line_names() {
+        let html = r#"<div></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(
+            r#"div { grid-template-columns: [side-start] 100px [side-end content-start] 1fr [content-end]; }"#,
+        );
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        let names = div.style.grid_line_names.as_deref().expect("line names");
+
+        assert_eq!(names.column_line("side", GridEdge::Start), Some(0));
+        // One bracket may name the same line twice.
+        assert_eq!(names.column_line("side", GridEdge::End), Some(1));
+        assert_eq!(names.column_line("content", GridEdge::Start), Some(1));
+        assert_eq!(names.column_line("content", GridEdge::End), Some(2));
+        assert_eq!(names.column_line("nope", GridEdge::Start), None);
+    }
+
+    /// A bare `grid-column: content` names both edges, so it spans
+    /// content-start..content-end rather than collapsing to one line.
+    #[test]
+    fn bare_named_placement_fills_both_edges() {
+        let html = r#"<div style="grid-column: content;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        let names = div.style.grid_placement_names.as_deref().expect("names");
+        assert_eq!(names.column_start.as_deref(), Some("content"));
+        assert_eq!(names.column_end.as_deref(), Some("content"));
+    }
+
+    /// `grid-template: <rows> / <columns>` feeds both axes at once.
+    #[test]
+    fn grid_template_shorthand_splits_rows_and_columns() {
+        let html = r#"<div></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(
+            r#"div { grid-template: min-content 1fr / 196px minmax(0,1fr); }"#,
+        );
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(
+            div.style.grid_template_rows,
+            vec![GridTrackSize::MinContent, GridTrackSize::Fr(1000)]
+        );
+        assert_eq!(
+            div.style.grid_template_columns,
+            vec![GridTrackSize::Pixels(196), GridTrackSize::Fr(1000)]
+        );
+    }
+
+    /// The area form of the shorthand: strings build the template, and the
+    /// sizes written between them size the rows.
+    #[test]
+    fn grid_template_shorthand_reads_areas_and_row_sizes() {
+        let html = r#"<div></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(
+            r#"div { grid-template: "head head" 40px "nav main" 1fr / 100px 1fr; }"#,
+        );
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+
+        let areas = div.style.grid_template_areas.as_deref().expect("areas");
+        assert_eq!((areas.rows, areas.columns), (2, 2));
+        assert_eq!(areas.area("head"), Some((0, 0, 1, 2)));
+        assert_eq!(areas.area("main"), Some((1, 1, 2, 2)));
+        assert_eq!(
+            div.style.grid_template_rows,
+            vec![GridTrackSize::Pixels(40), GridTrackSize::Fr(1000)]
+        );
+        assert_eq!(
+            div.style.grid_template_columns,
+            vec![GridTrackSize::Pixels(100), GridTrackSize::Fr(1000)]
+        );
     }
 
     #[test]

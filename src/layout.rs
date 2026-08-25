@@ -1,6 +1,6 @@
 use crate::css::{
     BackgroundRepeat, BackgroundSize, BoxSizing, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
-    FontFamilyKind, GridTrackSize, LengthValue, ListStyleType, ObjectFit, Overflow, Position, FlexDirection,
+    FontFamilyKind, GridEdge, GridTrackSize, LengthValue, ListStyleType, ObjectFit, Overflow, Position, FlexDirection,
     FlexWrap, AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
     VerticalAlign, WhiteSpaceMode, apply_text_transform, ClearSide, FloatSide,
 };
@@ -5355,6 +5355,7 @@ fn layout_grid_container(
     // ── Resolve column widths ──────────────────────────────────────────────
     let gap = element.style.gap;
     let areas = element.style.grid_template_areas.as_deref();
+    let line_names = element.style.grid_line_names.as_deref();
     let col_tracks = &element.style.grid_template_columns;
 
     // The explicit grid is as wide as the larger of the two definitions, and a
@@ -5363,20 +5364,17 @@ fn layout_grid_container(
     // -- not the single full-width column an empty track list would give, which
     // is what used to squeeze named-area pages into one narrow strip.
     let explicit_cols = col_tracks.len().max(areas.map_or(0, |a| a.columns));
-    let col_widths: Vec<u32> = if explicit_cols == 0 {
-        vec![content_width]
-    } else {
-        let tracks: Vec<GridTrackSize> = (0..explicit_cols)
-            .map(|i| {
-                col_tracks
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(|| element.style.grid_auto_columns.clone())
-            })
-            .collect();
-        resolve_grid_tracks(&tracks, content_width, gap)
-    };
-    let n_cols = col_widths.len().max(1);
+    let tracks: Vec<GridTrackSize> = (0..explicit_cols)
+        .map(|i| {
+            col_tracks
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| element.style.grid_auto_columns.clone())
+        })
+        .collect();
+    // Widths are resolved after placement, because a content-sized track cannot
+    // be measured until we know which items are in it.
+    let n_cols = tracks.len().max(1);
 
     // ── Collect grid items ─────────────────────────────────────────────────
     let children: Vec<&StyledElement> = element.children.iter().filter_map(|c| {
@@ -5412,8 +5410,42 @@ fn layout_grid_container(
             .as_deref()
             .and_then(|name| areas.and_then(|template| template.area(name)));
 
+        // `<custom-ident>` line references (`grid-column: content`) resolve
+        // against *this* container's track list, which the item cannot see from
+        // its own style. A start with no matching end spans a single track.
+        let (named_col, named_row) = match (child.style.grid_placement_names.as_deref(), line_names)
+        {
+            (Some(refs), Some(names)) => {
+                let span_between = |start: Option<usize>, end: Option<usize>| match (start, end) {
+                    (Some(start), Some(end)) => Some((start, end.saturating_sub(start).max(1))),
+                    (Some(start), None) => Some((start, 1)),
+                    _ => None,
+                };
+                let col = span_between(
+                    refs.column_start
+                        .as_deref()
+                        .and_then(|n| names.column_line(n, GridEdge::Start)),
+                    refs.column_end
+                        .as_deref()
+                        .and_then(|n| names.column_line(n, GridEdge::End)),
+                );
+                let row = span_between(
+                    refs.row_start
+                        .as_deref()
+                        .and_then(|n| names.row_line(n, GridEdge::Start)),
+                    refs.row_end
+                        .as_deref()
+                        .and_then(|n| names.row_line(n, GridEdge::End)),
+                );
+                (col, row)
+            }
+            _ => (None, None),
+        };
+
         let (col_start, col_span) = if let Some((_, col_start, _, col_end)) = named_area {
             (Some(col_start), col_end - col_start)
+        } else if let Some((start, span)) = named_col {
+            (Some(start), span)
         } else {
             let p = &child.style.grid_column;
             let span = p.span.unwrap_or(1) as usize;
@@ -5422,6 +5454,8 @@ fn layout_grid_container(
         };
         let (row_start, row_span) = if let Some((row_start, _, row_end, _)) = named_area {
             (Some(row_start), row_end - row_start)
+        } else if let Some((start, span)) = named_row {
+            (Some(start), span)
         } else {
             let p = &child.style.grid_row;
             let span = p.span.unwrap_or(1) as usize;
@@ -5483,6 +5517,57 @@ fn layout_grid_container(
             row_span,
         });
     }
+
+    // ── Resolve column widths ──────────────────────────────────────────────
+    // `auto` / `min-content` / `max-content` tracks are sized by what is in
+    // them, so they have to wait for placement. Without a measurement they used
+    // to fall back to an equal share of the free space, which handed a third of
+    // the page to the narrow tools rail in Wikipedia's `minmax(0,1fr)
+    // min-content` body grid and squeezed the article into what was left.
+    let content_sized = |track: Option<&GridTrackSize>| {
+        matches!(
+            track,
+            Some(GridTrackSize::Auto | GridTrackSize::MinContent | GridTrackSize::MaxContent)
+        )
+    };
+    let intrinsic_widths: Vec<u32> = if (0..n_cols).any(|c| content_sized(tracks.get(c))) {
+        (0..n_cols)
+            .map(|c| {
+                if !content_sized(tracks.get(c)) {
+                    return 0;
+                }
+                // Only single-column items speak for a column; a spanning item
+                // would need the space distributed across the columns it covers.
+                placed
+                    .iter()
+                    .filter(|item| item.col == c && item.col_span <= 1)
+                    .map(|item| {
+                        // Clamped: this measurement is the item's laid-out width,
+                        // not a true min-content width, so overflowing content can
+                        // report far more than the container has. A track can never
+                        // need to be wider than the grid it sits in.
+                        flex_item_content_width(
+                            item.element,
+                            content_width,
+                            images,
+                            fonts,
+                            context.background_color,
+                        )
+                        .min(content_width)
+                    })
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let col_widths: Vec<u32> = if tracks.is_empty() {
+        vec![content_width]
+    } else {
+        resolve_grid_tracks_with_intrinsic(&tracks, content_width, gap, &intrinsic_widths)
+    };
 
     // ── Compute row heights ────────────────────────────────────────────────
     let max_row = placed
@@ -5724,11 +5809,30 @@ fn layout_grid_container(
 
 /// Resolve grid track sizes into pixel widths, distributing fr units.
 fn resolve_grid_tracks(tracks: &[GridTrackSize], available_px: u32, gap: u32) -> Vec<u32> {
+    resolve_grid_tracks_with_intrinsic(tracks, available_px, gap, &[])
+}
+
+/// As `resolve_grid_tracks`, but with measured widths for the content-sized
+/// tracks.
+///
+/// A track with a measured width is treated as fixed, so the `fr` tracks split
+/// what genuinely remains. `intrinsic` is indexed by track; a missing or zero
+/// entry means "not measured" and falls back to the old even-share behaviour.
+fn resolve_grid_tracks_with_intrinsic(
+    tracks: &[GridTrackSize],
+    available_px: u32,
+    gap: u32,
+    intrinsic: &[u32],
+) -> Vec<u32> {
     let n = tracks.len();
     let total_gap = gap * n.saturating_sub(1) as u32;
     let remaining_after_gap = available_px.saturating_sub(total_gap);
 
+    let measured = |i: usize| intrinsic.get(i).copied().filter(|width| *width > 0);
+
     let mut widths = vec![0u32; n];
+    // Which tracks are already final, so the stretch pass below leaves them be.
+    let mut content_fixed = vec![false; n];
     let mut fixed_total = 0u32;
     let mut fr_total = 0u32;
     let mut auto_count = 0u32;
@@ -5747,6 +5851,17 @@ fn resolve_grid_tracks(tracks: &[GridTrackSize], available_px: u32, gap: u32) ->
             GridTrackSize::Fr(fr_x1000) => {
                 fr_total += fr_x1000;
             }
+            // `min-content` / `max-content` are sized purely by their contents
+            // and do *not* stretch, so a measurement makes them fixed.
+            GridTrackSize::MinContent | GridTrackSize::MaxContent if measured(i).is_some() => {
+                let width = measured(i).unwrap_or(0);
+                widths[i] = width;
+                content_fixed[i] = true;
+                fixed_total += width;
+            }
+            // `auto` is content-sized *and then stretched* to fill what is left,
+            // so it takes a share of the free space and uses its measurement
+            // only as a floor. Unmeasured content tracks fall in here too.
             GridTrackSize::Auto | GridTrackSize::MinContent | GridTrackSize::MaxContent => {
                 auto_count += 1;
             }
@@ -5755,10 +5870,10 @@ fn resolve_grid_tracks(tracks: &[GridTrackSize], available_px: u32, gap: u32) ->
 
     let remaining = remaining_after_gap.saturating_sub(fixed_total);
 
-    // Split the free space between the `fr` tracks and the `auto` tracks. When
-    // only one kind is present it takes all of it: reserving a share for a kind
-    // that is not there used to throw that share away, because the `fr` payout
-    // below is skipped entirely when `fr_total` is zero. An all-`auto` list
+    // Split the free space between the `fr` tracks and the stretching tracks.
+    // When only one kind is present it takes all of it: reserving a share for a
+    // kind that is not there used to throw that share away, because the `fr`
+    // payout is skipped entirely when `fr_total` is zero. An all-`auto` list
     // therefore kept only a third of the width -- `auto auto` across 1200px got
     // 200px per column instead of 600px.
     let (fr_space, auto_space) = match (fr_total > 0, auto_count > 0) {
@@ -5781,11 +5896,15 @@ fn resolve_grid_tracks(tracks: &[GridTrackSize], available_px: u32, gap: u32) ->
     if auto_count > 0 {
         let per_auto = auto_space / auto_count;
         for (i, track) in tracks.iter().enumerate() {
+            if content_fixed[i] {
+                continue;
+            }
             if matches!(
                 track,
                 GridTrackSize::Auto | GridTrackSize::MinContent | GridTrackSize::MaxContent
             ) {
-                widths[i] = per_auto;
+                // Never stretch a track below what it has to hold.
+                widths[i] = per_auto.max(measured(i).unwrap_or(0));
             }
         }
     }
@@ -8977,6 +9096,74 @@ mod tests {
         assert!(
             longest > 1,
             "main column collapsed -- text broke into single characters"
+        );
+    }
+
+    /// The MDN regression in miniature: a container whose track list names its
+    /// lines, with a child placed by `grid-column: <name>`. The child must land
+    /// on the wide middle track, not auto-place into the narrow first one.
+    #[test]
+    fn named_line_placement_puts_the_item_on_the_named_track() {
+        use crate::css::{build_styled_tree, parse_stylesheet};
+        use crate::html::parse_document;
+
+        let html = r#"<div class="page"><div class="c">CONTENT</div></div>"#;
+        let stylesheet = parse_stylesheet(
+            r#".page { display: grid;
+                      grid-template-columns: [pad-start] 40px [content-start] 1fr [content-end] 40px [pad-end]; }
+               .c { grid-column: content; }"#,
+        );
+        let doc = parse_document(html);
+        let styled =
+            build_styled_tree(&doc, &stylesheet, 1000, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 1000, &mut fonts);
+
+        let content = layout
+            .texts()
+            .into_iter()
+            .find(|t| t.text.contains("CONTENT"))
+            .expect("CONTENT should be rendered");
+
+        // Track 0 is the 40px pad, so the named track starts right after it.
+        assert_eq!(
+            content.x, 40,
+            "item should sit on the content track, not auto-place into the pad"
+        );
+    }
+
+    /// `min-content` is sized by what is in it and does not stretch, so a
+    /// narrow neighbour must not take an equal share from an `fr` track. This
+    /// is Wikipedia's `... / minmax(0,Nrem) min-content` article grid.
+    #[test]
+    fn min_content_track_does_not_steal_from_fr() {
+        use crate::css::{build_styled_tree, parse_stylesheet};
+        use crate::html::parse_document;
+
+        let html = r#"<div class="page"><div class="a">MAIN</div><div class="b">.</div></div>"#;
+        let stylesheet = parse_stylesheet(
+            r#".page { display: grid; grid-template-columns: 1fr min-content; }"#,
+        );
+        let doc = parse_document(html);
+        let styled =
+            build_styled_tree(&doc, &stylesheet, 1000, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 1000, &mut fonts);
+
+        let narrow = layout
+            .texts()
+            .into_iter()
+            .find(|t| t.text.trim() == ".")
+            .expect("the min-content item should be rendered");
+
+        // A third of 1000px would put the narrow column's start at ~667. Sized
+        // by its contents it starts far to the right of that.
+        assert!(
+            narrow.x > 800,
+            "min-content column took too much room; it starts at x={}",
+            narrow.x
         );
     }
 
