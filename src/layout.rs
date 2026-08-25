@@ -5354,11 +5354,27 @@ fn layout_grid_container(
 
     // ── Resolve column widths ──────────────────────────────────────────────
     let gap = element.style.gap;
+    let areas = element.style.grid_template_areas.as_deref();
     let col_tracks = &element.style.grid_template_columns;
-    let col_widths: Vec<u32> = if col_tracks.is_empty() {
+
+    // The explicit grid is as wide as the larger of the two definitions, and a
+    // column the track list does not size falls back to `grid-auto-columns`. So
+    // a template that names areas but sizes nothing is an all-`auto` track list
+    // -- not the single full-width column an empty track list would give, which
+    // is what used to squeeze named-area pages into one narrow strip.
+    let explicit_cols = col_tracks.len().max(areas.map_or(0, |a| a.columns));
+    let col_widths: Vec<u32> = if explicit_cols == 0 {
         vec![content_width]
     } else {
-        resolve_grid_tracks(col_tracks, content_width, gap)
+        let tracks: Vec<GridTrackSize> = (0..explicit_cols)
+            .map(|i| {
+                col_tracks
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| element.style.grid_auto_columns.clone())
+            })
+            .collect();
+        resolve_grid_tracks(&tracks, content_width, gap)
     };
     let n_cols = col_widths.len().max(1);
 
@@ -5387,13 +5403,26 @@ fn layout_grid_container(
     let mut placed: Vec<PlacedItem> = Vec::new();
 
     for child in &children {
-        let (col_start, col_span) = {
+        // `grid-area: <name>` names an area of *this* container's template. The
+        // item cannot see that template from its own style, so the lookup has to
+        // happen here; an unknown name simply falls through to normal placement.
+        let named_area = child
+            .style
+            .grid_area_name
+            .as_deref()
+            .and_then(|name| areas.and_then(|template| template.area(name)));
+
+        let (col_start, col_span) = if let Some((_, col_start, _, col_end)) = named_area {
+            (Some(col_start), col_end - col_start)
+        } else {
             let p = &child.style.grid_column;
             let span = p.span.unwrap_or(1) as usize;
             let start = p.start.map(|s| (s - 1).max(0) as usize);
             (start, span)
         };
-        let (row_start, row_span) = {
+        let (row_start, row_span) = if let Some((row_start, _, row_end, _)) = named_area {
+            (Some(row_start), row_end - row_start)
+        } else {
             let p = &child.style.grid_row;
             let span = p.span.unwrap_or(1) as usize;
             let start = p.start.map(|s| (s - 1).max(0) as usize);
@@ -5456,7 +5485,12 @@ fn layout_grid_container(
     }
 
     // ── Compute row heights ────────────────────────────────────────────────
-    let max_row = placed.iter().map(|p| p.row + p.row_span).max().unwrap_or(0);
+    let max_row = placed
+        .iter()
+        .map(|p| p.row + p.row_span)
+        .max()
+        .unwrap_or(0)
+        .max(areas.map_or(0, |a| a.rows));
     let auto_row_tracks = &element.style.grid_template_rows;
     let mut row_heights: Vec<u32> = vec![0u32; max_row];
 
@@ -8863,6 +8897,86 @@ mod tests {
         assert_eq!(
             super::resolve_grid_tracks(&[GridTrackSize::Fr(1000), GridTrackSize::Auto], 900, 0),
             vec![600, 300]
+        );
+    }
+
+    /// Items land on the rectangle their `grid-area` name points at: the header
+    /// spans both columns, and nav/main sit side by side beneath it.
+    #[test]
+    fn grid_named_areas_place_items_on_their_rectangle() {
+        use crate::css::{build_styled_tree, parse_stylesheet};
+        use crate::html::parse_document;
+
+        let html = r#"<div class="page"><div class="h">HEAD</div><div class="n">NAV</div><div class="m">MAIN</div></div>"#;
+        let stylesheet = parse_stylesheet(
+            r#".page { display: grid; grid-template-areas: "head head" "nav main"; }
+               .h { grid-area: head; }
+               .n { grid-area: nav; }
+               .m { grid-area: main; }"#,
+        );
+        let doc = parse_document(html);
+        let styled =
+            build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
+
+        let texts = layout.texts();
+        let find = |needle: &str| {
+            texts
+                .iter()
+                .find(|t| t.text.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} should be rendered"))
+                .clone()
+        };
+        let head = find("HEAD");
+        let nav = find("NAV");
+        let main = find("MAIN");
+
+        // Two columns across 800px, so the second one starts near the middle.
+        assert_eq!(head.x, nav.x, "head and nav both start in column 1");
+        assert!(
+            main.x >= 380 && main.x <= 420,
+            "main should start in column 2, got x={}",
+            main.x
+        );
+        // The header owns its own row above the other two.
+        assert!(head.y < nav.y, "head sits above nav");
+        assert_eq!(nav.y, main.y, "nav and main share a row");
+    }
+
+    /// The regression that motivated named areas: a grid laid out purely with
+    /// `grid-template-areas` used to collapse to one full-width column, so an
+    /// item in the second column got no width of its own and its text wrapped
+    /// one character per line.
+    #[test]
+    fn named_area_columns_are_wide_enough_to_hold_their_text() {
+        use crate::css::{build_styled_tree, parse_stylesheet};
+        use crate::html::parse_document;
+
+        let html = r#"<div class="page"><div class="s">SIDE</div><div class="m">Resources for developers</div></div>"#;
+        let stylesheet = parse_stylesheet(
+            r#".page { display: grid; grid-template-areas: "side main"; }
+               .s { grid-area: side; }
+               .m { grid-area: main; }"#,
+        );
+        let doc = parse_document(html);
+        let styled =
+            build_styled_tree(&doc, &stylesheet, 1000, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        let layout = layout_styled_document(&styled, &images, 1000, &mut fonts);
+
+        let texts = layout.texts();
+        let main_runs: Vec<_> = texts.iter().filter(|t| t.x >= 400).collect();
+        assert!(!main_runs.is_empty(), "the main area should render something");
+
+        // Half of 1000px is plenty for this phrase; if the column had collapsed
+        // every run would be a single character.
+        let longest = main_runs.iter().map(|t| t.text.trim().len()).max().unwrap();
+        assert!(
+            longest > 1,
+            "main column collapsed -- text broke into single characters"
         );
     }
 

@@ -580,6 +580,35 @@ impl Default for GridPlacement {
     }
 }
 
+/// A parsed `grid-template-areas` value: the size of the explicit grid the
+/// strings describe, plus one rectangle per named area.
+///
+/// Only the rectangles are kept, never the cell grid, because a rectangle is
+/// all layout ever asks for. That also puts the spec's validity rules --
+/// every row has the same number of tokens, and every named area is a single
+/// filled rectangle -- at parse time, which is where an invalid declaration
+/// has to be dropped whole rather than partially honoured.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GridTemplateAreas {
+    pub rows: usize,
+    pub columns: usize,
+    /// `(name, row_start, column_start, row_end, column_end)`, 0-based and
+    /// half-open, so a one-cell area at the origin is `(_, 0, 0, 1, 1)`.
+    pub areas: Vec<(Box<str>, usize, usize, usize, usize)>,
+}
+
+impl GridTemplateAreas {
+    /// The rectangle named `name`, if the template defines one.
+    pub fn area(&self, name: &str) -> Option<(usize, usize, usize, usize)> {
+        self.areas
+            .iter()
+            .find(|(area_name, ..)| &**area_name == name)
+            .map(|&(_, row_start, col_start, row_end, col_end)| {
+                (row_start, col_start, row_end, col_end)
+            })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct SignedEdgeSizes {
     pub top: i32,
@@ -732,9 +761,17 @@ pub struct ComputedStyle {
     pub grid_template_rows: Vec<GridTrackSize>,
     pub grid_auto_rows: GridTrackSize,
     pub grid_auto_columns: GridTrackSize,
+    /// `grid-template-areas`. Boxed because it is rare and `ComputedStyle` is
+    /// ~520 bytes shared through `Arc` + interning -- cold fields stay behind a
+    /// pointer so the common style pays 8 bytes, not the whole table.
+    pub grid_template_areas: Option<Box<GridTemplateAreas>>,
     // Grid item fields
     pub grid_column: GridPlacement,
     pub grid_row: GridPlacement,
+    /// `grid-area: <custom-ident>`, resolved against the containing grid's
+    /// areas at layout time (the item cannot see them from here). Boxed for
+    /// the same reason as `grid_template_areas`.
+    pub grid_area_name: Option<Box<str>>,
     // Filter effects
     pub filter_blur_px: u32,       // blur() value in pixels, 0 = no blur
     pub filter_brightness: u32,    // brightness() in percent * 100 (10000 = 100% = no change)
@@ -848,8 +885,10 @@ impl ComputedStyle {
             grid_template_rows: Vec::new(),
             grid_auto_rows: GridTrackSize::Auto,
             grid_auto_columns: GridTrackSize::Auto,
+            grid_template_areas: None,
             grid_column: GridPlacement::default(),
             grid_row: GridPlacement::default(),
+            grid_area_name: None,
             // Filter effects
             filter_blur_px: 0,
             filter_brightness: 10000,
@@ -3111,6 +3150,12 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.grid_auto_columns = parse_grid_track_size(value.trim(), parent_font_size)
                 .unwrap_or(GridTrackSize::Auto);
         }
+        "grid-template-areas" => {
+            style.grid_template_areas = parse_grid_template_areas(value).map(Box::new);
+        }
+        "grid-area" => {
+            apply_grid_area(style, value);
+        }
         "grid-column" => {
             style.grid_column = parse_grid_placement(value);
         }
@@ -4263,6 +4308,152 @@ fn parse_grid_placement(value: &str) -> GridPlacement {
         }
         _ => GridPlacement::default(),
     }
+}
+
+/// Parse `grid-template-areas`.
+///
+/// Returns `None` for `none`, for anything unparseable, and -- per spec -- for
+/// a template that is invalid, since an invalid declaration is dropped rather
+/// than partially applied.
+fn parse_grid_template_areas(value: &str) -> Option<GridTemplateAreas> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return None;
+    }
+
+    // Pull out the quoted strings; each one is a row. Anything outside quotes
+    // is not part of this property's grammar.
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    let mut rest = value;
+    while let Some(open) = rest.find(['"', '\'']) {
+        let quote = rest.as_bytes()[open] as char;
+        let after = &rest[open + 1..];
+        let close = after.find(quote)?;
+        let row = &after[..close];
+        rest = &after[close + 1..];
+
+        // A null cell token is a *run* of one or more periods: `.`, `...` and
+        // `.....` are each one empty cell, not one cell per period.
+        let cells: Vec<Option<String>> = row
+            .split_whitespace()
+            .map(|token| {
+                if token.chars().all(|c| c == '.') {
+                    None
+                } else {
+                    Some(token.to_string())
+                }
+            })
+            .collect();
+        rows.push(cells);
+    }
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    // Ragged rows invalidate the whole declaration.
+    let columns = rows[0].len();
+    if columns == 0 || rows.iter().any(|row| row.len() != columns) {
+        return None;
+    }
+
+    // Collect each name's bounding box, then require that the box is exactly
+    // filled by that name -- an L-shaped or split area is invalid.
+    let mut areas: Vec<(Box<str>, usize, usize, usize, usize)> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for row in &rows {
+        for cell in row {
+            if let Some(name) = cell {
+                if !seen.iter().any(|s| s == name) {
+                    seen.push(name.clone());
+                }
+            }
+        }
+    }
+
+    for name in seen {
+        let mut row_start = usize::MAX;
+        let mut col_start = usize::MAX;
+        let mut row_end = 0usize;
+        let mut col_end = 0usize;
+        let mut count = 0usize;
+        for (r, row) in rows.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                if cell.as_deref() == Some(name.as_str()) {
+                    row_start = row_start.min(r);
+                    col_start = col_start.min(c);
+                    row_end = row_end.max(r + 1);
+                    col_end = col_end.max(c + 1);
+                    count += 1;
+                }
+            }
+        }
+        if count != (row_end - row_start) * (col_end - col_start) {
+            return None;
+        }
+        areas.push((
+            name.into_boxed_str(),
+            row_start,
+            col_start,
+            row_end,
+            col_end,
+        ));
+    }
+
+    Some(GridTemplateAreas {
+        rows: rows.len(),
+        columns,
+        areas,
+    })
+}
+
+/// Apply the `grid-area` shorthand.
+///
+/// The positional order is row-start / column-start / row-end / column-end,
+/// and a lone `<custom-ident>` sets all four longhands to that name, which
+/// resolves through the area's implicit `-start` / `-end` lines to exactly the
+/// named rectangle. We record the name and let layout do that lookup, since
+/// the item cannot see its container's template from here.
+fn apply_grid_area(style: &mut ComputedStyle, value: &str) {
+    let parts: Vec<&str> = value.split('/').map(str::trim).collect();
+
+    if let [single] = parts.as_slice() {
+        if is_grid_area_ident(single) {
+            style.grid_area_name = Some((*single).to_string().into_boxed_str());
+            return;
+        }
+    }
+
+    let line = |index: usize| parts.get(index).and_then(|s| parse_grid_line(s));
+    let span_between = |start: Option<i32>, end: Option<i32>| {
+        match (start, end) {
+            (Some(start), Some(end)) => Some((end - start).max(1) as u32),
+            _ => None,
+        }
+    };
+
+    let row_start = line(0);
+    let col_start = line(1);
+    style.grid_row = GridPlacement {
+        start: row_start,
+        span: span_between(row_start, line(2)),
+    };
+    style.grid_column = GridPlacement {
+        start: col_start,
+        span: span_between(col_start, line(3)),
+    };
+}
+
+/// Is this `grid-area` value a bare area name rather than a line number?
+fn is_grid_area_ident(s: &str) -> bool {
+    !s.is_empty()
+        && !s.eq_ignore_ascii_case("auto")
+        && !s.eq_ignore_ascii_case("none")
+        && !s.starts_with("span")
+        && s.parse::<i32>().is_err()
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        && !s.starts_with(|c: char| c.is_ascii_digit())
 }
 
 fn parse_grid_line(s: &str) -> Option<i32> {
@@ -6524,6 +6715,102 @@ mod tests {
         assert_eq!(div.style.grid_column.start, Some(1));
         assert_eq!(div.style.grid_column.span, Some(2));
         assert_eq!(div.style.grid_row.start, Some(2));
+    }
+
+    /// A holy-grail template becomes one rectangle per name, with the explicit
+    /// grid sized from the strings.
+    #[test]
+    fn grid_template_areas_parsed_into_rectangles() {
+        let html = r#"<div></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(
+            r#"div { display: grid; grid-template-areas: "head head" "nav main" ". foot"; }"#,
+        );
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        let areas = div.style.grid_template_areas.as_deref().expect("template");
+
+        assert_eq!((areas.rows, areas.columns), (3, 2));
+        // Half-open rectangles: head spans both columns of row 0.
+        assert_eq!(areas.area("head"), Some((0, 0, 1, 2)));
+        assert_eq!(areas.area("nav"), Some((1, 0, 2, 1)));
+        assert_eq!(areas.area("main"), Some((1, 1, 2, 2)));
+        // The null cell leaves foot in the second column only.
+        assert_eq!(areas.area("foot"), Some((2, 1, 3, 2)));
+        assert_eq!(areas.area("nope"), None);
+    }
+
+    /// A run of periods is *one* null cell, not one per period -- so these two
+    /// rows have the same number of tokens and the template is valid.
+    #[test]
+    fn grid_template_areas_treats_a_period_run_as_one_null_cell() {
+        let html = r#"<div></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(
+            r#"div { display: grid; grid-template-areas: "a ..... b" "a . b"; }"#,
+        );
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        let areas = div.style.grid_template_areas.as_deref().expect("template");
+
+        assert_eq!(areas.columns, 3, "'.....' is one cell, not five");
+        assert_eq!(areas.area("a"), Some((0, 0, 2, 1)));
+        assert_eq!(areas.area("b"), Some((0, 2, 2, 3)));
+    }
+
+    /// Rows with differing token counts invalidate the whole declaration, and an
+    /// invalid declaration is dropped rather than partly honoured.
+    #[test]
+    fn grid_template_areas_rejects_ragged_rows() {
+        let html = r#"<div></div>"#;
+        let doc = parse_document(html);
+        let sheet =
+            parse_stylesheet(r#"div { display: grid; grid-template-areas: "a b" "c d e"; }"#);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert!(div.style.grid_template_areas.is_none());
+    }
+
+    /// An area whose cells do not form a filled rectangle is invalid. Here "a"
+    /// is L-shaped: its bounding box holds four cells but only three are "a".
+    #[test]
+    fn grid_template_areas_rejects_a_non_rectangular_area() {
+        let html = r#"<div></div>"#;
+        let doc = parse_document(html);
+        let sheet =
+            parse_stylesheet(r#"div { display: grid; grid-template-areas: "a a" "a b"; }"#);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert!(div.style.grid_template_areas.is_none());
+    }
+
+    /// A bare `grid-area: <ident>` is kept as a name for layout to resolve, and
+    /// must not be mistaken for a line number.
+    #[test]
+    fn grid_area_records_a_bare_name() {
+        let html = r#"<div style="grid-area: main-content;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.grid_area_name.as_deref(), Some("main-content"));
+        assert_eq!(div.style.grid_row.start, None);
+    }
+
+    /// The numeric form is row-start / column-start / row-end / column-end --
+    /// row first, and both starts before both ends.
+    #[test]
+    fn grid_area_numeric_form_maps_row_first() {
+        let html = r#"<div style="grid-area: 2 / 1 / 4 / 3;"></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(div.style.grid_row.start, Some(2));
+        assert_eq!(div.style.grid_row.span, Some(2));
+        assert_eq!(div.style.grid_column.start, Some(1));
+        assert_eq!(div.style.grid_column.span, Some(2));
+        assert_eq!(div.style.grid_area_name, None);
     }
 
     #[test]
