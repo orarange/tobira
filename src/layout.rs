@@ -5720,8 +5720,22 @@ fn resolve_grid_tracks(tracks: &[GridTrackSize], available_px: u32, gap: u32) ->
     }
 
     let remaining = remaining_after_gap.saturating_sub(fixed_total);
-    let fr_space = if auto_count == 0 { remaining } else { remaining * 2 / 3 };
-    let auto_space = if auto_count > 0 { remaining - fr_space } else { 0 };
+
+    // Split the free space between the `fr` tracks and the `auto` tracks. When
+    // only one kind is present it takes all of it: reserving a share for a kind
+    // that is not there used to throw that share away, because the `fr` payout
+    // below is skipped entirely when `fr_total` is zero. An all-`auto` list
+    // therefore kept only a third of the width -- `auto auto` across 1200px got
+    // 200px per column instead of 600px.
+    let (fr_space, auto_space) = match (fr_total > 0, auto_count > 0) {
+        (true, true) => {
+            let fr_space = remaining * 2 / 3;
+            (fr_space, remaining - fr_space)
+        }
+        (true, false) => (remaining, 0),
+        (false, true) => (0, remaining),
+        (false, false) => (0, 0),
+    };
 
     if fr_total > 0 {
         for (i, track) in tracks.iter().enumerate() {
@@ -8813,6 +8827,43 @@ mod tests {
         // They should be at different x positions
         assert!(b.x > a.x, "B should be to the right of A");
         assert!(c.x > b.x, "C should be to the right of B");
+    }
+
+    /// `auto` tracks must share *all* the free space.
+    ///
+    /// The split used to hand two thirds to the `fr` tracks unconditionally,
+    /// but the `fr` payout is skipped when there are none, so that share was
+    /// simply discarded -- `auto auto` across 1200px produced 200px columns
+    /// instead of 600px. Named-area grids hit this constantly, because a
+    /// template with no `grid-template-columns` is an all-`auto` track list.
+    #[test]
+    fn auto_grid_tracks_receive_the_whole_free_space() {
+        use crate::css::GridTrackSize;
+
+        assert_eq!(
+            super::resolve_grid_tracks(&[GridTrackSize::Auto, GridTrackSize::Auto], 1200, 0),
+            vec![600, 600]
+        );
+
+        // Fixed tracks come off the top; the remainder is still fully spent.
+        assert_eq!(
+            super::resolve_grid_tracks(
+                &[
+                    GridTrackSize::Pixels(200),
+                    GridTrackSize::Auto,
+                    GridTrackSize::Auto
+                ],
+                1200,
+                0
+            ),
+            vec![200, 500, 500]
+        );
+
+        // With both kinds present the existing 2/3 fr, 1/3 auto split stands.
+        assert_eq!(
+            super::resolve_grid_tracks(&[GridTrackSize::Fr(1000), GridTrackSize::Auto], 900, 0),
+            vec![600, 300]
+        );
     }
 
     #[test]
