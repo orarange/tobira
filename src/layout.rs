@@ -4669,6 +4669,12 @@ fn measure_cell_preferred_width(
         return width.max(1);
     }
 
+    // A flex row lays its items out side by side however each item declares
+    // itself, so a block-level child does not start a new line there. Treating
+    // it as one measured a row by its widest item instead of by their sum:
+    // rust-lang.org's eight navigation links came to 149px between them and the
+    // list wrapped to one link a line.
+    let in_a_row = lays_children_out_in_a_row(&cell.style);
     let mut max_width = 1_u32;
     let mut inline_width = 0_u32;
     for child in &cell.children {
@@ -4683,7 +4689,7 @@ fn measure_cell_preferred_width(
         }
 
         let child_width = measure_node_preferred_width(child, images, fonts);
-        if is_block_level(child) {
+        if is_block_level(child) && !in_a_row {
             max_width = max_width.max(inline_width).max(child_width);
             inline_width = 0;
         } else {
@@ -4711,6 +4717,19 @@ fn measure_cell_min_width(
     }
 
     max_width.saturating_add(padding.saturating_mul(2)).max(1)
+}
+
+/// Whether this box puts all of its children on one axis, so that its
+/// max-content width is the sum of theirs rather than the widest of them.
+fn lays_children_out_in_a_row(style: &ComputedStyle) -> bool {
+    match style.display {
+        Display::Inline | Display::InlineBlock => true,
+        Display::Flex | Display::InlineFlex => matches!(
+            style.flex_direction,
+            FlexDirection::Row | FlexDirection::RowReverse
+        ),
+        _ => false,
+    }
 }
 
 fn measure_node_preferred_width(
@@ -4747,18 +4766,7 @@ fn measure_node_preferred_width(
                     });
             }
 
-            // Anything that puts all its children on one axis measures as the
-            // sum of them: inline boxes, `inline-block`, and a flex row.
-            let lays_children_out_in_a_row = match element.style.display {
-                Display::Inline | Display::InlineBlock => true,
-                Display::Flex | Display::InlineFlex => matches!(
-                    element.style.flex_direction,
-                    FlexDirection::Row | FlexDirection::RowReverse
-                ),
-                _ => false,
-            };
-
-            let child_width = if lays_children_out_in_a_row {
+            let child_width = if lays_children_out_in_a_row(&element.style) {
                 element
                     .children
                     .iter()
@@ -5507,6 +5515,25 @@ fn flex_item_content_width(
         }
         m
     }
+    // Lay the item out at *its own* max-content width, not at the container's.
+    // Measuring the painted extent inside a container-wide box counts the empty
+    // space that `text-align: center` (or `right`) leaves before the content:
+    // rust-lang.org centres each navigation label, so every one of them
+    // measured about half the page wide and only a single item fitted per line.
+    let surround = child.style.padding.left
+        + child.style.padding.right
+        + if child.style.border_style_none {
+            0
+        } else {
+            child.style.border.left + child.style.border.right
+        }
+        + child.style.margin.left.max(0) as u32
+        + child.style.margin.right.max(0) as u32;
+    let intrinsic = measure_cell_preferred_width(child, 0, images, fonts)
+        .saturating_add(surround)
+        .min(avail_width.max(1))
+        .max(1);
+
     let mut dummy_y = 0u32;
     let mut ctx = LayoutContext {
         background_color: bg,
@@ -5515,7 +5542,7 @@ fn flex_item_content_width(
     layout_block_element(
         child,
         0,
-        avail_width.max(1),
+        intrinsic,
         &mut dummy_y,
         &mut ctx,
         images,
@@ -5531,6 +5558,10 @@ fn flex_item_content_width(
     // doesn't cover margin.right — add it, or the item's slot is too narrow and a
     // later height-measure at that width wraps the content (a one-line span
     // ballooned to two lines, pushing every other flex item down).
+    // The layout pass can still report more than the estimate -- a form
+    // control or a nested flex row the intrinsic measure cannot see through --
+    // so take whichever is larger.
+    let w = w.max(intrinsic);
     let result = (w as i64 + child.style.margin.right as i64).max(1) as u32;
     if std::env::var_os("TOBIRA_DEBUG_ITEM").is_some() {
         eprintln!(
@@ -5855,6 +5886,13 @@ fn layout_flex_container(
                 // per-line cross-axis alignment.
                 let gap = element.style.gap;
                 let widths: Vec<u32> = item_widths.clone();
+                if std::env::var_os("TOBIRA_DEBUG_FLEX").is_some() {
+                    eprintln!(
+                        "flexwrap <{}> class={:?} w={content_width} gap={gap} widths={widths:?}",
+                        element.tag_name,
+                        element.attributes.get("class").map(|c| c.chars().take(28).collect::<String>()),
+                    );
+                }
                 let mut lines: Vec<Vec<usize>> = vec![Vec::new()];
                 let mut line_w = 0u32;
                 for (i, &w) in widths.iter().enumerate() {
@@ -6220,6 +6258,47 @@ mod percentage_sizing_tests {
         assert!(
             pin.y >= 40,
             "the box stays below the block it follows: {pin:?}"
+        );
+    }
+
+    /// A flex item was measured by laying it out across the whole container and
+    /// reading how far the paint reached. That counts the empty space
+    /// `text-align: center` leaves *before* the content, so a centred label came
+    /// out about half the container wide. rust-lang.org centres every
+    /// navigation label, and its eight links each claimed half the page.
+    #[test]
+    fn a_centred_flex_item_is_measured_by_its_content() {
+        let runs = text_runs(
+            ".row{display:flex}.cell{text-align:center}",
+            "<div class=\"row\" style=\"width:600px\">\
+             <div class=\"cell\">\u{4e00}</div><div class=\"cell\">\u{4e8c}</div>\
+             <div class=\"cell\">\u{4e09}</div></div>",
+        );
+        let first = runs.iter().find(|run| run.text == "\u{4e00}").expect("first");
+        let last = runs.iter().find(|run| run.text == "\u{4e09}").expect("last");
+        assert_eq!(first.y, last.y, "all three belong on one line: {runs:?}");
+        assert!(
+            last.x < 200,
+            "each item is one glyph wide, so the third starts early: {runs:?}"
+        );
+    }
+
+    /// A flex row's max-content width is the sum of its items, whatever each
+    /// item's own `display` says. Breaking a line at every block-level child
+    /// measured rust-lang.org's eight navigation links at 149px between them,
+    /// and the list wrapped to one link a line.
+    #[test]
+    fn a_flex_rows_intrinsic_width_is_the_sum_of_its_items() {
+        let runs = text_runs(
+            ".outer{display:flex}.row{display:flex}.item{display:block}",
+            "<div class=\"outer\" style=\"width:600px\"><div class=\"row\">\
+             <div class=\"item\">\u{4e00}</div><div class=\"item\">\u{4e8c}</div>\
+             <div class=\"item\">\u{4e09}</div></div></div>",
+        );
+        let ys: Vec<u32> = runs.iter().map(|run| run.y).collect();
+        assert!(
+            ys.windows(2).all(|pair| pair[0] == pair[1]),
+            "the inner row must not wrap: {runs:?}"
         );
     }
 
