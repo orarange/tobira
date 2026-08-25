@@ -1950,6 +1950,14 @@ fn layout_atomic_inline(
     .min(available_width)
     .max(1);
 
+    if std::env::var_os("TOBIRA_DEBUG_ATOMIC").is_some() {
+        eprintln!(
+            "atomic <{}> class={:?} avail={available_width} -> {width}",
+            element.tag_name,
+            element.attributes.get("class").map(|c| c.chars().take(24).collect::<String>()),
+        );
+    }
+
     let mut sub_context = LayoutContext {
         background_color: context.background_color,
         next_control_id: context.next_control_id,
@@ -5698,11 +5706,30 @@ fn layout_flex_container(
                 && element.style.flex_wrap == FlexWrap::NoWrap
                 && base_sum > 0
             {
-                // Single-line overflow: shrink items proportionally to fit.
+                // Single-line overflow. CSS Flexbox 9.7 weights the
+                // shrinkage by `flex-shrink` times the base size, so an item
+                // that says `flex-shrink: 0` keeps its width and the others
+                // absorb the whole overflow. `flex-shrink` was parsed and then
+                // never read: everything shrank proportionally, and Yahoo!
+                // JAPAN's topics column -- `flex: 1 0 240px`, i.e. "at least
+                // 240px, never shrink" -- was squeezed to 132px, which wrapped
+                // every headline onto three lines.
                 let avail = content_width.saturating_sub(total_gap).max(1);
-                for w in item_widths.iter_mut() {
-                    *w = (((*w as u64) * (avail as u64)) / base_sum as u64).max(1) as u32;
+                let overflow = base_sum.saturating_sub(avail) as u64;
+                let weights: Vec<u64> = children
+                    .iter()
+                    .zip(base_widths.iter())
+                    .map(|(child, base)| child.style.flex_shrink as u64 * *base as u64)
+                    .collect();
+                let total_weight: u64 = weights.iter().sum();
+                if total_weight > 0 {
+                    for (i, w) in item_widths.iter_mut().enumerate() {
+                        let taken = overflow.saturating_mul(weights[i]) / total_weight;
+                        *w = (*w as u64).saturating_sub(taken).max(1) as u32;
+                    }
                 }
+                // With nothing allowed to shrink the row simply overflows,
+                // which is what the spec asks for.
             } else {
                 // Distribute free space to growers (flex-grow), proportionally.
                 let free = content_width
@@ -6167,6 +6194,29 @@ mod percentage_sizing_tests {
             "<div style=\"width:600px\"><div>ホームページに設定する</div></div>",
         );
         assert!(runs.len() > 1, "first-child should still apply: {runs:?}");
+    }
+
+    /// `flex-shrink` was parsed and then never read: an overflowing row shrank
+    /// every item proportionally, whatever each one asked for. Yahoo! JAPAN's
+    /// topics column says `flex: 1 0 240px` -- at least 240px, never shrink --
+    /// and was squeezed to 132px, which wrapped every headline onto three lines.
+    #[test]
+    fn flex_shrink_zero_keeps_an_items_width() {
+        const HEADLINE: &str = "\u{3042}\u{3044}\u{3046}\u{3048}\u{304a}\u{304b}\u{304d}\u{304f}\u{3051}\u{3053}";
+        let html = format!(
+            "<div class=\"row\" style=\"width:300px\">\
+             <div class=\"fixed\">{HEADLINE}</div>\
+             <div class=\"rest\">{HEADLINE}{HEADLINE}{HEADLINE}</div></div>"
+        );
+        let runs = text_runs(".row{display:flex}.fixed{flex:1 0 240px}", &html);
+        let headline = runs
+            .iter()
+            .find(|run| run.text == HEADLINE)
+            .unwrap_or_else(|| panic!("the fixed item must not wrap: {runs:?}"));
+        assert!(
+            headline.width >= 160,
+            "the fixed item keeps its 240px slot: {headline:?}"
+        );
     }
 
     /// Flex arithmetic works in margin boxes, and an item's margins were counted
