@@ -5050,6 +5050,14 @@ fn measure_cell_preferred_width(
             max_width = max_width.max(inline_width).max(child_width);
             inline_width = 0;
         } else {
+            // A row holds its items apart by `gap`, so that space is part of
+            // what the row needs. Left out, the box came up exactly the gaps
+            // short and its contents wrapped inside a box measured to fit them:
+            // firefox.com's header menu titles are a label and a chevron 4px
+            // apart, and every one of them broke over two lines.
+            if in_a_row && inline_width > 0 {
+                inline_width = inline_width.saturating_add(cell.style.gap);
+            }
             inline_width = inline_width.saturating_add(child_width);
         }
     }
@@ -5199,12 +5207,25 @@ fn measure_node_preferred_width(
                 // flex row then overflowed by fivefold and shrank every item
                 // proportionally, which crushed the one tab that had measured
                 // correctly down to a single character per line.
-                element
-                    .children
-                    .iter()
-                    .filter(|child| !is_hidden(child))
-                    .map(|child| measure_node_preferred_width(child, images, fonts))
-                    .sum::<u32>()
+                // A row holds its items apart by `gap`, so that space counts
+                // towards what the row needs. Left out, the box came up exactly
+                // the gaps short and its own contents wrapped inside a box
+                // measured to fit them: firefox.com's header menu titles are a
+                // label and a chevron 4px apart, and every one broke over two
+                // lines, taking the header from 68px to 117px tall.
+                {
+                    let visible: Vec<u32> = element
+                        .children
+                        .iter()
+                        .filter(|child| !is_hidden(child))
+                        .map(|child| measure_node_preferred_width(child, images, fonts))
+                        .collect();
+                    let gaps = element
+                        .style
+                        .gap
+                        .saturating_mul(visible.len().saturating_sub(1) as u32);
+                    visible.iter().fold(gaps, |total, width| total.saturating_add(*width))
+                }
                     .max(1)
             } else {
                 // A block box breaks a line only at a block-level child, so its
@@ -7216,6 +7237,21 @@ mod percentage_sizing_tests {
             12,
             "a plain inline box is not clipped"
         );
+    }
+
+    /// A row holds its items apart by `gap`, so that space counts towards the
+    /// width the row needs. Left out, a shrink-to-fit box came up exactly the
+    /// gaps short and its own contents then wrapped inside a box that had been
+    /// measured to fit them. firefox.com's header menu titles are a label and a
+    /// chevron 4px apart; every one broke over two lines and took the header
+    /// from 68px to 117px tall.
+    #[test]
+    fn a_rows_gaps_count_towards_the_width_it_needs() {
+        let runs = text_runs(
+            ".menu{display:flex}.title{display:inline-block}.head{display:flex;gap:40px}.pad{width:40px}",
+            "<div class=\"menu\" style=\"width:600px\"><a class=\"title\"><span class=\"head\">ブラウザー<span class=\"pad\"></span></span></a></div>",
+        );
+        assert_eq!(runs.len(), 1, "the label must not be broken up: {runs:?}");
     }
 
     /// An `inline-flex` box is inline-level: as wide as its contents, not as
