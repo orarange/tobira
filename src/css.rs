@@ -3594,7 +3594,13 @@ fn default_display(tag_name: &str) -> Display {
                 Display::Block
             }
         }
-        "script" | "style" | "title" | "head" | "meta" | "link" | "noscript" => Display::None,
+        // `<template>` belongs here too: its contents are inert and are never
+        // rendered, only cloned by script. Leaving it out let every custom
+        // element on MDN paint the markup it keeps in a template -- the search
+        // button was drawn twice, once from its template and once for real.
+        "script" | "style" | "title" | "head" | "meta" | "link" | "noscript" | "template" => {
+            Display::None
+        }
         _ => Display::Inline,
     }
 }
@@ -7623,6 +7629,20 @@ mod tests {
         let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         let inner = find_first_element(&styled, "span").unwrap();
         assert_eq!(inner.style.padding.left, 7);
+    }
+
+    /// `<template>` contents are inert: they are cloned by script, never drawn.
+    ///
+    /// It was missing from the not-rendered list, so every custom element on MDN
+    /// painted the markup it keeps in a template alongside the real thing.
+    #[test]
+    fn template_contents_are_not_rendered() {
+        let html = r#"<div><template><p class="ghost">hidden</p></template><p class="real">shown</p></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet("");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let template = find_first_element(&styled, "template").unwrap();
+        assert_eq!(template.style.display, Display::None);
     }
 
     #[test]
