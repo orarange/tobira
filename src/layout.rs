@@ -1798,7 +1798,7 @@ fn layout_block_element(
     }
 
     // Draw borders if present
-    if !element.style.border_style_none {
+    if !element.style.border_style_none && !element.style.border_color_transparent {
         let bc = apply_opacity(
             element.style.border_color,
             context.background_color,
@@ -1808,6 +1808,21 @@ fn layout_block_element(
         let border_bottom_h = element.style.border.bottom;
         let border_left_w = element.style.border.left;
         let border_right_w = element.style.border.right;
+
+        // Which element drew this? Border rects all look alike in the command
+        // dump, and tracking one back to its rule is otherwise guesswork.
+        if std::env::var_os("TOBIRA_DEBUG_BORDERS").is_some()
+            && border_top_h + border_bottom_h + border_left_w + border_right_w > 0
+        {
+            eprintln!(
+                "border <{}> class={:?} t={border_top_h} r={border_right_w} b={border_bottom_h} l={border_left_w} color={bc:#08x}",
+                element.tag_name,
+                element
+                    .attributes
+                    .get("class")
+                    .map(|c| c.chars().take(30).collect::<String>()),
+            );
+        }
 
         if border_top_h > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
@@ -2461,13 +2476,28 @@ fn layout_block_element_as_layer(
     }
 
     // Draw borders into the sub-context (they are part of the composited layer)
-    if !element.style.border_style_none {
+    if !element.style.border_style_none && !element.style.border_color_transparent {
         // Borders use raw border_color since they're inside the layer
         let bc = element.style.border_color;
         let border_top_h = element.style.border.top;
         let border_bottom_h = element.style.border.bottom;
         let border_left_w = element.style.border.left;
         let border_right_w = element.style.border.right;
+
+        // Which element drew this? Border rects all look alike in the command
+        // dump, and tracking one back to its rule is otherwise guesswork.
+        if std::env::var_os("TOBIRA_DEBUG_BORDERS").is_some()
+            && border_top_h + border_bottom_h + border_left_w + border_right_w > 0
+        {
+            eprintln!(
+                "border <{}> class={:?} t={border_top_h} r={border_right_w} b={border_bottom_h} l={border_left_w} color={bc:#08x}",
+                element.tag_name,
+                element
+                    .attributes
+                    .get("class")
+                    .map(|c| c.chars().take(30).collect::<String>()),
+            );
+        }
 
         if border_top_h > 0 {
             sub_context.commands.push(DrawCommand::Rect(RectCommand {
@@ -5950,7 +5980,7 @@ fn layout_grid_container(
     }
 
     // Draw border
-    if !element.style.border_style_none {
+    if !element.style.border_style_none && !element.style.border_color_transparent {
         let bc = apply_opacity(
             element.style.border_color,
             context.background_color,
@@ -5961,6 +5991,21 @@ fn layout_grid_container(
         let border_bottom_h = if border_h > 0 { element.style.border.bottom } else { 0 };
         let border_left_w = if border_v > 0 { element.style.border.left } else { 0 };
         let border_right_w = if border_v > 0 { element.style.border.right } else { 0 };
+
+        // Which element drew this? Border rects all look alike in the command
+        // dump, and tracking one back to its rule is otherwise guesswork.
+        if std::env::var_os("TOBIRA_DEBUG_BORDERS").is_some()
+            && border_top_h + border_bottom_h + border_left_w + border_right_w > 0
+        {
+            eprintln!(
+                "border <{}> class={:?} t={border_top_h} r={border_right_w} b={border_bottom_h} l={border_left_w} color={bc:#08x}",
+                element.tag_name,
+                element
+                    .attributes
+                    .get("class")
+                    .map(|c| c.chars().take(30).collect::<String>()),
+            );
+        }
         if border_top_h > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
                 x: outer_x,
@@ -6688,8 +6733,20 @@ fn layout_flex_container(
     }
 
     // Draw borders
-    if !element.style.border_style_none {
+    if !element.style.border_style_none && !element.style.border_color_transparent {
         let bc = apply_opacity(element.style.border_color, context.background_color, element.style.effective_opacity);
+        if std::env::var_os("TOBIRA_DEBUG_BORDERS").is_some()
+            && border_top + border_bottom_sz + border_left + border_right > 0
+        {
+            eprintln!(
+                "border(flex) <{}> class={:?} t={border_top} r={border_right} b={border_bottom_sz} l={border_left} color={bc:#08x}",
+                element.tag_name,
+                element
+                    .attributes
+                    .get("class")
+                    .map(|c| c.chars().take(30).collect::<String>()),
+            );
+        }
         if border_top > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
                 x: outer_x, y: background_top,

@@ -880,6 +880,15 @@ pub struct ComputedStyle {
     ///
     /// `Arc`, not `Rc`: the finished style tree is handed to the render worker
     /// thread, so everything hanging off it has to be `Send`.
+    /// The border colour resolved to something that paints nothing --
+    /// `transparent`, `#0000`, `rgba(..., 0)`.
+    ///
+    /// The width still counts for layout, so this cannot be folded into
+    /// `border_style_none` (which also zeroes the widths). Falling back to the
+    /// default colour instead drew a solid black line wherever a page used
+    /// `border: 1px solid transparent` to reserve space -- MDN rules its nav
+    /// tabs that way, so the bar came out boxed in black.
+    pub border_color_transparent: bool,
     pub custom_properties: Option<Arc<BTreeMap<String, String>>>,
     /// Line names from `grid-template-columns` / `grid-template-rows`. Boxed
     /// for the same reason as the areas below: most pages never name a line.
@@ -924,6 +933,7 @@ impl ComputedStyle {
         let parent_font_size = parent.map(|s| s.font_size_px).unwrap_or(16);
         let mut style = Self {
             // Custom properties inherit; the ancestors' map is shared, not copied.
+            border_color_transparent: false,
             custom_properties: parent.and_then(|s| s.custom_properties.clone()),
             display: default_display(tag_name),
             color: parent.map(|s| s.color).unwrap_or(DEFAULT_TEXT_COLOR),
@@ -5313,8 +5323,16 @@ fn parse_border_shorthand(style: &mut ComputedStyle, value: &str, parent_font_si
             style.border = EdgeSizes::all(px);
             continue;
         }
-        if let Some(color) = parse_color(token) {
-            style.border_color = color;
+        match parse_color(token) {
+            Some(color) => {
+                style.border_color = color;
+                style.border_color_transparent = false;
+            }
+            // A colour that paints nothing. Leaving the previous colour in place
+            // would draw a line the author asked to be invisible.
+            None => style.border_color_transparent = true,
+        }
+        {
             continue;
         }
     }
@@ -5360,8 +5378,12 @@ fn parse_border_side_shorthand(
         // This engine keeps one border colour for all four sides, so a per-side
         // declaration sets that shared colour -- which is what a page means when
         // it only ever colours one side.
-        if let Some(color) = parse_color(token) {
-            style.border_color = color;
+        match parse_color(token) {
+            Some(color) => {
+                style.border_color = color;
+                style.border_color_transparent = false;
+            }
+            None => style.border_color_transparent = true,
         }
     }
 }
@@ -7936,6 +7958,37 @@ mod tests {
         assert_eq!(t.style.border_color, 0xC3C7CB);
         assert!(!t.style.border_style_none, "`solid` means it is drawn");
         assert_eq!(t.style.border.left, 0, "only the named side gets a width");
+    }
+
+    /// A transparent border colour paints nothing, but still takes its width.
+    ///
+    /// `border: 1px solid transparent` is how a page reserves the space a border
+    /// will occupy later. Falling back to the default colour drew a solid black
+    /// line instead: MDN rules its nav tabs exactly this way (`#0000`), so the
+    /// bar came out boxed in black.
+    #[test]
+    fn a_transparent_border_is_not_painted() {
+        let style_of = |css: &str| {
+            let doc = parse_document(r#"<div>x</div>"#);
+            let sheet = parse_stylesheet(css);
+            let styled =
+                build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+            find_first_element(&styled, "div").unwrap().style.clone()
+        };
+
+        for css in [
+            "div { border: 1px solid transparent }",
+            "div { border: 1px solid #0000 }",
+            "div { border-top: 1px solid #0000 }",
+        ] {
+            let s = style_of(css);
+            assert!(s.border_color_transparent, "{css} must not paint");
+            assert_eq!(s.border.top, 1, "{css} still reserves the width");
+        }
+
+        let solid = style_of("div { border: 1px solid #c3c7cb }");
+        assert!(!solid.border_color_transparent);
+        assert_eq!(solid.border_color, 0xC3C7CB);
     }
 
     #[test]
