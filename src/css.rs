@@ -5505,49 +5505,160 @@ pub fn resolve_calc(percent_hundredths: i32, px: i32, basis: u32) -> u32 {
 /// Returns `None` for anything that does not fit that shape -- other units,
 /// multiplication, nesting -- leaving those to the font-size-relative evaluator
 /// that handles the general case.
-fn parse_calc_length_value(expr: &str) -> Option<LengthValue> {
-    if expr.contains('*') || expr.contains('/') || expr.contains('(') {
+fn parse_calc_length_value(expr: &str, parent_font_size: u32) -> Option<LengthValue> {
+    // `var()` is substituted before we get here, so a leftover paren means a
+    // nested function we do not model.
+    if expr.contains('(') {
         return None;
     }
 
-    let mut percent_hundredths = 0_i32;
-    let mut px = 0_i32;
-    let mut sign = 1_i32;
+    let mut percent_hundredths = 0_f32;
+    let mut px = 0_f32;
+    let mut sign = 1_f32;
     let mut expect_operator = false;
 
-    for token in expr.split_whitespace() {
+    // calc() *requires* whitespace around `+` and `-` but merely *allows* it
+    // around `*` and `/`. That asymmetry is what makes `20em * -1` unambiguous:
+    // the `-` belongs to the number, not to the sum. Collapsing the optional
+    // spaces first means each whitespace-delimited token is exactly one term.
+    let normalized = collapse_spaces_around_muldiv(expr);
+    for token in normalized.split_whitespace() {
         if expect_operator {
             sign = match token {
-                "+" => 1,
-                "-" => -1,
+                "+" => 1.0,
+                "-" => -1.0,
                 _ => return None,
             };
             expect_operator = false;
             continue;
         }
-        if let Some(number) = token.strip_suffix('%') {
-            percent_hundredths += sign * (parse_float(number)? * 100.0).round() as i32;
-        } else if let Some(number) = token.strip_suffix("px") {
-            px += sign * parse_float(number)?.round() as i32;
-        } else if let Some(number) = parse_float(token) {
-            // A bare number is only valid as zero, which costs nothing either way.
-            px += sign * number.round() as i32;
-        } else {
-            return None;
-        }
+        let (term_percent, term_px) = parse_calc_term(token, parent_font_size)?;
+        percent_hundredths += sign * term_percent;
+        px += sign * term_px;
         expect_operator = true;
     }
 
     if !expect_operator {
         return None;
     }
-    if percent_hundredths == 0 {
-        return Some(LengthValue::Pixels(px.max(0) as u32));
+
+    let percent_hundredths = percent_hundredths.round() as i32;
+    let px = px.round() as i32;
+    if percent_hundredths == 0 && px >= 0 {
+        return Some(LengthValue::Pixels(px as u32));
     }
+    // A negative result has to survive. `top: calc(var(--offset) * -1)` is how
+    // MDN parks its skip link above the viewport; clamping that to zero left the
+    // link sitting on the page, and because its width came from another calc it
+    // also had no room, so it rendered one character per line.
     Some(LengthValue::Calc {
         percent_hundredths,
         px,
     })
+}
+
+/// Remove the optional whitespace around `*` and `/` so each term survives a
+/// `split_whitespace()` as one token. Spacing around `+` and `-` is left alone,
+/// because calc() relies on it to tell a subtraction from a negative number.
+fn collapse_spaces_around_muldiv(expr: &str) -> String {
+    let mut out = String::with_capacity(expr.len());
+    let mut chars = expr.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '*' || ch == '/' {
+            while out.ends_with(' ') {
+                out.pop();
+            }
+            out.push(ch);
+            while chars.peek().is_some_and(|next| next.is_whitespace()) {
+                chars.next();
+            }
+        } else if ch.is_whitespace() {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// One multiplicative term of a `calc()` sum, as `(percent_hundredths, px)`.
+///
+/// A term is at most one length or percentage, scaled by any number of plain
+/// numbers: `2px*2`, `35rem*-1/4`, `100%`.
+fn parse_calc_term(token: &str, parent_font_size: u32) -> Option<(f32, f32)> {
+    // Split into factors, keeping the operator that preceded each one.
+    let mut factors: Vec<(char, &str)> = Vec::new();
+    let mut operator = '*';
+    let mut start = 0usize;
+    for (index, ch) in token.char_indices() {
+        if ch == '*' || ch == '/' {
+            factors.push((operator, &token[start..index]));
+            operator = ch;
+            start = index + ch.len_utf8();
+        }
+    }
+    factors.push((operator, &token[start..]));
+
+    let mut scale = 1_f32;
+    let mut length: Option<(f32, f32)> = None;
+
+    for (operator, raw) in factors {
+        match parse_calc_factor(raw, parent_font_size)? {
+            CalcFactor::Number(n) => match operator {
+                '*' => scale *= n,
+                '/' if n != 0.0 => scale /= n,
+                _ => return None,
+            },
+            CalcFactor::Length(term_percent, term_px) => {
+                // A term holds at most one length, and dividing *by* a length
+                // is not valid calc().
+                if length.is_some() || operator == '/' {
+                    return None;
+                }
+                length = Some((term_percent, term_px));
+            }
+        }
+    }
+
+    match length {
+        Some((term_percent, term_px)) => Some((term_percent * scale, term_px * scale)),
+        // A term with no length at all is a bare number, which only really makes
+        // sense as zero; treat it as pixels the way this parser always has.
+        None => Some((0.0, scale)),
+    }
+}
+
+enum CalcFactor {
+    Number(f32),
+    /// `(percent_hundredths, px)`
+    Length(f32, f32),
+}
+
+fn parse_calc_factor(token: &str, parent_font_size: u32) -> Option<CalcFactor> {
+    let token = token.trim().to_ascii_lowercase();
+    if token.is_empty() {
+        return None;
+    }
+    if let Some(number) = token.strip_suffix('%') {
+        return Some(CalcFactor::Length(parse_float(number)? * 100.0, 0.0));
+    }
+    if let Some(number) = token.strip_suffix("px") {
+        return Some(CalcFactor::Length(0.0, parse_float(number)?));
+    }
+    // `rem` before `em`, or every rem would be read as an em.
+    if let Some(number) = token.strip_suffix("rem") {
+        return Some(CalcFactor::Length(
+            0.0,
+            parse_float(number)? * root_font_size() as f32,
+        ));
+    }
+    if let Some(number) = token.strip_suffix("em") {
+        return Some(CalcFactor::Length(
+            0.0,
+            parse_float(number)? * parent_font_size as f32,
+        ));
+    }
+    parse_float(&token).map(CalcFactor::Number)
 }
 
 /// Parse a box offset (`top` / `right` / `bottom` / `left`).
@@ -5563,7 +5674,7 @@ fn parse_offset(input: &str, parent_font_size: u32) -> Option<LengthValue> {
         return None;
     }
     if let Some(inner) = value.strip_prefix("calc(").and_then(|s| s.strip_suffix(')'))
-        && let Some(length) = parse_calc_length_value(inner)
+        && let Some(length) = parse_calc_length_value(inner, parent_font_size)
     {
         return Some(length);
     }
@@ -5593,7 +5704,7 @@ fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue>
         _ => {}
     }
     if let Some(inner) = value.strip_prefix("calc(").and_then(|s| s.strip_suffix(')'))
-        && let Some(length) = parse_calc_length_value(inner)
+        && let Some(length) = parse_calc_length_value(inner, parent_font_size)
     {
         return Some(length);
     }
@@ -6676,6 +6787,57 @@ mod tests {
         let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
         let p = find_first_element(&styled, "p").unwrap();
         assert_eq!(p.style.font_size_px, 24);
+    }
+
+    /// A width like `calc(100% - var(--outline)*2)` reduces to a percentage and
+    /// a pixel offset. Multiplication used to make the whole value unparseable,
+    /// so the element fell back to `width: auto`.
+    #[test]
+    fn calc_length_value_handles_multiplication() {
+        assert_eq!(
+            super::parse_calc_length_value("100% - 2px*2", 16),
+            Some(LengthValue::Calc {
+                percent_hundredths: 10000,
+                px: -4
+            })
+        );
+    }
+
+    /// `top: calc(var(--offset) * -1)` parks an element off-screen. Clamping the
+    /// result to zero is what left MDN's skip link sitting on the page.
+    #[test]
+    fn calc_negative_offset_stays_negative() {
+        let expected = Some(LengthValue::Calc {
+            percent_hundredths: 0,
+            px: -320,
+        });
+        // The stylesheet writes it without spaces; both forms are valid calc().
+        assert_eq!(super::parse_calc_length_value("20em*-1", 16), expected);
+        assert_eq!(super::parse_calc_length_value("20em * -1", 16), expected);
+    }
+
+    /// Division, and `rem` resolved against the root font size rather than the
+    /// parent's. MDN's mandala uses `calc(var(--height)*-1/4)`.
+    #[test]
+    fn calc_length_value_handles_division_and_rem() {
+        assert_eq!(
+            super::parse_calc_length_value("2rem/4", 40),
+            Some(LengthValue::Pixels(8))
+        );
+        assert_eq!(
+            super::parse_calc_length_value("35rem*-1/4", 16),
+            Some(LengthValue::Calc {
+                percent_hundredths: 0,
+                px: -140
+            })
+        );
+    }
+
+    /// Two lengths multiplied together is not a valid calc() term.
+    #[test]
+    fn calc_rejects_length_times_length() {
+        assert_eq!(super::parse_calc_length_value("2px*3px", 16), None);
+        assert_eq!(super::parse_calc_length_value("100%/2px", 16), None);
     }
 
     #[test]
