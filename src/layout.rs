@@ -5005,9 +5005,17 @@ fn measure_node_preferred_width(
             }
 
             let child_width = if lays_children_out_in_a_row(&element.style) {
+                // Skip `display: none`, the same as the block branch below does.
+                // Summing hidden children counted MDN's mega-menu panel -- a
+                // hidden 600px block -- into the width of the little nav tab that
+                // owns it, so every tab measured 721px instead of about 80. The
+                // flex row then overflowed by fivefold and shrank every item
+                // proportionally, which crushed the one tab that had measured
+                // correctly down to a single character per line.
                 element
                     .children
                     .iter()
+                    .filter(|child| !is_hidden(child))
                     .map(|child| measure_node_preferred_width(child, images, fonts))
                     .sum::<u32>()
                     .max(1)
@@ -6096,7 +6104,7 @@ fn flex_item_content_width(
     let result = (w as i64 + child.style.margin.right as i64).max(1) as u32;
     if std::env::var_os("TOBIRA_DEBUG_ITEM").is_some() {
         eprintln!(
-            "item <{}> class={:?} avail={avail_width} painted={w} -> {result} pad=({},{}) border=({},{}) margin=({},{})",
+            "item <{}> class={:?} avail={avail_width} intrinsic={intrinsic} painted={w} -> {result} pad=({},{}) border=({},{}) margin=({},{})",
             child.tag_name,
             child.attributes.get("class").map(|c| c.chars().take(24).collect::<String>()),
             child.style.padding.left, child.style.padding.right,
