@@ -5547,10 +5547,25 @@ fn parse_calc(expr: &str, parent_font_size: u32) -> Option<u32> {
 
     let chars: Vec<char> = expr.chars().collect();
     let mut i = 0;
+    let mut depth = 0usize;
     while i < chars.len() {
         let ch = chars[i];
         match ch {
-            '+' | '*' | '/' => {
+            '(' => {
+                depth += 1;
+                buf.push(ch);
+                i += 1;
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                buf.push(ch);
+                i += 1;
+            }
+            // Only split on operators at the top level. Without the depth test a
+            // grouped sub-expression was torn apart -- `(15rem + 2rem) * 2` became
+            // the tokens `(15rem` and `2rem)`, neither of which parses, so the
+            // whole calc() was discarded. MDN writes its breakpoints this way.
+            '+' | '*' | '/' if depth == 0 => {
                 if !buf.trim().is_empty() {
                     values.push(resolve_calc_operand_f32(buf.trim(), parent_font_size)?);
                     buf.clear();
@@ -5558,7 +5573,7 @@ fn parse_calc(expr: &str, parent_font_size: u32) -> Option<u32> {
                 ops.push(ch);
                 i += 1;
             }
-            '-' if !buf.trim().is_empty() => {
+            '-' if depth == 0 && !buf.trim().is_empty() => {
                 values.push(resolve_calc_operand_f32(buf.trim(), parent_font_size)?);
                 buf.clear();
                 ops.push('-');
@@ -5621,6 +5636,10 @@ fn resolve_calc_operand_f32(token: &str, parent_font_size: u32) -> Option<f32> {
     if let Ok(f) = t.parse::<f32>() {
         return Some(f);
     }
+    // A parenthesised group is its own calc() body.
+    if let Some(inner) = t.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+        return parse_calc(inner, parent_font_size).map(|v| v as f32);
+    }
     // nested min()/max()/clamp() inside calc()
     if let Some(inner) = t.strip_prefix("min(").and_then(|s| s.strip_suffix(')')) {
         return parse_css_min_max(inner, parent_font_size, false).map(|v| v as f32);
@@ -5634,11 +5653,14 @@ fn resolve_calc_operand_f32(token: &str, parent_font_size: u32) -> Option<f32> {
     if let Some(n) = t.strip_suffix("px") {
         return parse_float(n);
     }
-    if let Some(n) = t.strip_suffix("em") {
-        return parse_float(n).map(|f| f * parent_font_size as f32);
-    }
+    // `rem` before `em`: the shorter suffix also matches a rem value, turning
+    // `30rem` into `30r`, which then fails to parse and takes the whole calc()
+    // down with it. Every `calc()` containing a rem was silently discarded.
     if let Some(n) = t.strip_suffix("rem") {
         return parse_float(n).map(|f| f * 16.0);
+    }
+    if let Some(n) = t.strip_suffix("em") {
+        return parse_float(n).map(|f| f * parent_font_size as f32);
     }
     if let Some(n) = t.strip_suffix("vw") {
         return parse_float(n).map(|f| f * 12.8); // viewport 1280px wide
@@ -7643,6 +7665,52 @@ mod tests {
         let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         let template = find_first_element(&styled, "template").unwrap();
         assert_eq!(template.style.display, Display::None);
+    }
+
+    /// The modern media-query range syntax.
+    ///
+    /// It parsed to `Unknown`, and an unknown query matches, so a page using it
+    /// applied its mobile and desktop rules at once. MDN's docs pages write every
+    /// breakpoint this way, which is why the left sidebar stayed hidden.
+    #[test]
+    fn media_query_range_syntax_is_understood() {
+        // Mobile-only rule must not apply on a wide viewport.
+        let sheet = "p { color: #0000ff } @media (width <= 769px) { p { color: #ff0000 } }";
+        let doc = parse_document("<p>x</p>");
+        let wide = build_styled_tree(
+            &doc,
+            &parse_stylesheet(sheet),
+            1280,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(find_first_element(&wide, "p").unwrap().style.color, 0x0000FF);
+
+        let narrow = build_styled_tree(
+            &doc,
+            &parse_stylesheet(sheet),
+            400,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(find_first_element(&narrow, "p").unwrap().style.color, 0xFF0000);
+    }
+
+    /// The value may be `calc()`, and the comparison may be written from either
+    /// side. MDN uses `(width >= calc(1rem * 2 + 31rem))`.
+    #[test]
+    fn media_query_range_handles_calc_and_reversed_form() {
+        let sheet = "p { color: #0000ff } @media (width >= calc(30rem + 10rem)) { p { color: #00ff00 } }";
+        let doc = parse_document("<p>x</p>");
+        // 40rem = 640px.
+        let wide = build_styled_tree(&doc, &parse_stylesheet(sheet), 700, &super::InteractiveState::default());
+        assert_eq!(find_first_element(&wide, "p").unwrap().style.color, 0x00FF00);
+        let narrow = build_styled_tree(&doc, &parse_stylesheet(sheet), 600, &super::InteractiveState::default());
+        assert_eq!(find_first_element(&narrow, "p").unwrap().style.color, 0x0000FF);
+
+        let reversed = "p { color: #0000ff } @media (640px <= width) { p { color: #00ff00 } }";
+        let wide = build_styled_tree(&doc, &parse_stylesheet(reversed), 700, &super::InteractiveState::default());
+        assert_eq!(find_first_element(&wide, "p").unwrap().style.color, 0x00FF00);
+        let narrow = build_styled_tree(&doc, &parse_stylesheet(reversed), 600, &super::InteractiveState::default());
+        assert_eq!(find_first_element(&narrow, "p").unwrap().style.color, 0x0000FF);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! CSS `@media` query parsing and evaluation (extracted from css.rs).
 
-use super::{parse_length, split_at_top_level};
+use super::{parse_calc, parse_length, split_at_top_level};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MediaCondition {
@@ -118,7 +118,14 @@ fn split_media_and_conditions(input: &str) -> Vec<String> {
 
 fn parse_media_atom(query: &str) -> MediaCondition {
     let q = query.trim();
-    let inner = q.trim_start_matches('(').trim_end_matches(')').trim();
+    // Strip one layer of parens, not every trailing one: `trim_end_matches`
+    // is greedy, so `(width >= calc(40rem))` came out as `width >= calc(40rem`
+    // and no value in a media feature could be a function call.
+    let inner = q
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(q)
+        .trim();
 
     if inner == "screen" || q == "screen" || inner == "all" || q == "all" {
         return MediaCondition::Screen;
@@ -130,14 +137,123 @@ fn parse_media_atom(query: &str) -> MediaCondition {
         return MediaCondition::PrefersColorSchemeDark;
     }
     if let Some(rest) = inner.strip_prefix("max-width:") {
-        if let Some(px) = parse_length(rest.trim(), 16) {
+        if let Some(px) = parse_media_length(rest.trim()) {
             return MediaCondition::MaxWidth(px);
         }
     }
     if let Some(rest) = inner.strip_prefix("min-width:") {
-        if let Some(px) = parse_length(rest.trim(), 16) {
+        if let Some(px) = parse_media_length(rest.trim()) {
             return MediaCondition::MinWidth(px);
         }
     }
+    if let Some(condition) = parse_width_range(inner) {
+        return condition;
+    }
     MediaCondition::Unknown
+}
+
+/// A length in a media query. `rem` is against the initial font size (16px) by
+/// definition -- a media query cannot depend on the document's own font size --
+/// so the fixed 16 here is the spec behaviour, not a shortcut.
+fn parse_media_length(value: &str) -> Option<u32> {
+    let value = value.trim();
+    if let Some(inner) = value
+        .strip_prefix("calc(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        return parse_calc(inner, 16);
+    }
+    parse_length(value, 16)
+}
+
+/// The range syntax: `(width >= 40rem)`, `(width < 769px)`, the reversed
+/// `(40rem <= width)`, and the two-sided `(20rem <= width <= 60rem)`.
+///
+/// These were unrecognised, and an unrecognised query *matches*, so a page using
+/// them applied its mobile and desktop rules at the same time and let source
+/// order decide the winner. On MDN's docs pages that left the left sidebar at
+/// `display: none` however wide the window was.
+fn parse_width_range(inner: &str) -> Option<MediaCondition> {
+    let mut operands: Vec<String> = Vec::new();
+    let mut operators: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+
+    let characters: Vec<char> = inner.chars().collect();
+    let mut index = 0usize;
+    while index < characters.len() {
+        let character = characters[index];
+        match character {
+            '(' => {
+                depth += 1;
+                current.push(character);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(character);
+            }
+            '<' | '>' if depth == 0 => {
+                let mut operator = String::from(character);
+                if characters.get(index + 1) == Some(&'=') {
+                    operator.push('=');
+                    index += 1;
+                }
+                operands.push(current.trim().to_string());
+                current.clear();
+                operators.push(operator);
+            }
+            _ => current.push(character),
+        }
+        index += 1;
+    }
+    operands.push(current.trim().to_string());
+
+    if operators.is_empty() {
+        return None;
+    }
+
+    // `width > v` is `width >= v + 1` on a whole-pixel viewport, and likewise at
+    // the other end. Reusing MinWidth/MaxWidth keeps evaluation in one place.
+    let lower = |operator: &str, value: u32| match operator {
+        ">=" => Some(MediaCondition::MinWidth(value)),
+        ">" => Some(MediaCondition::MinWidth(value.saturating_add(1))),
+        _ => None,
+    };
+    let upper = |operator: &str, value: u32| match operator {
+        "<=" => Some(MediaCondition::MaxWidth(value)),
+        "<" => Some(MediaCondition::MaxWidth(value.saturating_sub(1))),
+        _ => None,
+    };
+    fn flip(operator: &str) -> &str {
+        match operator {
+            ">=" => "<=",
+            ">" => "<",
+            "<=" => ">=",
+            "<" => ">",
+            other => other,
+        }
+    }
+
+    match (operands.as_slice(), operators.as_slice()) {
+        // `width >= v` / `width < v`
+        ([name, value], [operator]) if name.eq_ignore_ascii_case("width") => {
+            let value = parse_media_length(value)?;
+            lower(operator, value).or_else(|| upper(operator, value))
+        }
+        // `v <= width` -- same relation read from the other side.
+        ([value, name], [operator]) if name.eq_ignore_ascii_case("width") => {
+            let value = parse_media_length(value)?;
+            let operator = flip(operator);
+            lower(operator, value).or_else(|| upper(operator, value))
+        }
+        // `v1 <= width <= v2`
+        ([low, name, high], [first, second]) if name.eq_ignore_ascii_case("width") => {
+            let low = parse_media_length(low)?;
+            let high = parse_media_length(high)?;
+            let low = lower(flip(first), low)?;
+            let high = upper(second, high)?;
+            Some(MediaCondition::All(vec![low, high]))
+        }
+        _ => None,
+    }
 }
