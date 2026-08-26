@@ -20,6 +20,8 @@ use crate::image::DecodedImage;
 /// declare `0 0 24 24` and are displayed at 38px. Rasterizing at the declared
 /// size would leave them visibly blocky, so small drawings are scaled up to a
 /// sensible working resolution and the layout scales from there.
+use std::collections::HashMap;
+
 const TARGET_EDGE: f32 = 96.0;
 /// Ceiling on the raster, so a drawing that declares a huge `viewBox` cannot
 /// turn one icon into a multi-megabyte buffer.
@@ -195,7 +197,50 @@ impl Document {
     }
 
     /// Walk the tree, resolving inherited paint and transforms into flat shapes.
+    /// One flat colour per paint server, standing in for its gradient.
+    ///
+    /// A gradient cannot be painted here, and an unresolved `url(#id)` fill fell
+    /// back to whatever was inherited -- usually the root's `fill="none"`, so the
+    /// shape was skipped and the whole drawing came out empty. Nothing painted
+    /// means no image at all, and the page then showed the `alt` text: every
+    /// pictogram on firefox.com's front page read out as "Shield_Balanced" and
+    /// the like. The average of the stops is not the gradient, but it is the
+    /// right colour family in the right place.
+    fn paint_server_colors(&self) -> HashMap<String, [u8; 4]> {
+        let mut colors = HashMap::new();
+        let mut open: Option<(String, usize, Vec<[u8; 4]>)> = None;
+        for element in &self.elements {
+            if let Some((id, depth, stops)) = open.take() {
+                if element.depth > depth && element.name == "stop" {
+                    let mut stops = stops;
+                    if let Some(color) = stop_color(element) {
+                        stops.push(color);
+                    }
+                    open = Some((id, depth, stops));
+                    continue;
+                }
+                if let Some(color) = average_color(&stops) {
+                    colors.insert(id, color);
+                }
+            }
+            // Element names arrive lowercased, so `linearGradient` reads as
+            // `lineargradient` here.
+            if matches!(element.name.as_str(), "lineargradient" | "radialgradient")
+                && let Some(id) = element.attribute("id")
+            {
+                open = Some((id.to_string(), element.depth, Vec::new()));
+            }
+        }
+        if let Some((id, _, stops)) = open
+            && let Some(color) = average_color(&stops)
+        {
+            colors.insert(id, color);
+        }
+        colors
+    }
+
     fn shapes(&self, root: Transform) -> Vec<Shape> {
+        let paints = self.paint_server_colors();
         // One entry per open ancestor: its depth and the state it contributes.
         let mut stack: Vec<(usize, State)> = vec![(0, State::root(root))];
         let mut shapes = Vec::new();
@@ -206,7 +251,7 @@ impl Document {
                 stack.pop();
             }
             let inherited = stack.last().map(|(_, s)| s.clone()).unwrap_or(State::root(root));
-            let state = inherited.inherit(element);
+            let state = inherited.inherit(element, &paints);
 
             if element.name == "g" || element.name == "svg" || element.name == "a" {
                 stack.push((element.depth, state));
@@ -279,14 +324,14 @@ impl State {
         }
     }
 
-    fn inherit(&self, element: &Element) -> State {
+    fn inherit(&self, element: &Element, paints: &HashMap<String, [u8; 4]>) -> State {
         let mut state = self.clone();
 
         // A `style` attribute wins over presentation attributes, so read the
         // attributes first and let the declarations overwrite them.
         let mut apply = |property: &str, value: &str, state: &mut State| match property {
-            "fill" => state.fill = parse_paint(value, state.fill),
-            "stroke" => state.stroke = parse_paint(value, state.stroke),
+            "fill" => state.fill = parse_paint(value, state.fill, paints),
+            "stroke" => state.stroke = parse_paint(value, state.stroke, paints),
             "stroke-width" => {
                 if let Some(width) = parse_dimension(value) {
                     state.stroke_width = width;
@@ -782,8 +827,20 @@ fn parse_dimension(value: &str) -> Option<f32> {
     Some(number * scale)
 }
 
-fn parse_paint(value: &str, inherited: Option<[u8; 4]>) -> Option<[u8; 4]> {
+fn parse_paint(
+    value: &str,
+    inherited: Option<[u8; 4]>,
+    paints: &HashMap<String, [u8; 4]>,
+) -> Option<[u8; 4]> {
     let value = value.trim();
+    if let Some(rest) = value.strip_prefix("url(")
+        && let Some(reference) = rest.split(')').next()
+    {
+        let id = reference.trim().trim_matches(['"', '#', ' ']);
+        // A paint server this drawing does not define leaves the shape with
+        // whatever it inherited, which is what the spec's fallback does too.
+        return paints.get(id).copied().or(inherited);
+    }
     match value.to_ascii_lowercase().as_str() {
         "none" | "transparent" => None,
         // Without a host element to ask, the sensible reading of
@@ -791,6 +848,37 @@ fn parse_paint(value: &str, inherited: Option<[u8; 4]>) -> Option<[u8; 4]> {
         "currentcolor" | "inherit" => inherited,
         _ => parse_color(value).or(inherited),
     }
+}
+
+/// The colour a `<stop>` contributes, with its own opacity folded in.
+fn stop_color(element: &Element) -> Option<[u8; 4]> {
+    let mut color = element.attribute("stop-color").and_then(parse_color)?;
+    if let Some(opacity) = element.attribute("stop-opacity").and_then(parse_dimension) {
+        color[3] = (f32::from(color[3]) * opacity.clamp(0.0, 1.0)).round() as u8;
+    }
+    Some(color)
+}
+
+/// The mean of a gradient's stops, ignoring fully transparent ones so a fade to
+/// nothing does not wash the colour out.
+fn average_color(stops: &[[u8; 4]]) -> Option<[u8; 4]> {
+    let visible: Vec<&[u8; 4]> = stops.iter().filter(|stop| stop[3] > 0).collect();
+    if visible.is_empty() {
+        return None;
+    }
+    let mut total = [0_u32; 4];
+    for stop in &visible {
+        for (channel, value) in total.iter_mut().zip(stop.iter()) {
+            *channel += u32::from(*value);
+        }
+    }
+    let n = visible.len() as u32;
+    Some([
+        (total[0] / n) as u8,
+        (total[1] / n) as u8,
+        (total[2] / n) as u8,
+        (total[3] / n) as u8,
+    ])
 }
 
 fn parse_color(value: &str) -> Option<[u8; 4]> {
@@ -1233,6 +1321,43 @@ mod tests {
         assert!(
             rasterize("<svg viewBox='0 0 10 10'><rect width='10' height='10' fill='none'/></svg>")
                 .is_none()
+        );
+    }
+
+    /// A gradient cannot be painted here, so a shape that asks for one is filled
+    /// with a colour standing in for its stops.
+    ///
+    /// Falling back to the inherited paint instead meant falling back to the
+    /// root's `fill="none"`, so nothing was drawn and the whole drawing was
+    /// reported as undecodable -- the page then showed the image's `alt` text.
+    /// Every pictogram on firefox.com's front page read out as
+    /// "Shield_Balanced" and the like where a picture belonged.
+    #[test]
+    fn a_gradient_fill_is_painted_as_a_flat_colour() {
+        let image = rasterize(
+            "<svg viewBox='0 0 10 10' fill='none'>             <defs><linearGradient id='g'>             <stop stop-color='#ff0000'/><stop stop-color='#0000ff'/>             </linearGradient></defs>             <rect width='10' height='10' fill='url(#g)'/></svg>",
+        )
+        .expect("a gradient-filled shape must produce an image");
+        let middle = (image.height as usize / 2 * image.width as usize
+            + image.width as usize / 2)
+            * 4;
+        let pixel = &image.rgba[middle..middle + 4];
+        assert!(pixel[3] > 0, "the shape must be painted: {pixel:?}");
+        assert!(
+            pixel[0] > 0 && pixel[2] > 0,
+            "and carry both stops' colour: {pixel:?}"
+        );
+    }
+
+    /// A reference to a paint server the drawing does not define leaves the
+    /// shape with what it inherited, rather than inventing a colour.
+    #[test]
+    fn an_unknown_paint_reference_falls_back() {
+        assert!(
+            rasterize(
+                "<svg viewBox='0 0 10 10' fill='none'>                 <rect width='10' height='10' fill='url(#missing)'/></svg>"
+            )
+            .is_none()
         );
     }
 
