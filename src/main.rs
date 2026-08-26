@@ -262,6 +262,37 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
         let s = format!("{cmd:?}");
         println!("  cmd[{i}] = {}", s.chars().take(160).collect::<String>());
     }
+
+    // A layer prints as one line however much is inside it, which hides exactly
+    // what you need when a sticky header or a clipped box looks wrong. Set
+    // TOBIRA_DUMP_LAYERS=1 to walk into them; inner coordinates are relative to
+    // the layer's own origin.
+    if std::env::var_os("TOBIRA_DUMP_LAYERS").is_some() {
+        fn walk(commands: &[layout::DrawCommand], depth: usize) {
+            for cmd in commands {
+                let indent = "  ".repeat(depth + 1);
+                match cmd {
+                    layout::DrawCommand::Layer(l) => {
+                        println!("{indent}Layer {}x{} @ {},{}", l.width, l.height, l.x, l.y);
+                        walk(&l.commands, depth + 1);
+                    }
+                    layout::DrawCommand::Sticky(s) => {
+                        println!(
+                            "{indent}Sticky normal_y={} -> Layer {}x{} @ {},{}",
+                            s.normal_y, s.layer.width, s.layer.height, s.layer.x, s.layer.y
+                        );
+                        walk(&s.layer.commands, depth + 1);
+                    }
+                    other => {
+                        let text = format!("{other:?}");
+                        println!("{indent}{}", text.chars().take(120).collect::<String>());
+                    }
+                }
+            }
+        }
+        println!("=== command tree ===");
+        walk(&layout.commands, 0);
+    }
     println!("element hitboxes    = {}", layout.element_hitboxes.len());
 
     // What kinds of command the page actually produced, and how many images

@@ -3525,6 +3525,23 @@ fn layout_mixed_children(
         if inline_fragments.is_empty() && bullet_pending.is_none() {
             return;
         }
+        // A run of nothing but whitespace generates no line box -- CSS drops it.
+        // Emitting one put a phantom line wherever a page sets an empty inline
+        // between two blocks: MDN's header has three such gaps (an empty
+        // `<mdn-search-modal>` and the newlines around it), and together they
+        // made the sticky bar 71px taller than the 98px its own variables ask
+        // for, so the nav sat over the article instead of above it.
+        //
+        // Under `white-space: pre` the spaces are content, so leave those alone.
+        if bullet_pending.is_none()
+            && element_style.white_space != WhiteSpaceMode::Pre
+            && inline_fragments.iter().all(|fragment| {
+                matches!(fragment, InlineFragment::Text { text, .. } if text.trim().is_empty())
+            })
+        {
+            inline_fragments.clear();
+            return;
+        }
         if let Some(marker) = bullet_pending.take() {
             inline_fragments.insert(
                 0,
@@ -8050,6 +8067,45 @@ mod tests {
         );
         let box_ = probe_rect(&l, 0xBB0063).expect("box");
         assert_eq!(box_.height, 30);
+    }
+
+    /// Whitespace between two blocks generates no line box.
+    ///
+    /// An empty inline (a custom element that renders nothing, say) plus the
+    /// newlines around it used to add a phantom line. MDN's sticky header has
+    /// three such gaps and came out 71px taller than it asks to be, which put
+    /// the nav bar on top of the article instead of above it.
+    #[test]
+    fn whitespace_between_blocks_makes_no_line_box() {
+        let with_gap = probe_layout(
+            r#"<html><body style="margin:0"><div style="height:20px;background:#bb0071"></div>
+            <my-thing></my-thing>
+            <div style="height:20px;background:#bb0072"></div></body></html>"#,
+            400,
+        );
+        let without_gap = probe_layout(
+            r#"<html><body style="margin:0"><div style="height:20px;background:#bb0071"></div><div style="height:20px;background:#bb0072"></div></body></html>"#,
+            400,
+        );
+        assert_eq!(
+            probe_rect(&with_gap, 0xBB0072).unwrap().y,
+            probe_rect(&without_gap, 0xBB0072).unwrap().y,
+            "an empty inline between blocks must not take a line"
+        );
+    }
+
+    /// ...but under `white-space: pre` the blank line is content.
+    #[test]
+    fn pre_keeps_a_blank_line() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="white-space:pre;height:auto">
+</div><div style="height:20px;background:#bb0073"></div></body></html>"#,
+            400,
+        );
+        assert!(
+            probe_rect(&l, 0xBB0073).unwrap().y > 0,
+            "the preformatted blank line should still occupy space"
+        );
     }
 
     #[test]
