@@ -1269,6 +1269,38 @@ fn explicit_box_height(
     cursor_y: &mut u32,
     container_height: Option<u32>,
 ) -> u32 {
+    let height = specified_box_height(style, background_top, content_height, cursor_y, container_height);
+
+    // `max-height` caps whatever we arrived at, including a purely content-based
+    // height. It was parsed into the style and then never consulted, so MDN's
+    // decorative mandala -- `max-height: 20rem; overflow: hidden` around a 35rem
+    // drawing -- claimed its full 608px instead of the 320px it asks for.
+    //
+    // Capping pulls the following content up, which is what a browser does too:
+    // overflow does not participate in layout. Anything spilling past the cap is
+    // painted over what follows unless the box also clips.
+    let Some(max_content) = style.max_height else {
+        return height;
+    };
+    let cap = max_content
+        .saturating_add(style.padding.top)
+        .saturating_add(style.padding.bottom)
+        .max(1);
+    if height > cap {
+        *cursor_y = background_top.saturating_add(cap);
+        return cap;
+    }
+    height
+}
+
+/// The height `height` alone asks for, before `max-height` gets a say.
+fn specified_box_height(
+    style: &ComputedStyle,
+    background_top: u32,
+    content_height: u32,
+    cursor_y: &mut u32,
+    container_height: Option<u32>,
+) -> u32 {
     // Resolve the specified content-box height to pixels: a pixel value directly,
     // or a percentage against the containing block's definite height.
     let px = match style.height {
@@ -7981,6 +8013,38 @@ mod tests {
         );
         let after = probe_rect(&l, 0xBB0052).expect("the box after the grid");
         assert_eq!(after.y, 60, "the next box starts below the stated height");
+    }
+
+    /// `max-height` caps a box, including one sized purely by its content.
+    ///
+    /// It was parsed and then never consulted, so MDN's decorative mandala --
+    /// `max-height: 20rem` around a 35rem drawing -- kept its full height and
+    /// pushed the page down.
+    #[test]
+    fn max_height_caps_a_box() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="max-height:40px;background:#bb0061"><div style="height:200px"></div></div><div style="height:5px;background:#bb0062"></div></body></html>"#,
+            400,
+        );
+
+        let capped = probe_rect(&l, 0xBB0061).expect("capped box");
+        assert_eq!(capped.height, 40, "content is 200px but max-height is 40px");
+        let after = probe_rect(&l, 0xBB0062).expect("the box after it");
+        assert_eq!(
+            after.y, 40,
+            "overflow does not take part in layout, so the next box follows the cap"
+        );
+    }
+
+    /// A box shorter than its cap is left alone.
+    #[test]
+    fn max_height_leaves_a_shorter_box_alone() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="max-height:200px;background:#bb0063"><div style="height:30px"></div></div></body></html>"#,
+            400,
+        );
+        let box_ = probe_rect(&l, 0xBB0063).expect("box");
+        assert_eq!(box_.height, 30);
     }
 
     #[test]
