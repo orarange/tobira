@@ -196,6 +196,15 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
             .unwrap_or(1280)
     }
 
+    /// How many boxes the largest-box list prints. Ten is enough to see the page
+    /// frame; tracking down where a section's height comes from needs more.
+    fn dump_box_count() -> usize {
+        std::env::var("TOBIRA_DUMP_BOXES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10)
+    }
+
     fn dump_depth() -> usize {
         std::env::var("TOBIRA_DUMP_DEPTH")
             .ok()
@@ -372,11 +381,42 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
             walk(&layout.commands);
         }
     }
+    // A box list of bare node ids cannot be checked against a real browser,
+    // which talks in selectors. Name each box after the element it belongs to so
+    // the two can be lined up.
+    fn name_boxes(node: &StyledNode, names: &mut std::collections::HashMap<usize, String>) {
+        let StyledNode::Element(element) = node else {
+            return;
+        };
+        if let Some(id) = element
+            .attributes
+            .get("data-tobira-node-id")
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            let mut name = element.tag_name.clone();
+            if let Some(class) = element.attributes.get("class") {
+                for token in class.split_whitespace().take(3) {
+                    name.push('.');
+                    name.push_str(token);
+                }
+            }
+            names.insert(id, name);
+        }
+        for child in &element.children {
+            name_boxes(child, names);
+        }
+    }
+    let mut names = std::collections::HashMap::new();
+    name_boxes(&page.styled_document, &mut names);
+
     let mut boxes = layout.element_hitboxes.clone();
     boxes.sort_by_key(|b| std::cmp::Reverse(u64::from(b.width) * u64::from(b.height)));
-    println!("largest boxes (node: WxH @ x,y):");
-    for b in boxes.iter().take(10) {
-        println!("  node {} : {}x{} @ {},{}", b.node_id, b.width, b.height, b.x, b.y);
+    println!("largest boxes (WxH @ x,y):");
+    for b in boxes.iter().take(dump_box_count()) {
+        let name = names
+            .get(&b.node_id)
+            .map_or_else(|| format!("node {}", b.node_id), Clone::clone);
+        println!("  {}x{} @ {},{}  {}", b.width, b.height, b.x, b.y, name);
     }
 
     // Two runs of text drawn over each other is the loudest rendering defect a

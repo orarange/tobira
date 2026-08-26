@@ -6390,8 +6390,30 @@ fn layout_flex_container(
                 // text node carries its parent's computed style, so copying it
                 // verbatim would make the wrapper a flex container that wraps
                 // its own text again, for ever.
+                //
+                // Everything else the container styles its own box with has to
+                // go for the same reason -- an anonymous box takes the
+                // inherited properties and nothing more. Left in place, the
+                // padding was charged again one level down, so the text was
+                // laid out in a strip narrower than the space measured for it
+                // and wrapped where it fits perfectly: firefox.com's header
+                // menu titles each broke across two lines and pushed the header
+                // from 68px to 117px tall.
                 let mut style = (*text.style).clone();
                 style.display = Display::Block;
+                style.padding = crate::css::EdgeSizes::default();
+                style.margin = crate::css::SignedEdgeSizes::default();
+                style.border = crate::css::EdgeSizes::default();
+                style.border_radius = 0;
+                style.background_color = None;
+                style.background_gradient = None;
+                style.background_image_url = None;
+                style.width = None;
+                style.height = None;
+                style.min_width = None;
+                style.max_width = None;
+                style.min_height = 0;
+                style.max_height = None;
                 Some(StyledElement {
                     tag_name: String::new(),
                     attributes: std::collections::BTreeMap::new(),
@@ -7124,6 +7146,25 @@ mod percentage_sizing_tests {
             12,
             "a plain inline box is not clipped"
         );
+    }
+
+    /// The anonymous box wrapping text in a flex container takes the inherited
+    /// half of its parent's style and nothing else. Carrying the padding over
+    /// charged it a second time one level down, so the text was laid out in a
+    /// strip narrower than the width measured for it and wrapped where it fits
+    /// exactly -- firefox.com's header menu titles each broke over two lines.
+    #[test]
+    fn an_anonymous_flex_item_does_not_repeat_its_parents_padding() {
+        let runs = text_runs(
+            ".row{display:flex;padding:0 8px;width:96px}",
+            "<div style=\"width:600px\"><div class=\"row\">ブラウザー</div></div>",
+        );
+        assert_eq!(
+            runs.len(),
+            1,
+            "the text fits the padded row on one line: {runs:?}"
+        );
+        assert_eq!(runs[0].x, 8, "and starts just inside the padding");
     }
 
     /// `text-indent` inherits, so a nested block starts its first line indented
