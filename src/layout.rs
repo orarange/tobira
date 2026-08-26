@@ -1207,8 +1207,12 @@ fn layout_node(
                     layout_flex_container(element, x, width, cursor_y, context, images, fonts, current_form.clone());
                 }
                 Display::InlineFlex => {
-                    // Inline-flex: behaves like flex internally but inline in parent flow.
-                    // Treat it as a flex container with full available width here (block-level fallback).
+                    // Inline-level: as wide as its contents, not as wide as the
+                    // space on offer, and placed by the surrounding
+                    // `text-align`. Given the whole line instead, firefox.com's
+                    // download button spanned the hero from edge to edge rather
+                    // than sitting centred at 246px, and its 32px border radius
+                    // turned the 100px-tall result into an oval.
                     let current_form = form_context_for_element(element, context, current_form);
                     let inline_width = element.style.width
                         .map(|w| match w {
@@ -1219,8 +1223,28 @@ fn layout_node(
                             LengthValue::FitContent(max_px) => width.min(max_px),
                             LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
                         })
-                        .unwrap_or(width);
-                    layout_flex_container(element, x, inline_width, cursor_y, context, images, fonts, current_form.clone());
+                        .unwrap_or_else(|| {
+                            // A plain measurement, not a trial layout: laying the
+                            // box out to size it re-enters this very arm and the
+                            // recursion never bottoms out.
+                            let surround = element.style.padding.left
+                                + element.style.padding.right
+                                + if element.style.border_style_none {
+                                    0
+                                } else {
+                                    element.style.border.left + element.style.border.right
+                                };
+                            measure_cell_preferred_width(element, 0, images, fonts)
+                                .saturating_add(surround)
+                                .min(width)
+                                .max(1)
+                        });
+                    let offset = match element.style.text_align {
+                        TextAlign::Center => width.saturating_sub(inline_width) / 2,
+                        TextAlign::Right => width.saturating_sub(inline_width),
+                        TextAlign::Left => 0,
+                    };
+                    layout_flex_container(element, x.saturating_add(offset), inline_width, cursor_y, context, images, fonts, current_form.clone());
                 }
                 Display::Grid => {
                     let current_form = form_context_for_element(element, context, current_form);
@@ -1363,12 +1387,42 @@ fn layout_block_element(
     // nested inside another flex row, and the inner one stacked its two service
     // groups vertically instead of putting them side by side.
     match element.style.display {
-        Display::Flex | Display::InlineFlex => {
-            layout_flex_container(element, x, width, cursor_y, context, images, fonts, current_form);
-            return;
-        }
-        Display::Grid | Display::InlineGrid => {
-            layout_grid_container(element, x, width, cursor_y, context, images, fonts, current_form);
+        Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid => {
+            // An `inline-flex` or `inline-grid` box is inline-level: it is as
+            // wide as its contents, not as wide as the space it is offered, and
+            // the surrounding `text-align` places it. Laid out as a block it
+            // spanned the whole line -- firefox.com's download button filled the
+            // hero from edge to edge instead of sitting centred at 246px, and
+            // its 32px border radius made a 100px-tall oval of it.
+            let inline_level = matches!(
+                element.style.display,
+                Display::InlineFlex | Display::InlineGrid
+            );
+            let (x, width) = if inline_level && settled_main_size.is_none() {
+                let shrunk = flex_item_content_width(
+                    element,
+                    width,
+                    images,
+                    fonts,
+                    context.background_color,
+                )
+                .min(width)
+                .max(1);
+                let free = width.saturating_sub(shrunk);
+                let offset = match element.style.text_align {
+                    TextAlign::Center => free / 2,
+                    TextAlign::Right => free,
+                    TextAlign::Left => 0,
+                };
+                (x.saturating_add(offset), shrunk)
+            } else {
+                (x, settled_main_size.unwrap_or(width))
+            };
+            if matches!(element.style.display, Display::Flex | Display::InlineFlex) {
+                layout_flex_container(element, x, width, cursor_y, context, images, fonts, current_form);
+            } else {
+                layout_grid_container(element, x, width, cursor_y, context, images, fonts, current_form);
+            }
             return;
         }
         _ => {}
@@ -7161,6 +7215,36 @@ mod percentage_sizing_tests {
             inline.iter().map(|r| r.text.chars().count()).sum::<usize>(),
             12,
             "a plain inline box is not clipped"
+        );
+    }
+
+    /// An `inline-flex` box is inline-level: as wide as its contents, not as
+    /// wide as the space on offer, and placed by the surrounding `text-align`.
+    /// Given the whole line instead, firefox.com's download button spanned the
+    /// hero from edge to edge rather than sitting centred, and its border radius
+    /// turned the over-tall result into an oval.
+    #[test]
+    fn an_inline_flex_box_shrinks_to_its_contents() {
+        let centred = text_runs(
+            ".b{display:inline-flex;padding:0 32px}",
+            "<div style=\"width:600px;text-align:center\"><a class=\"b\">HELLO</a></div>",
+        );
+        assert_eq!(centred.len(), 1, "{centred:?}");
+        let wide = text_runs(
+            ".b{display:flex;padding:0 32px}",
+            "<div style=\"width:600px;text-align:center\"><a class=\"b\">HELLO</a></div>",
+        );
+        assert_eq!(wide.len(), 1, "{wide:?}");
+        assert!(
+            centred[0].x > wide[0].x,
+            "the inline one is centred, the block one starts at the edge: {} vs {}",
+            centred[0].x,
+            wide[0].x
+        );
+        assert!(
+            centred[0].x > 200,
+            "and sits near the middle of 600px: {}",
+            centred[0].x
         );
     }
 
