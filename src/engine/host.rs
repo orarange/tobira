@@ -703,6 +703,17 @@ pub trait Host: Any {
 
     fn window(&self) -> WindowId;
     fn window_metrics(&self, window: WindowId) -> HostResult<WindowMetrics>;
+
+    /// Whether a media query holds right now.
+    ///
+    /// The engine has no CSS in it, so the embedder answers. Returning `false`
+    /// for everything -- which is what a stubbed `matchMedia` did -- tells a
+    /// page it is on none of the breakpoints it knows about: firefox.com only
+    /// wires up its header navigation when `(min-width: 900px)` matches, so a
+    /// desktop window got the menu markup and none of the behaviour.
+    fn matches_media(&self, _query: &str) -> HostResult<bool> {
+        Ok(false)
+    }
     fn location(&self, window: WindowId) -> HostResult<LocationSnapshot>;
     fn navigate(&mut self, action: NavigationAction) -> HostResult<NavigationOutcome>;
     fn history(&mut self, action: HistoryAction) -> HostResult<HistoryOutcome>;

@@ -15,7 +15,7 @@ use crate::site_state;
 use crate::url::Url;
 
 const MAX_REDIRECTS: usize = 5;
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Tobira/0.1";
+use tobira_engine::engine::USER_AGENT;
 const RESPONSE_HEADER_SLACK_BYTES: usize = 64 * 1024;
 /// Cap on a single decoded response body. Applied by [`fetch`] so that no call
 /// site can pull an unbounded response into memory, and so a small gzip/brotli

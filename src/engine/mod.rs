@@ -1,5 +1,12 @@
 #![allow(dead_code, unused_imports)]
 
+/// What this browser calls itself, to the network and to script alike.
+///
+/// The two have to agree. The request header claimed Chrome on Windows while
+/// `navigator.userAgent` said `Tobira/0.1`, so a page served desktop markup and
+/// then took a different branch reading it back.
+pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Tobira/0.1";
+
 pub mod ast;
 pub mod chunk;
 pub mod compiler;

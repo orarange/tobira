@@ -257,6 +257,23 @@ impl FunctionExpression {
         }
     }
 
+    /// Whether the name was written in the source rather than worked out from
+    /// where the function sits.
+    ///
+    /// Only a written name goes into scope inside the body. The parser fills a
+    /// name in for `{ n: function () {} }` so the function reports one, and
+    /// treating that as a binding shadowed whatever the surrounding code called
+    /// `n`.
+    #[must_use]
+    pub const fn has_binding_identifier(&self) -> bool {
+        match self {
+            Self::Function(value) => value.has_binding_identifier(),
+            Self::Generator(value) => value.has_binding_identifier(),
+            Self::AsyncFunction(value) => value.has_binding_identifier(),
+            Self::AsyncGenerator(value) => value.has_binding_identifier(),
+        }
+    }
+
     #[must_use]
     pub const fn parameters(&self) -> &FormalParameterListNode {
         match self {

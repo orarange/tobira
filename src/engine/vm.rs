@@ -341,6 +341,8 @@ enum BuiltinId {
     HistoryGo,
     // performance, idle, encoding
     PerformanceNow,
+    CssSupports,
+    CssEscape,
     PerformanceMark,
     PerformanceMeasure,
     PerformanceClearMarks,
@@ -13698,6 +13700,31 @@ impl Vm {
                 }
                 Ok(Value::Undefined)
             }
+            BuiltinId::CssSupports => {
+                // The same answer `@supports` gives here: yes, unless the
+                // renderer knows it cannot do the thing. Saying no would send
+                // pages down fallback paths they no longer maintain.
+                Ok(Value::Bool(true))
+            }
+            BuiltinId::CssEscape => {
+                let input = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let mut escaped = String::with_capacity(input.len());
+                for (index, ch) in input.chars().enumerate() {
+                    // A digit is fine inside an identifier but not at the front,
+                    // where it has to be written as a hex escape.
+                    let needs_hex = ch.is_ascii_digit() && index == 0;
+                    let bare = ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || !ch.is_ascii();
+                    if bare && !needs_hex {
+                        escaped.push(ch);
+                    } else if needs_hex {
+                        escaped.push_str(&format!("\\{:x} ", ch as u32));
+                    } else {
+                        escaped.push('\\');
+                        escaped.push(ch);
+                    }
+                }
+                Ok(self.make_string_value(&escaped))
+            }
             BuiltinId::PerformanceNow => {
                 let ms = self.host.now().monotonic_ms as f64;
                 Ok(Value::Number(ms))
@@ -13955,8 +13982,9 @@ impl Vm {
             }
             BuiltinId::WindowMatchMedia => {
                 let result_obj = self.allocate_ordinary_object(None);
-                self.define_data_property(result_obj, PropertyKey::from("matches"), Value::Bool(false), true, true, true);
                 let media = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let matches = self.host.matches_media(&media).unwrap_or(false);
+                self.define_data_property(result_obj, PropertyKey::from("matches"), Value::Bool(matches), true, true, true);
                 let media_value = self.make_string_value(&media);
                 self.define_data_property(result_obj, PropertyKey::from("media"), media_value, true, true, true);
                 self.define_data_property(result_obj, PropertyKey::from("onchange"), Value::Null, true, true, true);
@@ -16055,6 +16083,7 @@ impl Vm {
             name,
             "location"
                 | "navigator"
+                | "CSS"
                 | "screen"
                 | "history"
                 | "performance"
@@ -16111,12 +16140,77 @@ impl Vm {
                 Ok(Value::Number(v))
             }
             "location" => self.make_location_object(),
+            "CSS" => {
+                // `CSS.supports` and `CSS.escape` are read straight off the
+                // global by feature-detection code. firefox.com's bundle calls
+                // one while setting up its header navigation, and a missing
+                // `CSS` threw before the menu had been built, leaving an empty
+                // strip where it belongs.
+                let css = self.allocate_ordinary_object(None);
+                let supports = self.allocate_builtin_method(BuiltinId::CssSupports);
+                self.define_data_property(css, PropertyKey::from("supports"), supports, true, true, true);
+                let escape = self.allocate_builtin_method(BuiltinId::CssEscape);
+                self.define_data_property(css, PropertyKey::from("escape"), escape, true, true, true);
+                Ok(Value::Object(css))
+            }
             "navigator" => {
                 let nav = self.allocate_ordinary_object(None);
-                let ua = self.make_string_value("Tobira/0.1");
-                self.define_data_property(nav, PropertyKey::from("userAgent"), ua, true, true, true);
-                let lang = self.make_string_value("en");
-                self.define_data_property(nav, PropertyKey::from("language"), lang, true, true, true);
+                // Feature-detection code reads these without checking they are
+                // there. firefox.com's site script starts with
+                // `navigator.platform.indexOf("Win32")`, and an absent
+                // `platform` threw before it could wire up the header
+                // navigation -- which then rendered as an empty strip.
+                for (key, value) in [
+                    ("userAgent", crate::engine::USER_AGENT),
+                    ("appVersion", "5.0 (Windows NT 10.0; Win64; x64)"),
+                    ("appCodeName", "Mozilla"),
+                    ("appName", "Netscape"),
+                    ("platform", "Win32"),
+                    ("product", "Gecko"),
+                    ("vendor", "Google Inc."),
+                    ("language", "en-US"),
+                ] {
+                    let value = self.make_string_value(value);
+                    self.define_data_property(nav, PropertyKey::from(key), value, true, true, true);
+                }
+                let languages = self.make_string_value("en-US");
+                let languages = self.make_array_from_values(vec![languages])?;
+                self.define_data_property(
+                    nav,
+                    PropertyKey::from("languages"),
+                    languages,
+                    true,
+                    true,
+                    true,
+                );
+                for (key, value) in [("onLine", true), ("cookieEnabled", true), ("webdriver", false)] {
+                    self.define_data_property(
+                        nav,
+                        PropertyKey::from(key),
+                        Value::Bool(value),
+                        true,
+                        true,
+                        true,
+                    );
+                }
+                for (key, value) in [("maxTouchPoints", 0.0), ("hardwareConcurrency", 8.0)] {
+                    self.define_data_property(
+                        nav,
+                        PropertyKey::from(key),
+                        Value::Number(value),
+                        true,
+                        true,
+                        true,
+                    );
+                }
+                self.define_data_property(
+                    nav,
+                    PropertyKey::from("doNotTrack"),
+                    Value::Null,
+                    true,
+                    true,
+                    true,
+                );
                 Ok(Value::Object(nav))
             }
             "screen" => {
@@ -16500,6 +16594,25 @@ impl Vm {
             "className" => {
                 let value = self.get_dom_attribute(node_id, "class");
                 Ok(self.make_string_value(&value))
+            }
+            // Properties that reflect an attribute of the same name and read as
+            // "" when it is absent. Scripts call string methods on them without
+            // checking: firefox.com's bundle does `.toLowerCase()` on the
+            // document element's `lang`, and an undefined value threw there
+            // before the page's header navigation had been built, leaving an
+            // empty strip where the menu belongs.
+            "lang" | "dir" | "title" | "target" | "rel" | "name" | "alt" | "placeholder"
+            | "accessKey" => {
+                let attribute = match name.as_str() {
+                    "accessKey" => "accesskey",
+                    other => other,
+                };
+                let value = self.get_dom_attribute(node_id, attribute);
+                Ok(self.make_string_value(&value))
+            }
+            "localName" => {
+                let tag = self.get_node_name(node_id).to_ascii_lowercase();
+                Ok(self.make_string_value(&tag))
             }
             "type" => {
                 // `input.type` reflects the attribute but DEFAULTS to "text" when

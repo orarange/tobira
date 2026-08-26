@@ -1675,6 +1675,10 @@ impl Host for BrowserHost {
         })
     }
 
+    fn matches_media(&self, query: &str) -> HostResult<bool> {
+        Ok(crate::css::parse_media_condition(query).matches(self.inner_width.max(0.0) as u32))
+    }
+
     fn location(&self, _window: WindowId) -> HostResult<LocationSnapshot> {
         Ok(self.location.clone())
     }

@@ -46,7 +46,8 @@ impl<'a> super::FunctionCompiler<'a> {
             ExpressionNode::ArrayLiteral(array) => self.compile_array_literal(array),
             ExpressionNode::ObjectLiteral(object) => self.compile_object_literal(object),
             ExpressionNode::Spread(_) => Err(CompileError::Unimplemented("spread expressions")),
-            ExpressionNode::FunctionExpression(function) => self.compile_nested_function_value(
+            ExpressionNode::FunctionExpression(function) => self
+                .compile_nested_function_value_bound(
                 function
                     .name()
                     .map(|identifier| self.identifier_name(&identifier)),
@@ -56,6 +57,7 @@ impl<'a> super::FunctionCompiler<'a> {
                 false,
                 false,
                 false,
+                function.has_binding_identifier(),
             ),
             ExpressionNode::ArrowFunction(function) => self.compile_nested_function_value(
                 function
@@ -333,13 +335,14 @@ impl<'a> super::FunctionCompiler<'a> {
             MethodDefinitionKindNode::AsyncGenerator => (true, true),
         };
 
-        self.compile_nested_function_value(
+        self.compile_nested_function_value_bound(
             self.property_name_string(method.name()),
             method.parameters(),
             method.body(),
             method.body().strict(),
             is_async,
             is_generator,
+            false,
             false,
         )
     }
@@ -576,6 +579,42 @@ impl<'a> super::FunctionCompiler<'a> {
         is_generator: bool,
         is_arrow: bool,
     ) -> Result<(), CompileError> {
+        self.compile_nested_function_value_bound(
+            name,
+            parameters,
+            body,
+            is_strict,
+            is_async,
+            is_generator,
+            is_arrow,
+            true,
+        )
+    }
+
+    /// `binds_own_name` says whether the name also goes into scope inside the
+    /// function, or is only what the function reports as its `name`.
+    ///
+    /// An object literal's members are the case where it must not: neither
+    /// `{ n() {} }` nor `{ n: function () {} }` -- which the parser hands over as
+    /// the same thing -- puts `n` in scope in the body. Binding it anyway shadows
+    /// whatever the surrounding code calls `n`, and minified code names things
+    /// in exactly that way. babel's `for...of` helper keeps its iterator in an
+    /// outer `var n` and reads it back from inside a property also called `n`;
+    /// the read found the method instead of the iterator, so every `for...of`
+    /// over a NodeList threw "next is not a function" and firefox.com's header
+    /// navigation was never built.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn compile_nested_function_value_bound(
+        &mut self,
+        name: Option<String>,
+        parameters: &FormalParameterListNode,
+        body: &FunctionBodyNode,
+        is_strict: bool,
+        is_async: bool,
+        is_generator: bool,
+        is_arrow: bool,
+        binds_own_name: bool,
+    ) -> Result<(), CompileError> {
         // Named function EXPRESSIONS bind their own name inside the function body
         // (and only there) to the function itself, so recursive self-reference
         // works: `var f = function I(n){ return n<=1?1:n*I(n-1); }`. Minifiers
@@ -586,7 +625,7 @@ impl<'a> super::FunctionCompiler<'a> {
         // upvalue, then store the freshly made closure into the binding. Arrows
         // have no such self-binding, and declarations bind in the enclosing scope
         // already, so this only applies to non-arrow expressions with a name.
-        let self_binding_slot = match (&name, is_arrow) {
+        let self_binding_slot = match (&name, is_arrow || !binds_own_name) {
             (Some(fn_name), false) => {
                 self.push_scope();
                 Some((self.declare_block_scoped(fn_name)?, ()))
