@@ -815,7 +815,11 @@ pub struct ComputedStyle {
     pub effective_opacity: u8,
     pub font_style_italic: bool,
     pub text_transform: TextTransform,
-    pub text_indent: u32,
+    /// May be negative: `text-indent: -9999px` inside an `overflow: hidden`
+    /// box is the standard way to show a logo as a background image while
+    /// keeping a real `<img>` in the markup for anyone not seeing it. Held
+    /// unsigned, that indent parsed as nothing and both logos painted at once.
+    pub text_indent: i32,
     pub letter_spacing: i32,
     pub max_width: Option<LengthValue>,
     pub min_width: Option<LengthValue>,
@@ -980,7 +984,7 @@ impl ComputedStyle {
             text_transform: parent
                 .map(|s| s.text_transform)
                 .unwrap_or(TextTransform::None),
-            text_indent: 0,
+            text_indent: parent.map(|s| s.text_indent).unwrap_or(0),
             letter_spacing: parent.map(|s| s.letter_spacing).unwrap_or(0),
             max_width: None,
             min_width: None,
@@ -2562,12 +2566,14 @@ fn compute_style_with_rules(
         style.effective_opacity = 255;
     }
 
-    blockify_out_of_flow(&mut style);
+    blockify(&mut style, parent_style);
 
     style
 }
 
-/// Taking a box out of flow makes it block-level (CSS Display 3, "blockification").
+/// Some contexts force a box to be block-level whatever `display` asked for
+/// (CSS Display 3, "blockification"). Two of them apply here: leaving the flow,
+/// and being a flex or grid item.
 ///
 /// An absolutely positioned or floated `<span>` is a block box, not an inline
 /// one, and that matters beyond boxing: only the block path clips
@@ -2576,10 +2582,23 @@ fn compute_style_with_rules(
 /// every real page to hide text from sight but not from screen readers — left
 /// inline it was never clipped, so the text rendered in a 1px column, one
 /// character per line.
-fn blockify_out_of_flow(style: &mut ComputedStyle) {
+///
+/// The item half of the rule carries the image-replacement idiom. firefox.com
+/// heads its pages with an `<a>` flex item that draws the logo as a background
+/// and holds a real `<img>` for anyone not seeing it; `overflow: hidden` plus
+/// `text-indent: -9999px` is what pushes that `<img>` out of sight. Both of
+/// those only apply to a block container, so while the `<a>` stayed inline the
+/// two logos painted one on top of the other.
+fn blockify(style: &mut ComputedStyle, parent_style: Option<&ComputedStyle>) {
     let out_of_flow = matches!(style.position, Position::Absolute | Position::Fixed)
         || !matches!(style.float, FloatSide::None);
-    if !out_of_flow {
+    let is_item = parent_style.is_some_and(|parent| {
+        matches!(
+            parent.display,
+            Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+        )
+    });
+    if !out_of_flow && !is_item {
         return;
     }
     style.display = match style.display {
@@ -3227,7 +3246,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.text_transform = parse_text_transform(value);
         }
         "text-indent" => {
-            style.text_indent = parse_length(value, parent_font_size).unwrap_or(0);
+            style.text_indent = parse_length_signed(value, parent_font_size).unwrap_or(0);
         }
         "letter-spacing" => {
             let v = value.trim().to_ascii_lowercase();

@@ -2620,7 +2620,21 @@ fn layout_image_element(
         TextAlign::Left => x,
     };
 
-    if element.style.opacity < 255 || element.style.filter_blur_px > 0 || element.style.filter_brightness != 10000 {
+    // Images reach this path whether they are inline or block level, so the
+    // inherited indent has to be honoured here as well as in the line builder.
+    // A negative one puts the image left of the content edge; once it clears the
+    // canvas entirely it is invisible, and the unsigned coordinates below cannot
+    // say where it went. That is how firefox.com hides the `<img>` inside its
+    // header logo link -- painted, it doubled up with the background image the
+    // link draws the same logo with.
+    let indented_x = i64::from(draw_x) + i64::from(element.style.text_indent);
+    let off_canvas = indented_x + i64::from(draw_width) <= 0;
+    let draw_x = indented_x.clamp(0, i64::from(u32::MAX)) as u32;
+
+    if off_canvas {
+        // Indented clear off the canvas: nothing to paint, though the box still
+        // takes up its height below.
+    } else if element.style.opacity < 255 || element.style.filter_blur_px > 0 || element.style.filter_brightness != 10000 {
         // Wrap the image in a LayerCommand so opacity/filters are applied correctly
         let img_cmd = DrawCommand::Image(ImageCommand {
             x: 0,
@@ -4120,7 +4134,7 @@ fn layout_normal_fragments(
             InlineFragment::Control(control) => {
                 let (control_width, _) = measure_form_control(control, fonts);
                 let effective_width = if first_line && line.is_empty() {
-                    width.saturating_sub(text_indent)
+                    width_after_indent(width, text_indent)
                 } else {
                     width
                 };
@@ -4152,7 +4166,7 @@ fn layout_normal_fragments(
                 }
 
                 let effective_width = if first_line && line.is_empty() {
-                    width.saturating_sub(text_indent)
+                    width_after_indent(width, text_indent)
                 } else {
                     width
                 };
@@ -4186,7 +4200,7 @@ fn layout_normal_fragments(
                 link_node_id,
             } => {
                 let effective_width = if first_line && line.is_empty() {
-                    width.saturating_sub(text_indent)
+                    width_after_indent(width, text_indent)
                 } else {
                     width
                 };
@@ -4216,7 +4230,7 @@ fn layout_normal_fragments(
                 }
 
                 let effective_width = if first_line && line.is_empty() {
-                    width.saturating_sub(text_indent)
+                    width_after_indent(width, text_indent)
                 } else {
                     width
                 };
@@ -4264,7 +4278,7 @@ fn layout_normal_fragments(
                         break;
                     }
                     let effective_width = if first_line && line.is_empty() {
-                        width.saturating_sub(text_indent)
+                        width_after_indent(width, text_indent)
                     } else {
                         width
                     };
@@ -4296,7 +4310,7 @@ fn layout_normal_fragments(
                     if ellipsis_done { break; }
 
                     let effective_width2 = if first_line && line.is_empty() {
-                        width.saturating_sub(text_indent)
+                        width_after_indent(width, text_indent)
                     } else {
                         width
                     };
@@ -4342,7 +4356,7 @@ fn layout_normal_fragments(
     }
 
     if ellipsis_mode && !ellipsis_done && !line.is_empty() {
-        let eff_width = width.saturating_sub(text_indent);
+        let eff_width = width_after_indent(width, text_indent);
         apply_ellipsis_to_line(&mut line, eff_width, container_style, fonts);
     }
 
@@ -4460,7 +4474,7 @@ fn layout_preformatted_fragments(
             InlineFragment::Control(control) => {
                 let (control_width, _) = measure_form_control(control, fonts);
                 let effective_width = if first_line {
-                    width.saturating_sub(text_indent)
+                    width_after_indent(width, text_indent)
                 } else {
                     width
                 };
@@ -4508,7 +4522,7 @@ fn layout_preformatted_fragments(
                     }
 
                     let character_width = char_width(style, character, fonts);
-                    let eff_w = if first_line { width.saturating_sub(text_indent) } else { width };
+                    let eff_w = if first_line { width_after_indent(width, text_indent) } else { width };
                     if !line.is_empty() && line.width.saturating_add(character_width) > eff_w {
                         emit_line_with_indent(
                             &mut line, container_style, x, width, cursor_y, context, fonts,
@@ -4588,6 +4602,13 @@ fn push_wrapped_word(
     }
 }
 
+/// The width left for a line once the indent has eaten into it. A negative
+/// indent widens it: the line starts left of the content edge but still ends at
+/// the right one.
+fn width_after_indent(width: u32, indent: i32) -> u32 {
+    (i64::from(width) - i64::from(indent)).clamp(0, i64::from(u32::MAX)) as u32
+}
+
 fn emit_line_with_indent(
     line: &mut LineBuilder,
     container_style: &ComputedStyle,
@@ -4596,7 +4617,7 @@ fn emit_line_with_indent(
     cursor_y: &mut u32,
     context: &mut LayoutContext,
     fonts: &mut FontContext,
-    indent: u32,
+    indent: i32,
 ) {
     emit_line_impl(
         line,
@@ -4630,17 +4651,31 @@ fn emit_line_impl(
     cursor_y: &mut u32,
     context: &mut LayoutContext,
     fonts: &mut FontContext,
-    indent: u32,
+    indent: i32,
 ) {
     if line.is_empty() {
         *cursor_y = cursor_y.saturating_add(text_line_height(container_style, fonts));
         return;
     }
 
-    let effective_x = x.saturating_add(indent);
-    let effective_width = width.saturating_sub(indent);
-
+    // A negative indent starts the line left of the content edge. The painter
+    // works in unsigned coordinates, and a line pushed clear off the left of the
+    // canvas is invisible in any case, so drop its content and keep only the
+    // height its line box occupies.
+    let line_start = i64::from(x) + i64::from(indent);
+    let effective_width = width_after_indent(width, indent);
     let line_width = line.width.min(effective_width);
+    if line_start + i64::from(line_width) <= 0 {
+        *cursor_y = cursor_y.saturating_add(
+            line.line_height
+                .max(text_line_height(container_style, fonts)),
+        );
+        line.spans.clear();
+        line.width = 0;
+        line.line_height = 0;
+        return;
+    }
+    let effective_x = line_start.max(0) as u32;
     let offset_x = match container_style.text_align {
         TextAlign::Left => 0,
         TextAlign::Center => effective_width.saturating_sub(line_width) / 2,
@@ -7088,6 +7123,86 @@ mod percentage_sizing_tests {
             inline.iter().map(|r| r.text.chars().count()).sum::<usize>(),
             12,
             "a plain inline box is not clipped"
+        );
+    }
+
+    /// `text-indent` inherits, so a nested block starts its first line indented
+    /// as well. Held as a non-inherited property it never reached the content
+    /// it was meant to move.
+    #[test]
+    fn text_indent_reaches_a_nested_block() {
+        let runs = text_runs(
+            ".outer{text-indent:40px}",
+            "<div style=\"width:600px\" class=\"outer\"><div>Firefox</div></div>",
+        );
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0].x, 40, "the inherited indent must move the line");
+    }
+
+    /// A negative indent pushes the first line clear off the canvas. That is the
+    /// image-replacement idiom -- `overflow:hidden` plus `text-indent:-9999px`
+    /// -- which shows a logo as a background image while leaving real text in
+    /// the markup for anyone not seeing it.
+    #[test]
+    fn a_negative_indent_pushes_the_line_off_the_canvas() {
+        let runs = text_runs(
+            ".logo{text-indent:-9999px;white-space:nowrap;overflow:hidden}",
+            "<div style=\"width:600px\"><div class=\"logo\">Firefox</div></div>",
+        );
+        assert!(runs.is_empty(), "nothing should paint: {runs:?}");
+    }
+
+    /// Blockification is what lets that idiom work on a flex item: `text-indent`
+    /// applies to block containers, and firefox.com's header logo link is an
+    /// inline `<a>` that only becomes one by being an item of the header flex
+    /// container.
+    #[test]
+    fn a_flex_item_is_blockified_enough_to_take_an_indent() {
+        let runs = text_runs(
+            ".row{display:flex}.logo{width:120px;overflow:hidden;text-indent:-9999px;white-space:nowrap}",
+            "<div style=\"width:600px\" class=\"row\"><a class=\"logo\">Firefox</a></div>",
+        );
+        assert!(runs.is_empty(), "the flex item must take the indent: {runs:?}");
+    }
+
+    fn images_painted(css: &str, html: &str) -> usize {
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &InteractiveState::default());
+        let mut images = ImageStore::default();
+        images.insert(
+            "logo.png".to_string(),
+            crate::image::DecodedImage {
+                width: 120,
+                height: 40,
+                rgba: vec![0; 120 * 40 * 4],
+            },
+        );
+        let mut fonts = FontContext::load();
+        layout_styled_document(&styled, &images, 1280, &mut fonts)
+            .commands
+            .iter()
+            .filter(|command| matches!(command, DrawCommand::Image(_)))
+            .count()
+    }
+
+    /// The indent has to move an image too, not just text. firefox.com draws its
+    /// header logo as a background on the link *and* keeps an `<img>` of the
+    /// same logo inside it; with the `<img>` left in place the two painted one
+    /// on top of the other.
+    #[test]
+    fn a_negative_indent_hides_an_image_too() {
+        const HTML: &str =
+            "<div style=\"width:600px\"><div class=\"logo\"><img src=\"logo.png\" width=\"120\" height=\"40\"></div></div>";
+        assert_eq!(
+            images_painted(".logo{width:120px}", HTML),
+            1,
+            "control: an unindented image paints"
+        );
+        assert_eq!(
+            images_painted(".logo{width:120px;overflow:hidden;text-indent:-9999px}", HTML),
+            0,
+            "an indented image must not paint"
         );
     }
 
