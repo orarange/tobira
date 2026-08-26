@@ -5625,22 +5625,26 @@ fn layout_grid_container(
                 }
                 // Only single-column items speak for a column; a spanning item
                 // would need the space distributed across the columns it covers.
+                //
+                // Each track kind asks its own question. `min-content` wants the
+                // narrowest the item can get, `max-content` and `auto` the width
+                // it would like. Measuring all three by laying the item out at the
+                // container's full width -- which is what this did at first --
+                // reports the *stretched* width of any block child, so a
+                // `min-content` column claimed the whole row and the `1fr` beside
+                // it collapsed. That is what crushed MDN's navigation menu.
+                let want_min = matches!(tracks.get(c), Some(GridTrackSize::MinContent));
                 placed
                     .iter()
                     .filter(|item| item.col == c && item.col_span <= 1)
                     .map(|item| {
-                        // Clamped: this measurement is the item's laid-out width,
-                        // not a true min-content width, so overflowing content can
-                        // report far more than the container has. A track can never
-                        // need to be wider than the grid it sits in.
-                        flex_item_content_width(
-                            item.element,
-                            content_width,
-                            images,
-                            fonts,
-                            context.background_color,
-                        )
-                        .min(content_width)
+                        let width = if want_min {
+                            measure_cell_min_width(item.element, 0, images, fonts)
+                        } else {
+                            measure_cell_preferred_width(item.element, 0, images, fonts)
+                        };
+                        // A track can never need to be wider than the grid it is in.
+                        width.min(content_width)
                     })
                     .max()
                     .unwrap_or(0)
