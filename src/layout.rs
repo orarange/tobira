@@ -5256,10 +5256,14 @@ fn layout_positioned_element(
             .max(0) as u32,
         (None, None) => static_x.max(base_x),
     };
-    let mut cursor_y = match top {
-        Some(top) => (base_y as i64 + top as i64).max(0) as u32,
-        None => static_y.max(base_y),
+    // Keep the unclamped position: page coordinates are unsigned, so a box with
+    // a negative `top` cannot be drawn where it belongs, and we need to know how
+    // far above the origin it wanted to sit before deciding what to do with it.
+    let signed_top = match top {
+        Some(top) => base_y as i64 + top as i64,
+        None => static_y.max(base_y) as i64,
     };
+    let mut cursor_y = signed_top.max(0) as u32;
     if std::env::var_os("TOBIRA_DEBUG_POS").is_some() {
         eprintln!(
             "abspos <{}> class={:?} base=({base_x},{base_y}) cb=({cb_width},{cb_height}) left={left:?} top={top:?} right={right:?} bottom={:?} -> {x},{cursor_y}",
@@ -5286,6 +5290,20 @@ fn layout_positioned_element(
     let current_form = form_context_for_element(element, &mut sub_context, current_form);
     let box_top = cursor_y;
     layout_block_element(element, x, elem_width, &mut cursor_y, &mut sub_context, images, fonts, current_form);
+    let box_height = cursor_y.saturating_sub(box_top);
+
+    // Parking a box above the viewport is the standard way to hide a skip link:
+    // MDN's is `top: calc(var(--offset) * -1)`. With coordinates clamped at zero
+    // it landed on y=0 instead and sat on top of the page. Nothing of it would be
+    // on screen in a browser either, so drop it rather than draw it in the wrong
+    // place. Only an explicitly negative `top` qualifies, so an ordinary
+    // zero-height box at the top of the page is left alone.
+    if top.is_some_and(|top| top < 0) && signed_top + box_height as i64 <= 0 {
+        context.next_control_id = sub_context.next_control_id;
+        context.next_form_id = sub_context.next_form_id;
+        return;
+    }
+
     let z = element.style.z_index.unwrap_or(0);
     let slot = context.positioned_commands.len();
     let links_from = context.links.len();
@@ -5308,7 +5326,7 @@ fn layout_positioned_element(
             controls_from,
             hitboxes_from,
             drawn_top: box_top,
-            height: cursor_y.saturating_sub(box_top),
+            height: box_height,
             offset,
         });
     }
@@ -5377,13 +5395,29 @@ fn layout_grid_container(
     let n_cols = tracks.len().max(1);
 
     // ── Collect grid items ─────────────────────────────────────────────────
-    let children: Vec<&StyledElement> = element.children.iter().filter_map(|c| {
-        if let StyledNode::Element(el) = c {
-            if el.style.display != Display::None { Some(el) } else { None }
-        } else {
-            None
-        }
-    }).collect();
+    // Absolutely positioned children are out of flow and take no grid slot.
+    // Grid was the last container still placing them as items, so MDN's skip
+    // link -- a `position:absolute; top:calc(var(--offset)*-1)` list sitting
+    // under a `display:grid` body -- was laid out as a grid item and never had
+    // its negative offset applied at all.
+    let mut out_of_flow: Vec<&StyledElement> = Vec::new();
+    let children: Vec<&StyledElement> = element
+        .children
+        .iter()
+        .filter_map(|child| {
+            let StyledNode::Element(el) = child else {
+                return None;
+            };
+            if el.style.display == Display::None {
+                return None;
+            }
+            if matches!(el.style.position, Position::Absolute | Position::Fixed) {
+                out_of_flow.push(el);
+                return None;
+            }
+            Some(el)
+        })
+        .collect();
 
     // ── Auto-place items into grid cells ──────────────────────────────────
     let mut col_cursor = 0usize;
@@ -5802,6 +5836,22 @@ fn layout_grid_container(
                 border_radius: 0,
             }));
         }
+    }
+
+    // Placed last, from the grid's content box, the same way a flex container
+    // finishes with its own out-of-flow children.
+    for child in out_of_flow {
+        let mut static_y = content_top;
+        layout_positioned_element(
+            child,
+            content_x,
+            content_width,
+            &mut static_y,
+            context,
+            images,
+            fonts,
+            current_form.clone(),
+        );
     }
 
     *cursor_y = advance_by_margin(background_bottom, element.style.margin.bottom);
@@ -7738,6 +7788,53 @@ mod tests {
         let child = probe_rect(&l, 0xBB0011).expect("absolute child");
         assert_eq!(child.x, 30, "absolute child x should be relative to parent");
         assert_eq!(child.y, 40, "absolute child y should be relative to parent");
+    }
+
+    /// A box parked entirely above the page origin is not drawn.
+    ///
+    /// This is the skip-link idiom: MDN hides "skip to main content" with
+    /// `top: calc(var(--offset) * -1)`. Page coordinates are unsigned, so
+    /// clamping that to zero put the link on top of the page instead of off it.
+    #[test]
+    fn an_absolute_box_above_the_page_origin_is_not_drawn() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="position:absolute;top:-320px;left:0;width:200px;height:40px;background:#bb0021"></div><div style="position:absolute;top:-10px;left:0;width:200px;height:40px;background:#bb0022"></div></body></html>"#,
+            400,
+        );
+        assert!(
+            probe_rect(&l, 0xBB0021).is_err(),
+            "a box entirely above the origin should not be drawn"
+        );
+        // One that only overhangs the top still has something on screen.
+        assert!(
+            probe_rect(&l, 0xBB0022).is_ok(),
+            "a partly visible box should still be drawn"
+        );
+    }
+
+    /// An absolutely positioned child takes no grid slot.
+    ///
+    /// Grid was the last container that still placed such a child as an item,
+    /// so its offsets never applied. MDN's skip link is exactly this shape: a
+    /// `position:absolute` list directly under a `display:grid` body.
+    #[test]
+    fn an_out_of_flow_child_takes_no_slot_in_a_grid() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="display:grid;grid-template-columns:100px 100px"><div style="position:absolute;top:5px;left:7px;width:20px;height:10px;background:#bb0031"></div><div style="height:10px;background:#bb0032"></div><div style="height:10px;background:#bb0033"></div></div></body></html>"#,
+            400,
+        );
+
+        let first = probe_rect(&l, 0xBB0032).expect("first in-flow item");
+        let second = probe_rect(&l, 0xBB0033).expect("second in-flow item");
+        assert_eq!(first.x, 0, "the in-flow items should own both columns");
+        assert_eq!(second.x, 100, "the positioned child must not hold a slot");
+
+        let positioned = probe_rect(&l, 0xBB0031).expect("positioned child");
+        assert_eq!(
+            (positioned.x, positioned.y),
+            (7, 5),
+            "the positioned child should honour its own offsets"
+        );
     }
 
     #[test]
