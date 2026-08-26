@@ -2476,6 +2476,11 @@ fn compute_style_with_rules(
         if declaration.value.contains("var(") {
             declaration.value = substitute_vars(&declaration.value, vars_ref);
         }
+        // After substitution, because the light and dark arms are usually
+        // `var()` references themselves.
+        if declaration.value.contains("light-dark(") {
+            declaration.value = resolve_light_dark(&declaration.value);
+        }
         apply_declaration(&mut style, &declaration, parent_font_size);
     }
 
@@ -2565,6 +2570,50 @@ fn compute_style_naive(
         viewport_width,
         interactive,
     )
+}
+
+/// Resolve `light-dark(<light>, <dark>)` to the value for the light scheme.
+///
+/// This engine renders light: `prefers-color-scheme: dark` never matches, so the
+/// first argument is always the one that applies. MDN defines nearly every colour
+/// token with it -- 49 of them on a docs page -- and leaving the function
+/// unparsed left those declarations unreadable. `background-color` then went
+/// unset, so the sticky header was transparent and the article scrolled visibly
+/// through it.
+fn resolve_light_dark(value: &str) -> String {
+    let mut result = value.to_string();
+    let mut guard = 0;
+    while let Some(start) = result.find("light-dark(") {
+        guard += 1;
+        if guard > 10 {
+            break;
+        }
+        let args_start = start + "light-dark(".len();
+        let mut depth = 0usize;
+        let mut end = None;
+        for (offset, character) in result[args_start..].char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => {
+                    if depth == 0 {
+                        end = Some(args_start + offset);
+                        break;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            break;
+        };
+        let light = split_at_top_level(&result[args_start..end], ',')
+            .first()
+            .map(|argument| argument.trim().to_string())
+            .unwrap_or_default();
+        result = format!("{}{}{}", &result[..start], light, &result[end + 1..]);
+    }
+    result
 }
 
 fn substitute_vars(value: &str, vars: &BTreeMap<String, String>) -> String {
@@ -7711,6 +7760,21 @@ mod tests {
         assert_eq!(find_first_element(&wide, "p").unwrap().style.color, 0x00FF00);
         let narrow = build_styled_tree(&doc, &parse_stylesheet(reversed), 600, &super::InteractiveState::default());
         assert_eq!(find_first_element(&narrow, "p").unwrap().style.color, 0x0000FF);
+    }
+
+    /// `light-dark()` picks its first argument, because this engine renders in
+    /// the light colour scheme. MDN builds nearly every colour token on it.
+    #[test]
+    fn light_dark_resolves_to_the_light_value() {
+        let html = r#"<p>x</p>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(
+            ":root { --white: #ffffff; --ink: #102030 }              p { color: light-dark(var(--ink), #ff0000); background-color: light-dark(var(--white), #000000) }",
+        );
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let p = find_first_element(&styled, "p").unwrap();
+        assert_eq!(p.style.color, 0x102030);
+        assert_eq!(p.style.background_color, Some(0xFFFFFF));
     }
 
     #[test]
