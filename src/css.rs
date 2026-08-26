@@ -300,6 +300,13 @@ pub enum Display {
     /// everything nested inside an `inline-block` wrapper vanished.
     InlineBlock,
     ListItem,
+    /// Generates no box at all: the element's children stand in its place.
+    ///
+    /// Collapsing this to `Inline` (which is what used to happen) turns a
+    /// transparent wrapper into a real inline box, so its block children stack
+    /// vertically instead of becoming items of the grid or flex container that
+    /// should have adopted them.
+    Contents,
     None,
     Flex,
     InlineFlex,
@@ -4273,7 +4280,8 @@ fn parse_display(input: &str) -> Option<Display> {
         "grid" => Some(Display::Grid),
         "inline-grid" => Some(Display::InlineGrid),
         "inline-block" => Some(Display::InlineBlock),
-        "inline" | "table-cell" | "contents" => Some(Display::Inline),
+        "contents" => Some(Display::Contents),
+        "inline" | "table-cell" => Some(Display::Inline),
         "list-item" => Some(Display::ListItem),
         "none" => Some(Display::None),
         _ => None,

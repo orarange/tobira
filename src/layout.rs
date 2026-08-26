@@ -1060,6 +1060,29 @@ fn collect_raw_text_content(children: &[StyledNode]) -> String {
     text
 }
 
+/// The nodes that actually take part in `element`'s formatting context.
+///
+/// `display: contents` makes an element generate no box at all: its children
+/// stand in its place. MDN's navigation depends on it -- `.navigation__popup`
+/// is `display:contents`, so its three children are the grid's items. Treating
+/// the wrapper as a box of its own stacked them vertically and made the sticky
+/// header 606px tall instead of the 66px its `--navigation-height` asks for.
+fn formatting_context_children(element: &StyledElement) -> Vec<&StyledNode> {
+    fn walk<'a>(nodes: &'a [StyledNode], out: &mut Vec<&'a StyledNode>) {
+        for node in nodes {
+            match node {
+                StyledNode::Element(el) if el.style.display == Display::Contents => {
+                    walk(&el.children, out);
+                }
+                _ => out.push(node),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&element.children, &mut out);
+    out
+}
+
 fn layout_node(
     node: &StyledNode,
     x: u32,
@@ -1101,6 +1124,21 @@ fn layout_node(
             // badges of its trending-keyword list onto the masthead.
             match element.style.display {
                 Display::None => {}
+                // No box of its own: the children take this element's place.
+                Display::Contents => {
+                    for child in &element.children {
+                        layout_node(
+                            child,
+                            x,
+                            width,
+                            cursor_y,
+                            context,
+                            images,
+                            fonts,
+                            current_form.clone(),
+                        );
+                    }
+                }
                 Display::Inline => {
                     let fragments =
                         flatten_inline_fragments(node, context, current_form.clone(), images, fonts, width);
@@ -3706,6 +3744,22 @@ fn collect_inline_fragments(
 
             match element.style.display {
                 Display::None => {}
+                // Transparent wrapper: flatten straight through to the children.
+                Display::Contents => {
+                    for child in &element.children {
+                        collect_inline_fragments(
+                            child,
+                            output,
+                            link_href,
+                            link_node_id,
+                            current_form.clone(),
+                            context,
+                            images,
+                            fonts,
+                            available_width,
+                        );
+                    }
+                }
                 Display::Inline => {
                     if element.tag_name == "br" {
                         output.push(InlineFragment::LineBreak);
@@ -5401,9 +5455,8 @@ fn layout_grid_container(
     // under a `display:grid` body -- was laid out as a grid item and never had
     // its negative offset applied at all.
     let mut out_of_flow: Vec<&StyledElement> = Vec::new();
-    let children: Vec<&StyledElement> = element
-        .children
-        .iter()
+    let children: Vec<&StyledElement> = formatting_context_children(element)
+        .into_iter()
         .filter_map(|child| {
             let StyledNode::Element(el) = child else {
                 return None;
@@ -7835,6 +7888,30 @@ mod tests {
             (7, 5),
             "the positioned child should honour its own offsets"
         );
+    }
+
+    /// `display: contents` generates no box: the wrapper's children become the
+    /// container's items.
+    ///
+    /// MDN's navigation is built this way -- `.navigation__popup` is
+    /// `display:contents` -- and treating the wrapper as a real box stacked its
+    /// three children vertically instead of laying them across the columns,
+    /// which is what made the sticky header 606px tall.
+    #[test]
+    fn display_contents_hands_its_children_to_the_grid() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="display:grid;grid-template-columns:100px 100px"><div style="display:contents"><div style="height:10px;background:#bb0041"></div><div style="height:10px;background:#bb0042"></div></div></div></body></html>"#,
+            400,
+        );
+
+        let first = probe_rect(&l, 0xBB0041).expect("first child");
+        let second = probe_rect(&l, 0xBB0042).expect("second child");
+        assert_eq!(first.x, 0);
+        assert_eq!(
+            second.x, 100,
+            "the wrapper's children should be separate grid items"
+        );
+        assert_eq!(first.y, second.y, "and share a row instead of stacking");
     }
 
     #[test]
