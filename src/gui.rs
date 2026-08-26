@@ -5071,6 +5071,31 @@ fn start_render_worker(
         .expect("render worker should spawn");
 }
 
+/// Writes the window's own layout to the file named by `TOBIRA_DUMP_FRAME`.
+///
+/// `--dump-styled` prints a layout built from a freshly loaded page, and that is
+/// not the same thing the window is showing: the window keeps running the
+/// page's script and rebuilds from the result. Comparing the two as if they
+/// matched cost real time -- the same page measured 8813px tall on screen and
+/// 12711px in the dump, and every conclusion drawn from the dump about what was
+/// on screen was guesswork. This is the window's side of that comparison.
+fn dump_frame_if_asked(layout: &LayoutDocument, width: u32) {
+    let Ok(path) = std::env::var("TOBIRA_DUMP_FRAME") else {
+        return;
+    };
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "=== frame (width={width}) ===");
+    let _ = writeln!(out, "content_height      = {}", layout.content_height);
+    let _ = writeln!(out, "draw commands       = {}", layout.commands.len());
+    for (index, command) in layout.commands.iter().enumerate() {
+        let _ = writeln!(out, "  cmd[{index}] = {command:?}");
+    }
+    // Each frame overwrites the last, so the file holds what is on screen now
+    // rather than whatever the first paint happened to look like.
+    let _ = std::fs::write(&path, out);
+}
+
 fn render_content_frame(
     request: RenderRequest,
     fonts: &mut FontContext,
@@ -5081,6 +5106,7 @@ fn render_content_frame(
         request.content_width,
         fonts,
     );
+    dump_frame_if_asked(&layout, request.content_width);
     let mut pixels = vec![
         layout.background_color;
         request.content_width as usize * request.viewport_height as usize

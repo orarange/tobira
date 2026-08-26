@@ -35,6 +35,11 @@ pub struct Stylesheet {
     /// so style computation tests only candidate rules instead of every rule.
     /// Rebuilt by `extend` so it stays in sync with the rule set.
     rule_index: RuleIndex,
+    /// Every cascade layer named by the document, in the order the layers were
+    /// first declared. A layer declared later beats one declared earlier, and
+    /// an unlayered rule beats them all, so this order is what the cascade
+    /// sorts on -- not the order the rules happen to appear in.
+    layer_order: Vec<Arc<str>>,
 }
 
 impl Stylesheet {
@@ -46,7 +51,32 @@ impl Stylesheet {
         self.root_vars = Rc::new(merged);
         // Merge media-conditional root vars
         self.media_root_vars.extend(other.media_root_vars);
+        // Layer order is a property of the document, not of one sheet: a layer
+        // first named in an earlier sheet keeps its place when a later sheet
+        // adds to it.
+        for name in other.layer_order {
+            if !self.layer_order.contains(&name) {
+                self.layer_order.push(name);
+            }
+        }
         self.rule_index.rebuild(&self.rules);
+    }
+
+    /// Where a rule sits in the cascade's layer ordering.
+    ///
+    /// Unlayered rules are the strongest normal declarations an author can
+    /// write, which is exactly what firefox.com relies on: its base stylesheet
+    /// sets `body { width: 700px }` outside any layer, and the
+    /// `@layer defaults { body { inline-size: 100% } }` that comes later in the
+    /// source does not override it.
+    fn layer_rank(&self, layer: Option<&Arc<str>>) -> u32 {
+        let Some(name) = layer else {
+            return u32::MAX;
+        };
+        self.layer_order
+            .iter()
+            .position(|known| known == name)
+            .map_or(u32::MAX, |index| index as u32)
     }
 }
 
@@ -145,6 +175,9 @@ pub struct Rule {
     declarations: Vec<Declaration>,
     /// None = always apply; Some(cond) = apply only when cond matches
     media: Option<MediaCondition>,
+    /// The cascade layer this rule was written in, `None` for an unlayered
+    /// rule. Nested layers are joined with a dot, as the spec names them.
+    layer: Option<Arc<str>>,
     pub pseudo_element: Option<PseudoElement>,
 }
 
@@ -1345,6 +1378,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut root_vars = BTreeMap::new();
     let mut media_root_vars: Vec<(MediaCondition, BTreeMap<String, String>)> = Vec::new();
+    let mut layer_order: Vec<Arc<str>> = Vec::new();
     let source = strip_comments(input);
     let mut cursor = 0;
 
@@ -1368,7 +1402,13 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         };
         let block_end = block_start + close_offset;
 
-        let selector_text = statement_prelude_tail(source[selector_start..selector_end].trim());
+        let (statements, selector_text) =
+            split_statement_prelude(source[selector_start..selector_end].trim());
+        // `@layer a, b, c;` names an order without opening a block, and it is
+        // the only way a sheet can put a layer ahead of one that appears
+        // earlier in the source. It has to be read before the block it runs
+        // into is parsed.
+        register_layer_statements(statements, &mut layer_order);
         let block_text = source[block_start..block_end].trim();
         cursor = block_end + 1;
 
@@ -1401,6 +1441,9 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                 for (inner_cond, inner_map) in inner_stylesheet.media_root_vars {
                     media_root_vars.push((inner_cond, inner_map));
                 }
+                for name in inner_stylesheet.layer_order {
+                    register_layer(&name, &mut layer_order);
+                }
                 for mut rule in inner_stylesheet.rules {
                     rule.media = Some(media_cond.clone());
                     rules.push(rule);
@@ -1423,7 +1466,39 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                 for (inner_cond, inner_map) in inner_stylesheet.media_root_vars {
                     media_root_vars.push((inner_cond, inner_map));
                 }
-                rules.extend(inner_stylesheet.rules);
+
+                // `@layer name { ... }` puts everything inside it in that layer;
+                // an `@layer` nested in another joins their names with a dot.
+                // `@supports` is not a layer and leaves its rules where they are.
+                let outer = at_lower.strip_prefix("@layer").map(|name| {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        // An anonymous layer is its own layer, distinct from
+                        // every other anonymous one, so give it a name nothing
+                        // else can collide with.
+                        format!("<anonymous {}>", layer_order.len())
+                    } else {
+                        name.to_string()
+                    }
+                });
+                if let Some(ref outer) = outer {
+                    register_layer(outer, &mut layer_order);
+                }
+                for name in inner_stylesheet.layer_order {
+                    match outer {
+                        Some(ref outer) => register_layer(&format!("{outer}.{name}"), &mut layer_order),
+                        None => register_layer(&name, &mut layer_order),
+                    }
+                }
+                for mut rule in inner_stylesheet.rules {
+                    if let Some(ref outer) = outer {
+                        rule.layer = Some(match rule.layer {
+                            Some(inner) => Arc::from(format!("{outer}.{inner}").as_str()),
+                            None => Arc::from(outer.as_str()),
+                        });
+                    }
+                    rules.push(rule);
+                }
             }
             // other at-rules are skipped
             continue;
@@ -1464,6 +1539,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                 selectors,
                 declarations,
                 media: None,
+                layer: None,
                 pseudo_element,
             });
         }
@@ -1475,6 +1551,30 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         root_vars: Rc::new(root_vars),
         media_root_vars,
         rule_index,
+        layer_order,
+    }
+}
+
+/// Records the layers named by `@layer a, b, c;` statements in a prelude.
+fn register_layer_statements(statements: &str, order: &mut Vec<Arc<str>>) {
+    for statement in statements.split(';') {
+        let statement = statement.trim();
+        let Some(names) = statement.strip_prefix("@layer") else {
+            continue;
+        };
+        for name in names.split(',') {
+            register_layer(name.trim(), order);
+        }
+    }
+}
+
+fn register_layer(name: &str, order: &mut Vec<Arc<str>>) {
+    if name.is_empty() {
+        return;
+    }
+    let name: Arc<str> = Arc::from(name);
+    if !order.contains(&name) {
+        order.push(name);
     }
 }
 
@@ -1673,7 +1773,7 @@ fn split_supports_condition<'a>(condition: &'a str, keyword: &str) -> Option<Vec
 /// `@layer base, theme, ...;@supports not (all: revert-layer){...}`. Read whole,
 /// that prelude starts with `@layer`, so the `@supports` test never ran and an
 /// entire second copy of the base stylesheet was applied over the real one.
-fn statement_prelude_tail(prelude: &str) -> &str {
+fn split_statement_prelude(prelude: &str) -> (&str, &str) {
     let mut depth = 0_i32;
     let mut in_string: Option<char> = None;
     let mut escaped = false;
@@ -1695,8 +1795,8 @@ fn statement_prelude_tail(prelude: &str) -> &str {
         }
     }
     match last_semicolon {
-        Some(i) => prelude[i + 1..].trim(),
-        None => prelude,
+        Some(i) => (&prelude[..i], prelude[i + 1..].trim()),
+        None => ("", prelude),
     }
 }
 
@@ -2595,7 +2695,8 @@ fn compute_style_with_rules(
             }
         }
     }
-    let mut applicable: Vec<(bool, usize, usize, Declaration)> = Vec::new();
+    // (important, layer rank, specificity, source order, declaration)
+    let mut applicable: Vec<(bool, u32, usize, usize, Declaration)> = Vec::new();
 
     for rule_index in candidate_rule_indices {
         let rule = &stylesheet.rules[rule_index];
@@ -2631,10 +2732,20 @@ fn compute_style_with_rules(
                         element_vars.insert(decl.property.clone(), decl.value.clone());
                     }
                 }
+                let rank = stylesheet.layer_rank(rule.layer.as_ref());
                 applicable.extend(rule.declarations.iter().cloned().enumerate().map(
                     |(declaration_index, declaration)| {
                         (
                             declaration.important,
+                            // Layers rank ahead of specificity, and `!important`
+                            // turns the ordering upside down: an important
+                            // declaration in an early layer beats a later one,
+                            // and an unlayered important is the weakest of all.
+                            if declaration.important {
+                                u32::MAX - rank
+                            } else {
+                                rank
+                            },
                             selector.specificity(),
                             rule_index * 100 + declaration_index,
                             declaration,
@@ -2659,12 +2770,23 @@ fn compute_style_with_rules(
                 .into_iter()
                 .enumerate()
                 .map(|(index, declaration)| {
-                    (declaration.important, 1_000, usize::MAX - 1_000 + index, declaration)
+                    // A style attribute is not in any layer and outranks every
+                    // layered declaration of the same importance, so it takes
+                    // the top rank whether or not it is important.
+                    (
+                        declaration.important,
+                        u32::MAX,
+                        1_000,
+                        usize::MAX - 1_000 + index,
+                        declaration,
+                    )
                 }),
         );
     }
 
-    applicable.sort_by_key(|(important, specificity, order, _)| (*important, *specificity, *order));
+    applicable.sort_by_key(|(important, layer, specificity, order, _)| {
+        (*important, *layer, *specificity, *order)
+    });
 
     // Publish this element's own declarations on top of what it inherited, so
     // its descendants see them too.
@@ -2688,7 +2810,7 @@ fn compute_style_with_rules(
     let declared_vars = style.custom_properties.clone();
     let needs_vars = applicable
         .iter()
-        .any(|(_, _, _, declaration)| declaration.value.contains("var("));
+        .any(|(_, _, _, _, declaration)| declaration.value.contains("var("));
     let merged_lookup: Option<BTreeMap<String, String>> = if !needs_vars {
         None
     } else {
@@ -2716,7 +2838,7 @@ fn compute_style_with_rules(
         (None, None) => &*root_vars,
     };
 
-    for (_, _, _, mut declaration) in applicable {
+    for (_, _, _, _, mut declaration) in applicable {
         // skip CSS custom properties
         if declaration.property.starts_with("--") {
             continue;
@@ -4055,7 +4177,15 @@ fn default_display(tag_name: &str) -> Display {
         "document" | "html" | "body" | "main" | "section" | "article" | "div" | "header"
         | "footer" | "nav" | "aside" | "p" | "ul" | "ol" | "li" | "pre" | "blockquote" | "h1"
         | "h2" | "h3" | "h4" | "h5" | "h6" | "table" | "tbody" | "thead" | "tfoot" | "tr"
-        | "td" | "th" | "center" | "frameset" | "hr" => {
+        | "td" | "th" | "center" | "frameset" | "hr"
+        // The rest of the block-level elements the HTML rendering rules name.
+        // Falling through to `inline` does not just misplace them: an inline
+        // formatting context drops block-level children outright. firefox.com
+        // wraps its front-page headline in `<hgroup>`, so the largest text on
+        // the page -- an `<h1>` that is `display: block` -- was never laid out
+        // at all, leaving the hero empty.
+        | "hgroup" | "figure" | "figcaption" | "address" | "dl" | "dt" | "dd" | "fieldset"
+        | "legend" | "form" | "details" | "summary" | "search" | "menu" | "dir" | "caption" => {
             if tag_name == "li" {
                 Display::ListItem
             } else {
@@ -8506,6 +8636,67 @@ mod tests {
             color_of(
                 ".box{color:#00ff00}@layer base, theme, defaults;                 @supports not (all: revert-layer) { .box { color: #ff0000 } }"
             ),
+            0x00ff00
+        );
+    }
+
+    /// An unlayered rule beats a layered one however late the layer appears.
+    /// firefox.com's base sheet sets `body { width: 700px }` outside any layer;
+    /// the `@layer defaults { body { inline-size: 100% } }` further down does not
+    /// override it, and treating source order as the answer stretched the whole
+    /// site to the window.
+    #[test]
+    fn an_unlayered_rule_beats_a_later_layer() {
+        assert_eq!(
+            color_of(".box{color:#00ff00}@layer defaults{.box{color:#ff0000}}"),
+            0x00ff00
+        );
+    }
+
+    /// Between layers it is the order they were declared in that decides, not
+    /// where the rules sit.
+    #[test]
+    fn a_later_layer_beats_an_earlier_one() {
+        assert_eq!(
+            color_of("@layer base{.box{color:#ff0000}}@layer defaults{.box{color:#00ff00}}                      @layer base{.box{color:#ff0000}}"),
+            0x00ff00,
+            "base was declared first, so defaults wins even though a base block comes last"
+        );
+    }
+
+    /// `@layer a, b, c;` names an order before any of those layers has a block,
+    /// which is the only way a sheet can put a layer ahead of one written
+    /// earlier.
+    #[test]
+    fn a_layer_statement_sets_the_order() {
+        assert_eq!(
+            color_of("@layer defaults, base;@layer base{.box{color:#00ff00}}                      @layer defaults{.box{color:#ff0000}}"),
+            0x00ff00,
+            "the statement puts base last, so it wins despite coming first"
+        );
+    }
+
+    /// `!important` turns layer ordering upside down.
+    #[test]
+    fn important_reverses_the_layer_order() {
+        assert_eq!(
+            color_of("@layer base{.box{color:#00ff00!important}}@layer defaults{.box{color:#ff0000!important}}"),
+            0x00ff00,
+            "an important declaration in the earlier layer wins"
+        );
+        assert_eq!(
+            color_of("@layer base{.box{color:#00ff00!important}}.box{color:#ff0000!important}"),
+            0x00ff00,
+            "and an unlayered important is the weakest of them"
+        );
+    }
+
+    /// A nested layer belongs to its parent, so the parent's place in the order
+    /// is what counts.
+    #[test]
+    fn a_nested_layer_ranks_under_its_parent() {
+        assert_eq!(
+            color_of("@layer base{@layer inner{.box{color:#ff0000}}}@layer defaults{.box{color:#00ff00}}"),
             0x00ff00
         );
     }
