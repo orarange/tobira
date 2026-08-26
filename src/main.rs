@@ -181,6 +181,21 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
         }
     }
 
+    /// The viewport this dump lays the page out at.
+    ///
+    /// It was fixed at 1280, which is not the GUI window's width, so comparing a
+    /// screenshot against these numbers quietly compared two different layouts.
+    /// That produced one wrong diagnosis already -- a "96px gap above the nav"
+    /// that existed at neither width. Set TOBIRA_DUMP_WIDTH to the window's width
+    /// to line the two up.
+    fn dump_width() -> u32 {
+        std::env::var("TOBIRA_DUMP_WIDTH")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|width| *width > 0)
+            .unwrap_or(1280)
+    }
+
     fn dump_depth() -> usize {
         std::env::var("TOBIRA_DUMP_DEPTH")
             .ok()
@@ -268,8 +283,8 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
     println!("{}", vis.join(" | "));
 
     let mut fonts = font::FontContext::load();
-    let layout = layout::layout_styled_document(&page.styled_document, &page.images, 1280, &mut fonts);
-    println!("\n=== layout (viewport_width=1280) ===");
+    let layout = layout::layout_styled_document(&page.styled_document, &page.images, dump_width(), &mut fonts);
+    println!("\n=== layout (viewport_width={}) ===", dump_width());
     println!("content_height      = {}", layout.content_height);
     println!("draw commands       = {}", layout.commands.len());
     for (i, cmd) in layout.commands.iter().enumerate().take(12) {
