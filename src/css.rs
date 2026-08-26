@@ -4214,9 +4214,14 @@ fn default_display(tag_name: &str) -> Display {
         // rendered, only cloned by script. Leaving it out let every custom
         // element on MDN paint the markup it keeps in a template -- the search
         // button was drawn twice, once from its template and once for real.
-        "script" | "style" | "title" | "head" | "meta" | "link" | "noscript" | "template" => {
-            Display::None
-        }
+        // A `<select>` shows one option at a time, in a control it draws
+        // itself; the rest are only there to be chosen from. Laying them out as
+        // ordinary content spilled every one onto the page -- firefox.com's
+        // footer carries a language picker with over a hundred entries, and it
+        // alone made the footer 6120px tall against the 975px a browser gives
+        // it.
+        "script" | "style" | "title" | "head" | "meta" | "link" | "noscript" | "template"
+        | "option" | "optgroup" => Display::None,
         _ => Display::Inline,
     }
 }

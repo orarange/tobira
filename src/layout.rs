@@ -7148,6 +7148,28 @@ mod percentage_sizing_tests {
         );
     }
 
+    /// A `<select>` shows one option at a time; the rest exist to be chosen
+    /// from, not to be laid out. Rendering them as content spilled every entry
+    /// onto the page -- firefox.com's footer language picker lists over a
+    /// hundred, and it alone made the footer 6120px tall where a browser gives
+    /// it 975px.
+    #[test]
+    fn a_selects_options_are_not_page_content() {
+        let runs = text_runs(
+            "",
+            "<div style=\"width:600px\">before<select><option>ALPHA</option>             <option>BETA</option></select>after</div>",
+        );
+        let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert!(
+            !shown.contains("ALPHA") && !shown.contains("BETA"),
+            "no option should be laid out as text: {shown:?}"
+        );
+        assert!(
+            shown.contains("before") && shown.contains("after"),
+            "the text around it still is: {shown:?}"
+        );
+    }
+
     /// The anonymous box wrapping text in a flex container takes the inherited
     /// half of its parent's style and nothing else. Carrying the padding over
     /// charged it a second time one level down, so the text was laid out in a
