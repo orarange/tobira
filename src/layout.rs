@@ -485,6 +485,15 @@ struct LayoutContext {
     /// used to resolve a child's `height: <percent>`. `None` when no ancestor
     /// has a definite height (then percentage heights are treated as auto).
     container_height: Option<u32>,
+    /// The main size the flex algorithm settled on for the item about to be
+    /// laid out, which that item must use rather than working its own out
+    /// again. A percentage width on a flex item resolves against the flex
+    /// container, and the item is then handed a slot of that size; re-resolving
+    /// the percentage against the slot shrinks it every time. firefox.com's
+    /// footer columns ask for `calc(25% - 12px)` of a 1050px row -- 250px --
+    /// and came out 31px wide, so every link stacked one character per line and
+    /// the footer ran to six screens.
+    flex_item_main_size: Option<u32>,
     /// Ordinal of the list item about to be laid out, set by its container.
     /// `None` for anything that is not a numbered item.
     list_ordinal: Option<u32>,
@@ -532,6 +541,7 @@ impl Default for LayoutContext {
             scroll_y_for_fixed: 0,
             positioned_commands: Vec::new(),
             container_height: None,
+            flex_item_main_size: None,
             list_ordinal: None,
             containing_block_size: (0, 0),
             pending_bottom: Vec::new(),
@@ -1336,6 +1346,10 @@ fn layout_block_element(
     fonts: &mut FontContext,
     current_form: Option<FormContext>,
 ) {
+    // Taken here, before any dispatch, so it cannot survive into a descendant
+    // and be spent on the wrong box.
+    let settled_main_size = context.flex_item_main_size.take();
+
     if element.tag_name == "br" {
         *cursor_y = cursor_y.saturating_add(text_line_height(&element.style, fonts));
         return;
@@ -1462,14 +1476,14 @@ fn layout_block_element(
     *cursor_y = advance_by_margin(*cursor_y, element.style.margin.top);
 
     // Resolve explicit width from style.width (LengthValue → px)
-    let explicit_width: Option<u32> = element.style.width.map(|w| match w {
+    let explicit_width: Option<u32> = settled_main_size.or_else(|| element.style.width.map(|w| match w {
         LengthValue::Pixels(px) => px,
         LengthValue::Percent(pct) => (width as u64 * pct as u64 / 100).min(width as u64) as u32,
         LengthValue::MinContent => 0,
         LengthValue::MaxContent => width,
         LengthValue::FitContent(max_px) => width.min(max_px),
         LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
-    });
+    }));
 
     // Container-derived width (what the element would be without explicit width)
     let container_derived_width = {
@@ -6743,6 +6757,7 @@ fn layout_flex_container(
                     let child_y_offset = child_cross_offset(child, max_height, item_heights[i]);
                     let mut child_y = content_y.saturating_add(child_y_offset);
                     let child_form = form_context_for_element(child, context, current_form.clone());
+                    context.flex_item_main_size = Some(child_w);
                     layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts, child_form);
                     cursor_x = cursor_x.saturating_add(child_w).saturating_add(item_gap);
                 }
@@ -6785,6 +6800,7 @@ fn layout_flex_container(
                         let yoff = child_cross_offset(child, line_h, item_heights[i]);
                         let mut cy = line_y.saturating_add(yoff);
                         let child_form = form_context_for_element(child, context, current_form.clone());
+                        context.flex_item_main_size = Some(w);
                         layout_block_element(child, cx, w, &mut cy, context, images, fonts, child_form);
                         cx = cx.saturating_add(w).saturating_add(gap);
                     }
@@ -7146,6 +7162,22 @@ mod percentage_sizing_tests {
             12,
             "a plain inline box is not clipped"
         );
+    }
+
+    /// A percentage width on a flex item resolves against the flex container,
+    /// and the item is then handed a slot of exactly that size. Resolving the
+    /// percentage a second time against the slot shrinks it on every pass:
+    /// firefox.com's footer columns ask for a quarter of a 1050px row and came
+    /// out 31px wide, so every link stacked one character per line and the
+    /// footer ran to six screens.
+    #[test]
+    fn a_flex_items_percentage_width_is_not_resolved_twice() {
+        let runs = text_runs(
+            ".row{display:flex;width:400px}.cell{width:25%}",
+            "<div class=\"row\"><div class=\"cell\">A</div><div class=\"cell\">B</div>             <div class=\"cell\">C</div><div class=\"cell\">D</div></div>",
+        );
+        let xs: Vec<u32> = runs.iter().map(|run| run.x).collect();
+        assert_eq!(xs, vec![0, 100, 200, 300], "quarters of 400px: {runs:?}");
     }
 
     /// A `<select>` shows one option at a time; the rest exist to be chosen
