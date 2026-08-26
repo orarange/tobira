@@ -865,6 +865,22 @@ pub struct ComputedStyle {
     pub grid_template_rows: Vec<GridTrackSize>,
     pub grid_auto_rows: GridTrackSize,
     pub grid_auto_columns: GridTrackSize,
+    /// Custom properties (`--x`) declared on this element or on an ancestor.
+    ///
+    /// They inherit like any other property, so a `--gap` set on a container is
+    /// visible to everything inside it. Only the element's own declarations were
+    /// consulted before, so MDN's `.menu { --menu-button-padding: ... }` never
+    /// reached the `.menu__tab-link { padding: var(--menu-button-padding) }`
+    /// beneath it and that padding silently vanished.
+    ///
+    /// `:root` and `@media` root variables are *not* copied in here: every
+    /// element can see those already, so they stay on the stylesheet and are
+    /// consulted as a fallback. Only what an ancestor actually declared travels
+    /// with the style, which keeps this empty on most pages.
+    ///
+    /// `Arc`, not `Rc`: the finished style tree is handed to the render worker
+    /// thread, so everything hanging off it has to be `Send`.
+    pub custom_properties: Option<Arc<BTreeMap<String, String>>>,
     /// Line names from `grid-template-columns` / `grid-template-rows`. Boxed
     /// for the same reason as the areas below: most pages never name a line.
     pub grid_line_names: Option<Box<GridLineNames>>,
@@ -907,6 +923,8 @@ impl ComputedStyle {
     fn for_element(tag_name: &str, parent: Option<&Self>) -> Self {
         let parent_font_size = parent.map(|s| s.font_size_px).unwrap_or(16);
         let mut style = Self {
+            // Custom properties inherit; the ancestors' map is shared, not copied.
+            custom_properties: parent.and_then(|s| s.custom_properties.clone()),
             display: default_display(tag_name),
             color: parent.map(|s| s.color).unwrap_or(DEFAULT_TEXT_COLOR),
             background_color: None,
@@ -2226,16 +2244,20 @@ fn compute_style_with_rules(
     let identity = ElementIdentity::from(element);
     // O(1) ref bump — we avoid cloning the full BTreeMap unless this element has its own vars.
     let root_vars = Rc::clone(&stylesheet.root_vars);
+    // What this element itself declares. Ancestors' declarations already ride
+    // along on the style courtesy of `for_element`.
+    let inherited_vars = style.custom_properties.clone();
     let mut element_vars: BTreeMap<String, String> = BTreeMap::new();
-    // Apply media-conditional root vars that match the current viewport width.
-    // These are stored separately from unconditional root_vars so they are only
-    // applied when their @media condition is satisfied.
+
+    // Root variables from a matching `@media` block. Every element sees these,
+    // so they are a lookup fallback rather than part of this element's own set.
+    let mut media_vars: BTreeMap<String, String> = BTreeMap::new();
     for (cond, vars) in &stylesheet.media_root_vars {
         if cond.matches(viewport_width) {
             // CSS cascade: last declaration wins, so use insert (not or_insert_with).
             // A later matching @media block should override an earlier one for the same var.
             for (k, v) in vars {
-                element_vars.insert(k.clone(), v.clone());
+                media_vars.insert(k.clone(), v.clone());
             }
         }
     }
@@ -2310,18 +2332,54 @@ fn compute_style_with_rules(
 
     applicable.sort_by_key(|(important, specificity, order, _)| (*important, *specificity, *order));
 
-    // Merge root_vars into element_vars once, before the declaration loop.
-    // element_vars (from matched rules + inline style) takes priority via or_insert_with.
-    // Doing this once here avoids repeated merge attempts on every var()-containing declaration.
+    // Publish this element's own declarations on top of what it inherited, so
+    // its descendants see them too.
     if !element_vars.is_empty() {
-        for (k, v) in root_vars.iter() {
-            element_vars.entry(k.clone()).or_insert_with(|| v.clone());
-        }
+        let merged = match &inherited_vars {
+            Some(inherited) => {
+                let mut merged = (**inherited).clone();
+                merged.extend(element_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+                merged
+            }
+            None => element_vars.clone(),
+        };
+        style.custom_properties = Some(Arc::new(merged));
     }
-    let vars_ref: &BTreeMap<String, String> = if element_vars.is_empty() {
-        &*root_vars
+
+    // Resolution order for `var()`: this element and its ancestors, then the
+    // `@media` root set, then the plain `:root` set. Only build the merged map
+    // when something actually asks for a variable -- the fallbacks are large on
+    // real pages and copying them per element would cost more than it saves.
+    // Cloned (an Arc bump), not borrowed: `apply_declaration` needs `style` mutably.
+    let declared_vars = style.custom_properties.clone();
+    let needs_vars = applicable
+        .iter()
+        .any(|(_, _, _, declaration)| declaration.value.contains("var("));
+    let merged_lookup: Option<BTreeMap<String, String>> = if !needs_vars {
+        None
     } else {
-        &element_vars
+        match declared_vars.as_deref() {
+            Some(declared) if !media_vars.is_empty() || !root_vars.is_empty() => {
+                let mut merged = declared.clone();
+                for (k, v) in media_vars.iter().chain(root_vars.iter()) {
+                    merged.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                Some(merged)
+            }
+            None if !media_vars.is_empty() => {
+                let mut merged = media_vars.clone();
+                for (k, v) in root_vars.iter() {
+                    merged.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                Some(merged)
+            }
+            _ => None,
+        }
+    };
+    let vars_ref: &BTreeMap<String, String> = match (&merged_lookup, declared_vars.as_deref()) {
+        (Some(merged), _) => merged,
+        (None, Some(declared)) => declared,
+        (None, None) => &*root_vars,
     };
 
     for (_, _, _, mut declaration) in applicable {
@@ -7430,6 +7488,56 @@ mod tests {
             div.style.grid_template_columns,
             vec![GridTrackSize::Pixels(100), GridTrackSize::Fr(1000)]
         );
+    }
+
+    /// Custom properties inherit.
+    ///
+    /// MDN sets `--menu-button-padding` on `.menu` and reads it on a
+    /// `.menu__tab-link` several levels below. Only the element's own
+    /// declarations used to be consulted, so that padding silently vanished.
+    #[test]
+    fn custom_properties_inherit_to_descendants() {
+        let html = r#"<div class="outer"><div><span class="inner">x</span></div></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(".outer { --pad: 12px } .inner { padding-left: var(--pad) }");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let inner = find_first_element(&styled, "span").unwrap();
+        assert_eq!(inner.style.padding.left, 12);
+    }
+
+    /// The nearest declaration wins: an ancestor shadows `:root`, and the
+    /// element itself shadows the ancestor.
+    #[test]
+    fn a_nearer_custom_property_shadows_the_root_one() {
+        let html = r#"<div class="outer"><span class="inner">x</span><b class="own">y</b></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(
+            ":root { --pad: 4px } .outer { --pad: 20px } .inner { padding-left: var(--pad) }              .own { --pad: 33px; padding-left: var(--pad) }",
+        );
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        assert_eq!(
+            find_first_element(&styled, "span").unwrap().style.padding.left,
+            20,
+            "the ancestor's value should beat :root"
+        );
+        assert_eq!(
+            find_first_element(&styled, "b").unwrap().style.padding.left,
+            33,
+            "the element's own value should beat the ancestor's"
+        );
+    }
+
+    /// A variable an ancestor never declared still falls back to `:root`.
+    #[test]
+    fn root_custom_properties_still_reach_deep_elements() {
+        let html = r#"<div class="outer"><span class="inner">x</span></div>"#;
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(
+            ":root { --pad: 7px } .outer { --other: 1px } .inner { padding-left: var(--pad) }",
+        );
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let inner = find_first_element(&styled, "span").unwrap();
+        assert_eq!(inner.style.padding.left, 7);
     }
 
     #[test]
