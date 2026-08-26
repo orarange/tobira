@@ -12,6 +12,17 @@ pub(crate) enum MediaCondition {
     All(Vec<MediaCondition>),
     Any(Vec<MediaCondition>),
     Not(Box<MediaCondition>),
+    /// A feature this renderer answers "no" to.
+    Never,
+    /// A feature nothing here recognises.
+    ///
+    /// Per spec an unknown media feature makes the query false, and that is what
+    /// real pages count on. postcss ships breakpoints as a resolved
+    /// `@media (max-width: 899px)` *plus* the original
+    /// `@media (--viewport-below-md)`; a browser skips the second because it
+    /// cannot read it. Treating it as a match applied firefox.com's mobile rules
+    /// at every width -- including `font-size: 0` on the header download button,
+    /// which shrank its label to a smear over the logo.
     Unknown,
 }
 
@@ -26,7 +37,8 @@ impl MediaCondition {
             MediaCondition::All(list) => list.iter().all(|cond| cond.matches(viewport_width)),
             MediaCondition::Any(list) => list.iter().any(|cond| cond.matches(viewport_width)),
             MediaCondition::Not(inner) => !inner.matches(viewport_width),
-            MediaCondition::Unknown => true,
+            MediaCondition::Never => false,
+            MediaCondition::Unknown => false,
         }
     }
 }
@@ -135,6 +147,38 @@ fn parse_media_atom(query: &str) -> MediaCondition {
     }
     if inner.contains("prefers-color-scheme") && inner.contains("dark") {
         return MediaCondition::PrefersColorSchemeDark;
+    }
+
+    // Features whose answer this renderer actually knows. Everything else falls
+    // through to `Unknown`, which does not match -- so these have to be spelled
+    // out or a page loses the styles meant for an ordinary desktop browser.
+    if let Some((feature, value)) = inner.split_once(':') {
+        let feature = feature.trim();
+        let value = value.trim();
+        let yes = |matches: bool| {
+            if matches {
+                MediaCondition::Screen
+            } else {
+                MediaCondition::Never
+            }
+        };
+        match feature {
+            // A mouse: hover works and the pointer is fine.
+            "hover" | "any-hover" => return yes(value == "hover"),
+            "pointer" | "any-pointer" => return yes(value == "fine"),
+            // A window is wider than it is tall often enough, and pages use this
+            // to pick a phone layout.
+            "orientation" => return yes(value == "landscape"),
+            // No accessibility preferences are set.
+            "prefers-reduced-motion" | "prefers-reduced-transparency" | "prefers-contrast" => {
+                return yes(value == "no-preference");
+            }
+            "forced-colors" => return yes(value == "none"),
+            "prefers-color-scheme" => return yes(value == "light"),
+            // Everything is displayed, nothing is being scripted away.
+            "scripting" => return yes(value == "enabled"),
+            _ => {}
+        }
     }
     if let Some(rest) = inner.strip_prefix("max-width:") {
         if let Some(px) = parse_media_length(rest.trim()) {

@@ -118,9 +118,13 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
         match node {
             StyledNode::Text(t) => {
                 if depth <= dump_depth() && !t.text.trim().is_empty() {
+                    // A text node carries its *own* style, not its parent's, so
+                    // its size can differ from the element the dump shows around
+                    // it. Printing only the element's left that invisible.
                     println!(
-                        "{}#text {:?}",
+                        "{}#text fs={} {:?}",
                         "  ".repeat(depth),
+                        t.style.font_size_px,
                         t.text.chars().take(60).collect::<String>()
                     );
                 }

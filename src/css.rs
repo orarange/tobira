@@ -8030,6 +8030,65 @@ mod tests {
         assert_eq!(solid.border_color, 0xC3C7CB);
     }
 
+    /// An unrecognised media feature does not match.
+    ///
+    /// postcss ships a breakpoint twice: the resolved `@media (max-width: 899px)`
+    /// and the original `@media (--viewport-below-md)`. A browser ignores the
+    /// second because it cannot read it. Treating unknown features as a match
+    /// applied firefox.com's mobile rules at every width, one of which is
+    /// `font-size: 0` on the header's download button.
+    #[test]
+    fn an_unknown_media_feature_does_not_match() {
+        let colour_at = |css: &str, width: u32| {
+            let doc = parse_document("<p>x</p>");
+            let styled = build_styled_tree(
+                &doc,
+                &parse_stylesheet(css),
+                width,
+                &super::InteractiveState::default(),
+            );
+            find_first_element(&styled, "p").unwrap().style.color
+        };
+
+        let sheet = "p { color: #0000ff } @media (--viewport-below-md) { p { color: #ff0000 } }";
+        assert_eq!(colour_at(sheet, 1280), 0x0000FF);
+        assert_eq!(colour_at(sheet, 400), 0x0000FF, "and not at any other width");
+
+        let nonsense = "p { color: #0000ff } @media (no-such-feature: 3) { p { color: #ff0000 } }";
+        assert_eq!(colour_at(nonsense, 1280), 0x0000FF);
+    }
+
+    /// The features a desktop browser can actually answer are answered, rather
+    /// than falling through to "unknown" and losing the rule.
+    #[test]
+    fn desktop_media_features_are_answered() {
+        let colour_at = |css: &str| {
+            let doc = parse_document("<p>x</p>");
+            let styled = build_styled_tree(
+                &doc,
+                &parse_stylesheet(css),
+                1280,
+                &super::InteractiveState::default(),
+            );
+            find_first_element(&styled, "p").unwrap().style.color
+        };
+
+        // A mouse is present.
+        assert_eq!(colour_at("p { color: #0000ff } @media (hover: hover) { p { color: #00ff00 } }"), 0x00FF00);
+        assert_eq!(colour_at("p { color: #0000ff } @media (hover: none) { p { color: #00ff00 } }"), 0x0000FF);
+        assert_eq!(colour_at("p { color: #0000ff } @media (pointer: fine) { p { color: #00ff00 } }"), 0x00FF00);
+
+        // No accessibility preference is set, so the "reduce" branch is skipped.
+        assert_eq!(
+            colour_at("p { color: #0000ff } @media (prefers-reduced-motion: reduce) { p { color: #ff0000 } }"),
+            0x0000FF
+        );
+        assert_eq!(
+            colour_at("p { color: #0000ff } @media (forced-colors: active) { p { color: #ff0000 } }"),
+            0x0000FF
+        );
+    }
+
     #[test]
     fn min_max_content_length_value_parsed() {
         let html = r#"<div style="width: min-content;"></div>"#;
