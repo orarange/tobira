@@ -1136,6 +1136,90 @@ pub struct StyledText {
 /// Split `input` on `delimiter` but only at depth 0 (ignoring delimiters inside
 /// parentheses/brackets and quoted strings).  This prevents `:not(.a, .b)` from
 /// being split on the inner comma.
+/// Rewrite `:is(...)` / `:where(...)` into a plain selector list.
+///
+/// Both were listed as "ignorable" pseudo-classes, meaning always satisfied with
+/// their argument discarded. That turns `:is(.homepage-hero h1)::after` into
+/// `*::after`, so MDN's `content: "_"` -- the little terminal cursor meant for
+/// one heading -- was stamped after the text of every element on the page.
+///
+/// The argument is an ordinary selector list, so splicing it in at parse time is
+/// enough; the matcher then only ever sees plain selectors, and nesting falls out
+/// of the recursion. Run-time matching would instead need ancestor context inside
+/// `SimpleSelector`, which it does not have.
+///
+/// One shape is deliberately left alone: with something before the group, as in
+/// `.x:is(.y .z)`, a textual splice would say `.x.y .z` when the selector means
+/// "a `.z` inside a `.y`, which is also `.x`". Those keep the old behaviour.
+fn expand_selector_groups(selector: &str) -> Vec<String> {
+    const GROUPS: [&str; 4] = [":is(", ":where(", ":matches(", ":any("];
+    let lower = selector.to_ascii_lowercase();
+
+    // The first group that is not itself inside brackets.
+    let mut depth = 0usize;
+    let mut opened: Option<(usize, usize)> = None;
+    for (index, character) in selector.char_indices() {
+        match character {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            ':' if depth == 0 => {
+                if let Some(group) = GROUPS.iter().find(|g| lower[index..].starts_with(**g)) {
+                    opened = Some((index, index + group.len()));
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some((start, args_start)) = opened else {
+        return vec![selector.to_string()];
+    };
+
+    let mut depth = 1usize;
+    let mut args_end = None;
+    for (offset, character) in selector[args_start..].char_indices() {
+        match character {
+            '(' | '[' => depth += 1,
+            ')' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    args_end = Some(args_start + offset);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(args_end) = args_end else {
+        return vec![selector.to_string()];
+    };
+
+    let prefix = &selector[..start];
+    let arguments = &selector[args_start..args_end];
+    let suffix = &selector[args_end + 1..];
+
+    let mut expanded = Vec::new();
+    for alternative in split_at_top_level(arguments, ',') {
+        let alternative = alternative.trim();
+        if alternative.is_empty() {
+            continue;
+        }
+        let is_compound = !alternative.contains([' ', '>', '+', '~']);
+        if !prefix.trim().is_empty() && !is_compound {
+            return vec![selector.to_string()];
+        }
+        expanded.extend(expand_selector_groups(&format!(
+            "{prefix}{alternative}{suffix}"
+        )));
+    }
+
+    if expanded.is_empty() {
+        vec![selector.to_string()]
+    } else {
+        expanded
+    }
+}
+
 fn split_at_top_level(input: &str, delimiter: char) -> Vec<String> {
     let mut result = Vec::new();
     let mut depth_paren: u32 = 0;
@@ -1343,6 +1427,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
 
         let selectors = split_at_top_level(selector_text, ',')
             .iter()
+            .flat_map(|s| expand_selector_groups(s.trim()))
             .filter_map(|s| parse_selector(s.trim()))
             .collect::<Vec<_>>();
 

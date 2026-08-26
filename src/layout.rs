@@ -6923,16 +6923,47 @@ mod percentage_sizing_tests {
         assert_eq!(shown, "L", "the rule must not apply: {runs:?}");
     }
 
-    /// `:is()` and `:where()` are grouping constructs; skipping over them keeps
-    /// the rest of the compound selector doing its work.
+    /// `:is()` is a grouping construct, not a wildcard: it matches only what its
+    /// argument matches.
+    ///
+    /// It used to be skipped over and its argument thrown away, which made
+    /// `a:is(.x, .y)` behave like a bare `a`. On MDN that turned
+    /// `:is(.homepage-hero h1)::after { content: "_" }` -- one heading's cursor --
+    /// into `*::after`, stamping an underscore after the text of every element.
     #[test]
-    fn grouping_pseudo_classes_are_skipped_not_failed() {
-        let runs = text_runs(
+    fn a_grouping_pseudo_class_matches_only_its_argument() {
+        let unmatched = text_runs(
             "a:is(.x, .y)::after{content:\"X\"}",
             "<div><a>L</a></div>",
         );
-        let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
-        assert_eq!(shown, "LX", "{runs:?}");
+        let shown: String = unmatched.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(shown, "L", "a class-less <a> must not match: {unmatched:?}");
+
+        let matched = text_runs(
+            "a:is(.x, .y)::after{content:\"X\"}",
+            "<div><a class=\"y\">L</a></div>",
+        );
+        let shown: String = matched.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(shown, "LX", "one of the alternatives must match: {matched:?}");
+    }
+
+    /// The argument may be a whole descendant chain, and may sit on its own with
+    /// the rest of the compound after it -- the shape every one of MDN's uses has.
+    #[test]
+    fn a_grouping_pseudo_class_carries_a_descendant_chain() {
+        let inside = text_runs(
+            ":is(.hero h1)::after{content:\"X\"}",
+            "<div class=\"hero\"><h1>L</h1></div>",
+        );
+        let shown: String = inside.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(shown, "LX", "{inside:?}");
+
+        let outside = text_runs(
+            ":is(.hero h1)::after{content:\"X\"}",
+            "<div><h1>L</h1><p>P</p></div>",
+        );
+        let shown: String = outside.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(shown, "LP", "an h1 outside .hero must not match: {outside:?}");
     }
 
     /// The `content` value is a list that may end with `/ <string>`, which is
