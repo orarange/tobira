@@ -5834,9 +5834,15 @@ fn layout_grid_container(
         );
     }
 
-    // Total content height
-    let total_h: u32 = row_heights.iter().sum::<u32>()
+    // Total content height. A stated `height` wins over the rows' own sum, the
+    // way it already does for a flex container -- grid was the one container
+    // still sizing itself purely by content. MDN's `.navigation` asks for
+    // `height: var(--navigation-height)` (4.125rem) and got whatever its items
+    // added up to instead, which left a tall empty band under the nav bar.
+    let rows_h: u32 = row_heights.iter().sum::<u32>()
         + gap * max_row.saturating_sub(1) as u32;
+    let stated_h = definite_height(&element.style);
+    let total_h = if stated_h > 0 { stated_h } else { rows_h };
     let content_bottom = content_top + total_h;
     let background_bottom = content_bottom
         .saturating_add(element.style.padding.bottom)
@@ -7955,6 +7961,26 @@ mod tests {
             "the wrapper's children should be separate grid items"
         );
         assert_eq!(first.y, second.y, "and share a row instead of stacking");
+    }
+
+    /// A grid container honours a stated height, the way a flex one already did.
+    ///
+    /// MDN's nav bar asks for `height: var(--navigation-height)`; sizing the
+    /// grid purely by its rows left a tall empty band under the tabs.
+    #[test]
+    fn a_grid_container_honours_a_stated_height() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="display:grid;height:60px;background:#bb0051"><div style="height:10px"></div></div><div style="height:5px;background:#bb0052"></div></body></html>"#,
+            400,
+        );
+
+        let grid = probe_rect(&l, 0xBB0051).expect("grid background");
+        assert_eq!(
+            grid.height, 60,
+            "the stated height should win over the row's 10px"
+        );
+        let after = probe_rect(&l, 0xBB0052).expect("the box after the grid");
+        assert_eq!(after.y, 60, "the next box starts below the stated height");
     }
 
     #[test]
