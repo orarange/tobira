@@ -5327,25 +5327,41 @@ fn parse_border_side_shorthand(
     side: &str,
 ) {
     let v = value.trim().to_ascii_lowercase();
+    let mut set_width = |style: &mut ComputedStyle, px: u32| match side {
+        "top" => style.border.top = px,
+        "right" => style.border.right = px,
+        "bottom" => style.border.bottom = px,
+        "left" => style.border.left = px,
+        _ => {}
+    };
     for token in v.split_whitespace() {
         if token == "none" {
-            match side {
-                "top" => style.border.top = 0,
-                "right" => style.border.right = 0,
-                "bottom" => style.border.bottom = 0,
-                "left" => style.border.left = 0,
-                _ => {}
-            }
+            set_width(style, 0);
+            continue;
+        }
+        // A style keyword means this side is drawn, the same as in the all-sides
+        // shorthand.
+        if matches!(
+            token,
+            "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset"
+        ) {
+            style.border_style_none = false;
             continue;
         }
         if let Some(px) = parse_length(token, parent_font_size) {
-            match side {
-                "top" => style.border.top = px,
-                "right" => style.border.right = px,
-                "bottom" => style.border.bottom = px,
-                "left" => style.border.left = px,
-                _ => {}
-            }
+            set_width(style, px);
+            continue;
+        }
+        // The colour was thrown away entirely: only the width was read, so
+        // `border-top: 1px solid #c3c7cb` drew a *black* line. MDN's nav tabs are
+        // separated by exactly that rule, so the bar came out ruled in black
+        // instead of light grey.
+        //
+        // This engine keeps one border colour for all four sides, so a per-side
+        // declaration sets that shared colour -- which is what a page means when
+        // it only ever colours one side.
+        if let Some(color) = parse_color(token) {
+            style.border_color = color;
         }
     }
 }
@@ -7906,6 +7922,20 @@ mod tests {
         let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         let n = find_first_element(&styled, "div").unwrap();
         assert_eq!(n.style.color, 0x00FF00);
+    }
+
+    /// A one-sided border shorthand carries a colour and a style, not just a
+    /// width. Only the width was read, so every such border was drawn black.
+    #[test]
+    fn a_one_sided_border_shorthand_keeps_its_colour() {
+        let doc = parse_document(r#"<div class="t">x</div>"#);
+        let sheet = parse_stylesheet(".t { border-top: 1px solid #c3c7cb }");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let t = find_first_element(&styled, "div").unwrap();
+        assert_eq!(t.style.border.top, 1);
+        assert_eq!(t.style.border_color, 0xC3C7CB);
+        assert!(!t.style.border_style_none, "`solid` means it is drawn");
+        assert_eq!(t.style.border.left, 0, "only the named side gets a width");
     }
 
     #[test]
