@@ -5861,6 +5861,22 @@ fn layout_grid_container(
         .saturating_add(if !element.style.border_style_none { element.style.border.top } else { 0 })
         .saturating_add(element.style.padding.top);
 
+    // A stated height taller than the rows themselves is shared out over them
+    // (`align-content: stretch`), which is what gives `align-items` room to work
+    // with. MDN's nav bar is one 33px row inside a 4.125rem box; without this the
+    // row stayed 33px and centring had nothing to centre in.
+    let stated_height = definite_height(&element.style);
+    if stated_height > 0 && !row_heights.is_empty() {
+        let rows_total: u32 =
+            row_heights.iter().sum::<u32>() + gap * max_row.saturating_sub(1) as u32;
+        if stated_height > rows_total {
+            let share = (stated_height - rows_total) / row_heights.len() as u32;
+            for height in row_heights.iter_mut() {
+                *height = height.saturating_add(share);
+            }
+        }
+    }
+
     // ── Render items ──────────────────────────────────────────────────────
     for item in &measured {
         let cell_x: u32 = {
@@ -5874,7 +5890,32 @@ fn layout_grid_container(
             content_top + y_offset
         };
 
-        let mut item_y = cell_y;
+        // `align-items` / `align-self` place the item within its row. Grid
+        // ignored both, so every item sat at the top of its row: MDN's nav tabs
+        // hugged the top edge of the bar instead of sitting in the middle of it.
+        let align = match item.element.style.align_self {
+            AlignSelf::Auto => element.style.align_items,
+            AlignSelf::Stretch => AlignItems::Stretch,
+            AlignSelf::FlexStart => AlignItems::FlexStart,
+            AlignSelf::FlexEnd => AlignItems::FlexEnd,
+            AlignSelf::Center => AlignItems::Center,
+            AlignSelf::Baseline => AlignItems::Baseline,
+        };
+        let row_height: u32 = {
+            let end = (item.row + item.row_span).min(row_heights.len());
+            let rows: u32 = row_heights[item.row.min(row_heights.len())..end].iter().sum();
+            rows + gap * end.saturating_sub(item.row).saturating_sub(1) as u32
+        };
+        let free = row_height.saturating_sub(item.measured_height);
+        let mut item_y = cell_y
+            + match align {
+                AlignItems::Center => free / 2,
+                AlignItems::FlexEnd => free,
+                // `stretch` and `baseline` both start at the top here; a real
+                // stretch would also resize the item, which block layout already
+                // does for an auto height.
+                AlignItems::Stretch | AlignItems::FlexStart | AlignItems::Baseline => 0,
+            };
         let item_form = form_context_for_element(item.element, context, current_form.clone());
         layout_block_element(
             item.element,
@@ -5895,8 +5936,7 @@ fn layout_grid_container(
     // added up to instead, which left a tall empty band under the nav bar.
     let rows_h: u32 = row_heights.iter().sum::<u32>()
         + gap * max_row.saturating_sub(1) as u32;
-    let stated_h = definite_height(&element.style);
-    let total_h = if stated_h > 0 { stated_h } else { rows_h };
+    let total_h = if stated_height > 0 { stated_height } else { rows_h };
     let content_bottom = content_top + total_h;
     let background_bottom = content_bottom
         .saturating_add(element.style.padding.bottom)
@@ -8106,6 +8146,38 @@ mod tests {
             probe_rect(&l, 0xBB0073).unwrap().y > 0,
             "the preformatted blank line should still occupy space"
         );
+    }
+
+    /// A grid centres its items in the row when asked to.
+    ///
+    /// `align-items` was read by the flex container and ignored by the grid, so
+    /// every grid item hugged the top of its row. MDN's nav bar is a 33px row of
+    /// tabs inside a 4.125rem bar, and they sat against its top edge.
+    #[test]
+    fn a_grid_centres_items_in_a_taller_row() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="display:grid;height:100px;align-items:center"><div style="height:20px;background:#bb0081"></div></div></body></html>"#,
+            400,
+        );
+        let item = probe_rect(&l, 0xBB0081).expect("grid item");
+        assert_eq!(item.y, 40, "a 20px item in a 100px row centres at y=40");
+    }
+
+    /// `align-items: end` puts it at the bottom, and the default leaves it at
+    /// the top.
+    #[test]
+    fn a_grid_honours_the_other_alignments() {
+        let bottom = probe_layout(
+            r#"<html><body style="margin:0"><div style="display:grid;height:100px;align-items:flex-end"><div style="height:20px;background:#bb0082"></div></div></body></html>"#,
+            400,
+        );
+        assert_eq!(probe_rect(&bottom, 0xBB0082).unwrap().y, 80);
+
+        let top = probe_layout(
+            r#"<html><body style="margin:0"><div style="display:grid;height:100px"><div style="height:20px;background:#bb0083"></div></div></body></html>"#,
+            400,
+        );
+        assert_eq!(probe_rect(&top, 0xBB0083).unwrap().y, 0);
     }
 
     #[test]
