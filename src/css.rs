@@ -62,6 +62,24 @@ impl Stylesheet {
         self.rule_index.rebuild(&self.rules);
     }
 
+    /// Makes every rule in this sheet conditional on `condition` as well as on
+    /// whatever it already asked for.
+    ///
+    /// A `<link>` carries its own media query, and ignoring it applies sheets a
+    /// browser would not load at all. firefox.com links its pre-layers base
+    /// stylesheet as `media="all and (-ms-high-contrast: none)"` -- an IE-only
+    /// test that matches nothing now. Applied anyway, its unlayered rules
+    /// outranked the entire modern sheet: the page came out 700px wide with its
+    /// navigation set to `display: none`.
+    pub(crate) fn apply_media(&mut self, condition: MediaCondition) {
+        for rule in &mut self.rules {
+            rule.media = Some(match rule.media.take() {
+                Some(existing) => MediaCondition::All(vec![condition.clone(), existing]),
+                None => condition.clone(),
+            });
+        }
+    }
+
     /// Where a rule sits in the cascade's layer ordering.
     ///
     /// Unlayered rules are the strongest normal declarations an author can
@@ -8638,6 +8656,38 @@ mod tests {
             ),
             0x00ff00
         );
+    }
+
+    fn color_with_linked_sheet(media: &str, viewport: u32) -> u32 {
+        let doc = parse_document(r#"<div class="box"></div>"#);
+        let mut sheet = parse_stylesheet(".box{color:#00ff00}");
+        let mut linked = parse_stylesheet(".box{color:#ff0000}");
+        linked.apply_media(super::parse_media_condition(media));
+        sheet.extend(linked);
+        let styled = build_styled_tree(&doc, &sheet, viewport, &super::InteractiveState::default());
+        find_first_element(&styled, "div").unwrap().style.color
+    }
+
+    /// A sheet linked for a medium that does not apply must not be applied.
+    /// firefox.com links its pre-layers base stylesheet as
+    /// `media="all and (-ms-high-contrast: none)"`, a test only IE 10 and 11
+    /// pass; applied anyway, its unlayered rules outranked the whole modern
+    /// sheet and the page came out 700px wide with its navigation hidden.
+    #[test]
+    fn a_sheet_linked_for_another_medium_does_not_apply() {
+        assert_eq!(
+            color_with_linked_sheet("all and (-ms-high-contrast: none)", 1280),
+            0x00ff00
+        );
+        assert_eq!(color_with_linked_sheet("print", 1280), 0x00ff00);
+    }
+
+    /// A width query on a link still follows the viewport rather than being
+    /// answered once at load.
+    #[test]
+    fn a_sheet_linked_for_a_width_follows_the_viewport() {
+        assert_eq!(color_with_linked_sheet("(max-width: 600px)", 1280), 0x00ff00);
+        assert_eq!(color_with_linked_sheet("(max-width: 600px)", 400), 0xff0000);
     }
 
     /// An unlayered rule beats a layered one however late the layer appears.

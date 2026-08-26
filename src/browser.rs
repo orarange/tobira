@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::css::{
     build_styled_tree, build_styled_tree_incremental, InteractiveState, StyledNode, Stylesheet,
-    parse_stylesheet,
+    parse_media_condition, parse_stylesheet,
 };
 use crate::error::Result;
 use crate::html::{Element, Node, parse_document};
@@ -1364,7 +1364,15 @@ fn collect_stylesheet(document: &Node, base_url: &Url) -> Stylesheet {
         stylesheet.extend(parse_stylesheet(&style_text));
     }
 
-    for href in collect_stylesheet_links(document) {
+    for (href, media) in collect_stylesheet_links(document) {
+        // `media="print"` and the like decide whether the sheet applies at all.
+        // The condition is kept rather than answered here so that a
+        // width-dependent one still follows the viewport.
+        let condition = media
+            .as_deref()
+            .map(str::trim)
+            .filter(|query| !query.is_empty() && !query.eq_ignore_ascii_case("all"))
+            .map(parse_media_condition);
         let Ok(url) = base_url.resolve(&href) else {
             continue;
         };
@@ -1372,7 +1380,11 @@ fn collect_stylesheet(document: &Node, base_url: &Url) -> Stylesheet {
             continue;
         };
         let css_text = decode_text_response(&response.body, response.header("content-type"));
-        stylesheet.extend(parse_stylesheet(&css_text));
+        let mut sheet = parse_stylesheet(&css_text);
+        if let Some(condition) = condition {
+            sheet.apply_media(condition);
+        }
+        stylesheet.extend(sheet);
     }
 
     stylesheet
@@ -1403,13 +1415,13 @@ fn collect_style_blocks_into(node: &Node, output: &mut Vec<String>) {
     }
 }
 
-fn collect_stylesheet_links(document: &Node) -> Vec<String> {
+fn collect_stylesheet_links(document: &Node) -> Vec<(String, Option<String>)> {
     let mut links = Vec::new();
     collect_stylesheet_links_into(document, &mut links);
     links
 }
 
-fn collect_stylesheet_links_into(node: &Node, output: &mut Vec<String>) {
+fn collect_stylesheet_links_into(node: &Node, output: &mut Vec<(String, Option<String>)>) {
     match node {
         Node::Text(_) => {}
         Node::Element(element) => {
@@ -1424,7 +1436,10 @@ fn collect_stylesheet_links_into(node: &Node, output: &mut Vec<String>) {
                     .unwrap_or(false)
             {
                 if let Some(href) = element.attribute("href") {
-                    output.push(href.to_string());
+                    output.push((
+                        href.to_string(),
+                        element.attribute("media").map(str::to_string),
+                    ));
                 }
             }
 
