@@ -2474,7 +2474,12 @@ fn compute_style_with_rules(
         }
         // substitute var() references
         if declaration.value.contains("var(") {
-            declaration.value = substitute_vars(&declaration.value, vars_ref);
+            let Some(substituted) = substitute_vars(&declaration.value, vars_ref) else {
+                // Guaranteed-invalid: drop it rather than apply a value the
+                // author never wrote.
+                continue;
+            };
+            declaration.value = substituted;
         }
         // After substitution, because the light and dark arms are usually
         // `var()` references themselves.
@@ -2616,53 +2621,135 @@ fn resolve_light_dark(value: &str) -> String {
     result
 }
 
-fn substitute_vars(value: &str, vars: &BTreeMap<String, String>) -> String {
-    let mut result = value.to_string();
-    let mut iterations = 0;
-    while result.contains("var(") && iterations < 10 {
-        iterations += 1;
-        let Some(start) = result.find("var(") else {
-            break;
-        };
-        let inner_start = start + 4;
-        let mut depth = 0usize;
-        let mut end = None;
-        for (offset, ch) in result[inner_start..].char_indices() {
-            match ch {
-                '(' => depth += 1,
+/// Substitute `var()` references.
+///
+/// Returns `None` when a reference names a custom property that does not exist
+/// and gives no fallback. The spec calls the result a *guaranteed-invalid value*
+/// and drops the whole declaration; substituting nothing instead quietly turns it
+/// into a different, valid declaration.
+///
+/// That distinction decides which palette MDN renders in. Its colours go through
+///
+///   html[data-theme=light] { --csstools-color-scheme--light: initial }
+///   --toggle: var(--csstools-color-scheme--light) var(--color-gray-05);
+///   --color-background-page: var(--toggle, var(--color-white))
+///
+/// With no `data-theme` attribute set, the scheme variable is undefined, so
+/// `--toggle` is guaranteed-invalid and the page falls back to white. Treating
+/// the missing reference as empty made `--toggle` resolve to the dark grey
+/// instead, and the whole site came out in its dark palette.
+/// Does this resolved custom-property value contain a CSS-wide keyword?
+///
+/// `initial` (and its siblings) cannot appear part-way through a value, so a
+/// custom property that resolves to one is guaranteed-invalid and any `var()`
+/// naming it takes its fallback instead.
+///
+/// This is not a corner case: it is the whole mechanism behind the light/dark
+/// toggle csstools generates, which is how MDN ships every colour.
+///
+///   html[data-theme=light] { --scheme-light: initial }
+///   --toggle: var(--scheme-light) var(--dark);   /* -> "initial <dark>" */
+///   --page:   var(--toggle, var(--light))        /* -> takes --light */
+///
+/// Without this the toggle resolved to the literal text `initial #18191b`,
+/// which parses as no colour at all -- so MDN's sticky header had no background
+/// and the article scrolled visibly through it.
+fn holds_css_wide_keyword(value: &str) -> bool {
+    value
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
+        .any(|token| {
+            matches!(
+                token.trim().to_ascii_lowercase().as_str(),
+                "initial" | "inherit" | "unset" | "revert" | "revert-layer"
+            )
+        })
+}
+
+fn substitute_vars(value: &str, vars: &BTreeMap<String, String>) -> Option<String> {
+    substitute_vars_at(value, vars, 0)
+}
+
+/// Resolve every `var()` in `value`, one reference at a time.
+///
+/// Each reference is resolved on its own so that an unresolvable one can fall
+/// back instead of poisoning the whole value. A custom property whose *own*
+/// value is guaranteed-invalid counts as absent, which is the rule the csstools
+/// light/dark toggle is built on:
+///
+///   --toggle: var(--scheme) var(--dark);        /* --scheme is undefined */
+///   --page:   var(--toggle, var(--light))       /* so this takes --light */
+///
+/// Resolving `--toggle` by pasting its raw text in and only then noticing the
+/// missing `--scheme` would drop the `--page` declaration entirely; MDN would
+/// lose its background colours instead of getting the light ones.
+fn substitute_vars_at(
+    value: &str,
+    vars: &BTreeMap<String, String>,
+    depth: usize,
+) -> Option<String> {
+    // Custom properties can reference each other; stop rather than spin.
+    if depth > 16 {
+        return None;
+    }
+
+    let mut result = String::with_capacity(value.len());
+    let mut rest = value;
+
+    while let Some(start) = rest.find("var(") {
+        result.push_str(&rest[..start]);
+        let inner_start = start + "var(".len();
+
+        let mut nesting = 0usize;
+        let mut close = None;
+        for (offset, character) in rest[inner_start..].char_indices() {
+            match character {
+                '(' => nesting += 1,
                 ')' => {
-                    if depth == 0 {
-                        end = Some(offset);
+                    if nesting == 0 {
+                        close = Some(inner_start + offset);
                         break;
                     }
-                    depth -= 1;
+                    nesting -= 1;
                 }
                 _ => {}
             }
         }
-        let Some(end) = end else {
-            break;
+        let Some(close) = close else {
+            // Unbalanced: keep what is left verbatim rather than guess.
+            result.push_str(&rest[start..]);
+            return Some(result);
         };
-        let inner = &result[inner_start..inner_start + end];
-        let (var_name, fallback) = if let Some(comma) = inner.find(',') {
-            (&inner[..comma], Some(inner[comma + 1..].trim()))
-        } else {
-            (inner.trim(), None)
+
+        let inner = &rest[inner_start..close];
+        let (name, fallback) = match split_at_top_level(inner, ',').split_first() {
+            Some((name, tail)) if !tail.is_empty() => {
+                // The fallback is everything after the first comma, with the
+                // separating space dropped.
+                (name.trim().to_string(), Some(tail.join(",").trim().to_string()))
+            }
+            Some((name, _)) => (name.trim().to_string(), None),
+            None => (String::new(), None),
         };
-        let replacement = vars
-            .get(var_name.trim())
-            .map(|s| s.as_str())
-            .or(fallback)
-            .unwrap_or("")
-            .to_string();
-        result = format!(
-            "{}{}{}",
-            &result[..start],
-            replacement,
-            &result[inner_start + end + 1..]
-        );
+
+        let resolved = vars
+            .get(&name)
+            .and_then(|raw| substitute_vars_at(raw, vars, depth + 1))
+            .filter(|text| !holds_css_wide_keyword(text));
+        let replacement = match resolved {
+            Some(replacement) => replacement,
+            None => match fallback {
+                Some(fallback) => substitute_vars_at(&fallback, vars, depth + 1)?,
+                // Undefined, and nothing to fall back on: the value this sits in
+                // is guaranteed-invalid and its declaration must be dropped.
+                None => return None,
+            },
+        };
+        result.push_str(&replacement);
+        rest = &rest[close + 1..];
     }
-    result
+
+    result.push_str(rest);
+    Some(result)
 }
 
 fn split_important(value: &str) -> (String, bool) {
@@ -6437,12 +6524,23 @@ mod tests {
     fn substitutes_var_with_nested_fallback_parentheses() {
         let mut vars = BTreeMap::new();
         vars.insert("--x".to_string(), "teal".to_string());
-        assert_eq!(super::substitute_vars("var(--x, rgb(1,2,3))", &vars), "teal");
+        assert_eq!(
+            super::substitute_vars("var(--x, rgb(1,2,3))", &vars).as_deref(),
+            Some("teal")
+        );
 
         let empty = BTreeMap::new();
-        assert_eq!(super::substitute_vars("var(--x, rgb(1,2,3))", &empty), "rgb(1,2,3)");
-        assert_eq!(super::substitute_vars("var(--y)", &empty), "");
-        assert_eq!(super::substitute_vars("var(--y, blue)", &empty), "blue");
+        assert_eq!(
+            super::substitute_vars("var(--x, rgb(1,2,3))", &empty).as_deref(),
+            Some("rgb(1,2,3)")
+        );
+        // Undefined with no fallback is a guaranteed-invalid value, not an empty
+        // string: the declaration that used it has to be dropped.
+        assert_eq!(super::substitute_vars("var(--y)", &empty), None);
+        assert_eq!(
+            super::substitute_vars("var(--y, blue)", &empty).as_deref(),
+            Some("blue")
+        );
     }
 
     #[test]
@@ -7775,6 +7873,39 @@ mod tests {
         let p = find_first_element(&styled, "p").unwrap();
         assert_eq!(p.style.color, 0x102030);
         assert_eq!(p.style.background_color, Some(0xFFFFFF));
+    }
+
+    /// The csstools light/dark toggle, which is how MDN ships every colour.
+    ///
+    /// The scheme variable is only defined under `html[data-theme=...]`. With no
+    /// such attribute it stays undefined, so the toggle is guaranteed-invalid and
+    /// the fallback -- the light colour -- wins. Substituting the missing
+    /// reference as empty instead made the toggle resolve, and the whole page
+    /// came out in the dark palette.
+    #[test]
+    fn an_unresolvable_var_falls_back_instead_of_resolving() {
+        let doc = parse_document(r#"<div class="n">x</div>"#);
+        let sheet = parse_stylesheet(
+            ":root { --light: #ffffff; --dark: #18191b;                      --toggle: var(--scheme-is-dark) var(--dark);                      --page: var(--toggle, var(--light)) }              .n { background-color: var(--page) }",
+        );
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let n = find_first_element(&styled, "div").unwrap();
+        assert_eq!(
+            n.style.background_color,
+            Some(0xFFFFFF),
+            "the toggle is invalid, so the light fallback applies"
+        );
+    }
+
+    /// A declaration whose `var()` cannot resolve is dropped, leaving whatever
+    /// the cascade had already put there.
+    #[test]
+    fn an_unresolvable_var_drops_only_its_own_declaration() {
+        let doc = parse_document(r#"<div class="n">x</div>"#);
+        let sheet = parse_stylesheet(".n { color: #00ff00 } .n { color: var(--nope) }");
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let n = find_first_element(&styled, "div").unwrap();
+        assert_eq!(n.style.color, 0x00FF00);
     }
 
     #[test]
