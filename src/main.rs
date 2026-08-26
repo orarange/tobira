@@ -149,7 +149,7 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                         .map(|c| c.chars().take(70).collect())
                         .unwrap_or_default();
                     println!(
-                        "{}<{} class=\"{}\" display={:?} position={:?} bg={} color={:#08x} opacity={} style=\"{}\">{}",
+                        "{}<{} class=\"{}\" display={:?} position={:?} bg={} color={:#08x} fs={} opacity={} style=\"{}\">{}",
                         "  ".repeat(depth),
                         e.tag_name,
                         cls,
@@ -164,6 +164,7 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                             None => "none".to_string(),
                         },
                         e.style.color,
+                        e.style.font_size_px,
                         e.style.opacity,
                         inline,
                         if matches!(e.style.display, Display::None) { "  [none]" } else if e.style.opacity == 0 { "  [OPACITY:0]" } else { "" },
