@@ -1355,11 +1355,20 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
 
         let block_text_raw = &source[block_start..];
         let Some(close_offset) = find_matching_close_brace(block_text_raw) else {
+            // Every rule after this point is lost, so a sheet that trips here
+            // goes quiet rather than wrong-looking. Say so when tracing.
+            if css_debug_enabled() {
+                eprintln!(
+                    "[css] unbalanced braces at byte {block_start}; dropping the rest of a {}-byte sheet (after {:?})",
+                    source.len(),
+                    &source[selector_start..selector_end.min(selector_start + 60)]
+                );
+            }
             break;
         };
         let block_end = block_start + close_offset;
 
-        let selector_text = source[selector_start..selector_end].trim();
+        let selector_text = statement_prelude_tail(source[selector_start..selector_end].trim());
         let block_text = source[block_start..block_end].trim();
         cursor = block_end + 1;
 
@@ -1397,8 +1406,12 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                     rules.push(rule);
                 }
             } else if at_lower.starts_with("@supports") || at_lower.starts_with("@layer") {
-                // @supports: treat condition as always-true (optimistic: assume all features supported)
                 // @layer: ignore layer name, parse rules as regular rules (no cascade layering)
+                if let Some(condition) = at_lower.strip_prefix("@supports")
+                    && !supports_condition(condition)
+                {
+                    continue;
+                }
                 let inner_stylesheet = parse_stylesheet(block_text);
                 if !inner_stylesheet.root_vars.is_empty() {
                     let inner_map = (*inner_stylesheet.root_vars).clone();
@@ -1465,13 +1478,235 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
     }
 }
 
+/// Rewrites a logical property to the physical one it stands for.
+///
+/// Only `writing-mode: horizontal-tb` is rendered here, so the inline axis is
+/// horizontal and the block axis vertical, which makes every logical property
+/// below a plain alias. Renaming at parse time rather than where declarations
+/// are applied matters twice over: they take part in the cascade, and layout
+/// looks some of them up by name. firefox.com sets `body { width: 700px }` near
+/// the top of its sheet and overrides it further down with
+/// `body { inline-size: 100% }` -- with the override unrecognised the whole
+/// site rendered in a 700px column, headings wrapping every few characters.
+///
+/// The two-value forms (`margin-inline`, `padding-block`, ...) are not aliases
+/// of any single property, so they are expanded in `apply_declaration` instead.
+fn to_physical_property(property: String) -> String {
+    let physical = match property.as_str() {
+        "inline-size" => "width",
+        "block-size" => "height",
+        "min-inline-size" => "min-width",
+        "max-inline-size" => "max-width",
+        "min-block-size" => "min-height",
+        "max-block-size" => "max-height",
+        "margin-inline-start" => "margin-left",
+        "margin-inline-end" => "margin-right",
+        "margin-block-start" => "margin-top",
+        "margin-block-end" => "margin-bottom",
+        "padding-inline-start" => "padding-left",
+        "padding-inline-end" => "padding-right",
+        "padding-block-start" => "padding-top",
+        "padding-block-end" => "padding-bottom",
+        "inset-inline-start" => "left",
+        "inset-inline-end" => "right",
+        "inset-block-start" => "top",
+        "inset-block-end" => "bottom",
+        "border-inline-start" => "border-left",
+        "border-inline-start-width" => "border-left-width",
+        "border-inline-start-color" => "border-left-color",
+        "border-inline-start-style" => "border-left-style",
+        "border-inline-end" => "border-right",
+        "border-inline-end-width" => "border-right-width",
+        "border-inline-end-color" => "border-right-color",
+        "border-inline-end-style" => "border-right-style",
+        "border-block-start" => "border-top",
+        "border-block-start-width" => "border-top-width",
+        "border-block-start-color" => "border-top-color",
+        "border-block-start-style" => "border-top-style",
+        "border-block-end" => "border-bottom",
+        "border-block-end-width" => "border-bottom-width",
+        "border-block-end-color" => "border-bottom-color",
+        "border-block-end-style" => "border-bottom-style",
+        _ => return property,
+    };
+    physical.to_string()
+}
+
+/// Whether an `@supports` condition holds.
+///
+/// The answer defaults to yes, which leaves every block this renderer already
+/// applied unconditionally exactly where it was. What it adds is a meaning for
+/// `not`: pages wrap a whole legacy stylesheet in
+/// `@supports not (<some modern feature>)`, and unwrapping that laid the old
+/// rules back on top of the new ones. firefox.com re-includes its entire base
+/// sheet inside `@supports not (all: revert-layer)` -- that put
+/// `body { width: 700px }` back after the layered rules had already replaced it
+/// with `inline-size: 100%`, and the whole site rendered in a 700px column with
+/// every heading wrapping after a few characters.
+///
+/// Saying yes to `revert-layer` is a claim about cascade layers, which are
+/// unwrapped here and left in source order rather than ordered by declaration.
+/// That is an approximation, but a much closer one than a second copy of the
+/// base sheet winning over everything built on top of it.
+fn supports_condition(condition: &str) -> bool {
+    let condition = condition.trim();
+    if condition.is_empty() {
+        return true;
+    }
+
+    if let Some(inner) = strip_wrapping_parens(condition) {
+        return supports_condition(inner);
+    }
+
+    if let Some(rest) = condition.strip_prefix("not ") {
+        return !supports_condition(rest);
+    }
+
+    // `and` binds no tighter than `or` in this grammar -- a condition may not
+    // mix them without parentheses -- so either split works first.
+    if let Some(parts) = split_supports_condition(condition, "and") {
+        return parts.iter().all(|part| supports_condition(part));
+    }
+    if let Some(parts) = split_supports_condition(condition, "or") {
+        return parts.iter().any(|part| supports_condition(part));
+    }
+
+    if let Some(rest) = condition.strip_prefix("selector(") {
+        // `:has()` is the one selector worth answering no to: a page that asks
+        // gets a layout built on a relationship this engine cannot match.
+        return !rest.contains(":has(");
+    }
+    if condition.contains('(') && !condition.starts_with('(') {
+        // `font-tech(...)`, `font-format(...)` and friends. Nothing here reads
+        // them, so the honest answer is no.
+        return false;
+    }
+
+    let Some((property, value)) = condition.split_once(':') else {
+        return true;
+    };
+    supports_declaration(property.trim(), value.trim())
+}
+
+/// Features named in an `@supports` test that this renderer plainly lacks.
+///
+/// Everything not listed answers yes, so this only ever removes a block that
+/// would have been applied before.
+fn supports_declaration(property: &str, _value: &str) -> bool {
+    !matches!(
+        property,
+        // Container queries: a block gated on these lays the page out against a
+        // container size nothing here measures.
+        "container-type" | "container-name" | "container"
+        // Anchor positioning.
+        | "anchor-name" | "position-anchor" | "position-area"
+        // Effects with no painter behind them.
+        | "backdrop-filter" | "-webkit-backdrop-filter"
+    )
+}
+
+/// The inside of `(...)` when the whole string is one parenthesised group.
+fn strip_wrapping_parens(condition: &str) -> Option<&str> {
+    let inner = condition.strip_prefix('(')?.strip_suffix(')')?;
+    let mut depth = 0_i32;
+    for byte in inner.bytes() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                // The opening paren closed before the end, so the string is a
+                // sequence like `(a) and (b)` rather than one group.
+                if depth < 0 {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    // A leaf `(display: grid)` has to keep its parens off, but a bare
+    // `display: grid` must not be split further either -- both are handled by
+    // the caller re-entering with the inside.
+    Some(inner)
+}
+
+/// Splits `a <keyword> b <keyword> c` at paren depth zero.
+fn split_supports_condition<'a>(condition: &'a str, keyword: &str) -> Option<Vec<&'a str>> {
+    let mut parts = Vec::new();
+    let mut depth = 0_i32;
+    let mut start = 0;
+    let bytes = condition.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ if depth == 0 => {
+                let rest = &condition[i..];
+                let after = i + keyword.len();
+                if rest.starts_with(keyword)
+                    && (i == 0 || bytes[i - 1].is_ascii_whitespace())
+                    && bytes.get(after).is_some_and(u8::is_ascii_whitespace)
+                {
+                    parts.push(condition[start..i].trim());
+                    start = after;
+                    i = after;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.push(condition[start..].trim());
+    Some(parts)
+}
+
+/// Drops any statement at-rules from the front of a block's prelude.
+///
+/// Blocks are found by scanning for the next `{`, so a statement at-rule --
+/// `@charset`, `@import`, or the `@layer a, b, c;` that names a layer order --
+/// gets swallowed into the prelude of whatever block follows it. firefox.com
+/// writes its layer order immediately before the legacy fallback:
+/// `@layer base, theme, ...;@supports not (all: revert-layer){...}`. Read whole,
+/// that prelude starts with `@layer`, so the `@supports` test never ran and an
+/// entire second copy of the base stylesheet was applied over the real one.
+fn statement_prelude_tail(prelude: &str) -> &str {
+    let mut depth = 0_i32;
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
+    let mut last_semicolon = None;
+    for (i, ch) in prelude.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            q @ ('"' | '\'') if in_string.is_none() => in_string = Some(q),
+            q if in_string == Some(q) => in_string = None,
+            _ if in_string.is_some() => {}
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ';' if depth == 0 => last_semicolon = Some(i),
+            _ => {}
+        }
+    }
+    match last_semicolon {
+        Some(i) => prelude[i + 1..].trim(),
+        None => prelude,
+    }
+}
+
 pub fn parse_inline_declarations(input: &str) -> Vec<Declaration> {
     let stripped = strip_comments(input);
     split_at_top_level(&stripped, ';')
         .into_iter()
         .filter_map(|entry| {
             let (property, value) = entry.split_once(':')?;
-            let property = property.trim().to_ascii_lowercase();
+            let property = to_physical_property(property.trim().to_ascii_lowercase());
             let (value, important) = split_important(value);
             if property.is_empty() || value.is_empty() {
                 return None;
@@ -3053,6 +3288,35 @@ fn parse_transform_origin_pct(s: &str) -> u32 {
 fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, parent_font_size: u32) {
     let value = &declaration.value;
     match declaration.property.as_str() {
+        // The two-value logical shorthands. `margin-inline: a b` sets the left
+        // and right margins; given one value, both take it.
+        "margin-inline" | "margin-block" | "padding-inline" | "padding-block"
+        | "inset-inline" | "inset-block" => {
+            let mut parts = value.split_whitespace();
+            let Some(start_value) = parts.next() else {
+                return;
+            };
+            let end_value = parts.next().unwrap_or(start_value);
+            let (start, end) = match declaration.property.as_str() {
+                "margin-inline" => ("margin-left", "margin-right"),
+                "margin-block" => ("margin-top", "margin-bottom"),
+                "padding-inline" => ("padding-left", "padding-right"),
+                "padding-block" => ("padding-top", "padding-bottom"),
+                "inset-inline" => ("left", "right"),
+                _ => ("top", "bottom"),
+            };
+            for (property, value) in [(start, start_value), (end, end_value)] {
+                apply_declaration(
+                    style,
+                    &Declaration {
+                        property: property.to_string(),
+                        value: value.to_string(),
+                        important: declaration.important,
+                    },
+                    parent_font_size,
+                );
+            }
+        }
         "color" => {
             if let Some(color) = parse_color(value) {
                 style.color = color;
@@ -8201,6 +8465,91 @@ mod tests {
         let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         let div = find_first_element(&styled, "div").unwrap();
         assert_eq!(div.style.color, 0x00ff00);
+    }
+
+    fn color_of(css: &str) -> u32 {
+        let doc = parse_document(r#"<div class="box"></div>"#);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        find_first_element(&styled, "div").unwrap().style.color
+    }
+
+    /// A condition naming something this renderer has holds, so the block
+    /// applies exactly as it did when every `@supports` was assumed true.
+    #[test]
+    fn a_supported_condition_still_applies() {
+        assert_eq!(
+            color_of("@supports (display: grid) { .box { color: #00ff00 } }"),
+            0x00ff00
+        );
+    }
+
+    /// `not` is the half that had to start meaning something. Pages wrap a whole
+    /// legacy stylesheet in `@supports not (<modern feature>)`; applied anyway,
+    /// those rules landed on top of the ones they were the fallback for.
+    #[test]
+    fn a_negated_condition_drops_its_block() {
+        assert_eq!(
+            color_of(".box{color:#00ff00}@supports not (all: revert-layer) { .box { color: #ff0000 } }"),
+            0x00ff00
+        );
+    }
+
+    /// Blocks are found by scanning for the next `{`, so the statement form of
+    /// `@layer` runs straight into the prelude of whatever follows it.
+    /// firefox.com writes exactly this, and read whole the prelude starts with
+    /// `@layer` -- the `@supports` test never ran, and a second copy of the base
+    /// stylesheet was applied over the real one.
+    #[test]
+    fn a_layer_statement_does_not_swallow_the_next_at_rule() {
+        assert_eq!(
+            color_of(
+                ".box{color:#00ff00}@layer base, theme, defaults;                 @supports not (all: revert-layer) { .box { color: #ff0000 } }"
+            ),
+            0x00ff00
+        );
+    }
+
+    /// `and` and `or` chains are read, not skipped over.
+    #[test]
+    fn compound_supports_conditions_are_evaluated() {
+        assert_eq!(
+            color_of("@supports (display: grid) and (display: flex) { .box { color: #00ff00 } }"),
+            0x00ff00
+        );
+        assert_eq!(
+            color_of(
+                ".box{color:#00ff00}@supports (display: grid) and (container-type: inline-size) { .box { color: #ff0000 } }"
+            ),
+            0x00ff00
+        );
+        assert_eq!(
+            color_of("@supports (container-type: inline-size) or (display: grid) { .box { color: #00ff00 } }"),
+            0x00ff00
+        );
+    }
+
+    /// Logical properties are aliases of physical ones and take part in the
+    /// cascade as such: firefox.com sets `body { width: 700px }` and overrides it
+    /// further down with `body { inline-size: 100% }`.
+    #[test]
+    fn a_logical_property_overrides_the_physical_one_it_aliases() {
+        let width_of = |css: &str| {
+            let doc = parse_document(r#"<div class="box"></div>"#);
+            let sheet = parse_stylesheet(css);
+            let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+            find_first_element(&styled, "div").unwrap().style.width
+        };
+        assert_eq!(
+            width_of(".box{width:700px}.box{inline-size:100%}"),
+            width_of(".box{width:100%}"),
+            "the later logical declaration has to win"
+        );
+        assert_ne!(
+            width_of(".box{width:700px}.box{inline-size:100%}"),
+            width_of(".box{width:700px}"),
+            "control: the two widths are distinguishable"
+        );
     }
 
     #[test]
