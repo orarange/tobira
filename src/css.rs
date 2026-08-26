@@ -2482,14 +2482,45 @@ fn compute_style_with_rules(
         if declaration.property.starts_with("--") {
             continue;
         }
+        // What a declaration finally became is the one thing worth seeing when a
+        // page's colours or sizes come out wrong, and it is invisible from both
+        // the stylesheet and the screen. Set TOBIRA_DEBUG_DECL to a property name
+        // to follow it: the raw value, what var() substitution made of it, or
+        // that it was dropped.
+        let traced = debug_traced_property().is_some_and(|want| declaration.property == want);
+        let raw_value = if traced {
+            Some(declaration.value.clone())
+        } else {
+            None
+        };
+
         // substitute var() references
         if declaration.value.contains("var(") {
             let Some(substituted) = substitute_vars(&declaration.value, vars_ref) else {
+                if traced {
+                    eprintln!(
+                        "decl <{}> class={:?} {}: {:?} -> DROPPED (unresolvable var)",
+                        element.tag_name,
+                        element.attribute("class").map(|c| c.split_whitespace().collect::<Vec<_>>().join(".")),
+                        declaration.property,
+                        raw_value.unwrap_or_default(),
+                    );
+                }
                 // Guaranteed-invalid: drop it rather than apply a value the
                 // author never wrote.
                 continue;
             };
             declaration.value = substituted;
+        }
+        if traced {
+            eprintln!(
+                "decl <{}> class={:?} {}: {:?} -> {:?}",
+                element.tag_name,
+                element.attribute("class").map(|c| c.split_whitespace().collect::<Vec<_>>().join(".")),
+                declaration.property,
+                raw_value.unwrap_or_default(),
+                declaration.value,
+            );
         }
         // After substitution, because the light and dark arms are usually
         // `var()` references themselves.
@@ -2673,6 +2704,14 @@ fn holds_css_wide_keyword(value: &str) -> bool {
                 "initial" | "inherit" | "unset" | "revert" | "revert-layer"
             )
         })
+}
+
+/// The property name `TOBIRA_DEBUG_DECL` asks to be traced, if any.
+fn debug_traced_property() -> Option<&'static str> {
+    static WANTED: OnceLock<Option<String>> = OnceLock::new();
+    WANTED
+        .get_or_init(|| std::env::var("TOBIRA_DEBUG_DECL").ok())
+        .as_deref()
 }
 
 fn substitute_vars(value: &str, vars: &BTreeMap<String, String>) -> Option<String> {

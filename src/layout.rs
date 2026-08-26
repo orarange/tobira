@@ -5887,6 +5887,35 @@ fn layout_grid_container(
         None
     };
 
+
+    // The gradient goes down with the background, before any child command, so
+    // it sits *under* the content. Emitting it after the children -- which is
+    // where the border is drawn -- buries them: the cards on firefox.com turned
+    // into blank white boxes. Its height is only known once the box is measured,
+    // so it is patched up alongside the background rect.
+    let gradient_cmd_index = if let Some(ref gradient) = element.style.background_gradient {
+        let stops: Vec<GradientStop> = gradient
+            .stops
+            .iter()
+            .map(|(color, position)| GradientStop {
+                color: *color,
+                position: *position,
+            })
+            .collect();
+        context.commands.push(DrawCommand::Gradient(GradientCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1,
+            border_radius: element.style.border_radius,
+            angle_deg_x1000: gradient.angle_deg_x1000,
+            stops,
+        }));
+        Some(context.commands.len() - 1)
+    } else {
+        None
+    };
+
     let content_top = background_top
         .saturating_add(if !element.style.border_style_none { element.style.border.top } else { 0 })
         .saturating_add(element.style.padding.top);
@@ -5978,6 +6007,12 @@ fn layout_grid_container(
             r.height = (background_bottom - background_top).max(1);
         }
     }
+    if let Some(index) = gradient_cmd_index
+        && let Some(DrawCommand::Gradient(gradient)) = context.commands.get_mut(index)
+    {
+        gradient.height = (background_bottom - background_top).max(1);
+    }
+
 
     // Draw border
     if !element.style.border_style_none && !element.style.border_color_transparent {
@@ -5987,7 +6022,7 @@ fn layout_grid_container(
             element.style.effective_opacity,
         );
         let background_height = background_bottom.saturating_sub(background_top).max(1);
-        let border_top_h = if border_h > 0 { element.style.border.top } else { 0 };
+            let border_top_h = if border_h > 0 { element.style.border.top } else { 0 };
         let border_bottom_h = if border_h > 0 { element.style.border.bottom } else { 0 };
         let border_left_w = if border_v > 0 { element.style.border.left } else { 0 };
         let border_right_w = if border_v > 0 { element.style.border.right } else { 0 };
@@ -6404,6 +6439,34 @@ fn layout_flex_container(
         None
     };
 
+    // The gradient goes down with the background, before any child command, so
+    // it sits *under* the content. Emitting it after the children -- where the
+    // border is drawn -- buries them: the cards on firefox.com turned into blank
+    // white boxes. Its height is only known once the box is measured, so it is
+    // patched up alongside the background rect.
+    let gradient_cmd_index = if let Some(ref gradient) = element.style.background_gradient {
+        let stops: Vec<GradientStop> = gradient
+            .stops
+            .iter()
+            .map(|(color, position)| GradientStop {
+                color: *color,
+                position: *position,
+            })
+            .collect();
+        context.commands.push(DrawCommand::Gradient(GradientCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1,
+            border_radius: element.style.border_radius,
+            angle_deg_x1000: gradient.angle_deg_x1000,
+            stops,
+        }));
+        Some(context.commands.len() - 1)
+    } else {
+        None
+    };
+
     let saved_bg = context.background_color;
     if let Some(bg) = element.style.background_color {
         if element.style.effective_opacity == 255 {
@@ -6700,6 +6763,11 @@ fn layout_flex_container(
         if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(idx) {
             rect.height = background_height;
         }
+    }
+    if let Some(index) = gradient_cmd_index
+        && let Some(DrawCommand::Gradient(gradient)) = context.commands.get_mut(index)
+    {
+        gradient.height = background_height;
     }
 
     context.background_color = saved_bg;
@@ -8235,6 +8303,44 @@ mod tests {
             400,
         );
         assert_eq!(probe_rect(&top, 0xBB0083).unwrap().y, 0);
+    }
+
+    /// Flex and grid containers paint a gradient background, and paint it under
+    /// their content.
+    ///
+    /// Only the block paths emitted gradients, so `background: linear-gradient()`
+    /// on a flex box produced nothing -- firefox.com's cards are `display:flex`,
+    /// and their light fill never appeared, leaving dark text on the page's dark
+    /// background. Emitting it after the children instead buries them.
+    #[test]
+    fn flex_and_grid_paint_a_gradient_under_their_content() {
+        for display in ["flex", "grid"] {
+            let l = probe_layout(
+                &format!(
+                    r#"<html><body style="margin:0"><div style="display:{display};background:linear-gradient(180deg,#ffffff 0%,#eeeeee 100%)"><div style="height:20px;background:#bb0091"></div></div></body></html>"#
+                ),
+                400,
+            );
+
+            let gradient_at = l
+                .commands
+                .iter()
+                .position(|c| matches!(c, DrawCommand::Gradient(_)))
+                .unwrap_or_else(|| panic!("{display} should paint a gradient: {:?}", l.commands));
+            let child_at = l
+                .commands
+                .iter()
+                .position(|c| matches!(c, DrawCommand::Rect(r) if r.color == 0xBB0091))
+                .expect("child rect");
+            assert!(
+                gradient_at < child_at,
+                "{display} must paint the gradient under its content"
+            );
+
+            if let DrawCommand::Gradient(g) = &l.commands[gradient_at] {
+                assert!(g.height > 1, "{display} gradient height should be measured");
+            }
+        }
     }
 
     #[test]
