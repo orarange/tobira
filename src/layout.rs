@@ -3550,7 +3550,12 @@ fn layout_mixed_children(
         *bullet_pending = None;
     };
 
-    for child in &element.children {
+    // See through `display: contents`. This is the block container's own child
+    // walk, separate from `layout_node`, and it was the one path the original
+    // `display: contents` support missed -- MDN's article pages put their whole
+    // body under `<main class="layout__content">`, which is `display: contents`,
+    // so every docs page laid out its header and footer and nothing in between.
+    for child in formatting_context_children(element) {
         if is_hidden(child) {
             continue;
         }
