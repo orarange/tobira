@@ -149,12 +149,21 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                         .map(|c| c.chars().take(70).collect())
                         .unwrap_or_default();
                     println!(
-                        "{}<{} class=\"{}\" display={:?} position={:?} opacity={} style=\"{}\">{}",
+                        "{}<{} class=\"{}\" display={:?} position={:?} bg={} color={:#08x} opacity={} style=\"{}\">{}",
                         "  ".repeat(depth),
                         e.tag_name,
                         cls,
                         e.style.display,
                         e.style.position,
+                        // Separates "the rule never matched" from "it matched and
+                        // we failed to paint it" -- the two look identical on
+                        // screen, and guessing between them from the stylesheet
+                        // has cost more than one wrong turn.
+                        match e.style.background_color {
+                            Some(c) => format!("{c:#08x}"),
+                            None => "none".to_string(),
+                        },
+                        e.style.color,
                         e.style.opacity,
                         inline,
                         if matches!(e.style.display, Display::None) { "  [none]" } else if e.style.opacity == 0 { "  [OPACITY:0]" } else { "" },
