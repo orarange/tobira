@@ -522,7 +522,15 @@ pub fn layout_styled_document(
 
     // Append absolutely/fixed positioned elements sorted by z-index
     let mut positioned = std::mem::take(&mut context.positioned_commands);
-    positioned.sort_by_key(|(z, _)| *z);
+    // Stable, so two boxes with the same path keep the order they were laid out
+    // in -- which is tree order, and the tie-break the spec asks for.
+    positioned.sort_by(|(left, _), (right, _)| left.cmp(right));
+    if std::env::var_os("TOBIRA_DEBUG_PAINT").is_some() {
+        for (path, commands) in &positioned {
+            let first = commands.first().map(|c| format!("{c:?}").chars().take(80).collect::<String>());
+            eprintln!("z{path:?} n={} {}", commands.len(), first.unwrap_or_default());
+        }
+    }
     for (_, cmds) in positioned {
         context.commands.extend(cmds);
     }
@@ -547,7 +555,26 @@ struct LayoutContext {
     next_form_id: usize,
     containing_block_origin: (u32, u32),
     scroll_y_for_fixed: u32,
-    positioned_commands: Vec<(i32, Vec<DrawCommand>)>,
+    /// Boxes that paint above the flow, each tagged with the `z-index` path
+    /// from the root down to it.
+    ///
+    /// A `z-index` is read inside the stacking context that holds it, not
+    /// against the whole page. Sorted on a single number, a descendant is torn
+    /// away from its ancestor the moment either carries one: firefox.com wraps
+    /// its hero in `z-index: 1` and the hero's own text sorted below that
+    /// wrapper's background, which then painted over all of it. Comparing the
+    /// paths keeps a subtree together and still orders siblings by their own
+    /// number.
+    positioned_commands: Vec<(Vec<(i32, u32)>, Vec<DrawCommand>)>,
+    /// Handed out in tree order, so a box always outranks its ancestors and
+    /// its earlier siblings.
+    ///
+    /// The number pairs with the `z-index` in a path entry. Without it two
+    /// sibling stacking contexts that share a number are the same path, and
+    /// everything inside them interleaves: firefox.com gives its hero and its
+    /// card row `z-index: 1` apiece, and the fox living inside the hero came
+    /// out over the cards.
+    next_stacking_seq: u32,
     /// Content height of the nearest ancestor with a definite (pixel) height,
     /// used to resolve a child's `height: <percent>`. `None` when no ancestor
     /// has a definite height (then percentage heights are treated as auto).
@@ -632,6 +659,7 @@ impl Default for LayoutContext {
             stretch_cross_size: None,
             list_ordinal: None,
             containing_block_size: (0, 0),
+            next_stacking_seq: 0,
             lines_emitted: 0,
             pending_bottom: Vec::new(),
         }
@@ -1669,6 +1697,13 @@ fn layout_block_element(
     }
 
     let block_cmd_start = context.commands.len();
+    // Where this block's subtree starts contributing positioned boxes. Anything
+    // from here on was drawn inside it, so a shift applied to the block has to
+    // reach those too, and a promotion of the block itself has to land in front
+    // of them.
+    let positioned_from = context.positioned_commands.len();
+    let stacking_seq = context.next_stacking_seq;
+    context.next_stacking_seq = context.next_stacking_seq.saturating_add(1);
 
     // The previous sibling's bottom margin is already in the cursor, so only
     // the part this block's top margin adds beyond it is applied.
@@ -2219,9 +2254,7 @@ fn layout_block_element(
         let dx = offset(element.style.left, cb_width) - offset(element.style.right, cb_width);
         let dy = offset(element.style.top, cb_height) - offset(element.style.bottom, cb_height);
         if dx != 0 || dy != 0 {
-            for cmd in &mut context.commands[block_cmd_start..] {
-                shift_command_signed(cmd, dx, dy);
-            }
+            shift_block_and_its_positioned(context, block_cmd_start, positioned_from, dx, dy);
         }
     }
 
@@ -2263,8 +2296,39 @@ fn layout_block_element(
     let tx = element.style.transform_translate_x;
     let ty = element.style.transform_translate_y;
     if tx != 0 || ty != 0 {
-        for cmd in &mut context.commands[block_cmd_start..] {
-            shift_command_signed(cmd, tx, ty);
+        shift_block_and_its_positioned(context, block_cmd_start, positioned_from, tx, ty);
+    }
+
+    // An element with a `z-index` opens a stacking context: everything its
+    // subtree hoisted is read inside it, so its own number goes in front of
+    // theirs. Without this the numbers all compete at the top level and a
+    // subtree is scattered among strangers.
+    let own_z = element.style.z_index.unwrap_or(0);
+    if element.style.z_index.is_some() && element.style.position != Position::Static {
+        for (path, _) in context.positioned_commands[positioned_from..].iter_mut() {
+            path.insert(0, (own_z, stacking_seq));
+        }
+    }
+
+    // A positioned box paints with the other positioned boxes, above everything
+    // that is not positioned -- `position: relative` included, even though it
+    // never leaves the flow. Left among the ordinary commands, it went under
+    // every absolutely positioned box on the page regardless of source order:
+    // firefox.com hangs the fox off its hero's `::before`, and the hero's own
+    // text and download button disappeared behind it.
+    if element.style.position == Position::Relative {
+        let commands: Vec<DrawCommand> = context.commands.drain(block_cmd_start..).collect();
+        if !commands.is_empty() {
+            // In front of the boxes its own subtree contributed, so a
+            // positioned child still paints over the box that holds it.
+            for pending in context.pending_bottom.iter_mut() {
+                if pending.slot >= positioned_from {
+                    pending.slot += 1;
+                }
+            }
+            context
+                .positioned_commands
+                .insert(positioned_from, (vec![(own_z, stacking_seq)], commands));
         }
     }
 
@@ -2273,6 +2337,29 @@ fn layout_block_element(
     let bottom_margin = collapse_margins(trailing_child_margin, element.style.margin.bottom);
     *cursor_y = advance_by_margin(*cursor_y, bottom_margin);
     context.last_bottom_margin = bottom_margin;
+}
+
+/// Move a block's drawing, including the positioned boxes its subtree put
+/// aside.
+///
+/// A relative offset or a translate carries the whole subtree, and a box that
+/// was hoisted into the positioned list is still part of that subtree -- it was
+/// placed against this block's own edges, which are what just moved.
+fn shift_block_and_its_positioned(
+    context: &mut LayoutContext,
+    block_cmd_start: usize,
+    positioned_from: usize,
+    dx: i32,
+    dy: i32,
+) {
+    for command in &mut context.commands[block_cmd_start..] {
+        shift_command_signed(command, dx, dy);
+    }
+    for (_, commands) in context.positioned_commands[positioned_from..].iter_mut() {
+        for command in commands.iter_mut() {
+            shift_command_signed(command, dx, dy);
+        }
+    }
 }
 
 /// Remove or clamp draw commands (from index `start`) to the given clip box.
@@ -2513,7 +2600,9 @@ fn layout_atomic_inline(
     // Out-of-flow descendants were collected against the page, not this box;
     // they are already positioned and must not be shifted with it.
     for (_, commands) in sub_context.positioned_commands {
-        context.positioned_commands.push((0, commands));
+        let seq = context.next_stacking_seq;
+        context.next_stacking_seq = context.next_stacking_seq.saturating_add(1);
+        context.positioned_commands.push((vec![(0, seq)], commands));
     }
 
     Some(AtomicInline {
@@ -6095,7 +6184,14 @@ fn layout_positioned_element(
         return;
     }
 
-    let z = element.style.z_index.unwrap_or(0);
+    let z = vec![(
+        element.style.z_index.unwrap_or(0),
+        {
+            let seq = context.next_stacking_seq;
+            context.next_stacking_seq = context.next_stacking_seq.saturating_add(1);
+            seq
+        },
+    )];
     let slot = context.positioned_commands.len();
     let links_from = context.links.len();
     let controls_from = context.controls.len();
@@ -9111,6 +9207,33 @@ mod tests {
     /// children were laid out via `layout_block_element` (block path), which never
     /// emitted controls, so buttons/inputs inside `display:flex` painted but were
     /// dead to hit-testing (the React demo's counter / todo controls).
+    #[test]
+    fn a_stacking_context_keeps_its_contents_together() {
+        // Two siblings with the same z-index, the first holding an absolutely
+        // positioned box. Everything in the second belongs above everything in
+        // the first, however the numbers inside them fall. Scored on a single
+        // z-index, firefox.com's hero fox floated up over the card row below it.
+        let layout = probe_layout(
+            "<html><body>             <div style=\"position:relative;z-index:1;height:100px\">               <span style=\"position:absolute;top:0;left:0;width:80px;height:80px;                background-color:#aa0000;display:block\"></span>             </div>             <div style=\"position:relative;z-index:1;margin-top:-50px;height:100px;              background-color:#00aa00\"></div>             </body></html>",
+            400,
+        );
+
+        let order = |color: u32| -> usize {
+            layout
+                .commands
+                .iter()
+                .position(|command| {
+                    matches!(command, super::DrawCommand::Rect(rect) if rect.color == color)
+                })
+                .unwrap_or_else(|| panic!("no rect painted in {color:#08x}"))
+        };
+
+        assert!(
+            order(0x00AA00) > order(0xAA0000),
+            "the later stacking context must paint over the earlier one's contents"
+        );
+    }
+
     #[test]
     fn balanced_text_evens_out_its_lines() {
         // Two lines either way; balanced they should come out close to the same
