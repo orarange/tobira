@@ -2998,6 +2998,7 @@ fn layout_image_element(
 
     *cursor_y = cursor_y.saturating_add(draw_height);
     *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
+    context.last_bottom_margin = element.style.margin.bottom;
 }
 
 fn layout_image_fallback(
@@ -6857,7 +6858,14 @@ fn layout_flex_container(
     fonts: &mut FontContext,
     current_form: Option<FormContext>,
 ) {
-    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.top);
+    // A flex container keeps its own children's margins to itself, but its own
+    // still collapse with the blocks either side of it -- it is an ordinary
+    // block-level box in its parent's flow. Added on top of the previous
+    // sibling's, the gap came out as the sum: firefox.com's front-page button
+    // sat 34px lower than a browser puts it.
+    let pending_margin = std::mem::take(&mut context.last_bottom_margin);
+    let collapsed_top = collapse_margins(pending_margin, element.style.margin.top);
+    *cursor_y = advance_by_margin(*cursor_y, collapsed_top - pending_margin);
     let avail_width = outer_width_with_margins(width, element.style.margin.left, element.style.margin.right);
     // Honor an explicit width on the flex container (needed for flex-wrap to know
     // where lines break); otherwise take the available width.
@@ -7482,6 +7490,7 @@ fn layout_flex_container(
     context.containing_block_size = saved_cb_size;
 
     *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
+    context.last_bottom_margin = element.style.margin.bottom;
 }
 
 /// In a reverse direction the main axis starts at the far edge, so
@@ -9399,6 +9408,25 @@ mod tests {
         let child = probe_rect(&l, 0xBB0018).expect("child");
         assert_eq!(parent.y, 40, "the gap lands above the parent");
         assert_eq!(child.y, parent.y, "and the child sits at its top edge");
+    }
+
+    /// A flex container keeps its own children's margins to itself, but its own
+    /// still collapse with the blocks either side of it -- it is an ordinary
+    /// block-level box in its parent's flow. Added on top of the previous
+    /// sibling's, the gap came out as the sum.
+    #[test]
+    fn a_flex_containers_margins_collapse_with_its_siblings() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="height:20px;margin-bottom:30px;background:#bb0022"></div><div style="display:flex;margin-top:20px;margin-bottom:40px;height:20px;background:#bb0023"></div><div style="height:20px;background:#bb0024"></div></body></html>"#,
+            400,
+        );
+        let first = probe_rect(&l, 0xBB0022).expect("first block");
+        let flex = probe_rect(&l, 0xBB0023).expect("flex container");
+        assert_eq!(
+            flex.y,
+            first.y + first.height + 30,
+            "the larger of 30 and 20 is the gap above it, not their sum of 50"
+        );
     }
 
     /// The last child's bottom margin belongs below the parent, not inside it.
