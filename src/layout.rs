@@ -1596,13 +1596,20 @@ fn specified_box_height(
         },
         _ => return content_height,
     };
-    // `height` is the content-box height; this engine's box height also spans the
-    // vertical padding (borders are drawn overlapping it), so add the padding to
-    // arrive at the box height the surrounding code accounts for.
-    let desired = px
-        .saturating_add(style.padding.top)
-        .saturating_add(style.padding.bottom)
-        .max(1);
+    // `height` measures the content box, while this engine's box height also
+    // spans the vertical padding (borders are drawn overlapping it) -- so the
+    // padding is added on. Under `box-sizing: border-box` the stated height
+    // already covers it, and adding it again inflates the box: the round icon
+    // badges on firefox.com's cards ask for 36px square with 8px of padding and
+    // came out 36 wide by 52 tall, a white pill where a circle belongs. Width
+    // already read the property; height did not.
+    let desired = if matches!(style.box_sizing, BoxSizing::BorderBox) {
+        px.max(1)
+    } else {
+        px.saturating_add(style.padding.top)
+            .saturating_add(style.padding.bottom)
+            .max(1)
+    };
     if desired > content_height {
         *cursor_y = background_top.saturating_add(desired);
         desired
@@ -7645,7 +7652,19 @@ fn layout_flex_container(
                     context.container_height.map(|ch| (ch as u64 * p as u64 / 100) as u32)
                 }
                 _ => None,
-            };
+            }
+            // A stated height is the border box when the page says so, and the
+            // padding is added back below -- so what the line gets is what is
+            // left inside it. Taken whole, firefox.com's round card badges
+            // (36px square, 8px padding) grew to 36 by 52 and drew a pill.
+            .map(|px| {
+                if matches!(element.style.box_sizing, BoxSizing::BorderBox) {
+                    px.saturating_sub(element.style.padding.top)
+                        .saturating_sub(element.style.padding.bottom)
+                } else {
+                    px
+                }
+            });
             let max_height = container_cross_height
                 .map(|h| h.max(content_max_height))
                 .unwrap_or(content_max_height);
@@ -9442,6 +9461,27 @@ mod tests {
             .expect("the select should register a control");
 
         assert_eq!(control.value, "one");
+    }
+
+    #[test]
+    fn border_box_height_already_covers_the_padding() {
+        // firefox.com's round card badges are 36px square with 8px of padding,
+        // under a `* { box-sizing: border-box }` reset. Adding the padding on
+        // top of the stated height made them 36 by 52 -- a white pill where a
+        // circle belongs. Both the block and the flex path had to learn it.
+        for display in ["block", "flex", "inline-flex"] {
+            let layout = probe_layout(
+                &format!(
+                    "<html><body><div style=\"box-sizing:border-box;display:{display};                     width:36px;height:36px;padding:8px;background-color:#123456\">                     <span style=\"display:block;width:18px;height:18px\"></span>                     </div></body></html>"
+                ),
+                640,
+            );
+            let badge = probe_rect(&layout, 0x123456)
+                .unwrap_or_else(|error| panic!("no badge painted for {display}: {error}"));
+
+            assert_eq!(badge.height, 36, "a {display} badge must stay square");
+            assert_eq!(badge.width, 36);
+        }
     }
 
     #[test]
