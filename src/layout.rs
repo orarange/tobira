@@ -1919,44 +1919,55 @@ fn layout_block_element(
             );
         }
 
-        if border_top_h > 0 {
+        // Each side is a straight bar, so it has to stop where the corner
+        // starts curving. Run edge to edge, the bar cuts across the rounded
+        // corner and the page shows through between the two: firefox.com's
+        // front-page cards had a dark notch bitten out of each bottom corner.
+        let corner = corner_inset(
+            element.style.border_radius,
+            outer_width.max(1),
+            background_height,
+        );
+        let bar_width = outer_width.max(1).saturating_sub(corner.saturating_mul(2));
+        let bar_height = background_height.saturating_sub(corner.saturating_mul(2));
+        if border_top_h > 0 && bar_width > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x,
+                x: outer_x.saturating_add(corner),
                 y: background_top,
-                width: outer_width.max(1),
+                width: bar_width,
                 height: border_top_h,
-                color: bc,
-                border_radius: element.style.border_radius,
-            }));
-        }
-        if border_bottom_h > 0 {
-            context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x,
-                y: cursor_y.saturating_sub(border_bottom_h),
-                width: outer_width.max(1),
-                height: border_bottom_h,
-                color: bc,
-                border_radius: element.style.border_radius,
-            }));
-        }
-        if border_left_w > 0 {
-            context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x,
-                y: background_top,
-                width: border_left_w,
-                height: background_height,
                 color: bc,
                 border_radius: 0,
             }));
         }
-        if border_right_w > 0 {
+        if border_bottom_h > 0 && bar_width > 0 {
+            context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x.saturating_add(corner),
+                y: cursor_y.saturating_sub(border_bottom_h),
+                width: bar_width,
+                height: border_bottom_h,
+                color: bc,
+                border_radius: 0,
+            }));
+        }
+        if border_left_w > 0 && bar_height > 0 {
+            context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x,
+                y: background_top.saturating_add(corner),
+                width: border_left_w,
+                height: bar_height,
+                color: bc,
+                border_radius: 0,
+            }));
+        }
+        if border_right_w > 0 && bar_height > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
                 x: outer_x
                     .saturating_add(outer_width)
                     .saturating_sub(border_right_w),
-                y: background_top,
+                y: background_top.saturating_add(corner),
                 width: border_right_w,
-                height: background_height,
+                height: bar_height,
                 color: bc,
                 border_radius: 0,
             }));
@@ -6455,6 +6466,14 @@ fn resolve_grid_tracks_with_intrinsic(
 /// what it produced (rects/text/images/controls). Used to size flex items that
 /// have neither an explicit `width` nor `flex-basis`, so they shrink-to-fit
 /// instead of stretching to fill.
+/// How far in from each corner a straight border bar has to start.
+///
+/// A radius never exceeds half the box, the same clamp the painter applies, so
+/// opposite corners cannot eat into one another.
+fn corner_inset(radius: u32, width: u32, height: u32) -> u32 {
+    radius.min(width / 2).min(height / 2)
+}
+
 /// How an item is aligned across its container, resolving `align-self: auto`
 /// against the container's own `align-items`.
 fn resolved_cross_align(child: &StyledElement, container_align: AlignItems) -> AlignItems {
