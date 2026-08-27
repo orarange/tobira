@@ -53,6 +53,15 @@ fn outer_x_with_auto_margins(
     offset_x_by_margin(container_x, style.margin.left)
 }
 
+/// Two adjoining vertical margins make one gap: the largest positive plus the
+/// most negative, which for two positives is simply the larger of them.
+///
+/// Taking the maximum alone would drop a negative margin, and pages use those to
+/// pull a box back over the one before it.
+fn collapse_margins(a: i32, b: i32) -> i32 {
+    a.max(b).max(0) + a.min(b).min(0)
+}
+
 fn advance_by_margin(cursor: u32, m: i32) -> u32 {
     (cursor as i64 + m as i64).max(0) as u32
 }
@@ -494,6 +503,13 @@ struct LayoutContext {
     /// and came out 31px wide, so every link stacked one character per line and
     /// the footer ran to six screens.
     flex_item_main_size: Option<u32>,
+    /// The bottom margin of the block just laid out, still sitting in the
+    /// cursor. The next block's top margin collapses with it: two adjoining
+    /// vertical margins make one gap the size of the larger, not both stacked.
+    /// Added instead, every gap between blocks came out too big -- on
+    /// firefox.com the space under the front page's headline was 80px where a
+    /// browser leaves 32.
+    last_bottom_margin: i32,
     /// The height the item about to be laid out is stretched to: the cross size
     /// of its flex line, or the height of its grid row.
     /// An item with `align-self: stretch` -- the default -- is that tall,
@@ -549,6 +565,7 @@ impl Default for LayoutContext {
             positioned_commands: Vec::new(),
             container_height: None,
             flex_item_main_size: None,
+            last_bottom_margin: 0,
             stretch_cross_size: None,
             list_ordinal: None,
             containing_block_size: (0, 0),
@@ -1542,7 +1559,11 @@ fn layout_block_element(
 
     let block_cmd_start = context.commands.len();
 
-    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.top);
+    // The previous sibling's bottom margin is already in the cursor, so only
+    // the part this block's top margin adds beyond it is applied.
+    let pending_margin = std::mem::take(&mut context.last_bottom_margin);
+    let collapsed = collapse_margins(pending_margin, element.style.margin.top);
+    *cursor_y = advance_by_margin(*cursor_y, collapsed - pending_margin);
 
     // Resolve explicit width from style.width (LengthValue → px)
     let explicit_width: Option<u32> = settled_main_size.or_else(|| element.style.width.map(|w| match w {
@@ -2086,6 +2107,7 @@ fn layout_block_element(
     }
 
     *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
+    context.last_bottom_margin = element.style.margin.bottom;
 }
 
 /// Remove or clamp draw commands (from index `start`) to the given clip box.
@@ -9184,15 +9206,37 @@ mod tests {
         assert!(shifted.x >= 15, "relative left offset should shift box right, got x={}", shifted.x);
     }
 
+    /// Adjoining vertical margins make one gap the size of the larger, not both
+    /// stacked. This used to assert the sum, which is what the layout did and
+    /// what no browser does -- measured against one, `margin-bottom: 30px`
+    /// followed by `margin-top: 20px` leaves 30px, not 50.
     #[test]
-    fn adjacent_block_margins_are_added_without_collapsing() {
+    fn adjacent_block_margins_collapse() {
         let l = probe_layout(
             r#"<html><body style="margin:0"><div style="height:20px;margin-bottom:30px;background:#bb0013"></div><div style="height:20px;margin-top:20px;background:#bb0014"></div></body></html>"#,
             400,
         );
         let first = probe_rect(&l, 0xBB0013).expect("first block");
         let second = probe_rect(&l, 0xBB0014).expect("second block");
-        assert_eq!(second.y, first.y + first.height + 50, "adjacent margins should add, not collapse");
+        assert_eq!(
+            second.y,
+            first.y + first.height + 30,
+            "the larger of the two margins is the gap"
+        );
+    }
+
+    /// A negative margin survives the collapse: the rule is the largest positive
+    /// plus the most negative, so a box can still be pulled back over the one
+    /// before it.
+    #[test]
+    fn a_negative_margin_survives_collapsing() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="height:20px;margin-bottom:30px;background:#bb0015"></div><div style="height:20px;margin-top:-10px;background:#bb0016"></div></body></html>"#,
+            400,
+        );
+        let first = probe_rect(&l, 0xBB0015).expect("first block");
+        let second = probe_rect(&l, 0xBB0016).expect("second block");
+        assert_eq!(second.y, first.y + first.height + 20, "30 - 10");
     }
 
     fn probe_layout(html: &str, width: u32) -> super::LayoutDocument {
