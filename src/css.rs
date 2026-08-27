@@ -2315,10 +2315,7 @@ fn build_node(
                 &style,
                 interactive,
             ) {
-                children.insert(0, StyledNode::Text(StyledText {
-                    text: before_text,
-                    style: intern_style(pseudo_style),
-                }));
+                children.insert(0, pseudo_node(before_text, pseudo_style));
             }
             if let Some((after_text, pseudo_style)) = collect_pseudo_content(
                 element,
@@ -2332,10 +2329,7 @@ fn build_node(
                 &style,
                 interactive,
             ) {
-                children.push(StyledNode::Text(StyledText {
-                    text: after_text,
-                    style: intern_style(pseudo_style),
-                }));
+                children.push(pseudo_node(after_text, pseudo_style));
             }
 
             StyledNode::Element(StyledElement {
@@ -2492,10 +2486,7 @@ fn build_node_incremental(
                 &style,
                 interactive,
             ) {
-                children.insert(0, StyledNode::Text(StyledText {
-                    text: before_text,
-                    style: intern_style(pseudo_style),
-                }));
+                children.insert(0, pseudo_node(before_text, pseudo_style));
             }
             if let Some((after_text, pseudo_style)) = collect_pseudo_content(
                 element,
@@ -2509,10 +2500,7 @@ fn build_node_incremental(
                 &style,
                 interactive,
             ) {
-                children.push(StyledNode::Text(StyledText {
-                    text: after_text,
-                    style: intern_style(pseudo_style),
-                }));
+                children.push(pseudo_node(after_text, pseudo_style));
             }
 
             Some(StyledNode::Element(StyledElement {
@@ -2708,6 +2696,39 @@ fn strip_css_string_quotes(s: &str) -> &str {
 /// or `None` if no matching `::before`/`::after` rule with a non-empty `content` exists.
 /// The returned `ComputedStyle` carries the pseudo-element's own declarations
 /// (color, font-size, font-weight, etc.) so callers can apply them to the injected node.
+/// Turn a pseudo-element's content and style into a node.
+///
+/// A `::before` is normally just text, and a text node is all it needs. But a
+/// pseudo-element is a box like any other, and pages lean on that: firefox.com
+/// draws the fox curling under its hero entirely through
+/// `.fl-home-intro::before` -- `content: ""`, a background image, an
+/// aspect-ratio and an inset. As a text node it has nothing to paint and the
+/// illustration simply was not there.
+///
+/// Only a pseudo carrying a picture becomes an element. Out-of-flow and
+/// background-bearing boxes are exactly the decorative case, and leaving the
+/// text-only ones alone keeps quotes, bullets and icon glyphs laid out the way
+/// they already were.
+fn pseudo_node(text: String, style: ComputedStyle) -> StyledNode {
+    let is_decorative = style.background_image_url.is_some() || style.background_gradient.is_some();
+    if !is_decorative {
+        return StyledNode::Text(StyledText { text, style: intern_style(style) });
+    }
+    let children = if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![StyledNode::Text(StyledText { text, style: intern_style(style.clone()) })]
+    };
+    StyledNode::Element(StyledElement {
+        // Not a real tag: nothing may match it as one, and it reads for what it
+        // is in a dump.
+        tag_name: "::pseudo".to_string(),
+        attributes: BTreeMap::new(),
+        style: intern_style(style),
+        children,
+    })
+}
+
 fn collect_pseudo_content(
     element: &Element,
     stylesheet: &Stylesheet,
@@ -2725,6 +2746,11 @@ fn collect_pseudo_content(
     // CSS requires pseudo-elements to inherit from their originating element.
     let mut pseudo_style = host_style.clone();
     let mut content_text: Option<String> = None;
+    let mut pseudo_vars: BTreeMap<String, String> = host_style
+        .custom_properties
+        .as_deref()
+        .cloned()
+        .unwrap_or_default();
 
     for rule in &stylesheet.rules {
         if let Some(cond) = &rule.media {
@@ -2753,12 +2779,38 @@ fn collect_pseudo_content(
         // Accumulate `content` text separately to avoid intermediate clones of pseudo_style —
         // the final (text, pseudo_style) pair is only constructed once at the end.
         for decl in &rule.declarations {
+            // A pseudo-element sees the custom properties of the element it
+            // hangs off, plus any it declares itself. Applied raw, every
+            // `var()` in a `::before` rule was taken literally and dropped:
+            // firefox.com sizes its hero fox with
+            // `inline-size: var(--banner-kit-width, 580px)`, so the box came out
+            // with no width at all and nothing was drawn.
+            if let Some(name) = decl.property.strip_prefix("--") {
+                let _ = name;
+                pseudo_vars.insert(decl.property.clone(), decl.value.clone());
+                continue;
+            }
+            let value = if decl.value.contains("var(") {
+                let Some(substituted) = substitute_vars(&decl.value, &pseudo_vars) else {
+                    // Guaranteed-invalid; leave the property as it stands
+                    // rather than apply something the author never wrote.
+                    continue;
+                };
+                std::borrow::Cow::Owned(substituted)
+            } else {
+                std::borrow::Cow::Borrowed(&decl.value)
+            };
             if decl.property == "content" {
-                content_text = parse_content_for(&decl.value, Some(element));
+                content_text = parse_content_for(&value, Some(element));
             } else {
                 // Use host_style.font_size_px so em/% units in pseudo-element rules
                 // resolve against the originating element's font size (not a hardcoded 16px).
-                apply_declaration(&mut pseudo_style, decl, host_style.font_size_px);
+                let resolved = Declaration {
+                    property: decl.property.clone(),
+                    value: value.into_owned(),
+                    important: decl.important,
+                };
+                apply_declaration(&mut pseudo_style, &resolved, host_style.font_size_px);
             }
         }
     }
@@ -7391,6 +7443,41 @@ mod tests {
 
         assert_eq!(div.style.padding.top, 308);
         assert_eq!(div.style.padding.bottom, 64);
+    }
+
+    #[test]
+    fn a_pseudo_element_with_a_picture_becomes_a_box() {
+        // firefox.com draws the fox under its hero entirely through
+        // `.fl-home-intro::before`: empty content, a background image, and a
+        // size written with custom properties. As a text node it painted
+        // nothing, and with `var()` left unresolved it had no size either.
+        let document = parse_document("<section class=\"hero\"><p>x</p></section>");
+        let stylesheet = parse_stylesheet(
+            ".hero { --kit-width: 940px }              .hero::before { content: \"\"; position: absolute;              inline-size: var(--kit-width, 580px);              background: url(/media/fox.svg) }",
+        );
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let hero = find_first_element(&styled, "section").expect("section should exist");
+        let StyledNode::Element(pseudo) = &hero.children[0] else {
+            panic!("::before should be an element, not text");
+        };
+
+        assert_eq!(pseudo.style.background_image_url.as_deref(), Some("/media/fox.svg"));
+        assert_eq!(pseudo.style.width, Some(LengthValue::Pixels(940)));
+    }
+
+    #[test]
+    fn a_text_only_pseudo_element_stays_text() {
+        let document = parse_document("<p>x</p>");
+        let stylesheet = parse_stylesheet("p::before { content: \"> \" }");
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let paragraph = find_first_element(&styled, "p").expect("p should exist");
+
+        assert!(
+            matches!(&paragraph.children[0], StyledNode::Text(t) if t.text == "> "),
+            "a pseudo-element with nothing to paint must not grow a box"
+        );
     }
 
     #[test]

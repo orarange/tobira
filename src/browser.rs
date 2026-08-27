@@ -1356,6 +1356,16 @@ fn collect_styled_background_images(styled: &StyledNode, base_url: &Url, images:
                 if !images.was_attempted(url_str) {
                     let decoded = image_bytes(url_str, Some(base_url))
                         .and_then(|bytes| decode_image(&bytes).ok());
+                    // A style image that never arrives leaves no trace on
+                    // screen -- the element simply paints nothing -- so there is
+                    // no way to tell a fetch that failed from a rule that never
+                    // matched without asking.
+                    if std::env::var_os("TOBIRA_DEBUG_IMAGES").is_some() {
+                        eprintln!(
+                            "style image {} {url_str}",
+                            if decoded.is_some() { "ok    " } else { "FAILED" },
+                        );
+                    }
                     match decoded {
                         Some(image) => images.insert(url_str.clone(), image),
                         None => images.mark_failed(url_str.clone()),
