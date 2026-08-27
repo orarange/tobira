@@ -494,12 +494,13 @@ struct LayoutContext {
     /// and came out 31px wide, so every link stacked one character per line and
     /// the footer ran to six screens.
     flex_item_main_size: Option<u32>,
-    /// The cross size of the flex line the item about to be laid out sits on.
+    /// The height the item about to be laid out is stretched to: the cross size
+    /// of its flex line, or the height of its grid row.
     /// An item with `align-self: stretch` -- the default -- is that tall,
     /// whatever its own content comes to. Left to size themselves, the four
     /// cards across firefox.com's front page each ended where their own text
     /// did, so their white panels finished at four different heights.
-    flex_item_cross_size: Option<u32>,
+    stretch_cross_size: Option<u32>,
     /// Ordinal of the list item about to be laid out, set by its container.
     /// `None` for anything that is not a numbered item.
     list_ordinal: Option<u32>,
@@ -548,7 +549,7 @@ impl Default for LayoutContext {
             positioned_commands: Vec::new(),
             container_height: None,
             flex_item_main_size: None,
-            flex_item_cross_size: None,
+            stretch_cross_size: None,
             list_ordinal: None,
             containing_block_size: (0, 0),
             pending_bottom: Vec::new(),
@@ -1382,7 +1383,7 @@ fn layout_block_element(
     // Taken here, before any dispatch, so it cannot survive into a descendant
     // and be spent on the wrong box.
     let settled_main_size = context.flex_item_main_size.take();
-    let settled_cross_size = context.flex_item_cross_size.take();
+    let settled_cross_size = context.stretch_cross_size.take();
 
     if element.tag_name == "br" {
         *cursor_y = cursor_y.saturating_add(text_line_height(&element.style, fonts));
@@ -1428,6 +1429,10 @@ fn layout_block_element(
             } else {
                 (x, settled_main_size.unwrap_or(width))
             };
+            // The container is a box in its own right and may itself be an item
+            // that has to fill its line, so hand the stretch on rather than
+            // spending it here.
+            context.stretch_cross_size = settled_cross_size;
             if matches!(element.style.display, Display::Flex | Display::InlineFlex) {
                 layout_flex_container(element, x, width, cursor_y, context, images, fonts, current_form);
             } else {
@@ -6202,12 +6207,18 @@ fn layout_grid_container(
             + match align {
                 AlignItems::Center => free / 2,
                 AlignItems::FlexEnd => free,
-                // `stretch` and `baseline` both start at the top here; a real
-                // stretch would also resize the item, which block layout already
-                // does for an auto height.
+                // `stretch` and `baseline` both start at the top of the row;
+                // stretch then fills it, which is handled below.
                 AlignItems::Stretch | AlignItems::FlexStart | AlignItems::Baseline => 0,
             };
         let item_form = form_context_for_element(item.element, context, current_form.clone());
+        // A grid item fills its row unless it says otherwise. Left to size
+        // itself, each of the four cards across firefox.com's front page ended
+        // where its own text did, so their white panels finished at four
+        // different heights.
+        if matches!(align, AlignItems::Stretch) {
+            context.stretch_cross_size = Some(row_height);
+        }
         layout_block_element(
             item.element,
             cell_x,
@@ -6571,6 +6582,7 @@ fn layout_flex_container(
     let outer_x = outer_x_with_auto_margins(&element.style, x, width, outer_width);
     let background_top = *cursor_y;
 
+    let settled_cross_size = context.stretch_cross_size.take();
     let border_left = if !element.style.border_style_none { element.style.border.left } else { 0 };
     let border_right = if !element.style.border_style_none { element.style.border.right } else { 0 };
     let border_top = if !element.style.border_style_none { element.style.border.top } else { 0 };
@@ -6963,7 +6975,7 @@ fn layout_flex_container(
                     let mut child_y = content_y.saturating_add(child_y_offset);
                     let child_form = form_context_for_element(child, context, current_form.clone());
                     context.flex_item_main_size = Some(child_w);
-                    context.flex_item_cross_size = stretch_target(child, element.style.align_items, max_height);
+                    context.stretch_cross_size = stretch_target(child, element.style.align_items, max_height);
                     layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts, child_form);
                     cursor_x = cursor_x.saturating_add(child_w).saturating_add(item_gap);
                 }
@@ -7007,7 +7019,7 @@ fn layout_flex_container(
                         let mut cy = line_y.saturating_add(yoff);
                         let child_form = form_context_for_element(child, context, current_form.clone());
                         context.flex_item_main_size = Some(w);
-                        context.flex_item_cross_size = stretch_target(child, element.style.align_items, line_h);
+                        context.stretch_cross_size = stretch_target(child, element.style.align_items, line_h);
                         layout_block_element(child, cx, w, &mut cy, context, images, fonts, child_form);
                         cx = cx.saturating_add(w).saturating_add(gap);
                     }
@@ -7035,6 +7047,14 @@ fn layout_flex_container(
         }
     } else {
         *cursor_y = content_y.saturating_add(element.style.padding.bottom).saturating_add(border_bottom_sz);
+    }
+
+    // An item that fills its line is that tall whatever its own contents come
+    // to. A box that states its own height keeps it.
+    if let Some(target) = settled_cross_size
+        && element.style.height.is_none()
+    {
+        *cursor_y = (*cursor_y).max(background_top.saturating_add(target));
     }
 
     // Update background rect height
@@ -7368,6 +7388,40 @@ mod percentage_sizing_tests {
             inline.iter().map(|r| r.text.chars().count()).sum::<usize>(),
             12,
             "a plain inline box is not clipped"
+        );
+    }
+
+    /// A grid item fills its row, and so does a flex container that is itself
+    /// one -- the card it fills is a flex box in a grid. firefox.com's four
+    /// front-page cards are exactly that, and each ended where its own text did
+    /// until both halves were in place.
+    #[test]
+    fn a_flex_card_in_a_grid_fills_its_row() {
+        let doc = parse_document(
+            "<div class=\"grid\"><article class=\"card\"><p>one</p></article>             <article class=\"card\"><p>a good deal more text than the other so it wraps</p></article></div>",
+        );
+        let sheet = parse_stylesheet(
+            ".grid{display:grid;grid-template-columns:120px 120px;width:400px}             .card{display:flex;background:#00ff00}",
+        );
+        let styled = build_styled_tree(&doc, &sheet, 1280, &InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 1280, &mut fonts);
+        let panels: Vec<u32> = layout
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Rect(rect) if rect.color == 0x00ff00 && rect.width == 120 => {
+                    Some(rect.height)
+                }
+                _ => None,
+            })
+            .collect();
+        let tallest = panels.iter().copied().max().unwrap_or(0);
+        assert!(tallest > 23, "the wrapped card is more than one line: {panels:?}");
+        assert_eq!(
+            panels.iter().filter(|height| **height == tallest).count(),
+            2,
+            "both cards fill the row: {panels:?}"
         );
     }
 
