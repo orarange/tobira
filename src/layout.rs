@@ -1222,6 +1222,7 @@ fn layout_node(
                             LengthValue::MaxContent => width,
                             LengthValue::FitContent(max_px) => width.min(max_px),
                             LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
+                            LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, width),
                         })
                         .unwrap_or_else(|| {
                             // A plain measurement, not a trial layout: laying the
@@ -1260,6 +1261,7 @@ fn layout_node(
                             LengthValue::MaxContent => width,
                             LengthValue::FitContent(max_px) => width.min(max_px),
                             LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
+                            LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, width),
                         })
                         .unwrap_or(width);
                     layout_grid_container(element, x, inline_width, cursor_y, context, images, fonts, current_form);
@@ -1537,6 +1539,7 @@ fn layout_block_element(
         LengthValue::MaxContent => width,
         LengthValue::FitContent(max_px) => width.min(max_px),
         LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
+        LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, width),
     }));
 
     // Container-derived width (what the element would be without explicit width)
@@ -1852,6 +1855,7 @@ fn layout_block_element(
                 LengthValue::Percent(_) => background_height, // can't resolve % without context
                 LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => background_height,
                 LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, background_height),
+                LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, background_height),
             })
             .unwrap_or(background_height);
         clip_commands_to_box(
@@ -2618,6 +2622,7 @@ fn layout_block_element_as_layer(
                 LengthValue::Percent(_) => final_height,
                 LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => final_height,
                 LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, final_height),
+                LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, final_height),
             })
             .unwrap_or(final_height);
         clip_commands_to_box(
@@ -3720,6 +3725,7 @@ fn layout_mixed_children(
                 Some(LengthValue::Percent(pct)) => (width as u64 * pct as u64 / 100).min(width as u64) as u32,
                 Some(LengthValue::MinContent) | Some(LengthValue::MaxContent) | Some(LengthValue::FitContent(_)) => width.max(1),
                 Some(LengthValue::Calc { percent_hundredths, px }) => crate::css::resolve_calc(percent_hundredths, px, width).max(1),
+                Some(LengthValue::Bounded { lower, value, upper }) => crate::css::resolve_bounded(lower, value, upper, width).max(1),
                 None => {
                     if matches!(child, StyledNode::Element(StyledElement { tag_name, .. }) if tag_name == "img") {
                         width.max(1)
@@ -5188,6 +5194,7 @@ fn measure_node_preferred_width(
                         LengthValue::MinContent => 0,
                         LengthValue::MaxContent | LengthValue::FitContent(_) => u32::MAX / 2,
                         LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, u32::MAX / 2),
+                        LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, u32::MAX / 2),
                     })
                     .unwrap_or_else(|| {
                         collect_table_rows(element)
@@ -5399,6 +5406,9 @@ fn resolve_offset(length: LengthValue, basis: u32) -> i32 {
             ((basis as i64 * percent_hundredths as i64) / 10_000 + px as i64)
                 .clamp(i32::MIN as i64, i32::MAX as i64) as i32
         }
+        LengthValue::Bounded { lower, value, upper } => {
+            crate::css::resolve_bounded(lower, value, upper, basis).min(i32::MAX as u32) as i32
+        }
         LengthValue::MinContent => 0,
         LengthValue::MaxContent => basis.min(i32::MAX as u32) as i32,
         LengthValue::FitContent(px) => basis.min(px).min(i32::MAX as u32) as i32,
@@ -5413,6 +5423,7 @@ fn resolve_length_value(length: LengthValue, available_width: u32) -> u32 {
         LengthValue::MaxContent => available_width,
         LengthValue::FitContent(max_px) => available_width.min(max_px),
         LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, available_width),
+        LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, available_width),
     }
 }
 
@@ -5474,6 +5485,7 @@ fn layout_positioned_element(
         LengthValue::MaxContent => container_width,
         LengthValue::FitContent(max_px) => container_width.min(*max_px),
         LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(*percent_hundredths, *px, container_width),
+        LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(*lower, *value, *upper, container_width),
     });
 
     // `left` / `right` resolve against the containing block's width, `top` /
@@ -6634,6 +6646,7 @@ fn layout_flex_container(
                     LengthValue::MaxContent => content_width,
                     LengthValue::FitContent(max_px) => content_width.min(*max_px),
                     LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(*percent_hundredths, *px, content_width),
+                    LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(*lower, *value, *upper, content_width),
                 }
             };
 

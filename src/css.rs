@@ -464,6 +464,41 @@ pub enum LengthValue {
         percent_hundredths: i32,
         px: i32,
     },
+    /// `min()`, `max()` and `clamp()`: a linear form with optional bounds, each
+    /// bound a linear form of its own. Like `calc()`, the percentages have to
+    /// survive until the containing block is known.
+    ///
+    /// All three functions reduce to this shape -- `min(a, b)` is `a` bounded
+    /// above by `b`, `max(a, b)` is `a` bounded below by `b`. Unparsed, they
+    /// collapsed to almost nothing: firefox.com caps a banner's text column with
+    /// `max-inline-size: min(600px, 100%)`, and at 16px wide it stacked a 64px
+    /// heading one character to a line and ran to twelve hundred pixels.
+    Bounded {
+        lower: Option<(i32, i32)>,
+        value: (i32, i32),
+        upper: Option<(i32, i32)>,
+    },
+}
+
+/// Resolves a `min()` / `max()` / `clamp()` against a known containing block.
+pub fn resolve_bounded(
+    lower: Option<(i32, i32)>,
+    value: (i32, i32),
+    upper: Option<(i32, i32)>,
+    container: u32,
+) -> u32 {
+    let at = |(percent_hundredths, px): (i32, i32)| -> i64 {
+        i64::from(percent_hundredths) * i64::from(container) / 10_000 + i64::from(px)
+    };
+    let mut resolved = at(value);
+    if let Some(upper) = upper {
+        resolved = resolved.min(at(upper));
+    }
+    // The lower bound wins a contradiction, as `clamp()` specifies.
+    if let Some(lower) = lower {
+        resolved = resolved.max(at(lower));
+    }
+    resolved.clamp(0, i64::from(u32::MAX)) as u32
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -6536,6 +6571,35 @@ fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue>
     {
         return Some(length);
     }
+    for (name, kind) in [("min(", 0_u8), ("max(", 1), ("clamp(", 2)] {
+        let Some(inner) = value.strip_prefix(name).and_then(|s| s.strip_suffix(')')) else {
+            continue;
+        };
+        let parts: Vec<(i32, i32)> = split_at_top_level(inner, ',')
+            .iter()
+            .filter_map(|part| linear_length_form(part.trim(), parent_font_size))
+            .collect();
+        // `min()` and `max()` take any number of arguments; only the first two
+        // are kept, which is what real stylesheets write.
+        return match (kind, parts.as_slice()) {
+            (0, [a, b, ..]) => Some(LengthValue::Bounded {
+                lower: None,
+                value: *a,
+                upper: Some(*b),
+            }),
+            (1, [a, b, ..]) => Some(LengthValue::Bounded {
+                lower: Some(*b),
+                value: *a,
+                upper: None,
+            }),
+            (2, [low, mid, high]) => Some(LengthValue::Bounded {
+                lower: Some(*low),
+                value: *mid,
+                upper: Some(*high),
+            }),
+            _ => None,
+        };
+    }
     if let Some(inner) = value.strip_prefix("fit-content(").and_then(|s| s.strip_suffix(')')) {
         if let Some(px) = parse_length(inner, parent_font_size) {
             return Some(LengthValue::FitContent(px));
@@ -6545,6 +6609,29 @@ fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue>
         return parse_float(number).map(|p| LengthValue::Percent(p.round().max(0.0) as u32));
     }
     parse_length(&value, parent_font_size).map(LengthValue::Pixels)
+}
+
+/// One argument of `min()` / `max()` / `clamp()` as "a share of the containing
+/// block, plus an offset" -- the same shape `calc()` reduces to.
+fn linear_length_form(input: &str, parent_font_size: u32) -> Option<(i32, i32)> {
+    let value = input.trim();
+    if let Some(number) = value.strip_suffix('%') {
+        let percent = parse_float(number)?;
+        return Some(((percent * 100.0).round() as i32, 0));
+    }
+    if let Some(inner) = value
+        .strip_prefix("calc(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        && let Some(length) = parse_calc_length_value(inner, parent_font_size)
+    {
+        return match length {
+            LengthValue::Pixels(px) => Some((0, px.min(i32::MAX as u32) as i32)),
+            LengthValue::Percent(percent) => Some((percent.min(i32::MAX as u32) as i32 * 100, 0)),
+            LengthValue::Calc { percent_hundredths, px } => Some((percent_hundredths, px)),
+            _ => None,
+        };
+    }
+    parse_length_signed(value, parent_font_size).map(|px| (0, px))
 }
 
 fn parse_float(input: &str) -> Option<f32> {
@@ -7677,6 +7764,30 @@ mod tests {
     fn calc_rejects_length_times_length() {
         assert_eq!(super::parse_calc_length_value("2px*3px", 16), None);
         assert_eq!(super::parse_calc_length_value("100%/2px", 16), None);
+    }
+
+    /// `min()`, `max()` and `clamp()` keep their percentages until the
+    /// containing block is known, the same as `calc()` does.
+    ///
+    /// Unparsed they collapsed to almost nothing: firefox.com caps a banner's
+    /// text column with `max-inline-size: min(600px, 100%)`, and at 16px wide it
+    /// stacked a 64px heading one character to a line, running the section to
+    /// twelve hundred pixels.
+    #[test]
+    fn min_max_and_clamp_resolve_against_the_containing_block() {
+        let bounded = |input: &str, container: u32| match super::parse_length_value(input, 16) {
+            Some(LengthValue::Bounded { lower, value, upper }) => {
+                super::resolve_bounded(lower, value, upper, container)
+            }
+            other => panic!("{input} did not parse as a bounded length: {other:?}"),
+        };
+        assert_eq!(bounded("min(600px, 100%)", 1000), 600);
+        assert_eq!(bounded("min(600px, 100%)", 400), 400);
+        assert_eq!(bounded("max(200px, 30%)", 1000), 300);
+        assert_eq!(bounded("max(200px, 30%)", 100), 200);
+        assert_eq!(bounded("clamp(100px, 50%, 400px)", 1000), 400);
+        assert_eq!(bounded("clamp(100px, 50%, 400px)", 400), 200);
+        assert_eq!(bounded("clamp(100px, 50%, 400px)", 100), 100);
     }
 
     #[test]
