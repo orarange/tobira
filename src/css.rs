@@ -35,6 +35,10 @@ pub struct Stylesheet {
     /// so style computation tests only candidate rules instead of every rule.
     /// Rebuilt by `extend` so it stays in sync with the rule set.
     rule_index: RuleIndex,
+    /// Whether any rule in this sheet asks a `:has()` question. Gathering an
+    /// element's children costs an allocation per element, and almost no page
+    /// needs it, so the walk skips that work unless a rule will read it.
+    uses_has: bool,
     /// Every cascade layer named by the document, in the order the layers were
     /// first declared. A layer declared later beats one declared earlier, and
     /// an unlayered rule beats them all, so this order is what the cascade
@@ -59,6 +63,7 @@ impl Stylesheet {
                 self.layer_order.push(name);
             }
         }
+        self.uses_has |= other.uses_has;
         self.rule_index.rebuild(&self.rules);
     }
 
@@ -249,6 +254,14 @@ enum PseudoClass {
     LastChild,
     NthChild(i32, i32), // (a, b) → matches when (index - b) % a == 0 (1-based index)
     Not(Vec<SimpleSelector>),
+    /// `:has(...)`, answered by looking at the element's children.
+    ///
+    /// Only the child form is exact: `:has(> .x)` asks precisely this question.
+    /// The descendant form `:has(.x)` should search the whole subtree, and
+    /// answering it from the children alone can only say "no" where a browser
+    /// says "yes" -- the same answer this renderer gave before, when an
+    /// unmodelled `:has()` made its rule match nothing at all.
+    Has(Vec<SimpleSelector>),
     Hover,
     Focus,
     Active,
@@ -320,6 +333,22 @@ struct AncestorSlot {
     siblings: Rc<[ElementIdentity]>,
     /// Index of this element in `siblings` (equal to the number of preceding siblings).
     prec_count: usize,
+    /// This element's own element children, for `:has()`. Empty everywhere a
+    /// slot is built for something other than the element being matched, so a
+    /// `:has()` nested inside another selector's argument answers no rather
+    /// than reaching for data that is not there.
+    children: Rc<[ElementIdentity]>,
+}
+
+impl Selector {
+    /// Whether any part of this selector asks a `:has()` question.
+    fn mentions_has(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|part| part.simple.pseudo_classes.iter().any(|pseudo| {
+                matches!(pseudo, PseudoClass::Has(_))
+            }))
+    }
 }
 
 impl AncestorSlot {
@@ -1598,9 +1627,15 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         }
     }
 
+    let uses_has = rules.iter().any(|rule| {
+        rule.selectors
+            .iter()
+            .any(|selector| selector.mentions_has())
+    });
     let rule_index = RuleIndex::build(&rules);
     Stylesheet {
         rules,
+        uses_has,
         root_vars: Rc::new(root_vars),
         media_root_vars,
         rule_index,
@@ -2157,6 +2192,7 @@ fn build_node(
                 sibling_count,
                 siblings: parent_all_sibling_ids.unwrap_or_else(|| Rc::from(preceding_siblings)),
                 prec_count: sibling_index,
+                children: empty_siblings_rc(),
             };
             let mut next_ancestors = ancestors.to_vec();
             next_ancestors.push(current_slot);
@@ -2335,6 +2371,7 @@ fn build_node_incremental(
                 sibling_count,
                 siblings: parent_all_sibling_ids.unwrap_or_else(|| Rc::from(preceding_siblings)),
                 prec_count: sibling_index,
+                children: empty_siblings_rc(),
             };
             let mut next_ancestors = ancestors.to_vec();
             next_ancestors.push(current_slot);
@@ -2632,6 +2669,7 @@ fn collect_pseudo_content(
                     sibling_index,
                     sibling_count,
                     preceding_siblings,
+                    &empty_siblings_rc(),
                     interactive,
                 )
         });
@@ -2674,7 +2712,15 @@ pub fn compute_placeholder_style(
         }
         let host_matches = rule.selectors.iter().any(|sel| {
             sel.pseudo_element.as_ref() == Some(&PseudoElement::Placeholder)
-                && sel.matches(&identity, ancestors, 0, 1, &[], &InteractiveState::default())
+                && sel.matches(
+                    &identity,
+                    ancestors,
+                    0,
+                    1,
+                    &[],
+                    &empty_siblings_rc(),
+                    &InteractiveState::default(),
+                )
         });
         if !host_matches { continue; }
         has_match = true;
@@ -2729,6 +2775,21 @@ fn compute_style_with_rules(
     apply_legacy_attributes(&mut style, element, parent_font_size);
 
     let identity = ElementIdentity::from(element);
+    // `:has()` is the only selector that looks downwards, and it is rare, so the
+    // children are only gathered when some rule in the document asks for them.
+    let child_identities: Rc<[ElementIdentity]> = if stylesheet.uses_has {
+        element
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                Node::Element(child) => Some(ElementIdentity::from(child)),
+                Node::Text(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .into()
+    } else {
+        empty_siblings_rc()
+    };
     // O(1) ref bump — we avoid cloning the full BTreeMap unless this element has its own vars.
     let root_vars = Rc::clone(&stylesheet.root_vars);
     // What this element itself declares. Ancestors' declarations already ride
@@ -2777,6 +2838,7 @@ fn compute_style_with_rules(
                 sibling_index,
                 sibling_count,
                 preceding_siblings,
+                &child_identities,
                 interactive,
             ) {
                 // First pass: collect CSS variables
@@ -4673,6 +4735,30 @@ fn parse_pseudo_class(name: &str, args: Option<&str>) -> Option<PseudoClass> {
                 Some(PseudoClass::Not(selectors))
             }
         }
+        "has" => {
+            let arg = args.unwrap_or("").trim();
+            // A sibling form asks about the element's siblings, not its
+            // children, so answering it here would widen the rule rather than
+            // narrow it. Leave it unmodelled -- Wikipedia scopes its
+            // edit-link brackets with `a:has(+ a.mw-editsection-visualeditor)`,
+            // and a wrong yes there drew a stray `]` after every link on the
+            // page.
+            if arg.starts_with('+') || arg.starts_with('~') {
+                return None;
+            }
+            // `:has(> x)` and `:has(x)` are both answered against the children,
+            // so the child combinator is simply consumed.
+            let arg = arg.strip_prefix('>').unwrap_or(arg).trim();
+            let selectors = split_at_top_level(arg, ',')
+                .into_iter()
+                .map(|part| parse_simple_selector(part.trim()))
+                .collect::<Option<Vec<_>>>()?;
+            if selectors.is_empty() {
+                None
+            } else {
+                Some(PseudoClass::Has(selectors))
+            }
+        }
         "hover" => Some(PseudoClass::Hover),
         "focus" | "focus-visible" | "focus-within" => Some(PseudoClass::Focus),
         "active" => Some(PseudoClass::Active),
@@ -4822,6 +4908,7 @@ impl Selector {
         sibling_index: usize,
         sibling_count: usize,
         preceding_siblings: &[ElementIdentity],
+        children: &Rc<[ElementIdentity]>,
         interactive: &InteractiveState,
     ) -> bool {
         let Some(last_index) = self.parts.len().checked_sub(1) else {
@@ -4842,6 +4929,7 @@ impl Selector {
             sibling_count,
             siblings: empty_siblings_rc(), // shared empty Rc — no allocation per call
             prec_count: 0,
+            children: Rc::clone(children),
         };
         self.matches_part(last_index, &current, ancestors, preceding_siblings, interactive)
     }
@@ -4896,6 +4984,7 @@ impl Selector {
                         sibling_count: current.sibling_count,
                         siblings: empty_siblings_rc(),
                         prec_count: 0,
+                        children: empty_siblings_rc(),
                     };
                     self.matches_part(
                         part_index - 1,
@@ -4916,6 +5005,7 @@ impl Selector {
                         sibling_count: current.sibling_count,
                         siblings: empty_siblings_rc(),
                         prec_count: 0,
+                        children: empty_siblings_rc(),
                     };
                     self.matches_part(
                         part_index - 1,
@@ -5021,6 +5111,22 @@ impl SimpleSelector {
                 }
                 PseudoClass::Not(selectors) => {
                     !selectors.iter().any(|selector| selector.matches_slot(slot, interactive))
+                }
+                PseudoClass::Has(selectors) => {
+                    let count = slot.children.len();
+                    (0..count).any(|index| {
+                        let child = AncestorSlot {
+                            element: slot.children[index].clone(),
+                            sibling_index: index,
+                            sibling_count: count,
+                            siblings: slot.children.clone(),
+                            prec_count: index,
+                            children: empty_siblings_rc(),
+                        };
+                        selectors
+                            .iter()
+                            .any(|selector| selector.matches_slot(&child, interactive))
+                    })
                 }
                 PseudoClass::Hover => {
                     slot.element.node_id.is_some()
@@ -7016,6 +7122,7 @@ mod tests {
                     sibling_count,
                     siblings: parent_all_sibling_ids.unwrap_or_else(|| Rc::from(preceding_siblings)),
                     prec_count: sibling_index,
+                    children: super::empty_siblings_rc(),
                 };
                 let mut next_ancestors = ancestors.to_vec();
                 next_ancestors.push(current_slot);
@@ -8804,6 +8911,52 @@ mod tests {
     fn a_sheet_linked_for_a_width_follows_the_viewport() {
         assert_eq!(color_with_linked_sheet("(max-width: 600px)", 1280), 0x00ff00);
         assert_eq!(color_with_linked_sheet("(max-width: 600px)", 400), 0xff0000);
+    }
+
+    fn color_of_html(css: &str, html: &str) -> u32 {
+        let doc = parse_document(html);
+        let sheet = parse_stylesheet(css);
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        find_first_element(&styled, "div").unwrap().style.color
+    }
+
+    /// `:has(> x)` asks about the element's children. firefox.com counts a card
+    /// grid's children this way -- a grid with exactly four of them gets two
+    /// columns until the window is wide enough for four -- and with the rule
+    /// dropped the cards were laid out four across at every width.
+    #[test]
+    fn has_matches_on_the_children() {
+        const CSS: &str = ".g{color:#0000ff}.g:has(>:nth-child(4):last-child){color:#00ff00}";
+        assert_eq!(
+            color_of_html(CSS, "<div class=\"g\"><i></i><i></i><i></i><i></i></div>"),
+            0x00ff00,
+            "exactly four children"
+        );
+        assert_eq!(
+            color_of_html(CSS, "<div class=\"g\"><i></i><i></i><i></i></div>"),
+            0x0000ff,
+            "three children do not match"
+        );
+        assert_eq!(
+            color_of_html(CSS, "<div class=\"g\"><i></i><i></i><i></i><i></i><i></i></div>"),
+            0x0000ff,
+            "five children do not match either"
+        );
+    }
+
+    /// A sibling form asks about siblings, not children, so answering it from
+    /// the children would widen the rule instead of narrowing it. Wikipedia
+    /// scopes its edit-link brackets with `a:has(+ a.mw-editsection-…)`, and a
+    /// wrong yes there drew a stray `]` after every link on the page.
+    #[test]
+    fn a_sibling_has_still_matches_nothing() {
+        assert_eq!(
+            color_of_html(
+                ".g{color:#0000ff}.g:has(+ i){color:#00ff00}",
+                "<div class=\"g\"><i></i></div>"
+            ),
+            0x0000ff
+        );
     }
 
     /// An unlayered rule beats a layered one however late the layer appears.
