@@ -3610,6 +3610,37 @@ fn parse_transform_origin_pct(s: &str) -> u32 {
     }
 }
 
+/// Split a declaration value on whitespace, keeping bracketed groups whole.
+///
+/// `calc(a + b)` and `rgb(1, 2, 3)` contain spaces that are not separators.
+fn split_value_components(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0_usize;
+    for character in value.chars() {
+        match character {
+            '(' | '[' => {
+                depth += 1;
+                current.push(character);
+            }
+            ')' | ']' => {
+                depth = depth.saturating_sub(1);
+                current.push(character);
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, parent_font_size: u32) {
     let value = &declaration.value;
     match declaration.property.as_str() {
@@ -3617,11 +3648,16 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         // and right margins; given one value, both take it.
         "margin-inline" | "margin-block" | "padding-inline" | "padding-block"
         | "inset-inline" | "inset-block" => {
-            let mut parts = value.split_whitespace();
-            let Some(start_value) = parts.next() else {
+            // Split outside brackets: a plain `split_whitespace` tears
+            // `calc(var(--kit-size) + var(--fl-section-v-padding)*2)` into four
+            // meaningless words, and the whole declaration is then dropped.
+            // firefox.com writes its pre-footer that way, so the 308px that
+            // clears the floating download kit came out as 0.
+            let parts = split_value_components(value);
+            let Some(start_value) = parts.first() else {
                 return;
             };
-            let end_value = parts.next().unwrap_or(start_value);
+            let end_value = parts.get(1).unwrap_or(start_value);
             let (start, end) = match declaration.property.as_str() {
                 "margin-inline" => ("margin-left", "margin-right"),
                 "margin-block" => ("margin-top", "margin-bottom"),
@@ -3635,7 +3671,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                     style,
                     &Declaration {
                         property: property.to_string(),
-                        value: value.to_string(),
+                        value: value.clone(),
                         important: declaration.important,
                     },
                     parent_font_size,
@@ -7338,6 +7374,23 @@ mod tests {
         let div = find_first_element(&styled, "div").expect("div should exist");
 
         assert_eq!(div.style.color, 0x0000FF);
+    }
+
+    #[test]
+    fn logical_shorthand_keeps_a_calc_value_whole() {
+        // Two values, the first a `calc()` with spaces in it. Split on plain
+        // whitespace the declaration falls apart and both paddings come out 0 --
+        // which is what flattened firefox.com's pre-footer.
+        let document = parse_document("<div>x</div>");
+        let stylesheet = parse_stylesheet(
+            ":root { --k: 180px; --v: 64px } div { padding-block: calc(var(--k) + var(--v) * 2) var(--v) }",
+        );
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").expect("div should exist");
+
+        assert_eq!(div.style.padding.top, 308);
+        assert_eq!(div.style.padding.bottom, 64);
     }
 
     #[test]
