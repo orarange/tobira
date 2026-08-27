@@ -1381,6 +1381,23 @@ fn resolve_definite_height(style: &ComputedStyle, container_height: Option<u32>)
     }
 }
 
+/// `min-height` as a border-box floor.
+///
+/// The property measures the content box unless the element says
+/// `box-sizing: border-box`, and almost every page says exactly that in its
+/// reset -- firefox.com's cards ask for 480px and mean 480px all in, padding
+/// included.
+fn min_height_border_box(style: &ComputedStyle) -> u32 {
+    if matches!(style.box_sizing, BoxSizing::BorderBox) {
+        style.min_height
+    } else {
+        style
+            .min_height
+            .saturating_add(style.padding.top)
+            .saturating_add(style.padding.bottom)
+    }
+}
+
 fn explicit_box_height(
     style: &ComputedStyle,
     background_top: u32,
@@ -1389,6 +1406,22 @@ fn explicit_box_height(
     container_height: Option<u32>,
 ) -> u32 {
     let height = specified_box_height(style, background_top, content_height, cursor_y, container_height);
+
+    // `min-height` holds the box open when its contents come to less. It was
+    // parsed and then never read: firefox.com's front-page cards ask for
+    // `min-block-size: 480px` and stood at the 382px their text happened to
+    // need, so the two rows of them came up 200px short of what a browser gives.
+    let height = if style.min_height > 0 {
+        let floor = min_height_border_box(style);
+        if height < floor {
+            *cursor_y = background_top.saturating_add(floor);
+            floor
+        } else {
+            height
+        }
+    } else {
+        height
+    };
 
     // `max-height` caps whatever we arrived at, including a purely content-based
     // height. It was parsed into the style and then never consulted, so MDN's
@@ -7371,6 +7404,16 @@ fn layout_flex_container(
         *cursor_y = (*cursor_y).max(background_top.saturating_add(target));
     }
 
+    // `min-height` holds the box open when its contents come to less. The block
+    // path applies it while working out its height; a flex container works its
+    // own out here, and skipped it -- firefox.com's front-page cards are flex
+    // boxes asking for `min-block-size: 480px` and stood at the 382px their text
+    // happened to need.
+    if element.style.min_height > 0 {
+        let floor = background_top.saturating_add(min_height_border_box(&element.style));
+        *cursor_y = (*cursor_y).max(floor);
+    }
+
     // Update background rect height
     let background_height = cursor_y.saturating_sub(background_top).max(1);
     if let Some(idx) = bg_cmd_index {
@@ -9408,6 +9451,37 @@ mod tests {
         let child = probe_rect(&l, 0xBB0018).expect("child");
         assert_eq!(parent.y, 40, "the gap lands above the parent");
         assert_eq!(child.y, parent.y, "and the child sits at its top edge");
+    }
+
+    /// `min-height` holds a box open when its contents come to less. Parsed and
+    /// never read, firefox.com's front-page cards stood at the 382px their text
+    /// happened to need instead of the 480px they ask for, and the two rows of
+    /// them came up 200px short.
+    #[test]
+    fn min_height_holds_a_box_open() {
+        let height_of = |style: &str| {
+            let l = probe_layout(
+                &format!(
+                    r#"<html><body style="margin:0"><div style="{style};background:#bb0025">x</div></body></html>"#
+                ),
+                400,
+            );
+            probe_rect(&l, 0xBB0025).expect("box").height
+        };
+        assert_eq!(height_of("min-height:200px"), 200, "a plain block");
+        assert_eq!(height_of("display:flex;min-height:200px"), 200, "and a flex one");
+        // The property measures the content box unless the element says
+        // otherwise, and almost every page says `border-box` in its reset.
+        assert_eq!(
+            height_of("min-height:200px;padding:20px"),
+            240,
+            "content-box adds the padding on top"
+        );
+        assert_eq!(
+            height_of("min-height:200px;padding:20px;box-sizing:border-box"),
+            200,
+            "border-box means 200px all in"
+        );
     }
 
     /// A flex container keeps its own children's margins to itself, but its own
