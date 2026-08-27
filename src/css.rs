@@ -6298,6 +6298,16 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
         return parse_float(number).map(|p| (p * parent_font_size as f32).round() as u32);
     }
 
+    // `ch` is the width of a "0" and `ex` the height of an "x", both of which
+    // need the font. Lengths are resolved while styles are computed, before any
+    // font is picked, so half the font size stands in for each -- close for the
+    // proportional faces pages actually use. Unsupported, they were dropped
+    // entirely: firefox.com holds its front-page blurb to `max-inline-size: 48ch`
+    // and without it the line ran the full width of the column.
+    if let Some(number) = value.strip_suffix("ch").or_else(|| value.strip_suffix("ex")) {
+        return parse_float(number).map(|p| (p * parent_font_size as f32 / 2.0).round() as u32);
+    }
+
     if let Some(number) = value.strip_suffix('%') {
         return parse_float(number).map(|p| ((p / 100.0) * parent_font_size as f32).round() as u32);
     }

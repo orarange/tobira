@@ -1682,15 +1682,22 @@ fn layout_block_element(
         (container_derived_width, false)
     };
 
-    // Compute outer_x: center when both margins are auto AND width is actually constrained.
-    let outer_x = if element.style.margin_left_auto && element.style.margin_right_auto && width_is_constrained {
-        let total_margin = width.saturating_sub(outer_width);
-        x.saturating_add(total_margin / 2)
-    } else if element.style.margin_right_auto && !element.style.margin_left_auto {
-        offset_x_by_margin(x, element.style.margin.left)
-    } else {
-        offset_x_by_margin(x, element.style.margin.left)
+    // Auto margins share out whatever room is left over, however the box came to
+    // be narrower than the room it was given. This asked for an explicit `width`
+    // and so did nothing for a box narrowed by `max-width` -- firefox.com holds
+    // its front-page blurb to `max-inline-size: 48ch; margin: … auto`, and it sat
+    // against the left edge instead of under the middle of the headline.
+    let free_space = width.saturating_sub(outer_width);
+    let outer_x = match (
+        element.style.margin_left_auto,
+        element.style.margin_right_auto,
+    ) {
+        (true, true) => x.saturating_add(free_space / 2),
+        // One auto margin takes all of it, pushing the box away from that side.
+        (true, false) => x.saturating_add(free_space),
+        _ => offset_x_by_margin(x, element.style.margin.left),
     };
+    let _ = width_is_constrained;
 
     let background_top = *cursor_y;
 
@@ -9267,6 +9274,23 @@ mod tests {
             first.y + first.height + 30,
             "the larger of the two margins is the gap"
         );
+    }
+
+    /// Auto margins share out whatever room is left over, however the box came
+    /// to be narrower than the room it was given. Centring asked for an explicit
+    /// `width` and so did nothing for a box narrowed by `max-width`:
+    /// firefox.com holds its front-page blurb to `max-inline-size: 48ch` with
+    /// auto margins, and it sat against the left edge.
+    #[test]
+    fn auto_margins_centre_a_box_narrowed_by_max_width() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="width:600px"><div style="max-width:200px;margin:0 auto;height:20px;background:#bb001b"></div><div style="max-width:200px;margin-left:auto;height:20px;background:#bb001c"></div></div></body></html>"#,
+            700,
+        );
+        let centred = probe_rect(&l, 0xBB001B).expect("centred box");
+        assert_eq!(centred.x, 200, "half the free space on each side");
+        let pushed = probe_rect(&l, 0xBB001C).expect("right-aligned box");
+        assert_eq!(pushed.x, 400, "one auto margin takes all of it");
     }
 
     /// Nothing separates a block's top edge from its first child's when there is
