@@ -156,7 +156,10 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                         .map(|c| c.chars().take(70).collect())
                         .unwrap_or_default();
                     println!(
-                        "{}<{} class=\"{}\" display={:?} position={:?} bg={} color={:#08x} fs={} opacity={} style=\"{}\">{}",
+                        // Padding and margin decide most of a page's spacing, and
+                        // reading them back from a stylesheet is guesswork once
+                        // shorthands, logical names and the cascade are in play.
+                        "{}<{} class=\"{}\" display={:?} position={:?} bg={} color={:#08x} fs={} opacity={} pad={},{},{},{} mar={},{},{},{} minh={} style=\"{}\">{}",
                         "  ".repeat(depth),
                         e.tag_name,
                         cls,
@@ -173,6 +176,15 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                         e.style.color,
                         e.style.font_size_px,
                         e.style.opacity,
+                        e.style.padding.top,
+                        e.style.padding.right,
+                        e.style.padding.bottom,
+                        e.style.padding.left,
+                        e.style.margin.top,
+                        e.style.margin.right,
+                        e.style.margin.bottom,
+                        e.style.margin.left,
+                        e.style.min_height,
                         inline,
                         if matches!(e.style.display, Display::None) { "  [none]" } else if e.style.opacity == 0 { "  [OPACITY:0]" } else { "" },
                     );
