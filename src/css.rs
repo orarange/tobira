@@ -1231,6 +1231,12 @@ impl ComputedStyle {
                 style.color = DEFAULT_LINK_COLOR;
                 style.underline = true;
             }
+            // A control is drawn in the platform's own colours, not the page's:
+            // its box is a light field whatever the surrounding text is. Left
+            // inheriting, firefox.com's footer picker drew white text on the
+            // white box. Set here rather than at paint time so an authored
+            // `color` still wins -- this is a default, not an override.
+            "select" => style.color = DEFAULT_TEXT_COLOR,
             "pre" => {
                 style.font_family = FontFamilyKind::Monospace;
                 style.white_space = WhiteSpaceMode::Pre;

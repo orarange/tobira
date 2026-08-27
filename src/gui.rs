@@ -25,8 +25,8 @@ use crate::font::FontContext;
 use crate::image::{DecodedImage, ImageStore};
 use crate::js::{DomEventDispatchResult, DomEventRequest};
 use crate::layout::{
-    DrawCommand, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument, TextCommand,
-    layout_styled_document,
+    DrawCommand, FormControlCommand, FormControlKind, LayerCommand, LayoutDocument,
+    SELECT_CHEVRON_WIDTH, TextCommand, layout_styled_document,
 };
 use crate::url::Url;
 
@@ -912,6 +912,10 @@ impl BrowserApp {
                 return Some(match control.kind {
                     FormControlKind::TextInput => HitTarget::PageTextInput(control.id),
                     FormControlKind::Button => HitTarget::PageButton(control.id),
+                    // Drawn, not yet operable: opening the list is a popup this
+                    // does not have. Clicking one should do nothing rather than
+                    // do something wrong.
+                    FormControlKind::Select => return None,
                     FormControlKind::Hidden => return None,
                 });
             }
@@ -4246,7 +4250,73 @@ fn paint_page_control(
                 control.font_family,
             );
         }
+        FormControlKind::Select => {
+            let chosen = fit_text_to_width(
+                fonts,
+                control.value.trim(),
+                control
+                    .width
+                    .saturating_sub(CONTROL_PADDING_X * 2 + SELECT_CHEVRON_WIDTH),
+                control.font_size_px,
+                control.font_family,
+            );
+            let line_height = fonts.line_height_px(control.font_size_px, control.font_family);
+            let text_y = absolute_y.saturating_add(control.height.saturating_sub(line_height) / 2);
+            fonts.draw_text(
+                buffer,
+                width,
+                height,
+                absolute_x.saturating_add(CONTROL_PADDING_X),
+                text_y,
+                &chosen,
+                control.font_size_px,
+                control.text_color,
+                false,
+                false,
+                false,
+                control.font_family,
+            );
+            draw_select_chevron(
+                buffer,
+                width,
+                height,
+                absolute_x
+                    .saturating_add(control.width)
+                    .saturating_sub(SELECT_CHEVRON_WIDTH),
+                absolute_y.saturating_add(control.height / 2),
+                control.text_color,
+            );
+        }
         FormControlKind::Hidden => {}
+    }
+}
+
+/// The little downward wedge at the right of a `<select>`.
+///
+/// Drawn rather than set in text: the font may not have a chevron, and a
+/// missing glyph would put a tofu box where the affordance belongs.
+fn draw_select_chevron(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    x: u32,
+    centre_y: u32,
+    color: u32,
+) {
+    const HALF: u32 = 4;
+    let left = x.saturating_add(SELECT_CHEVRON_WIDTH / 2).saturating_sub(HALF);
+    let top = centre_y.saturating_sub(HALF / 2);
+    for step in 0..=HALF {
+        // Two pixels per step, walking in from both ends towards the point.
+        for (px, py) in [
+            (left.saturating_add(step), top.saturating_add(step)),
+            (
+                left.saturating_add(HALF * 2).saturating_sub(step),
+                top.saturating_add(step),
+            ),
+        ] {
+            draw_rect(buffer, width, height, px, py, 2, 2, color);
+        }
     }
 }
 

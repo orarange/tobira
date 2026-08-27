@@ -424,6 +424,12 @@ pub struct LinkCommand {
 pub enum FormControlKind {
     TextInput,
     Button,
+    /// A `<select>`: a box showing the chosen option, with a chevron.
+    ///
+    /// Its `<option>` children are `display: none`, so before this the element
+    /// drew nothing at all -- firefox.com's footer language picker was a gap in
+    /// the page where every other browser shows a bordered box reading 日本語.
+    Select,
     Hidden,
 }
 
@@ -779,6 +785,9 @@ struct FormControlSpec {
     name: Option<String>,
     value: String,
     placeholder: Option<String>,
+    /// A button's caption. For a `<select>` this carries the widest option
+    /// instead: the box is as wide as the longest thing it can show, which is
+    /// what decides its size and nothing else needs.
     label: String,
     form_id: Option<usize>,
     form_action: Option<String>,
@@ -1045,6 +1054,37 @@ fn build_form_control_spec(
                 }),
             }
         }
+        "select" => {
+            let options = select_option_labels(&element.children);
+            // Whichever option carries `selected`, else the first -- the same
+            // rule a browser uses for what shows when the list is closed.
+            let chosen = select_chosen_label(&element.children)
+                .or_else(|| options.first().cloned())
+                .unwrap_or_default();
+            let widest = options
+                .iter()
+                .max_by_key(|option| option.chars().count())
+                .cloned()
+                .unwrap_or_else(|| chosen.clone());
+            Some(FormControlSpec {
+                id: context.allocate_control_id(),
+                node_id,
+                form_node_id,
+                kind: FormControlKind::Select,
+                style: element.style.clone(),
+                name: element.attributes.get("name").cloned(),
+                value: chosen,
+                placeholder: None,
+                label: widest,
+                form_id,
+                form_action,
+                form_method,
+                activates_submit: false,
+                disabled,
+                masked: false,
+                size_chars: None,
+            })
+        }
         "textarea" => Some(FormControlSpec {
             id: context.allocate_control_id(),
             node_id,
@@ -1162,7 +1202,64 @@ fn measure_form_control(control: &FormControlSpec, fonts: &mut FontContext) -> (
             };
             (label_width.saturating_add(24).max(64), height)
         }
+        FormControlKind::Select => {
+            // Wide enough for the longest option, plus room for the chevron.
+            let widest = control.label.trim();
+            let widest = if widest.is_empty() {
+                control.value.trim()
+            } else {
+                widest
+            };
+            let text = text_width(&control.style, widest, fonts);
+            (
+                text.saturating_add(SELECT_PADDING_X * 2 + SELECT_CHEVRON_WIDTH).max(72),
+                height,
+            )
+        }
     }
+}
+
+/// Room set aside at the right of a `<select>` for its chevron.
+pub const SELECT_CHEVRON_WIDTH: u32 = 20;
+
+/// Breathing space either side of a `<select>`'s text.
+pub const SELECT_PADDING_X: u32 = 8;
+
+/// The text of every `<option>` under a `<select>`, in document order.
+fn select_option_labels(children: &[StyledNode]) -> Vec<String> {
+    let mut labels = Vec::new();
+    collect_option_labels(children, &mut labels);
+    labels
+}
+
+fn collect_option_labels(children: &[StyledNode], out: &mut Vec<String>) {
+    for child in children {
+        if let StyledNode::Element(element) = child {
+            if element.tag_name == "option" {
+                out.push(collect_text_content(&element.children));
+            } else {
+                // `<optgroup>` wraps its options; anything else is not expected
+                // but costs nothing to walk.
+                collect_option_labels(&element.children, out);
+            }
+        }
+    }
+}
+
+/// The option marked `selected`, if any.
+fn select_chosen_label(children: &[StyledNode]) -> Option<String> {
+    for child in children {
+        if let StyledNode::Element(element) = child {
+            if element.tag_name == "option" {
+                if element.attributes.contains_key("selected") {
+                    return Some(collect_text_content(&element.children));
+                }
+            } else if let Some(found) = select_chosen_label(&element.children) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn collect_text_content(children: &[StyledNode]) -> String {
@@ -9309,6 +9406,42 @@ mod tests {
 
         // 8px of body margin, then (600 - 100) / 2 of free space.
         assert_eq!(item.x, 258, "a wrapped line must honour justify-content: center");
+    }
+
+    #[test]
+    fn a_select_draws_a_control_showing_its_chosen_option() {
+        // firefox.com's footer language picker. Before this the element drew
+        // nothing at all -- its options are `display: none` and it had no
+        // control of its own.
+        let layout = probe_layout(
+            "<html><body><select name=\"lang\">             <option>English</option>             <option selected>Deutsch (Deutschland)</option>             </select></body></html>",
+            640,
+        );
+
+        let control = layout
+            .controls
+            .iter()
+            .find(|control| matches!(control.kind, super::FormControlKind::Select))
+            .expect("the select should register a control");
+
+        assert_eq!(control.value, "Deutsch (Deutschland)", "the selected option shows");
+        assert!(control.width > 100, "wide enough for the longest option: {}", control.width);
+        assert!(control.height >= 28);
+    }
+
+    #[test]
+    fn a_select_without_a_selected_option_shows_the_first() {
+        let layout = probe_layout(
+            "<html><body><select><option>one</option><option>two</option></select></body></html>",
+            640,
+        );
+        let control = layout
+            .controls
+            .iter()
+            .find(|control| matches!(control.kind, super::FormControlKind::Select))
+            .expect("the select should register a control");
+
+        assert_eq!(control.value, "one");
     }
 
     #[test]
