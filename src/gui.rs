@@ -493,6 +493,9 @@ impl BrowserApp {
         let size = window.inner_size();
         let chrome = chrome_layout_metrics(&mut self.fonts, size.width);
         let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
+        // Media queries are answered at this width, so the styler has to know
+        // it before anything is built or laid out at it.
+        crate::browser::set_style_viewport_width(content_width);
         let viewport_height = size
             .height
             .saturating_sub(chrome.height + FRAME_PADDING)
@@ -734,6 +737,9 @@ impl BrowserApp {
         let can_go_forward = self.can_go_forward();
         let body_top = chrome.height + FRAME_PADDING;
         let content_width = size.width.saturating_sub(FRAME_PADDING).max(1);
+        // Media queries are answered at this width, so the styler has to know
+        // it before anything is built or laid out at it.
+        crate::browser::set_style_viewport_width(content_width);
         let viewport_height = size.height.saturating_sub(body_top + FRAME_PADDING).max(1);
         let layout = self.current_layout();
         let frame_matches = self.latest_render_frame.as_ref().is_some_and(|frame| {
@@ -932,6 +938,12 @@ impl BrowserApp {
             self.hovered_element_node_id = hovered_element;
             // Trigger a CSS relayout with the new interactive state
             let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
+            // Media queries are answered at this width, so the styler has to know
+            // it before anything is built or laid out at it.
+            crate::browser::set_style_viewport_width(content_width);
+        // Media queries are answered at this width, so the styler has to know
+        // it before anything is built or laid out at it.
+        crate::browser::set_style_viewport_width(content_width);
             let interactive = InteractiveState {
                 hovered_node_id: hovered_element,
                 ..Default::default()
@@ -1731,6 +1743,9 @@ impl BrowserApp {
             .map(|window| window.inner_size())
             .unwrap_or_else(|| PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
         let content_width = window_size.width.saturating_sub(FRAME_PADDING).max(1);
+        // Media queries are answered at this width, so the styler has to know
+        // it before anything is built or laid out at it.
+        crate::browser::set_style_viewport_width(content_width);
 
         if let DocumentContent::Loaded(_) = &self.document.content {
             // Whether we've already rendered this page at least once. Durable

@@ -107,6 +107,9 @@ fn run() -> Result<()> {
 /// "content is in the DOM but CSS/JS hides it" from "layout collapses it".
 fn dump_styled_layout(url: &Url) -> Result<()> {
     use css::{Display, StyledNode};
+    // Media queries are answered at this width; styling at a different one
+    // from the layout makes the dump disagree with itself.
+    browser::set_style_viewport_width(dump_width());
     let page = load_page_for_cli(url)?;
 
     fn walk(

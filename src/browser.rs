@@ -331,6 +331,24 @@ pub fn load_page(url: &Url) -> Result<BrowserPage> {
     load_page_with_options(url, false)
 }
 
+/// The width media queries are answered at.
+///
+/// Styling ran at a fixed 1280 whatever the window was, so a page took the
+/// wrong side of every breakpoint. firefox.com swaps its whole footer at
+/// 1200px: in a 1082px window a browser lays out the two-column list and this
+/// one laid out the six-column one, which then had to wrap. It also made
+/// `--dump-styled` disagree with the window it was meant to be measuring,
+/// because only layout followed `TOBIRA_DUMP_WIDTH`.
+static STYLE_VIEWPORT_WIDTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1280);
+
+pub fn set_style_viewport_width(width: u32) {
+    STYLE_VIEWPORT_WIDTH.store(width.max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn style_viewport_width() -> u32 {
+    STYLE_VIEWPORT_WIDTH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn load_page_for_cli(url: &Url) -> Result<BrowserPage> {
     load_page_with_options(url, true)
 }
@@ -438,7 +456,14 @@ fn rebuild_page_from_document(
     let mut images = collect_image_resources(&document);
     let rendered = include_rendered_output.then(|| render_document(&document));
     let styled_document = styled_document
-        .unwrap_or_else(|| build_styled_tree(&document, &stylesheet, 1280, &InteractiveState::default()));
+        .unwrap_or_else(|| {
+            build_styled_tree(
+                &document,
+                &stylesheet,
+                style_viewport_width(),
+                &InteractiveState::default(),
+            )
+        });
     collect_styled_background_images(&styled_document, url, &mut images);
 
     BrowserPage {
@@ -502,7 +527,7 @@ fn rebuild_page_from_html_incremental(
     let styled_document = build_styled_tree_incremental(
         &document,
         &stylesheet,
-        1280,
+        style_viewport_width(),
         &InteractiveState::default(),
         old_styled_document,
         old_node_order,
