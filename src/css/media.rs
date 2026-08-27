@@ -26,6 +26,52 @@ pub(crate) enum MediaCondition {
     Unknown,
 }
 
+
+/// Whether the desktop is set to a dark colour scheme.
+///
+/// A browser answers `prefers-color-scheme` from the machine it runs on, and
+/// pages lean on it hard: firefox.com paints the whole lower half of its front
+/// page from a gradient it only emits under `prefers-color-scheme: dark`.
+/// Answering "light" on a dark desktop left that half white with dark text --
+/// nothing like what every other browser on the same machine shows.
+///
+/// Read once. Nothing here notices the setting changing mid-session.
+fn prefers_dark() -> bool {
+    static DARK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DARK.get_or_init(read_system_dark_mode)
+}
+
+#[cfg(target_os = "windows")]
+fn read_system_dark_mode() -> bool {
+    // `AppsUseLightTheme` is 0 for dark. Read through `reg` rather than taking a
+    // dependency on the Windows API crates for one value; it runs once.
+    let Ok(output) = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            "/v",
+            "AppsUseLightTheme",
+        ])
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    // "    AppsUseLightTheme    REG_DWORD    0x0"
+    text.split_whitespace()
+        .next_back()
+        .and_then(|value| value.strip_prefix("0x"))
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+        .is_some_and(|light| light == 0)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_system_dark_mode() -> bool {
+    // No portable way to ask, and light is the safer default: a page that only
+    // styles one scheme styles the light one.
+    false
+}
+
 impl MediaCondition {
     pub(crate) fn matches(&self, viewport_width: u32) -> bool {
         match self {
@@ -33,7 +79,7 @@ impl MediaCondition {
             MediaCondition::MinWidth(w) => viewport_width >= *w,
             MediaCondition::Screen => true,
             MediaCondition::Print => false,
-            MediaCondition::PrefersColorSchemeDark => false,
+            MediaCondition::PrefersColorSchemeDark => prefers_dark(),
             MediaCondition::All(list) => list.iter().all(|cond| cond.matches(viewport_width)),
             MediaCondition::Any(list) => list.iter().any(|cond| cond.matches(viewport_width)),
             MediaCondition::Not(inner) => !inner.matches(viewport_width),
@@ -174,7 +220,9 @@ fn parse_media_atom(query: &str) -> MediaCondition {
                 return yes(value == "no-preference");
             }
             "forced-colors" => return yes(value == "none"),
-            "prefers-color-scheme" => return yes(value == "light"),
+            "prefers-color-scheme" => {
+                return yes(value == if prefers_dark() { "dark" } else { "light" });
+            }
             // Everything is displayed, nothing is being scripted away.
             "scripting" => return yes(value == "enabled"),
             _ => {}
@@ -299,5 +347,28 @@ fn parse_width_range(inner: &str) -> Option<MediaCondition> {
             Some(MediaCondition::All(vec![low, high]))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod color_scheme_tests {
+    use super::{MediaCondition, parse_media_condition, prefers_dark};
+
+    /// The answer depends on the desktop this runs on, so the test pins the
+    /// relationship rather than the value: exactly one of the two schemes
+    /// matches, and `prefers-color-scheme: dark` agrees with the bare form the
+    /// parser has its own branch for.
+    #[test]
+    fn exactly_one_colour_scheme_matches() {
+        let light = parse_media_condition("(prefers-color-scheme: light)").matches(1280);
+        let dark = parse_media_condition("(prefers-color-scheme: dark)").matches(1280);
+
+        assert_ne!(light, dark, "a desktop is one scheme or the other, not both");
+        assert_eq!(
+            dark,
+            MediaCondition::PrefersColorSchemeDark.matches(1280),
+            "both routes to the dark query must give the same answer"
+        );
+        assert_eq!(dark, prefers_dark());
     }
 }
