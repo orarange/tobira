@@ -4528,6 +4528,7 @@ fn render_commands(
                                 image.object_position_x,
                                 image.object_position_y,
                                 min_y,
+                                image.tint,
                             );
                         }
                     }
@@ -5607,6 +5608,8 @@ fn draw_scaled_image(
     object_position_x: u32,
     object_position_y: u32,
     min_y: i32,
+    // Set for a mask: only the image's shape is used, painted in this colour.
+    tint: Option<u32>,
 ) {
     if draw_width == 0 || draw_height == 0 || image.width == 0 || image.height == 0 {
         return;
@@ -5792,6 +5795,18 @@ fn draw_scaled_image(
             let source_index = ((source_y * image.width + source_x) * 4) as usize;
             let source = &image.rgba[source_index..source_index + 4];
             let alpha = source[3] as u32;
+            // A mask contributes its shape only; the colour comes from the
+            // element. This is how a page draws an icon that takes the colour of
+            // the text around it.
+            let source = match tint {
+                Some(color) => [
+                    ((color >> 16) & 0xFF) as u8,
+                    ((color >> 8) & 0xFF) as u8,
+                    (color & 0xFF) as u8,
+                    source[3],
+                ],
+                None => [source[0], source[1], source[2], source[3]],
+            };
 
             let pixel_index = row_offset + dest_x as usize;
             if alpha == 255 {

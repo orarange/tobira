@@ -402,6 +402,10 @@ pub struct ImageCommand {
     pub object_position_x: u32,
     pub object_position_y: u32,
     pub tile: bool,  // true = background-repeat tile at natural size
+    /// When set, only the image's shape is used: every pixel it covers is
+    /// painted in this colour. That is what `mask-image` asks for, and how a
+    /// page draws an icon that takes the colour of the text around it.
+    pub tint: Option<Color>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1794,6 +1798,28 @@ fn layout_block_element(
             BackgroundSize::Auto => ObjectFit::Fill,
         }
     };
+    // A masked box is not filled: its colour is painted only where the mask
+    // covers it. Filled anyway, every icon came out a solid square.
+    if let Some(mask) = element.style.mask_image_url.as_ref()
+        && let Some(color) = element.style.background_color
+    {
+        context.commands.push(DrawCommand::Image(ImageCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: outer_width.max(1),
+            src: mask.clone(),
+            object_fit: ObjectFit::Contain,
+            object_position_x: 50,
+            object_position_y: 50,
+            tile: false,
+            tint: Some(apply_opacity(
+                color,
+                context.background_color,
+                element.style.effective_opacity,
+            )),
+        }));
+    }
     let bg_image_cmd_idx: Option<usize> = element.style.background_image_url.as_ref().map(|url| {
         let idx = context.commands.len();
         context.commands.push(DrawCommand::Image(ImageCommand {
@@ -1806,6 +1832,7 @@ fn layout_block_element(
             object_position_x: element.style.background_position_x,
             object_position_y: element.style.background_position_y,
             tile: bg_img_tile,
+            tint: None,
         }));
         idx
     });
@@ -2568,8 +2595,31 @@ fn layout_block_element_as_layer(
         None
     };
 
+    // A masked box is not filled: its colour is painted only where the mask
+    // covers it. This is the path the icons take -- they carry a transform, so
+    // they are composited through a layer -- and filled whole they came out as
+    // solid squares where firefox.com draws a chevron or a globe.
+    if let Some(mask) = element.style.mask_image_url.as_ref()
+        && let Some(color) = element.style.background_color
+    {
+        sub_context.commands.push(DrawCommand::Image(ImageCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: outer_width.max(1),
+            src: mask.clone(),
+            object_fit: ObjectFit::Contain,
+            object_position_x: 50,
+            object_position_y: 50,
+            tile: false,
+            tint: Some(color),
+        }));
+    }
+
     // The element's own background rect goes into the sub-context (raw color, no opacity blend)
-    let background_cmd_index = if let Some(background_color) = element.style.background_color {
+    let background_cmd_index = if element.style.mask_image_url.is_some() {
+        None
+    } else if let Some(background_color) = element.style.background_color {
         // Use raw background color — opacity is applied by the layer compositor
         sub_context.commands.push(DrawCommand::Rect(RectCommand {
             x: outer_x,
@@ -2738,6 +2788,7 @@ fn layout_block_element_as_layer(
             object_position_x: element.style.background_position_x,
             object_position_y: element.style.background_position_y,
             tile,
+            tint: None,
         }));
     }
 
@@ -2913,6 +2964,7 @@ fn layout_image_element(
             object_position_x: element.style.object_position_x,
             object_position_y: element.style.object_position_y,
             tile: false,
+            tint: None,
         });
         context.commands.push(DrawCommand::Layer(LayerCommand {
             x: draw_x,
@@ -2940,6 +2992,7 @@ fn layout_image_element(
             object_position_x: element.style.object_position_x,
             object_position_y: element.style.object_position_y,
             tile: false,
+            tint: None,
         }));
     }
 
@@ -3210,6 +3263,7 @@ fn layout_table_element(
                     object_position_x: placement.cell.style.background_position_x,
                     object_position_y: placement.cell.style.background_position_y,
                     tile,
+                    tint: None,
                 }));
             }
             // Content commands are (0,0)-relative within the cell; offset by padding/valign
@@ -3316,6 +3370,7 @@ fn layout_table_element(
                     object_position_x: placement.cell.style.background_position_x,
                     object_position_y: placement.cell.style.background_position_y,
                     tile,
+                    tint: None,
                 }));
             }
             merge_fragment(context, layout, content_x, content_y);
@@ -3707,6 +3762,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             object_position_x: image.object_position_x,
             object_position_y: image.object_position_y,
             tile: image.tile,
+            tint: image.tint,
         }),
         DrawCommand::Layer(layer) => DrawCommand::Layer(LayerCommand {
             x: layer.x.saturating_add(offset_x),
@@ -5038,6 +5094,7 @@ fn emit_line_impl(
                     object_position_x: image.style.object_position_x,
                     object_position_y: image.style.object_position_y,
                     tile: false,
+                    tint: None,
                 });
                 context.commands.push(DrawCommand::Layer(LayerCommand {
                     x: cursor_x,
@@ -5065,6 +5122,7 @@ fn emit_line_impl(
                     object_position_x: image.style.object_position_x,
                     object_position_y: image.style.object_position_y,
                     tile: false,
+                    tint: None,
                 }));
             }
 

@@ -910,6 +910,13 @@ pub struct ComputedStyle {
     pub text_shadow: Option<TextShadow>,
     pub background_gradient: Option<LinearGradient>,
     pub background_image_url: Option<String>,
+    /// `mask-image`: the shape the element's own colour is painted in.
+    ///
+    /// Icons on modern pages are an empty box with a mask and
+    /// `background-color: currentColor`, so the same drawing takes the colour of
+    /// the text around it. Without the mask the box was painted whole -- every
+    /// icon on firefox.com came out as a filled square.
+    pub mask_image_url: Option<String>,
     pub background_size: BackgroundSize,
     pub background_repeat: BackgroundRepeat,
     pub background_position_x: u32,
@@ -1079,6 +1086,7 @@ impl ComputedStyle {
             text_shadow: None,
             background_gradient: None,
             background_image_url: None,
+            mask_image_url: None,
             background_size: BackgroundSize::Auto,
             background_repeat: BackgroundRepeat::Repeat,
             background_position_x: 50,
@@ -3570,7 +3578,14 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "background-color" => {
-            style.background_color = parse_color(value);
+            // `currentColor` is whatever `color` is on this element, which is
+            // how an icon drawn as a masked box takes the colour of the text
+            // around it. Unread, the box had no colour and nothing was painted.
+            style.background_color = if value.trim().eq_ignore_ascii_case("currentcolor") {
+                Some(style.color)
+            } else {
+                parse_color(value)
+            };
         }
         "background-image" => {
             let v = value.trim();
@@ -3582,6 +3597,16 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.background_gradient = parse_linear_gradient(v);
             } else if vl.starts_with("url(") {
                 style.background_image_url = extract_url(v);
+            }
+        }
+        // `mask` and its prefixed form carry the image among other components;
+        // the url is the part that decides the shape.
+        "mask-image" | "mask" | "-webkit-mask-image" | "-webkit-mask" => {
+            let v = value.trim();
+            if v.eq_ignore_ascii_case("none") {
+                style.mask_image_url = None;
+            } else if let Some(url) = find_url(v) {
+                style.mask_image_url = Some(url);
             }
         }
         "background-size" => {
@@ -6829,6 +6854,18 @@ pub fn apply_text_transform(text: &str, transform: TextTransform) -> String {
 }
 
 /// Extract a URL from a CSS `url(...)` token.
+/// The first `url(...)` anywhere in a value.
+///
+/// `extract_url` wants the whole value to be one, which the shorthands are not:
+/// `mask: url(...) no-repeat center / 1em 1em` carries the image among the
+/// other components.
+fn find_url(value: &str) -> Option<String> {
+    let start = value.find("url(")?;
+    let rest = &value[start..];
+    let end = rest.find(')')?;
+    extract_url(&rest[..=end])
+}
+
 fn extract_url(value: &str) -> Option<String> {
     let v = value.trim();
     let inner = v.strip_prefix("url(")?.strip_suffix(')')?;
@@ -8932,6 +8969,30 @@ mod tests {
         let sheet = parse_stylesheet(css);
         let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         find_first_element(&styled, "div").unwrap().style.color
+    }
+
+    /// An icon on a modern page is an empty box with a mask and
+    /// `background-color: currentColor`, so one drawing takes the colour of the
+    /// text around it. Neither half was read, so firefox.com's chevrons and
+    /// globes came out as solid squares.
+    #[test]
+    fn a_masked_box_takes_its_shape_and_its_colour() {
+        let doc = parse_document(r#"<div class="i"></div>"#);
+        let sheet = parse_stylesheet(
+            ".i{color:#00ff00;background-color:currentColor;             mask:url(\"/icon.svg\") no-repeat center /1em 1em}",
+        );
+        let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").unwrap();
+        assert_eq!(
+            div.style.mask_image_url.as_deref(),
+            Some("/icon.svg"),
+            "the url is picked out of the shorthand"
+        );
+        assert_eq!(
+            div.style.background_color,
+            Some(0x00ff00),
+            "currentColor is the element's own colour"
+        );
     }
 
     /// `:has(> x)` asks about the element's children. firefox.com counts a card

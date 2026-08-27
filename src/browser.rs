@@ -1343,7 +1343,12 @@ fn collect_styled_background_images(styled: &StyledNode, base_url: &Url, images:
     match styled {
         StyledNode::Text(_) => {}
         StyledNode::Element(element) => {
-            if let Some(ref url_str) = element.style.background_image_url {
+            // A mask is fetched like any other background image: it decides the
+            // shape the element's colour is painted in.
+            for url_str in [&element.style.background_image_url, &element.style.mask_image_url]
+                .into_iter()
+                .flatten()
+            {
                 // `was_attempted`, not `get`: a URL that failed to fetch or
                 // decode must not be retried for every other element that
                 // references it. One undecodable SVG icon used to cost 274
@@ -4153,6 +4158,7 @@ mod tests {
                     text_shadow: None,
                     background_gradient: None,
                     background_image_url: None,
+                    mask_image_url: None,
                     background_size: crate::css::BackgroundSize::Auto,
                     background_repeat: crate::css::BackgroundRepeat::Repeat,
                     background_position_x: 50,
@@ -4329,6 +4335,7 @@ mod tests {
                     text_shadow: None,
                     background_gradient: None,
                     background_image_url: None,
+                    mask_image_url: None,
                     background_size: crate::css::BackgroundSize::Auto,
                     background_repeat: crate::css::BackgroundRepeat::Repeat,
                     background_position_x: 50,
@@ -4855,6 +4862,7 @@ mod tests {
                 text_shadow: None,
                 background_gradient: None,
                 background_image_url: None,
+                mask_image_url: None,
                 background_size: crate::css::BackgroundSize::Auto,
                 background_repeat: crate::css::BackgroundRepeat::Repeat,
                 background_position_x: 50,
