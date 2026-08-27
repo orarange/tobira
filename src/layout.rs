@@ -4136,9 +4136,12 @@ fn layout_nowrap_fragments(
             InlineFragment::Text { text, style, link_href, link_node_id } => {
                 let starts_with_whitespace = text.chars().next().map(char::is_whitespace).unwrap_or(false);
                 let ends_with_whitespace = text.chars().last().map(char::is_whitespace).unwrap_or(false);
-                let words: Vec<&str> = text.split_whitespace().collect();
+                let words = line_break_segments(text);
                 let mut needs_space = pending_space || starts_with_whitespace;
-                for word in words {
+                for (index, (word, space_before)) in words.into_iter().enumerate() {
+                    if index > 0 {
+                        needs_space = space_before;
+                    }
                     if needs_space && !line.is_empty() {
                         line.push_span(" ", style, fonts, link_href.as_deref(), *link_node_id);
                     }
@@ -4344,10 +4347,13 @@ fn layout_normal_fragments(
             } => {
                 let starts_with_whitespace = text.chars().next().map(char::is_whitespace).unwrap_or(false);
                 let ends_with_whitespace = text.chars().last().map(char::is_whitespace).unwrap_or(false);
-                let words: Vec<&str> = text.split_whitespace().collect();
+                let words = line_break_segments(text);
                 let mut needs_space = pending_space || starts_with_whitespace;
 
-                for word in words {
+                for (index, (word, space_before)) in words.into_iter().enumerate() {
+                    if index > 0 {
+                        needs_space = space_before;
+                    }
                     if ellipsis_mode && ellipsis_done {
                         break;
                     }
@@ -5155,6 +5161,78 @@ fn lays_children_out_in_a_row(style: &ComputedStyle) -> bool {
         ),
         _ => false,
     }
+}
+
+/// Splits text into the pieces a line may be broken between, each flagged with
+/// whether whitespace separated it from the piece before it.
+///
+/// Whitespace is the only break opportunity in Latin text, but Japanese is
+/// written without spaces and breaks between almost any two characters. Split on
+/// whitespace alone, a whole Japanese sentence was one unbreakable word: it did
+/// not fit beside the word before it, so it went to a line of its own and then
+/// overran the box. firefox.com's "Firefox に乗り換えると..." left "Firefox"
+/// stranded on a line by itself with the rest spilling past the column edge.
+fn line_break_segments(text: &str) -> Vec<(&str, bool)> {
+    let mut segments = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut space_before = false;
+    let mut previous: Option<char> = None;
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() {
+            if let Some(from) = start.take() {
+                segments.push((&text[from..index], space_before));
+            }
+            space_before = true;
+            previous = None;
+            continue;
+        }
+        match start {
+            Some(from) if breaks_between(previous, character) => {
+                segments.push((&text[from..index], space_before));
+                space_before = false;
+                start = Some(index);
+            }
+            Some(_) => {}
+            None => start = Some(index),
+        }
+        previous = Some(character);
+    }
+    if let Some(from) = start {
+        segments.push((&text[from..], space_before));
+    }
+    segments
+}
+
+/// Whether a line may be broken between these two characters.
+///
+/// Only where one of them is Japanese: Latin words break at spaces alone. The
+/// two lists are the characters that may not start a line (small kana, the
+/// punctuation that hangs off the end of a phrase, closing brackets) and the
+/// ones that may not end one (opening brackets).
+fn breaks_between(previous: Option<char>, next: char) -> bool {
+    let Some(previous) = previous else {
+        return false;
+    };
+    if !is_ideographic(previous) && !is_ideographic(next) {
+        return false;
+    }
+    const NO_BREAK_BEFORE: &str = "、。，．・：；？！ー〜ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ）］｝」』】〉》〕";
+    const NO_BREAK_AFTER: &str = "（［｛「『【〈《〔";
+    !NO_BREAK_BEFORE.contains(next) && !NO_BREAK_AFTER.contains(previous)
+}
+
+fn is_ideographic(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3000..=0x303F      // CJK punctuation
+            | 0x3040..=0x309F // hiragana
+            | 0x30A0..=0x30FF // katakana
+            | 0x3400..=0x4DBF // rare ideographs
+            | 0x4E00..=0x9FFF // common ideographs
+            | 0xF900..=0xFAFF // compatibility ideographs
+            | 0xFF01..=0xFF60 // fullwidth forms
+            | 0xFFE0..=0xFFE6
+    )
 }
 
 fn measure_node_preferred_width(
@@ -7250,6 +7328,34 @@ mod percentage_sizing_tests {
             12,
             "a plain inline box is not clipped"
         );
+    }
+
+    /// Japanese is written without spaces and breaks between almost any two
+    /// characters. Split on whitespace alone, a whole sentence was one
+    /// unbreakable word: it did not fit beside the word before it, so it went to
+    /// a line of its own and then overran the box. firefox.com's
+    /// "Firefox Firefox に乗り換えると、ブックマークやパスワード、閲覧履歴は自動的に引き継がれます。" left "Firefox" stranded on a line by itself with the
+    /// rest spilling past the column edge.
+    #[test]
+    fn japanese_breaks_between_characters_not_only_at_spaces() {
+        let runs = text_runs(
+            ".col{width:400px}",
+            "<div class=\"col\"><p>Firefox に乗り換えると、ブックマークやパスワード、閲覧履歴は自動的に引き継がれます。</p></div>",
+        );
+        assert!(runs.len() > 1, "the sentence has to wrap: {runs:?}");
+        assert!(
+            runs[0].text.starts_with("Firefox "),
+            "the first line keeps going past the space: {:?}",
+            runs[0].text
+        );
+        for run in &runs {
+            assert!(
+                run.width <= 400,
+                "no line may overrun the column: {:?} is {}px",
+                run.text,
+                run.width
+            );
+        }
     }
 
     /// A row holds its items apart by `gap`, so that space counts towards the
