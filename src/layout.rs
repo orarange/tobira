@@ -6455,6 +6455,49 @@ fn resolve_grid_tracks_with_intrinsic(
 /// what it produced (rects/text/images/controls). Used to size flex items that
 /// have neither an explicit `width` nor `flex-basis`, so they shrink-to-fit
 /// instead of stretching to fill.
+/// How an item is aligned across its container, resolving `align-self: auto`
+/// against the container's own `align-items`.
+fn resolved_cross_align(child: &StyledElement, container_align: AlignItems) -> AlignItems {
+    match child.style.align_self {
+        AlignSelf::Auto => container_align,
+        AlignSelf::Stretch => AlignItems::Stretch,
+        AlignSelf::FlexStart => AlignItems::FlexStart,
+        AlignSelf::FlexEnd => AlignItems::FlexEnd,
+        AlignSelf::Center => AlignItems::Center,
+        AlignSelf::Baseline => AlignItems::Baseline,
+    }
+}
+
+/// How wide an item in a column flex is when it is not stretched: its own
+/// content, within what the column offers and whatever it states for itself.
+fn column_item_width(
+    child: &StyledElement,
+    available: u32,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+) -> u32 {
+    if let Some(width) = child.style.width {
+        return resolve_length_value(width, available).min(available).max(1);
+    }
+    let surround = child.style.padding.left
+        + child.style.padding.right
+        + if child.style.border_style_none {
+            0
+        } else {
+            child.style.border.left + child.style.border.right
+        };
+    let mut width = measure_cell_preferred_width(child, 0, images, fonts)
+        .saturating_add(surround)
+        .min(available);
+    if let Some(max) = child.style.max_width {
+        width = width.min(resolve_length_value(max, available));
+    }
+    if let Some(min) = child.style.min_width {
+        width = width.max(resolve_length_value(min, available).min(available));
+    }
+    width.max(1)
+}
+
 /// The height a flex item is stretched to, or `None` when it sizes itself.
 ///
 /// `stretch` is the default, and it is what makes a row of cards line up along
@@ -7033,11 +7076,29 @@ fn layout_flex_container(
                     .saturating_add(border_bottom_sz);
             }
         } else {
-            // Column direction: stack children vertically with gap
+            // Column direction: stack children vertically with gap. The cross
+            // axis is horizontal here, so `align-items` decides how wide each
+            // item is and where across the column it sits. Giving every one the
+            // full width and the left edge ignored that: firefox.com stacks a
+            // carousel's heading and blurb in a centred column, and both sat
+            // hard against the left instead.
             *cursor_y = content_y;
             for (i, child) in children.iter().enumerate() {
                 let child_form = form_context_for_element(child, context, current_form.clone());
-                layout_block_element(child, content_x, content_width, cursor_y, context, images, fonts, child_form);
+                let align = resolved_cross_align(child, element.style.align_items);
+                let (child_x, child_width) = if matches!(align, AlignItems::Stretch) {
+                    (content_x, content_width)
+                } else {
+                    let width = column_item_width(child, content_width, images, fonts);
+                    let free = content_width.saturating_sub(width);
+                    let offset = match align {
+                        AlignItems::Center => free / 2,
+                        AlignItems::FlexEnd => free,
+                        _ => 0,
+                    };
+                    (content_x.saturating_add(offset), width)
+                };
+                layout_block_element(child, child_x, child_width, cursor_y, context, images, fonts, child_form);
                 if i < children.len() - 1 {
                     *cursor_y = cursor_y.saturating_add(gap);
                 }
@@ -7388,6 +7449,32 @@ mod percentage_sizing_tests {
             inline.iter().map(|r| r.text.chars().count()).sum::<usize>(),
             12,
             "a plain inline box is not clipped"
+        );
+    }
+
+    /// The cross axis of a column flex is horizontal, so `align-items` decides
+    /// how wide each item is and where across the column it sits. Giving every
+    /// one the full width and the left edge ignored that: firefox.com stacks a
+    /// carousel's heading and blurb in a centred column, and both sat hard
+    /// against the left.
+    #[test]
+    fn a_column_flex_aligns_its_items_across() {
+        let centred = text_runs(
+            ".col{display:flex;flex-direction:column;align-items:center;width:600px}             .t{max-width:200px}",
+            "<div class=\"col\"><div class=\"t\">HELLO</div></div>",
+        );
+        let stretched = text_runs(
+            ".col{display:flex;flex-direction:column;width:600px}.t{max-width:200px}",
+            "<div class=\"col\"><div class=\"t\">HELLO</div></div>",
+        );
+        assert_eq!(centred.len(), 1, "{centred:?}");
+        assert_eq!(stretched.len(), 1, "{stretched:?}");
+        assert_eq!(stretched[0].x, 0, "stretched fills from the left edge");
+        // The box is only as wide as its text, so the text lands at the middle.
+        assert_eq!(
+            centred[0].x,
+            (600 - centred[0].width) / 2,
+            "centred sits half the free space in: {centred:?}"
         );
     }
 
