@@ -1799,6 +1799,41 @@ fn layout_block_element(
         cursor_y,
         parent_container_height,
     );
+    // `aspect-ratio` gives a box its height when nothing else does. It was read
+    // for images only, so a `<div>` shaped by one collapsed: firefox.com frames
+    // its carousel with `aspect-ratio: 2/1`, and at 1px tall the slides showed
+    // nothing at all.
+    //
+    // The ratio applies to the content box, so the padding and border go back on
+    // top. Where the content is taller than the ratio asks for, the content
+    // wins: the spec would let it overflow, but nothing here clips reliably
+    // enough to risk hiding text.
+    let background_height = match element.style.aspect_ratio {
+        Some(ratio_milli) if ratio_milli > 0 && element.style.height.is_none() => {
+            let border_x = if element.style.border_style_none {
+                0
+            } else {
+                element.style.border.left + element.style.border.right
+            };
+            let border_y = if element.style.border_style_none {
+                0
+            } else {
+                element.style.border.top + element.style.border.bottom
+            };
+            let content_width = outer_width
+                .saturating_sub(border_x)
+                .saturating_sub(element.style.padding.left + element.style.padding.right);
+            let from_ratio = (u64::from(content_width) * 1000 / u64::from(ratio_milli)) as u32;
+            let shaped = from_ratio
+                .saturating_add(element.style.padding.top + element.style.padding.bottom)
+                .saturating_add(border_y)
+                .max(background_height);
+            *cursor_y = (*cursor_y).max(background_top.saturating_add(shaped));
+            shaped
+        }
+        _ => background_height,
+    };
+
     // A flex item with `align-self: stretch` is as tall as its line. A box that
     // states its own height keeps it.
     let background_height = match settled_cross_size {
@@ -7494,6 +7529,45 @@ mod percentage_sizing_tests {
             centred[0].x,
             (600 - centred[0].width) / 2,
             "centred sits half the free space in: {centred:?}"
+        );
+    }
+
+    /// `aspect-ratio` gives a box its height when nothing else does. Read for
+    /// images only, a `<div>` shaped by one collapsed: firefox.com frames its
+    /// carousel with `aspect-ratio: 2/1`, and at 1px tall the slides showed
+    /// nothing.
+    #[test]
+    fn aspect_ratio_shapes_an_empty_box() {
+        let height_of = |css: &str| {
+            let doc = parse_document("<div class=\"frame\"></div>");
+            let sheet = parse_stylesheet(css);
+            let styled = build_styled_tree(&doc, &sheet, 1280, &InteractiveState::default());
+            let mut fonts = FontContext::load();
+            let layout = layout_styled_document(&styled, &ImageStore::default(), 1280, &mut fonts);
+            layout
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    DrawCommand::Rect(rect) if rect.color == 0x00ff00 => Some(rect.height),
+                    _ => None,
+                })
+                .unwrap_or(0)
+        };
+        assert_eq!(
+            height_of(".frame{width:600px;aspect-ratio:2/1;background:#00ff00}"),
+            300,
+            "half its width"
+        );
+        assert_eq!(
+            height_of(".frame{width:600px;aspect-ratio:2/1;height:80px;background:#00ff00}"),
+            80,
+            "a stated height wins"
+        );
+        // The ratio measures the content box, so padding goes on top of it.
+        assert_eq!(
+            height_of(".frame{width:640px;padding:20px;aspect-ratio:2/1;background:#00ff00}"),
+            340,
+            "600/2 plus 20px of padding at each end"
         );
     }
 
