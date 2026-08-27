@@ -4591,6 +4591,8 @@ fn render_commands(
                 // Project length: length of the gradient vector across the box
                 let proj_len = (dx * gw).abs() + (dy * gh).abs();
                 let proj_len = if proj_len < 0.001 { 1.0 } else { proj_len };
+                // Half the diagonal: the distance from the middle to a corner.
+                let radius = ((gw / 2.0).hypot(gh / 2.0)).max(0.001);
 
                 // border_radius corner check setup
                 let r = g.border_radius.min(g.width / 2).min(g.height / 2) as i64;
@@ -4650,9 +4652,17 @@ fn render_commands(
                         // Project pixel position onto gradient direction
                         // t = (dx*(rel_x - cx) + dy*(rel_y - cy) + proj_len/2) / proj_len
                         // Simpler: use dot product with direction vector, offset so that center of box = 0.5
-                        let dot = dx * rel_x + dy * rel_y;
-                        // Range of dot across box: from 0 to proj_len (approximately)
-                        let t_raw = dot / proj_len;
+                        let t_raw = if g.radial {
+                            // Out from the middle, reaching the last stop at the
+                            // farthest corner -- the default shape and size, and
+                            // the only one modelled.
+                            let from_centre_x = rel_x - gw / 2.0;
+                            let from_centre_y = rel_y - gh / 2.0;
+                            (from_centre_x.hypot(from_centre_y)) / radius
+                        } else {
+                            // Range of dot across box: from 0 to proj_len (approximately)
+                            (dx * rel_x + dy * rel_y) / proj_len
+                        };
                         let t = t_raw.clamp(0.0, 1.0);
 
                         // Interpolate color between stops

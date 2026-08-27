@@ -142,6 +142,8 @@ pub struct GradientCommand {
     pub height: u32,
     pub border_radius: u32,
     pub angle_deg_x1000: i32,
+    /// Stops run out from the centre rather than along the angle.
+    pub radial: bool,
     pub stops: Vec<GradientStop>,
 }
 
@@ -2132,6 +2134,7 @@ fn layout_block_element(
             height: background_height,
             border_radius: element.style.border_radius,
             angle_deg_x1000: gradient.angle_deg_x1000,
+            radial: gradient.radial,
             stops,
         }));
     }
@@ -2904,6 +2907,7 @@ fn layout_block_element_as_layer(
             height: final_height,
             border_radius: element.style.border_radius,
             angle_deg_x1000: gradient.angle_deg_x1000,
+            radial: gradient.radial,
             stops,
         }));
     }
@@ -3929,6 +3933,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             height: g.height,
             border_radius: g.border_radius,
             angle_deg_x1000: g.angle_deg_x1000,
+            radial: g.radial,
             stops: g.stops.clone(),
         }),
         DrawCommand::Sticky(sticky) => DrawCommand::Sticky(StickyCommand {
@@ -6675,6 +6680,7 @@ fn layout_grid_container(
             height: 1,
             border_radius: element.style.border_radius,
             angle_deg_x1000: gradient.angle_deg_x1000,
+            radial: gradient.radial,
             stops,
         }));
         Some(context.commands.len() - 1)
@@ -7367,6 +7373,7 @@ fn layout_flex_container(
             height: 1,
             border_radius: element.style.border_radius,
             angle_deg_x1000: gradient.angle_deg_x1000,
+            radial: gradient.radial,
             stops,
         }));
         Some(context.commands.len() - 1)
@@ -9207,6 +9214,25 @@ mod tests {
     /// children were laid out via `layout_block_element` (block path), which never
     /// emitted controls, so buttons/inputs inside `display:flex` painted but were
     /// dead to hit-testing (the React demo's counter / todo controls).
+    #[test]
+    fn a_radial_gradient_runs_out_from_the_middle() {
+        let layout = probe_layout(
+            "<html><body><div style=\"width:200px;height:200px;             background:radial-gradient(#ffffff 0%, #000000 100%)\"></div></body></html>",
+            400,
+        );
+        let gradient = layout
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                super::DrawCommand::Gradient(gradient) => Some(gradient),
+                _ => None,
+            })
+            .expect("the gradient should be painted");
+
+        assert!(gradient.radial, "radial-gradient must not be drawn as a linear one");
+        assert_eq!(gradient.width, 200);
+    }
+
     #[test]
     fn a_stacking_context_keeps_its_contents_together() {
         // Two siblings with the same z-index, the first holding an absolutely

@@ -79,7 +79,85 @@ pub fn parse_color(input: &str) -> Option<Color> {
         }
     }
 
+    // `oklch()` and `oklab()`, which design systems have largely moved to:
+    // firefox.com mixes its whole palette in oklch, and the radial gradient that
+    // washes the lower half of its front page purple is written entirely in it.
+    // Unparsed, that half of the page came out white with dark text on it.
+    for (name, polar) in [("oklch(", true), ("oklab(", false)] {
+        if let Some(arguments) = value.strip_prefix(name).and_then(|rest| rest.strip_suffix(')')) {
+            return parse_oklab(arguments, polar);
+        }
+    }
+
     parse_named_color(&value)
+}
+
+/// `oklch(L C H)` / `oklab(L a b)`, with an optional `/ alpha`.
+///
+/// Lightness is a fraction or a percentage of one; chroma runs to about 0.4;
+/// hue is in degrees.
+fn parse_oklab(arguments: &str, polar: bool) -> Option<Color> {
+    let (components, alpha) = match arguments.split_once('/') {
+        Some((components, alpha)) => {
+            let alpha = alpha.trim();
+            let alpha = match alpha.strip_suffix('%') {
+                Some(percent) => percent.trim().parse::<f32>().ok()? / 100.0,
+                None => alpha.parse::<f32>().ok()?,
+            };
+            (components, alpha.clamp(0.0, 1.0))
+        }
+        None => (arguments, 1.0),
+    };
+    if alpha == 0.0 {
+        return None;
+    }
+
+    let mut parts = components.split_whitespace();
+    let number = |token: Option<&str>, percent_of: f32| -> Option<f32> {
+        let token = token?.trim().trim_end_matches("deg");
+        match token.strip_suffix('%') {
+            Some(percent) => Some(percent.parse::<f32>().ok()? / 100.0 * percent_of),
+            None => token.parse::<f32>().ok(),
+        }
+    };
+    let lightness = number(parts.next(), 1.0)?;
+    // In the polar form a percentage chroma is a share of 0.4, which is the
+    // reference maximum the spec names.
+    let (second, third) = if polar {
+        let chroma = number(parts.next(), 0.4)?;
+        let hue = number(parts.next(), 360.0)?.to_radians();
+        (chroma * hue.cos(), chroma * hue.sin())
+    } else {
+        (number(parts.next(), 0.4)?, number(parts.next(), 0.4)?)
+    };
+
+    // OKLab -> cone response, cubed, -> linear sRGB. The constants are
+    // Björn Ottosson's.
+    let long = (lightness + 0.3963377774 * second + 0.2158037573 * third).powi(3);
+    let medium = (lightness - 0.1055613458 * second - 0.0638541728 * third).powi(3);
+    let short = (lightness - 0.0894841775 * second - 1.2914855480 * third).powi(3);
+
+    let linear = [
+        4.0767416621 * long - 3.3077115913 * medium + 0.2309699292 * short,
+        -1.2684380046 * long + 2.6097574011 * medium - 0.3413193965 * short,
+        -0.0041960863 * long - 0.7034186147 * medium + 1.7076147010 * short,
+    ];
+    let encode = |channel: f32| -> u8 {
+        let channel = channel.clamp(0.0, 1.0);
+        let encoded = if channel <= 0.0031308 {
+            channel * 12.92
+        } else {
+            1.055 * channel.powf(1.0 / 2.4) - 0.055
+        };
+        (encoded * 255.0).round().clamp(0.0, 255.0) as u8
+    };
+
+    let (red, green, blue) = (encode(linear[0]), encode(linear[1]), encode(linear[2]));
+    if alpha >= 1.0 {
+        Some(rgb(red, green, blue))
+    } else {
+        Some(rgba(red, green, blue, (alpha * 255.0).round() as u8))
+    }
 }
 
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
@@ -296,4 +374,41 @@ fn parse_named_color(name: &str) -> Option<Color> {
         "yellowgreen" => rgb(154, 205, 50),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod oklab_tests {
+    use super::parse_color;
+
+    #[test]
+    fn oklch_lands_on_the_colour_the_page_meant() {
+        // firefox.com's brand purple, written the way its stylesheet writes it.
+        assert_eq!(
+            parse_color("oklch(53.618% 0.2266 291.092deg)"),
+            Some(0x7543E3),
+            "the brand purple should come back out"
+        );
+        // The ends of the lightness axis are exact.
+        assert_eq!(parse_color("oklch(1 0 0)"), Some(0xFFFFFF));
+        assert_eq!(parse_color("oklch(0 0 0)"), Some(0x000000));
+    }
+
+    #[test]
+    fn oklab_takes_its_axes_directly() {
+        // Same colour, in the rectangular form: C=0.2266 at 291.092deg.
+        let polar = parse_color("oklch(0.53618 0.2266 291.092)").expect("polar");
+        let rect = parse_color("oklab(0.53618 0.0819 -0.2113)").expect("rectangular");
+        let channel = |color: u32, shift: u32| ((color >> shift) & 0xFF) as i32;
+        for shift in [16, 8, 0] {
+            assert!(
+                (channel(polar, shift) - channel(rect, shift)).abs() <= 2,
+                "{polar:#08x} and {rect:#08x} should agree"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fully_transparent_oklch_paints_nothing() {
+        assert_eq!(parse_color("oklch(0.5 0.1 200 / 0)"), None);
+    }
 }

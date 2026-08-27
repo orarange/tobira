@@ -453,6 +453,10 @@ pub struct TextShadow {
 pub struct LinearGradient {
     pub angle_deg_x1000: i32,
     pub stops: Vec<(u32, u32)>, // (color, position 0-1000)
+    /// `radial-gradient()` rather than `linear-gradient()`: the stops run out
+    /// from the centre instead of along an angle. The two share everything but
+    /// that, so they share a parser and a command.
+    pub radial: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3745,7 +3749,8 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         }
         "background" => {
             let v = value.trim();
-            if v.to_ascii_lowercase().contains("linear-gradient(") {
+            let lowered = v.to_ascii_lowercase();
+            if lowered.contains("linear-gradient(") || lowered.contains("radial-gradient(") {
                 style.background_gradient = parse_linear_gradient(v);
             } else if v.to_ascii_lowercase().starts_with("url(") {
                 style.background_image_url = extract_url(v);
@@ -3769,7 +3774,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if vl == "none" {
                 style.background_gradient = None;
                 style.background_image_url = None;
-            } else if vl.contains("linear-gradient(") {
+            } else if vl.contains("linear-gradient(") || vl.contains("radial-gradient(") {
                 style.background_gradient = parse_linear_gradient(v);
             } else if vl.starts_with("url(") {
                 style.background_image_url = extract_url(v);
@@ -7116,8 +7121,17 @@ fn parse_text_shadow(value: &str, parent_font_size: u32) -> Option<TextShadow> {
 fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
     // Find the linear-gradient(...) part
     let lower = value.to_ascii_lowercase();
-    let start = lower.find("linear-gradient(")?;
-    let after = &value[start + "linear-gradient(".len()..];
+    // `repeating-` forms are read as their plain counterparts: the first pass
+    // through the stops is the part that shows over most of a box anyway.
+    let (start, radial, prefix) = match (lower.find("linear-gradient("), lower.find("radial-gradient(")) {
+        (Some(linear), Some(radial_at)) if radial_at < linear => {
+            (radial_at, true, "radial-gradient(")
+        }
+        (Some(linear), _) => (linear, false, "linear-gradient("),
+        (None, Some(radial_at)) => (radial_at, true, "radial-gradient("),
+        (None, None) => return None,
+    };
+    let after = &value[start + prefix.len()..];
     // Find matching closing paren
     let mut depth = 1u32;
     let mut end = 0;
@@ -7149,7 +7163,27 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
     let first_arg = arg_iter.peek()?.trim().to_ascii_lowercase();
     let angle_deg_x1000: i32;
 
-    if first_arg.starts_with("to ") {
+    if radial {
+        // A radial gradient's first argument may describe the shape, the size
+        // and the centre. None of that is modelled -- the stops always run from
+        // the middle to the farthest corner -- so it is stepped over rather than
+        // read as a colour.
+        const SHAPE_WORDS: [&str; 7] = [
+            "circle",
+            "ellipse",
+            "closest-side",
+            "closest-corner",
+            "farthest-side",
+            "farthest-corner",
+            " at ",
+        ];
+        if SHAPE_WORDS.iter().any(|word| first_arg.contains(word.trim()))
+            && parse_color(&first_arg).is_none()
+        {
+            arg_iter.next();
+        }
+        angle_deg_x1000 = 0;
+    } else if first_arg.starts_with("to ") {
         let dir = first_arg[3..].trim();
         angle_deg_x1000 = match dir {
             "right" => 90_000,
@@ -7249,7 +7283,7 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
         (c, pos)
     }).collect();
 
-    Some(LinearGradient { angle_deg_x1000, stops })
+    Some(LinearGradient { angle_deg_x1000, stops, radial })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
