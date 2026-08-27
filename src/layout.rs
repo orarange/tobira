@@ -53,6 +53,19 @@ fn outer_x_with_auto_margins(
     offset_x_by_margin(container_x, style.margin.left)
 }
 
+/// Whether a block's bottom edge is kept apart from its last child's, so their
+/// bottom margins stay separate.
+///
+/// A stated height also separates them: the box is that tall whatever its
+/// contents do, so nothing can escape through the bottom.
+fn separates_bottom_margins(element: &StyledElement) -> bool {
+    element.style.padding.bottom > 0
+        || (!element.style.border_style_none && element.style.border.bottom > 0)
+        || !matches!(element.style.overflow, Overflow::Visible)
+        || !matches!(element.style.display, Display::Block | Display::ListItem)
+        || element.style.height.is_some()
+}
+
 /// The top margin a block takes over from its first child, or 0 when the two
 /// are kept apart.
 ///
@@ -77,7 +90,15 @@ fn hoisted_first_child_margin(element: &StyledElement) -> i32 {
                     && matches!(child.style.position, Position::Static | Position::Relative)
                     && matches!(child.style.float, FloatSide::None) =>
             {
-                Some(child.style.margin.top)
+                // The gap carries on up through nested first children: nothing
+                // separates any of their top edges either. Stopping at the
+                // first level left firefox.com's headline group starting 32px
+                // above the headline while its own parent started 32px above
+                // that again.
+                Some(collapse_margins(
+                    child.style.margin.top,
+                    hoisted_first_child_margin(child),
+                ))
             }
             // Text before the first element keeps the two apart.
             StyledNode::Text(text) if !text.text.trim().is_empty() => Some(0),
@@ -1879,6 +1900,16 @@ fn layout_block_element(
     context.containing_block_size = saved_cb_size;
     context.container_height = saved_container_height;
 
+    // The last child's bottom margin is the other end of the same story: with
+    // nothing between the two bottom edges the gap belongs below the parent, not
+    // inside it. Left inside, firefox.com's headline group ran 48px past its
+    // last line for a margin a browser puts outside the group.
+    let trailing_child_margin = if separates_bottom_margins(element) {
+        0
+    } else {
+        std::mem::take(&mut context.last_bottom_margin)
+    };
+    *cursor_y = advance_by_margin(*cursor_y, -trailing_child_margin);
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     let content_height = cursor_y.saturating_sub(background_top).max(1);
     // Honor an explicit CSS `height` (px or percent); expands a short box.
@@ -2157,8 +2188,11 @@ fn layout_block_element(
         }
     }
 
-    *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
-    context.last_bottom_margin = element.style.margin.bottom;
+    // Whatever came up from the last child joins this block's own bottom margin
+    // into one gap.
+    let bottom_margin = collapse_margins(trailing_child_margin, element.style.margin.bottom);
+    *cursor_y = advance_by_margin(*cursor_y, bottom_margin);
+    context.last_bottom_margin = bottom_margin;
 }
 
 /// Remove or clamp draw commands (from index `start`) to the given clip box.
@@ -9307,6 +9341,32 @@ mod tests {
         let child = probe_rect(&l, 0xBB0018).expect("child");
         assert_eq!(parent.y, 40, "the gap lands above the parent");
         assert_eq!(child.y, parent.y, "and the child sits at its top edge");
+    }
+
+    /// The last child's bottom margin belongs below the parent, not inside it.
+    /// Left inside, firefox.com's headline group ran 48px past its last line.
+    #[test]
+    fn a_blocks_bottom_margin_collapses_with_its_last_childs() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="background:#bb001d"><div style="height:20px;margin-bottom:40px;background:#bb001e"></div></div><div style="height:10px;background:#bb001f"></div></body></html>"#,
+            400,
+        );
+        let parent = probe_rect(&l, 0xBB001D).expect("parent");
+        let after = probe_rect(&l, 0xBB001F).expect("following block");
+        assert_eq!(parent.height, 20, "the margin is not part of the parent");
+        assert_eq!(after.y, 60, "it makes the gap below it instead");
+    }
+
+    /// A stated height keeps the two apart: the box is that tall whatever its
+    /// contents do, so nothing escapes through the bottom.
+    #[test]
+    fn a_stated_height_stops_the_bottom_margins_collapsing() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="height:60px;background:#bb0020"><div style="height:20px;margin-bottom:40px;background:#bb0021"></div></div></body></html>"#,
+            400,
+        );
+        let parent = probe_rect(&l, 0xBB0020).expect("parent");
+        assert_eq!(parent.height, 60, "the stated height stands");
     }
 
     /// Padding along the top edge keeps the two apart, and then the child's
