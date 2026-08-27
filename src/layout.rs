@@ -7404,7 +7404,23 @@ fn layout_flex_container(
                 let mut line_y = content_y;
                 for line in &lines {
                     let line_h = line.iter().map(|&i| item_heights[i]).max().unwrap_or(0);
-                    let mut cx = content_x;
+                    // Each line is justified on its own, the same as the
+                    // single-line case. Left flush regardless, a wrapping
+                    // container quietly dropped `justify-content` -- which is
+                    // how firefox.com's hero download button ended up hard
+                    // against the left edge of a centred column.
+                    let line_gap = gap.saturating_mul(line.len().saturating_sub(1) as u32);
+                    let (start_offset, item_gap) = justify_content_offsets(
+                        justify_for_direction(
+                            element.style.justify_content,
+                            element.style.flex_direction,
+                        ),
+                        content_width,
+                        line.iter().map(|&i| widths[i]).sum::<u32>(),
+                        line_gap,
+                        line.len() as u32,
+                    );
+                    let mut cx = content_x.saturating_add(start_offset);
                     for &i in line {
                         let child = &children[i];
                         let w = widths[i];
@@ -7414,7 +7430,9 @@ fn layout_flex_container(
                         context.flex_item_main_size = Some(w);
                         context.stretch_cross_size = stretch_target(child, element.style.align_items, line_h);
                         layout_block_element(child, cx, w, &mut cy, context, images, fonts, child_form);
-                        cx = cx.saturating_add(w).saturating_add(gap);
+                        // `item_gap` only spaces items along the line; the row
+                        // gap between lines stays the declared one.
+                        cx = cx.saturating_add(w).saturating_add(item_gap);
                     }
                     line_y = line_y.saturating_add(line_h).saturating_add(gap);
                 }
@@ -8962,6 +8980,21 @@ mod tests {
     /// children were laid out via `layout_block_element` (block path), which never
     /// emitted controls, so buttons/inputs inside `display:flex` painted but were
     /// dead to hit-testing (the React demo's counter / todo controls).
+    #[test]
+    fn a_wrapping_flex_container_still_justifies_each_line() {
+        // `flex-wrap: wrap` used to drop justify-content entirely, so
+        // firefox.com's hero download button sat hard against the left edge of
+        // its centred column.
+        let layout = probe_layout(
+            "<html><body><div style=\"width:600px;display:flex;justify-content:center;             flex-wrap:wrap;gap:16px\"><span style=\"display:block;width:100px;height:20px;             background-color:#123456\"></span></div></body></html>",
+            800,
+        );
+        let item = probe_rect(&layout, 0x123456).expect("the item should be painted");
+
+        // 8px of body margin, then (600 - 100) / 2 of free space.
+        assert_eq!(item.x, 258, "a wrapped line must honour justify-content: center");
+    }
+
     #[test]
     fn a_masked_box_does_not_fill_itself() {
         // firefox.com draws its nav icons as `background-color: currentColor`
