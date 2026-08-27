@@ -494,6 +494,12 @@ struct LayoutContext {
     /// and came out 31px wide, so every link stacked one character per line and
     /// the footer ran to six screens.
     flex_item_main_size: Option<u32>,
+    /// The cross size of the flex line the item about to be laid out sits on.
+    /// An item with `align-self: stretch` -- the default -- is that tall,
+    /// whatever its own content comes to. Left to size themselves, the four
+    /// cards across firefox.com's front page each ended where their own text
+    /// did, so their white panels finished at four different heights.
+    flex_item_cross_size: Option<u32>,
     /// Ordinal of the list item about to be laid out, set by its container.
     /// `None` for anything that is not a numbered item.
     list_ordinal: Option<u32>,
@@ -542,6 +548,7 @@ impl Default for LayoutContext {
             positioned_commands: Vec::new(),
             container_height: None,
             flex_item_main_size: None,
+            flex_item_cross_size: None,
             list_ordinal: None,
             containing_block_size: (0, 0),
             pending_bottom: Vec::new(),
@@ -1375,6 +1382,7 @@ fn layout_block_element(
     // Taken here, before any dispatch, so it cannot survive into a descendant
     // and be spent on the wrong box.
     let settled_main_size = context.flex_item_main_size.take();
+    let settled_cross_size = context.flex_item_cross_size.take();
 
     if element.tag_name == "br" {
         *cursor_y = cursor_y.saturating_add(text_line_height(&element.style, fonts));
@@ -1786,6 +1794,16 @@ fn layout_block_element(
         cursor_y,
         parent_container_height,
     );
+    // A flex item with `align-self: stretch` is as tall as its line. A box that
+    // states its own height keeps it.
+    let background_height = match settled_cross_size {
+        Some(target) if element.style.height.is_none() => {
+            let stretched = background_height.max(target);
+            *cursor_y = (*cursor_y).max(background_top.saturating_add(stretched));
+            stretched
+        }
+        _ => background_height,
+    };
 
     // The block's own bottom padding is part of its height, and it is exactly
     // the room a page reserves for a box anchored there -- so settle against
@@ -6426,6 +6444,27 @@ fn resolve_grid_tracks_with_intrinsic(
 /// what it produced (rects/text/images/controls). Used to size flex items that
 /// have neither an explicit `width` nor `flex-basis`, so they shrink-to-fit
 /// instead of stretching to fill.
+/// The height a flex item is stretched to, or `None` when it sizes itself.
+///
+/// `stretch` is the default, and it is what makes a row of cards line up along
+/// the bottom however much text each one holds.
+fn stretch_target(
+    child: &StyledElement,
+    container_align: AlignItems,
+    line_cross_size: u32,
+) -> Option<u32> {
+    // `align-self: auto` defers to the container. Reading the child's own
+    // `align-items` instead answered "stretch" for every item, whatever the row
+    // asked for -- `align-items` is not inherited, so a child that never
+    // mentions it still reports the initial value.
+    let stretches = match child.style.align_self {
+        AlignSelf::Auto => matches!(container_align, AlignItems::Stretch),
+        AlignSelf::Stretch => true,
+        _ => false,
+    };
+    (stretches && line_cross_size > 0).then_some(line_cross_size)
+}
+
 fn flex_item_content_width(
     child: &StyledElement,
     avail_width: u32,
@@ -6924,6 +6963,7 @@ fn layout_flex_container(
                     let mut child_y = content_y.saturating_add(child_y_offset);
                     let child_form = form_context_for_element(child, context, current_form.clone());
                     context.flex_item_main_size = Some(child_w);
+                    context.flex_item_cross_size = stretch_target(child, element.style.align_items, max_height);
                     layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts, child_form);
                     cursor_x = cursor_x.saturating_add(child_w).saturating_add(item_gap);
                 }
@@ -6967,6 +7007,7 @@ fn layout_flex_container(
                         let mut cy = line_y.saturating_add(yoff);
                         let child_form = form_context_for_element(child, context, current_form.clone());
                         context.flex_item_main_size = Some(w);
+                        context.flex_item_cross_size = stretch_target(child, element.style.align_items, line_h);
                         layout_block_element(child, cx, w, &mut cy, context, images, fonts, child_form);
                         cx = cx.saturating_add(w).saturating_add(gap);
                     }
@@ -7327,6 +7368,48 @@ mod percentage_sizing_tests {
             inline.iter().map(|r| r.text.chars().count()).sum::<usize>(),
             12,
             "a plain inline box is not clipped"
+        );
+    }
+
+    /// A flex item is as tall as its line unless it says otherwise -- `stretch`
+    /// is the default. Left to size themselves, the four cards across
+    /// firefox.com's front page each ended where their own text did, so their
+    /// white panels finished at four different heights.
+    #[test]
+    fn flex_items_stretch_to_the_height_of_their_line() {
+        let heights = |css: &str| {
+            let doc = parse_document(
+                "<div class=\"row\"><div class=\"c\">one</div>                 <div class=\"c\">a good deal more text than the others so it wraps</div></div>",
+            );
+            let sheet = parse_stylesheet(css);
+            let styled = build_styled_tree(&doc, &sheet, 1280, &InteractiveState::default());
+            let mut fonts = FontContext::load();
+            let layout = layout_styled_document(&styled, &ImageStore::default(), 1280, &mut fonts);
+            layout
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCommand::Rect(rect) if rect.color == 0x00ff00 => Some(rect.height),
+                    _ => None,
+                })
+                .collect::<Vec<u32>>()
+        };
+        // The card's own panel is the tallest thing painted in its colour; the
+        // rest are the line boxes inside it.
+        let tallest_count = |heights: Vec<u32>| {
+            let tallest = heights.iter().copied().max().unwrap_or(0);
+            (tallest, heights.iter().filter(|h| **h == tallest).count())
+        };
+        let (tall, both) =
+            tallest_count(heights(".row{display:flex;width:400px}.c{width:120px;background:#00ff00}"));
+        assert!(tall > 23, "the wrapped card is more than one line tall: {tall}");
+        assert_eq!(both, 2, "both cards reach the height of their line");
+        let (_, one) = tallest_count(heights(
+            ".row{display:flex;width:400px;align-items:flex-start}.c{width:120px;background:#00ff00}",
+        ));
+        assert_eq!(
+            one, 1,
+            "control: another alignment lets each keep its own height"
         );
     }
 
