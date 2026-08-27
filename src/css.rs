@@ -2764,11 +2764,25 @@ fn collect_pseudo_content(
     // CSS requires pseudo-elements to inherit from their originating element.
     let mut pseudo_style = host_style.clone();
     let mut content_text: Option<String> = None;
-    let mut pseudo_vars: BTreeMap<String, String> = host_style
-        .custom_properties
-        .as_deref()
-        .cloned()
-        .unwrap_or_default();
+    // A pseudo-element resolves `var()` against the same set its host does:
+    // the document's `:root` block, whatever a matching `@media` adds to it,
+    // then anything declared on the host itself. Seeded from the host alone,
+    // a `:root` variable was simply unknown -- and firefox.com gates the
+    // gradient that washes its lower half in purple behind
+    // `content: var(--content-dark-mode-only)`, so the whole thing was skipped.
+    let mut pseudo_vars: BTreeMap<String, String> = (*stylesheet.root_vars).clone();
+    for (condition, vars) in &stylesheet.media_root_vars {
+        if condition.matches(viewport_width) {
+            for (name, value) in vars {
+                pseudo_vars.insert(name.clone(), value.clone());
+            }
+        }
+    }
+    if let Some(declared) = host_style.custom_properties.as_deref() {
+        for (name, value) in declared {
+            pseudo_vars.insert(name.clone(), value.clone());
+        }
+    }
 
     for rule in &stylesheet.rules {
         if let Some(cond) = &rule.media {
@@ -7531,6 +7545,27 @@ mod tests {
         let link = find_first_element(&styled, "a").expect("a should exist");
 
         assert_ne!(link.style.color, 0xFF0000, "no history means nothing is visited");
+    }
+
+    #[test]
+    fn a_pseudo_element_reads_root_variables() {
+        // The gradient over firefox.com's lower half is gated behind
+        // `content: var(--content-dark-mode-only)`, declared on `:root`.
+        // Looking only at the host's own properties left it unknown, and an
+        // unresolvable `var()` drops the declaration -- so the pseudo-element
+        // never came into being.
+        let document = parse_document("<div class=\"a\">x</div>");
+        let stylesheet = parse_stylesheet(
+            ":root { --flag: \"\"; --art: url(/art.svg) }              .a::before { content: var(--flag); background: var(--art) }",
+        );
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let host = find_first_element(&styled, "div").expect("div should exist");
+        let StyledNode::Element(pseudo) = &host.children[0] else {
+            panic!("the ::before should have become a box");
+        };
+
+        assert_eq!(pseudo.style.background_image_url.as_deref(), Some("/art.svg"));
     }
 
     #[test]
