@@ -1478,6 +1478,20 @@ fn specified_box_height(
     }
 }
 
+/// The colour a box actually fills with.
+///
+/// A masked box paints its colour only where the mask covers it, so on its own
+/// it fills nothing -- the mask image goes down tinted instead. Filled anyway,
+/// every firefox.com nav icon came out a solid white square, and an icon whose
+/// image never arrives has to leave nothing behind rather than a block.
+fn fill_color(style: &ComputedStyle) -> Option<Color> {
+    if style.mask_image_url.is_some() {
+        None
+    } else {
+        style.background_color
+    }
+}
+
 fn layout_block_element(
     element: &StyledElement,
     x: u32,
@@ -1796,7 +1810,7 @@ fn layout_block_element(
         None
     };
 
-    let background_cmd_index = if let Some(background_color) = element.style.background_color {
+    let background_cmd_index = if let Some(background_color) = fill_color(&element.style) {
         // Use effective_opacity for the actual drawn rect color (correct visual result)
         let blended_for_rect = apply_opacity(
             background_color,
@@ -6372,7 +6386,7 @@ fn layout_grid_container(
     }
 
     // Background placeholder
-    let bg_cmd_index = if let Some(bg) = element.style.background_color {
+    let bg_cmd_index = if let Some(bg) = fill_color(&element.style) {
         let blended = apply_opacity(bg, context.background_color, element.style.effective_opacity);
         context.commands.push(DrawCommand::Rect(RectCommand {
             x: outer_x,
@@ -6387,6 +6401,31 @@ fn layout_grid_container(
         None
     };
 
+
+
+    // The tinted mask image, the counterpart to `fill_color` refusing to fill a
+    // masked box. Only the block paths emitted this, so an icon inside a flex or
+    // grid container had its square suppressed and nothing drawn in its place.
+    if let Some(mask) = element.style.mask_image_url.as_ref()
+        && let Some(color) = element.style.background_color
+    {
+        context.commands.push(DrawCommand::Image(ImageCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: outer_width.max(1),
+            src: mask.clone(),
+            object_fit: ObjectFit::Contain,
+            object_position_x: 50,
+            object_position_y: 50,
+            tile: false,
+            tint: Some(apply_opacity(
+                color,
+                context.background_color,
+                element.style.effective_opacity,
+            )),
+        }));
+    }
 
     // The gradient goes down with the background, before any child command, so
     // it sits *under* the content. Emitting it after the children -- which is
@@ -7042,7 +7081,7 @@ fn layout_flex_container(
     }
 
     // Reserve a slot for background rect — insert placeholder now, update height later
-    let bg_cmd_index = if let Some(background_color) = element.style.background_color {
+    let bg_cmd_index = if let Some(background_color) = fill_color(&element.style) {
         let blended = apply_opacity(background_color, context.background_color, element.style.effective_opacity);
         context.commands.push(DrawCommand::Rect(RectCommand {
             x: outer_x, y: background_top,
@@ -7054,6 +7093,31 @@ fn layout_flex_container(
     } else {
         None
     };
+
+
+    // The tinted mask image, the counterpart to `fill_color` refusing to fill a
+    // masked box. Only the block paths emitted this, so an icon inside a flex or
+    // grid container had its square suppressed and nothing drawn in its place.
+    if let Some(mask) = element.style.mask_image_url.as_ref()
+        && let Some(color) = element.style.background_color
+    {
+        context.commands.push(DrawCommand::Image(ImageCommand {
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: outer_width.max(1),
+            src: mask.clone(),
+            object_fit: ObjectFit::Contain,
+            object_position_x: 50,
+            object_position_y: 50,
+            tile: false,
+            tint: Some(apply_opacity(
+                color,
+                context.background_color,
+                element.style.effective_opacity,
+            )),
+        }));
+    }
 
     // The gradient goes down with the background, before any child command, so
     // it sits *under* the content. Emitting it after the children -- where the
@@ -8898,6 +8962,26 @@ mod tests {
     /// children were laid out via `layout_block_element` (block path), which never
     /// emitted controls, so buttons/inputs inside `display:flex` painted but were
     /// dead to hit-testing (the React demo's counter / todo controls).
+    #[test]
+    fn a_masked_box_does_not_fill_itself() {
+        // firefox.com draws its nav icons as `background-color: currentColor`
+        // behind a `mask` cut to the icon's shape. Filled as a plain rect they
+        // came out as solid squares beside every menu label; with no mask image
+        // to hand, nothing should be drawn at all.
+        for display in ["block", "flex", "grid", "inline-block"] {
+            let layout = probe_layout(
+                &format!(
+                    "<html><body><span style=\"display:{display};width:16px;height:16px;                     background-color:#ffffff;mask:url(/icons/chevron.svg) no-repeat center\">                     </span></body></html>"
+                ),
+                640,
+            );
+            assert!(
+                probe_rect(&layout, 0xFFFFFF).is_err(),
+                "a masked {display} box filled itself with a solid rect"
+            );
+        }
+    }
+
     #[test]
     fn flex_child_controls_are_registered() {
         let l = probe_layout(
