@@ -912,6 +912,13 @@ pub struct ComputedStyle {
     pub font_size_px: u32,
     pub font_family: FontFamilyKind,
     pub text_align: TextAlign,
+    /// `text-wrap: balance` -- spread the run over the same number of lines,
+    /// but as evenly as they will go.
+    ///
+    /// Inherited, like the rest of `text-wrap`. Only `balance` is modelled:
+    /// `pretty` only pulls a short last line up, which is a subtler thing than
+    /// this does, and the rest of the keywords say "wrap normally".
+    pub text_wrap_balance: bool,
     pub vertical_align: VerticalAlign,
     pub font_weight: bool,
     pub underline: bool,
@@ -1086,6 +1093,7 @@ impl ComputedStyle {
                 .map(|s| s.font_family)
                 .unwrap_or(FontFamilyKind::Sans),
             text_align: parent.map(|s| s.text_align).unwrap_or(TextAlign::Left),
+            text_wrap_balance: parent.map(|s| s.text_wrap_balance).unwrap_or(false),
             vertical_align: VerticalAlign::Top,
             font_weight: parent.map(|s| s.font_weight).unwrap_or(false),
             underline: parent.map(|s| s.underline).unwrap_or(false),
@@ -3908,6 +3916,12 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         }
         "min-height" => {
             style.min_height = parse_length(value, parent_font_size).unwrap_or(0);
+        }
+        // `text-wrap` also carries `nowrap`, which `white-space` already
+        // covers, and `stable`, which is about reflow while editing.
+        "text-wrap" | "text-wrap-style" => {
+            let v = value.trim().to_ascii_lowercase();
+            style.text_wrap_balance = v == "balance";
         }
         "text-align" => {
             if let Some(text_align) = parse_text_align(value) {

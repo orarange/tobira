@@ -582,6 +582,11 @@ struct LayoutContext {
     /// The height is only known when an ancestor states one, so a percentage
     /// `top` falls back to zero rather than to a guess.
     containing_block_size: (u32, u32),
+    /// How many line boxes have been emitted, ever.
+    ///
+    /// Only differences matter: `text-wrap: balance` lays a run out at a trial
+    /// width, reads how many lines came of it, and throws the result away.
+    lines_emitted: usize,
     /// Boxes placed by `bottom` with `top` auto, waiting for the height of the
     /// block that contains them.
     pending_bottom: Vec<PendingBottom>,
@@ -627,6 +632,7 @@ impl Default for LayoutContext {
             stretch_cross_size: None,
             list_ordinal: None,
             containing_block_size: (0, 0),
+            lines_emitted: 0,
             pending_bottom: Vec::new(),
         }
     }
@@ -4464,7 +4470,131 @@ fn layout_nowrap_fragments(
     );
 }
 
+/// Lay `fragments` out at `trial_width`, count the lines, and put everything
+/// back the way it was.
+///
+/// The wrapper writes as it goes -- draw commands, links, hit boxes -- so a
+/// question as simple as "how many lines would this be?" has to be asked by
+/// doing the work and then undoing it. Only text runs are ever tried this way,
+/// so nothing but those three lists and the cursor can have moved.
+fn trial_line_count(
+    fragments: &[InlineFragment],
+    container_style: &ComputedStyle,
+    x: u32,
+    trial_width: u32,
+    cursor_y: u32,
+    context: &mut LayoutContext,
+    fonts: &mut FontContext,
+) -> usize {
+    let commands = context.commands.len();
+    let links = context.links.len();
+    let hitboxes = context.element_hitboxes.len();
+    let lines_before = context.lines_emitted;
+    let last_bottom_margin = context.last_bottom_margin;
+
+    let mut throwaway_cursor = cursor_y;
+    layout_normal_fragments_at(
+        fragments,
+        container_style,
+        x,
+        trial_width,
+        &mut throwaway_cursor,
+        context,
+        fonts,
+    );
+
+    let lines = context.lines_emitted - lines_before;
+    context.commands.truncate(commands);
+    context.links.truncate(links);
+    context.element_hitboxes.truncate(hitboxes);
+    context.lines_emitted = lines_before;
+    context.last_bottom_margin = last_bottom_margin;
+    lines
+}
+
+/// The width to wrap a `text-wrap: balance` run at.
+///
+/// Balancing keeps the line count the run already had and makes the lines as
+/// even as it can, which is the narrowest width that still fits in that many
+/// lines. Found by bisection, since the wrapper is the only thing that knows
+/// where the breaks fall.
+///
+/// The floor matters: an unbreakable word overflows rather than adding a line,
+/// so without one the search would happily walk down to a single pixel. A run
+/// that needed `lines` lines at the full width holds more text than
+/// `width * (lines - 1)`, so nothing narrower than that average can hold it.
+fn balanced_wrap_width(
+    fragments: &[InlineFragment],
+    container_style: &ComputedStyle,
+    x: u32,
+    width: u32,
+    cursor_y: u32,
+    context: &mut LayoutContext,
+    fonts: &mut FontContext,
+) -> u32 {
+    // Browsers stop balancing past a handful of lines: it costs more the longer
+    // the run, and a paragraph does not want it in the first place.
+    const MAX_BALANCED_LINES: usize = 10;
+
+    let lines = trial_line_count(fragments, container_style, x, width, cursor_y, context, fonts);
+    if lines < 2 || lines > MAX_BALANCED_LINES {
+        return width;
+    }
+
+    let mut low = (width as usize * (lines - 1) / lines).max(1) as u32;
+    let mut high = width;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if trial_line_count(fragments, container_style, x, mid, cursor_y, context, fonts) <= lines {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    low
+}
+
 fn layout_normal_fragments(
+    fragments: &[InlineFragment],
+    container_style: &ComputedStyle,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    fonts: &mut FontContext,
+) {
+    // Balancing narrows the box the lines are broken in, but not the box they
+    // sit in: a centred heading stays centred on the original column. Only
+    // plain text is balanced -- an image or a form control in the run would
+    // leave more behind than the trial run knows how to take back.
+    let plain_text = fragments
+        .iter()
+        .all(|fragment| matches!(fragment, InlineFragment::Text { .. } | InlineFragment::LineBreak));
+    if container_style.text_wrap_balance && plain_text && width > 0 {
+        let balanced =
+            balanced_wrap_width(fragments, container_style, x, width, *cursor_y, context, fonts);
+        if balanced < width {
+            let slack = width - balanced;
+            let offset = match container_style.text_align {
+                TextAlign::Center => slack / 2,
+                TextAlign::Right => slack,
+                TextAlign::Left => 0,
+            };
+            return layout_normal_fragments_at(
+                fragments,
+                container_style,
+                x.saturating_add(offset),
+                balanced,
+                cursor_y,
+                context,
+                fonts,
+            );
+        }
+    }
+    layout_normal_fragments_at(fragments, container_style, x, width, cursor_y, context, fonts);
+}
+
+fn layout_normal_fragments_at(
     fragments: &[InlineFragment],
     container_style: &ComputedStyle,
     x: u32,
@@ -5031,6 +5161,7 @@ fn emit_line_impl(
     fonts: &mut FontContext,
     indent: i32,
 ) {
+    context.lines_emitted = context.lines_emitted.saturating_add(1);
     if line.is_empty() {
         *cursor_y = cursor_y.saturating_add(text_line_height(container_style, fonts));
         return;
@@ -8980,6 +9111,42 @@ mod tests {
     /// children were laid out via `layout_block_element` (block path), which never
     /// emitted controls, so buttons/inputs inside `display:flex` painted but were
     /// dead to hit-testing (the React demo's counter / todo controls).
+    #[test]
+    fn balanced_text_evens_out_its_lines() {
+        // Two lines either way; balanced they should come out close to the same
+        // length instead of one full line and a short tail. firefox.com's hero
+        // heading is written this way and breaks 8/8/7 in a browser.
+        let source = "<html><body><div style=\"width:600px;font-size:32px;TEXTWRAP\">                      The quick brown fox jumps over the lazy dog again and again today                      </div></body></html>";
+        let plain = probe_layout(&source.replace("TEXTWRAP", ""), 800);
+        let balanced = probe_layout(&source.replace("TEXTWRAP", "text-wrap:balance"), 800);
+
+        let widths = |layout: &super::LayoutDocument| -> Vec<u32> {
+            layout
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    super::DrawCommand::Text(text) => Some(text.width),
+                    _ => None,
+                })
+                .collect()
+        };
+        let plain_widths = widths(&plain);
+        let balanced_widths = widths(&balanced);
+
+        assert_eq!(
+            plain_widths.len(),
+            balanced_widths.len(),
+            "balancing must not change the line count"
+        );
+        assert!(plain_widths.len() >= 2, "the sample has to wrap: {plain_widths:?}");
+
+        let spread = |w: &[u32]| w.iter().max().copied().unwrap_or(0) - w.iter().min().copied().unwrap_or(0);
+        assert!(
+            spread(&balanced_widths) < spread(&plain_widths),
+            "balanced lines should be closer in length: {balanced_widths:?} vs {plain_widths:?}"
+        );
+    }
+
     #[test]
     fn a_wrapping_flex_container_still_justifies_each_line() {
         // `flex-wrap: wrap` used to drop justify-content entirely, so
