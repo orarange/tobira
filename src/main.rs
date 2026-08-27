@@ -159,7 +159,7 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                         // Padding and margin decide most of a page's spacing, and
                         // reading them back from a stylesheet is guesswork once
                         // shorthands, logical names and the cascade are in play.
-                        "{}<{} class=\"{}\" display={:?} position={:?} bg={} color={:#08x} fs={} opacity={} pad={},{},{},{} mar={},{},{},{} minh={} style=\"{}\">{}",
+                        "{}<{} class=\"{}\" display={:?} position={:?} bg={} color={:#08x} fs={} opacity={} pad={},{},{},{} mar={},{},{},{} minh={} mask={} style=\"{}\">{}",
                         "  ".repeat(depth),
                         e.tag_name,
                         cls,
@@ -185,6 +185,9 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                         e.style.margin.bottom,
                         e.style.margin.left,
                         e.style.min_height,
+                        // "the rule never matched" vs "it matched and the image
+                        // never arrived" look identical on screen.
+                        e.style.mask_image_url.as_deref().unwrap_or("-"),
                         inline,
                         if matches!(e.style.display, Display::None) { "  [none]" } else if e.style.opacity == 0 { "  [OPACITY:0]" } else { "" },
                     );

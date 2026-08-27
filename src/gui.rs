@@ -5213,8 +5213,13 @@ fn apply_affine_transform(buf: &mut [u32], width: u32, height: u32, layer: &Laye
     let ox = layer.origin_x as f32 / 1000.0 * width as f32;
     let oy = layer.origin_y as f32 / 1000.0 * height as f32;
 
-    // Build a scratch buffer for the result
-    let mut result = vec![0u32; w * h];
+    // Start from what is already there -- the backdrop copied in before the
+    // layer's own commands were drawn. A scale below 1 leaves a ring of pixels
+    // no source pixel maps onto, and filling that ring with zero paints it
+    // black: firefox.com scales its nav chevrons to .8, so every menu label had
+    // a black square beside it. Keeping the backdrop there shows the page
+    // behind, which is what the uncovered area should show.
+    let mut result = buf.to_vec();
 
     for dy in 0..h {
         for dx in 0..w {
@@ -5236,7 +5241,7 @@ fn apply_affine_transform(buf: &mut [u32], width: u32, height: u32, layer: &Laye
             if ix >= 0 && iy >= 0 && (ix as usize) < w && (iy as usize) < h {
                 result[dy * w + dx] = buf[iy as usize * w + ix as usize];
             }
-            // Out-of-bounds → transparent (0) — already set by vec init
+            // Out-of-bounds → leave the backdrop `result` was seeded with.
         }
     }
 
