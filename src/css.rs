@@ -4915,6 +4915,12 @@ fn pseudo_class_is_ignorable(name: &str) -> bool {
             | "matches"
             | "any"
             | "any-link"
+            // Every link this renders is an unvisited one -- there is no
+            // history to consult -- so `:link` holds for all of them.
+            // `:visited` is deliberately *not* here: nothing has been visited,
+            // so a rule scoped to it should not apply, and dropping the
+            // selector is how that gets said.
+            | "link"
             | "scope"
             | "dir"
             | "lang"
@@ -7491,6 +7497,34 @@ mod tests {
 
         assert_eq!(div.style.padding.top, 308);
         assert_eq!(div.style.padding.bottom, 64);
+    }
+
+    #[test]
+    fn a_link_pseudo_class_still_selects() {
+        // firefox.com styles its whole footer through
+        // `.fl-footer a:link:not(.fl-button)`. Dropped for the `:link`, every
+        // footer link kept the default blue underline instead of the white the
+        // page asks for.
+        let document = parse_document("<div class=\"f\"><a href=\"/x\">go</a></div>");
+        let stylesheet =
+            parse_stylesheet(".f a:link:not(.b) { color: #ffffff; text-decoration: none }");
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let link = find_first_element(&styled, "a").expect("a should exist");
+
+        assert_eq!(link.style.color, 0xFFFFFF);
+        assert!(!link.style.underline);
+    }
+
+    #[test]
+    fn a_visited_rule_does_not_apply_when_nothing_has_been_visited() {
+        let document = parse_document("<a href=\"/x\">go</a>");
+        let stylesheet = parse_stylesheet("a:visited { color: #ff0000 }");
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let link = find_first_element(&styled, "a").expect("a should exist");
+
+        assert_ne!(link.style.color, 0xFF0000, "no history means nothing is visited");
     }
 
     #[test]
