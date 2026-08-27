@@ -1410,6 +1410,7 @@ fn collect_stylesheet(document: &Node, base_url: &Url) -> Stylesheet {
             continue;
         };
         let css_text = decode_text_response(&response.body, response.header("content-type"));
+        let css_text = absolutize_css_urls(&css_text, &url);
         let mut sheet = parse_stylesheet(&css_text);
         if let Some(condition) = condition {
             sheet.apply_media(condition);
@@ -1443,6 +1444,58 @@ fn collect_style_blocks_into(node: &Node, output: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// Rewrite every relative `url(...)` in a stylesheet against the sheet's own
+/// address.
+///
+/// A `url()` in CSS is resolved against the stylesheet, not the document. Left
+/// relative and joined with the page's address later, a sheet served from
+/// somewhere else takes all its images down with it: firefox.com links its CSS
+/// from `www.firefox.com` and writes `url("/media/img/...")` inside, so a page
+/// read from anywhere else lost the wordmark, the fox, and every nav icon.
+fn absolutize_css_urls(css: &str, base: &Url) -> String {
+    let lower = css.to_ascii_lowercase();
+    let mut out = String::with_capacity(css.len());
+    let mut cursor = 0_usize;
+    while let Some(found) = lower[cursor..].find("url(") {
+        let open = cursor + found + "url(".len();
+        let Some(close) = css[open..].find(')') else {
+            break;
+        };
+        let close = open + close;
+        out.push_str(&css[cursor..open]);
+        let raw = css[open..close].trim();
+        // Keep the quoting style the author used; only the inside changes.
+        let (quote, inner) = match raw.chars().next() {
+            Some(q @ ('"' | '\'')) if raw.len() >= 2 && raw.ends_with(q) => {
+                (Some(q), &raw[1..raw.len() - 1])
+            }
+            _ => (None, raw),
+        };
+        // `data:` carries the image itself, and a fragment points inside this
+        // very document (an SVG filter, say) -- neither is a place to fetch.
+        let rewritten = if inner.is_empty()
+            || inner.starts_with("data:")
+            || inner.starts_with('#')
+        {
+            None
+        } else {
+            base.resolve(inner).ok().map(|resolved| resolved.to_string())
+        };
+        match (rewritten, quote) {
+            (Some(value), Some(q)) => {
+                out.push(q);
+                out.push_str(&value);
+                out.push(q);
+            }
+            (Some(value), None) => out.push_str(&value),
+            (None, _) => out.push_str(&css[open..close]),
+        }
+        cursor = close;
+    }
+    out.push_str(&css[cursor..]);
+    out
 }
 
 fn collect_stylesheet_links(document: &Node) -> Vec<(String, Option<String>)> {
@@ -3418,6 +3471,42 @@ fn collect_raw_text_into(node: &Node, output: &mut String) {
                 collect_raw_text_into(child, output);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod css_url_tests {
+    use super::absolutize_css_urls;
+    use crate::url::Url;
+
+    #[test]
+    fn a_stylesheets_urls_resolve_against_the_stylesheet() {
+        let sheet = Url::parse("https://cdn.example.com/css/site.css").expect("sheet url");
+        let css = concat!(
+            ".a{background:url(\"/media/img/fox.svg\")}",
+            ".b{mask:url(icons/chevron.svg)}",
+            ".c{background:url('data:image/svg+xml,<svg/>')}",
+            ".d{background:url(https://other.example/x.png)}",
+            ".e{filter:url(#blur)}",
+        );
+
+        let out = absolutize_css_urls(css, &sheet);
+
+        assert!(out.contains("\"https://cdn.example.com/media/img/fox.svg\""), "{out}");
+        assert!(out.contains("url(https://cdn.example.com/css/icons/chevron.svg)"), "{out}");
+        // Neither of these names a place to fetch from.
+        assert!(out.contains("'data:image/svg+xml,<svg/>'"), "{out}");
+        assert!(out.contains("url(#blur)"), "{out}");
+        // Already absolute, and left alone.
+        assert!(out.contains("url(https://other.example/x.png)"), "{out}");
+    }
+
+    #[test]
+    fn a_sheet_without_urls_comes_back_unchanged() {
+        let sheet = Url::parse("https://cdn.example.com/css/site.css").expect("sheet url");
+        let css = "body { color: red } /* url is only mentioned here */";
+
+        assert_eq!(absolutize_css_urls(css, &sheet), css);
     }
 }
 
