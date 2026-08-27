@@ -438,8 +438,30 @@ impl Document {
         let mut stack: Vec<(usize, State)> = vec![(0, State::root(root))];
         let mut shapes = Vec::new();
         let mut segments = 0usize;
+        // Depth of the nearest definition container still open above us, if
+        // any. Everything inside one is a definition, not a drawing.
+        let mut inside_definitions: Option<usize> = None;
 
         for element in &self.elements {
+            if let Some(depth) = inside_definitions {
+                if element.depth > depth {
+                    continue;
+                }
+                inside_definitions = None;
+            }
+            // `<defs>` and friends hold shapes that exist to be referred to --
+            // a clip outline, a mask, a pattern tile. Drawn as if they were
+            // content, they land on top of everything: firefox.com's keyhole
+            // illustration ends with its own `<clipPath>`, a white rounded
+            // rectangle the size of the whole picture, and that white
+            // rectangle was the picture.
+            if matches!(
+                element.name.as_str(),
+                "defs" | "clippath" | "mask" | "pattern" | "symbol" | "marker"
+            ) {
+                inside_definitions = Some(element.depth);
+                continue;
+            }
             while stack.len() > 1 && stack.last().is_some_and(|(d, _)| *d >= element.depth) {
                 stack.pop();
             }
@@ -1535,6 +1557,23 @@ mod tests {
     /// reported as undecodable -- the page then showed the image's `alt` text.
     /// Every pictogram on firefox.com's front page read out as
     /// "Shield_Balanced" and the like where a picture belonged.
+    #[test]
+    fn a_shape_inside_a_definition_is_not_drawn() {
+        // The outline in a `<clipPath>` exists to be referred to. Drawn as
+        // content it lands on top: firefox.com's keyhole picture ends with a
+        // white rounded rectangle the size of the whole thing, and that white
+        // rectangle was all that came out.
+        let image = rasterize(
+            "<svg viewBox='0 0 10 10'>             <rect width='10' height='10' fill='#0000ff'/>             <defs><clipPath id='c'>             <rect width='10' height='10' fill='#ffffff'/>             </clipPath></defs></svg>",
+        )
+        .expect("the drawing must produce an image");
+
+        let middle = (image.height as usize / 2 * image.width as usize + image.width as usize / 2) * 4;
+        let pixel = &image.rgba[middle..middle + 4];
+
+        assert!(pixel[2] > pixel[0], "the blue rect should still show: {pixel:?}");
+    }
+
     #[test]
     fn a_gradient_fill_shades_across_the_shape() {
         let image = rasterize(
