@@ -2760,9 +2760,15 @@ fn collect_pseudo_content(
     interactive: &InteractiveState,
 ) -> Option<(String, ComputedStyle)> {
     let identity = ElementIdentity::from(element);
-    // Inherit from the host element so pseudo-elements pick up color, font-size, etc.
-    // CSS requires pseudo-elements to inherit from their originating element.
-    let mut pseudo_style = host_style.clone();
+    // A pseudo-element inherits from its host, which is not the same as being a
+    // copy of it: `display`, `position`, `background`, the box edges and the
+    // rest do not inherit. Cloned outright, a `::before` on a flex container
+    // came out `display: flex` itself, and firefox.com's background gradient --
+    // a `::before` on a flex row -- took a paint path that never drew it.
+    //
+    // Built as an anonymous inline with the host as its parent, so exactly the
+    // inheritable properties come through.
+    let mut pseudo_style = ComputedStyle::for_element("span", Some(host_style));
     let mut content_text: Option<String> = None;
     // A pseudo-element resolves `var()` against the same set its host does:
     // the document's `:root` block, whatever a matching `@media` adds to it,
@@ -4207,6 +4213,36 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         "z-index" => {
             if let Ok(n) = value.trim().parse::<i32>() {
                 style.z_index = Some(n);
+            }
+        }
+        // The four offsets in one, the same 1-to-4 value pattern `margin` uses.
+        // Unhandled, firefox.com's background gradient had no position at all:
+        // it is placed entirely by `inset: calc(70vh / -1.5) -30vw auto`.
+        "inset" => {
+            let parts = split_value_components(value);
+            let (top, right, bottom, left) = match parts.len() {
+                0 => return,
+                1 => (0, 0, 0, 0),
+                2 => (0, 1, 0, 1),
+                3 => (0, 1, 2, 1),
+                _ => (0, 1, 2, 3),
+            };
+            let pick = |index: usize| parts.get(index).map(String::as_str).unwrap_or(&parts[0]);
+            for (property, raw) in [
+                ("top", pick(top)),
+                ("right", pick(right)),
+                ("bottom", pick(bottom)),
+                ("left", pick(left)),
+            ] {
+                apply_declaration(
+                    style,
+                    &Declaration {
+                        property: property.to_string(),
+                        value: raw.to_string(),
+                        important: declaration.important,
+                    },
+                    parent_font_size,
+                );
             }
         }
         "top" => { style.top = parse_offset(value, parent_font_size); }
@@ -7545,6 +7581,57 @@ mod tests {
         let link = find_first_element(&styled, "a").expect("a should exist");
 
         assert_ne!(link.style.color, 0xFF0000, "no history means nothing is visited");
+    }
+
+    #[test]
+    fn inset_sets_all_four_offsets() {
+        let document = parse_document("<div>x</div>");
+        let stylesheet = parse_stylesheet("div { position: absolute; inset: 10px 20px 30px 40px }");
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").expect("div should exist");
+
+        assert_eq!(div.style.top, Some(LengthValue::Pixels(10)));
+        assert_eq!(div.style.right, Some(LengthValue::Pixels(20)));
+        assert_eq!(div.style.bottom, Some(LengthValue::Pixels(30)));
+        assert_eq!(div.style.left, Some(LengthValue::Pixels(40)));
+    }
+
+    #[test]
+    fn inset_repeats_its_values_the_way_margin_does() {
+        let document = parse_document("<div>x</div>");
+        let stylesheet = parse_stylesheet("div { position: absolute; inset: 5px 15px }");
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let div = find_first_element(&styled, "div").expect("div should exist");
+
+        assert_eq!(div.style.top, Some(LengthValue::Pixels(5)));
+        assert_eq!(div.style.bottom, Some(LengthValue::Pixels(5)));
+        assert_eq!(div.style.left, Some(LengthValue::Pixels(15)));
+        assert_eq!(div.style.right, Some(LengthValue::Pixels(15)));
+    }
+
+    #[test]
+    fn a_pseudo_element_inherits_rather_than_copies() {
+        // `display` does not inherit. Copied from the host, a `::before` on a
+        // flex row became a flex container itself and took a paint path that
+        // never drew its background -- which is how firefox.com lost the
+        // gradient over the whole lower half of its front page.
+        let document = parse_document("<div class=\"row\">x</div>");
+        let stylesheet = parse_stylesheet(
+            ".row { display: flex; color: #00ff00 }              .row::before { content: \"\"; background: linear-gradient(#ff0000, #ff0000) }",
+        );
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let row = find_first_element(&styled, "div").expect("div should exist");
+        let StyledNode::Element(pseudo) = &row.children[0] else {
+            panic!("the ::before should have become a box");
+        };
+
+        assert_ne!(pseudo.style.display, Display::Flex, "display must not be inherited");
+        // Colour does inherit, and the pseudo's own rules still apply.
+        assert_eq!(pseudo.style.color, 0x00FF00);
+        assert!(pseudo.style.background_gradient.is_some());
     }
 
     #[test]
