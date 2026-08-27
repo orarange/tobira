@@ -53,6 +53,39 @@ fn outer_x_with_auto_margins(
     offset_x_by_margin(container_x, style.margin.left)
 }
 
+/// The top margin a block takes over from its first child, or 0 when the two
+/// are kept apart.
+///
+/// They are kept apart by a border or padding along the top edge, and by
+/// anything that lays its children out itself -- a flex or grid container places
+/// its items rather than stacking them, and a scrolling box holds its contents
+/// inside.
+fn hoisted_first_child_margin(element: &StyledElement) -> i32 {
+    let separated = element.style.padding.top > 0
+        || (!element.style.border_style_none && element.style.border.top > 0)
+        || !matches!(element.style.overflow, Overflow::Visible)
+        || !matches!(element.style.display, Display::Block | Display::ListItem);
+    if separated {
+        return 0;
+    }
+    element
+        .children
+        .iter()
+        .find_map(|child| match child {
+            StyledNode::Element(child)
+                if child.style.display != Display::None
+                    && matches!(child.style.position, Position::Static | Position::Relative)
+                    && matches!(child.style.float, FloatSide::None) =>
+            {
+                Some(child.style.margin.top)
+            }
+            // Text before the first element keeps the two apart.
+            StyledNode::Text(text) if !text.text.trim().is_empty() => Some(0),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
 /// Two adjoining vertical margins make one gap: the largest positive plus the
 /// most negative, which for two positives is simply the larger of them.
 ///
@@ -1561,9 +1594,20 @@ fn layout_block_element(
 
     // The previous sibling's bottom margin is already in the cursor, so only
     // the part this block's top margin adds beyond it is applied.
+    //
+    // Nothing separates a block's top edge from its first child's when there is
+    // no border and no padding between them, so their top margins are one and
+    // the same gap and it lands above the parent. Kept inside, the child was
+    // pushed down within a box that had already started: firefox.com's front
+    // page headline sat 32px below the top of the group that holds it, and the
+    // group was 32px taller than a browser makes it.
+    let hoisted_child_margin = hoisted_first_child_margin(element);
     let pending_margin = std::mem::take(&mut context.last_bottom_margin);
-    let collapsed = collapse_margins(pending_margin, element.style.margin.top);
+    let own_top = collapse_margins(element.style.margin.top, hoisted_child_margin);
+    let collapsed = collapse_margins(pending_margin, own_top);
     *cursor_y = advance_by_margin(*cursor_y, collapsed - pending_margin);
+    // Spent above the parent, so the child must not add it again.
+    context.last_bottom_margin = hoisted_child_margin;
 
     // Resolve explicit width from style.width (LengthValue → px)
     let explicit_width: Option<u32> = settled_main_size.or_else(|| element.style.width.map(|w| match w {
@@ -9223,6 +9267,36 @@ mod tests {
             first.y + first.height + 30,
             "the larger of the two margins is the gap"
         );
+    }
+
+    /// Nothing separates a block's top edge from its first child's when there is
+    /// no border and no padding between them, so their top margins are one gap
+    /// and it lands above the parent. Kept inside, the child was pushed down
+    /// within a box that had already started.
+    #[test]
+    fn a_blocks_top_margin_collapses_with_its_first_childs() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="background:#bb0017"><div style="height:20px;margin-top:40px;background:#bb0018"></div></div></body></html>"#,
+            400,
+        );
+        let parent = probe_rect(&l, 0xBB0017).expect("parent");
+        let child = probe_rect(&l, 0xBB0018).expect("child");
+        assert_eq!(parent.y, 40, "the gap lands above the parent");
+        assert_eq!(child.y, parent.y, "and the child sits at its top edge");
+    }
+
+    /// Padding along the top edge keeps the two apart, and then the child's
+    /// margin stays inside.
+    #[test]
+    fn padding_stops_the_top_margins_collapsing() {
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="padding-top:5px;background:#bb0019"><div style="height:20px;margin-top:40px;background:#bb001a"></div></div></body></html>"#,
+            400,
+        );
+        let parent = probe_rect(&l, 0xBB0019).expect("parent");
+        let child = probe_rect(&l, 0xBB001A).expect("child");
+        assert_eq!(parent.y, 0, "the parent starts where it always did");
+        assert_eq!(child.y, 45, "5px of padding, then the child's own 40px");
     }
 
     /// A negative margin survives the collapse: the rule is the largest positive
