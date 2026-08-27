@@ -25,6 +25,44 @@ const WINDOWS_SANS_FONT_FILES: &[&str] = &[
     "seguiemj.ttf",
 ];
 
+/// The bold cut of each face above, in the same order.
+///
+/// Faking bold by smearing a regular glyph is a poor stand-in for a face that
+/// was actually drawn heavy -- most visibly for Japanese, where Yu Gothic
+/// Regular is very light and its bold cut is a different design, not a fattened
+/// one. firefox.com's hero heading came out lighter than the paragraph under
+/// it. Anything with no bold cut installed falls back to the regular stack and
+/// the smear.
+const WINDOWS_SANS_BOLD_FONT_FILES: &[&str] = &[
+    "segoeuib.ttf",
+    "YuGothB.ttc",
+    "meiryob.ttc",
+    "arialbd.ttf",
+    "seguisym.ttf",
+    "seguiemj.ttf",
+];
+
+const WINDOWS_MONOSPACE_BOLD_FONT_FILES: &[&str] =
+    &["consolab.ttf", "CascadiaMono.ttf", "msgothic.ttc", "courbd.ttf"];
+
+const WINDOWS_SERIF_BOLD_FONT_FILES: &[&str] = &["georgiab.ttf", "timesbd.ttf"];
+
+const UNIX_SANS_BOLD_FONT_PATHS: &[&str] = &[
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+];
+
+const UNIX_MONOSPACE_BOLD_FONT_PATHS: &[&str] = &[
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationMono-Bold.ttf",
+];
+
+const UNIX_SERIF_BOLD_FONT_PATHS: &[&str] = &[
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf",
+];
+
 const WINDOWS_MONOSPACE_FONT_FILES: &[&str] = &[
     "consola.ttf",
     "CascadiaMono.ttf",
@@ -55,6 +93,14 @@ const UNIX_SERIF_FONT_PATHS: &[&str] = &[
     "/Library/Fonts/Times New Roman.ttf",
 ];
 
+/// How far to smear a glyph sideways to fake a bold face, in pixels.
+///
+/// Roughly a 24th of the type size, which is about the difference between a
+/// regular and a bold stem in most faces, and never less than one pixel.
+fn synthetic_bold_smear(font_size_px: u32) -> u32 {
+    (font_size_px / 24).max(1)
+}
+
 pub struct FontContext {
     sans_fonts: Vec<Font>,
     monospace_fonts: Vec<Font>,
@@ -62,6 +108,15 @@ pub struct FontContext {
     sans_pending: VecDeque<PathBuf>,
     monospace_pending: VecDeque<PathBuf>,
     serif_pending: VecDeque<PathBuf>,
+    /// The bold cuts, loaded the same way and only when something asks for
+    /// bold. A family with none installed leaves its stack empty and the
+    /// regular one is smeared instead.
+    sans_bold_fonts: Vec<Font>,
+    monospace_bold_fonts: Vec<Font>,
+    serif_bold_fonts: Vec<Font>,
+    sans_bold_pending: VecDeque<PathBuf>,
+    monospace_bold_pending: VecDeque<PathBuf>,
+    serif_bold_pending: VecDeque<PathBuf>,
     glyph_cache: HashMap<GlyphKey, CachedGlyph>,
     line_metrics_cache: HashMap<(FontFamilyKind, u32), CachedLineMetrics>,
 }
@@ -71,6 +126,7 @@ struct GlyphKey {
     character: char,
     font_size_px: u32,
     font_family: FontFamilyKind,
+    bold: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +134,9 @@ struct CachedGlyph {
     advance_px: u32,
     ascent_px: i32,
     mode: GlyphMode,
+    /// Set when bold was asked for and no bold cut had this character, so the
+    /// regular glyph is standing in and still needs smearing.
+    synthetic_bold: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -111,9 +170,18 @@ impl FontContext {
             sans_fonts: Vec::new(),
             monospace_fonts: Vec::new(),
             serif_fonts: Vec::new(),
-            sans_pending: VecDeque::from(font_candidates(FontFamilyKind::Sans)),
-            monospace_pending: VecDeque::from(font_candidates(FontFamilyKind::Monospace)),
-            serif_pending: VecDeque::from(font_candidates(FontFamilyKind::Serif)),
+            sans_pending: VecDeque::from(font_candidates(FontFamilyKind::Sans, false)),
+            monospace_pending: VecDeque::from(font_candidates(FontFamilyKind::Monospace, false)),
+            serif_pending: VecDeque::from(font_candidates(FontFamilyKind::Serif, false)),
+            sans_bold_fonts: Vec::new(),
+            monospace_bold_fonts: Vec::new(),
+            serif_bold_fonts: Vec::new(),
+            sans_bold_pending: VecDeque::from(font_candidates(FontFamilyKind::Sans, true)),
+            monospace_bold_pending: VecDeque::from(font_candidates(
+                FontFamilyKind::Monospace,
+                true,
+            )),
+            serif_bold_pending: VecDeque::from(font_candidates(FontFamilyKind::Serif, true)),
             glyph_cache: HashMap::new(),
             line_metrics_cache: HashMap::new(),
         }
@@ -182,14 +250,38 @@ impl FontContext {
                 continue;
             }
 
-            let glyph = self.cached_glyph(character, font_size_px, font_family);
+            // Stepped by the regular cut's advance, not the bold one's. Layout
+            // measured this run before anything knew it would be drawn bold,
+            // and a wider step here would walk the text out of the box it was
+            // given.
+            let advance = self.glyph_advance_px(character, font_size_px, font_family);
+            let glyph = self.cached_glyph(character, font_size_px, font_family, bold);
+            let smear = glyph.synthetic_bold;
             draw_cached_glyph(buffer, width, height, cursor_x, y, glyph, color, clip_top);
 
-            if bold {
-                draw_cached_glyph(buffer, width, height, cursor_x + 1, y, glyph, color, clip_top);
+            if smear {
+                // Bold is faked by smearing the glyph sideways, and the smear
+                // has to grow with the type. Fixed at one pixel it reads as
+                // bold at body size and vanishes at display size: firefox.com
+                // sets its hero heading in 80px bold, and one pixel on a stem
+                // that wants four left it looking lighter than the paragraph
+                // below it. Every offset in between is drawn so the stem fills
+                // rather than splits.
+                for offset in 1..=synthetic_bold_smear(font_size_px) as i32 {
+                    draw_cached_glyph(
+                        buffer,
+                        width,
+                        height,
+                        cursor_x + offset,
+                        y,
+                        glyph,
+                        color,
+                        clip_top,
+                    );
+                }
             }
 
-            cursor_x = cursor_x.saturating_add(glyph.advance_px as i32);
+            cursor_x = cursor_x.saturating_add(advance as i32);
         }
 
         if underline && !text.is_empty() {
@@ -233,7 +325,9 @@ impl FontContext {
         font_size_px: u32,
         font_family: FontFamilyKind,
     ) -> u32 {
-        self.cached_glyph(character, font_size_px, font_family)
+        // Measurement always uses the regular cut: layout is done before
+        // anything knows a run will be drawn bold, and the two have to agree.
+        self.cached_glyph(character, font_size_px, font_family, false)
             .advance_px
     }
 
@@ -267,9 +361,11 @@ impl FontContext {
             return *metrics;
         }
 
-        self.ensure_family_loaded(font_family);
+        // Metrics come off the regular cut even when bold is drawn: the
+        // baseline layout measured with has to be the baseline painted on.
+        self.ensure_family_loaded(font_family, false);
         let metrics = self
-            .fonts_for(font_family)
+            .fonts_for(font_family, false)
             .iter()
             .find_map(|font| {
                 font.horizontal_line_metrics(font_size_px as f32)
@@ -290,15 +386,17 @@ impl FontContext {
         character: char,
         font_size_px: u32,
         font_family: FontFamilyKind,
+        bold: bool,
     ) -> &CachedGlyph {
         let key = GlyphKey {
             character,
             font_size_px,
             font_family,
+            bold,
         };
 
         if !self.glyph_cache.contains_key(&key) {
-            let glyph = self.rasterize_glyph(character, font_size_px, font_family);
+            let glyph = self.rasterize_glyph(character, font_size_px, font_family, bold);
             self.glyph_cache.insert(key, glyph);
         }
 
@@ -312,6 +410,7 @@ impl FontContext {
         character: char,
         font_size_px: u32,
         font_family: FontFamilyKind,
+        bold: bool,
     ) -> CachedGlyph {
         let ascent_px = self.line_metrics(font_size_px, font_family).ascent_px;
 
@@ -323,6 +422,7 @@ impl FontContext {
             return CachedGlyph {
                 advance_px: 0,
                 ascent_px,
+                synthetic_bold: false,
                 mode: GlyphMode::Vector {
                     width: 0,
                     height: 0,
@@ -333,11 +433,21 @@ impl FontContext {
             };
         }
 
-        self.ensure_font_for(character, font_family);
+        // Bold first; a family with no bold cut, or one whose bold cut lacks
+        // this character, drops through to the regular stack and is smeared.
+        let mut synthetic_bold = bold;
+        if bold {
+            self.ensure_font_for(character, font_family, true);
+            if self.fonts_for(font_family, true).iter().any(|font| font.has_glyph(character)) {
+                synthetic_bold = false;
+            }
+        }
+        let stack_is_bold = bold && !synthetic_bold;
+        self.ensure_font_for(character, font_family, stack_is_bold);
 
         let fallback_advance = estimated_glyph_advance_px(character, font_size_px, font_family);
 
-        for font in self.fonts_for(font_family) {
+        for font in self.fonts_for(font_family, stack_is_bold) {
             if !font.has_glyph(character) {
                 continue;
             }
@@ -353,6 +463,7 @@ impl FontContext {
                 return CachedGlyph {
                     advance_px,
                     ascent_px,
+                    synthetic_bold,
                     mode: GlyphMode::Vector {
                         width: 0,
                         height: 0,
@@ -366,6 +477,7 @@ impl FontContext {
             return CachedGlyph {
                 advance_px,
                 ascent_px,
+                synthetic_bold,
                 mode: GlyphMode::Vector {
                     width: metrics.width as u32,
                     height: metrics.height as u32,
@@ -386,16 +498,25 @@ impl FontContext {
         CachedGlyph {
             advance_px: fallback_advance,
             ascent_px,
+            synthetic_bold,
             mode: GlyphMode::Bitmap { glyph, scale },
         }
     }
 
-    fn fonts_for(&self, font_family: FontFamilyKind) -> &[Font] {
-        let fonts = match font_family {
-            FontFamilyKind::Sans => &self.sans_fonts,
-            FontFamilyKind::Serif => &self.serif_fonts,
-            FontFamilyKind::Monospace => &self.monospace_fonts,
+    fn fonts_for(&self, font_family: FontFamilyKind, bold: bool) -> &[Font] {
+        let fonts = match (font_family, bold) {
+            (FontFamilyKind::Sans, false) => &self.sans_fonts,
+            (FontFamilyKind::Sans, true) => &self.sans_bold_fonts,
+            (FontFamilyKind::Serif, false) => &self.serif_fonts,
+            (FontFamilyKind::Serif, true) => &self.serif_bold_fonts,
+            (FontFamilyKind::Monospace, false) => &self.monospace_fonts,
+            (FontFamilyKind::Monospace, true) => &self.monospace_bold_fonts,
         };
+        // A bold stack that came up empty is not backfilled with sans: the
+        // caller retries on the regular stack and smears instead.
+        if bold {
+            return fonts;
+        }
         // A family with no installed candidate borrows sans rather than holding
         // a copy of it: cloning a `fontdue::Font` would duplicate tens of MB.
         if fonts.is_empty() {
@@ -407,16 +528,8 @@ impl FontContext {
 
     /// Read this family's first available font if it has none yet. Callers that
     /// only need metrics (rather than a specific glyph) go through here.
-    fn ensure_family_loaded(&mut self, font_family: FontFamilyKind) {
-        let (fonts, pending) = Self::family_slots(
-            font_family,
-            &mut self.sans_fonts,
-            &mut self.monospace_fonts,
-            &mut self.serif_fonts,
-            &mut self.sans_pending,
-            &mut self.monospace_pending,
-            &mut self.serif_pending,
-        );
+    fn ensure_family_loaded(&mut self, font_family: FontFamilyKind, bold: bool) {
+        let (fonts, pending) = self.slots(font_family, bold);
         if !fonts.is_empty() {
             return;
         }
@@ -427,35 +540,36 @@ impl FontContext {
             }
         }
         // Nothing installed for this family: fall back to sans, which
-        // `fonts_for` will hand out.
-        if font_family != FontFamilyKind::Sans {
-            self.ensure_family_loaded(FontFamilyKind::Sans);
+        // `fonts_for` will hand out. A bold stack is left empty instead --
+        // borrowing regular sans would lose the family, and the caller has a
+        // smear to fall back on.
+        if font_family != FontFamilyKind::Sans && !bold {
+            self.ensure_family_loaded(FontFamilyKind::Sans, false);
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn family_slots<'a>(
-        font_family: FontFamilyKind,
-        sans: &'a mut Vec<Font>,
-        monospace: &'a mut Vec<Font>,
-        serif: &'a mut Vec<Font>,
-        sans_pending: &'a mut VecDeque<PathBuf>,
-        monospace_pending: &'a mut VecDeque<PathBuf>,
-        serif_pending: &'a mut VecDeque<PathBuf>,
-    ) -> (&'a mut Vec<Font>, &'a mut VecDeque<PathBuf>) {
-        match font_family {
-            FontFamilyKind::Sans => (sans, sans_pending),
-            FontFamilyKind::Serif => (serif, serif_pending),
-            FontFamilyKind::Monospace => (monospace, monospace_pending),
+    fn slots(&mut self, font_family: FontFamilyKind, bold: bool)
+    -> (&mut Vec<Font>, &mut VecDeque<PathBuf>) {
+        match (font_family, bold) {
+            (FontFamilyKind::Sans, false) => (&mut self.sans_fonts, &mut self.sans_pending),
+            (FontFamilyKind::Sans, true) => {
+                (&mut self.sans_bold_fonts, &mut self.sans_bold_pending)
+            }
+            (FontFamilyKind::Serif, false) => (&mut self.serif_fonts, &mut self.serif_pending),
+            (FontFamilyKind::Serif, true) => {
+                (&mut self.serif_bold_fonts, &mut self.serif_bold_pending)
+            }
+            (FontFamilyKind::Monospace, false) => {
+                (&mut self.monospace_fonts, &mut self.monospace_pending)
+            }
+            (FontFamilyKind::Monospace, true) => {
+                (&mut self.monospace_bold_fonts, &mut self.monospace_bold_pending)
+            }
         }
     }
 
-    fn ensure_font_for(&mut self, character: char, font_family: FontFamilyKind) {
-        let (fonts, pending) = match font_family {
-            FontFamilyKind::Sans => (&mut self.sans_fonts, &mut self.sans_pending),
-            FontFamilyKind::Serif => (&mut self.serif_fonts, &mut self.serif_pending),
-            FontFamilyKind::Monospace => (&mut self.monospace_fonts, &mut self.monospace_pending),
-        };
+    fn ensure_font_for(&mut self, character: char, font_family: FontFamilyKind, bold: bool) {
+        let (fonts, pending) = self.slots(font_family, bold);
 
         if fonts.iter().any(|font| font.has_glyph(character)) {
             return;
@@ -476,7 +590,7 @@ impl FontContext {
 
         // This family cannot draw the character; sans is the shared fallback.
         if !found && font_family != FontFamilyKind::Sans {
-            self.ensure_font_for(character, FontFamilyKind::Sans);
+            self.ensure_font_for(character, FontFamilyKind::Sans, bold);
         }
     }
 }
@@ -510,25 +624,31 @@ pub fn estimated_glyph_advance_px(
     }
 }
 
-fn font_candidates(font_family: FontFamilyKind) -> Vec<PathBuf> {
+fn font_candidates(font_family: FontFamilyKind, bold: bool) -> Vec<PathBuf> {
     if cfg!(target_os = "windows") {
         let windows_root = std::env::var_os("WINDIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("C:\\Windows"));
         let fonts_dir = windows_root.join("Fonts");
-        let files = match font_family {
-            FontFamilyKind::Sans => WINDOWS_SANS_FONT_FILES,
-            FontFamilyKind::Serif => WINDOWS_SERIF_FONT_FILES,
-            FontFamilyKind::Monospace => WINDOWS_MONOSPACE_FONT_FILES,
+        let files = match (font_family, bold) {
+            (FontFamilyKind::Sans, false) => WINDOWS_SANS_FONT_FILES,
+            (FontFamilyKind::Sans, true) => WINDOWS_SANS_BOLD_FONT_FILES,
+            (FontFamilyKind::Serif, false) => WINDOWS_SERIF_FONT_FILES,
+            (FontFamilyKind::Serif, true) => WINDOWS_SERIF_BOLD_FONT_FILES,
+            (FontFamilyKind::Monospace, false) => WINDOWS_MONOSPACE_FONT_FILES,
+            (FontFamilyKind::Monospace, true) => WINDOWS_MONOSPACE_BOLD_FONT_FILES,
         };
 
         return files.iter().map(|file| fonts_dir.join(file)).collect();
     }
 
-    let files = match font_family {
-        FontFamilyKind::Sans => UNIX_SANS_FONT_PATHS,
-        FontFamilyKind::Serif => UNIX_SERIF_FONT_PATHS,
-        FontFamilyKind::Monospace => UNIX_MONOSPACE_FONT_PATHS,
+    let files = match (font_family, bold) {
+        (FontFamilyKind::Sans, false) => UNIX_SANS_FONT_PATHS,
+        (FontFamilyKind::Sans, true) => UNIX_SANS_BOLD_FONT_PATHS,
+        (FontFamilyKind::Serif, false) => UNIX_SERIF_FONT_PATHS,
+        (FontFamilyKind::Serif, true) => UNIX_SERIF_BOLD_FONT_PATHS,
+        (FontFamilyKind::Monospace, false) => UNIX_MONOSPACE_FONT_PATHS,
+        (FontFamilyKind::Monospace, true) => UNIX_MONOSPACE_BOLD_FONT_PATHS,
     };
 
     files.iter().map(PathBuf::from).collect()
@@ -868,7 +988,7 @@ mod lazy_loading_tests {
     #[test]
     fn lazy_metrics_come_from_a_real_font() {
         let mut fonts = FontContext::load();
-        let has_any_candidate = font_candidates(FontFamilyKind::Sans)
+        let has_any_candidate = font_candidates(FontFamilyKind::Sans, false)
             .iter()
             .any(|path| path.is_file());
         if !has_any_candidate {
@@ -882,19 +1002,41 @@ mod lazy_loading_tests {
         assert!(metrics.ascent_px > 0 && metrics.ascent_px < 64);
     }
 
+    /// Bold asks for the bold cut first and only smears when there is none.
+    #[test]
+    fn bold_prefers_an_installed_bold_cut() {
+        let mut fonts = FontContext::load();
+        if !font_candidates(FontFamilyKind::Sans, true)
+            .iter()
+            .any(|path| path.is_file())
+        {
+            return; // no bold cut on this machine; the smear is all there is
+        }
+
+        let glyph = fonts.cached_glyph('A', 32, FontFamilyKind::Sans, true);
+        assert!(
+            !glyph.synthetic_bold,
+            "a bold cut is installed, so the regular glyph must not be standing in"
+        );
+
+        // The regular request keeps its own cache entry and its own stack.
+        let regular = fonts.cached_glyph('A', 32, FontFamilyKind::Sans, false);
+        assert!(!regular.synthetic_bold);
+    }
+
     /// A family with no installed candidate borrows sans rather than cloning it;
     /// cloning a `fontdue::Font` would duplicate tens of megabytes.
     #[test]
     fn empty_family_borrows_sans_without_copying() {
         let mut fonts = FontContext::load();
-        fonts.ensure_family_loaded(FontFamilyKind::Sans);
+        fonts.ensure_family_loaded(FontFamilyKind::Sans, false);
         if fonts.sans_fonts.is_empty() {
             return; // no system fonts available
         }
         fonts.serif_pending.clear();
         assert!(fonts.serif_fonts.is_empty());
         assert_eq!(
-            fonts.fonts_for(FontFamilyKind::Serif).len(),
+            fonts.fonts_for(FontFamilyKind::Serif, false).len(),
             fonts.sans_fonts.len(),
             "an empty family should hand out the sans list"
         );
