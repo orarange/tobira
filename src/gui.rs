@@ -5094,7 +5094,7 @@ fn start_render_worker(
 /// matched cost real time -- the same page measured 8813px tall on screen and
 /// 12711px in the dump, and every conclusion drawn from the dump about what was
 /// on screen was guesswork. This is the window's side of that comparison.
-fn dump_frame_if_asked(layout: &LayoutDocument, width: u32) {
+fn dump_frame_if_asked(layout: &LayoutDocument, styled: &StyledNode, width: u32) {
     let Ok(path) = std::env::var("TOBIRA_DUMP_FRAME") else {
         return;
     };
@@ -5106,6 +5106,36 @@ fn dump_frame_if_asked(layout: &LayoutDocument, width: u32) {
     for (index, command) in layout.commands.iter().enumerate() {
         let _ = writeln!(out, "  cmd[{index}] = {command:?}");
     }
+
+    // What script has written onto the DOM, which is where a page's own
+    // behaviour shows up. `--dump-styled` loads its own copy of the page and
+    // cannot see this: the carousel on firefox.com is sized and faded by its
+    // script writing inline styles, and nothing else says what state it is in.
+    let _ = writeln!(out, "
+=== elements with an inline style ===");
+    fn walk(node: &StyledNode, out: &mut String) {
+        use std::fmt::Write as _;
+        let StyledNode::Element(element) = node else {
+            return;
+        };
+        if let Some(inline) = element.attributes.get("style")
+            && !inline.trim().is_empty()
+        {
+            let class = element.attributes.get("class").map_or("", String::as_str);
+            let _ = writeln!(
+                out,
+                "  <{}> class={:?} opacity={} style={:?}",
+                element.tag_name,
+                class.split_whitespace().take(3).collect::<Vec<_>>().join("."),
+                element.style.opacity,
+                inline.chars().take(90).collect::<String>()
+            );
+        }
+        for child in &element.children {
+            walk(child, out);
+        }
+    }
+    walk(styled, &mut out);
     // Each frame overwrites the last, so the file holds what is on screen now
     // rather than whatever the first paint happened to look like.
     let _ = std::fs::write(&path, out);
@@ -5121,7 +5151,7 @@ fn render_content_frame(
         request.content_width,
         fonts,
     );
-    dump_frame_if_asked(&layout, request.content_width);
+    dump_frame_if_asked(&layout, &request.page.styled_document, request.content_width);
     let mut pixels = vec![
         layout.background_color;
         request.content_width as usize * request.viewport_height as usize
