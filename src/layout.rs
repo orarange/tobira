@@ -1550,7 +1550,25 @@ fn layout_block_element(
         LengthValue::Percent(pct) => (width as u64 * pct as u64 / 100).min(width as u64) as u32,
         LengthValue::MinContent => 0,
         LengthValue::MaxContent => width,
-        LengthValue::FitContent(max_px) => width.min(max_px),
+        // `fit-content` is the contents' own width, within what the container
+        // offers -- not the container's width. Treated as the latter, a box that
+        // asks to shrink filled the line instead: firefox.com sizes its carousel
+        // frame that way and it spanned the section rather than hugging the
+        // picture.
+        LengthValue::FitContent(cap) => {
+            let surround = element.style.padding.left
+                + element.style.padding.right
+                + if element.style.border_style_none {
+                    0
+                } else {
+                    element.style.border.left + element.style.border.right
+                };
+            measure_cell_preferred_width(element, 0, images, fonts)
+                .saturating_add(surround)
+                .min(cap)
+                .min(width)
+                .max(1)
+        }
         LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
         LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, width),
     }));
@@ -6530,8 +6548,16 @@ fn column_item_width(
     images: &ImageStore,
     fonts: &mut FontContext,
 ) -> u32 {
-    if let Some(width) = child.style.width {
-        return resolve_length_value(width, available).min(available).max(1);
+    // Only a definite width answers on its own. The content keywords are
+    // answered by measuring, which is what the branch below does.
+    match child.style.width {
+        Some(
+            width @ (LengthValue::Pixels(_)
+            | LengthValue::Percent(_)
+            | LengthValue::Calc { .. }
+            | LengthValue::Bounded { .. }),
+        ) => return resolve_length_value(width, available).min(available).max(1),
+        _ => {}
     }
     let surround = child.style.padding.left
         + child.style.padding.right
@@ -7529,6 +7555,45 @@ mod percentage_sizing_tests {
             centred[0].x,
             (600 - centred[0].width) / 2,
             "centred sits half the free space in: {centred:?}"
+        );
+    }
+
+    /// `width: fit-content` is the contents' own width, within what the
+    /// container offers -- not the container's width. Treated as the latter, a
+    /// box that asks to shrink filled the line instead.
+    #[test]
+    fn fit_content_shrinks_to_the_contents() {
+        let width_of = |css: &str| {
+            let doc = parse_document("<div style=\"width:800px\"><div class=\"b\">SHORT</div></div>");
+            let sheet = parse_stylesheet(css);
+            let styled = build_styled_tree(&doc, &sheet, 1280, &InteractiveState::default());
+            let mut fonts = FontContext::load();
+            let layout = layout_styled_document(&styled, &ImageStore::default(), 1280, &mut fonts);
+            layout
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    DrawCommand::Rect(rect) if rect.color == 0x00ff00 => Some(rect.width),
+                    _ => None,
+                })
+                .unwrap_or(0)
+        };
+        let filled = width_of(".b{background:#00ff00}");
+        let shrunk = width_of(".b{width:fit-content;background:#00ff00}");
+        assert_eq!(filled, 800, "control: a plain block fills its container");
+        assert!(
+            shrunk > 0 && shrunk < 200,
+            "fit-content hugs the word: {shrunk}"
+        );
+        assert_eq!(
+            width_of(".b{width:fit-content(4000px);background:#00ff00}"),
+            shrunk,
+            "a cap wider than the contents changes nothing"
+        );
+        assert_eq!(
+            width_of(".b{width:fit-content(10px);background:#00ff00}"),
+            10,
+            "a cap narrower than the contents holds"
         );
     }
 

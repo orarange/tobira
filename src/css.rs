@@ -6668,6 +6668,10 @@ fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue>
     let value = input.trim().to_ascii_lowercase();
     match value.as_str() {
         "min-content" => return Some(LengthValue::MinContent),
+        // The bare keyword, as against `fit-content(<length>)` below: as wide as
+        // the contents want, within what the container offers. `u32::MAX` is the
+        // "no stated cap" case of the same thing.
+        "fit-content" => return Some(LengthValue::FitContent(u32::MAX)),
         "max-content" => return Some(LengthValue::MaxContent),
         "auto" => return None,
         _ => {}
