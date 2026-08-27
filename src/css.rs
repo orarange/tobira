@@ -212,6 +212,17 @@ pub struct Rule {
 struct Selector {
     parts: Vec<SelectorPart>,
     pseudo_element: Option<PseudoElement>,
+    /// What this selector counts for, when that differs from what its parts add
+    /// up to.
+    ///
+    /// `:where()` matches like `:is()` but contributes nothing to specificity.
+    /// Splicing its argument in makes it match correctly and count wrongly, and
+    /// counting wrongly changes which rule wins: firefox.com ends its front-page
+    /// hero with `:where(:not(.conditional-display)) > .fl-intro:first-child`,
+    /// which a browser scores below the `.fl-home-intro .fl-intro:first-child`
+    /// written earlier. Scored above it, the later rule's `padding-block` put
+    /// 128px under the hero where 64px belongs.
+    specificity_override: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1273,6 +1284,44 @@ pub struct StyledText {
 /// Split `input` on `delimiter` but only at depth 0 (ignoring delimiters inside
 /// parentheses/brackets and quoted strings).  This prevents `:not(.a, .b)` from
 /// being split on the inner comma.
+/// The same selector with every `:where(...)` group taken out, for scoring.
+///
+/// A group at the start of a compound leaves a `*` behind so the result is still
+/// a selector; one after something else just goes.
+fn without_where_groups(selector: &str) -> String {
+    let mut out = selector.to_string();
+    loop {
+        let lower = out.to_ascii_lowercase();
+        let Some(start) = lower.find(":where(") else {
+            return out;
+        };
+        let mut depth = 0_usize;
+        let mut end = None;
+        for (index, character) in out[start..].char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(start + index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            return out;
+        };
+        let starts_compound = out[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|previous| matches!(previous, ' ' | '>' | '+' | '~' | ','));
+        let replacement = if starts_compound { "*" } else { "" };
+        out.replace_range(start..=end, replacement);
+    }
+}
+
 /// Rewrite `:is(...)` / `:where(...)` into a plain selector list.
 ///
 /// Both were listed as "ignorable" pseudo-classes, meaning always satisfied with
@@ -1619,8 +1668,24 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
 
         let selectors = split_at_top_level(selector_text, ',')
             .iter()
-            .flat_map(|s| expand_selector_groups(s.trim()))
-            .filter_map(|s| parse_selector(s.trim()))
+            .flat_map(|part| {
+                let part = part.trim();
+                // Scored from the selector as written, minus the groups that
+                // count for nothing -- the expansion below cannot tell them
+                // apart afterwards.
+                let override_score = part.to_ascii_lowercase().contains(":where(").then(|| {
+                    parse_selector(without_where_groups(part).trim())
+                        .map_or(0, |scored| scored.specificity())
+                });
+                expand_selector_groups(part)
+                    .into_iter()
+                    .map(move |expanded| (expanded, override_score))
+            })
+            .filter_map(|(expanded, override_score)| {
+                let mut selector = parse_selector(expanded.trim())?;
+                selector.specificity_override = override_score;
+                Some(selector)
+            })
             .collect::<Vec<_>>();
 
         if !selectors.is_empty() && !declarations.is_empty() {
@@ -2832,6 +2897,14 @@ fn compute_style_with_rules(
                 continue;
             }
         }
+        // A selector list is scored by the *most specific* selector in it that
+        // matches, not the first one written. firefox.com writes
+        // `.fl-home-intro .fl-intro, .fl-home-intro .fl-intro:first-child` and
+        // relies on the `:first-child` half's extra weight to hold its hero
+        // padding against a later rule; scored by the first half instead, the
+        // two tied and the later rule won, putting 128px under the hero where
+        // 64px belongs.
+        let mut matched: Option<(usize, &Selector)> = None;
         for selector in &rule.selectors {
             // Skip pseudo-element selectors (::before/::after) — they are handled
             // by collect_pseudo_content and must not apply to the host element.
@@ -2849,6 +2922,14 @@ fn compute_style_with_rules(
                 &child_identities,
                 interactive,
             ) {
+                let score = selector.specificity();
+                if matched.is_none_or(|(best, _)| score > best) {
+                    matched = Some((score, selector));
+                }
+            }
+        }
+        {
+            if let Some((specificity, _selector)) = matched {
                 // First pass: collect CSS variables
                 for decl in &rule.declarations {
                     if decl.property.starts_with("--") {
@@ -2869,13 +2950,12 @@ fn compute_style_with_rules(
                             } else {
                                 rank
                             },
-                            selector.specificity(),
+                            specificity,
                             rule_index * 100 + declaration_index,
                             declaration,
                         )
                     },
                 ));
-                break; // each rule contributes once per matching selector
             }
         }
     }
@@ -4557,7 +4637,7 @@ fn parse_selector(input: &str) -> Option<Selector> {
     } else {
         // Extract pseudo_element from the last part's simple selector
         let pseudo_element = parts.last().and_then(|p| p.simple.pseudo_element.clone());
-        Some(Selector { parts, pseudo_element })
+        Some(Selector { parts, pseudo_element, specificity_override: None })
     }
 }
 
@@ -4923,7 +5003,8 @@ impl Selector {
     }
 
     fn specificity(&self) -> usize {
-        self.parts.iter().map(|part| part.simple.specificity()).sum()
+        self.specificity_override
+            .unwrap_or_else(|| self.parts.iter().map(|part| part.simple.specificity()).sum())
     }
 
     fn matches(
@@ -7257,6 +7338,35 @@ mod tests {
         let div = find_first_element(&styled, "div").expect("div should exist");
 
         assert_eq!(div.style.color, 0x0000FF);
+    }
+
+    #[test]
+    fn selector_list_is_scored_by_its_most_specific_match() {
+        // Both halves match; only the second carries the `:first-child` that
+        // outweighs the later rule. firefox.com's hero padding rides on this.
+        let document = parse_document("<section class=\"home\"><div class=\"intro\">x</div></section>");
+        let stylesheet = parse_stylesheet(
+            ".home .intro, .home .intro:first-child { color: green } .intro:first-child { color: red }",
+        );
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let intro = find_first_element(&styled, "div").expect("intro should exist");
+
+        assert_eq!(intro.style.color, 0x008000);
+    }
+
+    #[test]
+    fn where_contributes_nothing_to_specificity() {
+        let document = parse_document("<section class=\"home\"><div class=\"intro\">x</div></section>");
+        // `:where(.home)` scores zero, leaving a bare `.intro` -- one class,
+        // so it loses to the two-class rule written before it.
+        let stylesheet =
+            parse_stylesheet(".home .intro { color: green } :where(.home) .intro { color: red }");
+
+        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let intro = find_first_element(&styled, "div").expect("intro should exist");
+
+        assert_eq!(intro.style.color, 0x008000);
     }
 
     #[test]
