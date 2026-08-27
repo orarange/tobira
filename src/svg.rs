@@ -126,11 +126,165 @@ enum FillRule {
     EvenOdd,
 }
 
+/// What a shape is painted with.
+///
+/// A gradient used to be flattened to the mean of its stops, which is a colour
+/// the drawing never contains: firefox.com's card icons are cut entirely from
+/// magenta-to-blue ramps, and each came out as one flat mid-purple.
+#[derive(Debug, Clone)]
+enum Paint {
+    Solid([u8; 4]),
+    Gradient(std::rc::Rc<Gradient>),
+}
+
+/// A paint server, with its geometry already in whatever space
+/// `object_units` says.
+#[derive(Debug, Clone)]
+struct Gradient {
+    radial: bool,
+    /// Linear: the two ends. Radial: the centre in the first pair, and the
+    /// radius in `x2` (`y2` unused).
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    /// Coordinates are fractions of the shape's bounding box rather than user
+    /// space -- SVG's default, and what `objectBoundingBox` names.
+    object_units: bool,
+    /// `(offset, colour)`, in order.
+    stops: Vec<(f32, [u8; 4])>,
+}
+
+impl Paint {
+    fn is_invisible(&self) -> bool {
+        match self {
+            Paint::Solid(color) => color[3] == 0,
+            Paint::Gradient(gradient) => gradient.stops.iter().all(|(_, color)| color[3] == 0),
+        }
+    }
+
+    /// Fold an `opacity` into the paint.
+    fn faded(&self, opacity: f32) -> Paint {
+        let fade = |color: [u8; 4]| -> [u8; 4] {
+            let mut color = color;
+            color[3] = (f32::from(color[3]) * opacity).round().clamp(0.0, 255.0) as u8;
+            color
+        };
+        match self {
+            Paint::Solid(color) => Paint::Solid(fade(*color)),
+            Paint::Gradient(gradient) => {
+                let mut faded = (**gradient).clone();
+                for (_, color) in &mut faded.stops {
+                    *color = fade(*color);
+                }
+                Paint::Gradient(std::rc::Rc::new(faded))
+            }
+        }
+    }
+
+    /// Move a `userSpaceOnUse` gradient into device space.
+    ///
+    /// Its coordinates are written in the drawing's own units, so they have to
+    /// travel through the same transform the shape did. Box-relative ones are
+    /// left alone: they are resolved against the shape when it is filled.
+    fn to_device(&self, transform: Transform) -> Paint {
+        match self {
+            Paint::Solid(_) => self.clone(),
+            Paint::Gradient(gradient) if gradient.object_units => self.clone(),
+            Paint::Gradient(gradient) => {
+                let mut moved = (**gradient).clone();
+                let (x1, y1) = transform.apply(gradient.x1, gradient.y1);
+                if moved.radial {
+                    moved.x2 = gradient.x2 * transform.scale_factor();
+                } else {
+                    let (x2, y2) = transform.apply(gradient.x2, gradient.y2);
+                    moved.x2 = x2;
+                    moved.y2 = y2;
+                }
+                moved.x1 = x1;
+                moved.y1 = y1;
+                Paint::Gradient(std::rc::Rc::new(moved))
+            }
+        }
+    }
+
+    /// The colour at one point, given the shape's bounding box.
+    fn color_at(&self, x: f32, y: f32, bounds: (f32, f32, f32, f32)) -> [u8; 4] {
+        let gradient = match self {
+            Paint::Solid(color) => return *color,
+            Paint::Gradient(gradient) => gradient,
+        };
+        let (min_x, min_y, max_x, max_y) = bounds;
+        let (width, height) = ((max_x - min_x).max(0.001), (max_y - min_y).max(0.001));
+        let point = |gx: f32, gy: f32| -> (f32, f32) {
+            if gradient.object_units {
+                (min_x + gx * width, min_y + gy * height)
+            } else {
+                (gx, gy)
+            }
+        };
+
+        let t = if gradient.radial {
+            let (cx, cy) = point(gradient.x1, gradient.y1);
+            // A box-relative radius describes a circle in the unit square,
+            // which is an ellipse once the box is not square.
+            let (rx, ry) = if gradient.object_units {
+                (gradient.x2 * width, gradient.x2 * height)
+            } else {
+                (gradient.x2, gradient.x2)
+            };
+            (((x - cx) / rx.max(0.001)).powi(2) + ((y - cy) / ry.max(0.001)).powi(2)).sqrt()
+        } else {
+            let (ax, ay) = point(gradient.x1, gradient.y1);
+            let (bx, by) = point(gradient.x2, gradient.y2);
+            let (dx, dy) = (bx - ax, by - ay);
+            let length_squared = dx * dx + dy * dy;
+            if length_squared < 1e-6 {
+                0.0
+            } else {
+                ((x - ax) * dx + (y - ay) * dy) / length_squared
+            }
+        };
+        sample_stops(&gradient.stops, t.clamp(0.0, 1.0))
+    }
+}
+
+/// The colour a gradient shows at `t`, interpolating between the stops either
+/// side of it.
+fn sample_stops(stops: &[(f32, [u8; 4])], t: f32) -> [u8; 4] {
+    let Some((first_offset, first_color)) = stops.first().copied() else {
+        return [0, 0, 0, 0];
+    };
+    if t <= first_offset {
+        return first_color;
+    }
+    let (last_offset, last_color) = stops[stops.len() - 1];
+    if t >= last_offset {
+        return last_color;
+    }
+    for pair in stops.windows(2) {
+        let (left_offset, left) = pair[0];
+        let (right_offset, right) = pair[1];
+        if t >= left_offset && t <= right_offset {
+            let span = right_offset - left_offset;
+            let mix = if span <= 1e-6 { 0.0 } else { (t - left_offset) / span };
+            let mut color = [0_u8; 4];
+            for channel in 0..4 {
+                let from = f32::from(left[channel]);
+                let to = f32::from(right[channel]);
+                color[channel] = (from + (to - from) * mix).round().clamp(0.0, 255.0) as u8;
+            }
+            return color;
+        }
+    }
+    last_color
+}
+
 /// A filled area ready to rasterize.
 #[derive(Debug, Clone)]
 struct Shape {
     contours: Vec<Contour>,
-    color: [u8; 4],
+    paint: Paint,
     rule: FillRule,
 }
 
@@ -206,41 +360,80 @@ impl Document {
     /// pictogram on firefox.com's front page read out as "Shield_Balanced" and
     /// the like. The average of the stops is not the gradient, but it is the
     /// right colour family in the right place.
-    fn paint_server_colors(&self) -> HashMap<String, [u8; 4]> {
-        let mut colors = HashMap::new();
-        let mut open: Option<(String, usize, Vec<[u8; 4]>)> = None;
+    /// Every `<linearGradient>` / `<radialGradient>` in the drawing, by id.
+    fn paint_servers(&self) -> HashMap<String, Paint> {
+        let mut servers: HashMap<String, Paint> = HashMap::new();
+        let mut open: Option<(String, usize, Gradient)> = None;
         for element in &self.elements {
-            if let Some((id, depth, stops)) = open.take() {
+            if let Some((id, depth, gradient)) = open.take() {
                 if element.depth > depth && element.name == "stop" {
-                    let mut stops = stops;
+                    let mut gradient = gradient;
                     if let Some(color) = stop_color(element) {
-                        stops.push(color);
+                        let offset = element
+                            .attribute("offset")
+                            .and_then(parse_offset)
+                            // With no offset the stop sits where the last one
+                            // left off, or at the start.
+                            .unwrap_or_else(|| {
+                                gradient.stops.last().map_or(0.0, |(offset, _)| *offset)
+                            });
+                        gradient.stops.push((offset, color));
                     }
-                    open = Some((id, depth, stops));
+                    open = Some((id, depth, gradient));
                     continue;
                 }
-                if let Some(color) = average_color(&stops) {
-                    colors.insert(id, color);
+                if !gradient.stops.is_empty() {
+                    servers.insert(id, Paint::Gradient(std::rc::Rc::new(gradient)));
                 }
             }
             // Element names arrive lowercased, so `linearGradient` reads as
             // `lineargradient` here.
-            if matches!(element.name.as_str(), "lineargradient" | "radialgradient")
-                && let Some(id) = element.attribute("id")
-            {
-                open = Some((id.to_string(), element.depth, Vec::new()));
-            }
+            let radial = match element.name.as_str() {
+                "lineargradient" => false,
+                "radialgradient" => true,
+                _ => continue,
+            };
+            let Some(id) = element.attribute("id") else {
+                continue;
+            };
+            let number = |name: &str, fallback: f32| {
+                element.attribute(name).and_then(parse_dimension).unwrap_or(fallback)
+            };
+            // The defaults are the spec's: a linear ramp left to right across
+            // the box, or a circle filling it.
+            let gradient = if radial {
+                Gradient {
+                    radial,
+                    x1: number("cx", 0.5),
+                    y1: number("cy", 0.5),
+                    x2: number("r", 0.5),
+                    y2: 0.0,
+                    object_units: element.attribute("gradientunits") != Some("userSpaceOnUse"),
+                    stops: Vec::new(),
+                }
+            } else {
+                Gradient {
+                    radial,
+                    x1: number("x1", 0.0),
+                    y1: number("y1", 0.0),
+                    x2: number("x2", 1.0),
+                    y2: number("y2", 0.0),
+                    object_units: element.attribute("gradientunits") != Some("userSpaceOnUse"),
+                    stops: Vec::new(),
+                }
+            };
+            open = Some((id.to_string(), element.depth, gradient));
         }
-        if let Some((id, _, stops)) = open
-            && let Some(color) = average_color(&stops)
+        if let Some((id, _, gradient)) = open
+            && !gradient.stops.is_empty()
         {
-            colors.insert(id, color);
+            servers.insert(id, Paint::Gradient(std::rc::Rc::new(gradient)));
         }
-        colors
+        servers
     }
 
     fn shapes(&self, root: Transform) -> Vec<Shape> {
-        let paints = self.paint_server_colors();
+        let paints = self.paint_servers();
         // One entry per open ancestor: its depth and the state it contributes.
         let mut stack: Vec<(usize, State)> = vec![(0, State::root(root))];
         let mut shapes = Vec::new();
@@ -266,10 +459,17 @@ impl Document {
                 break;
             }
 
-            if let Some(color) = state.fill {
-                shapes.push(Shape { contours: contours.clone(), color, rule: state.fill_rule });
+            if let Some(paint) = &state.fill {
+                shapes.push(Shape {
+                    contours: contours.clone(),
+                    // A gradient written in user coordinates has to travel the
+                    // same transform its shape did.
+                    paint: paint.to_device(state.transform),
+                    rule: state.fill_rule,
+                });
             }
-            if let Some(color) = state.stroke {
+            if let Some(paint) = &state.stroke {
+                let color = paint.to_device(state.transform);
                 let width = (state.stroke_width * state.transform.scale_factor()).max(0.6);
                 let outlined = contours
                     .iter()
@@ -278,7 +478,7 @@ impl Document {
                 if !outlined.is_empty() {
                     // Each segment's quad is filled on its own, so overlapping
                     // ones must not cancel out: non-zero winding keeps them.
-                    shapes.push(Shape { contours: outlined, color, rule: FillRule::NonZero });
+                    shapes.push(Shape { contours: outlined, paint: color, rule: FillRule::NonZero });
                 }
             }
         }
@@ -303,8 +503,8 @@ impl Element {
 #[derive(Debug, Clone)]
 struct State {
     transform: Transform,
-    fill: Option<[u8; 4]>,
-    stroke: Option<[u8; 4]>,
+    fill: Option<Paint>,
+    stroke: Option<Paint>,
     stroke_width: f32,
     fill_rule: FillRule,
     opacity: f32,
@@ -316,7 +516,7 @@ impl State {
             transform,
             // The initial fill really is opaque black, which is what an icon
             // that names no colour at all expects.
-            fill: Some([0, 0, 0, 255]),
+            fill: Some(Paint::Solid([0, 0, 0, 255])),
             stroke: None,
             stroke_width: 1.0,
             fill_rule: FillRule::NonZero,
@@ -324,14 +524,14 @@ impl State {
         }
     }
 
-    fn inherit(&self, element: &Element, paints: &HashMap<String, [u8; 4]>) -> State {
+    fn inherit(&self, element: &Element, paints: &HashMap<String, Paint>) -> State {
         let mut state = self.clone();
 
         // A `style` attribute wins over presentation attributes, so read the
         // attributes first and let the declarations overwrite them.
         let mut apply = |property: &str, value: &str, state: &mut State| match property {
-            "fill" => state.fill = parse_paint(value, state.fill, paints),
-            "stroke" => state.stroke = parse_paint(value, state.stroke, paints),
+            "fill" => state.fill = parse_paint(value, state.fill.clone(), paints),
+            "stroke" => state.stroke = parse_paint(value, state.stroke.clone(), paints),
             "stroke-width" => {
                 if let Some(width) = parse_dimension(value) {
                     state.stroke_width = width;
@@ -368,9 +568,11 @@ impl State {
 
         // `opacity` multiplies down the tree; fold it into the paint so the
         // rasterizer only ever deals with a single alpha.
-        for paint in [&mut state.fill, &mut state.stroke] {
-            if let Some(color) = paint {
-                color[3] = (color[3] as f32 * state.opacity).round().clamp(0.0, 255.0) as u8;
+        if state.opacity < 1.0 {
+            for paint in [&mut state.fill, &mut state.stroke] {
+                if let Some(paint) = paint {
+                    *paint = paint.faded(state.opacity);
+                }
             }
         }
         state
@@ -497,7 +699,7 @@ impl Canvas {
 
     /// Scanline fill with vertical supersampling, returning whether it painted.
     fn fill(&mut self, shape: &Shape) -> bool {
-        if shape.color[3] == 0 {
+        if shape.paint.is_invisible() {
             return false;
         }
         let edges: Vec<((f32, f32), (f32, f32))> = shape
@@ -517,6 +719,16 @@ impl Canvas {
         let (min_y, max_y) = edges.iter().fold((f32::MAX, f32::MIN), |(lo, hi), (a, b)| {
             (lo.min(a.1).min(b.1), hi.max(a.1).max(b.1))
         });
+        // A box-relative gradient is read against this.
+        let (min_x, max_x) = edges.iter().fold((f32::MAX, f32::MIN), |(lo, hi), (a, b)| {
+            (lo.min(a.0).min(b.0), hi.max(a.0).max(b.0))
+        });
+        let bounds = (min_x, min_y, max_x, max_y);
+        // A solid paint is the same everywhere, so it is worked out once.
+        let solid = match &shape.paint {
+            Paint::Solid(color) => Some(*color),
+            Paint::Gradient(_) => None,
+        };
         let first_row = min_y.floor().max(0.0) as u32;
         let last_row = (max_y.ceil().min(self.height as f32) as u32).min(self.height);
 
@@ -562,7 +774,10 @@ impl Canvas {
             for (column, value) in coverage.iter().enumerate() {
                 let alpha = (value / SUBSAMPLES as f32).clamp(0.0, 1.0);
                 if alpha > 0.002 {
-                    self.blend(column as u32, row, shape.color, alpha);
+                    let color = solid.unwrap_or_else(|| {
+                        shape.paint.color_at(column as f32 + 0.5, row as f32 + 0.5, bounds)
+                    });
+                    self.blend(column as u32, row, color, alpha);
                     painted = true;
                 }
             }
@@ -829,9 +1044,9 @@ fn parse_dimension(value: &str) -> Option<f32> {
 
 fn parse_paint(
     value: &str,
-    inherited: Option<[u8; 4]>,
-    paints: &HashMap<String, [u8; 4]>,
-) -> Option<[u8; 4]> {
+    inherited: Option<Paint>,
+    paints: &HashMap<String, Paint>,
+) -> Option<Paint> {
     let value = value.trim();
     if let Some(rest) = value.strip_prefix("url(")
         && let Some(reference) = rest.split(')').next()
@@ -839,14 +1054,14 @@ fn parse_paint(
         let id = reference.trim().trim_matches(['"', '#', ' ']);
         // A paint server this drawing does not define leaves the shape with
         // whatever it inherited, which is what the spec's fallback does too.
-        return paints.get(id).copied().or(inherited);
+        return paints.get(id).cloned().or(inherited);
     }
     match value.to_ascii_lowercase().as_str() {
         "none" | "transparent" => None,
         // Without a host element to ask, the sensible reading of
         // `currentColor` is whatever colour was already in force.
         "currentcolor" | "inherit" => inherited,
-        _ => parse_color(value).or(inherited),
+        _ => parse_color(value).map(Paint::Solid).or(inherited),
     }
 }
 
@@ -859,26 +1074,14 @@ fn stop_color(element: &Element) -> Option<[u8; 4]> {
     Some(color)
 }
 
-/// The mean of a gradient's stops, ignoring fully transparent ones so a fade to
-/// nothing does not wash the colour out.
-fn average_color(stops: &[[u8; 4]]) -> Option<[u8; 4]> {
-    let visible: Vec<&[u8; 4]> = stops.iter().filter(|stop| stop[3] > 0).collect();
-    if visible.is_empty() {
-        return None;
-    }
-    let mut total = [0_u32; 4];
-    for stop in &visible {
-        for (channel, value) in total.iter_mut().zip(stop.iter()) {
-            *channel += u32::from(*value);
-        }
-    }
-    let n = visible.len() as u32;
-    Some([
-        (total[0] / n) as u8,
-        (total[1] / n) as u8,
-        (total[2] / n) as u8,
-        (total[3] / n) as u8,
-    ])
+/// A `<stop offset>`, which may be a fraction or a percentage.
+fn parse_offset(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let offset = match value.strip_suffix('%') {
+        Some(percent) => percent.trim().parse::<f32>().ok()? / 100.0,
+        None => value.parse::<f32>().ok()?,
+    };
+    Some(offset.clamp(0.0, 1.0))
 }
 
 fn parse_color(value: &str) -> Option<[u8; 4]> {
@@ -1333,20 +1536,27 @@ mod tests {
     /// Every pictogram on firefox.com's front page read out as
     /// "Shield_Balanced" and the like where a picture belonged.
     #[test]
-    fn a_gradient_fill_is_painted_as_a_flat_colour() {
+    fn a_gradient_fill_shades_across_the_shape() {
         let image = rasterize(
-            "<svg viewBox='0 0 10 10' fill='none'>             <defs><linearGradient id='g'>             <stop stop-color='#ff0000'/><stop stop-color='#0000ff'/>             </linearGradient></defs>             <rect width='10' height='10' fill='url(#g)'/></svg>",
+            "<svg viewBox='0 0 10 10' fill='none'>             <defs><linearGradient id='g'>             <stop offset='0' stop-color='#ff0000'/><stop offset='1' stop-color='#0000ff'/>             </linearGradient></defs>             <rect width='10' height='10' fill='url(#g)'/></svg>",
         )
         .expect("a gradient-filled shape must produce an image");
-        let middle = (image.height as usize / 2 * image.width as usize
-            + image.width as usize / 2)
-            * 4;
-        let pixel = &image.rgba[middle..middle + 4];
-        assert!(pixel[3] > 0, "the shape must be painted: {pixel:?}");
-        assert!(
-            pixel[0] > 0 && pixel[2] > 0,
-            "and carry both stops' colour: {pixel:?}"
-        );
+
+        let pixel = |x: usize| {
+            let index = (image.height as usize / 2 * image.width as usize + x) * 4;
+            [
+                image.rgba[index],
+                image.rgba[index + 1],
+                image.rgba[index + 2],
+                image.rgba[index + 3],
+            ]
+        };
+        let left = pixel(1);
+        let right = pixel(image.width as usize - 2);
+
+        assert!(left[3] > 0 && right[3] > 0, "the shape must be painted");
+        assert!(left[0] > left[2], "the left end keeps its red: {left:?}");
+        assert!(right[2] > right[0], "and the right end its blue: {right:?}");
     }
 
     /// A reference to a paint server the drawing does not define leaves the
