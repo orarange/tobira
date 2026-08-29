@@ -59,19 +59,130 @@ pub fn parse_document(input: &str) -> Node {
     document
 }
 
+/// One node while the tree is being built.
+///
+/// The tree is assembled in an arena -- nodes by index, with parent links --
+/// rather than by moving each element into its parent as it closes. HTML's own
+/// error handling reaches back into the tree it has already built: a misnested
+/// `</b>` moves nodes that are already placed, and content that lands inside a
+/// table is fostered out to just before it. Neither is expressible once a
+/// finished element has been handed to its parent by value.
+#[derive(Debug)]
+enum BuildKind {
+    Element {
+        tag_name: String,
+        attributes: BTreeMap<String, String>,
+    },
+    Text(String),
+    Comment(String),
+    Doctype(String),
+}
+
+#[derive(Debug)]
+struct BuildNode {
+    kind: BuildKind,
+    children: Vec<usize>,
+    parent: Option<usize>,
+}
+
+struct Builder {
+    nodes: Vec<BuildNode>,
+    /// The elements currently open, innermost last. Index 0 is the document.
+    open: Vec<usize>,
+}
+
+impl Builder {
+    fn new() -> Self {
+        Self {
+            nodes: vec![BuildNode {
+                kind: BuildKind::Element {
+                    tag_name: "document".to_string(),
+                    attributes: BTreeMap::new(),
+                },
+                children: Vec::new(),
+                parent: None,
+            }],
+            open: vec![0],
+        }
+    }
+
+    fn tag_of(&self, index: usize) -> &str {
+        match &self.nodes[index].kind {
+            BuildKind::Element { tag_name, .. } => tag_name,
+            _ => "",
+        }
+    }
+
+    fn current(&self) -> usize {
+        *self.open.last().expect("the document is always open")
+    }
+
+    fn attach(&mut self, parent: usize, child: usize) {
+        self.nodes[child].parent = Some(parent);
+        self.nodes[parent].children.push(child);
+    }
+
+    fn insert(&mut self, kind: BuildKind) -> usize {
+        let index = self.nodes.len();
+        self.nodes.push(BuildNode {
+            kind,
+            children: Vec::new(),
+            parent: None,
+        });
+        let parent = self.current();
+        self.attach(parent, index);
+        index
+    }
+
+    fn is_open(&self, target: &str) -> bool {
+        self.open[1..].iter().any(|i| self.tag_of(*i) == target)
+    }
+
+    /// Pop open elements until `target` has been closed. A stray end tag whose
+    /// element is not open is ignored.
+    fn close(&mut self, target: &str) {
+        if !self.is_open(target) {
+            return;
+        }
+        while self.open.len() > 1 {
+            let index = self.open.pop().expect("checked above");
+            if self.tag_of(index) == target {
+                break;
+            }
+        }
+    }
+
+    fn into_tree(mut self) -> Node {
+        fn build(nodes: &mut Vec<BuildNode>, index: usize) -> Node {
+            let children: Vec<usize> = std::mem::take(&mut nodes[index].children);
+            let kind = std::mem::replace(&mut nodes[index].kind, BuildKind::Text(String::new()));
+            match kind {
+                BuildKind::Text(text) => Node::Text(text),
+                BuildKind::Comment(text) => Node::Comment(text),
+                BuildKind::Doctype(name) => Node::Doctype(name),
+                BuildKind::Element {
+                    tag_name,
+                    attributes,
+                } => Node::Element(Element {
+                    tag_name,
+                    attributes,
+                    children: children.into_iter().map(|c| build(nodes, c)).collect(),
+                }),
+            }
+        }
+        build(&mut self.nodes, 0)
+    }
+}
+
 fn parse_document_body(input: &str) -> Node {
     let tokens = tokenize(input);
-    let mut stack = vec![Element::new("document")];
+    let mut builder = Builder::new();
 
     for token in tokens {
         match token {
             Token::Text(text) => {
                 if !text.is_empty() {
-                    stack
-                        .last_mut()
-                        .expect("document root always exists")
-                        .children
-                        .push(Node::Text(text));
+                    builder.insert(BuildKind::Text(text));
                 }
             }
             Token::StartTag {
@@ -79,84 +190,51 @@ fn parse_document_body(input: &str) -> Node {
                 attributes,
                 self_closing,
             } => {
-                // HTML5 optional-end-tag: implicitly close certain elements before
-                // opening a new one (e.g. <td> closes an open <td>, <li> closes open <li>).
+                // HTML5 optional-end-tag: implicitly close certain elements
+                // before opening a new one (a `<td>` closes an open `<td>`, an
+                // `<li>` closes an open `<li>`).
                 if !self_closing {
-                    maybe_auto_close(&mut stack, &name);
+                    maybe_auto_close(&mut builder, &name);
                 }
 
-                let element = Element {
+                let index = builder.insert(BuildKind::Element {
                     tag_name: name,
                     attributes,
-                    children: Vec::new(),
-                };
-
-                if self_closing {
-                    stack
-                        .last_mut()
-                        .expect("document root always exists")
-                        .children
-                        .push(Node::Element(element));
-                } else {
-                    stack.push(element);
+                });
+                if !self_closing {
+                    builder.open.push(index);
                 }
             }
             Token::EndTag(name) => {
                 // `</p>` with no open paragraph makes an empty one, and `</br>`
                 // is read as `<br>`. Both are what the standard says and what
                 // every browser does with the stray tags real pages contain.
-                if name == "p" && !stack[1..].iter().any(|el| el.tag_name == "p") {
-                    stack
-                        .last_mut()
-                        .expect("document root always exists")
-                        .children
-                        .push(Node::Element(Element::new("p")));
+                if name == "p" && !builder.is_open("p") {
+                    builder.insert(BuildKind::Element {
+                        tag_name: "p".to_string(),
+                        attributes: BTreeMap::new(),
+                    });
                 } else if name == "br" {
-                    stack
-                        .last_mut()
-                        .expect("document root always exists")
-                        .children
-                        .push(Node::Element(Element::new("br")));
+                    builder.insert(BuildKind::Element {
+                        tag_name: "br".to_string(),
+                        attributes: BTreeMap::new(),
+                    });
                 } else {
-                    close_element(&mut stack, &name);
+                    builder.close(&name);
                 }
             }
             Token::Comment(text) => {
-                stack
-                    .last_mut()
-                    .expect("document root always exists")
-                    .children
-                    .push(Node::Comment(text));
+                builder.insert(BuildKind::Comment(text));
             }
             Token::Doctype(name) => {
-                stack
-                    .last_mut()
-                    .expect("document root always exists")
-                    .children
-                    .push(Node::Doctype(name));
+                builder.insert(BuildKind::Doctype(name));
             }
         }
     }
 
-    while stack.len() > 1 {
-        let element = stack.pop().expect("stack is not empty");
-        stack
-            .last_mut()
-            .expect("document root always exists")
-            .children
-            .push(Node::Element(element));
-    }
-
-    Node::Element(stack.pop().expect("document root exists"))
+    builder.into_tree()
 }
 
-/// Parse an HTML fragment: the tags exactly as written, with no document
-/// structure built around them.
-///
-/// `innerHTML`, `outerHTML` and `insertAdjacentHTML` all take a fragment, and a
-/// fragment does not grow an `<html>`, a `<head>` or a `<body>` -- setting
-/// `el.innerHTML = '<span>x</span>'` puts a span inside `el`, not a whole
-/// document.
 pub fn parse_fragment(input: &str) -> Vec<Node> {
     let Node::Element(root) = parse_document_body(input) else {
         return Vec::new();
@@ -292,105 +370,66 @@ fn ensure_document_structure(root: &mut Element) {
     root.children = before_html;
 }
 
-fn close_element(stack: &mut Vec<Element>, target: &str) {
-    if !stack[1..].iter().any(|element| element.tag_name == target) {
-        return;
-    }
-
-    while stack.len() > 1 {
-        let element = stack.pop().expect("stack is not empty");
-        let matched = element.tag_name == target;
-        stack
-            .last_mut()
-            .expect("document root always exists")
-            .children
-            .push(Node::Element(element));
-        if matched {
-            break;
-        }
-    }
-}
-
 /// HTML5 optional-end-tag / implicit-close rules.
-/// When certain start tags are encountered, currently open elements of the
-/// same category must be implicitly closed first (e.g. a new <td> closes any
-/// already-open <td> that is within the same <tr>).
-fn maybe_auto_close(stack: &mut Vec<Element>, new_tag: &str) {
+///
+/// Certain start tags close currently open elements of the same category
+/// before they are inserted: a new `<td>` ends the open `<td>`, a new `<li>`
+/// ends the open `<li>`.
+fn maybe_auto_close(builder: &mut Builder, new_tag: &str) {
     // Anything that is not head content ends the head, whether or not the
     // markup wrote `</head>`. Without this, `<html><head><body>` left the body
-    // nested inside the head -- which is not a shape any browser produces.
-    if !is_head_only(new_tag)
-        && new_tag != "head"
-        && stack.iter().any(|element| element.tag_name == "head")
-    {
-        close_element(stack, "head");
+    // nested inside the head -- a shape no browser produces.
+    if !is_head_only(new_tag) && new_tag != "head" && builder.is_open("head") {
+        builder.close("head");
     }
 
+    const PARAGRAPH_BOUNDARIES: &[&str] =
+        &["td", "th", "li", "dd", "dt", "body", "html", "document"];
+
     match new_tag {
-        // Table cell: close any open td/th within the current tr context
-        "td" | "th" => {
-            auto_close_before(
-                stack,
-                &["td", "th"],
-                &["tr", "table", "tbody", "thead", "tfoot"],
-            );
-        }
-        // Table row: close any open tr within the current table body/head/foot
-        "tr" => {
-            auto_close_before(stack, &["tr"], &["table", "tbody", "thead", "tfoot"]);
-        }
-        // List item: close any open li within the current list
-        "li" => {
-            auto_close_before(stack, &["li"], &["ul", "ol"]);
-        }
-        // Definition list items
-        "dt" | "dd" => {
-            auto_close_before(stack, &["dt", "dd"], &["dl"]);
-        }
-        // A heading closes an open heading of any level: `<h1>a<h2>b` gives
-        // two siblings, not a nested pair.
+        // Table cell: close any open td/th within the current tr context.
+        "td" | "th" => auto_close_before(
+            builder,
+            &["td", "th"],
+            &["tr", "table", "tbody", "thead", "tfoot"],
+        ),
+        // Table row: close any open tr within the current section.
+        "tr" => auto_close_before(builder, &["tr"], &["table", "tbody", "thead", "tfoot"]),
+        // List item: close any open li within the current list.
+        "li" => auto_close_before(builder, &["li"], &["ul", "ol"]),
+        "dt" | "dd" => auto_close_before(builder, &["dt", "dd"], &["dl"]),
+        // A heading closes an open heading of any level: `<h1>a<h2>b` gives two
+        // siblings, not a nested pair.
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
             auto_close_before(
-                stack,
+                builder,
                 &["h1", "h2", "h3", "h4", "h5", "h6"],
-                &["td", "th", "li", "dd", "dt", "body", "html", "document"],
+                PARAGRAPH_BOUNDARIES,
             );
-            auto_close_before(
-                stack,
-                &["p"],
-                &["td", "th", "li", "dd", "dt", "body", "html", "document"],
-            );
+            auto_close_before(builder, &["p"], PARAGRAPH_BOUNDARIES);
         }
-        // A new <p> closes an open <p> (and many block elements do too)
-        tag if is_block_like(tag) => {
-            auto_close_before(
-                stack,
-                &["p"],
-                &["td", "th", "li", "dd", "dt", "body", "html", "document"],
-            );
-        }
+        // A new <p>, and many block elements, close an open <p>.
+        tag if is_block_like(tag) => auto_close_before(builder, &["p"], PARAGRAPH_BOUNDARIES),
         _ => {}
     }
 }
 
-/// Walk up the stack looking for an element whose tag is in `targets`.
-/// Stop (and do nothing) if we hit a `boundary` element first.
-/// If found, call close_element to pop up to and including that element.
-fn auto_close_before(stack: &mut Vec<Element>, targets: &[&str], boundaries: &[&str]) {
-    let close_tag = stack.iter().rev().find_map(|el| {
-        let name = el.tag_name.as_str();
+/// Walk up the open elements looking for one in `targets`, and close it.
+/// Stop and do nothing if a `boundary` element is met first.
+fn auto_close_before(builder: &mut Builder, targets: &[&str], boundaries: &[&str]) {
+    let mut close_tag: Option<String> = None;
+    for index in builder.open.iter().rev() {
+        let name = builder.tag_of(*index);
         if targets.contains(&name) {
-            Some(name.to_string())
-        } else if boundaries.contains(&name) {
-            Some(String::new()) // boundary hit — signal "stop, nothing to close"
-        } else {
-            None
+            close_tag = Some(name.to_string());
+            break;
         }
-    });
+        if boundaries.contains(&name) {
+            break;
+        }
+    }
     if let Some(tag) = close_tag {
-        if !tag.is_empty() {
-            close_element(stack, &tag);
-        }
+        builder.close(&tag);
     }
 }
 
