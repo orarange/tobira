@@ -7249,6 +7249,97 @@ fn resolved_cross_align(child: &StyledElement, container_align: AlignItems) -> A
 
 /// How wide an item in a column flex is when it is not stretched: its own
 /// content, within what the column offers and whatever it states for itself.
+/// How tall each item in a column flex container should be made.
+///
+/// `None` for an item that keeps its own height. Only a container with a height
+/// of its own has anything to share out, and only items with `flex-grow` take a
+/// share of it.
+fn column_grown_heights(
+    element: &StyledElement,
+    children: &[&StyledElement],
+    content_width: u32,
+    gap: u32,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+    background: Color,
+) -> Vec<Option<u32>> {
+    let none = vec![None; children.len()];
+    let Some(LengthValue::Pixels(stated)) = element.style.height else {
+        return none;
+    };
+    let inner = if matches!(element.style.box_sizing, BoxSizing::BorderBox) {
+        stated
+            .saturating_sub(element.style.padding.top + element.style.padding.bottom)
+            .saturating_sub(if element.style.border_style_none {
+                0
+            } else {
+                element.style.border.top + element.style.border.bottom
+            })
+    } else {
+        stated
+    };
+    let grow: Vec<u32> = children.iter().map(|child| child.style.flex_grow).collect();
+    let grow_total: u32 = grow.iter().sum();
+    if grow_total == 0 {
+        return none;
+    }
+
+    // The base each item starts from: its `flex-basis` where it has one --
+    // `flex: 1` means a basis of zero, so the items split the whole height --
+    // and otherwise the height its own content comes to.
+    let bases: Vec<u32> = children
+        .iter()
+        .map(|child| match (&child.style.height, &child.style.flex_basis) {
+            (Some(LengthValue::Pixels(px)), _) => *px,
+            (_, Some(LengthValue::Pixels(px))) => *px,
+            _ => {
+                let mut probe = LayoutContext {
+                    background_color: background,
+                    ..LayoutContext::default()
+                };
+                let mut y = 0;
+                layout_block_element(
+                    child,
+                    0,
+                    content_width.max(1),
+                    &mut y,
+                    &mut probe,
+                    images,
+                    fonts,
+                    None,
+                );
+                y
+            }
+        })
+        .collect();
+
+    let total_gap = gap.saturating_mul(children.len().saturating_sub(1) as u32);
+    let used: u32 = bases.iter().sum::<u32>().saturating_add(total_gap);
+    let free = inner.saturating_sub(used);
+    if free == 0 {
+        return none;
+    }
+    let mut out = Vec::with_capacity(children.len());
+    let mut handed = 0u32;
+    let mut remaining_grow = grow_total;
+    for (i, base) in bases.iter().enumerate() {
+        if grow[i] == 0 {
+            out.push(None);
+            continue;
+        }
+        // The last grower takes what is left, so the pieces add back up.
+        let share = if remaining_grow == grow[i] {
+            free.saturating_sub(handed)
+        } else {
+            free.saturating_mul(grow[i]) / grow_total
+        };
+        handed = handed.saturating_add(share);
+        remaining_grow = remaining_grow.saturating_sub(grow[i]);
+        out.push(Some(base.saturating_add(share)));
+    }
+    out
+}
+
 fn column_item_width(
     child: &StyledElement,
     available: u32,
@@ -7933,6 +8024,21 @@ fn layout_flex_container(
             // carousel's heading and blurb in a centred column, and both sat
             // hard against the left instead.
             *cursor_y = content_y;
+
+            // The main axis is vertical here, so `flex-grow` shares out the
+            // container's spare *height*. Nothing did, so `flex: 1` items in a
+            // column stood at their content height and left the rest of the box
+            // empty -- a sidebar meant to fill its frame ended a line tall.
+            let grown = column_grown_heights(
+                element,
+                &children,
+                content_width,
+                gap,
+                images,
+                fonts,
+                context.background_color,
+            );
+
             for (i, child) in children.iter().enumerate() {
                 let child_form = form_context_for_element(child, context, current_form.clone());
                 let align = resolved_cross_align(child, element.style.align_items);
@@ -7947,6 +8053,18 @@ fn layout_flex_container(
                         _ => 0,
                     };
                     (content_x.saturating_add(offset), width)
+                };
+                let stretched;
+                let child = match grown.get(i).copied().flatten() {
+                    Some(height) => {
+                        let mut copy: StyledElement = (*child).clone();
+                        std::sync::Arc::make_mut(&mut copy.style).height =
+                            Some(LengthValue::Pixels(height));
+                        std::sync::Arc::make_mut(&mut copy.style).box_sizing = BoxSizing::BorderBox;
+                        stretched = copy;
+                        &stretched
+                    }
+                    None => child,
                 };
                 layout_block_element(child, child_x, child_width, cursor_y, context, images, fonts, child_form);
                 if i < children.len() - 1 {
@@ -10896,6 +11014,35 @@ mod tests {
             "percent height should resolve to the parent's 40px, got {}",
             inner.height
         );
+    }
+
+    #[test]
+    fn a_column_shares_its_height_between_the_items_that_grow() {
+        // `flex: 1` in a column means the item takes a share of the height, the
+        // way it takes a share of the width in a row. Nothing shared it out, so
+        // the items stood at their content height and left the box half empty.
+        let document = parse_document(
+            "<div style=\"display:flex;flex-direction:column;height:90px;width:100px\"><div style=\"flex:1;background:#111111\"></div><div style=\"flex:1;background:#222222\"></div></div>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{margin:0}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
+        let heights: Vec<u32> = layout
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Rect(rect) if rect.color == 0x111111 || rect.color == 0x222222 => {
+                    Some(rect.height)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(heights, vec![45, 45]);
     }
 
     #[test]
