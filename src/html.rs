@@ -198,6 +198,14 @@ struct Builder {
     frameset_ok: bool,
     /// What `frameset_ok` was when the first `<frameset>` arrived.
     frameset_allowed: Option<bool>,
+    /// Whether a frameset has taken the body's place.
+    ///
+    /// From then on the document holds frames and nothing else: text and
+    /// ordinary markup written after it are dropped rather than shown beside
+    /// the frames.
+    frameset_document: bool,
+    /// Whether a `<form>` is open. There is only ever one.
+    form_open: bool,
     /// Formatting elements that are still in force.
     ///
     /// `<b>a<p>b</p>c` puts the bold inside the paragraph too: the `<b>` is
@@ -225,6 +233,8 @@ impl Builder {
             document_comments: Vec::new(),
             frameset_ok: true,
             frameset_allowed: None,
+            frameset_document: false,
+            form_open: false,
             formatting: Vec::new(),
         }
     }
@@ -957,6 +967,9 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
     for token in tokens {
         match token {
             Token::Text(text) => {
+                if builder.frameset_document && !text.trim().is_empty() {
+                    continue;
+                }
                 let text = if skip_leading_newline {
                     text.strip_prefix('\n').unwrap_or(&text).to_string()
                 } else {
@@ -992,6 +1005,23 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 let mut attributes = attributes;
                 builder.after_body = false;
                 builder.after_html = false;
+
+                // A frameset document holds frames. Markup written beside them
+                // has nowhere to go, so it is dropped rather than drawn.
+                if builder.frameset_document
+                    && !matches!(name.as_str(), "frameset" | "frame" | "noframes" | "html")
+                {
+                    continue;
+                }
+                // There is only ever one form. A second `<form>` while one is
+                // open is dropped, which is why a page that forgets `</form>`
+                // shows one form holding everything after it.
+                if name == "form" {
+                    if builder.form_open {
+                        continue;
+                    }
+                    builder.form_open = true;
+                }
 
                 if matches!(name.as_str(), "html" | "body") && builder.is_open(&name) {
                     builder.merge_attributes(&name, attributes);
@@ -1030,6 +1060,15 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                         builder.break_out_of_foreign_content();
                         namespace = Namespace::Html;
                     }
+                }
+                // `<svg>` inside MathML's `<annotation-xml>` really is SVG:
+                // that element exists to hold a drawing of the formula beside
+                // the markup of it.
+                if namespace == Namespace::MathMl
+                    && name == "svg"
+                    && builder.tag_of(builder.current()) == "annotation-xml"
+                {
+                    namespace = Namespace::Svg;
                 }
                 if namespace == Namespace::Html {
                     namespace = match name.as_str() {
@@ -1094,6 +1133,7 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     if builder.frameset_allowed.is_none() {
                         builder.frameset_allowed = Some(true);
                     }
+                    builder.frameset_document = true;
                 }
 
                 let starts_scope = starts_formatting_scope(&name);
@@ -1114,6 +1154,9 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 }
             }
             Token::EndTag(name) => {
+                if name == "form" {
+                    builder.form_open = false;
+                }
                 if name == "body" {
                     builder.after_body = true;
                 } else if name == "html" {
@@ -1469,6 +1512,15 @@ fn maybe_auto_close(builder: &mut Builder, new_tag: &str) {
         "dt" | "dd" => {
             auto_close_before(builder, &["dt", "dd"], &["dl"]);
             auto_close_before(builder, &["p"], PARAGRAPH_BOUNDARIES);
+        }
+        // A column group holds nothing but columns. Anything else ends it and
+        // is then read as if it came straight after the group.
+        tag if tag != "col"
+            && tag != "template"
+            && builder.tag_of(builder.current()) == "colgroup" =>
+        {
+            builder.open.pop();
+            maybe_auto_close(builder, new_tag);
         }
         // A table inside a cell is a real nested table; one written straight
         // inside another table is the author forgetting `</table>`.
@@ -2266,6 +2318,48 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_page_has_only_one_form() {
+        // A page that forgets `</form>` shows one form holding everything
+        // after it, rather than nesting a second one inside the first.
+        let document = parse_document("<body><form id=first><p>a<form id=second><p>b");
+        let body = body_of(&document);
+        assert_eq!(body.children.len(), 1);
+        let Node::Element(form) = &body.children[0] else {
+            panic!("expected one form");
+        };
+        assert_eq!(form.attributes.get("id").map(String::as_str), Some("first"));
+    }
+
+    #[test]
+    fn a_frameset_document_drops_the_markup_written_beside_it() {
+        let document = parse_document("<frameset><frame></frameset><div>x</div>text");
+        let html = html_of(&document);
+        let Some(Node::Element(frameset)) = html.children.get(1) else {
+            panic!("expected head then frameset");
+        };
+        assert_eq!(frameset.tag_name, "frameset");
+        assert_eq!(frameset.children.len(), 1, "only the frame belongs here");
+    }
+
+    #[test]
+    fn an_svg_inside_annotation_xml_is_really_svg() {
+        // The element exists to hold a drawing of the formula beside the
+        // markup of it, so what goes in is a different language again.
+        let document = parse_document("<body><math><annotation-xml><svg><circle>");
+        let body = body_of(&document);
+        let Node::Element(math) = &body.children[0] else {
+            panic!("expected math");
+        };
+        let Node::Element(annotation) = &math.children[0] else {
+            panic!("expected annotation-xml");
+        };
+        let Node::Element(svg) = &annotation.children[0] else {
+            panic!("expected the svg");
+        };
+        assert_eq!(svg.namespace, super::Namespace::Svg);
+    }
+
     #[test]
     fn a_second_link_ends_the_first_rather_than_nesting() {
         let document = parse_document("<body><a href=one>first<a href=two>second");
