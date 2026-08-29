@@ -4207,7 +4207,7 @@ mod tests {
             html_source: String::new(),
             styled_document: StyledNode::Text(crate::css::StyledText {
                 text: String::new(),
-                style: std::sync::Arc::new(crate::css::ComputedStyle {
+                style: std::sync::Arc::new(crate::css::ComputedStyle { break_long_words: false,
                     display: crate::css::Display::Inline,
                     color: crate::css::DEFAULT_TEXT_COLOR,
                     background_color: None,
@@ -4385,7 +4385,7 @@ mod tests {
             html_source: "<html><body>Hello</body></html>".to_string(),
             styled_document: StyledNode::Text(crate::css::StyledText {
                 text: "Hello".to_string(),
-                style: std::sync::Arc::new(crate::css::ComputedStyle {
+                style: std::sync::Arc::new(crate::css::ComputedStyle { break_long_words: false,
                     display: crate::css::Display::Inline,
                     color: crate::css::DEFAULT_TEXT_COLOR,
                     background_color: None,
@@ -4913,7 +4913,7 @@ mod tests {
     fn parse_styled_text(text: &str) -> StyledNode {
         crate::css::StyledNode::Text(crate::css::StyledText {
             text: text.to_string(),
-            style: std::sync::Arc::new(crate::css::ComputedStyle {
+            style: std::sync::Arc::new(crate::css::ComputedStyle { break_long_words: false,
                 display: crate::css::Display::Inline,
                 color: crate::css::DEFAULT_TEXT_COLOR,
                 background_color: None,

@@ -5425,13 +5425,27 @@ fn push_wrapped_word(
         return;
     }
 
-    let avg_char_width = char_width(style, 'M', fonts).max(1);
-    let max_chars = (width / avg_char_width).max(1) as usize;
-    let mut chunk = String::new();
+    // A word wider than the line is left whole and allowed to overflow, which
+    // is what a browser does: a long URL sticks out of its column rather than
+    // being cut in the middle. Only a page that says so -- `overflow-wrap:
+    // break-word`, `word-break: break-all` -- gets it broken.
+    if !style.break_long_words {
+        if !line.is_empty() {
+            emit_line(line, container_style, x, width, cursor_y, context, fonts);
+        }
+        line.push_span(word, style, fonts, link_href, link_node_id);
+        return;
+    }
 
+    // Break where the text actually runs out of room. Chopping at a fixed
+    // number of characters -- the line width over the width of an `M` -- fit
+    // half a line of ordinary text, because almost every letter is narrower
+    // than an `M`.
+    let mut chunk = String::new();
     for character in word.chars() {
-        chunk.push(character);
-        if chunk.chars().count() == max_chars {
+        let mut candidate = chunk.clone();
+        candidate.push(character);
+        if !chunk.is_empty() && text_width(style, &candidate, fonts) > width {
             if !line.is_empty() {
                 emit_line(line, container_style, x, width, cursor_y, context, fonts);
             }
@@ -5439,6 +5453,7 @@ fn push_wrapped_word(
             emit_line(line, container_style, x, width, cursor_y, context, fonts);
             chunk.clear();
         }
+        chunk.push(character);
     }
 
     if !chunk.is_empty() {
@@ -11066,6 +11081,30 @@ mod tests {
             "percent height should resolve to the parent's 40px, got {}",
             inner.height
         );
+    }
+
+    #[test]
+    fn a_long_word_overflows_unless_the_page_asks_for_it_to_break() {
+        let sheet = parse_stylesheet("body{margin:0;font-size:16px;line-height:1.5}");
+        let word = "supercalifragilisticexpialidocious word";
+
+        // Left whole, it takes two lines: the word on one, "word" on the next.
+        let document = parse_document(&format!("<div style=\"width:120px\">{word}</div>"));
+        let styled =
+            build_styled_tree(&document, &sheet, 1280, &crate::css::InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
+        assert_eq!(layout.content_height, 48);
+
+        // Asked to break, it takes three -- the width it actually needs, not
+        // the width of that many capital `M`s.
+        let document = parse_document(&format!(
+            "<div style=\"width:120px;overflow-wrap:break-word\">{word}</div>"
+        ));
+        let styled =
+            build_styled_tree(&document, &sheet, 1280, &crate::css::InteractiveState::default());
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
+        assert_eq!(layout.content_height, 72);
     }
 
     #[test]

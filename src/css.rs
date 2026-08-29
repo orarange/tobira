@@ -928,6 +928,13 @@ pub struct ComputedStyle {
     pub underline: bool,
     pub line_through: bool,
     pub white_space: WhiteSpaceMode,
+    /// Whether a word too long for its line may be broken mid-word.
+    ///
+    /// Off by default: a browser lets such a word overflow rather than cutting
+    /// it. `overflow-wrap: break-word`, `word-wrap: break-word` and
+    /// `word-break: break-all` each turn it on, and pages that hold long URLs
+    /// or identifiers say so.
+    pub break_long_words: bool,
     pub text_overflow_ellipsis: bool,
     pub text_shadow: Option<TextShadow>,
     pub background_gradient: Option<LinearGradient>,
@@ -1105,6 +1112,7 @@ impl ComputedStyle {
             white_space: parent
                 .map(|s| s.white_space)
                 .unwrap_or(WhiteSpaceMode::Normal),
+            break_long_words: parent.map(|s| s.break_long_words).unwrap_or(false),
             text_overflow_ellipsis: false,
             text_shadow: None,
             background_gradient: None,
@@ -4053,6 +4061,12 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if let Some(ws) = parse_white_space(value) {
                 style.white_space = ws;
             }
+        }
+        "overflow-wrap" | "word-wrap" => {
+            style.break_long_words = matches!(value.trim(), "break-word" | "anywhere");
+        }
+        "word-break" => {
+            style.break_long_words = matches!(value.trim(), "break-all" | "break-word");
         }
         "margin" => {
             parse_margin_shorthand(style, value, parent_font_size);
