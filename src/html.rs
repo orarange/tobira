@@ -637,6 +637,38 @@ fn starts_formatting_scope(tag: &str) -> bool {
 ///
 /// The standard's list is not a category so much as a record of what browsers
 /// settled on: anything that puts something on the page, or that a form needs.
+/// Build the rows and sections a table cell needs but the markup left out.
+///
+/// `<table><td>` is written all the time, and a browser reads it as
+/// `<table><tbody><tr><td>`. The generated elements are real: they are what
+/// `rowSpan` counts against and what a `tbody > tr` selector matches, so
+/// leaving the cell directly under the table changes both the layout and what
+/// the page's own script sees.
+fn ensure_table_ancestry(builder: &mut Builder, new_tag: &str) {
+    fn push(builder: &mut Builder, tag_name: &str) {
+        let index = builder.insert(BuildKind::Element {
+            tag_name: tag_name.to_string(),
+            attributes: BTreeMap::new(),
+            namespace: Namespace::Html,
+        });
+        builder.open.push(index);
+    }
+
+    match new_tag {
+        "td" | "th" => {
+            if builder.tag_of(builder.current()) == "table" {
+                push(builder, "tbody");
+            }
+            if matches!(builder.tag_of(builder.current()), "tbody" | "thead" | "tfoot") {
+                push(builder, "tr");
+            }
+        }
+        "tr" if builder.tag_of(builder.current()) == "table" => push(builder, "tbody"),
+        "col" if builder.tag_of(builder.current()) == "table" => push(builder, "colgroup"),
+        _ => {}
+    }
+}
+
 fn clears_frameset_ok(tag: &str) -> bool {
     matches!(
         tag,
@@ -860,6 +892,7 @@ fn parse_document_body(input: &str) -> (Node, bool) {
                 // `<li>` closes an open `<li>`).
                 if !self_closing {
                     maybe_auto_close(&mut builder, &name);
+                    ensure_table_ancestry(&mut builder, &name);
                 }
                 if !is_special(&name) {
                     builder.reconstruct_formatting();
@@ -1825,6 +1858,41 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_cell_written_straight_under_a_table_grows_a_row_and_a_section() {
+        let document = parse_document("<body><table><td>cell</td></table>");
+        let body = body_of(&document);
+        let Node::Element(table) = &body.children[0] else {
+            panic!("expected a table");
+        };
+        let Node::Element(section) = &table.children[0] else {
+            panic!("expected an implied tbody");
+        };
+        assert_eq!(section.tag_name, "tbody");
+        let Node::Element(row) = &section.children[0] else {
+            panic!("expected an implied tr");
+        };
+        assert_eq!(row.tag_name, "tr");
+        let Node::Element(cell) = &row.children[0] else {
+            panic!("expected the cell");
+        };
+        assert_eq!(cell.tag_name, "td");
+    }
+
+    #[test]
+    fn a_row_written_straight_under_a_table_grows_a_section() {
+        let document = parse_document("<body><table><tr><td>a</td></tr></table>");
+        let body = body_of(&document);
+        let Node::Element(table) = &body.children[0] else {
+            panic!("expected a table");
+        };
+        let Node::Element(section) = &table.children[0] else {
+            panic!("expected an implied tbody");
+        };
+        assert_eq!(section.tag_name, "tbody");
+        assert_eq!(section.children.len(), 1);
+    }
+
     #[test]
     fn stray_content_is_fostered_out_of_a_table() {
         // A word written between `<table>` and its first cell cannot be drawn
