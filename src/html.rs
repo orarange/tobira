@@ -167,15 +167,92 @@ impl Builder {
         self.nodes[parent].children.push(child);
     }
 
+    /// Attach `child` where the standard says it goes, which for a table is
+    /// not always inside it.
+    ///
+    /// Text and elements written between `<table>` and its first cell cannot be
+    /// drawn in a table, so browsers move them to just before the table --
+    /// foster parenting. Leaving them inside makes them vanish from the page,
+    /// and pages with a stray word inside a table are common.
+    fn attach_or_foster(&mut self, child: usize, fostered: bool) {
+        let target = fostered.then(|| self.enclosing_table()).flatten();
+        match target {
+            Some((table, parent)) => {
+                let position = self.nodes[parent]
+                    .children
+                    .iter()
+                    .position(|node| *node == table)
+                    .unwrap_or(self.nodes[parent].children.len());
+                self.nodes[child].parent = Some(parent);
+                self.nodes[parent].children.insert(position, child);
+            }
+            None => {
+                let parent = self.current();
+                self.attach(parent, child);
+            }
+        }
+    }
+
+    /// The innermost open table and the node holding it.
+    fn enclosing_table(&self) -> Option<(usize, usize)> {
+        let position = self.open.iter().rposition(|i| self.tag_of(*i) == "table")?;
+        let table = self.open[position];
+        let parent = self.nodes[table].parent?;
+        Some((table, parent))
+    }
+
+    /// Whether what is about to be inserted has to be fostered out of a table.
+    ///
+    /// Only the elements a table is made of may sit directly inside one; a
+    /// script or a hidden input is allowed too, since neither is drawn.
+    fn needs_fostering(&self, tag: Option<&str>) -> bool {
+        let Some(&node) = self.open.last() else {
+            return false;
+        };
+        if !matches!(
+            self.tag_of(node),
+            "table" | "tbody" | "tfoot" | "thead" | "tr"
+        ) {
+            return false;
+        }
+        match tag {
+            None => true,
+            Some(tag) => !matches!(
+                tag,
+                "caption"
+                    | "colgroup"
+                    | "col"
+                    | "tbody"
+                    | "tfoot"
+                    | "thead"
+                    | "tr"
+                    | "td"
+                    | "th"
+                    | "table"
+                    | "style"
+                    | "script"
+                    | "template"
+                    | "form"
+                    | "input"
+            ),
+        }
+    }
+
     fn insert(&mut self, kind: BuildKind) -> usize {
+        let fostered = match &kind {
+            // Whitespace alone is allowed to stay: it draws nothing, and
+            // moving it would put a stray gap above every table.
+            BuildKind::Text(text) => !text.trim().is_empty() && self.needs_fostering(None),
+            BuildKind::Element { tag_name, .. } => self.needs_fostering(Some(tag_name)),
+            _ => false,
+        };
         let index = self.nodes.len();
         self.nodes.push(BuildNode {
             kind,
             children: Vec::new(),
             parent: None,
         });
-        let parent = self.current();
-        self.attach(parent, index);
+        self.attach_or_foster(index, fostered);
         index
     }
 
@@ -289,8 +366,8 @@ impl Builder {
                 break;
             };
             let clone = self.clone_element(source);
-            let parent = self.current();
-            self.attach(parent, clone);
+            let fostered = self.needs_fostering(Some(&self.tag_of(clone).to_string()));
+            self.attach_or_foster(clone, fostered);
             self.open.push(clone);
             self.formatting[position] = Formatting::Element(clone);
             position += 1;
@@ -1748,6 +1825,36 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn stray_content_is_fostered_out_of_a_table() {
+        // A word written between `<table>` and its first cell cannot be drawn
+        // in a table, so it moves to just before the table instead of
+        // disappearing.
+        let document = parse_document("<body><div><table>stray<tr><td>cell</td></tr></table></div>");
+        let body = body_of(&document);
+        let Node::Element(container) = &body.children[0] else {
+            panic!("expected the div");
+        };
+        let Node::Text(text) = &container.children[0] else {
+            panic!("the stray text should come before the table");
+        };
+        assert_eq!(text, "stray");
+        let Node::Element(table) = &container.children[1] else {
+            panic!("expected the table after the text");
+        };
+        assert_eq!(table.tag_name, "table");
+    }
+
+    #[test]
+    fn whitespace_inside_a_table_stays_where_it_was_written() {
+        let document = parse_document("<body><table> <tr><td>a</td></tr></table>");
+        let body = body_of(&document);
+        let Node::Element(table) = &body.children[0] else {
+            panic!("expected a table first, with nothing fostered before it");
+        };
+        assert_eq!(table.tag_name, "table");
+    }
+
     #[test]
     fn a_frameset_after_content_is_ignored() {
         // The table is already on the page, so the frameset cannot take the
