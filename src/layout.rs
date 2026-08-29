@@ -3886,8 +3886,24 @@ fn compute_column_widths(
         widths[column] = widths[column].max(measured);
     }
 
+    // Where a table's columns came from is invisible from both the markup and
+    // the screen, and it is the first thing worth seeing when one comes out the
+    // wrong width. `TOBIRA_DEBUG_TABLE` prints it.
+    if std::env::var("TOBIRA_DEBUG_TABLE").is_ok() {
+        eprintln!("table columns: widths={widths:?} mins={mins:?} locked={locked:?} available={available_width}");
+    }
+    // A column is never narrower than the narrowest its content can be. A cell
+    // that asks for `width: 1%` -- which is how a table says "as narrow as it
+    // can be" -- otherwise got eight pixels and its label ran across the cell
+    // beside it. Wikipedia's navigation boxes are built this way.
+    let widths: Vec<u32> = widths
+        .iter()
+        .zip(mins.iter())
+        .map(|(width, min)| (*width).max(*min).max(1))
+        .collect();
+
     TableColumnSizing {
-        widths: widths.into_iter().map(|value| value.max(1)).collect(),
+        widths,
         mins: mins.into_iter().map(|value| value.max(1)).collect(),
         locked,
     }
@@ -6181,13 +6197,28 @@ fn measure_node_min_width(
     fonts: &mut FontContext,
 ) -> u32 {
     match node {
-        StyledNode::Text(text) => text
-            .text
-            .chars()
-            .find(|ch| !ch.is_whitespace())
-            .map(|ch| char_width(&text.style, ch, fonts))
-            .unwrap_or(1)
-            .max(1),
+        // The narrowest a run of text can be made is its longest unbreakable
+        // piece -- its longest word. Measuring one character instead said any
+        // text fits in ten pixels, so a table column asking to be narrow got
+        // ten and its label ran across the cell beside it.
+        StyledNode::Text(text) => {
+            if text.style.break_long_words {
+                return text
+                    .text
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace())
+                    .map(|ch| char_width(&text.style, ch, fonts))
+                    .max()
+                    .unwrap_or(1)
+                    .max(1);
+            }
+            line_break_segments(&text.text)
+                .into_iter()
+                .map(|(word, _)| text_width(&text.style, word, fonts))
+                .max()
+                .unwrap_or(1)
+                .max(1)
+        }
         StyledNode::Element(element) => {
             if element.tag_name == "img"
                 && let Some(src) = resolved_image_source(element)
@@ -11099,6 +11130,82 @@ mod tests {
             inner.height >= 40,
             "percent height should resolve to the parent's 40px, got {}",
             inner.height
+        );
+    }
+
+    #[test]
+    fn the_narrowest_a_run_of_text_can_be_is_its_longest_word() {
+        let document = parse_document("<p>Community business</p>");
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{font-size:16px}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        fn first_text(node: &crate::css::StyledNode) -> Option<crate::css::StyledNode> {
+            match node {
+                crate::css::StyledNode::Text(text) if !text.text.trim().is_empty() => {
+                    Some(node.clone())
+                }
+                crate::css::StyledNode::Element(element) => {
+                    element.children.iter().find_map(first_text)
+                }
+                _ => None,
+            }
+        }
+        let node = first_text(&styled).expect("the text should exist");
+        let crate::css::StyledNode::Text(text) = &node else {
+            panic!("expected the text");
+        };
+        let style = text.style.clone();
+        let mut fonts = FontContext::load();
+        let min = super::measure_node_min_width(&node, &ImageStore::default(), &mut fonts);
+        let longest = super::text_width(&style, "Community", &mut fonts);
+        // Not the width of one letter, which is what it used to report.
+        assert_eq!(min, longest);
+    }
+
+    #[test]
+    fn a_narrow_column_still_fits_its_own_label() {
+        // `width: 1%` on a cell is how a table asks for its narrowest column.
+        // Taken literally it got a handful of pixels and its label ran across
+        // the cell beside it.
+        let document = parse_document(
+            "<table style=\"width:600px\"><tr><th style=\"width:1%\">Community</th><td>list of things</td></tr></table>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{margin:0;font-size:16px;line-height:1.5}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
+        let mut runs: Vec<(u32, &str)> = layout
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text(text) => Some((text.x as u32 + text.width, text.text.as_str())),
+                _ => None,
+            })
+            .collect();
+        runs.sort();
+        let label_end = runs
+            .iter()
+            .find(|(_, text)| text.starts_with("Community"))
+            .map(|(end, _)| *end)
+            .expect("the label should be drawn");
+        let list_start = layout
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text(text) if text.text.starts_with("list") => Some(text.x as u32),
+                _ => None,
+            })
+            .expect("the list should be drawn");
+        assert!(
+            list_start >= label_end,
+            "the second cell starts at {list_start}, inside the first which ends at {label_end}"
         );
     }
 
