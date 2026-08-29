@@ -863,8 +863,8 @@ impl<'a> super::FunctionCompiler<'a> {
                         } else {
                             self.emit(Opcode::LoadUndefined);
                         }
-                        let argc = u8::try_from(args.len()).map_err(|_| {
-                            CompileError::message("optional call arity exceeded u8")
+                        let argc = u16::try_from(args.len()).map_err(|_| {
+                            CompileError::message("optional call arity exceeded u16")
                         })?;
                         for argument in args.iter() {
                             self.compile_expression(argument)?;
@@ -914,8 +914,8 @@ impl<'a> super::FunctionCompiler<'a> {
             self.emit(Opcode::Call(3));
             return Ok(());
         }
-        let argc = u8::try_from(call.args().len())
-            .map_err(|_| CompileError::message("call argument count exceeded u8"))?;
+        let argc = u16::try_from(call.args().len())
+            .map_err(|_| CompileError::message("call argument count exceeded u16"))?;
         for argument in call.args() {
             self.compile_expression(argument)?;
         }

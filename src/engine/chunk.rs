@@ -79,8 +79,13 @@ pub enum Opcode {
     JumpIfTruePop(i32),
     JumpIfFalsePop(i32),
 
-    Call(u8),
-    CallSpread(u8),
+    /// Call with this many arguments.
+    ///
+    /// Sixteen bits because a minified bundle really does write calls with more
+    /// than 255 arguments -- a big table handed to a helper in one go -- and a
+    /// narrower count made the whole file fail to compile.
+    Call(u16),
+    CallSpread(u16),
     Return,
     /// Suspend the current generator: pop the yielded value, save the frame, and
     /// return control to the `.next()` caller. On resume the sent value is pushed.
@@ -99,7 +104,7 @@ pub enum Opcode {
     GetIndexForCall,
     SetIndex,
     CopyDataProperties,
-    New(u8),
+    New(u16),
     Spread,
     GetForInKeys,
     GetForOfIterator,

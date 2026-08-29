@@ -374,8 +374,8 @@ impl<'a> super::FunctionCompiler<'a> {
         let resolved = self.resolve_binding(&super_name);
         self.emit_load_binding(&super_name, resolved)?;
         self.emit(Opcode::LoadThis);
-        let argc = u8::try_from(call.arguments().len())
-            .map_err(|_| CompileError::message("super call argument count exceeded u8"))?;
+        let argc = u16::try_from(call.arguments().len())
+            .map_err(|_| CompileError::message("super call argument count exceeded u16"))?;
         for argument in call.arguments() {
             self.compile_expression(argument)?;
         }

@@ -537,8 +537,8 @@ impl<'a> super::FunctionCompiler<'a> {
         for expr in exprs {
             self.compile_expression(expr)?;
         }
-        let argc = u8::try_from(1 + exprs.len())
-            .map_err(|_| CompileError::message("tagged template argument count exceeded u8"))?;
+        let argc = u16::try_from(1 + exprs.len())
+            .map_err(|_| CompileError::message("tagged template argument count exceeded u16"))?;
         let call_index = self.emit(Opcode::Call(argc));
         let position = template.span().start();
         self.record_call_position(call_index, position.line_number(), position.column_number());
@@ -685,8 +685,8 @@ impl<'a> super::FunctionCompiler<'a> {
                 self.emit(Opcode::LoadUndefined);
             }
         }
-        let argc = u8::try_from(call.args().len())
-            .map_err(|_| CompileError::message("call argument count exceeded u8"))?;
+        let argc = u16::try_from(call.args().len())
+            .map_err(|_| CompileError::message("call argument count exceeded u16"))?;
         for argument in call.args() {
             self.compile_expression(argument)?;
         }
@@ -740,8 +740,8 @@ impl<'a> super::FunctionCompiler<'a> {
             return self.compile_new_expression_with_spread(new_expression);
         }
         self.compile_expression(new_expression.constructor())?;
-        let argc = u8::try_from(new_expression.arguments().len())
-            .map_err(|_| CompileError::message("new expression arity exceeded u8"))?;
+        let argc = u16::try_from(new_expression.arguments().len())
+            .map_err(|_| CompileError::message("new expression arity exceeded u16"))?;
         for argument in new_expression.arguments() {
             self.compile_expression(argument)?;
         }

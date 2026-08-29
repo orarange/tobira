@@ -7207,7 +7207,7 @@ impl Vm {
             .ok_or_else(|| VmError::RangeError("operand stack underflow".to_string()))
     }
 
-    fn pop_args(&mut self, argc: u8) -> Result<Vec<Value>, VmError> {
+    fn pop_args(&mut self, argc: u16) -> Result<Vec<Value>, VmError> {
         let mut args = Vec::with_capacity(argc as usize);
         for _ in 0..argc {
             args.push(self.pop_value()?);
