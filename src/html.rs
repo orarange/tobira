@@ -348,6 +348,25 @@ impl Builder {
         self.open[1..].iter().any(|i| self.tag_of(*i) == target)
     }
 
+    /// Close `target`, but stop at anything the content cannot be lifted out of.
+    ///
+    /// `<span><button>foo</span>bar` keeps the button open: the closing tag is
+    /// dropped rather than taking the button with it, so "bar" is still part of
+    /// the button's label. That is what the standard's rule for an end tag with
+    /// no rule of its own says, and what a browser shows.
+    fn close_unless_special(&mut self, target: &str) {
+        for position in (1..self.open.len()).rev() {
+            let name = self.tag_of(self.open[position]);
+            if name == target {
+                self.open.truncate(position);
+                return;
+            }
+            if is_special(name) {
+                return;
+            }
+        }
+    }
+
     /// Pop open elements until `target` has been closed. A stray end tag whose
     /// element is not open is ignored.
     fn close(&mut self, target: &str) {
@@ -1253,7 +1272,41 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                             builder.formatting.truncate(position);
                         }
                     }
-                    builder.close(&name);
+                    // A structural tag closes the elements that end
+                    // implicitly inside it; anything else stops at the first
+                    // element its content cannot be lifted out of.
+                    if is_block_like(&name)
+                        || matches!(
+                            name.as_str(),
+                            "html"
+                                | "body"
+                                | "head"
+                                | "li"
+                                | "dd"
+                                | "dt"
+                                | "tbody"
+                                | "thead"
+                                | "tfoot"
+                                | "tr"
+                                | "td"
+                                | "th"
+                                | "caption"
+                                | "colgroup"
+                                | "select"
+                                | "optgroup"
+                                | "option"
+                                | "template"
+                                | "frameset"
+                                | "button"
+                                | "applet"
+                                | "marquee"
+                                | "object"
+                        )
+                    {
+                        builder.close(&name);
+                    } else {
+                        builder.close_unless_special(&name);
+                    }
                 }
             }
             Token::Comment(text) => {
@@ -2339,6 +2392,30 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_closing_tag_does_not_take_a_button_with_it() {
+        // `</span>` cannot lift the button's content out of it, so the tag is
+        // dropped instead and "bar" stays part of the button's label.
+        let document = parse_document("<body><span><button>foo</span>bar");
+        let body = body_of(&document);
+        assert_eq!(body.children.len(), 1);
+        let Node::Element(span) = &body.children[0] else {
+            panic!("expected the span");
+        };
+        let Node::Element(button) = &span.children[0] else {
+            panic!("expected the button");
+        };
+        let text: String = button
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                Node::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "foobar");
+    }
+
     #[test]
     fn a_formula_ends_the_search_for_a_paragraph_to_close() {
         // At an integration point HTML starts again, and the paragraph written
