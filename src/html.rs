@@ -879,6 +879,23 @@ fn starts_formatting_scope(tag: &str) -> bool {
 /// leaving the cell directly under the table changes both the layout and what
 /// the page's own script sees.
 fn ensure_table_ancestry(builder: &mut Builder, new_tag: &str) {
+    // A cell or a row belongs to the table, not to whatever was left open
+    // inside it. `<table><tr><div><td>` puts the div in front of the table --
+    // it cannot be drawn there -- and the cell that follows still goes into the
+    // row, so the stack is unwound back to the table's own parts first.
+    if matches!(new_tag, "td" | "th" | "tr" | "tbody" | "thead" | "tfoot" | "caption" | "col")
+        && builder.is_open("table")
+    {
+        while builder.open.len() > 1
+            && !matches!(
+                builder.tag_of(builder.current()),
+                "table" | "tbody" | "thead" | "tfoot" | "tr" | "caption" | "colgroup"
+            )
+        {
+            builder.open.pop();
+        }
+    }
+
     fn push(builder: &mut Builder, tag_name: &str) {
         let index = builder.insert(BuildKind::Element {
             tag_name: tag_name.to_string(),
@@ -2880,6 +2897,32 @@ mod tests {
             panic!("the second div should be inside the first");
         };
         assert_eq!(inner.tag_name, "div");
+    }
+
+    #[test]
+    fn a_cell_goes_back_into_the_row_after_something_was_pushed_out() {
+        // The div cannot be drawn in a row, so it goes in front of the table.
+        // The cell that follows still belongs to the row.
+        let document = parse_document("<body><table><tr><div><td>x");
+        let body = body_of(&document);
+        let Node::Element(division) = &body.children[0] else {
+            panic!("the div should be in front of the table");
+        };
+        assert_eq!(division.tag_name, "div");
+        assert!(division.children.is_empty(), "the cell does not belong to it");
+        let Node::Element(table) = &body.children[1] else {
+            panic!("expected the table");
+        };
+        let Node::Element(section) = &table.children[0] else {
+            panic!("expected the tbody");
+        };
+        let Node::Element(row) = &section.children[0] else {
+            panic!("expected the row");
+        };
+        let Node::Element(cell) = &row.children[0] else {
+            panic!("the cell should be in the row");
+        };
+        assert_eq!(cell.tag_name, "td");
     }
 
     #[test]
