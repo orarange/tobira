@@ -468,6 +468,27 @@ impl Builder {
         }
     }
 
+    /// The last still-active formatting element with this name, after any
+    /// marker.
+    fn active_formatting_named(&self, target: &str) -> Option<usize> {
+        for entry in self.formatting.iter().rev() {
+            match entry {
+                Formatting::Marker => return None,
+                Formatting::Element(index) if self.tag_of(*index) == target => return Some(*index),
+                Formatting::Element(_) => {}
+            }
+        }
+        None
+    }
+
+    fn forget_formatting(&mut self, index: usize) {
+        self.formatting
+            .retain(|entry| *entry != Formatting::Element(index));
+        if let Some(position) = self.open.iter().position(|i| *i == index) {
+            self.open.remove(position);
+        }
+    }
+
     /// A fresh element with the same name and attributes, and no children.
     fn clone_element(&mut self, source: usize) -> usize {
         let kind = match &self.nodes[source].kind {
@@ -1039,6 +1060,21 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     maybe_auto_close(&mut builder, &name);
                     ensure_table_ancestry(&mut builder, &name);
                 }
+                // A link inside a link is not a thing: the second `<a>` ends
+                // the first rather than nesting, and the same goes for the
+                // `<nobr>` old pages wrap around everything.
+                if name == "a" {
+                    if let Some(open_link) = builder.active_formatting_named("a") {
+                        builder.adoption_agency("a");
+                        builder.forget_formatting(open_link);
+                    }
+                } else if name == "nobr" {
+                    builder.reconstruct_formatting();
+                    if closes_enclosing(&builder, "nobr", DEFAULT_SCOPE) {
+                        builder.adoption_agency("nobr");
+                    }
+                }
+
                 if !is_special(&name) {
                     builder.reconstruct_formatting();
                 }
@@ -2230,6 +2266,20 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_second_link_ends_the_first_rather_than_nesting() {
+        let document = parse_document("<body><a href=one>first<a href=two>second");
+        let body = body_of(&document);
+        assert_eq!(body.children.len(), 2);
+        for (child, href) in body.children.iter().zip(["one", "two"]) {
+            let Node::Element(link) = child else {
+                panic!("expected two links side by side");
+            };
+            assert_eq!(link.tag_name, "a");
+            assert_eq!(link.attributes.get("href").map(String::as_str), Some(href));
+        }
+    }
+
     #[test]
     fn a_pre_block_drops_the_newline_after_its_opening_tag() {
         // Preformatted blocks are nearly always written with the content
