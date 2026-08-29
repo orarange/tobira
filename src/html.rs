@@ -1494,7 +1494,10 @@ fn tokenize(input: &str) -> Vec<Token> {
         // Raw text is an HTML notion. `<style>` and `<title>` inside `<svg>`
         // hold ordinary markup, which is why an SVG stylesheet has to be
         // wrapped in a CDATA section to survive.
-        let is_raw_text = !self_closing && foreign_depth == 0 && is_raw_text_element(&name);
+        let is_raw_text = !self_closing
+            && foreign_depth == 0
+            && (is_raw_text_element(&name) || is_escapable_text_element(&name));
+        let decodes = is_escapable_text_element(&name);
         tokens.push(Token::StartTag {
             name: name.clone(),
             attributes,
@@ -1503,16 +1506,16 @@ fn tokenize(input: &str) -> Vec<Token> {
 
         if is_raw_text {
             if let Some(close_start) = find_raw_text_close(input, index, &name) {
-                let raw_text = &input[index..close_start];
+                let raw_text = raw_text_content(&input[index..close_start], &name, decodes);
                 if !raw_text.is_empty() {
-                    tokens.push(Token::Text(raw_text.to_string()));
+                    tokens.push(Token::Text(raw_text));
                 }
                 tokens.push(Token::EndTag(name.clone()));
                 index = consume_raw_text_close(input, close_start, &name);
             } else {
-                let raw_text = &input[index..];
+                let raw_text = raw_text_content(&input[index..], &name, decodes);
                 if !raw_text.is_empty() {
-                    tokens.push(Token::Text(raw_text.to_string()));
+                    tokens.push(Token::Text(raw_text));
                 }
                 break;
             }
@@ -1596,8 +1599,42 @@ fn is_void_element(name: &str) -> bool {
     )
 }
 
+/// Elements whose content is text with no markup in it at all.
+///
+/// `<iframe>` and `<noframes>` hold the markup a browser without the feature
+/// would have shown, and a browser that has the feature must not build it: an
+/// `<iframe>` fallback full of `<p>` is text, not paragraphs.
+/// The text of a raw-text or escapable-text element, ready to insert.
+fn raw_text_content(raw: &str, tag_name: &str, decodes: bool) -> String {
+    // A newline straight after `<textarea>` or `<pre>` is swallowed, so that
+    // writing the opening tag on its own line does not indent the value.
+    let raw = if matches!(tag_name, "textarea" | "pre" | "listing") {
+        raw.strip_prefix("\r\n")
+            .or_else(|| raw.strip_prefix('\n'))
+            .unwrap_or(raw)
+    } else {
+        raw
+    };
+    if decodes {
+        decode_html_entities(raw)
+    } else {
+        raw.to_string()
+    }
+}
+
 fn is_raw_text_element(name: &str) -> bool {
-    matches!(name, "script" | "style" | "title" | "textarea")
+    matches!(
+        name,
+        "script" | "style" | "iframe" | "noembed" | "noframes" | "noscript" | "xmp"
+    )
+}
+
+/// Elements whose content is text, but text that still spells out characters.
+///
+/// This is the difference between a title reading `A &amp; B` and one reading
+/// `A & B`. Only these two are written this way.
+fn is_escapable_text_element(name: &str) -> bool {
+    matches!(name, "title" | "textarea")
 }
 
 /// Where the raw text of `tag_name` ends.
@@ -1885,6 +1922,51 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_title_spells_out_its_character_references() {
+        // The title is escapable text: `&amp;` in it is an ampersand, not the
+        // five characters. A raw-text element leaves them alone instead.
+        let document = parse_document("<title>A &amp; B &lt;/title></title>");
+        let head = head_of(&document);
+        let Node::Element(title) = &head.children[0] else {
+            panic!("expected a title");
+        };
+        let Node::Text(text) = &title.children[0] else {
+            panic!("expected title text");
+        };
+        assert_eq!(text, "A & B </title>");
+    }
+
+    #[test]
+    fn an_iframe_fallback_is_text_rather_than_markup() {
+        // What is written inside `<iframe>` is for a browser that cannot show
+        // one. A browser that can must not build it into the page.
+        let document = parse_document("<body><iframe><p>no frames</p></iframe>");
+        let body = body_of(&document);
+        let Node::Element(frame) = &body.children[0] else {
+            panic!("expected an iframe");
+        };
+        assert_eq!(frame.children.len(), 1);
+        let Node::Text(text) = &frame.children[0] else {
+            panic!("the fallback should be one run of text");
+        };
+        assert_eq!(text, "<p>no frames</p>");
+    }
+
+    #[test]
+    fn a_textarea_drops_the_newline_after_its_opening_tag() {
+        let document = parse_document("<body><textarea>
+value</textarea>");
+        let body = body_of(&document);
+        let Node::Element(area) = &body.children[0] else {
+            panic!("expected a textarea");
+        };
+        let Node::Text(text) = &area.children[0] else {
+            panic!("expected the value");
+        };
+        assert_eq!(text, "value");
+    }
+
     #[test]
     fn a_cdata_section_is_text_inside_svg_and_a_comment_outside_it() {
         // An SVG that carries its own stylesheet writes it in a CDATA section.
