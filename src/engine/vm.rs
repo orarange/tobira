@@ -225,6 +225,8 @@ enum BuiltinId {
     DomInterfaceConstructor,
     // DOM Node/Element methods
     DomNodeAppendChild,
+    DomSelectAdd,
+    DomSelectRemove,
     DomNodeInsertBefore,
     DomNodePrepend,
     DomNodeHasChildNodes,
@@ -3632,7 +3634,13 @@ impl Vm {
         // UMD bundles resolve their global via `global || self` and then attach
         // their exports to it (e.g. `self.React = {}`); pointing `self` at the
         // document meant those exports never landed on the real global.
-        self.globals.insert("self".to_string(), window_obj);
+        self.globals.insert("self".to_string(), window_obj.clone());
+        // With no frames of its own, a page's `top` and `parent` are itself.
+        // Scripts compare them (`if (window.top !== window.self)` is the
+        // frame-busting check nearly every embeddable widget carries), and an
+        // undefined `top` makes that comparison throw rather than answer.
+        self.globals.insert("top".to_string(), window_obj.clone());
+        self.globals.insert("parent".to_string(), window_obj);
 
         // DOM interface constructors so `node instanceof Element` (and friends)
         // works. Host DOM nodes don't have prototype chains linked to these, so
@@ -13213,6 +13221,46 @@ impl Vm {
                 }
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
             }
+            BuiltinId::DomSelectAdd => {
+                let select = self.this_node_id(&this_value);
+                let Some(option) = args.first().and_then(|v| self.node_id_from_host_val(v)) else {
+                    return Ok(Value::Undefined);
+                };
+                // The second argument is where to put it: an option, an index,
+                // or nothing at all, which means the end.
+                let reference = match args.get(1) {
+                    None | Some(Value::Undefined) | Some(Value::Null) => None,
+                    Some(Value::Number(index)) => {
+                        let options = self.option_nodes(select);
+                        options.get(*index as usize).copied()
+                    }
+                    Some(other) => self.node_id_from_host_val(other),
+                };
+                let _ = self.host.mutate_dom(DomMutation::InsertBefore {
+                    parent: select,
+                    child: option,
+                    reference,
+                });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomSelectRemove => {
+                let select = self.this_node_id(&this_value);
+                match args.first() {
+                    // `remove()` with no index is the one inherited from
+                    // Element: it takes the select itself out of the page.
+                    None | Some(Value::Undefined) => {
+                        let _ = self.host.mutate_dom(DomMutation::Remove { node: select });
+                    }
+                    Some(value) => {
+                        let index = self.to_number(value) as usize;
+                        let options = self.option_nodes(select);
+                        if let Some(option) = options.get(index).copied() {
+                            let _ = self.host.mutate_dom(DomMutation::Remove { node: option });
+                        }
+                    }
+                }
+                Ok(Value::Undefined)
+            }
             BuiltinId::DomNodeInsertBefore => {
                 let parent_id = self.this_node_id(&this_value);
                 let child_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
@@ -15530,6 +15578,84 @@ impl Vm {
         }
     }
 
+    /// Whether the attribute is written at all.
+    ///
+    /// A boolean attribute like `selected` carries no value, so reading it as
+    /// a string gives back the empty string -- which is not the same as its
+    /// being absent.
+    fn has_dom_attribute(&mut self, node_id: NodeId, name: &str) -> bool {
+        matches!(
+            self.host.read_dom(DomRead::Attribute {
+                node: node_id,
+                name: name.to_string(),
+            }),
+            Ok(DomReadResult::String(_))
+        )
+    }
+
+    fn node_tag_is(&self, node_id: NodeId, tag: &str) -> bool {
+        self.get_node_name(node_id).eq_ignore_ascii_case(tag)
+    }
+
+    /// The `<option>` elements a `<select>` holds, in document order.
+    fn option_nodes(&mut self, select: NodeId) -> Vec<NodeId> {
+        match self.host.read_dom(DomRead::QuerySelectorAll {
+            root: select,
+            selectors: "option".to_string(),
+        }) {
+            Ok(DomReadResult::Nodes(ids)) => ids,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Which option a select is showing.
+    ///
+    /// The one marked `selected`, or the first one: a select that names no
+    /// selection still shows its first option, and a script reading `.value`
+    /// before the reader has touched anything expects that value back.
+    fn selected_option(&mut self, select: NodeId) -> Option<NodeId> {
+        let options = self.option_nodes(select);
+        options
+            .iter()
+            .find(|id| self.has_dom_attribute(**id, "selected"))
+            .copied()
+            .or_else(|| options.first().copied())
+    }
+
+    fn select_of_option(&mut self, option: NodeId) -> Option<NodeId> {
+        let mut current = option;
+        for _ in 0..8 {
+            let parent = match self.host.read_dom(DomRead::Parent { node: current }) {
+                Ok(DomReadResult::Node(id)) => id,
+                _ => return None,
+            };
+            if self.node_tag_is(parent, "select") {
+                return Some(parent);
+            }
+            current = parent;
+        }
+        None
+    }
+
+    fn selected_option_of_parent(&mut self, option: NodeId) -> bool {
+        match self.select_of_option(option) {
+            Some(select) => self.selected_option(select) == Some(option),
+            None => self.has_dom_attribute(option, "selected"),
+        }
+    }
+
+    /// An option's value: its attribute, or its text when it has none.
+    fn option_value(&mut self, option: NodeId) -> String {
+        let attribute = self.get_dom_attribute(option, "value");
+        if !attribute.is_empty() {
+            return attribute;
+        }
+        match self.host.read_dom(DomRead::TextContent { node: option }) {
+            Ok(DomReadResult::String(text)) => text.trim().to_string(),
+            _ => String::new(),
+        }
+    }
+
     fn get_dom_attribute(&self, node_id: NodeId, name: &str) -> String {
         match self.host.read_dom(DomRead::Attribute {
             node: node_id,
@@ -16281,7 +16407,9 @@ impl Vm {
         match name.as_str() {
             // Return the same GcRef as the document global so `window.document === document`
             "document" => Ok(self.globals.get("document").cloned().unwrap_or(Value::Undefined)),
-            "window" | "self" | "globalThis" => Ok(self.globals.get("window").cloned().unwrap_or(Value::Undefined)),
+            "window" | "self" | "globalThis" | "top" | "parent" => {
+                Ok(self.globals.get("window").cloned().unwrap_or(Value::Undefined))
+            }
             "innerWidth" => {
                 let v = self.host.window_metrics(WindowId(0)).map(|m| m.inner_width).unwrap_or(0.0);
                 Ok(Value::Number(v))
@@ -16893,6 +17021,62 @@ impl Vm {
             "previousSibling" => Ok(self.dom_sibling(node_id, SiblingDirection::Previous, false)),
             "nextElementSibling" => Ok(self.dom_sibling(node_id, SiblingDirection::Next, true)),
             "previousElementSibling" => Ok(self.dom_sibling(node_id, SiblingDirection::Previous, true)),
+            // A `<select>` reads as its chosen option, not as an attribute.
+            // Its own `value` is the selected option's, and `<option>` falls
+            // back to its own text when it carries no value attribute --
+            // which is how most option lists are written.
+            "value" if self.node_tag_is(node_id, "select") => {
+                let selected = self.selected_option(node_id);
+                let text = selected.map(|option| self.option_value(option)).unwrap_or_default();
+                Ok(self.make_string_value(&text))
+            }
+            "value" if self.node_tag_is(node_id, "option") => {
+                let text = self.option_value(node_id);
+                Ok(self.make_string_value(&text))
+            }
+            "options" if self.node_tag_is(node_id, "select") => {
+                self.query_all_to_array(node_id, "option".to_string())
+            }
+            "selectedOptions" if self.node_tag_is(node_id, "select") => {
+                let selected = self.selected_option(node_id);
+                let items: Vec<Value> = selected
+                    .into_iter()
+                    .map(|id| self.make_dom_node_value(id))
+                    .collect();
+                self.make_array_from_values(items)
+            }
+            "selectedIndex" if self.node_tag_is(node_id, "select") => {
+                let options = self.option_nodes(node_id);
+                let selected = self.selected_option(node_id);
+                let index = selected
+                    .and_then(|target| options.iter().position(|id| *id == target))
+                    .map_or(-1.0, |position| position as f64);
+                Ok(Value::Number(index))
+            }
+            "text" if self.node_tag_is(node_id, "option") => {
+                let res = self.host.read_dom(DomRead::TextContent { node: node_id });
+                Ok(match res {
+                    Ok(DomReadResult::String(text)) => self.make_string_value(text.trim()),
+                    _ => self.make_string_value(""),
+                })
+            }
+            "selected" if self.node_tag_is(node_id, "option") => {
+                Ok(Value::Bool(self.selected_option_of_parent(node_id)))
+            }
+            "index" if self.node_tag_is(node_id, "option") => {
+                let parent = self.select_of_option(node_id);
+                let index = parent
+                    .map(|select| self.option_nodes(select))
+                    .and_then(|options| options.iter().position(|id| *id == node_id))
+                    .map_or(-1.0, |position| position as f64);
+                Ok(Value::Number(index))
+            }
+            "add" if self.node_tag_is(node_id, "select") => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomSelectAdd))
+            }
+            "remove" if self.node_tag_is(node_id, "select") => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomSelectRemove))
+            }
             "value" => {
                 let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "value".to_string() });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })

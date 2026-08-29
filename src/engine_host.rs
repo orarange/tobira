@@ -4043,6 +4043,42 @@ mod tests {
     }
 
     #[test]
+    fn a_select_reads_and_edits_its_options() {
+        let result = run_document_scripts(
+            r#"<html><body>
+                <select id="a"><option value="x">Ex</option><option value="y" selected>Why</option></select>
+                <select id="b"></select>
+                <script>
+                    var a = document.getElementById('a'), b = document.getElementById('b');
+                    var made = document.createElement('option');
+                    made.textContent = 'New';
+                    b.add(made);
+                    document.title = [
+                        a.value, a.selectedIndex, a.options.length,
+                        a.options[1].selected, b.value, b.options[0].index
+                    ].join("|");
+                </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        // The marked option wins; an option with no value attribute reads as
+        // its own text.
+        assert_eq!(result.title.as_deref(), Some("y|1|2|true|New|0"));
+    }
+
+    #[test]
+    fn a_page_without_frames_is_its_own_top() {
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                document.title = [window.top === window, window.parent === window].join("|");
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("true|true"));
+    }
+
+    #[test]
     fn intl_formats_numbers_and_dates_the_way_a_browser_does() {
         let result = run_document_scripts(
             r#"<html><body><script>
