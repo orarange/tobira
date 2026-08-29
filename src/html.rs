@@ -1285,6 +1285,11 @@ fn tokenize(input: &str) -> Vec<Token> {
     let bytes = input.as_bytes();
     let mut index = 0;
     let mut tokens = Vec::new();
+    // How deep we are inside `<svg>` or `<math>`. Only one construct cares:
+    // `<![CDATA[` is a section of literal text there, and a bogus comment
+    // everywhere else. An SVG that carries its own stylesheet is written that
+    // way, so reading it as a comment throws the stylesheet out.
+    let mut foreign_depth = 0usize;
 
     while index < bytes.len() {
         if bytes[index] != b'<' {
@@ -1369,12 +1374,28 @@ fn tokenize(input: &str) -> Vec<Token> {
             }
             let name = input[name_start..index].to_ascii_lowercase();
             consume_until_tag_end(input, &mut index);
+            if matches!(name.as_str(), "svg" | "math") {
+                foreign_depth = foreign_depth.saturating_sub(1);
+            }
             tokens.push(Token::EndTag(name));
             continue;
         }
 
         if input[index..].starts_with("<!") {
             let start = index;
+            if foreign_depth > 0 && input[start..].starts_with("<![CDATA[") {
+                // Everything up to `]]>` is literal, entities included.
+                let body = start + 9;
+                let (text, next) = match input[body..].find("]]>") {
+                    Some(offset) => (input[body..body + offset].to_string(), body + offset + 3),
+                    None => (input[body..].to_string(), bytes.len()),
+                };
+                if !text.is_empty() {
+                    tokens.push(Token::Text(text));
+                }
+                index = next;
+                continue;
+            }
             let is_doctype = input[start..].len() > 9 && input[start + 2..start + 9].eq_ignore_ascii_case("doctype");
             if !is_doctype {
                 // `<!` followed by anything that is not a doctype or a comment
@@ -1467,7 +1488,13 @@ fn tokenize(input: &str) -> Vec<Token> {
             }
         }
 
-        let is_raw_text = !self_closing && is_raw_text_element(&name);
+        if !self_closing && matches!(name.as_str(), "svg" | "math") {
+            foreign_depth += 1;
+        }
+        // Raw text is an HTML notion. `<style>` and `<title>` inside `<svg>`
+        // hold ordinary markup, which is why an SVG stylesheet has to be
+        // wrapped in a CDATA section to survive.
+        let is_raw_text = !self_closing && foreign_depth == 0 && is_raw_text_element(&name);
         tokens.push(Token::StartTag {
             name: name.clone(),
             attributes,
@@ -1858,6 +1885,29 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_cdata_section_is_text_inside_svg_and_a_comment_outside_it() {
+        // An SVG that carries its own stylesheet writes it in a CDATA section.
+        let document = parse_document("<body><svg><style><![CDATA[a{fill:red}]]></style></svg>");
+        let body = body_of(&document);
+        let Node::Element(svg) = &body.children[0] else {
+            panic!("expected an svg");
+        };
+        let Node::Element(style) = &svg.children[0] else {
+            panic!("expected a style");
+        };
+        let Node::Text(text) = &style.children[0] else {
+            panic!("expected the stylesheet as text");
+        };
+        assert_eq!(text, "a{fill:red}");
+
+        // The same markup in HTML is a bogus comment, which is what it means
+        // there and what every browser makes of it.
+        let document = parse_document("<body><![CDATA[x]]>");
+        let body = body_of(&document);
+        assert!(matches!(&body.children[0], Node::Comment(text) if text == "[CDATA[x]]"));
+    }
+
     #[test]
     fn a_cell_written_straight_under_a_table_grows_a_row_and_a_section() {
         let document = parse_document("<body><table><td>cell</td></table>");
