@@ -1078,6 +1078,10 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     continue;
                 }
                 // Between the head and the body, whitespace belongs to neither.
+                // A column group holds nothing but columns, text included.
+                if !text.trim().is_empty() && builder.tag_of(builder.current()) == "colgroup" {
+                    builder.open.pop();
+                }
                 if builder.after_head && builder.open.len() == 1 {
                     if text.trim().is_empty() {
                         builder.html_whitespace.push(Node::Text(text));
