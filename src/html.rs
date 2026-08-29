@@ -913,6 +913,24 @@ fn parse_document_body(input: &str) -> (Node, bool) {
                 let mut name = name;
                 let mut attributes = attributes;
 
+                // A select holds options and nothing else. Everything else
+                // written inside one is dropped, which is why a `<div>` between
+                // two options never appears on the page.
+                if builder.is_open("select") {
+                    match name.as_str() {
+                        "option" | "optgroup" | "hr" | "script" | "template" | "style" => {}
+                        // These end the select and are then read normally --
+                        // the author clearly meant to be past it.
+                        "select" | "input" | "keygen" | "textarea" => {
+                            builder.close("select");
+                            if name == "select" {
+                                continue;
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+
                 // Inside `<svg>` or `<math>` almost none of the HTML rules
                 // apply: no implied closing, no formatting to reconstruct, and
                 // a trailing slash really does close the element.
@@ -1246,9 +1264,33 @@ fn maybe_auto_close(builder: &mut Builder, new_tag: &str) {
         ),
         // Table row: close any open tr within the current section.
         "tr" => auto_close_before(builder, &["tr"], &["table", "tbody", "thead", "tfoot"]),
-        // List item: close any open li within the current list.
-        "li" => auto_close_before(builder, &["li"], &["ul", "ol"]),
-        "dt" | "dd" => auto_close_before(builder, &["dt", "dd"], &["dl"]),
+        // List item: close any open li within the current list. A list item
+        // also ends a paragraph, which is what `<p>text<li>` means.
+        "li" => {
+            auto_close_before(builder, &["li"], &["ul", "ol"]);
+            auto_close_before(builder, &["p"], PARAGRAPH_BOUNDARIES);
+        }
+        "dt" | "dd" => {
+            auto_close_before(builder, &["dt", "dd"], &["dl"]);
+            auto_close_before(builder, &["p"], PARAGRAPH_BOUNDARIES);
+        }
+        // A menu inside a select is a new group, so the option before it ends.
+        // `<select><option>a<option>b` is two options, not one nested in the
+        // other, and that is how nearly every select on the web is written.
+        "option" => {
+            if builder.tag_of(builder.current()) == "option" {
+                builder.open.pop();
+            }
+        }
+        "optgroup" => {
+            if builder.tag_of(builder.current()) == "option" {
+                builder.open.pop();
+            }
+            if builder.tag_of(builder.current()) == "optgroup" {
+                builder.open.pop();
+            }
+        }
+
         // A heading closes an open heading of any level: `<h1>a<h2>b` gives two
         // siblings, not a nested pair.
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
@@ -1980,6 +2022,51 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn options_written_without_closing_tags_are_siblings() {
+        // Nearly every select on the web is written this way.
+        let document = parse_document("<body><select><option>a<option>b</select>");
+        let body = body_of(&document);
+        let Node::Element(select) = &body.children[0] else {
+            panic!("expected a select");
+        };
+        assert_eq!(select.children.len(), 2);
+        for child in &select.children {
+            let Node::Element(option) = child else {
+                panic!("expected two options");
+            };
+            assert_eq!(option.tag_name, "option");
+            assert_eq!(option.children.len(), 1);
+        }
+    }
+
+    #[test]
+    fn markup_that_a_select_cannot_hold_is_dropped() {
+        let document = parse_document("<body><select><div>x</div><option>a</select>");
+        let body = body_of(&document);
+        let Node::Element(select) = &body.children[0] else {
+            panic!("expected a select");
+        };
+        // The div itself is dropped; its text stays, as it does in a browser.
+        assert!(matches!(&select.children[0], Node::Text(text) if text == "x"));
+        let Node::Element(option) = &select.children[1] else {
+            panic!("expected the option");
+        };
+        assert_eq!(option.tag_name, "option");
+        assert_eq!(select.children.len(), 2);
+    }
+
+    #[test]
+    fn a_list_item_ends_an_open_paragraph() {
+        let document = parse_document("<body><p>text<li>item");
+        let body = body_of(&document);
+        assert_eq!(body.children.len(), 2);
+        let Node::Element(item) = &body.children[1] else {
+            panic!("the list item should be a sibling of the paragraph");
+        };
+        assert_eq!(item.tag_name, "li");
+    }
+
     #[test]
     fn a_doctype_keeps_its_public_and_system_identifiers() {
         let document = parse_document(
