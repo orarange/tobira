@@ -196,6 +196,13 @@ struct Builder {
     /// They belong to the body whatever their name: `</body><meta>` puts the
     /// meta in the body, not in the head, because the head is long past.
     trailing_body: usize,
+    /// How many children the document had when the body's first content
+    /// arrived.
+    ///
+    /// Only those can still be head content. Anything the parser adds after --
+    /// including something it moves out of a table, which lands in front of the
+    /// table -- was written when the body was already under way.
+    head_children: Option<usize>,
     /// Whether anything that belongs to the body has been written yet.
     ///
     /// Before that, a stray end tag is simply dropped; the rules that invent
@@ -249,6 +256,7 @@ impl Builder {
             after_head: false,
             body_started: false,
             trailing_body: 0,
+            head_children: None,
             html_whitespace: Vec::new(),
             frameset_ok: true,
             frameset_allowed: None,
@@ -1063,6 +1071,7 @@ struct ParseExtras {
     html_comments: Vec<Node>,
     html_whitespace: Vec<Node>,
     trailing_body: usize,
+    head_children: Option<usize>,
     document_comments: Vec<Node>,
 }
 
@@ -1244,6 +1253,22 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 maybe_auto_close(&mut builder, &name);
                 ensure_table_ancestry(&mut builder, &name);
                 if !is_head_only(&name) && !matches!(name.as_str(), "html" | "head") {
+                    if !builder.body_started {
+                        // Counted the way `ensure_document_structure` counts:
+                        // the doctype and the comments before the markup are
+                        // lifted out of this list before it walks it.
+                        let counted = builder.nodes[0]
+                            .children
+                            .iter()
+                            .filter(|child| {
+                                !matches!(
+                                    builder.nodes[**child].kind,
+                                    BuildKind::Doctype(_) | BuildKind::Comment(_)
+                                )
+                            })
+                            .count();
+                        builder.head_children = Some(counted);
+                    }
                     builder.body_started = true;
                 }
                 // A link inside a link is not a thing: the second `<a>` ends
@@ -1500,6 +1525,7 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
         html_comments: std::mem::take(&mut builder.html_comments),
         html_whitespace: std::mem::take(&mut builder.html_whitespace),
         trailing_body: builder.trailing_body,
+        head_children: builder.head_children,
         document_comments: std::mem::take(&mut builder.document_comments),
     };
     (builder.into_tree(), extras)
@@ -1642,7 +1668,8 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
     let head_only_until = loose
         .len()
         .saturating_sub(extras.trailing_body)
-        .min(body_at.unwrap_or(usize::MAX));
+        .min(body_at.unwrap_or(usize::MAX))
+        .min(extras.head_children.unwrap_or(usize::MAX));
     for (position, node) in loose.into_iter().enumerate() {
         if position >= head_only_until {
             seen_body_content = true;
@@ -2853,6 +2880,19 @@ mod tests {
             panic!("the second div should be inside the first");
         };
         assert_eq!(inner.tag_name, "div");
+    }
+
+    #[test]
+    fn a_title_pushed_out_of_a_table_is_body_content() {
+        // It ends up in front of the table, but it was written when the body
+        // was already under way, so it does not go back up into the head.
+        let document = parse_document("<!doctype html><table><title>X</title></table>");
+        assert!(head_of(&document).children.is_empty());
+        let body = body_of(&document);
+        let Node::Element(title) = &body.children[0] else {
+            panic!("the title should be in the body, in front of the table");
+        };
+        assert_eq!(title.tag_name, "title");
     }
 
     #[test]
