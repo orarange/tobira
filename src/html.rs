@@ -101,7 +101,26 @@ fn parse_document_body(input: &str) -> Node {
                     stack.push(element);
                 }
             }
-            Token::EndTag(name) => close_element(&mut stack, &name),
+            Token::EndTag(name) => {
+                // `</p>` with no open paragraph makes an empty one, and `</br>`
+                // is read as `<br>`. Both are what the standard says and what
+                // every browser does with the stray tags real pages contain.
+                if name == "p" && !stack[1..].iter().any(|el| el.tag_name == "p") {
+                    stack
+                        .last_mut()
+                        .expect("document root always exists")
+                        .children
+                        .push(Node::Element(Element::new("p")));
+                } else if name == "br" {
+                    stack
+                        .last_mut()
+                        .expect("document root always exists")
+                        .children
+                        .push(Node::Element(Element::new("br")));
+                } else {
+                    close_element(&mut stack, &name);
+                }
+            }
             Token::Comment(text) => {
                 stack
                     .last_mut()
@@ -575,6 +594,9 @@ fn tokenize(input: &str) -> Vec<Token> {
         }
 
         let name = input[name_start..index].to_ascii_lowercase();
+        // The standard renames this one rather than honouring it: `<image>`
+        // is a misspelling of `<img>` old pages still contain.
+        let name = if name == "image" { "img".to_string() } else { name };
         let mut attributes = BTreeMap::new();
         let mut self_closing = is_void_element(&name);
 
@@ -782,6 +804,13 @@ fn decode_attribute_entities(input: &str) -> String {
 }
 
 fn decode_references(input: &str, in_attribute: bool) -> String {
+    // A NUL in ordinary content is dropped. It reaches the tree in no browser,
+    // and left in place it counts as content: `<html> <frameset>` looked like
+    // a body had already started, so the frameset never took the body's place.
+    if input.contains(' ') {
+        let cleaned: String = input.chars().filter(|c| *c != ' ').collect();
+        return decode_references(&cleaned, in_attribute);
+    }
     let mut output = String::with_capacity(input.len());
     let mut rest = input;
 
