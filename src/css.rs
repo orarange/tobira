@@ -8621,7 +8621,7 @@ mod tests {
     fn root_opacity_zero_is_clamped_but_others_honored() {
         fn opacity_of(tag: &str, css: &str) -> u8 {
             let ss = parse_stylesheet(css);
-            let el = Element {
+            let el = Element { namespace: Default::default(),
                 tag_name: tag.into(),
                 attributes: Default::default(),
                 children: vec![],
@@ -8643,7 +8643,7 @@ mod tests {
     #[test]
     fn test_position_relative_parsed() {
         let ss = parse_stylesheet("div { position: relative; top: 10px; left: 20px; }");
-        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let el = Element { namespace: Default::default(), tag_name: "div".into(), attributes: Default::default(), children: vec![] };
         let rule_index = RuleIndex::build(&ss.rules);
         let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
         assert_eq!(style.position, Position::Relative);
@@ -8654,7 +8654,7 @@ mod tests {
     #[test]
     fn test_position_absolute_parsed() {
         let ss = parse_stylesheet("div { position: absolute; top: 0px; }");
-        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let el = Element { namespace: Default::default(), tag_name: "div".into(), attributes: Default::default(), children: vec![] };
         let rule_index = RuleIndex::build(&ss.rules);
         let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
         assert_eq!(style.position, Position::Absolute);
@@ -8663,7 +8663,7 @@ mod tests {
     #[test]
     fn test_flex_display_parsed() {
         let ss = parse_stylesheet("div { display: flex; flex-direction: column; gap: 8px; }");
-        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let el = Element { namespace: Default::default(), tag_name: "div".into(), attributes: Default::default(), children: vec![] };
         let rule_index = RuleIndex::build(&ss.rules);
         let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
         assert_eq!(style.display, Display::Flex);
@@ -8674,7 +8674,7 @@ mod tests {
     #[test]
     fn test_justify_content_parsed() {
         let ss = parse_stylesheet("div { display: flex; justify-content: space-between; align-items: center; }");
-        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let el = Element { namespace: Default::default(), tag_name: "div".into(), attributes: Default::default(), children: vec![] };
         let rule_index = RuleIndex::build(&ss.rules);
         let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
         assert_eq!(style.justify_content, JustifyContent::SpaceBetween);
@@ -8684,7 +8684,7 @@ mod tests {
     #[test]
     fn test_z_index_parsed() {
         let ss = parse_stylesheet("div { position: absolute; z-index: 10; }");
-        let el = Element { tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let el = Element { namespace: Default::default(), tag_name: "div".into(), attributes: Default::default(), children: vec![] };
         let rule_index = RuleIndex::build(&ss.rules);
         let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
         assert_eq!(style.z_index, Some(10));

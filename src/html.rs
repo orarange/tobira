@@ -22,6 +22,20 @@ pub struct Element {
     pub tag_name: String,
     pub attributes: BTreeMap<String, String>,
     pub children: Vec<Node>,
+    /// Which language the element belongs to.
+    ///
+    /// `<title>` in HTML is the document title and `<title>` in SVG is a
+    /// tooltip; the name alone does not say which one an element is.
+    pub namespace: Namespace,
+}
+
+/// The three languages an element in an HTML document can be written in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Namespace {
+    #[default]
+    Html,
+    Svg,
+    MathMl,
 }
 
 impl Element {
@@ -30,6 +44,7 @@ impl Element {
             tag_name: tag_name.into(),
             attributes: BTreeMap::new(),
             children: Vec::new(),
+            namespace: Namespace::Html,
         }
     }
 
@@ -72,6 +87,7 @@ enum BuildKind {
     Element {
         tag_name: String,
         attributes: BTreeMap<String, String>,
+        namespace: Namespace,
     },
     Text(String),
     Comment(String),
@@ -112,7 +128,7 @@ impl Builder {
     fn new() -> Self {
         Self {
             nodes: vec![BuildNode {
-                kind: BuildKind::Element {
+                kind: BuildKind::Element { namespace: Default::default(),
                     tag_name: "document".to_string(),
                     attributes: BTreeMap::new(),
                 },
@@ -176,6 +192,66 @@ impl Builder {
     /// This is what carries `<b>` into the next paragraph. Without it, markup
     /// like `<b>one<p>two` leaves the second paragraph unbolded, which is not
     /// what any browser shows.
+    fn namespace_of(&self, index: usize) -> Namespace {
+        match &self.nodes[index].kind {
+            BuildKind::Element { namespace, .. } => *namespace,
+            _ => Namespace::Html,
+        }
+    }
+
+    /// The language the next token should be read in.
+    ///
+    /// Inside `<svg>` or `<math>` the rules of HTML are suspended, but not
+    /// everywhere: a handful of elements are integration points where HTML
+    /// starts again, which is how `<foreignObject>` can hold a `<div>` and how
+    /// `<mtext>` can hold ordinary markup.
+    fn foreign_context(&self, start_tag: Option<&str>) -> Namespace {
+        let Some(&node) = self.open.last() else {
+            return Namespace::Html;
+        };
+        let namespace = self.namespace_of(node);
+        if namespace == Namespace::Html {
+            return Namespace::Html;
+        }
+        let tag = self.tag_of(node);
+        match namespace {
+            Namespace::Svg if matches!(tag, "foreignObject" | "desc" | "title") => Namespace::Html,
+            Namespace::MathMl if matches!(tag, "mi" | "mo" | "mn" | "ms" | "mtext") => {
+                // These hold text, so they hold HTML -- except that `<mglyph>`
+                // and `<malignmark>` are still MathML of their own.
+                match start_tag {
+                    Some("mglyph") | Some("malignmark") => Namespace::MathMl,
+                    _ => Namespace::Html,
+                }
+            }
+            Namespace::MathMl if tag == "annotation-xml" => {
+                let encoding = self.attribute_of(node, "encoding").unwrap_or_default();
+                let encoding = encoding.to_ascii_lowercase();
+                if encoding == "text/html" || encoding == "application/xhtml+xml" {
+                    Namespace::Html
+                } else {
+                    Namespace::MathMl
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn attribute_of(&self, index: usize, name: &str) -> Option<String> {
+        match &self.nodes[index].kind {
+            BuildKind::Element { attributes, .. } => attributes.get(name).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Leave foreign content because an HTML element that cannot appear there
+    /// has been opened.
+    fn break_out_of_foreign_content(&mut self) {
+        while self.open.len() > 1 && self.foreign_context(None) != Namespace::Html {
+            self.open.pop();
+        }
+    }
+
     fn reconstruct_formatting(&mut self) {
         let Some(&last) = self.formatting.last() else {
             return;
@@ -216,9 +292,11 @@ impl Builder {
             BuildKind::Element {
                 tag_name,
                 attributes,
+                namespace,
             } => BuildKind::Element {
                 tag_name: tag_name.clone(),
                 attributes: attributes.clone(),
+                namespace: *namespace,
             },
             _ => BuildKind::Text(String::new()),
         };
@@ -402,9 +480,11 @@ impl Builder {
                 BuildKind::Element {
                     tag_name,
                     attributes,
+                    namespace,
                 } => Node::Element(Element {
                     tag_name,
                     attributes,
+                    namespace,
                     children: children.into_iter().map(|c| build(nodes, c)).collect(),
                 }),
             }
@@ -461,6 +541,134 @@ fn starts_formatting_scope(tag: &str) -> bool {
     matches!(tag, "applet" | "marquee" | "object" | "td" | "th" | "caption" | "template")
 }
 
+/// HTML elements that cannot live inside `<svg>` or `<math>`.
+///
+/// Meeting one of these means the author forgot to close the foreign element,
+/// so the parser leaves it rather than nesting a paragraph inside a drawing.
+fn breaks_out_of_foreign_content(tag: &str) -> bool {
+    matches!(
+        tag,
+        "b" | "big"
+            | "blockquote"
+            | "body"
+            | "br"
+            | "center"
+            | "code"
+            | "dd"
+            | "div"
+            | "dl"
+            | "dt"
+            | "em"
+            | "embed"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "head"
+            | "hr"
+            | "i"
+            | "img"
+            | "li"
+            | "listing"
+            | "menu"
+            | "meta"
+            | "nobr"
+            | "ol"
+            | "p"
+            | "pre"
+            | "ruby"
+            | "s"
+            | "small"
+            | "span"
+            | "strong"
+            | "strike"
+            | "sub"
+            | "sup"
+            | "table"
+            | "tt"
+            | "u"
+            | "ul"
+            | "var"
+    )
+}
+
+/// The SVG element and attribute names that are not all lowercase.
+///
+/// HTML is case insensitive and the tokenizer has already folded every name,
+/// but SVG is not: `viewBox` written as `viewbox` is a different attribute and
+/// the drawing silently loses its coordinate system.
+fn adjust_svg_tag_name(name: &str) -> Option<&'static str> {
+    const NAMES: &[&str] = &[
+        "altGlyph", "altGlyphDef", "altGlyphItem", "animateColor", "animateMotion",
+        "animateTransform", "clipPath", "feBlend", "feColorMatrix", "feComponentTransfer",
+        "feComposite", "feConvolveMatrix", "feDiffuseLighting", "feDisplacementMap",
+        "feDistantLight", "feFlood", "feFuncA", "feFuncB", "feFuncG", "feFuncR",
+        "feGaussianBlur", "feImage", "feMerge", "feMergeNode", "feMorphology", "feOffset",
+        "fePointLight", "feSpecularLighting", "feSpotLight", "feTile", "feTurbulence",
+        "foreignObject", "glyphRef", "linearGradient", "radialGradient", "textPath",
+    ];
+    NAMES
+        .iter()
+        .find(|candidate| candidate.eq_ignore_ascii_case(name))
+        .copied()
+}
+
+fn adjust_svg_attribute_name(name: &str) -> Option<&'static str> {
+    const NAMES: &[&str] = &[
+        "attributeName", "attributeType", "baseFrequency", "baseProfile", "calcMode",
+        "clipPathUnits", "diffuseConstant", "edgeMode", "filterUnits", "glyphRef",
+        "gradientTransform", "gradientUnits", "kernelMatrix", "kernelUnitLength", "keyPoints",
+        "keySplines", "keyTimes", "lengthAdjust", "limitingConeAngle", "markerHeight",
+        "markerUnits", "markerWidth", "maskContentUnits", "maskUnits", "numOctaves",
+        "pathLength", "patternContentUnits", "patternTransform", "patternUnits", "pointsAtX",
+        "pointsAtY", "pointsAtZ", "preserveAlpha", "preserveAspectRatio", "primitiveUnits",
+        "refX", "refY", "repeatCount", "repeatDur", "requiredExtensions", "requiredFeatures",
+        "specularConstant", "specularExponent", "spreadMethod", "startOffset", "stdDeviation",
+        "stitchTiles", "surfaceScale", "systemLanguage", "tableValues", "targetX", "targetY",
+        "textLength", "viewBox", "viewTarget", "xChannelSelector", "yChannelSelector",
+        "zoomAndPan",
+    ];
+    NAMES
+        .iter()
+        .find(|candidate| candidate.eq_ignore_ascii_case(name))
+        .copied()
+}
+
+/// Put a foreign start tag back into the case its language expects.
+fn adjust_foreign_names(
+    namespace: Namespace,
+    name: &mut String,
+    attributes: &mut BTreeMap<String, String>,
+) {
+    if namespace == Namespace::Svg {
+        if let Some(adjusted) = adjust_svg_tag_name(name) {
+            *name = adjusted.to_string();
+        }
+    }
+    let renames: Vec<(String, &'static str)> = attributes
+        .keys()
+        .filter_map(|key| {
+            let adjusted = match namespace {
+                Namespace::Svg => adjust_svg_attribute_name(key),
+                Namespace::MathMl if key == "definitionurl" => Some("definitionURL"),
+                _ => None,
+            }?;
+            if adjusted == key {
+                None
+            } else {
+                Some((key.clone(), adjusted))
+            }
+        })
+        .collect();
+    for (old, new) in renames {
+        if let Some(value) = attributes.remove(&old) {
+            attributes.insert(new.to_string(), value);
+        }
+    }
+}
+
 fn parse_document_body(input: &str) -> Node {
     let tokens = tokenize(input);
     let mut builder = Builder::new();
@@ -481,6 +689,46 @@ fn parse_document_body(input: &str) -> Node {
                 attributes,
                 self_closing,
             } => {
+                let mut name = name;
+                let mut attributes = attributes;
+
+                // Inside `<svg>` or `<math>` almost none of the HTML rules
+                // apply: no implied closing, no formatting to reconstruct, and
+                // a trailing slash really does close the element.
+                let mut namespace = builder.foreign_context(Some(&name));
+                if namespace != Namespace::Html {
+                    let breaks_out = breaks_out_of_foreign_content(&name)
+                        || (name == "font"
+                            && ["color", "face", "size"]
+                                .iter()
+                                .any(|key| attributes.contains_key(*key)));
+                    if breaks_out {
+                        builder.break_out_of_foreign_content();
+                        namespace = Namespace::Html;
+                    }
+                }
+                if namespace == Namespace::Html {
+                    namespace = match name.as_str() {
+                        "svg" => Namespace::Svg,
+                        "math" => Namespace::MathMl,
+                        _ => Namespace::Html,
+                    };
+                    // The tag that opens the foreign content carries foreign
+                    // attributes too: `<svg viewbox=...>` is a viewBox.
+                    adjust_foreign_names(namespace, &mut name, &mut attributes);
+                } else {
+                    adjust_foreign_names(namespace, &mut name, &mut attributes);
+                    let index = builder.insert(BuildKind::Element {
+                        tag_name: name,
+                        attributes,
+                        namespace,
+                    });
+                    if !self_closing {
+                        builder.open.push(index);
+                    }
+                    continue;
+                }
+
                 // HTML5 optional-end-tag: implicitly close certain elements
                 // before opening a new one (a `<td>` closes an open `<td>`, an
                 // `<li>` closes an open `<li>`).
@@ -496,6 +744,7 @@ fn parse_document_body(input: &str) -> Node {
                 let index = builder.insert(BuildKind::Element {
                     tag_name: name,
                     attributes,
+                    namespace,
                 });
                 if !self_closing {
                     builder.open.push(index);
@@ -507,16 +756,42 @@ fn parse_document_body(input: &str) -> Node {
                 }
             }
             Token::EndTag(name) => {
+                // An end tag in foreign content matches by name alone, walking
+                // down the stack until it reaches HTML again.
+                if builder
+                    .open
+                    .last()
+                    .is_some_and(|node| builder.namespace_of(*node) != Namespace::Html)
+                {
+                    let mut position = builder.open.len();
+                    let mut handled = false;
+                    while position > 1 {
+                        position -= 1;
+                        let node = builder.open[position];
+                        if builder.tag_of(node).eq_ignore_ascii_case(&name) {
+                            builder.open.truncate(position);
+                            handled = true;
+                            break;
+                        }
+                        if builder.namespace_of(node) == Namespace::Html {
+                            break;
+                        }
+                    }
+                    if handled {
+                        continue;
+                    }
+                }
+
                 // `</p>` with no open paragraph makes an empty one, and `</br>`
                 // is read as `<br>`. Both are what the standard says and what
                 // every browser does with the stray tags real pages contain.
                 if name == "p" && !builder.is_open("p") {
-                    builder.insert(BuildKind::Element {
+                    builder.insert(BuildKind::Element { namespace: Default::default(),
                         tag_name: "p".to_string(),
                         attributes: BTreeMap::new(),
                     });
                 } else if name == "br" {
-                    builder.insert(BuildKind::Element {
+                    builder.insert(BuildKind::Element { namespace: Default::default(),
                         tag_name: "br".to_string(),
                         attributes: BTreeMap::new(),
                     });
@@ -1386,6 +1661,53 @@ mod tests {
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
     #[test]
+    fn svg_keeps_its_own_namespace_and_capitalisation() {
+        let document = parse_document("<body><svg viewbox=\"0 0 1 1\"><clippath></clippath></svg>");
+        let body = body_of(&document);
+        let Node::Element(svg) = &body.children[0] else {
+            panic!("expected an svg");
+        };
+        assert_eq!(svg.namespace, super::Namespace::Svg);
+        // SVG is case sensitive, so the folded names have to be put back.
+        assert_eq!(svg.attributes.get("viewBox").map(String::as_str), Some("0 0 1 1"));
+        let Node::Element(clip) = &svg.children[0] else {
+            panic!("expected a clipPath");
+        };
+        assert_eq!(clip.tag_name, "clipPath");
+        assert_eq!(clip.namespace, super::Namespace::Svg);
+    }
+
+    #[test]
+    fn html_starts_again_inside_a_foreign_object() {
+        let document = parse_document("<body><svg><foreignobject><div>x</div></foreignobject></svg>");
+        let body = body_of(&document);
+        let Node::Element(svg) = &body.children[0] else {
+            panic!("expected an svg");
+        };
+        let Node::Element(object) = &svg.children[0] else {
+            panic!("expected a foreignObject");
+        };
+        assert_eq!(object.tag_name, "foreignObject");
+        let Node::Element(div) = &object.children[0] else {
+            panic!("expected a div");
+        };
+        assert_eq!(div.namespace, super::Namespace::Html);
+    }
+
+    #[test]
+    fn a_paragraph_breaks_out_of_an_unclosed_svg() {
+        // `<p>` cannot be drawn, so the author must have forgotten `</svg>`.
+        let document = parse_document("<body><svg><circle><p>text");
+        let body = body_of(&document);
+        assert_eq!(body.children.len(), 2);
+        let Node::Element(paragraph) = &body.children[1] else {
+            panic!("expected a paragraph beside the svg");
+        };
+        assert_eq!(paragraph.tag_name, "p");
+        assert_eq!(paragraph.namespace, super::Namespace::Html);
+    }
+
+    #[test]
     fn a_script_can_contain_the_characters_of_its_own_end_tag() {
         // Inside `<!--<script`, the script data is double escaped and the
         // `</script>` there only ends that state. A page that writes a script
@@ -1746,7 +2068,14 @@ mod html5lib_conformance {
 "));
             }
             Node::Element(element) => {
-                out.push_str(&format!("| {pad}<{}>\n", element.tag_name));
+                // html5lib writes the namespace before the name, so an SVG
+                // title reads `<svg title>` and an HTML one reads `<title>`.
+                let prefix = match element.namespace {
+                    super::Namespace::Html => "",
+                    super::Namespace::Svg => "svg ",
+                    super::Namespace::MathMl => "math ",
+                };
+                out.push_str(&format!("| {pad}<{prefix}{}>\n", element.tag_name));
                 for (name, value) in &element.attributes {
                     out.push_str(&format!("| {pad}  {name}=\"{value}\"\n"));
                 }
