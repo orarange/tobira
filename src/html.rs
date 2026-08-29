@@ -328,6 +328,20 @@ fn maybe_auto_close(stack: &mut Vec<Element>, new_tag: &str) {
         "dt" | "dd" => {
             auto_close_before(stack, &["dt", "dd"], &["dl"]);
         }
+        // A heading closes an open heading of any level: `<h1>a<h2>b` gives
+        // two siblings, not a nested pair.
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+            auto_close_before(
+                stack,
+                &["h1", "h2", "h3", "h4", "h5", "h6"],
+                &["td", "th", "li", "dd", "dt", "body", "html", "document"],
+            );
+            auto_close_before(
+                stack,
+                &["p"],
+                &["td", "th", "li", "dd", "dt", "body", "html", "document"],
+            );
+        }
         // A new <p> closes an open <p> (and many block elements do too)
         tag if is_block_like(tag) => {
             auto_close_before(
@@ -397,7 +411,33 @@ fn is_block_like(tag: &str) -> bool {
             | "summary"
             | "table"
             | "ul"
+            // These are not containers, but each still ends an open paragraph.
+            | "hr"
+            | "form"
+            | "header"
+            | "footer"
+            | "main"
+            | "nav"
+            | "figure"
+            | "menu"
+            | "search"
+            | "dir"
+            | "center"
+            | "listing"
+            | "plaintext"
+            | "xmp"
     )
+}
+
+/// The text of a bogus comment starting at `from`, and where it ends.
+///
+/// Everything up to the next `>` becomes the comment; without one it runs to
+/// the end of the file.
+fn bogus_comment(input: &str, from: usize) -> (String, usize) {
+    match input[from..].find('>') {
+        Some(offset) => (input[from..from + offset].to_string(), from + offset + 1),
+        None => (input[from..].to_string(), input.len()),
+    }
 }
 
 fn tokenize(input: &str) -> Vec<Token> {
@@ -431,6 +471,54 @@ fn tokenize(input: &str) -> Vec<Token> {
             continue;
         }
 
+        // A `<` that starts nothing is text, and several near-misses are
+        // comments instead: `<?`, `<!x`, and `</` followed by anything that is
+        // not a name. The standard calls the last three bogus comments, and
+        // browsers put them in the tree rather than dropping them.
+        let after_angle = input[index + 1..].chars().next();
+        match after_angle {
+            None => {
+                tokens.push(Token::Text("<".to_string()));
+                index = bytes.len();
+                continue;
+            }
+            Some('?') => {
+                let (text, next) = bogus_comment(input, index + 1);
+                tokens.push(Token::Comment(text));
+                index = next;
+                continue;
+            }
+            Some('!') => {}
+            Some('/') => {
+                let after_slash = input[index + 2..].chars().next();
+                match after_slash {
+                    None => {
+                        tokens.push(Token::Text("</".to_string()));
+                        index = bytes.len();
+                        continue;
+                    }
+                    Some(c) if !c.is_ascii_alphabetic() => {
+                        let (text, next) = bogus_comment(input, index + 2);
+                        tokens.push(Token::Comment(text));
+                        index = next;
+                        continue;
+                    }
+                    Some(_) => {}
+                }
+            }
+            Some(c) if !c.is_ascii_alphabetic() => {
+                // `<#` is not a tag; the `<` and what follows are text.
+                let next = input[index + 1..]
+                    .find('<')
+                    .map(|offset| index + 1 + offset)
+                    .unwrap_or(bytes.len());
+                tokens.push(Token::Text(decode_html_entities(&input[index..next])));
+                index = next;
+                continue;
+            }
+            Some(_) => {}
+        }
+
         if input[index..].starts_with("</") {
             index += 2;
             skip_whitespace(input, &mut index);
@@ -446,6 +534,15 @@ fn tokenize(input: &str) -> Vec<Token> {
 
         if input[index..].starts_with("<!") {
             let start = index;
+            let is_doctype = input[start..].len() > 9 && input[start + 2..start + 9].eq_ignore_ascii_case("doctype");
+            if !is_doctype {
+                // `<!` followed by anything that is not a doctype or a comment
+                // is a bogus comment holding the rest up to `>`.
+                let (text, next) = bogus_comment(input, start + 2);
+                tokens.push(Token::Comment(text));
+                index = next;
+                continue;
+            }
             consume_until_tag_end(input, &mut index);
             let raw = &input[start..index];
             if raw.len() > 9 && raw[2..9].eq_ignore_ascii_case("doctype") {
@@ -1152,6 +1249,7 @@ mod html5lib_conformance {
             std::collections::BTreeMap::new();
         let mut samples: Vec<String> = Vec::new();
         let mut sampled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let focus = std::env::var("TOBIRA_H5_FILE").ok();
 
         for case in &cases {
             // Fragment parsing takes a context element this parser has no entry
@@ -1166,7 +1264,19 @@ mod html5lib_conformance {
             if got == case.document {
                 passed += 1;
                 entry.0 += 1;
-            } else if !sampled.contains(&case.file) {
+            } else if focus.as_deref().is_some_and(|want| case.file.starts_with(want)) {
+                // `TOBIRA_H5_FILE=tests1` prints every failure in one file
+                // rather than one sample per file.
+                samples.push(format!(
+                    "--- {} ---
+input:    {:?}
+expected:
+{}
+got:
+{}",
+                    case.file, case.data, case.document, got
+                ));
+            } else if focus.is_none() && !sampled.contains(&case.file) {
                 // One per file, so the sample surveys rather than dwelling on
                 // whichever file sorts first.
                 sampled.insert(case.file.clone());
