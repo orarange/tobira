@@ -1592,6 +1592,9 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
             // Whitespace before the body starts is dropped, as it is in the
             // "before head" and "in head" modes.
             Node::Text(text) if !seen_body_content && text.trim().is_empty() => {}
+            // A comment written between two things that belong in the head
+            // belongs there too, and does not start the body.
+            Node::Comment(_) if !seen_body_content => head.children.push(node),
             _ => {
                 seen_body_content = true;
                 body.children.push(node);
