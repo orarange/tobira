@@ -1371,6 +1371,9 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                         attributes: BTreeMap::new(),
                     });
                 } else if name == "br" {
+                    // The `<br>` this leaves behind is body content, so a
+                    // stray `</p>` after it makes an empty paragraph.
+                    builder.body_started = true;
                     builder.insert(BuildKind::Element { namespace: Default::default(),
                         tag_name: "br".to_string(),
                         attributes: BTreeMap::new(),
