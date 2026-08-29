@@ -15335,6 +15335,18 @@ impl Vm {
                 data.prototype = Some(proto);
             }
         }
+        // Run the class body against the element that already exists.
+        //
+        // An upgrade is not a fresh construction: the node is on the page
+        // before its class is defined, and the standard runs the constructor
+        // with that node as `this`. Skipping it leaves every field -- public
+        // and private -- unset, so the element's own methods read undefined or
+        // throw. Pages built out of custom elements are built out of this.
+        let constructor = def.class_value.clone();
+        if self.is_callable_value(&constructor) {
+            self.call_value_sync(constructor, wrapper.clone(), Vec::new())?;
+        }
+
         // connectedCallback (looked up on the class prototype).
         let cb = self.get_property_value(&wrapper, &PropertyKey::from("connectedCallback"))?;
         if self.is_callable_value(&cb) {

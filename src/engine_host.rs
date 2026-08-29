@@ -3692,6 +3692,27 @@ mod tests {
     }
 
     #[test]
+    fn upgrading_an_element_runs_the_class_body_on_it() {
+        // The element is on the page before its class is defined. The upgrade
+        // has to run the constructor against that node, or every field the
+        // class declares stays unset and its own methods read undefined.
+        let result = run_document_scripts(
+            r#"<html><body><x-up id="e"></x-up><script>
+                class XUp extends HTMLElement {
+                    #count = 2;
+                    label = "ready";
+                    report() { return [this.label, this.#count].join("|"); }
+                }
+                customElements.define('x-up', XUp);
+                document.title = document.getElementById('e').report();
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("ready|2"));
+    }
+
+    #[test]
     fn import_meta_reports_the_module_url() {
         // Bundlers emit `import.meta.url` to find the assets that sit beside a
         // module. Without it, the whole module fails to compile and every
