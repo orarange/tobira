@@ -841,6 +841,11 @@ fn ensure_table_ancestry(builder: &mut Builder, new_tag: &str) {
 
     match new_tag {
         "td" | "th" => {
+            // A cell ends a caption: the caption is the table's title, not a
+            // place cells can go.
+            if builder.tag_of(builder.current()) == "caption" {
+                builder.open.pop();
+            }
             if builder.tag_of(builder.current()) == "table" {
                 push(builder, "tbody");
             }
@@ -1032,7 +1037,12 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
     for token in tokens {
         match token {
             Token::Text(text) => {
-                if builder.frameset_document && !text.trim().is_empty() {
+                if builder.frameset_document {
+                    // A frameset document keeps the whitespace written beside
+                    // its frames, and nothing else.
+                    if text.trim().is_empty() {
+                        builder.html_comments.push(Node::Text(text));
+                    }
                     continue;
                 }
                 // Between the head and the body, whitespace belongs to neither.
@@ -1239,6 +1249,15 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
             Token::EndTag(name) => {
                 if name == "form" {
                     builder.form_open = false;
+                    // The form leaves the stack, but what was opened inside it
+                    // stays open: `<form><div></form><div>` puts the second div
+                    // inside the first, where it was written.
+                    if let Some(position) =
+                        builder.open.iter().position(|i| builder.tag_of(*i) == "form")
+                    {
+                        builder.open.remove(position);
+                        continue;
+                    }
                 }
                 if name == "head" {
                     builder.after_head = true;
@@ -2677,6 +2696,37 @@ mod tests {
             .filter(|child| matches!(child, Node::Doctype(_)))
             .count();
         assert_eq!(doctypes, 1);
+    }
+
+    #[test]
+    fn closing_a_form_leaves_what_is_open_inside_it_open() {
+        let document = parse_document("<body><form><div></form><div>");
+        let body = body_of(&document);
+        assert_eq!(body.children.len(), 1);
+        let Node::Element(form) = &body.children[0] else {
+            panic!("expected the form");
+        };
+        let Node::Element(outer) = &form.children[0] else {
+            panic!("expected the first div");
+        };
+        let Node::Element(inner) = &outer.children[0] else {
+            panic!("the second div should be inside the first");
+        };
+        assert_eq!(inner.tag_name, "div");
+    }
+
+    #[test]
+    fn a_cell_ends_the_tables_caption() {
+        let document = parse_document("<body><table><caption><td>x");
+        let body = body_of(&document);
+        let Node::Element(table) = &body.children[0] else {
+            panic!("expected the table");
+        };
+        assert_eq!(table.children.len(), 2, "caption then the row's section");
+        let Node::Element(section) = &table.children[1] else {
+            panic!("expected the implied tbody");
+        };
+        assert_eq!(section.tag_name, "tbody");
     }
 
     #[test]
