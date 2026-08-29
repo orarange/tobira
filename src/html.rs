@@ -1433,7 +1433,11 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 }
             }
             Token::Comment(text) => {
-                if builder.after_html {
+                // Between `</head>` and the body, a comment sits in `<html>`
+                // beside the head rather than inside either.
+                if builder.after_head && builder.open.len() == 1 && !builder.after_body {
+                    builder.html_whitespace.push(Node::Comment(text));
+                } else if builder.after_html {
                     builder.document_comments.push(Node::Comment(text));
                 } else if builder.after_body {
                     builder.html_comments.push(Node::Comment(text));
@@ -1562,6 +1566,7 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
     let mut head = Element::new("head");
     let mut body = Element::new("body");
     let mut loose: Vec<Node> = Vec::new();
+    let mut before_head: Vec<Node> = Vec::new();
     for child in html.children.drain(..) {
         match child {
             // A second `<body>` tag does not start a second body. Its
@@ -1596,7 +1601,12 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
             // "before head" and "in head" modes.
             Node::Text(text) if !seen_body_content && text.trim().is_empty() => {}
             // A comment written between two things that belong in the head
-            // belongs there too, and does not start the body.
+            // belongs there too, and does not start the body. One that comes
+            // before the head has anything in it is earlier still: it sits in
+            // `<html>` ahead of the head.
+            Node::Comment(_) if !seen_body_content && head.children.is_empty() => {
+                before_head.push(node)
+            }
             Node::Comment(_) if !seen_body_content => head.children.push(node),
             _ => {
                 seen_body_content = true;
@@ -1619,7 +1629,8 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
         None => Node::Element(body),
     };
 
-    let mut html_children = vec![Node::Element(head)];
+    let mut html_children = before_head;
+    html_children.push(Node::Element(head));
     html_children.extend(extras.html_whitespace);
     html_children.push(second);
     html.children = html_children;
