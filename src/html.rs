@@ -1100,6 +1100,29 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     }
                 }
 
+                // A heading end tag closes whichever heading is innermost,
+                // whatever its level: `<h1><h3></h1>` closes the h3 and leaves
+                // the h1 open, which is what the algorithm's wording produces
+                // and what browsers do.
+                if matches!(name.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
+                    const HEADINGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
+                    if builder
+                        .open
+                        .iter()
+                        .rev()
+                        .take_while(|i| !DEFAULT_SCOPE.contains(&builder.tag_of(**i)))
+                        .any(|i| HEADINGS.contains(&builder.tag_of(*i)))
+                    {
+                        while builder.open.len() > 1 {
+                            let index = builder.open.pop().expect("checked above");
+                            if HEADINGS.contains(&builder.tag_of(index)) {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                }
+
                 // `</p>` with no open paragraph makes an empty one, and `</br>`
                 // is read as `<br>`. Both are what the standard says and what
                 // every browser does with the stray tags real pages contain.
@@ -1321,6 +1344,25 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
     root.children = before_html;
 }
 
+/// Close the elements that end wherever their container's next part begins.
+///
+/// A paragraph, a list item or a ruby annotation does not need a closing tag:
+/// the next sibling ends it. `except` names the one element to leave open,
+/// which is how `</li>` closes the paragraphs inside a list item but not the
+/// item itself.
+fn generate_implied_end_tags(builder: &mut Builder, except: &str) {
+    const IMPLIED: &[&str] = &[
+        "dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc",
+    ];
+    while builder.open.len() > 1 {
+        let name = builder.tag_of(builder.current());
+        if name == except || !IMPLIED.contains(&name) {
+            break;
+        }
+        builder.open.pop();
+    }
+}
+
 /// The elements a search up the open stack never crosses.
 const DEFAULT_SCOPE: &[&str] = &[
     "applet", "caption", "html", "table", "td", "th", "marquee", "object", "template", "document",
@@ -1406,6 +1448,10 @@ fn maybe_auto_close(builder: &mut Builder, new_tag: &str) {
 
         // A heading closes an open heading of any level: `<h1>a<h2>b` gives two
         // siblings, not a nested pair.
+        // Ruby annotations: the previous one ends where the next begins.
+        "rt" | "rp" | "rb" | "rtc" if closes_enclosing(builder, "ruby", DEFAULT_SCOPE) => {
+            generate_implied_end_tags(builder, "")
+        }
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
             auto_close_before(
                 builder,
@@ -2155,6 +2201,36 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_heading_end_tag_closes_whichever_heading_is_innermost() {
+        // `</h1>` closes the h3, not the h1: the algorithm pops until any
+        // heading has come off, so the outer one stays open.
+        let document = parse_document("<body><h1><div><h3><span></h1>foo");
+        let body = body_of(&document);
+        let Node::Element(outer) = &body.children[0] else {
+            panic!("expected the h1");
+        };
+        assert_eq!(outer.tag_name, "h1");
+        let Node::Element(division) = &outer.children[0] else {
+            panic!("expected the div inside it");
+        };
+        assert!(matches!(division.children.last(), Some(Node::Text(text)) if text == "foo"));
+    }
+
+    #[test]
+    fn a_ruby_annotation_ends_the_paragraph_before_it() {
+        let document = parse_document("<body><ruby><p><rp>");
+        let body = body_of(&document);
+        let Node::Element(ruby) = &body.children[0] else {
+            panic!("expected the ruby");
+        };
+        assert_eq!(ruby.children.len(), 2, "the rp should be a sibling of the p");
+        let Node::Element(annotation) = &ruby.children[1] else {
+            panic!("expected the rp");
+        };
+        assert_eq!(annotation.tag_name, "rp");
+    }
+
     #[test]
     fn carriage_returns_never_reach_the_tree() {
         // Pages written on Windows are full of them, and a script comparing
