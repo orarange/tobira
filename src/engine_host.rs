@@ -4043,6 +4043,23 @@ mod tests {
     }
 
     #[test]
+    fn a_top_level_var_exists_before_its_own_initializer_runs() {
+        // `var _ = _ || {}` is how a bundle opens its namespace. Reading the
+        // name being declared has to give undefined, not throw.
+        let result = run_document_scripts(
+            r#"<html><body>
+                <script>var ns = ns || {}; ns.first = 1;</script>
+                <script>var ns = ns || {}; ns.second = 2;</script>
+                <script>document.title = [ns.first, ns.second].join("|");</script>
+            </body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        // The second script's `var` must not wipe out what the first put there.
+        assert_eq!(result.title.as_deref(), Some("1|2"));
+    }
+
+    #[test]
     fn a_select_reads_and_edits_its_options() {
         let result = run_document_scripts(
             r#"<html><body>

@@ -1114,11 +1114,22 @@ impl<'a> super::FunctionCompiler<'a> {
             let mut names = Vec::new();
             self.collect_binding_names(variable.binding(), &mut names);
             for name in names {
-                self.resolve_declaration_binding(
+                let resolved = self.resolve_declaration_binding(
                     &name,
                     storage,
                     DeclarationContext::Statement,
                 )?;
+                // A `var` at a script's top level is a global, and hoisting has
+                // to make it exist -- holding `undefined` -- before any line
+                // runs. `var _ = _ || {}` is how a bundle opens its namespace,
+                // and reading the name it is declaring has to give undefined
+                // rather than throw. Writing back whatever is already there
+                // keeps a second script's `var` from clearing the first's work.
+                if storage == BindingStorage::Var && matches!(resolved, ResolvedBinding::Global) {
+                    let index = self.add_string_constant(name)?;
+                    self.emit(Opcode::GetGlobalOptional(index));
+                    self.emit(Opcode::SetGlobal(index));
+                }
             }
         }
         Ok(())
