@@ -130,9 +130,9 @@ fn parse_doctype(raw: &str) -> Doctype {
 }
 
 pub fn parse_document(input: &str) -> Node {
-    let (mut document, frameset_allowed) = parse_document_body(input);
+    let (mut document, extras) = parse_document_body(input);
     if let Node::Element(root) = &mut document {
-        ensure_document_structure(root, frameset_allowed);
+        ensure_document_structure(root, extras);
     }
     document
 }
@@ -178,6 +178,17 @@ struct Builder {
     nodes: Vec<BuildNode>,
     /// The elements currently open, innermost last. Index 0 is the document.
     open: Vec<usize>,
+    /// Whether `</body>` has been seen with nothing written since.
+    ///
+    /// What follows it is outside the body but still inside the document, and
+    /// the two closing tags put it in different places.
+    after_body: bool,
+    /// Whether `</html>` has been seen with nothing written since.
+    after_html: bool,
+    /// Comments written after `</body>`, which belong to `<html>`.
+    html_comments: Vec<Node>,
+    /// Comments written after `</html>`, which belong to the document.
+    document_comments: Vec<Node>,
     /// Whether a `<frameset>` would still be honoured.
     ///
     /// A frameset replaces the body, so it is only allowed while the body is
@@ -208,6 +219,10 @@ impl Builder {
                 parent: None,
             }],
             open: vec![0],
+            after_body: false,
+            after_html: false,
+            html_comments: Vec::new(),
+            document_comments: Vec::new(),
             frameset_ok: true,
             frameset_allowed: None,
             formatting: Vec::new(),
@@ -385,6 +400,22 @@ impl Builder {
                 }
             }
             other => other,
+        }
+    }
+
+    /// Fold a repeated `<html>` or `<body>` tag into the one already open.
+    ///
+    /// There is only ever one of each. A second tag adds the attributes the
+    /// first does not carry and is otherwise dropped -- the first value
+    /// written wins.
+    fn merge_attributes(&mut self, target: &str, attributes: BTreeMap<String, String>) {
+        let Some(&index) = self.open.iter().find(|i| self.tag_of(**i) == target) else {
+            return;
+        };
+        if let BuildKind::Element { attributes: existing, .. } = &mut self.nodes[index].kind {
+            for (name, value) in attributes {
+                existing.entry(name).or_insert(value);
+            }
         }
     }
 
@@ -884,13 +915,27 @@ fn adjust_foreign_names(
     }
 }
 
-fn parse_document_body(input: &str) -> (Node, bool) {
+/// What the tree alone cannot say, gathered while parsing.
+#[derive(Default)]
+struct ParseExtras {
+    frameset_allowed: bool,
+    html_comments: Vec<Node>,
+    document_comments: Vec<Node>,
+}
+
+fn parse_document_body(input: &str) -> (Node, ParseExtras) {
     let tokens = tokenize(input);
     let mut builder = Builder::new();
 
     for token in tokens {
         match token {
             Token::Text(text) => {
+                if !text.trim().is_empty() {
+                    // Writing anything again puts the parser back in the body,
+                    // however many closing tags came before it.
+                    builder.after_body = false;
+                    builder.after_html = false;
+                }
                 if !text.is_empty() {
                     // Text on the page settles it: a later frameset would have
                     // to discard what the reader can already see. Text in the
@@ -912,6 +957,13 @@ fn parse_document_body(input: &str) -> (Node, bool) {
             } => {
                 let mut name = name;
                 let mut attributes = attributes;
+                builder.after_body = false;
+                builder.after_html = false;
+
+                if matches!(name.as_str(), "html" | "body") && builder.is_open(&name) {
+                    builder.merge_attributes(&name, attributes);
+                    continue;
+                }
 
                 // A select holds options and nothing else. Everything else
                 // written inside one is dropped, which is why a `<div>` between
@@ -1013,6 +1065,13 @@ fn parse_document_body(input: &str) -> (Node, bool) {
                 }
             }
             Token::EndTag(name) => {
+                if name == "body" {
+                    builder.after_body = true;
+                } else if name == "html" {
+                    builder.after_body = true;
+                    builder.after_html = true;
+                }
+
                 // An end tag in foreign content matches by name alone, walking
                 // down the stack until it reaches HTML again.
                 if builder
@@ -1071,7 +1130,13 @@ fn parse_document_body(input: &str) -> (Node, bool) {
                 }
             }
             Token::Comment(text) => {
-                builder.insert(BuildKind::Comment(text));
+                if builder.after_html {
+                    builder.document_comments.push(Node::Comment(text));
+                } else if builder.after_body {
+                    builder.html_comments.push(Node::Comment(text));
+                } else {
+                    builder.insert(BuildKind::Comment(text));
+                }
             }
             Token::Doctype(doctype) => {
                 builder.insert(BuildKind::Doctype(doctype));
@@ -1079,8 +1144,12 @@ fn parse_document_body(input: &str) -> (Node, bool) {
         }
     }
 
-    let frameset_allowed = builder.frameset_allowed.unwrap_or(false);
-    (builder.into_tree(), frameset_allowed)
+    let extras = ParseExtras {
+        frameset_allowed: builder.frameset_allowed.unwrap_or(false),
+        html_comments: std::mem::take(&mut builder.html_comments),
+        document_comments: std::mem::take(&mut builder.document_comments),
+    };
+    (builder.into_tree(), extras)
 }
 
 pub fn parse_fragment(input: &str) -> Vec<Node> {
@@ -1133,7 +1202,7 @@ fn take_first_frameset(children: &mut Vec<Node>) -> Option<Node> {
     None
 }
 
-fn ensure_document_structure(root: &mut Element, frameset_allowed: bool) {
+fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
     // A doctype, and any comment written before the markup proper, belong to
     // the document itself rather than inside `<html>` -- which is where a
     // browser puts them, and where `document.doctype` looks for one.
@@ -1185,12 +1254,19 @@ fn ensure_document_structure(root: &mut Element, frameset_allowed: bool) {
     let mut loose: Vec<Node> = Vec::new();
     for child in html.children.drain(..) {
         match child {
+            // A second `<body>` tag does not start a second body. Its
+            // attributes are folded into the one that exists, and only the ones
+            // it does not already carry: the first value written wins.
             Node::Element(element) if element.tag_name == "head" => {
-                head.attributes.extend(element.attributes);
+                for (name, value) in element.attributes {
+                    head.attributes.entry(name).or_insert(value);
+                }
                 head.children.extend(element.children);
             }
             Node::Element(element) if element.tag_name == "body" => {
-                body.attributes.extend(element.attributes);
+                for (name, value) in element.attributes {
+                    body.attributes.entry(name).or_insert(value);
+                }
                 body.children.extend(element.children);
             }
             other => loose.push(other),
@@ -1221,7 +1297,8 @@ fn ensure_document_structure(root: &mut Element, frameset_allowed: bool) {
     // The frameset takes the body's place, and the body's contents go with it:
     // by the time the parser accepted the frameset it had already decided that
     // nothing worth keeping had been written.
-    let frameset = frameset_allowed
+    let frameset = extras
+        .frameset_allowed
         .then(|| take_first_frameset(&mut body.children))
         .flatten();
     let second = match frameset {
@@ -1230,8 +1307,30 @@ fn ensure_document_structure(root: &mut Element, frameset_allowed: bool) {
     };
 
     html.children = vec![Node::Element(head), second];
+    html.children.extend(extras.html_comments);
     before_html.push(Node::Element(html));
+    before_html.extend(extras.document_comments);
     root.children = before_html;
+}
+
+/// The elements a search up the open stack never crosses.
+const DEFAULT_SCOPE: &[&str] = &[
+    "applet", "caption", "html", "table", "td", "th", "marquee", "object", "template", "document",
+];
+
+/// Whether `target` is open near enough that a second one of it closes the
+/// first rather than nesting inside it.
+fn closes_enclosing(builder: &Builder, target: &str, boundaries: &[&str]) -> bool {
+    for index in builder.open.iter().rev() {
+        let name = builder.tag_of(*index);
+        if name == target {
+            return true;
+        }
+        if boundaries.contains(&name) {
+            return false;
+        }
+    }
+    false
 }
 
 /// HTML5 optional-end-tag / implicit-close rules.
@@ -1274,6 +1373,12 @@ fn maybe_auto_close(builder: &mut Builder, new_tag: &str) {
             auto_close_before(builder, &["dt", "dd"], &["dl"]);
             auto_close_before(builder, &["p"], PARAGRAPH_BOUNDARIES);
         }
+        // A table inside a cell is a real nested table; one written straight
+        // inside another table is the author forgetting `</table>`.
+        "table" if closes_enclosing(builder, "table", &["td", "th", "caption", "template"]) => {
+            builder.close("table")
+        }
+        "button" if closes_enclosing(builder, "button", DEFAULT_SCOPE) => builder.close("button"),
         // A menu inside a select is a new group, so the option before it ends.
         // `<select><option>a<option>b` is two options, not one nested in the
         // other, and that is how nearly every select on the web is written.
@@ -2022,6 +2127,56 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_comment_after_the_body_sits_beside_it_rather_than_inside() {
+        let document = parse_document("<div>x</div></body><!--after-->");
+        let html = html_of(&document);
+        // head, body, then the comment: the comment is not part of the page.
+        assert_eq!(html.children.len(), 3);
+        assert!(matches!(&html.children[2], Node::Comment(text) if text == "after"));
+    }
+
+    #[test]
+    fn a_comment_after_the_html_element_belongs_to_the_document() {
+        let document = parse_document("<html><body>x</body></html><!--last-->");
+        let Node::Element(root) = &document else {
+            panic!("expected the document");
+        };
+        assert!(matches!(root.children.last(), Some(Node::Comment(text)) if text == "last"));
+    }
+
+    #[test]
+    fn writing_again_after_a_closing_tag_puts_the_parser_back_in_the_body() {
+        let document = parse_document("<html><body></body></html>x<!--inside-->");
+        let body = body_of(&document);
+        assert!(matches!(&body.children[0], Node::Text(text) if text == "x"));
+        assert!(matches!(&body.children[1], Node::Comment(text) if text == "inside"));
+    }
+
+    #[test]
+    fn a_second_body_tag_only_adds_the_attributes_the_first_lacks() {
+        let document = parse_document("<body one=first><body one=second two=new>");
+        let body = body_of(&document);
+        assert_eq!(body.attributes.get("one").map(String::as_str), Some("first"));
+        assert_eq!(body.attributes.get("two").map(String::as_str), Some("new"));
+    }
+
+    #[test]
+    fn a_table_nests_inside_a_cell_but_not_inside_a_table() {
+        let document = parse_document("<body><table><tr><td><table><tr><td>x");
+        let body = body_of(&document);
+        let Node::Element(outer) = &body.children[0] else {
+            panic!("expected the outer table");
+        };
+        assert_eq!(outer.tag_name, "table");
+        assert_eq!(body.children.len(), 1, "the inner table should be nested");
+
+        // Written straight inside another table, it is a forgotten `</table>`.
+        let document = parse_document("<body><table><table>");
+        let body = body_of(&document);
+        assert_eq!(body.children.len(), 2);
+    }
+
     #[test]
     fn options_written_without_closing_tags_are_siblings() {
         // Nearly every select on the web is written this way.
