@@ -935,6 +935,11 @@ pub struct ComputedStyle {
     /// `word-break: break-all` each turn it on, and pages that hold long URLs
     /// or identifiers say so.
     pub break_long_words: bool,
+    /// How far the text is lifted off the line's baseline, in pixels.
+    ///
+    /// Negative is up. `<sup>` and `<sub>` are the only things that set it, and
+    /// they are why a footnote marker or the 2 in H2O sits where it does.
+    pub baseline_shift: i32,
     pub text_overflow_ellipsis: bool,
     pub text_shadow: Option<TextShadow>,
     pub background_gradient: Option<LinearGradient>,
@@ -1113,6 +1118,9 @@ impl ComputedStyle {
                 .map(|s| s.white_space)
                 .unwrap_or(WhiteSpaceMode::Normal),
             break_long_words: parent.map(|s| s.break_long_words).unwrap_or(false),
+            // Not inherited: a `<sup>` inside a `<sup>` is raised once more
+            // from where the outer one put it, not twice from the baseline.
+            baseline_shift: 0,
             text_overflow_ellipsis: false,
             text_shadow: None,
             background_gradient: None,
@@ -1263,6 +1271,15 @@ impl ComputedStyle {
             }
             "strong" | "b" => {
                 style.font_weight = true;
+            }
+            // Smaller type, lifted off the baseline. The size is the browser's
+            // own `smaller`, and the lift is a third of the surrounding type --
+            // which is what puts a footnote marker beside the word rather than
+            // in the middle of it.
+            "sup" | "sub" => {
+                style.font_size_px = (parent_font_size * 83 / 100).max(1);
+                let shift = (parent_font_size * 33 / 100) as i32;
+                style.baseline_shift = if tag_name == "sup" { -shift } else { shift / 2 };
             }
             "small" => {
                 style.font_size_px = parent_font_size.saturating_sub(2).max(12);
@@ -7638,6 +7655,22 @@ mod tests {
         assert_eq!(by_id("a").style.flex_basis, Some(LengthValue::Pixels(0)));
         assert_eq!(by_id("b").style.flex_grow, 0);
         assert_eq!(by_id("c").style.flex_basis, Some(LengthValue::Pixels(200)));
+    }
+
+    #[test]
+    fn a_superscript_is_smaller_and_lifted() {
+        let document = crate::html::parse_document("<p>H<sub>2</sub>O and x<sup>2</sup></p>");
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{font-size:16px}"),
+            1280,
+            &super::InteractiveState::default(),
+        );
+        let sup = find_first_element(&styled, "sup").expect("the sup should exist");
+        let sub = find_first_element(&styled, "sub").expect("the sub should exist");
+        assert_eq!(sup.style.font_size_px, 13);
+        assert!(sup.style.baseline_shift < 0, "a superscript is lifted");
+        assert!(sub.style.baseline_shift > 0, "a subscript is dropped");
     }
 
     #[test]

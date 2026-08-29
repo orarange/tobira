@@ -5604,8 +5604,16 @@ fn emit_line_impl(
         } else {
             text_line_height(&span.style, fonts).saturating_sub(below_baseline(&span.style))
         };
-        above = above.max(span_above);
-        below = below.max(span.height.saturating_sub(span_above));
+        // A raised or lowered run is that much further from the baseline, so
+        // the line has to make room for it: a superscript on the first line of
+        // a paragraph must not be cut off by the box above.
+        let shift = span.style.baseline_shift;
+        above = above.max(span_above.saturating_add_signed(-shift));
+        below = below.max(
+            span.height
+                .saturating_sub(span_above)
+                .saturating_add_signed(shift),
+        );
     }
     let line_height = above.saturating_add(below).max(line.line_height.min(above + below).max(1));
     let baseline = above;
@@ -5770,7 +5778,7 @@ fn emit_line_impl(
         };
         context.commands.push(DrawCommand::Text(TextCommand {
             x: cursor_x,
-            y: *cursor_y,
+            y: cursor_y.saturating_add_signed(span.style.baseline_shift),
             width: span.width,
             text: display_text,
             font_size_px: span.style.font_size_px,
