@@ -2705,6 +2705,115 @@ const RUNTIME_PRELUDE: &str = r#"
     g.MessageChannel = MessageChannel;
     g.MessagePort = MessagePort;
   }
+
+  if (typeof g.DataView === 'undefined' && typeof g.ArrayBuffer !== 'undefined') {
+    // A DataView reads a buffer a field at a time, with the byte order named
+    // at each call rather than fixed by the view. Binary formats on the web --
+    // fonts, protobuf frames, WebAssembly -- are read this way, and a bundle
+    // that touches one throws on the first line without it.
+    var scratch = new ArrayBuffer(8);
+    var sBytes = new Uint8Array(scratch);
+    var sF32 = new Float32Array(scratch);
+    var sF64 = new Float64Array(scratch);
+    var sI32 = new Int32Array(scratch);
+    // Which way the machine itself stores a number, so the scratch buffer can
+    // be filled in the order the reinterpreting view expects.
+    sI32[0] = 1;
+    var nativeLittleEndian = sBytes[0] === 1;
+
+    function DataView(buffer, byteOffset, byteLength) {
+      if (!(buffer instanceof ArrayBuffer)) {
+        throw new TypeError('First argument to DataView constructor must be an ArrayBuffer');
+      }
+      var offset = byteOffset === undefined ? 0 : (byteOffset | 0);
+      var length = byteLength === undefined ? buffer.byteLength - offset : (byteLength | 0);
+      if (offset < 0 || length < 0 || offset + length > buffer.byteLength) {
+        throw new RangeError('Invalid DataView length');
+      }
+      this.buffer = buffer;
+      this.byteOffset = offset;
+      this.byteLength = length;
+      this._bytes = new Uint8Array(buffer);
+    }
+
+    function checked(view, index, size) {
+      var at = (index | 0);
+      if (at < 0 || at + size > view.byteLength) {
+        throw new RangeError('Offset is outside the bounds of the DataView');
+      }
+      return view.byteOffset + at;
+    }
+
+    function read(view, index, size, littleEndian) {
+      var at = checked(view, index, size);
+      var value = 0;
+      if (littleEndian) {
+        for (var i = size - 1; i >= 0; i--) value = value * 256 + view._bytes[at + i];
+      } else {
+        for (var j = 0; j < size; j++) value = value * 256 + view._bytes[at + j];
+      }
+      return value;
+    }
+
+    function write(view, index, size, value, littleEndian) {
+      var at = checked(view, index, size);
+      var rest = Math.floor(Number(value));
+      if (!isFinite(rest)) rest = 0;
+      // Two's complement falls out of the modulo, so signed and unsigned
+      // writes share this path.
+      rest = ((rest % Math.pow(2, size * 8)) + Math.pow(2, size * 8)) % Math.pow(2, size * 8);
+      for (var i = 0; i < size; i++) {
+        var byte = rest % 256;
+        rest = Math.floor(rest / 256);
+        view._bytes[at + (littleEndian ? i : size - 1 - i)] = byte;
+      }
+    }
+
+    function signed(value, size) {
+      var limit = Math.pow(2, size * 8 - 1);
+      return value >= limit ? value - limit * 2 : value;
+    }
+
+    DataView.prototype.getUint8 = function (i) { return read(this, i, 1, false); };
+    DataView.prototype.getInt8 = function (i) { return signed(read(this, i, 1, false), 1); };
+    DataView.prototype.getUint16 = function (i, le) { return read(this, i, 2, !!le); };
+    DataView.prototype.getInt16 = function (i, le) { return signed(read(this, i, 2, !!le), 2); };
+    DataView.prototype.getUint32 = function (i, le) { return read(this, i, 4, !!le); };
+    DataView.prototype.getInt32 = function (i, le) { return signed(read(this, i, 4, !!le), 4); };
+    DataView.prototype.setUint8 = function (i, v) { write(this, i, 1, v, false); };
+    DataView.prototype.setInt8 = function (i, v) { write(this, i, 1, v, false); };
+    DataView.prototype.setUint16 = function (i, v, le) { write(this, i, 2, v, !!le); };
+    DataView.prototype.setInt16 = function (i, v, le) { write(this, i, 2, v, !!le); };
+    DataView.prototype.setUint32 = function (i, v, le) { write(this, i, 4, v, !!le); };
+    DataView.prototype.setInt32 = function (i, v, le) { write(this, i, 4, v, !!le); };
+
+    // Floats go through a scratch buffer: the bytes are laid out in the
+    // machine's own order and then read back as a number.
+    function readFloat(view, index, size, littleEndian, out) {
+      var at = checked(view, index, size);
+      for (var i = 0; i < size; i++) {
+        var from = littleEndian ? at + i : at + size - 1 - i;
+        sBytes[nativeLittleEndian ? i : size - 1 - i] = view._bytes[from];
+      }
+      return out[0];
+    }
+
+    function writeFloat(view, index, size, value, littleEndian, into) {
+      var at = checked(view, index, size);
+      into[0] = Number(value);
+      for (var i = 0; i < size; i++) {
+        var byte = sBytes[nativeLittleEndian ? i : size - 1 - i];
+        view._bytes[littleEndian ? at + i : at + size - 1 - i] = byte;
+      }
+    }
+
+    DataView.prototype.getFloat32 = function (i, le) { return readFloat(this, i, 4, !!le, sF32); };
+    DataView.prototype.getFloat64 = function (i, le) { return readFloat(this, i, 8, !!le, sF64); };
+    DataView.prototype.setFloat32 = function (i, v, le) { writeFloat(this, i, 4, v, !!le, sF32); };
+    DataView.prototype.setFloat64 = function (i, v, le) { writeFloat(this, i, 8, v, !!le, sF64); };
+
+    g.DataView = DataView;
+  }
 })();
 "#;
 
@@ -3689,6 +3798,28 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.title.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn data_view_reads_and_writes_with_either_byte_order() {
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                var view = new DataView(new ArrayBuffer(16));
+                view.setUint16(0, 0x1234);
+                view.setFloat64(8, -2.5, true);
+                view.setInt32(4, -123456);
+                document.title = [
+                    view.getUint16(0).toString(16),
+                    view.getUint16(0, true).toString(16),
+                    view.getFloat64(8, true),
+                    view.getInt32(4)
+                ].join("|");
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        // Big-endian by default, little-endian when asked, and the two differ.
+        assert_eq!(result.title.as_deref(), Some("1234|3412|-2.5|-123456"));
     }
 
     #[test]
