@@ -191,6 +191,11 @@ struct Builder {
     document_comments: Vec<Node>,
     /// Whether `</head>` has been seen and the body has not started.
     after_head: bool,
+    /// Whether anything that belongs to the body has been written yet.
+    ///
+    /// Before that, a stray end tag is simply dropped; the rules that invent
+    /// an element for one only apply once the body has started.
+    body_started: bool,
     /// Whitespace written between `</head>` and the body, which belongs to
     /// `<html>` -- it is outside both, and a browser keeps it there.
     html_whitespace: Vec<Node>,
@@ -237,6 +242,7 @@ impl Builder {
             html_comments: Vec::new(),
             document_comments: Vec::new(),
             after_head: false,
+            body_started: false,
             html_whitespace: Vec::new(),
             frameset_ok: true,
             frameset_allowed: None,
@@ -1168,6 +1174,9 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 // paragraph it was written to separate.
                 maybe_auto_close(&mut builder, &name);
                 ensure_table_ancestry(&mut builder, &name);
+                if !is_head_only(&name) && !matches!(name.as_str(), "html" | "head") {
+                    builder.body_started = true;
+                }
                 // A link inside a link is not a thing: the second `<a>` ends
                 // the first rather than nesting, and the same goes for the
                 // `<nobr>` old pages wrap around everything.
@@ -1234,11 +1243,17 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 if name == "head" {
                     builder.after_head = true;
                 }
+                // `</body>` and `</html>` do not take their element off the
+                // stack: they only say that what follows is outside it. Popping
+                // them let a second `<html>` tag build a second one inside the
+                // body instead of adding its attributes to the first.
                 if name == "body" {
                     builder.after_body = true;
+                    continue;
                 } else if name == "html" {
                     builder.after_body = true;
                     builder.after_html = true;
+                    continue;
                 }
 
                 // An end tag in foreign content matches by name alone, walking
@@ -1293,7 +1308,7 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 // `</p>` with no open paragraph makes an empty one, and `</br>`
                 // is read as `<br>`. Both are what the standard says and what
                 // every browser does with the stray tags real pages contain.
-                if name == "p" && !builder.is_open("p") {
+                if name == "p" && builder.body_started && !builder.is_open("p") {
                     builder.insert(BuildKind::Element { namespace: Default::default(),
                         tag_name: "p".to_string(),
                         attributes: BTreeMap::new(),
@@ -2662,6 +2677,19 @@ mod tests {
             .filter(|child| matches!(child, Node::Doctype(_)))
             .count();
         assert_eq!(doctypes, 1);
+    }
+
+    #[test]
+    fn a_second_html_tag_adds_its_attributes_to_the_first() {
+        // `</html>` says what follows is outside the element, not that the
+        // element is gone. Popping it let a second `<html>` build another one
+        // inside the body.
+        let document = parse_document("<html c=d><body></html><html a=b>");
+        let html = html_of(&document);
+        assert_eq!(html.attributes.get("c").map(String::as_str), Some("d"));
+        assert_eq!(html.attributes.get("a").map(String::as_str), Some("b"));
+        let body = body_of(&document);
+        assert!(body.children.is_empty(), "nothing should have been added to the body");
     }
 
     #[test]
