@@ -412,6 +412,12 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
             .and_then(|value| value.parse::<usize>().ok())
         {
             let mut name = element.tag_name.clone();
+            // The id first: it is how a page names the box you are looking for,
+            // and how a run here lines up with the same box in another browser.
+            if let Some(value) = element.attributes.get("id") {
+                name.push('#');
+                name.push_str(value);
+            }
             if let Some(class) = element.attributes.get("class") {
                 for token in class.split_whitespace().take(3) {
                     name.push('.');

@@ -1652,16 +1652,22 @@ fn specified_box_height(
     let desired = if matches!(style.box_sizing, BoxSizing::BorderBox) {
         px.max(1)
     } else {
+        let border = if style.border_style_none {
+            0
+        } else {
+            style.border.top.saturating_add(style.border.bottom)
+        };
         px.saturating_add(style.padding.top)
             .saturating_add(style.padding.bottom)
+            .saturating_add(border)
             .max(1)
     };
-    if desired > content_height {
-        *cursor_y = background_top.saturating_add(desired);
-        desired
-    } else {
-        content_height
-    }
+    // A stated height is what the box is, even when the content is taller: the
+    // content overflows rather than pushing the box open. Taking the larger of
+    // the two made every box with a short fixed height grow to fit its text,
+    // and everything below it moved down with it.
+    *cursor_y = background_top.saturating_add(desired);
+    desired
 }
 
 /// The colour a box actually fills with.
@@ -2081,6 +2087,17 @@ fn layout_block_element(
     // filter commands added by children (even when there is no background rect).
     let clip_start_idx = context.commands.len();
 
+    // A border takes up room. The box is its content plus the padding plus the
+    // border, so a box with `border: 5px` is ten pixels taller than the same
+    // box without one, and everything below it sits ten pixels lower. Counting
+    // only the padding left every bordered box short by its border, and the
+    // error added up down the page.
+    let (border_top, border_bottom) = if element.style.border_style_none {
+        (0, 0)
+    } else {
+        (element.style.border.top, element.style.border.bottom)
+    };
+    *cursor_y = cursor_y.saturating_add(border_top);
     *cursor_y = cursor_y.saturating_add(element.style.padding.top);
 
     let marker = list_marker_text(&element.style, context.list_ordinal.unwrap_or(1));
@@ -2178,6 +2195,7 @@ fn layout_block_element(
     };
     *cursor_y = advance_by_margin(*cursor_y, -trailing_child_margin);
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
+    *cursor_y = cursor_y.saturating_add(border_bottom);
     let content_height = cursor_y.saturating_sub(background_top).max(1);
     // Honor an explicit CSS `height` (px or percent); expands a short box.
     let background_height = explicit_box_height(
@@ -10822,6 +10840,44 @@ mod tests {
             inner.height >= 40,
             "percent height should resolve to the parent's 40px, got {}",
             inner.height
+        );
+    }
+
+    #[test]
+    fn a_border_makes_the_box_taller_and_moves_what_follows_down() {
+        // Chrome puts the second box at y=34 here: 24 of line plus 5 of border
+        // at each edge. Counting only the padding left it at 24.
+        let document = parse_document(
+            "<div style=\"border:5px solid black\">a</div><div id=\"after\">b</div>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{margin:0;font-size:16px;line-height:1.5}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
+        // 34 for the bordered box, then 24 for the plain one below it.
+        assert_eq!(layout.content_height, 58);
+    }
+
+    #[test]
+    fn a_stated_height_wins_over_taller_content() {
+        // The content overflows rather than pushing the box open, which is what
+        // every browser does and what keeps a fixed-height strip fixed.
+        let document = parse_document("<div id=\"short\" style=\"height:20px\">text</div>");
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{margin:0;font-size:16px;line-height:1.5}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
+        assert_eq!(
+            layout.content_height, 20,
+            "the box should be 20px tall, not the 24px its line needs"
         );
     }
 
