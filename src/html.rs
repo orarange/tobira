@@ -13,8 +13,8 @@ pub enum Node {
     /// it as a marker. Dropped at the tokenizer, it was invisible to all of
     /// them.
     Comment(String),
-    /// `<!DOCTYPE ...>`, reduced to the name it declares.
-    Doctype(String),
+    /// `<!DOCTYPE ...>`, with the name and identifiers it declares.
+    Doctype(Doctype),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +56,7 @@ impl Element {
 #[derive(Debug)]
 enum Token {
     Comment(String),
-    Doctype(String),
+    Doctype(Doctype),
     StartTag {
         name: String,
         attributes: BTreeMap<String, String>,
@@ -64,6 +64,69 @@ enum Token {
     },
     EndTag(String),
     Text(String),
+}
+
+/// A document type declaration.
+///
+/// The name is what `document.doctype.name` reports. The two identifiers are
+/// what a browser reads to decide whether to lay the page out in quirks mode,
+/// so they have to survive parsing even though nothing draws them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Doctype {
+    pub name: String,
+    pub public_id: Option<String>,
+    pub system_id: Option<String>,
+}
+
+/// Read a `<!DOCTYPE ...>` declaration.
+///
+/// Anything the standard does not recognise makes the declaration bogus: the
+/// name is kept and the identifiers are thrown away, which is also how a
+/// browser ends up in quirks mode for a malformed doctype.
+fn parse_doctype(raw: &str) -> Doctype {
+    let raw = raw.trim_start_matches('<').trim_end_matches('>');
+    let rest = raw.get(8..).unwrap_or("");
+    let rest = rest.trim_start();
+    let name_end = rest
+        .find(|c: char| c.is_ascii_whitespace())
+        .unwrap_or(rest.len());
+    let name = rest[..name_end].to_ascii_lowercase();
+    let mut rest = rest[name_end..].trim_start();
+
+    let mut doctype = Doctype {
+        name,
+        public_id: None,
+        system_id: None,
+    };
+
+    fn take_quoted(rest: &mut &str) -> Option<String> {
+        let quote = rest.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            return None;
+        }
+        let body = &rest[1..];
+        let end = body.find(quote).unwrap_or(body.len());
+        let value = body[..end].to_string();
+        *rest = body[(end + usize::from(end < body.len())).min(body.len())..].trim_start();
+        Some(value)
+    }
+
+    if rest.len() >= 6 && rest[..6].eq_ignore_ascii_case("public") {
+        rest = rest[6..].trim_start();
+        match take_quoted(&mut rest) {
+            Some(public) => doctype.public_id = Some(public),
+            None => return doctype,
+        }
+        doctype.system_id = take_quoted(&mut rest);
+    } else if rest.len() >= 6 && rest[..6].eq_ignore_ascii_case("system") {
+        rest = rest[6..].trim_start();
+        match take_quoted(&mut rest) {
+            Some(system) => doctype.system_id = Some(system),
+            None => return doctype,
+        }
+    }
+
+    doctype
 }
 
 pub fn parse_document(input: &str) -> Node {
@@ -91,7 +154,7 @@ enum BuildKind {
     },
     Text(String),
     Comment(String),
-    Doctype(String),
+    Doctype(Doctype),
 }
 
 #[derive(Debug)]
@@ -564,7 +627,7 @@ impl Builder {
             match kind {
                 BuildKind::Text(text) => Node::Text(text),
                 BuildKind::Comment(text) => Node::Comment(text),
-                BuildKind::Doctype(name) => Node::Doctype(name),
+                BuildKind::Doctype(doctype) => Node::Doctype(doctype),
                 BuildKind::Element {
                     tag_name,
                     attributes,
@@ -992,8 +1055,8 @@ fn parse_document_body(input: &str) -> (Node, bool) {
             Token::Comment(text) => {
                 builder.insert(BuildKind::Comment(text));
             }
-            Token::Doctype(name) => {
-                builder.insert(BuildKind::Doctype(name));
+            Token::Doctype(doctype) => {
+                builder.insert(BuildKind::Doctype(doctype));
             }
         }
     }
@@ -1166,8 +1229,13 @@ fn maybe_auto_close(builder: &mut Builder, new_tag: &str) {
         builder.close("head");
     }
 
-    const PARAGRAPH_BOUNDARIES: &[&str] =
-        &["td", "th", "li", "dd", "dt", "body", "html", "document"];
+    // What the standard calls button scope: a paragraph is only closed if the
+    // search for it does not cross one of these first. `<button>` is on the
+    // list, so `<p><button><p>` nests rather than closing the outer one.
+    const PARAGRAPH_BOUNDARIES: &[&str] = &[
+        "td", "th", "body", "html", "document", "button", "applet", "caption", "table",
+        "marquee", "object", "template",
+    ];
 
     match new_tag {
         // Table cell: close any open td/th within the current tr context.
@@ -1408,17 +1476,7 @@ fn tokenize(input: &str) -> Vec<Token> {
             consume_until_tag_end(input, &mut index);
             let raw = &input[start..index];
             if raw.len() > 9 && raw[2..9].eq_ignore_ascii_case("doctype") {
-                // Only the name is kept: it is what `document.doctype.name`
-                // reports and what decides quirks mode.
-                let name = raw[9..]
-                    .trim_end_matches('>')
-                    .trim()
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .trim_matches('"')
-                    .to_ascii_lowercase();
-                tokens.push(Token::Doctype(name));
+                tokens.push(Token::Doctype(parse_doctype(raw)));
             }
             continue;
         }
@@ -1922,6 +1980,41 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_doctype_keeps_its_public_and_system_identifiers() {
+        let document = parse_document(
+            "<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01//EN\" \"http://www.w3.org/TR/html4/strict.dtd\"><p>x",
+        );
+        let Node::Element(root) = &document else {
+            panic!("expected the document");
+        };
+        let Node::Doctype(doctype) = &root.children[0] else {
+            panic!("expected a doctype first");
+        };
+        assert_eq!(doctype.name, "html");
+        assert_eq!(doctype.public_id.as_deref(), Some("-//W3C//DTD HTML 4.01//EN"));
+        assert_eq!(
+            doctype.system_id.as_deref(),
+            Some("http://www.w3.org/TR/html4/strict.dtd")
+        );
+    }
+
+    #[test]
+    fn an_unquoted_identifier_makes_the_doctype_bogus() {
+        // The identifier has to be quoted. Without quotes the declaration is
+        // malformed, and a browser keeps only the name -- which is also what
+        // puts the page into quirks mode.
+        let document = parse_document("<!DOCTYPE potato SYSTEM taco>x");
+        let Node::Element(root) = &document else {
+            panic!("expected the document");
+        };
+        let Node::Doctype(doctype) = &root.children[0] else {
+            panic!("expected a doctype first");
+        };
+        assert_eq!(doctype.name, "potato");
+        assert_eq!(doctype.system_id, None);
+    }
+
     #[test]
     fn a_title_spells_out_its_character_references() {
         // The title is escapable text: `&amp;` in it is an ampersand, not the
@@ -2482,9 +2575,19 @@ mod html5lib_conformance {
                 out.push_str(&format!("| {pad}<!-- {text} -->
 "));
             }
-            Node::Doctype(name) => {
-                out.push_str(&format!("| {pad}<!DOCTYPE {name}>
-"));
+            Node::Doctype(doctype) => {
+                // html5lib prints both identifiers whenever either one
+                // was declared, the missing one as an empty string.
+                let name = &doctype.name;
+                let identifiers = match (&doctype.public_id, &doctype.system_id) {
+                    (None, None) => String::new(),
+                    (public, system) => format!(
+                        " \"{}\" \"{}\"",
+                        public.clone().unwrap_or_default(),
+                        system.clone().unwrap_or_default()
+                    ),
+                };
+                out.push_str(&format!("| {pad}<!DOCTYPE {name}{identifiers}>\n"));
             }
             Node::Element(element) => {
                 // html5lib writes the namespace before the name, so an SVG
