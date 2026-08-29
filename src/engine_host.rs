@@ -338,8 +338,9 @@ impl BrowserHost {
         // until the page (or its scripts) provide the element.
         if let Node::Element(element) = &root {
             for child in &element.children {
-                let child_idx = host.build_from_node(child);
-                host.attach(host.document, child_idx);
+                if let Some(child_idx) = host.build_from_node(child) {
+                    host.attach(host.document, child_idx);
+                }
             }
         }
         host
@@ -357,9 +358,14 @@ impl BrowserHost {
     }
 
     /// Recursively build arena nodes from an `html::Node`, returning the new idx.
-    fn build_from_node(&mut self, node: &Node) -> usize {
+    fn build_from_node(&mut self, node: &Node) -> Option<usize> {
         match node {
-            Node::Text(text) => self.push(DomNode::text(text)),
+            // Not in this DOM yet. Returning an index here would have to be a
+            // real one -- a default of zero is the *document*, and attaching
+            // that under an element makes the tree a ring, which the first walk
+            // over it rides until the stack runs out.
+            Node::Comment(_) | Node::Doctype(_) => None,
+            Node::Text(text) => Some(self.push(DomNode::text(text))),
             Node::Element(element) => {
                 let idx = self.push(DomNode::element(&element.tag_name));
                 for (key, value) in &element.attributes {
@@ -368,12 +374,12 @@ impl BrowserHost {
                 let child_indices: Vec<usize> = element
                     .children
                     .iter()
-                    .map(|child| self.build_from_node(child))
+                    .filter_map(|child| self.build_from_node(child))
                     .collect();
                 for child in child_indices {
                     self.attach(idx, child);
                 }
-                idx
+                Some(idx)
             }
         }
     }
@@ -1563,7 +1569,7 @@ impl BrowserHost {
         // span inside the element, not a whole `<html><head></head><body>`.
         crate::html::parse_fragment(html)
             .iter()
-            .map(|child| self.build_from_node(child))
+            .filter_map(|child| self.build_from_node(child))
             .collect()
     }
 
@@ -1579,7 +1585,7 @@ impl BrowserHost {
         {
             let child_indices: Vec<usize> = fragment_children
                 .iter()
-                .map(|child| self.build_from_node(child))
+                .filter_map(|child| self.build_from_node(child))
                 .collect();
             for child in child_indices {
                 self.attach(parent, child);
@@ -2136,7 +2142,7 @@ impl Host for BrowserHost {
                 {
                     let child_indices: Vec<usize> = fragment_children
                         .iter()
-                        .map(|child| self.build_from_node(child))
+                        .filter_map(|child| self.build_from_node(child))
                         .collect();
                     for child in child_indices {
                         self.attach(body, child);
@@ -6208,6 +6214,8 @@ mod tests {
             match node {
                 Node::Text(t) => t.clone(),
                 Node::Element(el) => el.children.iter().map(collect_node_text).collect(),
+                // A comment's text is not the document's text.
+                Node::Comment(_) | Node::Doctype(_) => String::new(),
             }
         }
         let btn_id = find_button_id(&tree, "count:").expect("counter button has a node id");

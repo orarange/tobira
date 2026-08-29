@@ -4,6 +4,15 @@ use std::collections::BTreeMap;
 pub enum Node {
     Element(Element),
     Text(String),
+    /// `<!-- ... -->`, with the text exactly as written between the delimiters.
+    ///
+    /// A comment is a node like any other: scripts walk over it in
+    /// `childNodes`, read it as `nodeType === 8`, and templating libraries use
+    /// it as a marker. Dropped at the tokenizer, it was invisible to all of
+    /// them.
+    Comment(String),
+    /// `<!DOCTYPE ...>`, reduced to the name it declares.
+    Doctype(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +38,8 @@ impl Element {
 
 #[derive(Debug)]
 enum Token {
+    Comment(String),
+    Doctype(String),
     StartTag {
         name: String,
         attributes: BTreeMap<String, String>,
@@ -89,6 +100,20 @@ fn parse_document_body(input: &str) -> Node {
                 }
             }
             Token::EndTag(name) => close_element(&mut stack, &name),
+            Token::Comment(text) => {
+                stack
+                    .last_mut()
+                    .expect("document root always exists")
+                    .children
+                    .push(Node::Comment(text));
+            }
+            Token::Doctype(name) => {
+                stack
+                    .last_mut()
+                    .expect("document root always exists")
+                    .children
+                    .push(Node::Doctype(name));
+            }
         }
     }
 
@@ -140,6 +165,25 @@ fn is_head_only(name: &str) -> bool {
 /// the parser: the shape is what pages and scripts observe, and this reaches it
 /// without disturbing the tag handling that real pages already depend on.
 fn ensure_document_structure(root: &mut Element) {
+    // A doctype, and any comment written before the markup proper, belong to
+    // the document itself rather than inside `<html>` -- which is where a
+    // browser puts them, and where `document.doctype` looks for one.
+    let mut before_html: Vec<Node> = Vec::new();
+    let mut rest: Vec<Node> = Vec::new();
+    let mut seen_content = false;
+    for child in root.children.drain(..) {
+        match &child {
+            Node::Doctype(_) if !seen_content => before_html.push(child),
+            Node::Comment(_) if !seen_content => before_html.push(child),
+            Node::Text(text) if !seen_content && text.trim().is_empty() => {}
+            _ => {
+                seen_content = true;
+                rest.push(child);
+            }
+        }
+    }
+    root.children = rest;
+
     let existing_html = root
         .children
         .iter()
@@ -211,6 +255,8 @@ fn ensure_document_structure(root: &mut Element) {
         .position(|child| matches!(child, Node::Element(e) if e.tag_name == "frameset"))
         .filter(|_| {
             body.children.iter().all(|child| match child {
+                // Neither renders, and neither carries anything this walk wants.
+                Node::Comment(_) | Node::Doctype(_) => Default::default(),
                 Node::Element(e) => matches!(e.tag_name.as_str(), "frameset" | "noframes"),
                 Node::Text(text) => text.trim().is_empty(),
             })
@@ -221,7 +267,8 @@ fn ensure_document_structure(root: &mut Element) {
     };
 
     html.children = vec![Node::Element(head), second];
-    root.children = vec![Node::Element(html)];
+    before_html.push(Node::Element(html));
+    root.children = before_html;
 }
 
 fn close_element(stack: &mut Vec<Element>, target: &str) {
@@ -358,11 +405,17 @@ fn tokenize(input: &str) -> Vec<Token> {
         }
 
         if input[index..].starts_with("<!--") {
-            if let Some(offset) = input[index + 4..].find("-->") {
-                index += 4 + offset + 3;
-            } else {
-                break;
-            }
+            // An unterminated comment runs to the end of the file, which is
+            // what a browser does with it rather than dropping the rest.
+            let (text, next) = match input[index + 4..].find("-->") {
+                Some(offset) => (
+                    input[index + 4..index + 4 + offset].to_string(),
+                    index + 4 + offset + 3,
+                ),
+                None => (input[index + 4..].to_string(), bytes.len()),
+            };
+            tokens.push(Token::Comment(text));
+            index = next;
             continue;
         }
 
@@ -380,7 +433,22 @@ fn tokenize(input: &str) -> Vec<Token> {
         }
 
         if input[index..].starts_with("<!") {
+            let start = index;
             consume_until_tag_end(input, &mut index);
+            let raw = &input[start..index];
+            if raw.len() > 9 && raw[2..9].eq_ignore_ascii_case("doctype") {
+                // Only the name is kept: it is what `document.doctype.name`
+                // reports and what decides quirks mode.
+                let name = raw[9..]
+                    .trim_end_matches('>')
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches('"')
+                    .to_ascii_lowercase();
+                tokens.push(Token::Doctype(name));
+            }
             continue;
         }
 
@@ -936,6 +1004,14 @@ mod html5lib_conformance {
         match node {
             Node::Text(text) => {
                 out.push_str(&format!("| {pad}\"{text}\"\n"));
+            }
+            Node::Comment(text) => {
+                out.push_str(&format!("| {pad}<!-- {text} -->
+"));
+            }
+            Node::Doctype(name) => {
+                out.push_str(&format!("| {pad}<!DOCTYPE {name}>
+"));
             }
             Node::Element(element) => {
                 out.push_str(&format!("| {pad}<{}>\n", element.tag_name));

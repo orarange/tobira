@@ -2089,6 +2089,8 @@ fn establish_root_font_size(
 /// The `<html>` element, however deeply the parser nested it.
 fn root_element(node: &Node) -> Option<&Element> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Element(element) if element.tag_name == "html" => Some(element),
         Node::Element(element) => element.children.iter().find_map(root_element),
         Node::Text(_) => None,
@@ -2232,6 +2234,16 @@ fn build_node(
     interactive: &InteractiveState,
 ) -> StyledNode {
     match node {
+        // Neither renders. They reach here only because a caller mapped over
+        // every child; an empty text node is how the styled tree holds nothing.
+        Node::Comment(_) | Node::Doctype(_) => StyledNode::Text(StyledText {
+            text: String::new(),
+            style: intern_style(
+                parent_style
+                    .cloned()
+                    .unwrap_or_else(|| ComputedStyle::for_element("body", None)),
+            ),
+        }),
         Node::Text(text) => {
             let mut style = parent_style
                 .cloned()
@@ -2398,6 +2410,8 @@ fn build_node_incremental(
     under_dirty: bool,
 ) -> Option<StyledNode> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(text) => {
             let mut style = parent_style
                 .cloned()
@@ -2541,6 +2555,8 @@ fn build_parent_map(
     out: &mut HashMap<u32, Option<u32>>,
 ) -> Option<()> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => Some(()),
         Node::Element(element) => {
             let id = *node_order.next()?;
@@ -2558,6 +2574,8 @@ fn build_parent_map(
 /// iterator stays aligned with the document walk.
 fn skip_element_ids(node: &Node, node_order: &mut std::slice::Iter<'_, u32>) -> Option<()> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => Some(()),
         Node::Element(element) => {
             node_order.next()?;
@@ -2945,6 +2963,8 @@ fn compute_style_with_rules(
             .children
             .iter()
             .filter_map(|child| match child {
+                // Neither renders, and neither carries anything this walk wants.
+                Node::Comment(_) | Node::Doctype(_) => Default::default(),
                 Node::Element(child) => Some(ElementIdentity::from(child)),
                 Node::Text(_) => None,
             })

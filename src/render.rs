@@ -31,6 +31,8 @@ struct Renderer {
 impl Renderer {
     fn render_node(&mut self, node: &Node) {
         match node {
+            // Neither renders, and neither carries anything this walk wants.
+            Node::Comment(_) | Node::Doctype(_) => Default::default(),
             Node::Text(text) => self.push_text(text),
             Node::Element(element) => self.render_element(element),
         }
@@ -183,6 +185,8 @@ impl Renderer {
 
 fn find_first_text_by_tag(node: &Node, tag_name: &str) -> Option<String> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => None,
         Node::Element(element) => {
             if element.tag_name == tag_name {
@@ -205,6 +209,8 @@ fn find_first_text_by_tag(node: &Node, tag_name: &str) -> Option<String> {
 
 fn find_first_heading(node: &Node) -> Option<String> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => None,
         Node::Element(element) => {
             if matches!(
@@ -236,6 +242,8 @@ fn collect_text(node: &Node) -> String {
 
 fn collect_text_into(node: &Node, buffer: &mut String) {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(text) => {
             buffer.push_str(text);
             buffer.push(' ');
@@ -259,6 +267,8 @@ fn collect_raw_text(node: &Node) -> String {
 
 fn collect_raw_text_into(node: &Node, buffer: &mut String) {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(text) => buffer.push_str(text),
         Node::Element(element) => {
             for child in &element.children {

@@ -750,6 +750,8 @@ fn build_parent_map(
     parent_id: Option<u32>,
 ) -> Option<()> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => Some(()),
         Node::Element(element) => {
             let id = *node_order.next()?;
@@ -831,6 +833,8 @@ fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<
 
 fn first_frameset(node: &Node) -> Option<&Element> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => None,
         Node::Element(element) => {
             if element.tag_name == "frameset" {
@@ -939,6 +943,8 @@ fn collect_frame_specs(document: &Node) -> Vec<FrameSpec> {
 
 fn collect_frame_specs_into(node: &Node, output: &mut Vec<FrameSpec>) {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => {}
         Node::Element(element) => {
             if matches!(element.tag_name.as_str(), "frame" | "iframe")
@@ -1153,6 +1159,8 @@ fn row_attributes(track: &FrameTrack) -> BTreeMap<String, String> {
 
 fn extract_body_children(node: &Node) -> Vec<Node> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => Vec::new(),
         Node::Element(element) => {
             if element.tag_name == "body" {
@@ -1176,6 +1184,8 @@ fn extract_body_children(node: &Node) -> Vec<Node> {
 /// Preserves `bgcolor`, `text` (body text color), and `data-scratch-background`.
 fn extract_body_style_attrs(node: &Node) -> BTreeMap<String, String> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => BTreeMap::new(),
         Node::Element(element) => {
             if element.tag_name == "body" {
@@ -1266,6 +1276,8 @@ fn has_url_scheme(href: &str) -> bool {
 
 fn annotate_resource_urls(document: &mut Node, base_url: &Url) {
     match document {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => {}
         Node::Element(element) => {
             if element.tag_name == "img"
@@ -1381,6 +1393,8 @@ fn collect_styled_background_images(styled: &StyledNode, base_url: &Url, images:
 
 fn collect_image_sources_into(node: &Node, output: &mut Vec<String>) {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => {}
         Node::Element(element) => {
             if element.tag_name == "img"
@@ -1439,6 +1453,8 @@ fn collect_style_blocks(document: &Node) -> Vec<String> {
 
 fn collect_style_blocks_into(node: &Node, output: &mut Vec<String>) {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => {}
         Node::Element(element) => {
             if element.tag_name == "style" {
@@ -1516,6 +1532,8 @@ fn collect_stylesheet_links(document: &Node) -> Vec<(String, Option<String>)> {
 
 fn collect_stylesheet_links_into(node: &Node, output: &mut Vec<(String, Option<String>)>) {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => {}
         Node::Element(element) => {
             if element.tag_name == "link"
@@ -1627,6 +1645,8 @@ fn document_has_meaningful_body(document: &Node) -> bool {
 
 fn node_has_meaningful_content(node: &Node) -> bool {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(text) => !text.trim().is_empty(),
         Node::Element(element) => {
             if matches!(
@@ -3199,6 +3219,8 @@ fn json_text(value: &Value) -> Option<String> {
 
 fn find_meta_content(node: &Node, attribute: &str, expected: &str) -> Option<String> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => None,
         Node::Element(element) => {
             if element.tag_name == "meta"
@@ -3225,6 +3247,8 @@ fn find_meta_content(node: &Node, attribute: &str, expected: &str) -> Option<Str
 
 fn find_link_href(node: &Node, attribute: &str, expected: &str) -> Option<String> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => None,
         Node::Element(element) => {
             if element.tag_name == "link"
@@ -3251,6 +3275,8 @@ fn find_link_href(node: &Node, attribute: &str, expected: &str) -> Option<String
 
 fn find_link_content(node: &Node, attribute: &str, expected: &str) -> Option<String> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => None,
         Node::Element(element) => {
             if element.tag_name == "link"
@@ -3277,6 +3303,8 @@ fn find_link_content(node: &Node, attribute: &str, expected: &str) -> Option<Str
 
 fn find_interaction_count(node: &Node, expected_type_fragment: &str) -> Option<String> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => None,
         Node::Element(element) => {
             if element.tag_name == "div"
@@ -3398,6 +3426,8 @@ fn document_title(node: &Node) -> Option<String> {
 
 fn first_heading(node: &Node) -> Option<String> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => None,
         Node::Element(element) => {
             if matches!(
@@ -3423,6 +3453,8 @@ fn first_heading(node: &Node) -> Option<String> {
 
 fn first_text_by_tag(node: &Node, tag_name: &str) -> Option<String> {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(_) => None,
         Node::Element(element) => {
             if element.tag_name == tag_name {
@@ -3451,6 +3483,8 @@ fn collect_text(node: &Node) -> String {
 
 fn collect_text_into(node: &Node, output: &mut String) {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(text) => {
             output.push_str(text);
             output.push(' ');
@@ -3475,6 +3509,8 @@ fn collect_raw_text(node: &Node) -> String {
 
 fn collect_raw_text_into(node: &Node, output: &mut String) {
     match node {
+        // Neither renders, and neither carries anything this walk wants.
+        Node::Comment(_) | Node::Doctype(_) => Default::default(),
         Node::Text(text) => output.push_str(text),
         Node::Element(element) => {
             for child in &element.children {
