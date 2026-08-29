@@ -5581,9 +5581,34 @@ fn emit_line_impl(
     };
 
     let mut cursor_x = effective_x.saturating_add(offset_x);
-    let line_height = line
-        .line_height
-        .max(text_line_height(container_style, fonts));
+
+    // Where the line's baseline sits, and how far the line reaches below it.
+    //
+    // Everything on a line is hung from the same baseline. A box taller than
+    // the text grows the line downwards, not upwards -- so a 40px badge beside
+    // a line of type has its top level with the text's, not its bottom.
+    let strut_below = below_baseline(container_style);
+    let mut above = text_line_height(container_style, fonts).saturating_sub(strut_below);
+    let mut below = strut_below;
+    for span in &line.spans {
+        if span.control.is_some() {
+            // A control is centred on the line rather than hung from it.
+            above = above.max(span.height / 2);
+            below = below.max(span.height - span.height / 2);
+            continue;
+        }
+        let span_above = if span.atomic.is_some() {
+            atomic_baseline(&span.style, fonts)
+        } else if span.image.is_some() {
+            span.height
+        } else {
+            text_line_height(&span.style, fonts).saturating_sub(below_baseline(&span.style))
+        };
+        above = above.max(span_above);
+        below = below.max(span.height.saturating_sub(span_above));
+    }
+    let line_height = above.saturating_add(below).max(line.line_height.min(above + below).max(1));
+    let baseline = above;
 
     for span in &line.spans {
         if let Some(control) = &span.control {
@@ -5623,7 +5648,13 @@ fn emit_line_impl(
         if let Some(atomic) = &span.atomic {
             // The box was laid out from its own origin, so shift the whole
             // result to where the line breaker put it.
-            let box_y = cursor_y.saturating_add(line_height.saturating_sub(span.height));
+            //
+            // Vertically it sits on the line's baseline -- by its own first
+            // line's baseline, not by its bottom edge. Bottom-aligning it
+            // dropped a badge or a button a few pixels below the words beside
+            // it, and a short one much further.
+            let box_y =
+                cursor_y.saturating_add(baseline.saturating_sub(atomic_baseline(&span.style, fonts)));
             let mut commands = atomic.commands.clone();
             offset_commands(&mut commands, cursor_x, box_y);
             context.commands.append(&mut commands);
@@ -5802,6 +5833,22 @@ fn is_hidden(node: &StyledNode) -> bool {
 
 fn char_width(style: &ComputedStyle, character: char, fonts: &mut FontContext) -> u32 {
     fonts.glyph_advance_px(character, style.font_size_px, style.font_family)
+}
+
+/// Where an inline box's own baseline sits, measured from its top.
+///
+/// Its first line's baseline, which is what the line it sits on hangs it from.
+fn atomic_baseline(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
+    let border = if style.border_style_none {
+        0
+    } else {
+        style.border.top
+    };
+    style
+        .padding
+        .top
+        .saturating_add(border)
+        .saturating_add(text_line_height(style, fonts).saturating_sub(below_baseline(style)))
 }
 
 /// The room a line leaves below the baseline for the text's descenders.
@@ -11268,6 +11315,34 @@ mod tests {
         // One line, not three. The image is missing here, so the line is the
         // height of its alt text rather than of the image.
         assert_eq!(layout.content_height, 24);
+    }
+
+    #[test]
+    fn a_tall_box_beside_text_grows_the_line_downwards() {
+        // Everything on a line hangs from the same baseline, so a badge taller
+        // than the type has its top level with the text's and pushes the line's
+        // bottom down. Bottom-aligning it put it below the words instead.
+        let document = parse_document(
+            "<div style=\"width:600px\">text <span style=\"display:inline-block;width:60px;height:40px;background:#334455\">b</span></div>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{margin:0;font-size:16px;line-height:1.5}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
+        let badge = layout
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Rect(rect) if rect.color == 0x334455 => Some(rect),
+                _ => None,
+            })
+            .expect("the badge should be drawn");
+        assert_eq!(badge.y, 0, "its top should be level with the text's");
+        assert_eq!(layout.content_height, 40, "and the line should be as tall as it is");
     }
 
     #[test]
