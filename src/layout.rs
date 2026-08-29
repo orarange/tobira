@@ -3823,6 +3823,21 @@ fn build_table_placements<'a>(rows: &[&'a StyledElement]) -> Vec<TablePlacement<
     placements
 }
 
+/// The horizontal room a cell's own padding and border take, outside its text.
+fn cell_surround_width(cell: &StyledElement) -> u32 {
+    // Under `box-sizing: border-box` a stated width already covers them, so
+    // adding them again would widen the column past what the page asked for.
+    if matches!(cell.style.box_sizing, BoxSizing::BorderBox) && cell.style.width.is_some() {
+        return 0;
+    }
+    let border = if cell.style.border_style_none {
+        0
+    } else {
+        cell.style.border.left + cell.style.border.right
+    };
+    cell.style.padding.left + cell.style.padding.right + border
+}
+
 fn compute_column_widths(
     _table: &StyledElement,
     placements: &[TablePlacement<'_>],
@@ -3846,7 +3861,12 @@ fn compute_column_widths(
         }
 
         let column = placement.column_index;
-        let min_width = measure_cell_min_width(placement.cell, padding, images, fonts);
+        // The cell's own padding and border widen the column it sits in: the
+        // text inside starts past them. Measuring only the content left the
+        // column too narrow, and the next cell's text ran over this one's.
+        let surround = cell_surround_width(placement.cell);
+        let min_width =
+            measure_cell_min_width(placement.cell, padding, images, fonts).saturating_add(surround);
         mins[column] = mins[column].max(min_width);
         if let Some(length) = specified_length(placement.cell, placement.cell.style.width, "width")
         {
@@ -3856,7 +3876,8 @@ fn compute_column_widths(
             continue;
         }
 
-        let measured = measure_cell_preferred_width(placement.cell, padding, images, fonts);
+        let measured = measure_cell_preferred_width(placement.cell, padding, images, fonts)
+            .saturating_add(cell_surround_width(placement.cell));
         widths[column] = widths[column].max(measured);
     }
 
@@ -3983,12 +4004,41 @@ fn layout_table_cell(
         next_form_id: form_id_seed,
         ..LayoutContext::default()
     };
-    let mut cursor_y = 0_u32;
+    // The cell's own padding and border take up room, the way they do in any
+    // other box. Only the legacy `cellpadding` attribute was counted, so a
+    // table styled the modern way -- `td { padding: 4px; border: 1px }` --
+    // came out two pixels short of its content on every side and the rows sat
+    // tighter than the page asked for.
+    let (border_x, border_y) = if cell.style.border_style_none {
+        (0, 0)
+    } else {
+        (
+            cell.style.border.left + cell.style.border.right,
+            cell.style.border.top + cell.style.border.bottom,
+        )
+    };
+    let inset_left = cell.style.padding.left
+        + if cell.style.border_style_none {
+            0
+        } else {
+            cell.style.border.left
+        };
+    let inset_top = cell.style.padding.top
+        + if cell.style.border_style_none {
+            0
+        } else {
+            cell.style.border.top
+        };
+    let surround_x = cell.style.padding.left + cell.style.padding.right + border_x;
+    let surround_y = cell.style.padding.top + cell.style.padding.bottom + border_y;
+    let inner_width = width.saturating_sub(surround_x).max(1);
+
+    let mut cursor_y = inset_top;
 
     layout_mixed_children(
         cell,
-        0,
-        width,
+        inset_left,
+        inner_width,
         &mut cursor_y,
         &mut context,
         None,
@@ -3998,7 +4048,9 @@ fn layout_table_cell(
     );
 
     FragmentLayout {
-        content_height: cursor_y.max(1),
+        content_height: cursor_y
+            .saturating_add(surround_y.saturating_sub(inset_top))
+            .max(1),
         commands: context.commands,
         links: context.links,
         controls: context.controls,
@@ -11014,6 +11066,25 @@ mod tests {
             "percent height should resolve to the parent's 40px, got {}",
             inner.height
         );
+    }
+
+    #[test]
+    fn a_table_cell_makes_room_for_its_own_padding_and_border() {
+        // Chrome gives this table a 34px row: 24 of line, 8 of padding and 2 of
+        // border. Only the legacy `cellpadding` attribute was counted, so a
+        // table styled the modern way came out short on every side.
+        let document = parse_document(
+            "<table style=\"width:400px\"><tr><td style=\"padding:4px;border:1px solid black\">a</td></tr></table>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{margin:0;font-size:16px;line-height:1.5}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
+        assert_eq!(layout.content_height, 34);
     }
 
     #[test]
