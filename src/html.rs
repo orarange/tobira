@@ -1150,8 +1150,11 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     match name.as_str() {
                         "option" | "optgroup" | "hr" | "script" | "template" | "style" => {}
                         // These end the select and are then read normally --
-                        // the author clearly meant to be past it.
-                        "select" | "input" | "keygen" | "textarea" => {
+                        // the author clearly meant to be past it. A table tag
+                        // does too: a select fostered out of a table must not
+                        // swallow the rows that follow it.
+                        "select" | "input" | "keygen" | "textarea" | "caption" | "table"
+                        | "tbody" | "tfoot" | "thead" | "tr" | "td" | "th" => {
                             builder.close("select");
                             if name == "select" {
                                 continue;
