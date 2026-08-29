@@ -1855,6 +1855,7 @@ fn layout_block_element(
     }
 
     let block_cmd_start = context.commands.len();
+    let hitboxes_from_transform = context.element_hitboxes.len();
     // Where this block's subtree starts contributing positioned boxes. Anything
     // from here on was drawn inside it, so a shift applied to the block has to
     // reach those too, and a promotion of the block itself has to land in front
@@ -2425,7 +2426,15 @@ fn layout_block_element(
         let dx = offset(element.style.left, cb_width) - offset(element.style.right, cb_width);
         let dy = offset(element.style.top, cb_height) - offset(element.style.bottom, cb_height);
         if dx != 0 || dy != 0 {
-            shift_block_and_its_positioned(context, block_cmd_start, positioned_from, dx, dy);
+            // `position: relative` moves the box with its drawing too.
+            shift_block_and_its_positioned(
+                context,
+                block_cmd_start,
+                positioned_from,
+                hitboxes_from_transform,
+                dx,
+                dy,
+            );
         }
     }
 
@@ -2467,7 +2476,14 @@ fn layout_block_element(
     let tx = element.style.transform_translate_x;
     let ty = element.style.transform_translate_y;
     if tx != 0 || ty != 0 {
-        shift_block_and_its_positioned(context, block_cmd_start, positioned_from, tx, ty);
+        shift_block_and_its_positioned(
+            context,
+            block_cmd_start,
+            positioned_from,
+            hitboxes_from_transform,
+            tx,
+            ty,
+        );
     }
 
     // An element with a `z-index` opens a stacking context: everything its
@@ -2520,6 +2536,7 @@ fn shift_block_and_its_positioned(
     context: &mut LayoutContext,
     block_cmd_start: usize,
     positioned_from: usize,
+    hitboxes_from: usize,
     dx: i32,
     dy: i32,
 ) {
@@ -2530,6 +2547,14 @@ fn shift_block_and_its_positioned(
         for command in commands.iter_mut() {
             shift_command_signed(command, dx, dy);
         }
+    }
+    // The box moves with its drawing. Left behind, a translated button answered
+    // to the pointer where it used to be, and a script measuring it read the
+    // place it was never shown.
+    let start = hitboxes_from.min(context.element_hitboxes.len());
+    for hitbox in &mut context.element_hitboxes[start..] {
+        hitbox.x = hitbox.x.saturating_add_signed(dx);
+        hitbox.y = hitbox.y.saturating_add_signed(dy);
     }
 }
 
