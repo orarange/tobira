@@ -4406,18 +4406,53 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         }
         "flex" => {
             let parts: Vec<&str> = value.split_whitespace().collect();
-            if parts.len() >= 1 {
-                if let Ok(g) = parts[0].parse::<f32>() {
-                    style.flex_grow = (g * 100.0).round() as u32;
+            match parts.as_slice() {
+                ["none"] => {
+                    style.flex_grow = 0;
+                    style.flex_shrink = 0;
+                    style.flex_basis = None;
                 }
-            }
-            if parts.len() >= 2 {
-                if let Ok(s) = parts[1].parse::<f32>() {
-                    style.flex_shrink = (s * 100.0).round() as u32;
+                ["auto"] => {
+                    style.flex_grow = 100;
+                    style.flex_shrink = 100;
+                    style.flex_basis = None;
                 }
-            }
-            if parts.len() >= 3 {
-                style.flex_basis = parse_length_value(parts[2], parent_font_size);
+                ["initial"] => {
+                    style.flex_grow = 0;
+                    style.flex_shrink = 100;
+                    style.flex_basis = None;
+                }
+                _ => {
+                    if let Some(first) = parts.first() {
+                        if let Ok(grow) = first.parse::<f32>() {
+                            style.flex_grow = (grow * 100.0).round() as u32;
+                            // One number means `<grow> 1 0%`: the item starts
+                            // from nothing and the whole width is shared out by
+                            // the grow factors. Leaving the basis at `auto` let
+                            // each item keep its content width first, so a row
+                            // of three came out short of an even split.
+                            if parts.len() == 1 {
+                                style.flex_shrink = 100;
+                                style.flex_basis = Some(LengthValue::Pixels(0));
+                            }
+                        } else {
+                            // `flex: <basis>`, e.g. `flex: 200px`.
+                            style.flex_grow = 100;
+                            style.flex_shrink = 100;
+                            style.flex_basis = parse_length_value(first, parent_font_size);
+                        }
+                    }
+                    if parts.len() >= 2 {
+                        if let Ok(shrink) = parts[1].parse::<f32>() {
+                            style.flex_shrink = (shrink * 100.0).round() as u32;
+                        } else {
+                            style.flex_basis = parse_length_value(parts[1], parent_font_size);
+                        }
+                    }
+                    if parts.len() >= 3 {
+                        style.flex_basis = parse_length_value(parts[2], parent_font_size);
+                    }
+                }
             }
         }
         // `gap: <row> <column>`. This engine keeps one gap, so the row value
@@ -7569,6 +7604,40 @@ mod tests {
             }
             _ => panic!("node shape mismatch"),
         }
+    }
+
+    #[test]
+    fn one_number_after_flex_means_start_from_nothing() {
+        // `flex: 1` is `1 1 0%`: the item starts from nothing and the whole
+        // width is shared out by the grow factors. Left at `auto`, each item
+        // kept its content width first and a row of three came out uneven.
+        let document = crate::html::parse_document(
+            "<div style=\"display:flex\"><span id=a style=\"flex:1\">a</span><span id=b style=\"flex:none\">b</span><span id=c style=\"flex:200px\">c</span></div>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &super::InteractiveState::default(),
+        );
+        let by_id = |id: &str| {
+            fn walk(node: &StyledNode, id: &str) -> Option<StyledElement> {
+                match node {
+                    StyledNode::Element(element) => {
+                        if element.attributes.get("id").map(String::as_str) == Some(id) {
+                            return Some(element.clone());
+                        }
+                        element.children.iter().find_map(|child| walk(child, id))
+                    }
+                    StyledNode::Text(_) => None,
+                }
+            }
+            walk(&styled, id).expect("the span should exist")
+        };
+        assert_eq!(by_id("a").style.flex_grow, 100);
+        assert_eq!(by_id("a").style.flex_basis, Some(LengthValue::Pixels(0)));
+        assert_eq!(by_id("b").style.flex_grow, 0);
+        assert_eq!(by_id("c").style.flex_basis, Some(LengthValue::Pixels(200)));
     }
 
     #[test]

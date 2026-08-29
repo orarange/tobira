@@ -7374,9 +7374,15 @@ fn resolve_grid_tracks_with_intrinsic(
     };
 
     if fr_total > 0 {
+        // Each share is rounded to the nearest pixel rather than cut down.
+        // `1fr 2fr` of 284px is 94.67 and 189.33, which a browser lays out as
+        // 95 and 189 -- cutting both down put the second column a pixel to the
+        // left of where it belongs and left the grid a pixel short.
         for (i, track) in tracks.iter().enumerate() {
             if let GridTrackSize::Fr(fr_x1000) = track {
-                widths[i] = (fr_space as u64 * *fr_x1000 as u64 / fr_total as u64) as u32;
+                let numerator = fr_space as u64 * *fr_x1000 as u64;
+                let denominator = fr_total as u64;
+                widths[i] = ((numerator + denominator / 2) / denominator) as u32;
             }
         }
     }
@@ -7962,7 +7968,16 @@ fn layout_flex_container(
                         .as_ref()
                         .map(|length| resolve(length))
                         .unwrap_or(u32::MAX);
-                    base.min(max).max(min.min(max)).max(1).saturating_add(margins)
+                    // An item that grows may start from nothing: `flex: 1`
+                    // means a basis of zero, and the whole width is then shared
+                    // out by the grow factors. Holding every base at one pixel
+                    // took those pixels out of the sharing, so three items
+                    // across a row each came out a pixel short of their share.
+                    let floor = if child.style.flex_grow > 0 { 0 } else { 1 };
+                    base.min(max)
+                        .max(min.min(max))
+                        .max(floor)
+                        .saturating_add(margins)
                 })
                 .collect();
 
@@ -8007,11 +8022,16 @@ fn layout_flex_container(
                     .saturating_sub(total_gap);
                 let total_grow: u32 = children.iter().map(|c| c.style.flex_grow).sum();
                 if free > 0 && total_grow > 0 {
+                    // Rounded to the nearest pixel, the way a browser splits
+                    // it, rather than cut down -- which left every item after
+                    // the first a pixel to the left of where it belongs.
                     for (i, child) in children.iter().enumerate() {
                         if child.style.flex_grow > 0 {
-                            item_widths[i] = item_widths[i].saturating_add(
-                                free.saturating_mul(child.style.flex_grow) / total_grow,
-                            );
+                            let numerator =
+                                free as u64 * child.style.flex_grow as u64;
+                            let denominator = total_grow as u64;
+                            let share = ((numerator + denominator / 2) / denominator) as u32;
+                            item_widths[i] = item_widths[i].saturating_add(share);
                         }
                     }
                 }
