@@ -231,6 +231,9 @@ enum BuiltinId {
     DomNodeInsertAdjacentElement,
     DomNodeInsertAdjacentText,
     DomNodeGetClientRects,
+    DomDocImportNode,
+    DomDocHasFocus,
+    CustomElementsUpgrade,
     DomSelectAdd,
     DomSelectRemove,
     DomNodeInsertBefore,
@@ -3705,6 +3708,11 @@ impl Vm {
         let custom_elements_object = self.allocate_ordinary_object(Some(object_prototype));
         self.define_builtin_method(custom_elements_object, "define", BuiltinId::CustomElementsDefine);
         self.define_builtin_method(custom_elements_object, "get", BuiltinId::CustomElementsGet);
+        self.define_builtin_method(
+            custom_elements_object,
+            "upgrade",
+            BuiltinId::CustomElementsUpgrade,
+        );
         self.globals.insert(
             "customElements".to_string(),
             Value::Object(custom_elements_object),
@@ -13339,6 +13347,32 @@ impl Vm {
             // One rect, the same one `getBoundingClientRect` reports. A box that
             // wraps over several lines really has one per line; nothing here
             // tracks those yet.
+            // `importNode` and `adoptNode` both hand back a node this document
+            // can hold. Nothing here has more than one document, so a copy (or
+            // the node itself) is the whole of it -- and a page cloning a
+            // template's content through `importNode` gets what it asked for.
+            BuiltinId::DomDocImportNode => {
+                let Some(node) = args.first().and_then(|v| self.node_id_from_host_val(v)) else {
+                    return Ok(Value::Undefined);
+                };
+                let deep = args.get(1).map(|v| self.is_truthy(v)).unwrap_or(false);
+                let res = self
+                    .host
+                    .mutate_dom(DomMutation::CloneNode { node, deep });
+                Ok(match res {
+                    Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Undefined,
+                })
+            }
+            // The page this engine runs is the one on screen.
+            BuiltinId::DomDocHasFocus => Ok(Value::Bool(true)),
+            BuiltinId::CustomElementsUpgrade => {
+                if let Some(node) = args.first().and_then(|v| self.node_id_from_host_val(v)) {
+                    let tag = self.get_node_name(node).to_ascii_lowercase();
+                    self.construct_custom_element(node, &tag)?;
+                }
+                Ok(Value::Undefined)
+            }
             BuiltinId::DomNodeGetClientRects => {
                 let rect =
                     self.invoke_builtin(BuiltinId::DomNodeGetBoundingClientRect, this_value, args)?;
@@ -16823,10 +16857,16 @@ impl Vm {
                 let res = self.host.read_dom(DomRead::DocumentHead { window: WindowId(0) });
                 Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
             }
-            "documentElement" => {
+            // The element a page scrolls: in standards mode that is `<html>`,
+            // and scripts read it to find or set the scroll position.
+            "documentElement" | "scrollingElement" => {
                 let res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
                 Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
             }
+            "importNode" | "adoptNode" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomDocImportNode))
+            }
+            "hasFocus" => Ok(self.allocate_builtin_method(BuiltinId::DomDocHasFocus)),
             "title" => {
                 let head_res = self.host.read_dom(DomRead::DocumentHead { window: WindowId(0) });
                 match head_res {

@@ -4272,6 +4272,26 @@ mod tests {
     }
 
     #[test]
+    fn a_template_can_be_brought_in_with_import_node() {
+        // Cloning a template's content through `importNode` is the usual way a
+        // component builds itself.
+        let result = run_document_scripts(
+            r#"<html><body><template id="t"><b>hi</b></template><div id="out"></div><script>
+                var copy = document.importNode(document.getElementById('t').content, true);
+                document.getElementById('out').appendChild(copy);
+                document.title = [
+                    document.getElementById('out').innerHTML,
+                    document.scrollingElement.tagName,
+                    document.hasFocus()
+                ].join("|");
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("<b>hi</b>|HTML|true"));
+    }
+
+    #[test]
     fn a_node_can_put_things_beside_itself() {
         // `after`, `before` and `replaceWith` are the modern way to move markup
         // about. A page that uses them has no fallback: either they work or the
