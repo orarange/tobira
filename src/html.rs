@@ -334,6 +334,18 @@ impl Builder {
     }
 
     fn insert(&mut self, kind: BuildKind) -> usize {
+        // Characters that arrive one after another make one text node, not
+        // several. A script reading `childNodes` or `nodeValue` sees what a
+        // browser shows it only if they are joined here.
+        if let BuildKind::Text(text) = &kind
+            && !self.needs_fostering(None)
+            && let Some(&last) = self.nodes[self.current()].children.last()
+            && let BuildKind::Text(existing) = &mut self.nodes[last].kind
+        {
+            existing.push_str(text);
+            return last;
+        }
+
         let fostered = match &kind {
             // Whitespace alone is allowed to stay: it draws nothing, and
             // moving it would put a stray gap above every table.
@@ -1137,10 +1149,12 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 // HTML5 optional-end-tag: implicitly close certain elements
                 // before opening a new one (a `<td>` closes an open `<td>`, an
                 // `<li>` closes an open `<li>`).
-                if !self_closing {
-                    maybe_auto_close(&mut builder, &name);
-                    ensure_table_ancestry(&mut builder, &name);
-                }
+                // A void element closes what it has to just as any other tag
+                // does: `<p>a<hr>` ends the paragraph, and `<img>` ends the
+                // head. Skipping this for them left the `<hr>` drawn inside the
+                // paragraph it was written to separate.
+                maybe_auto_close(&mut builder, &name);
+                ensure_table_ancestry(&mut builder, &name);
                 // A link inside a link is not a thing: the second `<a>` ends
                 // the first rather than nesting, and the same goes for the
                 // `<nobr>` old pages wrap around everything.
@@ -2618,6 +2632,31 @@ mod tests {
             .filter(|child| matches!(child, Node::Doctype(_)))
             .count();
         assert_eq!(doctypes, 1);
+    }
+
+    #[test]
+    fn a_rule_ends_the_paragraph_it_was_written_to_separate() {
+        let document = parse_document("<body><p>a<hr>b");
+        let body = body_of(&document);
+        assert_eq!(body.children.len(), 3);
+        let Node::Element(rule) = &body.children[1] else {
+            panic!("the rule should be a sibling of the paragraph");
+        };
+        assert_eq!(rule.tag_name, "hr");
+    }
+
+    #[test]
+    fn characters_that_arrive_together_make_one_text_node() {
+        // `</i>` matches nothing here and is dropped, and the text on either
+        // side of it is one run -- which is what a script walking childNodes
+        // sees in a browser.
+        let document = parse_document("<body><b>Test</i>Test</b>");
+        let body = body_of(&document);
+        let Node::Element(bold) = &body.children[0] else {
+            panic!("expected the bold");
+        };
+        assert_eq!(bold.children.len(), 1);
+        assert!(matches!(&bold.children[0], Node::Text(text) if text == "TestTest"));
     }
 
     #[test]
