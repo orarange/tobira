@@ -1370,6 +1370,12 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 // stack: they only say that what follows is outside it. Popping
                 // them let a second `<html>` tag build a second one inside the
                 // body instead of adding its attributes to the first.
+                // Either of them ends the head as well: what follows is past
+                // it, so `<head></html><meta>` puts the meta in the body.
+                if matches!(name.as_str(), "body" | "html") && builder.is_open("head") {
+                    builder.close("head");
+                    builder.after_head = true;
+                }
                 if name == "body" {
                     builder.after_body = true;
                     continue;
