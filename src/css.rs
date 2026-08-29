@@ -1197,35 +1197,39 @@ impl ComputedStyle {
             "body" => {
                 style.margin = SignedEdgeSizes::all(8);
             }
+            // The sizes and margins a browser's own sheet gives a heading,
+            // in the em the standard states them in: 2em/0.67em down to
+            // 0.67em/2.33em. Ours ran a step large from h2 down, so a page
+            // that leaves its headings alone showed them all too big.
             "h1" => {
                 style.font_size_px = 32;
                 style.font_weight = true;
-                style.margin = SignedEdgeSizes::vertical(18, 12);
+                style.margin = SignedEdgeSizes::vertical(21, 21);
             }
             "h2" => {
-                style.font_size_px = 28;
-                style.font_weight = true;
-                style.margin = SignedEdgeSizes::vertical(16, 10);
-            }
-            "h3" => {
                 style.font_size_px = 24;
                 style.font_weight = true;
-                style.margin = SignedEdgeSizes::vertical(14, 8);
+                style.margin = SignedEdgeSizes::vertical(20, 20);
+            }
+            "h3" => {
+                style.font_size_px = 19;
+                style.font_weight = true;
+                style.margin = SignedEdgeSizes::vertical(19, 19);
             }
             "h4" => {
-                style.font_size_px = 20;
-                style.font_weight = true;
-                style.margin = SignedEdgeSizes::vertical(12, 8);
-            }
-            "h5" => {
-                style.font_size_px = 18;
-                style.font_weight = true;
-                style.margin = SignedEdgeSizes::vertical(10, 6);
-            }
-            "h6" => {
                 style.font_size_px = 16;
                 style.font_weight = true;
-                style.margin = SignedEdgeSizes::vertical(10, 6);
+                style.margin = SignedEdgeSizes::vertical(21, 21);
+            }
+            "h5" => {
+                style.font_size_px = 13;
+                style.font_weight = true;
+                style.margin = SignedEdgeSizes::vertical(22, 22);
+            }
+            "h6" => {
+                style.font_size_px = 11;
+                style.font_weight = true;
+                style.margin = SignedEdgeSizes::vertical(25, 25);
             }
             "a" => {
                 style.color = DEFAULT_LINK_COLOR;
@@ -1260,6 +1264,20 @@ impl ComputedStyle {
             }
             "td" | "th" => {
                 style.vertical_align = VerticalAlign::Middle;
+            }
+            // The room a list leaves for its own markers. Without it the
+            // bullets sat in the margin of the page and the text started at
+            // the left edge, which is not where any browser puts a list.
+            "ul" | "ol" | "menu" | "dir" => {
+                style.padding = EdgeSizes {
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                    left: 40,
+                };
+            }
+            "dd" => {
+                style.margin.left = 40;
             }
             _ => {}
         }
@@ -4637,17 +4655,23 @@ fn default_display(tag_name: &str) -> Display {
 
 fn default_margin(tag_name: &str) -> SignedEdgeSizes {
     match tag_name {
-        "p" => SignedEdgeSizes::vertical(0, 12),
-        "ul" | "ol" => SignedEdgeSizes::vertical(0, 12),
-        "li" => SignedEdgeSizes::vertical(0, 4),
-        "table" | "tr" => SignedEdgeSizes::vertical(0, 8),
-        "td" | "th" => SignedEdgeSizes::vertical(0, 6),
-        "hr" => SignedEdgeSizes::vertical(10, 10),
+        // `1em` above and below, which collapses to one gap between two of
+        // them. Writing only a bottom margin left no room above the first
+        // paragraph of a section, and half the gap everywhere else.
+        "p" => SignedEdgeSizes::vertical(16, 16),
+        "ul" | "ol" | "menu" | "dir" => SignedEdgeSizes::vertical(16, 16),
+        "dl" => SignedEdgeSizes::vertical(16, 16),
+        // A list item has no margin of its own; the room around a list comes
+        // from the list.
+        "li" => SignedEdgeSizes::default(),
+        "table" | "tr" => SignedEdgeSizes::default(),
+        "td" | "th" => SignedEdgeSizes::default(),
+        "hr" => SignedEdgeSizes::vertical(8, 8),
         "blockquote" => SignedEdgeSizes {
-            top: 0,
-            right: 0,
-            bottom: 12,
-            left: 18,
+            top: 16,
+            right: 40,
+            bottom: 16,
+            left: 40,
         },
         _ => SignedEdgeSizes::default(),
     }
@@ -7527,6 +7551,23 @@ mod tests {
             }
             _ => panic!("node shape mismatch"),
         }
+    }
+
+    #[test]
+    fn a_list_leaves_room_for_its_own_markers() {
+        // Chrome puts a list's content 40px in. Without the padding the bullets
+        // sat in the page margin and the text started at the left edge.
+        let document = crate::html::parse_document("<ul><li>item</li></ul><dl><dd>def</dd></dl>");
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &super::InteractiveState::default(),
+        );
+        let list = find_first_element(&styled, "ul").expect("the list should exist");
+        assert_eq!(list.style.padding.left, 40);
+        let definition = find_first_element(&styled, "dd").expect("the dd should exist");
+        assert_eq!(definition.style.margin.left, 40);
     }
 
     #[test]
