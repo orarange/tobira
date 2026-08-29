@@ -5549,7 +5549,11 @@ fn parse_display(input: &str) -> Option<Display> {
         "inline-grid" => Some(Display::InlineGrid),
         "inline-block" => Some(Display::InlineBlock),
         "contents" => Some(Display::Contents),
-        "inline" | "table-cell" => Some(Display::Inline),
+        "inline" => Some(Display::Inline),
+        // A cell is a box that sits beside its siblings and takes a width and a
+        // height of its own. Read as plain inline it took neither, so a layout
+        // built out of `display: table-cell` collapsed to a line of text.
+        "table-cell" => Some(Display::InlineBlock),
         "list-item" => Some(Display::ListItem),
         "none" => Some(Display::None),
         _ => None,
@@ -7565,6 +7569,23 @@ mod tests {
             }
             _ => panic!("node shape mismatch"),
         }
+    }
+
+    #[test]
+    fn a_table_cell_is_a_box_of_its_own() {
+        // Read as plain inline, `display: table-cell` took neither a width nor
+        // a height, so a layout built out of them collapsed to a line of text.
+        let document = crate::html::parse_document(
+            "<div style=\"display:table-cell;width:100px;height:25px\">cell</div>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &super::InteractiveState::default(),
+        );
+        let cell = find_first_element(&styled, "div").expect("the cell should exist");
+        assert_eq!(cell.style.display, Display::InlineBlock);
     }
 
     #[test]
