@@ -1438,7 +1438,13 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 // `</p>` with no open paragraph makes an empty one, and `</br>`
                 // is read as `<br>`. Both are what the standard says and what
                 // every browser does with the stray tags real pages contain.
-                if name == "p" && builder.body_started && !builder.is_open("p") {
+                // Nothing to close within button scope: the tag makes an empty
+                // paragraph where it stands. A `<p>` outside the button does
+                // not count -- `<p><button></p>` puts an empty one inside.
+                if name == "p"
+                    && builder.body_started
+                    && !closes_enclosing(&builder, "p", PARAGRAPH_BOUNDARIES_FOR_STRAY)
+                {
                     builder.insert(BuildKind::Element { namespace: Default::default(),
                         tag_name: "p".to_string(),
                         attributes: BTreeMap::new(),
@@ -1777,6 +1783,13 @@ fn generate_implied_end_tags(builder: &mut Builder, except: &str) {
     }
 }
 
+/// What a search for a paragraph to close does not cross. The same list the
+/// implicit-close rules use, named here so the stray-`</p>` rule can share it.
+const PARAGRAPH_BOUNDARIES_FOR_STRAY: &[&str] = &[
+    "td", "th", "body", "html", "document", "button", "applet", "caption", "table", "marquee",
+    "object", "template",
+];
+
 /// The elements a search up the open stack never crosses.
 const DEFAULT_SCOPE: &[&str] = &[
     "applet", "caption", "html", "table", "td", "th", "marquee", "object", "template", "document",
@@ -2045,7 +2058,12 @@ fn tokenize(input: &str) -> Vec<Token> {
                     input[index + 4..index + 4 + offset].to_string(),
                     index + 4 + offset + 3,
                 ),
-                None => (input[index + 4..].to_string(), bytes.len()),
+                // A comment the file ends in the middle of loses the dashes it
+                // was in the middle of writing: `<!--x--` is the comment `x`.
+                None => (
+                    input[index + 4..].trim_end_matches('-').to_string(),
+                    bytes.len(),
+                ),
             };
             tokens.push(Token::Comment(text));
             index = next;
