@@ -3151,6 +3151,15 @@ fn compute_style_with_rules(
         (None, None) => &*root_vars,
     };
 
+    // Font size first, whatever order the sheet wrote it in. Every other
+    // property measures `em` against the element's own font size -- `5em` on an
+    // element at 20px is 100px, not 5 times whatever the parent was set to --
+    // so the size has to be settled before the rest are read.
+    let mut applicable: Vec<_> = applicable.into_iter().collect();
+    applicable.sort_by_key(|(_, _, _, _, declaration)| {
+        u8::from(!matches!(declaration.property.as_str(), "font-size" | "font"))
+    });
+
     for (_, _, _, _, mut declaration) in applicable {
         // skip CSS custom properties
         if declaration.property.starts_with("--") {
@@ -3201,7 +3210,14 @@ fn compute_style_with_rules(
         if declaration.value.contains("light-dark(") {
             declaration.value = resolve_light_dark(&declaration.value);
         }
-        apply_declaration(&mut style, &declaration, parent_font_size);
+        // `font-size` itself is relative to the parent; everything else is
+        // relative to what this element ended up with.
+        let em_basis = if matches!(declaration.property.as_str(), "font-size" | "font") {
+            parent_font_size
+        } else {
+            style.font_size_px
+        };
+        apply_declaration(&mut style, &declaration, em_basis);
     }
 
     style.effective_opacity = parent_style
@@ -7503,6 +7519,26 @@ mod tests {
             }
             _ => panic!("node shape mismatch"),
         }
+    }
+
+    #[test]
+    fn em_measures_against_the_element_s_own_font_size() {
+        // `5em` on an element set to 20px is 100px. Reading it against the
+        // parent made every box sized in em wrong wherever the element changed
+        // its own size -- which is exactly where authors write em.
+        let document = crate::html::parse_document(
+            "<div style=\"width:5em;height:2em;font-size:20px\">x</div>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{font-size:16px}"),
+            1280,
+            &super::InteractiveState::default(),
+        );
+        let element = find_first_element(&styled, "div").expect("the div should exist");
+        assert_eq!(element.style.font_size_px, 20);
+        assert_eq!(element.style.width, Some(LengthValue::Pixels(100)));
+        assert_eq!(element.style.height, Some(LengthValue::Pixels(40)));
     }
 
     #[test]
