@@ -209,6 +209,9 @@ struct Builder {
     /// because that is what the pages written before doctypes expect. Here it
     /// decides one thing so far -- whether `<table>` ends an open paragraph.
     quirks: bool,
+    /// Attributes from a `<body>` tag written when the body was already under
+    /// way. There is only one body, so they belong to the one being built.
+    body_attributes: BTreeMap<String, String>,
     /// Whether anything that belongs to the body has been written yet.
     ///
     /// Before that, a stray end tag is simply dropped; the rules that invent
@@ -263,6 +266,7 @@ impl Builder {
             // No doctype until one is written, so a document starts in quirks
             // mode and leaves it when a doctype says so.
             quirks: true,
+            body_attributes: BTreeMap::new(),
             body_started: false,
             trailing_body: 0,
             head_children: None,
@@ -1110,6 +1114,7 @@ struct ParseExtras {
     html_whitespace: Vec<Node>,
     trailing_body: usize,
     head_children: Option<usize>,
+    body_attributes: BTreeMap<String, String>,
     document_comments: Vec<Node>,
 }
 
@@ -1204,6 +1209,18 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
 
                 if matches!(name.as_str(), "html" | "body") && builder.is_open(&name) {
                     builder.merge_attributes(&name, attributes);
+                    continue;
+                }
+                // A second `<body>` tag once the body is under way does not open
+                // one: `<div><body>` leaves the div where it is and keeps only
+                // the attributes.
+                if name == "body" && builder.body_started {
+                    // Writing `<body>` at all settles the frameset question,
+                    // whether or not the tag opens anything.
+                    builder.frameset_ok = false;
+                    for (key, value) in attributes {
+                        builder.body_attributes.entry(key).or_insert(value);
+                    }
                     continue;
                 }
 
@@ -1583,6 +1600,7 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
         html_whitespace: std::mem::take(&mut builder.html_whitespace),
         trailing_body: builder.trailing_body,
         head_children: builder.head_children,
+        body_attributes: std::mem::take(&mut builder.body_attributes),
         document_comments: std::mem::take(&mut builder.document_comments),
     };
     (builder.into_tree(), extras)
@@ -1719,6 +1737,9 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
     // Before any body content, head-only elements go to the head; once
     // something else has appeared, everything that follows is body content --
     // which is what "after head" means.
+    for (name, value) in extras.body_attributes {
+        body.attributes.entry(name).or_insert(value);
+    }
     let mut seen_body_content = false;
     // Whatever was written after `</body>`, or after the `<body>` tag itself,
     // is body content whatever its name.
