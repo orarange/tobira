@@ -536,6 +536,9 @@ impl Builder {
             "document",
         ];
         for index in self.open.iter().rev() {
+            if self.namespace_of(*index) != Namespace::Html {
+                return false;
+            }
             let name = self.tag_of(*index);
             if name == target {
                 return true;
@@ -797,7 +800,11 @@ fn ensure_table_ancestry(builder: &mut Builder, new_tag: &str) {
 fn clears_frameset_ok(tag: &str) -> bool {
     matches!(
         tag,
-        "pre" | "listing"
+        // Writing `<body>` at all settles it: the author meant a document
+        // with a body, so a `<frameset>` after that is ignored.
+        "body"
+            | "pre"
+            | "listing"
             | "li"
             | "dd"
             | "dt"
@@ -1123,6 +1130,11 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                         && attributes.get("type").map(String::as_str) != Some("hidden"))
                 {
                     builder.frameset_ok = false;
+                }
+                // A `<frame>` only means anything inside a frameset. On an
+                // ordinary page it is dropped, not drawn.
+                if name == "frame" && !builder.is_open("frameset") {
+                    continue;
                 }
                 if name == "frameset" && !builder.is_open("frameset") {
                     if !builder.frameset_ok {
@@ -1462,6 +1474,9 @@ const DEFAULT_SCOPE: &[&str] = &[
 /// first rather than nesting inside it.
 fn closes_enclosing(builder: &Builder, target: &str, boundaries: &[&str]) -> bool {
     for index in builder.open.iter().rev() {
+        if builder.namespace_of(*index) != Namespace::Html {
+            return false;
+        }
         let name = builder.tag_of(*index);
         if name == target {
             return true;
@@ -1574,6 +1589,12 @@ fn maybe_auto_close(builder: &mut Builder, new_tag: &str) {
 fn auto_close_before(builder: &mut Builder, targets: &[&str], boundaries: &[&str]) {
     let mut close_tag: Option<String> = None;
     for index in builder.open.iter().rev() {
+        // A drawing or a formula ends the search. `<p><math><mi><p>` opens the
+        // second paragraph inside the annotation, where it was written -- the
+        // one outside the formula is not what it closes.
+        if builder.namespace_of(*index) != Namespace::Html {
+            break;
+        }
         let name = builder.tag_of(*index);
         if targets.contains(&name) {
             close_tag = Some(name.to_string());
@@ -2318,6 +2339,28 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_formula_ends_the_search_for_a_paragraph_to_close() {
+        // At an integration point HTML starts again, and the paragraph written
+        // there belongs there -- not to the one outside the formula.
+        let document = parse_document("<body><p><math><mi><p>inner");
+        let body = body_of(&document);
+        assert_eq!(body.children.len(), 1);
+        let Node::Element(outer) = &body.children[0] else {
+            panic!("expected the outer paragraph");
+        };
+        let Node::Element(math) = &outer.children[0] else {
+            panic!("expected the math");
+        };
+        let Node::Element(annotation) = &math.children[0] else {
+            panic!("expected the mi");
+        };
+        let Node::Element(inner) = &annotation.children[0] else {
+            panic!("the inner paragraph should be inside the mi");
+        };
+        assert_eq!(inner.tag_name, "p");
+    }
+
     #[test]
     fn a_page_has_only_one_form() {
         // A page that forgets `</form>` shows one form holding everything
