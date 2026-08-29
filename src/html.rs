@@ -189,6 +189,11 @@ struct Builder {
     html_comments: Vec<Node>,
     /// Comments written after `</html>`, which belong to the document.
     document_comments: Vec<Node>,
+    /// Whether `</head>` has been seen and the body has not started.
+    after_head: bool,
+    /// Whitespace written between `</head>` and the body, which belongs to
+    /// `<html>` -- it is outside both, and a browser keeps it there.
+    html_whitespace: Vec<Node>,
     /// Whether a `<frameset>` would still be honoured.
     ///
     /// A frameset replaces the body, so it is only allowed while the body is
@@ -231,6 +236,8 @@ impl Builder {
             after_html: false,
             html_comments: Vec::new(),
             document_comments: Vec::new(),
+            after_head: false,
+            html_whitespace: Vec::new(),
             frameset_ok: true,
             frameset_allowed: None,
             frameset_document: false,
@@ -977,6 +984,7 @@ fn adjust_foreign_names(
 struct ParseExtras {
     frameset_allowed: bool,
     html_comments: Vec<Node>,
+    html_whitespace: Vec<Node>,
     document_comments: Vec<Node>,
 }
 
@@ -995,6 +1003,14 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
             Token::Text(text) => {
                 if builder.frameset_document && !text.trim().is_empty() {
                     continue;
+                }
+                // Between the head and the body, whitespace belongs to neither.
+                if builder.after_head && builder.open.len() == 1 {
+                    if text.trim().is_empty() {
+                        builder.html_whitespace.push(Node::Text(text));
+                        continue;
+                    }
+                    builder.after_head = false;
                 }
                 let text = if skip_leading_newline {
                     text.strip_prefix('\n').unwrap_or(&text).to_string()
@@ -1188,6 +1204,9 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 if name == "form" {
                     builder.form_open = false;
                 }
+                if name == "head" {
+                    builder.after_head = true;
+                }
                 if name == "body" {
                     builder.after_body = true;
                 } else if name == "html" {
@@ -1333,6 +1352,7 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
     let extras = ParseExtras {
         frameset_allowed: builder.frameset_allowed.unwrap_or(false),
         html_comments: std::mem::take(&mut builder.html_comments),
+        html_whitespace: std::mem::take(&mut builder.html_whitespace),
         document_comments: std::mem::take(&mut builder.document_comments),
     };
     (builder.into_tree(), extras)
@@ -1492,7 +1512,10 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
         None => Node::Element(body),
     };
 
-    html.children = vec![Node::Element(head), second];
+    let mut html_children = vec![Node::Element(head)];
+    html_children.extend(extras.html_whitespace);
+    html_children.push(second);
+    html.children = html_children;
     html.children.extend(extras.html_comments);
     before_html.push(Node::Element(html));
     before_html.extend(extras.document_comments);
@@ -2595,6 +2618,14 @@ mod tests {
             .filter(|child| matches!(child, Node::Doctype(_)))
             .count();
         assert_eq!(doctypes, 1);
+    }
+
+    #[test]
+    fn whitespace_between_the_head_and_the_body_belongs_to_neither() {
+        let document = parse_document("<head></head> <body>x</body>");
+        let html = html_of(&document);
+        assert_eq!(html.children.len(), 3);
+        assert!(matches!(&html.children[1], Node::Text(text) if text == " "));
     }
 
     #[test]
