@@ -924,7 +924,9 @@ struct ParseExtras {
 }
 
 fn parse_document_body(input: &str) -> (Node, ParseExtras) {
-    let tokens = tokenize(input);
+    let input = normalise_newlines(input);
+    let tokens = tokenize(&input);
+    let mut seen_doctype = false;
     let mut builder = Builder::new();
 
     for token in tokens {
@@ -1139,7 +1141,13 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 }
             }
             Token::Doctype(doctype) => {
-                builder.insert(BuildKind::Doctype(doctype));
+                // A document has one doctype, declared before anything else.
+                // A second one, or one written after the markup has started,
+                // is dropped rather than left in the tree.
+                if !seen_doctype && builder.open.len() == 1 {
+                    seen_doctype = true;
+                    builder.insert(BuildKind::Doctype(doctype));
+                }
             }
         }
     }
@@ -1496,6 +1504,19 @@ fn bogus_comment(input: &str, from: usize) -> (String, usize) {
     }
 }
 
+/// Normalise the line endings before anything reads the markup.
+///
+/// A carriage return is not a character in an HTML document: `\\r\\n` and a
+/// lone `\\r` both mean one newline. Pages written on Windows are full of
+/// them, and left in they end up inside text nodes, inside `<pre>` and inside
+/// attribute values, where a script comparing strings can see them.
+fn normalise_newlines(input: &str) -> std::borrow::Cow<'_, str> {
+    if !input.contains('\r') {
+        return std::borrow::Cow::Borrowed(input);
+    }
+    std::borrow::Cow::Owned(input.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
 fn tokenize(input: &str) -> Vec<Token> {
     let bytes = input.as_bytes();
     let mut index = 0;
@@ -1820,10 +1841,17 @@ fn raw_text_content(raw: &str, tag_name: &str, decodes: bool) -> String {
     } else {
         raw
     };
-    if decodes {
+    let text = if decodes {
         decode_html_entities(raw)
     } else {
         raw.to_string()
+    };
+    // A NUL is dropped in ordinary content, but inside raw text it is shown
+    // as the replacement character: the standard keeps the position.
+    if text.contains('\0') {
+        text.replace('\0', "\u{FFFD}")
+    } else {
+        text
     }
 }
 
@@ -2127,6 +2155,35 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn carriage_returns_never_reach_the_tree() {
+        // Pages written on Windows are full of them, and a script comparing
+        // the text of a `<pre>` would see them if they were left in.
+        let document = parse_document("<body><pre>one\r\ntwo\rthree</pre>");
+        let body = body_of(&document);
+        let Node::Element(block) = &body.children[0] else {
+            panic!("expected a pre");
+        };
+        let Node::Text(text) = &block.children[0] else {
+            panic!("expected the text");
+        };
+        assert_eq!(text, "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn only_the_first_doctype_counts() {
+        let document = parse_document("<!DOCTYPE html><!DOCTYPE other><p>x");
+        let Node::Element(root) = &document else {
+            panic!("expected the document");
+        };
+        let doctypes = root
+            .children
+            .iter()
+            .filter(|child| matches!(child, Node::Doctype(_)))
+            .count();
+        assert_eq!(doctypes, 1);
+    }
+
     #[test]
     fn a_comment_after_the_body_sits_beside_it_rather_than_inside() {
         let document = parse_document("<div>x</div></body><!--after-->");
