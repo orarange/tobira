@@ -2542,11 +2542,14 @@ mod tests {
             panic!("root should be an element");
         };
         assert_eq!(root.tag_name, "document");
-        let Some(Node::Element(html)) = root.children.first() else {
-            panic!("document should hold an <html>");
-        };
-        assert_eq!(html.tag_name, "html");
-        html
+        // A doctype or a comment can come before it, so look for it by name.
+        root.children
+            .iter()
+            .find_map(|child| match child {
+                Node::Element(element) if element.tag_name == "html" => Some(element),
+                _ => None,
+            })
+            .expect("document should hold an <html>")
     }
 
     fn head_of(document: &Node) -> &Element {
@@ -2558,19 +2561,15 @@ mod tests {
     }
 
     fn body_of(document: &Node) -> &Element {
-        let Node::Element(root) = document else {
-            panic!("root should be an element");
-        };
-        assert_eq!(root.tag_name, "document");
-        let Some(Node::Element(html)) = root.children.first() else {
-            panic!("document should hold an <html>");
-        };
-        assert_eq!(html.tag_name, "html");
-        let Some(Node::Element(body)) = html.children.get(1) else {
-            panic!("<html> should hold <head> then <body>");
-        };
-        assert_eq!(body.tag_name, "body");
-        body
+        // By name: a comment can sit between the head and the body.
+        html_of(document)
+            .children
+            .iter()
+            .find_map(|child| match child {
+                Node::Element(element) if element.tag_name == "body" => Some(element),
+                _ => None,
+            })
+            .expect("<html> should hold a <body>")
     }
 
     #[test]
