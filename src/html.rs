@@ -1927,6 +1927,20 @@ fn tokenize(input: &str) -> Vec<Token> {
             continue;
         }
 
+        // `<!-->` and `<!--->` are empty comments: the standard lets a comment
+        // close before it has begun. Searching for `-->` ran them to the end of
+        // the file and swallowed the rest of the page.
+        if input[index..].starts_with("<!-->") {
+            tokens.push(Token::Comment(String::new()));
+            index += 5;
+            continue;
+        }
+        if input[index..].starts_with("<!--->") {
+            tokens.push(Token::Comment(String::new()));
+            index += 6;
+            continue;
+        }
+
         if input[index..].starts_with("<!--") {
             // An unterminated comment runs to the end of the file, which is
             // what a browser does with it rather than dropping the rest.
@@ -2808,6 +2822,18 @@ mod tests {
             panic!("the second div should be inside the first");
         };
         assert_eq!(inner.tag_name, "div");
+    }
+
+    #[test]
+    fn a_comment_may_close_before_it_begins() {
+        // `<!-->` is an empty comment. Looking for `-->` ran it to the end of
+        // the file and swallowed the rest of the page.
+        let document = parse_document("<!--><div>x</div>");
+        let body = body_of(&document);
+        let Node::Element(division) = body.children.last().expect("the div should survive") else {
+            panic!("expected the div");
+        };
+        assert_eq!(division.tag_name, "div");
     }
 
     #[test]
