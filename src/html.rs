@@ -1234,7 +1234,10 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     }
                 }
 
-                if !is_special(&name) {
+                // `<applet>`, `<marquee>` and `<object>` re-open the
+                // formatting in force before they put their own marker down, so
+                // a `<b>` outside one still reaches inside it.
+                if !is_special(&name) || starts_formatting_scope(&name) {
                     builder.reconstruct_formatting();
                 }
 
