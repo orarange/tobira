@@ -203,6 +203,12 @@ struct Builder {
     /// including something it moves out of a table, which lands in front of the
     /// table -- was written when the body was already under way.
     head_children: Option<usize>,
+    /// Whether the document is being read in quirks mode.
+    ///
+    /// A page with no doctype is: browsers keep a set of old behaviours for it,
+    /// because that is what the pages written before doctypes expect. Here it
+    /// decides one thing so far -- whether `<table>` ends an open paragraph.
+    quirks: bool,
     /// Whether anything that belongs to the body has been written yet.
     ///
     /// Before that, a stray end tag is simply dropped; the rules that invent
@@ -254,6 +260,9 @@ impl Builder {
             html_comments: Vec::new(),
             document_comments: Vec::new(),
             after_head: false,
+            // No doctype until one is written, so a document starts in quirks
+            // mode and leaves it when a doctype says so.
+            quirks: true,
             body_started: false,
             trailing_body: 0,
             head_children: None,
@@ -1544,6 +1553,12 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 // is dropped rather than left in the tree.
                 if !seen_doctype && builder.open.len() == 1 {
                     seen_doctype = true;
+                    // `<!DOCTYPE html>` with no identifiers is the modern one.
+                    // Anything else -- another name, or one of the old public
+                    // identifiers -- keeps the page in quirks mode.
+                    builder.quirks = doctype.name != "html"
+                        || doctype.public_id.is_some()
+                        || doctype.system_id.is_some();
                     builder.insert(BuildKind::Doctype(doctype));
                 }
             }
@@ -1903,6 +1918,10 @@ fn maybe_auto_close(builder: &mut Builder, new_tag: &str) {
                 builder.open.pop();
             }
         }
+        // In quirks mode a table does not end the paragraph it is written in.
+        // Pages from before doctypes were written expecting that, and it is one
+        // of the behaviours a browser keeps for them.
+        "table" if builder.quirks => {}
         // A new <p>, and many block elements, close an open <p>.
         tag if is_block_like(tag) => auto_close_before(builder, &["p"], PARAGRAPH_BOUNDARIES),
         _ => {}
@@ -3000,6 +3019,29 @@ mod tests {
         };
         assert_eq!(meta.tag_name, "meta");
         assert!(head_of(&document).children.is_empty());
+    }
+
+    #[test]
+    fn a_table_ends_a_paragraph_only_outside_quirks_mode() {
+        // With a doctype the table ends the paragraph; without one the page is
+        // read in quirks mode and the table stays inside it, which is what the
+        // pages written before doctypes expect.
+        let modern = parse_document("<!doctype html><body><p>a<table>");
+        assert_eq!(body_of(&modern).children.len(), 2);
+
+        let quirks = parse_document("<body><p>a<table>");
+        let body = body_of(&quirks);
+        assert_eq!(body.children.len(), 1);
+        let Node::Element(paragraph) = &body.children[0] else {
+            panic!("expected the paragraph");
+        };
+        assert!(
+            paragraph
+                .children
+                .iter()
+                .any(|child| matches!(child, Node::Element(e) if e.tag_name == "table")),
+            "the table should be inside the paragraph"
+        );
     }
 
     #[test]
