@@ -1282,11 +1282,21 @@ fn annotate_resource_urls(document: &mut Node, base_url: &Url) {
         Node::Element(element) => {
             if element.tag_name == "img"
                 && let Some(src) = element.attribute("src")
-                && let Ok(url) = base_url.resolve(src)
             {
-                element
-                    .attributes
-                    .insert("data-scratch-src".to_string(), url.to_string());
+                // A `data:` URL carries the image itself and has nothing to
+                // resolve against. Passing it through the resolver dropped it,
+                // so an inlined icon -- the usual way a small image is written
+                // now -- never reached the image store and drew as `[image]`.
+                let resolved = if src.len() > 5 && src[..5].eq_ignore_ascii_case("data:") {
+                    Some(src.to_string())
+                } else {
+                    base_url.resolve(src).ok().map(|url| url.to_string())
+                };
+                if let Some(resolved) = resolved {
+                    element
+                        .attributes
+                        .insert("data-scratch-src".to_string(), resolved);
+                }
             }
 
             if element.tag_name == "body"

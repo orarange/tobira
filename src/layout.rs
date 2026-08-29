@@ -4068,10 +4068,24 @@ fn layout_table_cell(
         current_form,
     );
 
+    // A cell with a height of its own is at least that tall.
+    let content_height = cursor_y
+        .saturating_add(surround_y.saturating_sub(inset_top))
+        .max(1);
+    let content_height = match cell.style.height {
+        Some(LengthValue::Pixels(px)) => {
+            let stated = if matches!(cell.style.box_sizing, BoxSizing::BorderBox) {
+                px
+            } else {
+                px.saturating_add(surround_y)
+            };
+            content_height.max(stated)
+        }
+        _ => content_height,
+    };
+
     FragmentLayout {
-        content_height: cursor_y
-            .saturating_add(surround_y.saturating_sub(inset_top))
-            .max(1),
+        content_height,
         commands: context.commands,
         links: context.links,
         controls: context.controls,
@@ -11131,6 +11145,22 @@ mod tests {
             "percent height should resolve to the parent's 40px, got {}",
             inner.height
         );
+    }
+
+    #[test]
+    fn a_table_cell_with_a_height_of_its_own_keeps_it() {
+        let document = parse_document(
+            "<table><tr><td style=\"height:60px\">a</td></tr></table><div style=\"height:10px\"></div>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{margin:0;font-size:16px;line-height:1.5}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
+        assert_eq!(layout.content_height, 70);
     }
 
     #[test]
