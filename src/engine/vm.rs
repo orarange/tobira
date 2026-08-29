@@ -16414,6 +16414,7 @@ impl Vm {
                 | "crossOriginIsolated"
                 | "addEventListener"
                 | "removeEventListener"
+                | "dispatchEvent"
         )
     }
 
@@ -16539,6 +16540,11 @@ impl Vm {
             "addEventListener" | "removeEventListener" => {
                 Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener))
             }
+            // A library broadcasts by firing a custom event at the document or
+            // the window and letting anyone listening pick it up. Elements had
+            // this; these two did not, so the broadcast threw and took the rest
+            // of the script with it.
+            "dispatchEvent" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeDispatchEvent)),
             "performance" => {
                 let perf = self.allocate_ordinary_object(None);
                 let now_fn = self.allocate_builtin_method(BuiltinId::PerformanceNow);
@@ -16770,6 +16776,11 @@ impl Vm {
             "addEventListener" | "removeEventListener" => {
                 Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener))
             }
+            // A library broadcasts by firing a custom event at the document or
+            // the window and letting anyone listening pick it up. Elements had
+            // this; these two did not, so the broadcast threw and took the rest
+            // of the script with it.
+            "dispatchEvent" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeDispatchEvent)),
             // Common document properties
             "cookie" => {
                 // Non-HttpOnly cookies for this document's origin, as

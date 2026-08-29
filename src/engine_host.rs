@@ -2815,6 +2815,105 @@ const RUNTIME_PRELUDE: &str = r#"
     g.DataView = DataView;
   }
 
+  if (typeof Date.prototype.setTime === 'undefined') {
+    // The rest of `Date`.
+    //
+    // The getters were all there and none of the setters were, so a page could
+    // read a date but not build one: `d.setTime(d.getTime() + 18e5)` is how a
+    // cookie's expiry is written, and it threw. The clock here runs in UTC, so
+    // the `getUTC*` and `setUTC*` pairs are the same as the local ones.
+    var SHORT_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    var SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+    // Days since the epoch for a year/month/day, by the civil-from-days
+    // formula: no loops, and correct for any year.
+    function daysFromCivil(y, m, d) {
+      y = m <= 1 ? y - 1 : y;
+      var era = Math.floor((y >= 0 ? y : y - 399) / 400);
+      var yoe = y - era * 400;
+      var mp = (m + 10) % 12;
+      var doy = Math.floor((153 * mp + 2) / 5) + d - 1;
+      var doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy;
+      return era * 146097 + doe - 719468;
+    }
+
+    function build(date, parts) {
+      var year = parts.year === undefined ? date.getFullYear() : Number(parts.year);
+      var month = parts.month === undefined ? date.getMonth() : Number(parts.month);
+      var day = parts.day === undefined ? date.getDate() : Number(parts.day);
+      var hours = parts.hours === undefined ? date.getHours() : Number(parts.hours);
+      var minutes = parts.minutes === undefined ? date.getMinutes() : Number(parts.minutes);
+      var seconds = parts.seconds === undefined ? date.getSeconds() : Number(parts.seconds);
+      var ms = parts.ms === undefined ? date.getMilliseconds() : Number(parts.ms);
+      // A month outside 0..11 rolls the year, which is what makes
+      // `d.setMonth(d.getMonth() + 1)` work at the end of December.
+      year += Math.floor(month / 12);
+      month = ((month % 12) + 12) % 12;
+      var time = daysFromCivil(year, month, 1) * 86400000
+        + (day - 1) * 86400000
+        + hours * 3600000 + minutes * 60000 + seconds * 1000 + ms;
+      date.__time__ = time;
+      return time;
+    }
+
+    Date.prototype.setTime = function (t) { this.__time__ = Number(t); return this.__time__; };
+    Date.prototype.setFullYear = function (y, m, d) {
+      return build(this, { year: y, month: m, day: d });
+    };
+    Date.prototype.setMonth = function (m, d) { return build(this, { month: m, day: d }); };
+    Date.prototype.setDate = function (d) { return build(this, { day: d }); };
+    Date.prototype.setHours = function (h, mi, s, ms) {
+      return build(this, { hours: h, minutes: mi, seconds: s, ms: ms });
+    };
+    Date.prototype.setMinutes = function (mi, s, ms) {
+      return build(this, { minutes: mi, seconds: s, ms: ms });
+    };
+    Date.prototype.setSeconds = function (s, ms) { return build(this, { seconds: s, ms: ms }); };
+    Date.prototype.setMilliseconds = function (ms) { return build(this, { ms: ms }); };
+
+    Date.prototype.getUTCFullYear = Date.prototype.getFullYear;
+    Date.prototype.getUTCMonth = Date.prototype.getMonth;
+    Date.prototype.getUTCDate = Date.prototype.getDate;
+    Date.prototype.getUTCDay = Date.prototype.getDay;
+    Date.prototype.getUTCHours = Date.prototype.getHours;
+    Date.prototype.getUTCMinutes = Date.prototype.getMinutes;
+    Date.prototype.getUTCSeconds = Date.prototype.getSeconds;
+    Date.prototype.getUTCMilliseconds = Date.prototype.getMilliseconds;
+    Date.prototype.setUTCFullYear = Date.prototype.setFullYear;
+    Date.prototype.setUTCMonth = Date.prototype.setMonth;
+    Date.prototype.setUTCDate = Date.prototype.setDate;
+    Date.prototype.setUTCHours = Date.prototype.setHours;
+    Date.prototype.setUTCMinutes = Date.prototype.setMinutes;
+    Date.prototype.setUTCSeconds = Date.prototype.setSeconds;
+    Date.prototype.setUTCMilliseconds = Date.prototype.setMilliseconds;
+
+    Date.prototype.toDateString = function () {
+      return SHORT_DAYS[this.getDay()] + ' ' + SHORT_MONTHS[this.getMonth()] + ' '
+        + pad2(this.getDate()) + ' ' + this.getFullYear();
+    };
+    Date.prototype.toTimeString = function () {
+      return pad2(this.getHours()) + ':' + pad2(this.getMinutes()) + ':'
+        + pad2(this.getSeconds()) + ' GMT+0000 (Coordinated Universal Time)';
+    };
+    // The form a page gets when it puts a date in a string. The ISO form is
+    // what `toISOString` is for; this one is what a reader sees.
+    Date.prototype.toString = function () {
+      if (isNaN(this.getTime())) return 'Invalid Date';
+      return this.toDateString() + ' ' + this.toTimeString();
+    };
+    // The form an HTTP header uses -- a cookie's expiry, most of all.
+    Date.prototype.toUTCString = function () {
+      return SHORT_DAYS[this.getUTCDay()] + ', ' + pad2(this.getUTCDate()) + ' '
+        + SHORT_MONTHS[this.getUTCMonth()] + ' ' + this.getUTCFullYear() + ' '
+        + pad2(this.getUTCHours()) + ':' + pad2(this.getUTCMinutes()) + ':'
+        + pad2(this.getUTCSeconds()) + ' GMT';
+    };
+    Date.prototype.toGMTString = Date.prototype.toUTCString;
+  }
+
   if (typeof g.Intl === 'undefined') {
     // Enough of Intl to keep pages running.
     //
@@ -4170,6 +4269,33 @@ mod tests {
         assert!(result.error.is_none(), "error: {:?}", result.error);
         // Big-endian by default, little-endian when asked, and the two differ.
         assert_eq!(result.title.as_deref(), Some("1234|3412|-2.5|-123456"));
+    }
+
+    #[test]
+    fn a_date_can_be_built_as_well_as_read() {
+        // `d.setTime(d.getTime() + 18e5)` then `toUTCString()` is how a cookie's
+        // expiry is written. None of the setters existed, so it threw.
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                var d = new Date(0);
+                d.setTime(d.getTime() + 18e5);
+                var leap = new Date(0);
+                leap.setFullYear(2000, 1, 29);
+                var roll = new Date(0);
+                roll.setMonth(13);
+                document.title = [
+                    d.toUTCString(),
+                    leap.toDateString(),
+                    roll.toISOString().slice(0, 10)
+                ].join("|");
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(
+            result.title.as_deref(),
+            Some("Thu, 01 Jan 1970 00:30:00 GMT|Tue Feb 29 2000|1971-02-01")
+        );
     }
 
     #[test]
