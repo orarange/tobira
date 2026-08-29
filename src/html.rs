@@ -1395,6 +1395,17 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                             builder.formatting.truncate(position);
                         }
                     }
+                    // A list item only closes one in the same list. `<ul><li>
+                    // <ul></li>` leaves the item open, because the `</li>` has
+                    // an inner list in the way, and what follows goes inside
+                    // that list.
+                    const LIST_SCOPE: &[&str] = &["ol", "ul"];
+                    if matches!(name.as_str(), "li" | "dd" | "dt")
+                        && !closes_enclosing(&builder, &name, LIST_SCOPE)
+                    {
+                        continue;
+                    }
+
                     // A structural tag closes the elements that end
                     // implicitly inside it; anything else stops at the first
                     // element its content cannot be lifted out of.
@@ -2786,6 +2797,25 @@ mod tests {
             panic!("the second div should be inside the first");
         };
         assert_eq!(inner.tag_name, "div");
+    }
+
+    #[test]
+    fn a_closing_list_item_stops_at_an_inner_list() {
+        // `<ul><li><ul></li>` leaves the item open: the inner list is in the
+        // way, so what follows goes inside that list.
+        let document = parse_document("<body><ul><li><ul></li><li>a</li></ul>");
+        let body = body_of(&document);
+        let Node::Element(outer) = &body.children[0] else {
+            panic!("expected the outer list");
+        };
+        let Node::Element(item) = &outer.children[0] else {
+            panic!("expected the item");
+        };
+        let Node::Element(inner) = &item.children[0] else {
+            panic!("expected the inner list");
+        };
+        assert_eq!(inner.tag_name, "ul");
+        assert_eq!(inner.children.len(), 1, "the second item belongs to the inner list");
     }
 
     #[test]
