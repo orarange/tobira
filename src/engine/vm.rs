@@ -225,6 +225,12 @@ enum BuiltinId {
     DomInterfaceConstructor,
     // DOM Node/Element methods
     DomNodeAppendChild,
+    DomNodeAfter,
+    DomNodeBefore,
+    DomNodeReplaceWith,
+    DomNodeInsertAdjacentElement,
+    DomNodeInsertAdjacentText,
+    DomNodeGetClientRects,
     DomSelectAdd,
     DomSelectRemove,
     DomNodeInsertBefore,
@@ -13235,6 +13241,109 @@ impl Vm {
                 }
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
             }
+            // Putting something beside a node, rather than inside it. The
+            // modern way to move markup about, and a page that uses it has no
+            // fallback: `el.replaceWith(...)` either works or the script stops.
+            BuiltinId::DomNodeAfter | BuiltinId::DomNodeBefore => {
+                let node = self.this_node_id(&this_value);
+                let Some(parent) = self.parent_node_id(node) else {
+                    return Ok(Value::Undefined);
+                };
+                let children = self.node_ids_from_node_or_string_args(&args);
+                let reference = if matches!(builtin, BuiltinId::DomNodeBefore) {
+                    Some(node)
+                } else {
+                    self.next_sibling_node_id(node)
+                };
+                for child in children {
+                    let _ = self.host.mutate_dom(DomMutation::InsertBefore {
+                        parent,
+                        child,
+                        reference,
+                    });
+                    self.connect_custom_elements(child)?;
+                }
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomNodeReplaceWith => {
+                let node = self.this_node_id(&this_value);
+                let Some(parent) = self.parent_node_id(node) else {
+                    return Ok(Value::Undefined);
+                };
+                let children = self.node_ids_from_node_or_string_args(&args);
+                for child in children {
+                    let _ = self.host.mutate_dom(DomMutation::InsertBefore {
+                        parent,
+                        child,
+                        reference: Some(node),
+                    });
+                    self.connect_custom_elements(child)?;
+                }
+                let _ = self.host.mutate_dom(DomMutation::Remove { node });
+                Ok(Value::Undefined)
+            }
+            BuiltinId::DomNodeInsertAdjacentElement | BuiltinId::DomNodeInsertAdjacentText => {
+                let node = self.this_node_id(&this_value);
+                let where_to = args
+                    .first()
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let child = if matches!(builtin, BuiltinId::DomNodeInsertAdjacentText) {
+                    let text = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+                    match self.host.mutate_dom(DomMutation::CreateTextNode {
+                        window: WindowId(0),
+                        data: text,
+                    }) {
+                        Ok(super::host::DomMutationResult::Node(id)) => id,
+                        _ => return Ok(Value::Undefined),
+                    }
+                } else {
+                    match args.get(1).and_then(|v| self.node_id_from_host_val(v)) {
+                        Some(id) => id,
+                        None => return Ok(Value::Undefined),
+                    }
+                };
+                match where_to.as_str() {
+                    "beforebegin" | "afterend" => {
+                        let Some(parent) = self.parent_node_id(node) else {
+                            return Ok(Value::Undefined);
+                        };
+                        let reference = if where_to == "beforebegin" {
+                            Some(node)
+                        } else {
+                            self.next_sibling_node_id(node)
+                        };
+                        let _ = self.host.mutate_dom(DomMutation::InsertBefore {
+                            parent,
+                            child,
+                            reference,
+                        });
+                    }
+                    "afterbegin" => {
+                        let _ = self.host.mutate_dom(DomMutation::Prepend {
+                            parent: node,
+                            children: vec![child],
+                        });
+                    }
+                    _ => {
+                        let _ = self.host.mutate_dom(DomMutation::Append {
+                            parent: node,
+                            children: vec![child],
+                        });
+                    }
+                }
+                self.connect_custom_elements(child)?;
+                Ok(args.get(1).cloned().unwrap_or(Value::Undefined))
+            }
+            // One rect, the same one `getBoundingClientRect` reports. A box that
+            // wraps over several lines really has one per line; nothing here
+            // tracks those yet.
+            BuiltinId::DomNodeGetClientRects => {
+                let rect =
+                    self.invoke_builtin(BuiltinId::DomNodeGetBoundingClientRect, this_value, args)?;
+                self.make_array_from_values(vec![rect])
+            }
             BuiltinId::DomSelectAdd => {
                 let select = self.this_node_id(&this_value);
                 let Some(option) = args.first().and_then(|v| self.node_id_from_host_val(v)) else {
@@ -15607,6 +15716,30 @@ impl Vm {
         )
     }
 
+    fn parent_node_id(&mut self, node: NodeId) -> Option<NodeId> {
+        match self.host.read_dom(DomRead::Parent { node }) {
+            Ok(DomReadResult::Node(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The node after this one under the same parent, if any.
+    fn next_sibling_node_id(&mut self, node: NodeId) -> Option<NodeId> {
+        let parent = self.parent_node_id(node)?;
+        let DomReadResult::Nodes(children) = self
+            .host
+            .read_dom(DomRead::Children {
+                node: parent,
+                elements_only: false,
+            })
+            .ok()?
+        else {
+            return None;
+        };
+        let position = children.iter().position(|id| *id == node)?;
+        children.get(position + 1).copied()
+    }
+
     fn node_tag_is(&self, node_id: NodeId, tag: &str) -> bool {
         self.get_node_name(node_id).eq_ignore_ascii_case(tag)
     }
@@ -16903,6 +17036,16 @@ impl Vm {
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
             }
             "insertAdjacentHTML" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeInsertAdjacentHtml)),
+            "insertAdjacentElement" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomNodeInsertAdjacentElement))
+            }
+            "insertAdjacentText" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomNodeInsertAdjacentText))
+            }
+            "after" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeAfter)),
+            "before" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeBefore)),
+            "replaceWith" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeReplaceWith)),
+            "getClientRects" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeGetClientRects)),
             "id" => {
                 let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "id".to_string() });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })

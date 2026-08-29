@@ -4272,6 +4272,30 @@ mod tests {
     }
 
     #[test]
+    fn a_node_can_put_things_beside_itself() {
+        // `after`, `before` and `replaceWith` are the modern way to move markup
+        // about. A page that uses them has no fallback: either they work or the
+        // script stops there.
+        let result = run_document_scripts(
+            r#"<html><body><div id="host"><span id="a">A</span><span id="b">B</span></div><script>
+                var made = function (tag, text) { var e = document.createElement(tag); e.textContent = text; return e; };
+                document.getElementById('a').after(made('i', 'X'));
+                document.getElementById('b').before(made('u', 'Y'));
+                document.getElementById('a').replaceWith(made('s', 'Z'));
+                document.getElementById('b').insertAdjacentElement('afterend', made('em', 'Q'));
+                document.getElementById('b').insertAdjacentText('afterbegin', '!');
+                document.title = document.getElementById('host').innerHTML;
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(
+            result.title.as_deref(),
+            Some("<s>Z</s><i>X</i><u>Y</u><span id=\"b\">!B</span><em>Q</em>")
+        );
+    }
+
+    #[test]
     fn a_date_can_be_built_as_well_as_read() {
         // `d.setTime(d.getTime() + 18e5)` then `toUTCString()` is how a cookie's
         // expiry is written. None of the setters existed, so it threw.
