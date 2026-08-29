@@ -1100,30 +1100,83 @@ fn is_raw_text_element(name: &str) -> bool {
     matches!(name, "script" | "style" | "title" | "textarea")
 }
 
+/// Where the raw text of `tag_name` ends.
+///
+/// An end tag only closes raw text when the name is followed by whitespace, a
+/// slash or `>`. `</SCRIPT` at the end of the file closes nothing -- it is just
+/// more script.
+///
+/// Inside `<script>` there are two further states, and they are why a script
+/// can contain the characters `</script>` without ending. After `<!--`, the
+/// script data is escaped; if `<script` then appears, it is *double* escaped,
+/// and a `</script>` there only ends the double escape. Writing a document that
+/// contains a script tag is the everyday reason a page relies on this.
 fn find_raw_text_close(input: &str, start: usize, tag_name: &str) -> Option<usize> {
-    let mut search_index = start;
+    let bytes = input.as_bytes();
     let close_tag = format!("</{tag_name}");
+    let open_tag = format!("<{tag_name}");
+    let script = tag_name == "script";
 
-    while search_index < input.len() {
-        let remaining = &input[search_index..];
-        let Some(offset) = find_case_insensitive(remaining, &close_tag) else {
-            return None;
-        };
-        let close_start = search_index + offset;
-        let name_end = close_start + close_tag.len();
-        if name_end >= input.len() {
-            return Some(close_start);
+    // Set by `<!--`, cleared by `-->`.
+    let mut escaped = false;
+    // Set by `<script` while escaped, cleared by `</script`.
+    let mut double_escaped = false;
+
+    let terminates = |at: usize| -> bool {
+        match bytes.get(at) {
+            None => false,
+            Some(byte) => byte.is_ascii_whitespace() || *byte == b'>' || *byte == b'/',
         }
+    };
 
-        let trailing = input.as_bytes()[name_end];
-        if trailing.is_ascii_whitespace() || trailing == b'>' {
-            return Some(close_start);
+    let mut index = start;
+    while index < bytes.len() {
+        if script && !escaped && input[index..].starts_with("<!--") {
+            escaped = true;
+            index += 4;
+            continue;
         }
-
-        search_index = close_start + 1;
+        if script && escaped && input[index..].starts_with("-->") {
+            escaped = false;
+            double_escaped = false;
+            index += 3;
+            continue;
+        }
+        if starts_with_case_insensitive(&input[index..], &close_tag)
+            && terminates(index + close_tag.len())
+        {
+            if double_escaped {
+                double_escaped = false;
+                index += close_tag.len();
+                continue;
+            }
+            return Some(index);
+        }
+        if script
+            && escaped
+            && !double_escaped
+            && starts_with_case_insensitive(&input[index..], &open_tag)
+            && terminates(index + open_tag.len())
+        {
+            double_escaped = true;
+            index += open_tag.len();
+            continue;
+        }
+        index += 1;
+        while index < bytes.len() && !input.is_char_boundary(index) {
+            index += 1;
+        }
     }
 
     None
+}
+
+fn starts_with_case_insensitive(haystack: &str, needle: &str) -> bool {
+    // Compared as bytes: slicing the string would panic when the tag name is
+    // followed by a multi-byte character, which any Japanese page has.
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    haystack.len() >= needle.len() && haystack[..needle.len()].eq_ignore_ascii_case(needle)
 }
 
 fn consume_raw_text_close(input: &str, close_start: usize, tag_name: &str) -> usize {
@@ -1332,6 +1385,53 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_script_can_contain_the_characters_of_its_own_end_tag() {
+        // Inside `<!--<script`, the script data is double escaped and the
+        // `</script>` there only ends that state. A page that writes a script
+        // tag from a script depends on this.
+        let document =
+            parse_document("<script><!--<script></script><script></script></script>after");
+        let head = head_of(&document);
+        let Node::Element(script) = &head.children[0] else {
+            panic!("expected a script");
+        };
+        assert_eq!(script.tag_name, "script");
+        let Node::Text(text) = &script.children[0] else {
+            panic!("expected script text");
+        };
+        assert_eq!(text, "<!--<script></script><script></script>");
+    }
+
+    #[test]
+    fn an_end_tag_without_a_terminator_is_not_an_end_tag() {
+        // `</SCRIPT` with nothing after it is more script, not a close.
+        let document = parse_document("<script></SCRIPT");
+        let head = head_of(&document);
+        let Node::Element(script) = &head.children[0] else {
+            panic!("expected a script");
+        };
+        let Node::Text(text) = &script.children[0] else {
+            panic!("expected script text");
+        };
+        assert_eq!(text, "</SCRIPT");
+    }
+
+    #[test]
+    fn raw_text_survives_multi_byte_characters() {
+        // Scanning for the end tag compares bytes; slicing the string at the
+        // tag length would land inside a character here.
+        let document = parse_document("<title>tobira 自作</title><p>x</p>");
+        let head = head_of(&document);
+        let Node::Element(title) = &head.children[0] else {
+            panic!("expected a title");
+        };
+        let Node::Text(text) = &title.children[0] else {
+            panic!("expected title text");
+        };
+        assert_eq!(text, "tobira 自作");
+    }
+
     #[test]
     fn decodes_the_standard_named_references() {
         let text = |html: &str| -> String {
