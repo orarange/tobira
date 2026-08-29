@@ -195,9 +195,7 @@ impl<'a> super::FunctionCompiler<'a> {
             ExpressionNode::Parenthesized(expression) => {
                 self.compile_expression(expression.expression())
             }
-            ExpressionNode::FormalParameterList(_) | ExpressionNode::Debugger => {
-                Err(CompileError::message("invalid expression node"))
-            }
+            _ => Err(CompileError::message("invalid expression node")),
         }
     }
 

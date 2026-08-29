@@ -168,7 +168,9 @@ fn declaration_to_node(declaration: BoaDeclaration) -> StatementNode {
             boa_ast::declaration::LexicalDeclaration::Let(_) => {
                 StatementNode::VariableDeclaration(VariableDeclaration::Let(lexical))
             }
-            boa_ast::declaration::LexicalDeclaration::Const(_) => {
+            boa_ast::declaration::LexicalDeclaration::Using(_)
+            | boa_ast::declaration::LexicalDeclaration::AwaitUsing(_)
+            | boa_ast::declaration::LexicalDeclaration::Const(_) => {
                 StatementNode::VariableDeclaration(VariableDeclaration::Const(lexical))
             }
         },
@@ -182,10 +184,8 @@ fn statement_to_node(statement: BoaStatement) -> StatementNode {
             StatementNode::VariableDeclaration(VariableDeclaration::Var(var_decl))
         }
         BoaStatement::Empty => StatementNode::EmptyStatement,
-        BoaStatement::Expression(expression) => match expression {
-            BoaExpression::Debugger => StatementNode::DebuggerStatement,
-            other => StatementNode::ExpressionStatement(other),
-        },
+        BoaStatement::Expression(expression) => StatementNode::ExpressionStatement(expression),
+        BoaStatement::Debugger => StatementNode::DebuggerStatement,
         BoaStatement::If(if_statement) => StatementNode::IfStatement(if_statement),
         BoaStatement::DoWhileLoop(loop_statement) => {
             StatementNode::DoWhileStatement(loop_statement)
@@ -264,6 +264,10 @@ fn map_boa_error(source: &str, error: BoaParseError) -> ParseError {
         BoaParseError::AbruptEnd => {
             let (line, column) = last_position(source);
             ParseError::new("abrupt end of input", line, column, source.len())
+        }
+        other => {
+            let (line, column) = last_position(source);
+            ParseError::new(other.to_string(), line, column, source.len())
         }
     }
 }

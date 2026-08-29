@@ -1155,7 +1155,9 @@ impl<'a> super::FunctionCompiler<'a> {
                         boa_ast::declaration::LexicalDeclaration::Let(_) => {
                             VariableDeclaration::Let(lexical)
                         }
-                        boa_ast::declaration::LexicalDeclaration::Const(_) => {
+                        boa_ast::declaration::LexicalDeclaration::Const(_)
+                        | boa_ast::declaration::LexicalDeclaration::Using(_)
+                        | boa_ast::declaration::LexicalDeclaration::AwaitUsing(_) => {
                             VariableDeclaration::Const(lexical)
                         }
                     };

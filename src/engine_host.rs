@@ -3692,6 +3692,23 @@ mod tests {
     }
 
     #[test]
+    fn contextual_keywords_can_be_variable_names() {
+        // `of` is only special in a for-of head. Minifiers hand out short
+        // names and this is one of them, so rejecting it loses whole bundles.
+        let result = run_document_scripts(
+            r#"<html><body><script type="module">
+                let of = 1;
+                let async = 2;
+                let target = 3;
+                document.title = [of, async, target].join("|");
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("1|2|3"));
+    }
+
+    #[test]
     fn a_template_holds_its_children_in_a_content_fragment() {
         // Components clone from a template. Without `content` there is nothing
         // to clone, and the append that follows it throws on undefined.

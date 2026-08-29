@@ -45,7 +45,9 @@ impl<'a> super::FunctionCompiler<'a> {
                         boa_ast::declaration::LexicalDeclaration::Let(_) => {
                             VariableDeclaration::Let(lexical)
                         }
-                        boa_ast::declaration::LexicalDeclaration::Const(_) => {
+                        boa_ast::declaration::LexicalDeclaration::Const(_)
+                        | boa_ast::declaration::LexicalDeclaration::Using(_)
+                        | boa_ast::declaration::LexicalDeclaration::AwaitUsing(_) => {
                             VariableDeclaration::Const(lexical)
                         }
                     };
@@ -63,7 +65,7 @@ impl<'a> super::FunctionCompiler<'a> {
                 self.compile_export_list(list.as_ref())?;
                 Ok(())
             }
-            BoaExportDeclaration::ReExport { kind, specifier } => {
+            BoaExportDeclaration::ReExport { kind, specifier, .. } => {
                 let Some(module_context) = self.module_context.clone() else {
                     return Err(CompileError::Unimplemented("export * (phase 2)"));
                 };
@@ -296,7 +298,7 @@ impl<'a> super::FunctionCompiler<'a> {
         export: &ExportAllDeclaration,
     ) -> Result<(), CompileError> {
         match export.0.clone() {
-            BoaExportDeclaration::ReExport { kind, specifier } => {
+            BoaExportDeclaration::ReExport { kind, specifier, .. } => {
                 let Some(module_context) = self.module_context.clone() else {
                     return Err(CompileError::Unimplemented("export * (phase 2)"));
                 };

@@ -474,6 +474,13 @@ pub fn declaration_to_node(declaration: boa_ast::declaration::Declaration) -> St
             boa_ast::declaration::LexicalDeclaration::Const(_) => {
                 StatementNode::VariableDeclaration(VariableDeclaration::Const(lexical))
             }
+            // `using` and `await using` declare a binding whose value is
+            // disposed at the end of the block. The binding part is the same as
+            // `let`; the disposal is not implemented.
+            boa_ast::declaration::LexicalDeclaration::Using(_)
+            | boa_ast::declaration::LexicalDeclaration::AwaitUsing(_) => {
+                StatementNode::VariableDeclaration(VariableDeclaration::Let(lexical))
+            }
         },
     }
 }
@@ -486,10 +493,8 @@ pub fn statement_to_node(statement: Statement) -> StatementNode {
             StatementNode::VariableDeclaration(VariableDeclaration::Var(var_decl))
         }
         Statement::Empty => StatementNode::EmptyStatement,
-        Statement::Expression(expression) => match expression {
-            Expression::Debugger => StatementNode::DebuggerStatement,
-            other => StatementNode::ExpressionStatement(other),
-        },
+        Statement::Expression(expression) => StatementNode::ExpressionStatement(expression),
+        Statement::Debugger => StatementNode::DebuggerStatement,
         Statement::If(if_statement) => StatementNode::IfStatement(if_statement),
         Statement::DoWhileLoop(loop_statement) => StatementNode::DoWhileStatement(loop_statement),
         Statement::WhileLoop(loop_statement) => StatementNode::WhileStatement(loop_statement),

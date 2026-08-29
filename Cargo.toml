@@ -8,9 +8,9 @@ arboard = "3.6.1"
 # boa_ast / boa_parser / boa_interner are used only by the self-built engine
 # (src/engine/) for its AST front-end. The boa runtime (boa_engine / boa_gc)
 # was removed when the self-built engine became the sole JS backend (Stage 4).
-boa_ast = "0.21.1"
-boa_interner = "0.21.1"
-boa_parser = "0.21.1"
+boa_ast = "0.22.0"
+boa_interner = "0.22.0"
+boa_parser = "0.22.0"
 brotli = "8.0.2"
 encoding_rs = "0.8.35"
 flate2 = "1.1.5"
