@@ -1105,9 +1105,10 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
     for token in tokens {
         match token {
             Token::Text(text) => {
-                if builder.frameset_document {
+                if builder.frameset_document && !builder.is_open("noframes") {
                     // A frameset document keeps the whitespace written beside
-                    // its frames, and nothing else.
+                    // its frames, and whatever is inside `<noframes>` -- the
+                    // page a browser without frames would show.
                     if text.trim().is_empty() {
                         builder.html_comments.push(Node::Text(text));
                     }
@@ -1728,8 +1729,20 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
         .frameset_allowed
         .then(|| take_first_frameset(&mut body.children))
         .flatten();
+    // What a frameset document keeps besides its frames: the `<noframes>` a
+    // page leaves for a browser that cannot show them.
+    let mut noframes: Vec<Node> = Vec::new();
     let second = match frameset {
-        Some(node) => node,
+        Some(node) => {
+            noframes = body
+                .children
+                .into_iter()
+                .filter(|child| {
+                    matches!(child, Node::Element(element) if element.tag_name == "noframes")
+                })
+                .collect();
+            node
+        }
         None => Node::Element(body),
     };
 
@@ -1737,6 +1750,7 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
     html_children.push(Node::Element(head));
     html_children.extend(extras.html_whitespace);
     html_children.push(second);
+    html_children.extend(noframes);
     html.children = html_children;
     html.children.extend(extras.html_comments);
     before_html.push(Node::Element(html));
