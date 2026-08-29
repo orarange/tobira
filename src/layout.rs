@@ -251,7 +251,7 @@ fn shift_command(cmd: &mut DrawCommand, dx: u32, dy: u32) {
             t.y = t.y.saturating_add(dy);
         }
         DrawCommand::Image(i) => {
-            i.x = i.x.saturating_add(dx);
+            i.x = i.x.saturating_add(dx as i32);
             i.y = i.y.saturating_add(dy);
         }
         DrawCommand::Layer(l) => {
@@ -270,6 +270,36 @@ fn shift_command(cmd: &mut DrawCommand, dx: u32, dy: u32) {
     }
 }
 
+/// Push a command left by `dx` (negative), cutting off what goes past the edge.
+///
+/// Page coordinates are unsigned, so a box reaching left of zero cannot simply
+/// be moved there. Clamping instead slides it back into view, which is worse
+/// than losing the part that is off-screen: a browser shows the right-hand
+/// remainder exactly where it belongs. Images carry a signed `x` of their own,
+/// so they keep their true position and the painter skips the columns before
+/// zero -- that is what keeps a picture from stretching as it is cut.
+fn shift_command_off_canvas(cmd: &mut DrawCommand, dx: i32) {
+    fn cut(x: &mut u32, width: &mut u32, dx: i32) {
+        let moved = *x as i64 + dx as i64;
+        if moved < 0 {
+            *width = width.saturating_sub((-moved).min(u32::MAX as i64) as u32);
+            *x = 0;
+        } else {
+            *x = moved as u32;
+        }
+    }
+    match cmd {
+        DrawCommand::Rect(r) => cut(&mut r.x, &mut r.width, dx),
+        DrawCommand::Gradient(g) => cut(&mut g.x, &mut g.width, dx),
+        DrawCommand::Layer(l) => cut(&mut l.x, &mut l.width, dx),
+        DrawCommand::Sticky(s) => cut(&mut s.layer.x, &mut s.layer.width, dx),
+        // A run has no width to trim here; one starting off the edge simply
+        // begins at it.
+        DrawCommand::Text(t) => t.x = (t.x as i64 + dx as i64).max(0) as u32,
+        DrawCommand::Image(i) => i.x = i.x.saturating_add(dx),
+    }
+}
+
 fn shift_command_signed(cmd: &mut DrawCommand, dx: i32, dy: i32) {
     match cmd {
         DrawCommand::Rect(r) => {
@@ -281,7 +311,7 @@ fn shift_command_signed(cmd: &mut DrawCommand, dx: i32, dy: i32) {
             t.y = (t.y as i64 + dy as i64).max(0) as u32;
         }
         DrawCommand::Image(i) => {
-            i.x = (i.x as i64 + dx as i64).max(0) as u32;
+            i.x = (i.x as i64 + dx as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
             i.y = (i.y as i64 + dy as i64).max(0) as u32;
         }
         DrawCommand::Layer(l) => {
@@ -350,7 +380,7 @@ fn collect_images(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec
         match cmd {
             DrawCommand::Image(i) => {
                 let mut i2 = i.clone();
-                i2.x = i2.x.saturating_add(offset_x);
+                i2.x = i2.x.saturating_add(offset_x as i32);
                 i2.y = i2.y.saturating_add(offset_y);
                 out.push(i2);
             }
@@ -395,7 +425,14 @@ pub struct TextCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageCommand {
-    pub x: u32,
+    /// Signed, unlike every other command's `x`.
+    ///
+    /// A box placed by `right` can start left of the canvas -- firefox.com hangs
+    /// the fox off its hero that way, 285px off the left edge. Clamped to zero
+    /// the picture slides back into view instead of being cut off at the edge,
+    /// which is what a browser does. The painter already takes an `i32` here and
+    /// skips the columns before zero, so only the number had to become honest.
+    pub x: i32,
     pub y: u32,
     pub width: u32,
     pub height: u32,
@@ -1998,7 +2035,7 @@ fn layout_block_element(
         && let Some(color) = element.style.background_color
     {
         context.commands.push(DrawCommand::Image(ImageCommand {
-            x: outer_x,
+            x: outer_x as i32,
             y: background_top,
             width: outer_width.max(1),
             height: outer_width.max(1),
@@ -2017,7 +2054,7 @@ fn layout_block_element(
     let bg_image_cmd_idx: Option<usize> = element.style.background_image_url.as_ref().map(|url| {
         let idx = context.commands.len();
         context.commands.push(DrawCommand::Image(ImageCommand {
-            x: outer_x,
+            x: outer_x as i32,
             y: background_top,
             width: outer_width.max(1),
             height: 1, // placeholder; updated after children
@@ -2563,12 +2600,12 @@ fn clip_commands_to_box(
                 Some(DrawCommand::Rect(r))
             }
             DrawCommand::Image(img) => {
-                let ix2 = img.x.saturating_add(img.width);
+                let ix2 = img.x.saturating_add(img.width as i32).max(0) as u32;
                 let iy2 = img.y.saturating_add(img.height);
                 // Only discard entirely-outside images; don't resize (clamping x/y/width/height
                 // would rescale the full image into a smaller rect instead of cropping it).
                 // Pixel-accurate cropping would require source-rect support in the renderer.
-                if img.x >= clip_x2 || img.y >= clip_y2 || ix2 <= clip_x || iy2 <= clip_y {
+                if img.x.max(0) as u32 >= clip_x2 || img.y >= clip_y2 || ix2 <= clip_x || iy2 <= clip_y {
                     None
                 } else {
                     Some(DrawCommand::Image(img))
@@ -2736,7 +2773,7 @@ fn offset_commands(commands: &mut [DrawCommand], dx: u32, dy: u32) {
                 t.y = t.y.saturating_add(dy);
             }
             DrawCommand::Image(i) => {
-                i.x = i.x.saturating_add(dx);
+                i.x = i.x.saturating_add(dx as i32);
                 i.y = i.y.saturating_add(dy);
             }
             DrawCommand::Layer(l) => {
@@ -2768,7 +2805,7 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
                 t.y = t.y.saturating_sub(origin_y);
             }
             DrawCommand::Image(i) => {
-                i.x = i.x.saturating_sub(origin_x);
+                i.x = i.x.saturating_sub(origin_x as i32);
                 i.y = i.y.saturating_sub(origin_y);
             }
             DrawCommand::Layer(l) => {
@@ -2852,7 +2889,7 @@ fn layout_block_element_as_layer(
         && let Some(color) = element.style.background_color
     {
         sub_context.commands.push(DrawCommand::Image(ImageCommand {
-            x: outer_x,
+            x: outer_x as i32,
             y: background_top,
             width: outer_width.max(1),
             height: outer_width.max(1),
@@ -3029,7 +3066,7 @@ fn layout_block_element_as_layer(
             }
         };
         sub_context.commands.push(DrawCommand::Image(ImageCommand {
-            x: outer_x,
+            x: outer_x as i32,
             y: background_top,
             width: outer_width.max(1),
             height: final_height,
@@ -3233,7 +3270,7 @@ fn layout_image_element(
         }));
     } else {
         context.commands.push(DrawCommand::Image(ImageCommand {
-            x: draw_x,
+            x: draw_x as i32,
             y: *cursor_y,
             width: draw_width,
             height: draw_height,
@@ -3612,7 +3649,7 @@ fn layout_table_element(
                     }
                 };
                 context.commands.push(DrawCommand::Image(ImageCommand {
-                    x: cell_x,
+                    x: cell_x as i32,
                     y: cell_y,
                     width: cell_width.max(1),
                     height: cell_height.max(1),
@@ -4004,7 +4041,7 @@ fn offset_draw_command(cmd: &DrawCommand, offset_x: u32, offset_y: u32) -> DrawC
             text_shadow: text.text_shadow.clone(),
         }),
         DrawCommand::Image(image) => DrawCommand::Image(ImageCommand {
-            x: image.x.saturating_add(offset_x),
+            x: image.x.saturating_add(offset_x as i32),
             y: image.y.saturating_add(offset_y),
             width: image.width,
             height: image.height,
@@ -5490,7 +5527,7 @@ fn emit_line_impl(
                 }));
             } else {
                 context.commands.push(DrawCommand::Image(ImageCommand {
-                    x: cursor_x,
+                    x: cursor_x as i32,
                     y: image_y,
                     width: image.draw_width,
                     height: image.draw_height,
@@ -6234,17 +6271,23 @@ fn layout_positioned_element(
         .unwrap_or(u32::MAX);
     let elem_width = elem_width.min(max_width).max(min_width.min(max_width)).max(1);
 
-    let x = match (left, right) {
-        (Some(left), _) => (base_x as i64 + left as i64).max(0) as u32,
+    let signed_x = match (left, right) {
+        (Some(left), _) => base_x as i64 + left as i64,
         // Only `right` is given, so it is the box's *right* edge that is placed,
         // that far in from the containing block's right edge. Ignoring `right`
         // pinned every such box to the left edge instead.
-        (None, Some(right)) => (base_x as i64 + container_width as i64
-            - right as i64
-            - elem_width as i64)
-            .max(0) as u32,
-        (None, None) => static_x.max(base_x),
+        (None, Some(right)) => {
+            base_x as i64 + container_width as i64 - right as i64 - elem_width as i64
+        }
+        (None, None) => static_x.max(base_x) as i64,
     };
+    let x = signed_x.max(0) as u32;
+    // How far the box reaches past the left edge of the page. Page coordinates
+    // are unsigned, so it is laid out at zero and its drawing pushed back
+    // afterwards -- clipped at the edge, not slid into view. Slid, firefox.com's
+    // hero fox sat 285px right of where it belongs: it is placed by `right` at
+    // `calc(50% - 134px)` and hangs a third of itself off the left of the page.
+    let left_overhang = signed_x.min(0).max(i32::MIN as i64) as i32;
     // Keep the unclamped position: page coordinates are unsigned, so a box with
     // a negative `top` cannot be drawn where it belongs, and we need to know how
     // far above the origin it wanted to sit before deciding what to do with it.
@@ -6305,7 +6348,14 @@ fn layout_positioned_element(
     let links_from = context.links.len();
     let controls_from = context.controls.len();
     let hitboxes_from = context.element_hitboxes.len();
-    context.positioned_commands.push((z, sub_context.commands));
+    // The box was laid out at zero; put its drawing back where it belongs.
+    let mut commands = sub_context.commands;
+    if left_overhang < 0 {
+        for command in &mut commands {
+            shift_command_off_canvas(command, left_overhang);
+        }
+    }
+    context.positioned_commands.push((z, commands));
     context.links.extend(sub_context.links);
     context.controls.extend(sub_context.controls);
     context.element_hitboxes.extend(sub_context.element_hitboxes);
@@ -6746,7 +6796,7 @@ fn layout_grid_container(
         && let Some(color) = element.style.background_color
     {
         context.commands.push(DrawCommand::Image(ImageCommand {
-            x: outer_x,
+            x: outer_x as i32,
             y: background_top,
             width: outer_width.max(1),
             height: outer_width.max(1),
@@ -7187,7 +7237,7 @@ fn flex_item_content_width(
             let r = match cmd {
                 DrawCommand::Rect(r) => r.x.saturating_add(r.width),
                 DrawCommand::Text(t) => t.x.saturating_add(t.width),
-                DrawCommand::Image(i) => i.x.saturating_add(i.width),
+                DrawCommand::Image(i) => i.x.saturating_add(i.width as i32).max(0) as u32,
                 DrawCommand::Gradient(g) => g.x.saturating_add(g.width),
                 DrawCommand::Layer(l) => l.x.saturating_add(l.width).max(max_right(&l.commands)),
                 DrawCommand::Sticky(s) => s.layer.x.saturating_add(s.layer.width),
@@ -7439,7 +7489,7 @@ fn layout_flex_container(
         && let Some(color) = element.style.background_color
     {
         context.commands.push(DrawCommand::Image(ImageCommand {
-            x: outer_x,
+            x: outer_x as i32,
             y: background_top,
             width: outer_width.max(1),
             height: outer_width.max(1),
@@ -9478,6 +9528,31 @@ mod tests {
     }
 
     #[test]
+    fn a_box_hanging_off_the_left_edge_is_cut_not_slid() {
+        // firefox.com places the fox behind its hero with `right`, far enough
+        // that a third of it sits left of the page. Clamped to zero the whole
+        // picture slid into view, 285px right of where a browser draws it.
+        let layout = probe_layout(
+            "<html><body><div style=\"position:relative;width:400px;height:300px\">             <span style=\"position:absolute;right:200px;top:0;width:300px;height:100px;             display:block;background-image:url(/art.svg)\"></span></div></body></html>",
+            400,
+        );
+
+        let art = layout
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                super::DrawCommand::Image(image) if image.src.contains("art.svg") => Some(image),
+                _ => None,
+            })
+            .expect("the background image should be emitted");
+
+        // The containing block starts at the body's 8px margin and is 400 wide,
+        // so the box's right edge lands at 208 and its left at -92.
+        assert!(art.x < 0, "the box must keep its true position: {}", art.x);
+        assert_eq!(art.width, 300, "and its full width, so the art is not stretched");
+    }
+
+    #[test]
     fn a_flex_box_with_no_items_still_keeps_its_height() {
         // All of the flex sizing hangs off the items. With none, an empty flex
         // box fell through to nothing but its own padding -- `display: flex;
@@ -10242,7 +10317,7 @@ mod tests {
         }
         for image in layout.images() {
             assert!(
-                image.x.saturating_add(image.width) <= width,
+                image.x.saturating_add(image.width as i32) <= width as i32,
                 "image overflows: {} x={} width={} limit={}",
                 image.src,
                 image.x,
@@ -10299,7 +10374,7 @@ mod tests {
             layout
                 .texts()
                 .into_iter()
-                .any(|text| text.x >= image.x.saturating_add(image.width)),
+                .any(|text| text.x as i32 >= image.x.saturating_add(image.width as i32)),
             "text column should remain after the image column"
         );
     }
@@ -10984,7 +11059,7 @@ mod tests {
         assert!(
             layout.links.iter().any(|link| {
                 link.href == "https://example.com/x"
-                    && link.x == image.x
+                    && link.x as i32 == image.x
                     && link.y == image.y
                     && link.width == image.width
                     && link.height == image.height
