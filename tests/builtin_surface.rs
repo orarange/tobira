@@ -62,3 +62,26 @@ fn location_surface_exists() {
         assert(typeof location.reload === 'function');
     "#);
 }
+
+/// A regex reflects every flag it was built with. Pages read these to date the
+/// engine: MediaWiki's compatibility gate asks `/./.dotAll === false`, and an
+/// `undefined` there told Wikipedia the browser was too old to run its scripts.
+#[test]
+fn regexp_flag_reflectors() {
+    run(r#"
+        assert(/./.dotAll === false);
+        assert(/./s.dotAll === true);
+        assert(/./.sticky === false);
+        assert(/./y.sticky === true);
+        assert(/./.unicode === false);
+        assert(/./u.unicode === true);
+        assert(/./.hasIndices === false);
+        assert(/./d.hasIndices === true);
+
+        // The three that already worked, so the new ones sit beside them.
+        assert(/./.global === false);
+        assert(/./g.global === true);
+        assert(/./i.ignoreCase === true);
+        assert(/./m.multiline === true);
+    "#);
+}

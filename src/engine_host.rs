@@ -4053,6 +4053,39 @@ mod tests {
     }
 
     #[test]
+    fn the_in_operator_sees_host_backed_dom_properties() {
+        // MediaWiki gates its whole script bundle on
+        // `'querySelector' in document && 'localStorage' in window`. The host
+        // answers both when they are called, but `in` could not see them, so
+        // Wikipedia decided the browser was too old and served its
+        // no-JavaScript layout -- table of contents sprawled over the article.
+        let result = run_document_scripts(
+            r#"
+            <html class="before"><body><script>
+            var ok = ('querySelector' in document)
+                && ('querySelectorAll' in document)
+                && ('getElementById' in document)
+                && ('createElement' in document)
+                && ('cookie' in document)
+                && ('localStorage' in window)
+                && ('sessionStorage' in window)
+                && ('navigator' in window)
+                && ('location' in window);
+            document.documentElement.className = ok ? 'yes' : 'no';
+            </script></body></html>
+            "#,
+            "http://localhost/",
+        );
+
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains(r#"class="yes""#),
+            "every host-backed name should answer `in`: {}",
+            &result.html[..result.html.len().min(300)]
+        );
+    }
+
+    #[test]
     fn run_document_scripts_includes_js_backtrace() {
         let result = run_document_scripts(
             r#"

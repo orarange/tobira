@@ -2692,6 +2692,7 @@ impl Vm {
                     None => {
                         self.lookup_property_descriptor(object, &key).is_some()
                             || self.host_has_event_handler_property(object, &key)
+                            || self.host_manages_property(object, &key)
                     }
                 };
                 self.stack.push(Value::Bool(present));
@@ -4832,6 +4833,17 @@ impl Vm {
             ("global", Value::Bool(flags.contains('g'))),
             ("ignoreCase", Value::Bool(flags.contains('i'))),
             ("multiline", Value::Bool(flags.contains('m'))),
+            // The rest of the flag reflectors. Pages read them to tell how old
+            // an engine is: MediaWiki's compatibility gate asks
+            // `/./.dotAll === false` and, finding `undefined`, decided the
+            // browser was too old to run its scripts -- so Wikipedia served
+            // itself as if JavaScript were off, and its table of contents came
+            // out sprawled across the article.
+            ("dotAll", Value::Bool(flags.contains('s'))),
+            ("sticky", Value::Bool(flags.contains('y'))),
+            ("unicode", Value::Bool(flags.contains('u'))),
+            ("unicodeSets", Value::Bool(flags.contains('v'))),
+            ("hasIndices", Value::Bool(flags.contains('d'))),
         ] {
             self.define_data_property(object, PropertyKey::from(name), value, false, false, false);
         }
@@ -9820,6 +9832,37 @@ impl Vm {
     /// on it: `'oninput' in document` is how React decides whether the native
     /// `input` event is supported — if it reads false, React falls back to an IE
     /// polyfill path and `onChange` never fires from input events.
+    /// Whether a host object answers this name itself.
+    ///
+    /// `document.querySelector` and `window.localStorage` are served by the host
+    /// rather than stored as properties, so `in` could not see them and pages
+    /// that ask before they call concluded the browser was ancient. MediaWiki's
+    /// compatibility gate is exactly that shape -- `'querySelector' in document
+    /// && 'localStorage' in window` -- and failing it made Wikipedia put its
+    /// no-JavaScript layout on screen, table of contents sprawled across the
+    /// article.
+    fn host_manages_property(&self, object: GcRef<JsObject>, key: &PropertyKey) -> bool {
+        let PropertyKey::String(name) = key else {
+            return false;
+        };
+        let Some(data) = self.heap.objects().get(object) else {
+            return false;
+        };
+        let ObjectKind::Host(slot) = &data.kind else {
+            return false;
+        };
+        match slot.class {
+            HostObjectClass::Document => {
+                is_dom_managed_document_property(name) || is_dom_managed_node_property(name)
+            }
+            HostObjectClass::Node | HostObjectClass::EventTarget => {
+                is_dom_managed_node_property(name)
+            }
+            HostObjectClass::Window => Self::is_window_global(name),
+            _ => false,
+        }
+    }
+
     fn host_has_event_handler_property(&self, object: GcRef<JsObject>, key: &PropertyKey) -> bool {
         let PropertyKey::String(name) = key else {
             return false;
