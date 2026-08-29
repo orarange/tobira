@@ -1370,8 +1370,13 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                         attributes: BTreeMap::new(),
                     });
                 } else if is_formatting(&name) {
+                    // With no matching formatting element to work on, the tag
+                    // follows the ordinary rule and stops at anything its
+                    // content cannot be lifted out of -- a table cell puts a
+                    // marker on the list, so a `</b>` written inside one does
+                    // not reach the `<b>` outside the table.
                     if !builder.adoption_agency(&name) {
-                        builder.close(&name);
+                        builder.close_unless_special(&name);
                     }
                 } else {
                     if starts_formatting_scope(&name) {
