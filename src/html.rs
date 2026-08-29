@@ -85,10 +85,27 @@ struct BuildNode {
     parent: Option<usize>,
 }
 
+/// An entry in the list of active formatting elements.
+///
+/// A marker is pushed when a table cell, `<applet>`, `<object>` or `<marquee>`
+/// opens: formatting does not reach across one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Formatting {
+    Marker,
+    Element(usize),
+}
+
 struct Builder {
     nodes: Vec<BuildNode>,
     /// The elements currently open, innermost last. Index 0 is the document.
     open: Vec<usize>,
+    /// Formatting elements that are still in force.
+    ///
+    /// `<b>a<p>b</p>c` puts the bold inside the paragraph too: the `<b>` is
+    /// still active when the paragraph opens, so a fresh one is created there.
+    /// This list is what makes that happen, and what the adoption agency works
+    /// over when an end tag arrives out of order.
+    formatting: Vec<Formatting>,
 }
 
 impl Builder {
@@ -103,6 +120,7 @@ impl Builder {
                 parent: None,
             }],
             open: vec![0],
+            formatting: Vec::new(),
         }
     }
 
@@ -152,6 +170,227 @@ impl Builder {
         }
     }
 
+    /// Re-open the formatting elements that are still active but no longer on
+    /// the stack.
+    ///
+    /// This is what carries `<b>` into the next paragraph. Without it, markup
+    /// like `<b>one<p>two` leaves the second paragraph unbolded, which is not
+    /// what any browser shows.
+    fn reconstruct_formatting(&mut self) {
+        let Some(&last) = self.formatting.last() else {
+            return;
+        };
+        match last {
+            Formatting::Marker => return,
+            Formatting::Element(index) if self.open.contains(&index) => return,
+            Formatting::Element(_) => {}
+        }
+
+        // Walk back to the last entry that is a marker or still open; the
+        // entries after it are the ones to recreate.
+        let mut position = self.formatting.len() - 1;
+        while position > 0 {
+            match self.formatting[position - 1] {
+                Formatting::Marker => break,
+                Formatting::Element(index) if self.open.contains(&index) => break,
+                Formatting::Element(_) => position -= 1,
+            }
+        }
+
+        while position < self.formatting.len() {
+            let Formatting::Element(source) = self.formatting[position] else {
+                break;
+            };
+            let clone = self.clone_element(source);
+            let parent = self.current();
+            self.attach(parent, clone);
+            self.open.push(clone);
+            self.formatting[position] = Formatting::Element(clone);
+            position += 1;
+        }
+    }
+
+    /// A fresh element with the same name and attributes, and no children.
+    fn clone_element(&mut self, source: usize) -> usize {
+        let kind = match &self.nodes[source].kind {
+            BuildKind::Element {
+                tag_name,
+                attributes,
+            } => BuildKind::Element {
+                tag_name: tag_name.clone(),
+                attributes: attributes.clone(),
+            },
+            _ => BuildKind::Text(String::new()),
+        };
+        let index = self.nodes.len();
+        self.nodes.push(BuildNode {
+            kind,
+            children: Vec::new(),
+            parent: None,
+        });
+        index
+    }
+
+    fn detach(&mut self, child: usize) {
+        if let Some(parent) = self.nodes[child].parent.take() {
+            self.nodes[parent].children.retain(|c| *c != child);
+        }
+    }
+
+    /// Whether `target` is open with nothing but ordinary containers between --
+    /// what the standard calls being in scope.
+    fn in_scope(&self, target: &str) -> bool {
+        const BOUNDARIES: &[&str] = &[
+            "applet", "caption", "html", "table", "td", "th", "marquee", "object", "template",
+            "document",
+        ];
+        for index in self.open.iter().rev() {
+            let name = self.tag_of(*index);
+            if name == target {
+                return true;
+            }
+            if BOUNDARIES.contains(&name) {
+                return false;
+            }
+        }
+        false
+    }
+
+    /// The adoption agency: how a browser makes sense of formatting that closes
+    /// across a block boundary.
+    ///
+    /// `<b>1<p>2</b>3` is not a tree as written -- the `</b>` closes an element
+    /// a paragraph has been opened inside. Browsers produce
+    /// `<b>1</b><p><b>2</b>3</p>`: the bold is split, and the part inside the
+    /// paragraph stays bold. Closing the nearest matching tag instead threw the
+    /// paragraph away with it.
+    ///
+    /// Returns false when the subject is not an active formatting element, so
+    /// the caller falls back to an ordinary end tag.
+    fn adoption_agency(&mut self, subject: &str) -> bool {
+        for _ in 0..8 {
+            // The last active formatting element with this name, after any marker.
+            let mut formatting_position = None;
+            for (position, entry) in self.formatting.iter().enumerate().rev() {
+                match entry {
+                    Formatting::Marker => break,
+                    Formatting::Element(index) if self.tag_of(*index) == subject => {
+                        formatting_position = Some(position);
+                        break;
+                    }
+                    Formatting::Element(_) => {}
+                }
+            }
+            let Some(formatting_position) = formatting_position else {
+                return false;
+            };
+            let Formatting::Element(formatting_element) = self.formatting[formatting_position]
+            else {
+                return false;
+            };
+
+            let Some(stack_position) = self.open.iter().position(|i| *i == formatting_element)
+            else {
+                // Active but no longer open: drop it, and the tag is spent.
+                self.formatting.remove(formatting_position);
+                return true;
+            };
+            if stack_position == 0 || !self.in_scope(subject) {
+                return true;
+            }
+
+            // The nearest element below it that content cannot simply move out
+            // of. With none, the formatting element just closes.
+            let furthest_block = self.open[stack_position + 1..]
+                .iter()
+                .position(|i| is_special(self.tag_of(*i)))
+                .map(|offset| stack_position + 1 + offset);
+            let Some(furthest_block) = furthest_block else {
+                self.open.truncate(stack_position);
+                self.formatting.remove(formatting_position);
+                return true;
+            };
+
+            let common_ancestor = self.open[stack_position - 1];
+            let block = self.open[furthest_block];
+            let mut bookmark = formatting_position;
+
+            // Walk up from the furthest block to the formatting element,
+            // cloning the formatting elements on the way and re-parenting what
+            // was inside them.
+            let mut node_position = furthest_block;
+            let mut last_node = block;
+            for inner in 0..3 {
+                if node_position == 0 {
+                    break;
+                }
+                node_position -= 1;
+                let node = self.open[node_position];
+                if node == formatting_element {
+                    break;
+                }
+                let in_list = self
+                    .formatting
+                    .iter()
+                    .position(|entry| *entry == Formatting::Element(node));
+                match in_list {
+                    Some(position) if inner < 3 => {
+                        let clone = self.clone_element(node);
+                        self.formatting[position] = Formatting::Element(clone);
+                        self.open[node_position] = clone;
+                        if last_node == block {
+                            bookmark = position + 1;
+                        }
+                        self.detach(last_node);
+                        self.attach(clone, last_node);
+                        last_node = clone;
+                    }
+                    Some(position) => {
+                        self.formatting.remove(position);
+                        self.open.remove(node_position);
+                    }
+                    None => {
+                        self.open.remove(node_position);
+                    }
+                }
+            }
+
+            self.detach(last_node);
+            self.attach(common_ancestor, last_node);
+
+            // A fresh copy of the formatting element takes everything the
+            // furthest block held.
+            let clone = self.clone_element(formatting_element);
+            let moved: Vec<usize> = std::mem::take(&mut self.nodes[block].children);
+            for child in moved {
+                self.nodes[child].parent = Some(clone);
+                self.nodes[clone].children.push(child);
+            }
+            self.attach(block, clone);
+
+            if let Some(position) = self
+                .formatting
+                .iter()
+                .position(|entry| *entry == Formatting::Element(formatting_element))
+            {
+                self.formatting.remove(position);
+                if bookmark > position {
+                    bookmark -= 1;
+                }
+            }
+            let bookmark = bookmark.min(self.formatting.len());
+            self.formatting.insert(bookmark, Formatting::Element(clone));
+
+            if let Some(position) = self.open.iter().position(|i| *i == formatting_element) {
+                self.open.remove(position);
+            }
+            if let Some(position) = self.open.iter().position(|i| *i == block) {
+                self.open.insert(position + 1, clone);
+            }
+        }
+        true
+    }
+
     fn into_tree(mut self) -> Node {
         fn build(nodes: &mut Vec<BuildNode>, index: usize) -> Node {
             let children: Vec<usize> = std::mem::take(&mut nodes[index].children);
@@ -174,6 +413,54 @@ impl Builder {
     }
 }
 
+/// The formatting elements, which stay in force across the blocks that open
+/// inside them.
+fn is_formatting(tag: &str) -> bool {
+    matches!(
+        tag,
+        "a" | "b"
+            | "big"
+            | "code"
+            | "em"
+            | "font"
+            | "i"
+            | "nobr"
+            | "s"
+            | "small"
+            | "strike"
+            | "strong"
+            | "tt"
+            | "u"
+    )
+}
+
+/// The elements formatting cannot simply be moved out of.
+///
+/// The standard calls these special. The adoption agency looks for the nearest
+/// one below a misnested formatting element to decide what has to be split.
+fn is_special(tag: &str) -> bool {
+    matches!(
+        tag,
+        "address" | "applet" | "area" | "article" | "aside" | "base" | "basefont" | "bgsound"
+            | "blockquote" | "body" | "br" | "button" | "caption" | "center" | "col"
+            | "colgroup" | "dd" | "details" | "dir" | "div" | "dl" | "dt" | "embed"
+            | "fieldset" | "figcaption" | "figure" | "footer" | "form" | "frame" | "frameset"
+            | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "head" | "header" | "hgroup" | "hr"
+            | "html" | "iframe" | "img" | "input" | "keygen" | "li" | "link" | "listing"
+            | "main" | "marquee" | "menu" | "meta" | "nav" | "noembed" | "noframes"
+            | "noscript" | "object" | "ol" | "p" | "param" | "plaintext" | "pre" | "script"
+            | "search" | "section" | "select" | "source" | "style" | "summary" | "table"
+            | "tbody" | "td" | "template" | "textarea" | "tfoot" | "th" | "thead" | "title"
+            | "tr" | "track" | "ul" | "wbr" | "xmp" | "document"
+    )
+}
+
+/// Elements that put a marker on the formatting list: formatting does not
+/// reach across one.
+fn starts_formatting_scope(tag: &str) -> bool {
+    matches!(tag, "applet" | "marquee" | "object" | "td" | "th" | "caption" | "template")
+}
+
 fn parse_document_body(input: &str) -> Node {
     let tokens = tokenize(input);
     let mut builder = Builder::new();
@@ -182,6 +469,10 @@ fn parse_document_body(input: &str) -> Node {
         match token {
             Token::Text(text) => {
                 if !text.is_empty() {
+                    // Text belongs inside whatever formatting is still in
+                    // force, so any that has fallen off the stack is re-opened
+                    // around it first.
+                    builder.reconstruct_formatting();
                     builder.insert(BuildKind::Text(text));
                 }
             }
@@ -196,13 +487,23 @@ fn parse_document_body(input: &str) -> Node {
                 if !self_closing {
                     maybe_auto_close(&mut builder, &name);
                 }
+                if !is_special(&name) {
+                    builder.reconstruct_formatting();
+                }
 
+                let starts_scope = starts_formatting_scope(&name);
+                let formatting = is_formatting(&name);
                 let index = builder.insert(BuildKind::Element {
                     tag_name: name,
                     attributes,
                 });
                 if !self_closing {
                     builder.open.push(index);
+                }
+                if starts_scope {
+                    builder.formatting.push(Formatting::Marker);
+                } else if formatting && !self_closing {
+                    builder.formatting.push(Formatting::Element(index));
                 }
             }
             Token::EndTag(name) => {
@@ -219,7 +520,21 @@ fn parse_document_body(input: &str) -> Node {
                         tag_name: "br".to_string(),
                         attributes: BTreeMap::new(),
                     });
+                } else if is_formatting(&name) {
+                    if !builder.adoption_agency(&name) {
+                        builder.close(&name);
+                    }
                 } else {
+                    if starts_formatting_scope(&name) {
+                        // Leaving the scope drops everything back to its marker.
+                        if let Some(position) = builder
+                            .formatting
+                            .iter()
+                            .rposition(|entry| *entry == Formatting::Marker)
+                        {
+                            builder.formatting.truncate(position);
+                        }
+                    }
                     builder.close(&name);
                 }
             }
