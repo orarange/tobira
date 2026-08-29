@@ -1492,6 +1492,13 @@ pub struct Vm {
     dom_interface_ctors: HashMap<RawGcRef, &'static str>,
     /// `customElements.define` registry: lowercase tag name → definition.
     custom_elements: HashMap<String, CustomElementDef>,
+    /// The fragment holding each `<template>`'s content, once asked for.
+    template_contents: HashMap<NodeId, NodeId>,
+    /// Custom elements whose class body has already run, so that being
+    /// inserted after `createElement` does not construct them twice.
+    constructed_custom_elements: std::collections::HashSet<NodeId>,
+    /// Custom elements that have already had `connectedCallback` called.
+    connected_custom_elements: std::collections::HashSet<NodeId>,
 }
 
 /// A `customElements.define`d class: the constructor value plus its
@@ -1798,6 +1805,9 @@ impl Vm {
             generator_outcome: None,
             dom_interface_ctors: HashMap::new(),
             custom_elements: HashMap::new(),
+            template_contents: HashMap::new(),
+            constructed_custom_elements: std::collections::HashSet::new(),
+            connected_custom_elements: std::collections::HashSet::new(),
         };
         vm.install_globals();
         vm
@@ -10572,7 +10582,9 @@ impl Vm {
                     _ => Vec::new(),
                 };
                 for node in matches {
-                    self.upgrade_custom_element(node, &tag)?;
+                    if self.connected_custom_elements.insert(node) {
+                        self.upgrade_custom_element(node, &tag)?;
+                    }
                 }
                 Ok(Value::Undefined)
             }
@@ -13131,8 +13143,18 @@ impl Vm {
             }
             BuiltinId::DomDocCreateElement => {
                 let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let lower = tag.to_ascii_lowercase();
                 let res = self.host.mutate_dom(DomMutation::CreateElement { window: WindowId(0), local_name: tag });
-                Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+                let Ok(super::host::DomMutationResult::Node(id)) = res else {
+                    return Ok(Value::Undefined);
+                };
+                // A registered name is constructed, not just created: the class
+                // body has to run so the element arrives with its fields set.
+                if self.custom_elements.contains_key(&lower) {
+                    // Not connected yet, so no connectedCallback here.
+                    self.construct_custom_element(id, &lower)?;
+                }
+                Ok(self.make_dom_node_value(id))
             }
             BuiltinId::DomCreateElementNs => {
                 // createElementNS(namespace, qualifiedName): we don't track
@@ -13185,7 +13207,10 @@ impl Vm {
             BuiltinId::DomNodeAppendChild => {
                 let parent_id = self.this_node_id(&this_value);
                 let child_ids = self.node_ids_from_node_or_string_args(&args);
-                let _ = self.host.mutate_dom(DomMutation::Append { parent: parent_id, children: child_ids });
+                let _ = self.host.mutate_dom(DomMutation::Append { parent: parent_id, children: child_ids.clone() });
+                for child in child_ids {
+                    self.connect_custom_elements(child)?;
+                }
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
             }
             BuiltinId::DomNodeInsertBefore => {
@@ -13193,6 +13218,7 @@ impl Vm {
                 let child_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
                 let ref_id = args.get(1).and_then(|v| self.node_id_from_host_val(v));
                 let _ = self.host.mutate_dom(DomMutation::InsertBefore { parent: parent_id, child: child_id, reference: ref_id });
+                self.connect_custom_elements(child_id)?;
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
             }
             BuiltinId::DomNodePrepend => {
@@ -13200,7 +13226,10 @@ impl Vm {
                 let child_ids = self.node_ids_from_node_or_string_args(&args);
                 let _ = self
                     .host
-                    .mutate_dom(DomMutation::Prepend { parent: parent_id, children: child_ids });
+                    .mutate_dom(DomMutation::Prepend { parent: parent_id, children: child_ids.clone() });
+                for child in child_ids {
+                    self.connect_custom_elements(child)?;
+                }
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeReplaceChildren => {
@@ -15321,31 +15350,47 @@ impl Vm {
     /// Upgrade one element to its registered custom-element class: link the
     /// node wrapper's prototype to the class prototype (so `instanceof` and
     /// method lookup resolve) and fire `connectedCallback`.
+    /// Upgrade and connect the custom elements in a subtree that has just been
+    /// put into the page.
+    ///
+    /// A custom element built by a script and appended is as much a custom
+    /// element as one written in the markup. Without this, only the elements
+    /// present when `customElements.define` ran ever came to life, so every
+    /// component a page adds after load stayed an empty tag.
+    fn connect_custom_elements(&mut self, root: NodeId) -> Result<(), VmError> {
+        if self.custom_elements.is_empty() {
+            return Ok(());
+        }
+        let mut pending = vec![root];
+        let selector = self
+            .custom_elements
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",");
+        if let Ok(DomReadResult::Nodes(found)) = self.host.read_dom(DomRead::QuerySelectorAll {
+            root,
+            selectors: selector,
+        }) {
+            pending.extend(found);
+        }
+        for node in pending {
+            let tag = self.get_node_name(node).to_ascii_lowercase();
+            if !self.custom_elements.contains_key(&tag) {
+                continue;
+            }
+            if self.connected_custom_elements.insert(node) {
+                self.upgrade_custom_element(node, &tag)?;
+            }
+        }
+        Ok(())
+    }
+
     fn upgrade_custom_element(&mut self, node: NodeId, tag: &str) -> Result<(), VmError> {
         let Some(def) = self.custom_elements.get(tag).cloned() else {
             return Ok(());
         };
-        let class_proto = match self.get_property_value(&def.class_value, &PropertyKey::from("prototype")) {
-            Ok(Value::Object(proto)) => Some(proto),
-            _ => None,
-        };
-        let wrapper = self.make_dom_node_value(node);
-        if let (Value::Object(wrapper_ref), Some(proto)) = (&wrapper, class_proto) {
-            if let Some(data) = self.heap.objects_mut().get_mut(*wrapper_ref) {
-                data.prototype = Some(proto);
-            }
-        }
-        // Run the class body against the element that already exists.
-        //
-        // An upgrade is not a fresh construction: the node is on the page
-        // before its class is defined, and the standard runs the constructor
-        // with that node as `this`. Skipping it leaves every field -- public
-        // and private -- unset, so the element's own methods read undefined or
-        // throw. Pages built out of custom elements are built out of this.
-        let constructor = def.class_value.clone();
-        if self.is_callable_value(&constructor) {
-            self.call_value_sync(constructor, wrapper.clone(), Vec::new())?;
-        }
+        let wrapper = self.construct_custom_element(node, tag)?;
 
         // connectedCallback (looked up on the class prototype).
         let cb = self.get_property_value(&wrapper, &PropertyKey::from("connectedCallback"))?;
@@ -15362,6 +15407,36 @@ impl Vm {
             }
         }
         Ok(())
+    }
+
+    /// Link an element to its registered class and run the class body on it.
+    ///
+    /// An upgrade is not a fresh construction: the node exists before its class
+    /// is defined, and the standard runs the constructor with that node as
+    /// `this`. Skipping it leaves every field the class declares -- public and
+    /// private -- unset, so the element's own methods read undefined or throw.
+    /// Pages built out of custom elements are built out of this.
+    fn construct_custom_element(&mut self, node: NodeId, tag: &str) -> Result<Value, VmError> {
+        let wrapper = self.make_dom_node_value(node);
+        let Some(def) = self.custom_elements.get(tag).cloned() else {
+            return Ok(wrapper);
+        };
+        let class_proto = match self
+            .get_property_value(&def.class_value, &PropertyKey::from("prototype"))
+        {
+            Ok(Value::Object(proto)) => Some(proto),
+            _ => None,
+        };
+        if let (Value::Object(wrapper_ref), Some(proto)) = (&wrapper, class_proto) {
+            if let Some(data) = self.heap.objects_mut().get_mut(*wrapper_ref) {
+                data.prototype = Some(proto);
+            }
+        }
+        if self.constructed_custom_elements.insert(node) && self.is_callable_value(&def.class_value)
+        {
+            self.call_value_sync(def.class_value, wrapper.clone(), Vec::new())?;
+        }
+        Ok(wrapper)
     }
 
     /// Fire a custom element's `attributeChangedCallback(name, old, new)` when
@@ -16765,6 +16840,37 @@ impl Vm {
                     _ => self.make_array_from_values(vec![]),
                 }
             }
+            // A template's children are not part of the page: they live in a
+            // fragment of their own, which is what makes a template inert and
+            // what every custom element clones from.
+            "content" if self.get_node_name(node_id).eq_ignore_ascii_case("template") => {
+                let fragment = match self.template_contents.get(&node_id) {
+                    Some(fragment) => *fragment,
+                    None => {
+                        let created = match self
+                            .host
+                            .mutate_dom(DomMutation::CreateDocumentFragment { window: WindowId(0) })
+                        {
+                            Ok(super::host::DomMutationResult::Node(id)) => id,
+                            _ => return Ok(Value::Undefined),
+                        };
+                        // Moving the children in is what the parser should have
+                        // done; doing it on first ask has the same effect.
+                        if let Ok(DomReadResult::Nodes(children)) = self
+                            .host
+                            .read_dom(DomRead::Children { node: node_id, elements_only: false })
+                        {
+                            let _ = self.host.mutate_dom(DomMutation::Append {
+                                parent: created,
+                                children,
+                            });
+                        }
+                        self.template_contents.insert(node_id, created);
+                        created
+                    }
+                };
+                Ok(self.make_dom_node_value(fragment))
+            }
             "childNodes" => {
                 let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: false });
                 match res {
@@ -17212,6 +17318,7 @@ impl Vm {
                     "innerHTML" => {
                         let html = self.to_string(&value);
                         let _ = self.host.mutate_dom(DomMutation::SetInnerHtml { node: node_id, html });
+                        self.connect_custom_elements(node_id)?;
                     }
                     "outerHTML" => {
                         let html = self.to_string(&value);

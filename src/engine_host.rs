@@ -3692,6 +3692,47 @@ mod tests {
     }
 
     #[test]
+    fn a_template_holds_its_children_in_a_content_fragment() {
+        // Components clone from a template. Without `content` there is nothing
+        // to clone, and the append that follows it throws on undefined.
+        let result = run_document_scripts(
+            r#"<html><body><template id="t"><b>hi</b><i>there</i></template><div id="out"></div><script>
+                var t = document.getElementById('t');
+                document.getElementById('out').appendChild(t.content.cloneNode(true));
+                document.title = [t.content.childNodes.length, document.getElementById('out').innerHTML].join("|");
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("2|<b>hi</b><i>there</i>"));
+    }
+
+    #[test]
+    fn a_custom_element_appended_by_a_script_comes_to_life() {
+        // Only the elements present when `define` ran used to be upgraded, so
+        // every component a page added after load stayed an empty tag.
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                var connected = 0;
+                class XLate extends HTMLElement {
+                    #n = 3;
+                    connectedCallback() { connected++; }
+                    peek() { return this.#n; }
+                }
+                customElements.define('x-late', XLate);
+                var made = document.createElement('x-late');
+                var before = [made.peek(), connected].join(",");
+                document.body.appendChild(made);
+                document.title = [before, connected].join("|");
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        // Constructed by createElement, connected only once it is in the page.
+        assert_eq!(result.title.as_deref(), Some("3,0|1"));
+    }
+
+    #[test]
     fn upgrading_an_element_runs_the_class_body_on_it() {
         // The element is on the page before its class is defined. The upgrade
         // has to run the constructor against that node, or every field the
