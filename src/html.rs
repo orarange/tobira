@@ -461,6 +461,18 @@ impl Builder {
         }
         while self.open.len() > 1 {
             let index = self.open.pop().expect("checked above");
+            // A cell or an `<object>` put a marker on the formatting list when
+            // it opened; closing past it takes the marker and everything after
+            // it off again. Left there, the `<i>` opened inside a cell was
+            // re-opened around the text that follows the table.
+            if starts_formatting_scope(self.tag_of(index))
+                && let Some(position) = self
+                    .formatting
+                    .iter()
+                    .rposition(|entry| *entry == Formatting::Marker)
+            {
+                self.formatting.truncate(position);
+            }
             if self.tag_of(index) == target {
                 break;
             }
@@ -3019,6 +3031,21 @@ mod tests {
         };
         assert_eq!(meta.tag_name, "meta");
         assert!(head_of(&document).children.is_empty());
+    }
+
+    #[test]
+    fn formatting_opened_in_a_cell_does_not_escape_the_table() {
+        // The `<i>` belongs to the cell. Left on the formatting list, it was
+        // re-opened around the text that follows the table.
+        let document = parse_document("<body><b><table><td></b><i></table>X");
+        let body = body_of(&document);
+        let Node::Element(bold) = &body.children[0] else {
+            panic!("expected the bold");
+        };
+        assert!(
+            matches!(bold.children.last(), Some(Node::Text(text)) if text == "X"),
+            "the text after the table should be bare"
+        );
     }
 
     #[test]
