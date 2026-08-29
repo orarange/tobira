@@ -1588,8 +1588,8 @@ pub fn parse_fragment(input: &str) -> Vec<Node> {
 fn is_head_only(name: &str) -> bool {
     matches!(
         name,
-        "base" | "basefont" | "bgsound" | "link" | "meta" | "noscript" | "script" | "style"
-            | "template" | "title"
+        "base" | "basefont" | "bgsound" | "link" | "meta" | "noframes" | "noscript" | "script"
+            | "style" | "template" | "title"
     )
 }
 
