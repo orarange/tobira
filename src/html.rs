@@ -191,6 +191,11 @@ struct Builder {
     document_comments: Vec<Node>,
     /// Whether `</head>` has been seen and the body has not started.
     after_head: bool,
+    /// How many of the document's last children were written after `</body>`.
+    ///
+    /// They belong to the body whatever their name: `</body><meta>` puts the
+    /// meta in the body, not in the head, because the head is long past.
+    trailing_body: usize,
     /// Whether anything that belongs to the body has been written yet.
     ///
     /// Before that, a stray end tag is simply dropped; the rules that invent
@@ -243,6 +248,7 @@ impl Builder {
             document_comments: Vec::new(),
             after_head: false,
             body_started: false,
+            trailing_body: 0,
             html_whitespace: Vec::new(),
             frameset_ok: true,
             frameset_allowed: None,
@@ -362,6 +368,9 @@ impl Builder {
     }
 
     fn insert(&mut self, kind: BuildKind) -> usize {
+        if self.after_body && self.open.len() == 1 {
+            self.trailing_body = self.trailing_body.saturating_add(1);
+        }
         // Characters that arrive one after another make one text node, not
         // several. A script reading `childNodes` or `nodeValue` sees what a
         // browser shows it only if they are joined here.
@@ -1053,6 +1062,7 @@ struct ParseExtras {
     frameset_allowed: bool,
     html_comments: Vec<Node>,
     html_whitespace: Vec<Node>,
+    trailing_body: usize,
     document_comments: Vec<Node>,
 }
 
@@ -1122,7 +1132,9 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
             } => {
                 let mut name = name;
                 let mut attributes = attributes;
-                builder.after_body = false;
+                // `after_body` stays set: once `</body>` has been written, what
+                // follows belongs to the body whatever its name. Only the
+                // "after `</html>`" state ends here.
                 builder.after_html = false;
 
                 // A frameset document holds frames. Markup written beside them
@@ -1487,6 +1499,7 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
         frameset_allowed: builder.frameset_allowed.unwrap_or(false),
         html_comments: std::mem::take(&mut builder.html_comments),
         html_whitespace: std::mem::take(&mut builder.html_whitespace),
+        trailing_body: builder.trailing_body,
         document_comments: std::mem::take(&mut builder.document_comments),
     };
     (builder.into_tree(), extras)
@@ -1618,7 +1631,12 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
     // something else has appeared, everything that follows is body content --
     // which is what "after head" means.
     let mut seen_body_content = !body.children.is_empty();
-    for node in loose {
+    // Whatever was written after `</body>` is body content, whatever its name.
+    let head_only_until = loose.len().saturating_sub(extras.trailing_body);
+    for (position, node) in loose.into_iter().enumerate() {
+        if position >= head_only_until {
+            seen_body_content = true;
+        }
         match &node {
             Node::Element(element) if !seen_body_content && is_head_only(&element.tag_name) => {
                 head.children.push(node);
@@ -2825,6 +2843,19 @@ mod tests {
             panic!("the second div should be inside the first");
         };
         assert_eq!(inner.tag_name, "div");
+    }
+
+    #[test]
+    fn what_is_written_after_the_body_closes_is_body_content() {
+        // The head is long past by then, so a `<meta>` there goes into the body
+        // rather than back up into the head.
+        let document = parse_document("<!doctype html></body><meta>");
+        let body = body_of(&document);
+        let Node::Element(meta) = &body.children[0] else {
+            panic!("the meta should be in the body");
+        };
+        assert_eq!(meta.tag_name, "meta");
+        assert!(head_of(&document).children.is_empty());
     }
 
     #[test]
