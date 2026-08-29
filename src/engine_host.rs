@@ -2814,6 +2814,248 @@ const RUNTIME_PRELUDE: &str = r#"
 
     g.DataView = DataView;
   }
+
+  if (typeof g.Intl === 'undefined') {
+    // Enough of Intl to keep pages running.
+    //
+    // Formatting is the everyday use: a count with thousands separators, a
+    // date in the reader's order, "3 days ago". None of it is optional to a
+    // page that calls it -- `new Intl.NumberFormat()` on a missing Intl throws
+    // and takes the rest of the script with it. What follows formats the way
+    // en-US does, which is the default a page gets when it names no locale.
+    var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+      'August', 'September', 'October', 'November', 'December'];
+    var DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    function group(digits) {
+      var out = '';
+      var count = 0;
+      for (var i = digits.length - 1; i >= 0; i--) {
+        out = digits.charAt(i) + out;
+        count++;
+        if (count % 3 === 0 && i > 0) out = ',' + out;
+      }
+      return out;
+    }
+
+    function pad(value, width) {
+      var text = String(Math.abs(value));
+      while (text.length < width) text = '0' + text;
+      return (value < 0 ? '-' : '') + text;
+    }
+
+    function formatNumber(value, options) {
+      options = options || {};
+      var style = options.style || 'decimal';
+      var number = Number(value);
+      if (!isFinite(number)) return String(number);
+      if (style === 'percent') number = number * 100;
+
+      var minFraction = options.minimumFractionDigits;
+      var maxFraction = options.maximumFractionDigits;
+      if (minFraction === undefined) {
+        minFraction = style === 'currency' ? 2 : 0;
+      }
+      if (maxFraction === undefined) {
+        maxFraction = style === 'currency' ? 2 : (style === 'percent' ? 0 : 3);
+        if (maxFraction < minFraction) maxFraction = minFraction;
+      }
+
+      var fixed = Math.abs(number).toFixed(maxFraction);
+      var parts = fixed.split('.');
+      var whole = parts[0];
+      var fraction = parts.length > 1 ? parts[1] : '';
+      // `maximum` means at most: trailing zeros past the minimum come off.
+      while (fraction.length > minFraction && fraction.charAt(fraction.length - 1) === '0') {
+        fraction = fraction.slice(0, -1);
+      }
+      var minInteger = options.minimumIntegerDigits || 1;
+      while (whole.length < minInteger) whole = '0' + whole;
+      var useGrouping = options.useGrouping === undefined ? true : !!options.useGrouping;
+      var text = (useGrouping ? group(whole) : whole) + (fraction ? '.' + fraction : '');
+      if (number < 0) text = '-' + text;
+      if (style === 'percent') return text + '%';
+      if (style === 'currency') {
+        var symbols = { USD: '$', EUR: '€', GBP: '£', JPY: '¥' };
+        var code = options.currency || 'USD';
+        return (symbols[code] || code + ' ') + text;
+      }
+      return text;
+    }
+
+    function NumberFormat(locales, options) {
+      if (!(this instanceof NumberFormat)) return new NumberFormat(locales, options);
+      this._options = options || {};
+      this._locale = (Array.isArray(locales) ? locales[0] : locales) || 'en-US';
+    }
+    NumberFormat.prototype.format = function (value) {
+      return formatNumber(value, this._options);
+    };
+    NumberFormat.prototype.formatToParts = function (value) {
+      return [{ type: 'literal', value: this.format(value) }];
+    };
+    NumberFormat.prototype.resolvedOptions = function () {
+      return { locale: this._locale, numberingSystem: 'latn', style: this._options.style || 'decimal' };
+    };
+    NumberFormat.supportedLocalesOf = function (locales) {
+      return Array.isArray(locales) ? locales.slice() : (locales ? [locales] : []);
+    };
+
+    function hour12(hour) {
+      var value = hour % 12;
+      return value === 0 ? 12 : value;
+    }
+
+    function formatDate(date, options) {
+      options = options || {};
+      var named = options.year || options.month || options.day || options.weekday
+        || options.hour || options.minute || options.second;
+      var wantsDate = !named || options.year || options.month || options.day || options.weekday;
+      var wantsTime = !named ? false : !!(options.hour || options.minute || options.second);
+      var pieces = [];
+      if (options.weekday) {
+        var day = DAYS[date.getDay()];
+        pieces.push(options.weekday === 'short' ? day.slice(0, 3) : day);
+      }
+      if (wantsDate) {
+        if (options.month === 'long' || options.month === 'short') {
+          var month = MONTHS[date.getMonth()];
+          if (options.month === 'short') month = month.slice(0, 3);
+          var text = month;
+          if (options.day) text += ' ' + date.getDate();
+          if (options.year) text += ', ' + date.getFullYear();
+          pieces.push(text);
+        } else if (!named) {
+          pieces.push((date.getMonth() + 1) + '/' + date.getDate() + '/' + date.getFullYear());
+        } else {
+          var bits = [];
+          if (options.month) bits.push(options.month === '2-digit' ? pad(date.getMonth() + 1, 2) : (date.getMonth() + 1));
+          if (options.day) bits.push(options.day === '2-digit' ? pad(date.getDate(), 2) : date.getDate());
+          if (options.year) bits.push(options.year === '2-digit' ? pad(date.getFullYear() % 100, 2) : date.getFullYear());
+          if (bits.length) pieces.push(bits.join('/'));
+        }
+      }
+      if (wantsTime) {
+        var clock = options.hour12 === undefined ? true : !!options.hour12;
+        var hours = clock ? hour12(date.getHours()) : date.getHours();
+        var time = clock ? String(hours) : pad(hours, 2);
+        if (options.minute || options.second || !options.hour) time += ':' + pad(date.getMinutes(), 2);
+        if (options.second) time += ':' + pad(date.getSeconds(), 2);
+        if (clock) time += ' ' + (date.getHours() < 12 ? 'AM' : 'PM');
+        pieces.push(time);
+      }
+      return pieces.join(', ');
+    }
+
+    function DateTimeFormat(locales, options) {
+      if (!(this instanceof DateTimeFormat)) return new DateTimeFormat(locales, options);
+      this._options = options || {};
+      this._locale = (Array.isArray(locales) ? locales[0] : locales) || 'en-US';
+    }
+    DateTimeFormat.prototype.format = function (value) {
+      var date = value === undefined ? new Date() : (value instanceof Date ? value : new Date(value));
+      return formatDate(date, this._options);
+    };
+    DateTimeFormat.prototype.formatToParts = function (value) {
+      return [{ type: 'literal', value: this.format(value) }];
+    };
+    DateTimeFormat.prototype.resolvedOptions = function () {
+      return { locale: this._locale, calendar: 'gregory', numberingSystem: 'latn', timeZone: 'UTC' };
+    };
+    DateTimeFormat.supportedLocalesOf = NumberFormat.supportedLocalesOf;
+
+    function RelativeTimeFormat(locales, options) {
+      if (!(this instanceof RelativeTimeFormat)) return new RelativeTimeFormat(locales, options);
+      this._options = options || {};
+      this._locale = (Array.isArray(locales) ? locales[0] : locales) || 'en-US';
+    }
+    RelativeTimeFormat.prototype.format = function (value, unit) {
+      var count = Number(value);
+      var name = String(unit).replace(/s$/, '');
+      var plural = Math.abs(count) === 1 ? name : name + 's';
+      if (count < 0) return Math.abs(count) + ' ' + plural + ' ago';
+      return 'in ' + count + ' ' + plural;
+    };
+    RelativeTimeFormat.prototype.formatToParts = function (value, unit) {
+      return [{ type: 'literal', value: this.format(value, unit) }];
+    };
+
+    function Collator(locales, options) {
+      if (!(this instanceof Collator)) return new Collator(locales, options);
+      this._options = options || {};
+    }
+    Collator.prototype.compare = function (a, b) {
+      a = String(a);
+      b = String(b);
+      if (this._options.sensitivity === 'base' || this._options.sensitivity === 'accent') {
+        a = a.toLowerCase();
+        b = b.toLowerCase();
+      }
+      return a < b ? -1 : (a > b ? 1 : 0);
+    };
+    Collator.prototype.resolvedOptions = function () { return { locale: 'en-US' }; };
+    Collator.supportedLocalesOf = NumberFormat.supportedLocalesOf;
+
+    function PluralRules(locales, options) {
+      if (!(this instanceof PluralRules)) return new PluralRules(locales, options);
+      this._options = options || {};
+    }
+    PluralRules.prototype.select = function (value) {
+      if (this._options.type === 'ordinal') {
+        var n = Math.abs(Number(value)) % 100;
+        var last = n % 10;
+        if (last === 1 && n !== 11) return 'one';
+        if (last === 2 && n !== 12) return 'two';
+        if (last === 3 && n !== 13) return 'few';
+        return 'other';
+      }
+      return Number(value) === 1 ? 'one' : 'other';
+    };
+    PluralRules.prototype.resolvedOptions = function () { return { locale: 'en-US' }; };
+
+    function ListFormat(locales, options) {
+      if (!(this instanceof ListFormat)) return new ListFormat(locales, options);
+      this._options = options || {};
+    }
+    ListFormat.prototype.format = function (list) {
+      var items = Array.prototype.slice.call(list || []);
+      var joiner = this._options.type === 'disjunction' ? 'or' : 'and';
+      if (items.length === 0) return '';
+      if (items.length === 1) return String(items[0]);
+      if (items.length === 2) return items[0] + ' ' + joiner + ' ' + items[1];
+      return items.slice(0, -1).join(', ') + ', ' + joiner + ' ' + items[items.length - 1];
+    };
+
+    g.Intl = {
+      NumberFormat: NumberFormat,
+      DateTimeFormat: DateTimeFormat,
+      RelativeTimeFormat: RelativeTimeFormat,
+      Collator: Collator,
+      PluralRules: PluralRules,
+      ListFormat: ListFormat,
+      getCanonicalLocales: function (locales) {
+        if (locales === undefined) return [];
+        return Array.isArray(locales) ? locales.slice() : [String(locales)];
+      }
+    };
+
+    // The methods that read as locale-aware on their own types go through the
+    // same formatters, so a page gets one answer whichever way it asks.
+    Number.prototype.toLocaleString = function (locales, options) {
+      return formatNumber(Number(this), options);
+    };
+    Date.prototype.toLocaleDateString = function (locales, options) {
+      return formatDate(this, options || { year: 'numeric', month: 'numeric', day: 'numeric' });
+    };
+    Date.prototype.toLocaleTimeString = function (locales, options) {
+      return formatDate(this, options || { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    };
+    Date.prototype.toLocaleString = function (locales, options) {
+      if (options) return formatDate(this, options);
+      return formatDate(this, { year: 'numeric', month: 'numeric', day: 'numeric' })
+        + ', ' + formatDate(this, { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    };
+  }
 })();
 "#;
 
@@ -3798,6 +4040,26 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.title.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn intl_formats_numbers_and_dates_the_way_a_browser_does() {
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                document.title = [
+                    (1234567.891).toLocaleString(),
+                    new Intl.NumberFormat('en-US', {style:'currency', currency:'USD'}).format(1234.5),
+                    new Date(0).toLocaleDateString(),
+                    new Intl.RelativeTimeFormat('en').format(-3, 'day')
+                ].join("|");
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(
+            result.title.as_deref(),
+            Some("1,234,567.891|$1,234.50|1/1/1970|3 days ago")
+        );
     }
 
     #[test]
