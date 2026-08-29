@@ -911,7 +911,12 @@ impl LineBuilder {
         link_node_id: Option<usize>,
     ) {
         self.width = self.width.saturating_add(draw_width);
-        self.line_height = self.line_height.max(draw_height);
+        // An image sits on the text's baseline, so the line still has to leave
+        // the room below it that the text's descenders need. Sizing the line to
+        // the image alone put the next line's text against its bottom edge.
+        self.line_height = self
+            .line_height
+            .max(draw_height.saturating_add(below_baseline(style)));
         let image = InlineImageSpec {
             src: src.to_string(),
             draw_width,
@@ -5741,13 +5746,9 @@ fn emit_line_impl(
 }
 
 fn is_block_level(node: &StyledNode) -> bool {
-    if matches!(
-        node,
-        StyledNode::Element(StyledElement { tag_name, .. }) if tag_name == "img"
-    ) {
-        return true;
-    }
-
+    // An `<img>` is inline unless the page says otherwise. Treating every one
+    // as a block put an icon written beside a word on a line of its own and
+    // pushed the words after it to a third line.
     match node {
         StyledNode::Element(element) => matches!(
             element.style.display,
@@ -5771,6 +5772,24 @@ fn is_hidden(node: &StyledNode) -> bool {
 
 fn char_width(style: &ComputedStyle, character: char, fonts: &mut FontContext) -> u32 {
     fonts.glyph_advance_px(character, style.font_size_px, style.font_family)
+}
+
+/// The room a line leaves below the baseline for the text's descenders.
+///
+/// Half of the leading -- the difference between the line height and the space
+/// the letters themselves take -- plus the descent.
+fn below_baseline(style: &ComputedStyle) -> u32 {
+    let font_size = style.font_size_px;
+    let line_height = if style.line_height > 0 {
+        (font_size as u64 * style.line_height as u64 / 1000) as u32
+    } else {
+        font_size.saturating_mul(3) / 2
+    };
+    // Roughly what a sans-serif face asks for: 1.15em of letters, a fifth of
+    // that below the baseline.
+    let content = font_size.saturating_mul(115) / 100;
+    let descent = font_size.saturating_mul(21) / 100;
+    line_height.saturating_sub(content) / 2 + descent
 }
 
 fn text_line_height(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
@@ -11081,6 +11100,27 @@ mod tests {
             "percent height should resolve to the parent's 40px, got {}",
             inner.height
         );
+    }
+
+    #[test]
+    fn an_image_stays_on_the_line_the_text_is_on() {
+        // An icon written beside a word belongs beside it. Treated as a block,
+        // every image took a line of its own and pushed the words after it to
+        // the next one.
+        let document = parse_document(
+            "<div style=\"width:600px\">text <img src=\"p.png\" data-scratch-src=\"p.png\" width=\"32\" height=\"32\"> after</div>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{margin:0;font-size:16px;line-height:1.5}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
+        // One line, not three. The image is missing here, so the line is the
+        // height of its alt text rather than of the image.
+        assert_eq!(layout.content_height, 24);
     }
 
     #[test]
