@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+mod entities;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     Element(Element),
@@ -295,6 +297,16 @@ fn close_element(stack: &mut Vec<Element>, target: &str) {
 /// same category must be implicitly closed first (e.g. a new <td> closes any
 /// already-open <td> that is within the same <tr>).
 fn maybe_auto_close(stack: &mut Vec<Element>, new_tag: &str) {
+    // Anything that is not head content ends the head, whether or not the
+    // markup wrote `</head>`. Without this, `<html><head><body>` left the body
+    // nested inside the head -- which is not a shape any browser produces.
+    if !is_head_only(new_tag)
+        && new_tag != "head"
+        && stack.iter().any(|element| element.tag_name == "head")
+    {
+        close_element(stack, "head");
+    }
+
     match new_tag {
         // Table cell: close any open td/th within the current tr context
         "td" | "th" => {
@@ -563,7 +575,7 @@ fn parse_attribute_value(input: &str, index: &mut usize) -> String {
         while *index < bytes.len() && bytes[*index] != quote {
             *index += 1;
         }
-        let value = decode_html_entities(&input[start..*index]);
+        let value = decode_attribute_entities(&input[start..*index]);
         if *index < bytes.len() {
             *index += 1;
         }
@@ -575,7 +587,7 @@ fn parse_attribute_value(input: &str, index: &mut usize) -> String {
         {
             *index += 1;
         }
-        decode_html_entities(&input[start..*index])
+        decode_attribute_entities(&input[start..*index])
     }
 }
 
@@ -660,45 +672,70 @@ fn find_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
 }
 
 fn decode_html_entities(input: &str) -> String {
+    decode_references(input, false)
+}
+
+/// Character references in an attribute value.
+///
+/// One rule differs: a named reference that stops short of its semicolon is
+/// *not* a reference when what follows is `=` or alphanumeric. That is what
+/// keeps `?a=b&copy=1` a query string rather than a copyright sign.
+fn decode_attribute_entities(input: &str) -> String {
+    decode_references(input, true)
+}
+
+fn decode_references(input: &str, in_attribute: bool) -> String {
     let mut output = String::with_capacity(input.len());
-    let mut remaining = input;
+    let mut rest = input;
 
-    while let Some(entity_start) = remaining.find('&') {
-        output.push_str(&remaining[..entity_start]);
-        remaining = &remaining[entity_start + 1..];
+    while let Some(start) = rest.find('&') {
+        output.push_str(&rest[..start]);
+        rest = &rest[start + 1..];
 
-        let Some(entity_end) = remaining.find(';') else {
-            output.push('&');
-            output.push_str(remaining);
-            return output;
-        };
+        if let Some(after) = rest.strip_prefix('#') {
+            let digits_end = after
+                .find(|c: char| !(c.is_ascii_alphanumeric()))
+                .unwrap_or(after.len());
+            let digits = &after[..digits_end];
+            let consumed = 1 + digits_end;
+            let terminated = rest[consumed..].starts_with(';');
+            match decode_numeric_entity(&format!("#{digits}")) {
+                Some(character) if !digits.is_empty() => {
+                    output.push(character);
+                    rest = &rest[consumed + usize::from(terminated)..];
+                }
+                _ => {
+                    output.push('&');
+                }
+            }
+            continue;
+        }
 
-        let entity = &remaining[..entity_end];
-        remaining = &remaining[entity_end + 1..];
-
-        if let Some(character) = decode_entity(entity) {
-            output.push(character);
-        } else {
-            output.push('&');
-            output.push_str(entity);
-            output.push(';');
+        match entities::longest_match(rest) {
+            Some((len, replacement)) => {
+                let name = &rest[..len];
+                let ends_with_semicolon = name.ends_with(';');
+                let next = rest[len..].chars().next();
+                // The attribute-value carve-out, and nothing else: outside an
+                // attribute the shorter legacy name always wins.
+                let blocked_in_attribute = in_attribute
+                    && !ends_with_semicolon
+                    && next.is_some_and(|c| c == '=' || c.is_ascii_alphanumeric());
+                if blocked_in_attribute {
+                    output.push('&');
+                } else {
+                    output.push_str(replacement);
+                    rest = &rest[len..];
+                }
+            }
+            None => {
+                output.push('&');
+            }
         }
     }
 
-    output.push_str(remaining);
+    output.push_str(rest);
     output
-}
-
-fn decode_entity(entity: &str) -> Option<char> {
-    match entity {
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" => Some('\''),
-        "nbsp" => Some('\u{00A0}'),
-        _ => decode_numeric_entity(entity),
-    }
 }
 
 fn decode_numeric_entity(entity: &str) -> Option<char> {
@@ -776,6 +813,58 @@ mod tests {
 
         assert_eq!(anchor.attribute("href"), Some("/docs"));
         assert_eq!(anchor.attribute("data-kind"), Some("nav"));
+    }
+
+    /// The standard's whole table, and the rules that decide where a
+    /// reference ends. Pages lean on hundreds of these names, and the two
+    /// awkward cases -- a legacy name without its semicolon, and the same name
+    /// inside an attribute -- are where browsers agree and a naive decoder
+    /// does not.
+    #[test]
+    fn decodes_the_standard_named_references() {
+        let text = |html: &str| -> String {
+            let document = parse_document(html);
+            let body = body_of(&document);
+            body.children
+                .iter()
+                .map(|child| match child {
+                    Node::Text(t) => t.clone(),
+                    _ => String::new(),
+                })
+                .collect()
+        };
+
+        // Names the old six-entry table never had.
+        assert_eq!(text("a&mdash;b"), "a\u{2014}b");
+        assert_eq!(text("a&rsquo;b"), "a\u{2019}b");
+        assert_eq!(text("a&hellip;b"), "a\u{2026}b");
+        assert_eq!(text("a&times;b"), "a\u{D7}b");
+
+        // The legacy set resolves without its semicolon; the rest does not.
+        assert_eq!(text("FOO&gtBAR"), "FOO>BAR");
+        assert_eq!(text("FOO&mdashBAR"), "FOO&mdashBAR");
+
+        // The longest name wins: `&notit;` is `not` followed by `it;`.
+        assert_eq!(text("&notit;"), "\u{AC}it;");
+        assert_eq!(text("&notin;"), "\u{2209}");
+    }
+
+    /// In an attribute, a semicolon-less name followed by `=` or an
+    /// alphanumeric is not a reference at all -- which keeps `?a=b&copy=1` a
+    /// query string.
+    #[test]
+    fn attribute_values_keep_ambiguous_ampersands() {
+        let href = |html: &str| -> String {
+            let document = parse_document(html);
+            let Node::Element(a) = &body_of(&document).children[0] else {
+                panic!("expected an element");
+            };
+            a.attribute("href").unwrap_or_default().to_string()
+        };
+
+        assert_eq!(href(r#"<a href="?a=b&copy=1">x</a>"#), "?a=b&copy=1");
+        assert_eq!(href(r#"<a href="?a=b&copy;=1">x</a>"#), "?a=b\u{A9}=1");
+        assert_eq!(href(r#"<a href="?a=b&copy 1">x</a>"#), "?a=b\u{A9} 1");
     }
 
     #[test]
@@ -1062,6 +1151,7 @@ mod html5lib_conformance {
         let mut by_file: std::collections::BTreeMap<String, (usize, usize)> =
             std::collections::BTreeMap::new();
         let mut samples: Vec<String> = Vec::new();
+        let mut sampled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
         for case in &cases {
             // Fragment parsing takes a context element this parser has no entry
@@ -1076,7 +1166,10 @@ mod html5lib_conformance {
             if got == case.document {
                 passed += 1;
                 entry.0 += 1;
-            } else if samples.len() < 12 {
+            } else if !sampled.contains(&case.file) {
+                // One per file, so the sample surveys rather than dwelling on
+                // whichever file sorts first.
+                sampled.insert(case.file.clone());
                 samples.push(format!(
                     "--- {} ---\ninput:    {:?}\nexpected:\n{}\ngot:\n{}",
                     case.file, case.data, case.document, got
