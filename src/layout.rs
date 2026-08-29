@@ -7846,6 +7846,20 @@ fn layout_flex_container(
         *cursor_y = (*cursor_y).max(floor);
     }
 
+    // A stated height holds the box open the same way. All the sizing above
+    // hangs off the items, so a flex box with none fell through to nothing but
+    // its own padding -- `display: flex; height: 36px` with no children came out
+    // 16px tall.
+    if let Some(LengthValue::Pixels(px)) = element.style.height {
+        let stated = if matches!(element.style.box_sizing, BoxSizing::BorderBox) {
+            px
+        } else {
+            px.saturating_add(element.style.padding.top)
+                .saturating_add(element.style.padding.bottom)
+        };
+        *cursor_y = (*cursor_y).max(background_top.saturating_add(stated));
+    }
+
     // Update background rect height
     let background_height = cursor_y.saturating_sub(background_top).max(1);
     if let Some(idx) = bg_cmd_index {
@@ -9461,6 +9475,21 @@ mod tests {
             .expect("the select should register a control");
 
         assert_eq!(control.value, "one");
+    }
+
+    #[test]
+    fn a_flex_box_with_no_items_still_keeps_its_height() {
+        // All of the flex sizing hangs off the items. With none, an empty flex
+        // box fell through to nothing but its own padding -- `display: flex;
+        // height: 36px` came out 16px tall.
+        let layout = probe_layout(
+            "<html><body><div style=\"box-sizing:border-box;display:flex;             width:60px;height:50px;background-color:#654321\"></div></body></html>",
+            640,
+        );
+        let box_ = probe_rect(&layout, 0x654321).expect("the box should be painted");
+
+        assert_eq!(box_.height, 50);
+        assert_eq!(box_.width, 60);
     }
 
     #[test]
