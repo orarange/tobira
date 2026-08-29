@@ -8235,10 +8235,20 @@ fn layout_flex_container(
         let stated = if matches!(element.style.box_sizing, BoxSizing::BorderBox) {
             px
         } else {
+            let border = if element.style.border_style_none {
+                0
+            } else {
+                element.style.border.top.saturating_add(element.style.border.bottom)
+            };
             px.saturating_add(element.style.padding.top)
                 .saturating_add(element.style.padding.bottom)
+                .saturating_add(border)
         };
-        *cursor_y = (*cursor_y).max(background_top.saturating_add(stated));
+        // The stated height is what the box is, border included when the page
+        // says `border-box`. Taking the larger of it and the content made a
+        // 60px bar with a one-pixel rule under it 61px tall, and everything
+        // below the bar moved down with it.
+        *cursor_y = background_top.saturating_add(stated);
     }
 
     // Update background rect height
@@ -11258,6 +11268,25 @@ mod tests {
         // One line, not three. The image is missing here, so the line is the
         // height of its alt text rather than of the image.
         assert_eq!(layout.content_height, 24);
+    }
+
+    #[test]
+    fn a_bar_with_a_rule_under_it_is_the_height_it_asked_for() {
+        // `height: 60px` with `box-sizing: border-box` and a 1px bottom border
+        // is 60px all in. Taking the larger of the stated height and what the
+        // flow came to made it 61, and the whole page below moved down.
+        let document = parse_document(
+            "<div style=\"display:flex;height:60px;border-bottom:1px solid black;box-sizing:border-box\">x</div><div style=\"height:10px\"></div>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{margin:0;font-size:16px;line-height:1.5}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
+        assert_eq!(layout.content_height, 70);
     }
 
     #[test]
