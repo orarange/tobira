@@ -6348,6 +6348,22 @@ fn layout_positioned_element(
     // when propagated back — avoids form_id going backwards if element is a <form>
     let current_form = form_context_for_element(element, &mut sub_context, current_form);
     let box_top = cursor_y;
+    // Both edges pinned with no height of its own: the offsets say how tall the
+    // box is. A sidebar written as `top: 0; bottom: 0` is meant to run the full
+    // height of what holds it, and sized by its content it came out a line tall
+    // -- or nothing at all when it held nothing.
+    let stretched;
+    let element = match (element.style.height, top, element.style.bottom) {
+        (None, Some(top), Some(bottom)) if cb_height > 0 => {
+            let bottom = resolve_offset(bottom, cb_height);
+            let height = (i64::from(cb_height) - i64::from(top) - i64::from(bottom)).max(0) as u32;
+            let mut copy = element.clone();
+            std::sync::Arc::make_mut(&mut copy.style).height = Some(LengthValue::Pixels(height));
+            stretched = copy;
+            &stretched
+        }
+        _ => element,
+    };
     layout_block_element(element, x, elem_width, &mut cursor_y, &mut sub_context, images, fonts, current_form);
     let box_height = cursor_y.saturating_sub(box_top);
 
@@ -10855,6 +10871,33 @@ mod tests {
             "percent height should resolve to the parent's 40px, got {}",
             inner.height
         );
+    }
+
+    #[test]
+    fn pinning_both_edges_gives_a_positioned_box_its_height() {
+        // A sidebar written as `top: 0; bottom: 0` runs the full height of what
+        // holds it. Sized by its content it came out a line tall, or nothing at
+        // all when it held nothing.
+        let document = parse_document(
+            "<div style=\"position:relative;height:100px\"><div id=\"side\" style=\"position:absolute;top:0;bottom:0;left:0;width:10px;background:#123456\"></div></div>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{margin:0}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
+        let side = layout
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Rect(rect) if rect.color == 0x123456 => Some(rect),
+                _ => None,
+            })
+            .expect("the sidebar should be drawn");
+        assert_eq!(side.height, 100);
     }
 
     #[test]
