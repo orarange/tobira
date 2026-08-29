@@ -1452,13 +1452,17 @@ fn maybe_auto_close(builder: &mut Builder, new_tag: &str) {
         "rt" | "rp" | "rb" | "rtc" if closes_enclosing(builder, "ruby", DEFAULT_SCOPE) => {
             generate_implied_end_tags(builder, "")
         }
+        // A heading closes an open heading of any level: `<h1>a<h2>b` gives two
+        // siblings, not a nested pair. Only the innermost element counts, so a
+        // heading inside a `<div>` inside a heading really does nest.
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
-            auto_close_before(
-                builder,
-                &["h1", "h2", "h3", "h4", "h5", "h6"],
-                PARAGRAPH_BOUNDARIES,
-            );
             auto_close_before(builder, &["p"], PARAGRAPH_BOUNDARIES);
+            if matches!(
+                builder.tag_of(builder.current()),
+                "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+            ) {
+                builder.open.pop();
+            }
         }
         // A new <p>, and many block elements, close an open <p>.
         tag if is_block_like(tag) => auto_close_before(builder, &["p"], PARAGRAPH_BOUNDARIES),
@@ -2214,6 +2218,7 @@ mod tests {
         let Node::Element(division) = &outer.children[0] else {
             panic!("expected the div inside it");
         };
+        assert_eq!(division.tag_name, "div");
         assert!(matches!(division.children.last(), Some(Node::Text(text)) if text == "foo"));
     }
 
