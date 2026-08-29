@@ -1299,12 +1299,21 @@ fn select_chosen_label(children: &[StyledNode]) -> Option<String> {
     None
 }
 
+/// The text a control shows, which is the text a reader sees.
+///
+/// A subtree that is not displayed contributes nothing -- and `<style>` is one
+/// of those. Google puts an inline `<style>` inside its buttons, so a button's
+/// caption came out as the stylesheet: the search box carried a control reading
+/// `.pIR5qb.PHjFye .Ccx...` where it should say `AI モード`.
 fn collect_text_content(children: &[StyledNode]) -> String {
     let mut text = String::new();
     for child in children {
         match child {
             StyledNode::Text(node) => text.push_str(&node.text),
-            StyledNode::Element(element) => text.push_str(&collect_text_content(&element.children)),
+            StyledNode::Element(element) if element.style.display != Display::None => {
+                text.push_str(&collect_text_content(&element.children));
+            }
+            StyledNode::Element(_) => {}
         }
     }
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -9525,6 +9534,24 @@ mod tests {
             .expect("the select should register a control");
 
         assert_eq!(control.value, "one");
+    }
+
+    #[test]
+    fn a_control_label_ignores_what_is_not_displayed() {
+        // Google puts an inline `<style>` inside its buttons. Walked as text,
+        // the stylesheet became the caption: the search box carried a control
+        // reading `.pIR5qb.PHjFye .Ccx...`.
+        let layout = probe_layout(
+            "<html><body><button><style>.a{color:red}</style>             <span style=\"display:none\">hidden</span>Go</button></body></html>",
+            400,
+        );
+        let button = layout
+            .controls
+            .iter()
+            .find(|control| matches!(control.kind, super::FormControlKind::Button))
+            .expect("the button should register a control");
+
+        assert_eq!(button.label, "Go");
     }
 
     #[test]
