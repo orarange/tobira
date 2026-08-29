@@ -1757,10 +1757,13 @@ fn is_block_like(tag: &str) -> bool {
 ///
 /// Everything up to the next `>` becomes the comment; without one it runs to
 /// the end of the file.
+/// A `<!` or `<?` that is not a comment or a doctype: everything up to the
+/// next `>` is the comment's text, and a NUL in it is shown rather than
+/// dropped.
 fn bogus_comment(input: &str, from: usize) -> (String, usize) {
     match input[from..].find('>') {
-        Some(offset) => (input[from..from + offset].to_string(), from + offset + 1),
-        None => (input[from..].to_string(), input.len()),
+        Some(offset) => (show_nulls(&input[from..from + offset]), from + offset + 1),
+        None => (show_nulls(&input[from..]), input.len()),
     }
 }
 
@@ -1889,8 +1892,8 @@ fn tokenize(input: &str) -> Vec<Token> {
                 // Everything up to `]]>` is literal, entities included.
                 let body = start + 9;
                 let (text, next) = match input[body..].find("]]>") {
-                    Some(offset) => (input[body..body + offset].to_string(), body + offset + 3),
-                    None => (input[body..].to_string(), bytes.len()),
+                    Some(offset) => (show_nulls(&input[body..body + offset]), body + offset + 3),
+                    None => (show_nulls(&input[body..]), bytes.len()),
                 };
                 if !text.is_empty() {
                     tokens.push(Token::Text(text));
@@ -1987,9 +1990,9 @@ fn tokenize(input: &str) -> Vec<Token> {
                 attributes,
                 self_closing: false,
             });
-            let rest = &input[index..];
+            let rest = show_nulls(&input[index..]);
             if !rest.is_empty() {
-                tokens.push(Token::Text(rest.to_string()));
+                tokens.push(Token::Text(rest));
             }
             break;
         }
@@ -2118,6 +2121,20 @@ fn is_void_element(name: &str) -> bool {
 /// would have shown, and a browser that has the feature must not build it: an
 /// `<iframe>` fallback full of `<p>` is text, not paragraphs.
 /// The text of a raw-text or escapable-text element, ready to insert.
+/// Show a NUL rather than drop it.
+///
+/// Ordinary content drops the character, but the places that keep their text
+/// exactly as written -- a CDATA section, `<plaintext>`, a bogus comment, the
+/// inside of a drawing -- put the replacement character in its place, so the
+/// position is still there to see.
+fn show_nulls(text: &str) -> String {
+    if text.contains('\0') {
+        text.replace('\0', "\u{FFFD}")
+    } else {
+        text.to_string()
+    }
+}
+
 fn raw_text_content(raw: &str, tag_name: &str, decodes: bool) -> String {
     // A newline straight after `<textarea>` or `<pre>` is swallowed, so that
     // writing the opening tag on its own line does not indent the value.
