@@ -6423,7 +6423,21 @@ fn layout_grid_container(
 ) {
     *cursor_y = advance_by_margin(*cursor_y, element.style.margin.top);
     let outer_x = offset_x_by_margin(x, element.style.margin.left);
-    let outer_width = outer_width_with_margins(available_width, element.style.margin.left, element.style.margin.right);
+    // A stated width is what the tracks are shared out of. Taking the space on
+    // offer instead sized `1fr` against the whole page, so a 400px grid laid its
+    // columns out across a thousand pixels and everything after the first one
+    // hung off the right edge. The flex container already read this.
+    let outer_width = match element.style.width {
+        Some(LengthValue::Pixels(px)) => px.max(1),
+        Some(LengthValue::Percent(pct)) => {
+            ((available_width as u64 * pct as u64 / 100) as u32).max(1)
+        }
+        _ => outer_width_with_margins(
+            available_width,
+            element.style.margin.left,
+            element.style.margin.right,
+        ),
+    };
     let background_top = *cursor_y;
 
     let border_h = if !element.style.border_style_none {
@@ -10840,6 +10854,36 @@ mod tests {
             inner.height >= 40,
             "percent height should resolve to the parent's 40px, got {}",
             inner.height
+        );
+    }
+
+    #[test]
+    fn a_grid_shares_its_own_width_between_the_tracks() {
+        // `1fr` measures against the grid, not against the page. Sized against
+        // the space on offer, a 400px grid laid its columns across a thousand
+        // pixels and everything after the first hung off the right edge.
+        let document = parse_document(
+            "<div style=\"display:grid;grid-template-columns:100px 1fr;width:400px\"><div id=\"a\" style=\"height:20px\"></div><div id=\"b\" style=\"height:20px\"></div></div>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{margin:0}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 1000, &mut fonts);
+        let widths: Vec<u32> = layout
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Rect(rect) if rect.height == 20 => Some(rect.width),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            widths.iter().all(|width| *width <= 400),
+            "no track may be wider than the grid: {widths:?}"
         );
     }
 

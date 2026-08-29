@@ -4388,17 +4388,25 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.flex_basis = parse_length_value(parts[2], parent_font_size);
             }
         }
-        "gap" | "grid-gap" => {
+        // `gap: <row> <column>`. This engine keeps one gap, so the row value
+        // wins and a single value sets both -- which is how nearly every sheet
+        // writes it.
+        "gap" | "grid-gap" | "row-gap" | "grid-row-gap" => {
+            let first = split_value_components(value)
+                .into_iter()
+                .next()
+                .unwrap_or_default();
+            if let Some(px) = parse_length(&first, parent_font_size) {
+                style.gap = px;
+            }
+        }
+        // A column gap on its own was dropped, so items written with only
+        // `column-gap` sat flush against each other.
+        "column-gap" | "grid-column-gap" => {
             if let Some(px) = parse_length(value, parent_font_size) {
                 style.gap = px;
             }
         }
-        "row-gap" => {
-            if let Some(px) = parse_length(value, parent_font_size) {
-                style.gap = px;
-            }
-        }
-        "column-gap" => {}
         // ── Grid properties ──────────────────────────────────────────────────
         "grid-template" => {
             apply_grid_template(style, value, parent_font_size);
