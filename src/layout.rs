@@ -11261,6 +11261,24 @@ mod tests {
     }
 
     #[test]
+    fn a_line_a_browser_fits_fits_here_too() {
+        // Chrome sets this sentence in 637px of 16px Arial. Rounding every
+        // letter's advance up before adding them made it 695px here, so it
+        // wrapped in a 680px column that a browser fills with one line.
+        let sentence = "Main column with a longer run of text that will wrap across a couple of lines in this column.";
+        let document = parse_document(&format!("<div style=\"width:680px\">{sentence}</div>"));
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet("body{margin:0;font-family:Arial;font-size:16px;line-height:1.5}"),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
+        assert_eq!(layout.content_height, 24, "the sentence should take one line");
+    }
+
+    #[test]
     fn a_long_word_overflows_unless_the_page_asks_for_it_to_break() {
         let sheet = parse_stylesheet("body{margin:0;font-size:16px;line-height:1.5}");
         let word = "supercalifragilisticexpialidocious word";

@@ -14,10 +14,15 @@ use crate::css::{Color, FontFamilyKind};
 const MIN_ADVANCE_PX: u32 = 4;
 
 const WINDOWS_SANS_FONT_FILES: &[&str] = &[
+    // Arial first, because that is what a browser on Windows uses for
+    // `sans-serif` and for the `font-family: Arial` nearly every page writes.
+    // Segoe UI is a wider face, so leading with it made every line of text
+    // about a tenth wider than a browser draws it -- enough to wrap a line
+    // that should have fitted, on every paragraph of every page.
+    "arial.ttf",
     "segoeui.ttf",
     "YuGothR.ttc",
     "meiryo.ttc",
-    "arial.ttf",
     // Symbol/emoji fallbacks: cover dingbats and pictographs (e.g. ⚛ U+269B)
     // that the text faces above lack. seguiemj renders via its monochrome
     // outlines (the rasterizer doesn't do COLR color layers).
@@ -34,10 +39,10 @@ const WINDOWS_SANS_FONT_FILES: &[&str] = &[
 /// it. Anything with no bold cut installed falls back to the regular stack and
 /// the smear.
 const WINDOWS_SANS_BOLD_FONT_FILES: &[&str] = &[
+    "arialbd.ttf",
     "segoeuib.ttf",
     "YuGothB.ttc",
     "meiryob.ttc",
-    "arialbd.ttf",
     "seguisym.ttf",
     "seguiemj.ttf",
 ];
@@ -131,6 +136,12 @@ struct GlyphKey {
 
 #[derive(Debug, Clone)]
 struct CachedGlyph {
+    /// The step to the next glyph, before rounding.
+    ///
+    /// Kept fractional because a run's width is the sum of these, rounded once:
+    /// rounding each one first added up. Arial's `M` steps 13.33px at 16px, and
+    /// a whole line of them came out a pixel wider per letter.
+    advance: f32,
     advance_px: u32,
     ascent_px: i32,
     mode: GlyphMode,
@@ -243,18 +254,24 @@ impl FontContext {
         font_family: FontFamilyKind,
         clip_top: i32,
     ) {
-        let mut cursor_x = x;
+        // Stepped fractionally and rounded for each glyph, so a run ends where
+        // it was measured to end rather than a pixel further on for every
+        // narrow letter in it.
+        let mut cursor = x as f32;
 
         for character in text.chars() {
             if character == '\n' {
                 continue;
             }
+            let cursor_x = cursor.round() as i32;
 
             // Stepped by the regular cut's advance, not the bold one's. Layout
             // measured this run before anything knew it would be drawn bold,
             // and a wider step here would walk the text out of the box it was
             // given.
-            let advance = self.glyph_advance_px(character, font_size_px, font_family);
+            let advance = self
+                .cached_glyph(character, font_size_px, font_family, false)
+                .advance;
             let glyph = self.cached_glyph(character, font_size_px, font_family, bold);
             let smear = glyph.synthetic_bold;
             draw_cached_glyph(buffer, width, height, cursor_x, y, glyph, color, clip_top);
@@ -281,7 +298,7 @@ impl FontContext {
                 }
             }
 
-            cursor_x = cursor_x.saturating_add(advance as i32);
+            cursor += advance;
         }
 
         if underline && !text.is_empty() {
@@ -331,15 +348,25 @@ impl FontContext {
             .advance_px
     }
 
+    /// How wide a run of text is.
+    ///
+    /// The fractional advances are added up and rounded once at the end. Adding
+    /// up rounded ones made every line about a twentieth too wide, which is
+    /// enough to wrap a line that a browser fits.
     pub fn text_width_px(
         &mut self,
         text: &str,
         font_size_px: u32,
         font_family: FontFamilyKind,
     ) -> u32 {
-        text.chars()
-            .map(|character| self.glyph_advance_px(character, font_size_px, font_family))
-            .sum()
+        let total: f32 = text
+            .chars()
+            .map(|character| {
+                self.cached_glyph(character, font_size_px, font_family, false)
+                    .advance
+            })
+            .sum();
+        total.round() as u32
     }
 
     pub fn line_height_px(&mut self, font_size_px: u32, font_family: FontFamilyKind) -> u32 {
@@ -420,6 +447,7 @@ impl FontContext {
         // '?' fallback for each (the "??" seen in headings with emoji).
         if matches!(character, '\u{FE00}'..='\u{FE0F}' | '\u{200B}'..='\u{200D}' | '\u{FEFF}' | '\u{2060}') {
             return CachedGlyph {
+                advance: 0.0,
                 advance_px: 0,
                 ascent_px,
                 synthetic_bold: false,
@@ -453,14 +481,16 @@ impl FontContext {
             }
 
             let (metrics, bitmap) = font.rasterize(character, font_size_px as f32);
-            let advance_px = if metrics.advance_width > 0.0 {
-                metrics.advance_width.ceil() as u32
+            let advance = if metrics.advance_width > 0.0 {
+                metrics.advance_width
             } else {
-                fallback_advance
+                fallback_advance as f32
             }
-            .max(MIN_ADVANCE_PX);
+            .max(MIN_ADVANCE_PX as f32);
+            let advance_px = (advance.round() as u32).max(MIN_ADVANCE_PX);
             if metrics.width == 0 || metrics.height == 0 {
                 return CachedGlyph {
+                    advance,
                     advance_px,
                     ascent_px,
                     synthetic_bold,
@@ -475,6 +505,7 @@ impl FontContext {
             }
 
             return CachedGlyph {
+                advance,
                 advance_px,
                 ascent_px,
                 synthetic_bold,
@@ -496,6 +527,7 @@ impl FontContext {
         });
 
         CachedGlyph {
+            advance: fallback_advance as f32,
             advance_px: fallback_advance,
             ascent_px,
             synthetic_bold,
@@ -869,6 +901,7 @@ fn lookup_bitmap_glyph(character: char) -> Option<[u8; 8]> {
 
 #[cfg(test)]
 mod tests {
+
     use super::{FontContext, estimated_glyph_advance_px, estimated_text_width_px};
     use crate::css::FontFamilyKind;
 
