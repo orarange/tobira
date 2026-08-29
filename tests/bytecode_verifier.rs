@@ -143,6 +143,8 @@ fn linear_effect(opcode: &Opcode) -> Option<(i64, i64)> {
         Opcode::ForOfNext => (1, 2),
         Opcode::SetProtoOf => (2, 1),
         Opcode::SetObjectLiteralProto => (2, 0),
+        // Pushes this module's `import.meta`; takes nothing.
+        Opcode::ImportMeta(_) => (0, 1),
         Opcode::EnterTry(_) | Opcode::LeaveTry | Opcode::EndFinally | Opcode::Nop => (0, 0),
         Opcode::Jump(_)
         | Opcode::JumpIfTrue(_)

@@ -18001,6 +18001,7 @@ mod tests {
         let chunk = Compiler::new(&program)
             .with_module_context(ModuleContext {
                 self_key: self_key.clone(),
+                meta_url: String::new(),
                 imports: Default::default(),
                 dynamic_imports: Default::default(),
             })
@@ -18028,6 +18029,7 @@ mod tests {
         let chunk = Compiler::new(&program)
             .with_module_context(ModuleContext {
                 self_key: self_key.clone(),
+                meta_url: String::new(),
                 imports: Default::default(),
                 dynamic_imports: Default::default(),
             })
@@ -18088,6 +18090,7 @@ mod tests {
         let chunk = Compiler::new(&program)
             .with_module_context(ModuleContext {
                 self_key: self_key.clone(),
+                meta_url: String::new(),
                 imports: Default::default(),
                 dynamic_imports: Default::default(),
             })
@@ -18115,6 +18118,7 @@ mod tests {
         let chunk = Compiler::new(&program)
             .with_module_context(ModuleContext {
                 self_key: self_key.clone(),
+                meta_url: String::new(),
                 imports: std::iter::once(("./dep".to_string(), dep_key.clone())).collect(),
                 dynamic_imports: Default::default(),
             })
@@ -18160,6 +18164,7 @@ mod tests {
         let chunk = Compiler::new(&program)
             .with_module_context(ModuleContext {
                 self_key: self_key.clone(),
+                meta_url: String::new(),
                 imports: std::iter::once(("./dep".to_string(), dep_key.clone())).collect(),
                 dynamic_imports: Default::default(),
             })
@@ -18197,6 +18202,7 @@ mod tests {
         let chunk = Compiler::new(&program)
             .with_module_context(ModuleContext {
                 self_key: self_key.clone(),
+                meta_url: String::new(),
                 imports: std::iter::once(("./dep".to_string(), dep_key.clone())).collect(),
                 dynamic_imports: Default::default(),
             })

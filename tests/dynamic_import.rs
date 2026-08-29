@@ -25,6 +25,7 @@ fn import_literal_resolves_to_namespace() {
     .expect("module should parse");
     let chunk = Compiler::new(&program)
         .with_module_context(ModuleContext {
+            meta_url: String::new(),
             self_key: self_key.clone(),
             imports: Default::default(),
             dynamic_imports: std::iter::once(("./dep".to_string(), dep_key.clone())).collect(),
@@ -65,6 +66,7 @@ fn import_unknown_specifier_rejects() {
     .expect("module should parse");
     let chunk = Compiler::new(&program)
         .with_module_context(ModuleContext {
+            meta_url: String::new(),
             self_key: self_key.clone(),
             imports: Default::default(),
             dynamic_imports: Default::default(),

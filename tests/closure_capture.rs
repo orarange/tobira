@@ -106,17 +106,24 @@ fn arrow_this_in_array_callback() {
 
 #[test]
 fn regular_function_has_own_this() {
-    // A non-arrow nested function must NOT capture the outer `this`; called
-    // bare, its `this` is undefined, so reading a property throws.
+    // A non-arrow nested function does not capture the outer `this`. Called
+    // bare in a script, it gets the global object -- which is how a UMD wrapper
+    // finds one. Under `use strict` it gets undefined instead.
     run(r#"
         const o = {
             v: 1,
             get() {
+                function inner() { return this; }
+                return inner();
+            },
+            getStrict() {
+                'use strict';
                 function inner() { return typeof this; }
                 return inner();
             },
         };
-        assert(o.get() === 'undefined');
+        assert(o.get() === globalThis);
+        assert(o.getStrict() === 'undefined');
     "#);
 }
 

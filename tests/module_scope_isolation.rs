@@ -11,6 +11,7 @@ fn compile_module(source: &str, self_key: String, imports: HashMap<String, Strin
         .expect("module should parse");
     Compiler::new(&program)
         .with_module_context(ModuleContext {
+            meta_url: String::new(),
             self_key,
             imports,
             dynamic_imports: Default::default(),

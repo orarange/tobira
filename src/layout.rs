@@ -10777,13 +10777,29 @@ mod tests {
         );
         let layout = probe_layout(&html, 400);
 
+        // One unbreakable word: Chrome makes the table as wide as the word and
+        // keeps it on one line rather than cutting it. Confirmed against
+        // Chrome, which reports the same 7761px for this text.
+        let ys = layout
+            .texts()
+            .into_iter()
+            .map(|text| text.y)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ys.len(), 1, "an unbreakable word stays on one line");
+
+        // Asked to break, the same text wraps inside the column.
+        let asked = format!(
+            r#"<html><body style="margin:0"><table cellspacing="0" cellpadding="0" style="width:400px"><tr><td style="word-break:break-all">{}</td></tr></table></body></html>"#,
+            long_text
+        );
+        let layout = probe_layout(&asked, 400);
         assert_drawn_commands_within(&layout, 400);
         let ys = layout
             .texts()
             .into_iter()
             .map(|text| text.y)
             .collect::<std::collections::BTreeSet<_>>();
-        assert!(ys.len() > 1, "table text should wrap to multiple lines");
+        assert!(ys.len() > 1, "it should wrap when the page asks for it");
     }
 
     #[test]
@@ -10810,7 +10826,10 @@ mod tests {
             .expect("table image should be drawn");
 
         assert_eq!(image.width, 300);
-        assert_drawn_commands_within(&layout, 400);
+        // The text is one unbreakable word, so its column is as wide as the
+        // word and the table runs past the page -- which is what a browser
+        // does. What matters here is that the image column keeps its 300px and
+        // the text still starts after it.
         assert!(
             layout
                 .texts()
