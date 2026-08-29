@@ -1173,21 +1173,29 @@ fn decode_references(input: &str, in_attribute: bool) -> String {
         rest = &rest[start + 1..];
 
         if let Some(after) = rest.strip_prefix('#') {
-            let digits_end = after
-                .find(|c: char| !(c.is_ascii_alphanumeric()))
-                .unwrap_or(after.len());
-            let digits = &after[..digits_end];
-            let consumed = 1 + digits_end;
-            let terminated = rest[consumed..].starts_with(';');
-            match decode_numeric_entity(&format!("#{digits}")) {
-                Some(character) if !digits.is_empty() => {
-                    output.push(character);
-                    rest = &rest[consumed + usize::from(terminated)..];
-                }
-                _ => {
-                    output.push('&');
-                }
+            // A hexadecimal reference takes hex digits, a decimal one decimal
+            // digits, and the run stops at the first character that is not one.
+            // Reading to the end of the word instead made `&#xBAR` and
+            // `&#41BAR` unresolvable, where a browser reads `&#xBA` then `R`
+            // and `&#41` then `BAR`.
+            let (prefix_len, radix) = match after.as_bytes().first() {
+                Some(b'x') | Some(b'X') => (2, 16),
+                _ => (1, 10),
+            };
+            let body = &after[prefix_len - 1..];
+            let digits_end = body
+                .find(|c: char| !c.is_digit(radix))
+                .unwrap_or(body.len());
+            let digits = &body[..digits_end];
+            if digits.is_empty() {
+                output.push('&');
+                continue;
             }
+            let consumed = prefix_len + digits_end;
+            let terminated = rest[consumed..].starts_with(';');
+            let code = u32::from_str_radix(digits, radix).unwrap_or(0xFFFD);
+            output.push(numeric_reference_char(code));
+            rest = &rest[consumed + usize::from(terminated)..];
             continue;
         }
 
@@ -1216,6 +1224,30 @@ fn decode_references(input: &str, in_attribute: bool) -> String {
 
     output.push_str(rest);
     output
+}
+
+/// The character a numeric reference stands for, with the standard's
+/// substitutions applied.
+///
+/// Three groups do not mean what they say. Zero, the surrogates and anything
+/// past the last code point are all replaced. The 0x80..0x9F range is the
+/// famous one: those numbers name C1 controls, but the reference was almost
+/// always written by an author who meant the Windows-1252 character at that
+/// number -- a curly quote, an em dash -- so that is what browsers produce.
+fn numeric_reference_char(code: u32) -> char {
+    const WINDOWS_1252: [u32; 32] = [
+        0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+        0x2039, 0x0152, 0x008D, 0x017D, 0x008F, 0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+        0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178,
+    ];
+    let code = match code {
+        0 => 0xFFFD,
+        0x80..=0x9F => WINDOWS_1252[(code - 0x80) as usize],
+        0xD800..=0xDFFF => 0xFFFD,
+        c if c > 0x10FFFF => 0xFFFD,
+        c => c,
+    };
+    char::from_u32(code).unwrap_or('\u{FFFD}')
 }
 
 fn decode_numeric_entity(entity: &str) -> Option<char> {
@@ -1332,6 +1364,37 @@ mod tests {
     /// In an attribute, a semicolon-less name followed by `=` or an
     /// alphanumeric is not a reference at all -- which keeps `?a=b&copy=1` a
     /// query string.
+    /// A numeric reference takes only the digits of its own base, and three
+    /// ranges do not mean what they say.
+    #[test]
+    fn numeric_references_stop_at_the_first_non_digit() {
+        let text = |html: &str| -> String {
+            let document = parse_document(html);
+            body_of(&document)
+                .children
+                .iter()
+                .map(|child| match child {
+                    Node::Text(t) => t.clone(),
+                    _ => String::new(),
+                })
+                .collect()
+        };
+
+        // `R` is not a hex digit, and `B` is not a decimal one.
+        assert_eq!(text("FOO&#xBAR"), "FOO\u{BA}R");
+        assert_eq!(text("FOO&#41BAR"), "FOO)BAR");
+
+        // Written for Windows-1252, which is what the author meant.
+        assert_eq!(text("&#151;"), "\u{2014}");
+        assert_eq!(text("&#147;"), "\u{201C}");
+
+        // Zero, the surrogates and anything past the last code point are
+        // replaced.
+        assert_eq!(text("&#0;"), "\u{FFFD}");
+        assert_eq!(text("&#xD800;"), "\u{FFFD}");
+        assert_eq!(text("&#x110000;"), "\u{FFFD}");
+    }
+
     #[test]
     fn attribute_values_keep_ambiguous_ampersands() {
         let href = |html: &str| -> String {
