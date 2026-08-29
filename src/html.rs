@@ -337,13 +337,26 @@ impl Builder {
         // Characters that arrive one after another make one text node, not
         // several. A script reading `childNodes` or `nodeValue` sees what a
         // browser shows it only if they are joined here.
-        if let BuildKind::Text(text) = &kind
-            && !self.needs_fostering(None)
-            && let Some(&last) = self.nodes[self.current()].children.last()
-            && let BuildKind::Text(existing) = &mut self.nodes[last].kind
-        {
-            existing.push_str(text);
-            return last;
+        if let BuildKind::Text(text) = &kind {
+            // Where the run goes is where it joins: fostered text lands just
+            // before the table, so it joins whatever was fostered there before
+            // it rather than the last child of the table.
+            let neighbour = if self.needs_fostering(None) {
+                self.enclosing_table().and_then(|(table, parent)| {
+                    let position = self.nodes[parent].children.iter().position(|n| *n == table)?;
+                    position
+                        .checked_sub(1)
+                        .and_then(|before| self.nodes[parent].children.get(before).copied())
+                })
+            } else {
+                self.nodes[self.current()].children.last().copied()
+            };
+            if let Some(last) = neighbour
+                && let BuildKind::Text(existing) = &mut self.nodes[last].kind
+            {
+                existing.push_str(text);
+                return last;
+            }
         }
 
         let fostered = match &kind {
