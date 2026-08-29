@@ -294,6 +294,28 @@ impl Builder {
         }
     }
 
+    /// Put `child` in front of the table `inside` belongs to.
+    fn foster_before(&mut self, inside: usize, child: usize) {
+        let mut table = inside;
+        while !matches!(self.tag_of(table), "table") {
+            match self.nodes[table].parent {
+                Some(parent) => table = parent,
+                None => break,
+            }
+        }
+        let Some(parent) = self.nodes[table].parent else {
+            self.attach(inside, child);
+            return;
+        };
+        let position = self.nodes[parent]
+            .children
+            .iter()
+            .position(|node| *node == table)
+            .unwrap_or(self.nodes[parent].children.len());
+        self.nodes[child].parent = Some(parent);
+        self.nodes[parent].children.insert(position, child);
+    }
+
     /// The innermost open table and the node holding it.
     fn enclosing_table(&self) -> Option<(usize, usize)> {
         let position = self.open.iter().rposition(|i| self.tag_of(*i) == "table")?;
@@ -707,7 +729,17 @@ impl Builder {
             }
 
             self.detach(last_node);
-            self.attach(common_ancestor, last_node);
+            // What the agency lifts out cannot be put back into a table any
+            // more than it could have been written there: it goes in front of
+            // the table, like anything else a table cannot hold.
+            if matches!(
+                self.tag_of(common_ancestor),
+                "table" | "tbody" | "tfoot" | "thead" | "tr"
+            ) {
+                self.foster_before(common_ancestor, last_node);
+            } else {
+                self.attach(common_ancestor, last_node);
+            }
 
             // A fresh copy of the formatting element takes everything the
             // furthest block held.
@@ -2696,6 +2728,22 @@ mod tests {
             .filter(|child| matches!(child, Node::Doctype(_)))
             .count();
         assert_eq!(doctypes, 1);
+    }
+
+    #[test]
+    fn what_the_adoption_agency_lifts_out_of_a_table_goes_in_front_of_it() {
+        let document = parse_document("<body><table><i>a<b>b<div>c</i>");
+        let body = body_of(&document);
+        // The italic, then the bold the agency split out, then the table.
+        let tags: Vec<&str> = body
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                Node::Element(element) => Some(element.tag_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tags, vec!["i", "b", "table"]);
     }
 
     #[test]
