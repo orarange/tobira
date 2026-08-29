@@ -67,9 +67,9 @@ enum Token {
 }
 
 pub fn parse_document(input: &str) -> Node {
-    let mut document = parse_document_body(input);
+    let (mut document, frameset_allowed) = parse_document_body(input);
     if let Node::Element(root) = &mut document {
-        ensure_document_structure(root);
+        ensure_document_structure(root, frameset_allowed);
     }
     document
 }
@@ -115,6 +115,15 @@ struct Builder {
     nodes: Vec<BuildNode>,
     /// The elements currently open, innermost last. Index 0 is the document.
     open: Vec<usize>,
+    /// Whether a `<frameset>` would still be honoured.
+    ///
+    /// A frameset replaces the body, so it is only allowed while the body is
+    /// effectively empty. Text and most content elements settle the question:
+    /// once a page has shown something, a later `<frameset>` is ignored rather
+    /// than throwing that content away.
+    frameset_ok: bool,
+    /// What `frameset_ok` was when the first `<frameset>` arrived.
+    frameset_allowed: Option<bool>,
     /// Formatting elements that are still in force.
     ///
     /// `<b>a<p>b</p>c` puts the bold inside the paragraph too: the `<b>` is
@@ -136,6 +145,8 @@ impl Builder {
                 parent: None,
             }],
             open: vec![0],
+            frameset_ok: true,
+            frameset_allowed: None,
             formatting: Vec::new(),
         }
     }
@@ -545,6 +556,38 @@ fn starts_formatting_scope(tag: &str) -> bool {
 ///
 /// Meeting one of these means the author forgot to close the foreign element,
 /// so the parser leaves it rather than nesting a paragraph inside a drawing.
+/// Start tags after which a `<frameset>` is no longer honoured.
+///
+/// The standard's list is not a category so much as a record of what browsers
+/// settled on: anything that puts something on the page, or that a form needs.
+fn clears_frameset_ok(tag: &str) -> bool {
+    matches!(
+        tag,
+        "pre" | "listing"
+            | "li"
+            | "dd"
+            | "dt"
+            | "button"
+            | "applet"
+            | "marquee"
+            | "object"
+            | "table"
+            | "area"
+            | "br"
+            | "embed"
+            | "img"
+            | "image"
+            | "keygen"
+            | "wbr"
+            | "hr"
+            | "textarea"
+            | "xmp"
+            | "iframe"
+            | "noembed"
+            | "select"
+    )
+}
+
 fn breaks_out_of_foreign_content(tag: &str) -> bool {
     matches!(
         tag,
@@ -669,7 +712,7 @@ fn adjust_foreign_names(
     }
 }
 
-fn parse_document_body(input: &str) -> Node {
+fn parse_document_body(input: &str) -> (Node, bool) {
     let tokens = tokenize(input);
     let mut builder = Builder::new();
 
@@ -677,6 +720,12 @@ fn parse_document_body(input: &str) -> Node {
         match token {
             Token::Text(text) => {
                 if !text.is_empty() {
+                    // Text on the page settles it: a later frameset would have
+                    // to discard what the reader can already see. Text in the
+                    // head does not count, since none of it is shown.
+                    if !builder.is_open("head") && text.trim().is_empty() == false {
+                        builder.frameset_ok = false;
+                    }
                     // Text belongs inside whatever formatting is still in
                     // force, so any that has fallen off the stack is re-opened
                     // around it first.
@@ -737,6 +786,23 @@ fn parse_document_body(input: &str) -> Node {
                 }
                 if !is_special(&name) {
                     builder.reconstruct_formatting();
+                }
+
+                if clears_frameset_ok(&name)
+                    || (name == "input"
+                        && attributes.get("type").map(String::as_str) != Some("hidden"))
+                {
+                    builder.frameset_ok = false;
+                }
+                if name == "frameset" && !builder.is_open("frameset") {
+                    if !builder.frameset_ok {
+                        // Too late to replace the body, so the tag is dropped
+                        // rather than left in the middle of the page.
+                        continue;
+                    }
+                    if builder.frameset_allowed.is_none() {
+                        builder.frameset_allowed = Some(true);
+                    }
                 }
 
                 let starts_scope = starts_formatting_scope(&name);
@@ -822,11 +888,13 @@ fn parse_document_body(input: &str) -> Node {
         }
     }
 
-    builder.into_tree()
+    let frameset_allowed = builder.frameset_allowed.unwrap_or(false);
+    (builder.into_tree(), frameset_allowed)
 }
 
 pub fn parse_fragment(input: &str) -> Vec<Node> {
-    let Node::Element(root) = parse_document_body(input) else {
+    let (tree, _) = parse_document_body(input);
+    let Node::Element(root) = tree else {
         return Vec::new();
     };
     root.children
@@ -853,7 +921,28 @@ fn is_head_only(name: &str) -> bool {
 /// Done as a pass over the finished tree rather than as insertion modes inside
 /// the parser: the shape is what pages and scripts observe, and this reaches it
 /// without disturbing the tag handling that real pages already depend on.
-fn ensure_document_structure(root: &mut Element) {
+/// Lift the frameset out of wherever the markup left it.
+///
+/// The parser pops everything open when it accepts a frameset, so a
+/// `<frameset>` written inside a paragraph still ends up as the document's
+/// own -- the paragraph goes away with the rest of the body.
+fn take_first_frameset(children: &mut Vec<Node>) -> Option<Node> {
+    for index in 0..children.len() {
+        if matches!(&children[index], Node::Element(e) if e.tag_name == "frameset") {
+            return Some(children.remove(index));
+        }
+    }
+    for child in children.iter_mut() {
+        if let Node::Element(element) = child {
+            if let Some(found) = take_first_frameset(&mut element.children) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn ensure_document_structure(root: &mut Element, frameset_allowed: bool) {
     // A doctype, and any comment written before the markup proper, belong to
     // the document itself rather than inside `<html>` -- which is where a
     // browser puts them, and where `document.doctype` looks for one.
@@ -938,20 +1027,14 @@ fn ensure_document_structure(root: &mut Element) {
 
     // A frameset document has no body: the frameset takes its place. Browsers
     // put `html > head + frameset` on screen and leave the body out entirely.
-    let frameset = body
-        .children
-        .iter()
-        .position(|child| matches!(child, Node::Element(e) if e.tag_name == "frameset"))
-        .filter(|_| {
-            body.children.iter().all(|child| match child {
-                // Neither renders, and neither carries anything this walk wants.
-                Node::Comment(_) | Node::Doctype(_) => Default::default(),
-                Node::Element(e) => matches!(e.tag_name.as_str(), "frameset" | "noframes"),
-                Node::Text(text) => text.trim().is_empty(),
-            })
-        });
+    // The frameset takes the body's place, and the body's contents go with it:
+    // by the time the parser accepted the frameset it had already decided that
+    // nothing worth keeping had been written.
+    let frameset = frameset_allowed
+        .then(|| take_first_frameset(&mut body.children))
+        .flatten();
     let second = match frameset {
-        Some(index) => body.children.remove(index),
+        Some(node) => node,
         None => Node::Element(body),
     };
 
@@ -1355,6 +1438,11 @@ fn is_void_element(name: &str) -> bool {
         name,
         "area"
             | "base"
+            // Obsolete, but a browser still parses them, and pages from the
+            // era that used them are still on the web.
+            | "basefont"
+            | "bgsound"
+            | "keygen"
             | "frame"
             | "br"
             | "col"
@@ -1660,6 +1748,30 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_frameset_after_content_is_ignored() {
+        // The table is already on the page, so the frameset cannot take the
+        // body's place -- and it is dropped rather than drawn inside the table.
+        let document = parse_document("<table><frameset>");
+        let body = body_of(&document);
+        let Node::Element(table) = &body.children[0] else {
+            panic!("expected a table");
+        };
+        assert_eq!(table.tag_name, "table");
+        assert!(table.children.is_empty(), "the frameset should be gone");
+    }
+
+    #[test]
+    fn a_frameset_after_only_whitespace_still_replaces_the_body() {
+        let document = parse_document("<p> <frameset><frame>");
+        let html = html_of(&document);
+        let Some(Node::Element(frameset)) = html.children.get(1) else {
+            panic!("expected head then frameset");
+        };
+        assert_eq!(frameset.tag_name, "frameset");
+        assert_eq!(frameset.children.len(), 1);
+    }
+
     #[test]
     fn svg_keeps_its_own_namespace_and_capitalisation() {
         let document = parse_document("<body><svg viewbox=\"0 0 1 1\"><clippath></clippath></svg>");
