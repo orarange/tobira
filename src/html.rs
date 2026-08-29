@@ -927,11 +927,21 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
     let input = normalise_newlines(input);
     let tokens = tokenize(&input);
     let mut seen_doctype = false;
+    // `<pre>` is nearly always written with its content starting on the next
+    // line. That first newline is not part of the content, so it is dropped --
+    // otherwise every preformatted block on the web begins with a blank line.
+    let mut skip_leading_newline = false;
     let mut builder = Builder::new();
 
     for token in tokens {
         match token {
             Token::Text(text) => {
+                let text = if skip_leading_newline {
+                    text.strip_prefix('\n').unwrap_or(&text).to_string()
+                } else {
+                    text
+                };
+                skip_leading_newline = false;
                 if !text.trim().is_empty() {
                     // Writing anything again puts the parser back in the body,
                     // however many closing tags came before it.
@@ -1060,6 +1070,7 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 if !self_closing {
                     builder.open.push(index);
                 }
+                skip_leading_newline = matches!(builder.tag_of(index), "pre" | "listing");
                 if starts_scope {
                     builder.formatting.push(Formatting::Marker);
                 } else if formatting && !self_closing {
@@ -1764,6 +1775,20 @@ fn tokenize(input: &str) -> Vec<Token> {
             }
         }
 
+        if name == "plaintext" {
+            // Nothing after `<plaintext>` is markup, not even its own end tag.
+            tokens.push(Token::StartTag {
+                name,
+                attributes,
+                self_closing: false,
+            });
+            let rest = &input[index..];
+            if !rest.is_empty() {
+                tokens.push(Token::Text(rest.to_string()));
+            }
+            break;
+        }
+
         if !self_closing && matches!(name.as_str(), "svg" | "math") {
             foreign_depth += 1;
         }
@@ -2205,6 +2230,36 @@ mod tests {
     /// awkward cases -- a legacy name without its semicolon, and the same name
     /// inside an attribute -- are where browsers agree and a naive decoder
     /// does not.
+    #[test]
+    fn a_pre_block_drops_the_newline_after_its_opening_tag() {
+        // Preformatted blocks are nearly always written with the content
+        // starting on the next line. Keeping that newline would begin every
+        // one of them with a blank line.
+        let document = parse_document("<body><pre>\nfoo\n</pre>");
+        let body = body_of(&document);
+        let Node::Element(block) = &body.children[0] else {
+            panic!("expected a pre");
+        };
+        let Node::Text(text) = &block.children[0] else {
+            panic!("expected the text");
+        };
+        assert_eq!(text, "foo\n");
+    }
+
+    #[test]
+    fn nothing_after_plaintext_is_markup() {
+        let document = parse_document("<body><plaintext><p>a</plaintext>b");
+        let body = body_of(&document);
+        let Node::Element(block) = &body.children[0] else {
+            panic!("expected a plaintext");
+        };
+        assert_eq!(block.children.len(), 1);
+        let Node::Text(text) = &block.children[0] else {
+            panic!("expected one run of text");
+        };
+        assert_eq!(text, "<p>a</plaintext>b");
+    }
+
     #[test]
     fn a_heading_end_tag_closes_whichever_heading_is_innermost() {
         // `</h1>` closes the h3, not the h1: the algorithm pops until any
