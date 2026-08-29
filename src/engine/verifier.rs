@@ -349,6 +349,7 @@ fn stack_effect(op: &Opcode) -> (i64, i64, ControlFlow) {
         | Opcode::GetGlobal(_)
         | Opcode::GetGlobalOptional(_)
         | Opcode::DynamicImport
+        | Opcode::ImportMeta(_)
         | Opcode::LoadArguments
         | Opcode::MakeClosure(_)
         | Opcode::MakeObject

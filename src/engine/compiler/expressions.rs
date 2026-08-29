@@ -161,7 +161,16 @@ impl<'a> super::FunctionCompiler<'a> {
                 self.emit(Opcode::LoadNewTarget);
                 Ok(())
             }
-            ExpressionNode::ImportMeta(_) => Err(CompileError::Unimplemented("import.meta")),
+            ExpressionNode::ImportMeta(_) => {
+                let url = self
+                    .module_context
+                    .as_ref()
+                    .map(|ctx| ctx.meta_url.clone())
+                    .unwrap_or_default();
+                let index = self.add_string_constant(url)?;
+                self.emit(Opcode::ImportMeta(index));
+                Ok(())
+            }
             ExpressionNode::Assign(assign) => self.compile_assignment_expression(assign),
             ExpressionNode::Unary(unary) => self.compile_unary_expression(unary),
             ExpressionNode::Update(update) => self.compile_update_expression(update),

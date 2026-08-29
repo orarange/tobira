@@ -27,6 +27,11 @@ pub enum Opcode {
     /// is absent. Used for `typeof undeclaredName`.
     GetGlobalOptional(u16),
     DynamicImport,
+    /// Push this module's `import.meta`, whose URL is the named constant.
+    ///
+    /// One object per module, so `import.meta.foo = 1` in one place is visible
+    /// in another -- which is what makes it usable as a per-module scratchpad.
+    ImportMeta(u16),
     /// Build an `arguments` array from the current frame's call arguments.
     LoadArguments,
 

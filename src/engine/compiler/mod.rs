@@ -87,6 +87,8 @@ struct FunctionCompileOptions {
 #[derive(Debug, Clone)]
 pub struct ModuleContext {
     pub self_key: String,
+    /// The URL this module was fetched from, which `import.meta.url` reports.
+    pub meta_url: String,
     pub imports: HashMap<String, String>,
     pub dynamic_imports: HashMap<String, String>,
 }
@@ -124,6 +126,7 @@ impl<'a> Compiler<'a> {
             self.module_context.clone().or_else(|| {
                 Some(ModuleContext {
                     self_key: "\u{0}module:test".to_string(),
+                    meta_url: String::new(),
                     imports: HashMap::new(),
                     dynamic_imports: HashMap::new(),
                 })

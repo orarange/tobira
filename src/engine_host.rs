@@ -2792,6 +2792,7 @@ impl EngineSession {
                     vm.set_global_object(record.key.clone());
                     let module_ctx = ModuleContext {
                         self_key: record.key.clone(),
+                        meta_url: record.src_url.clone(),
                         imports,
                         dynamic_imports,
                     };
@@ -3688,6 +3689,22 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.title.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn import_meta_reports_the_module_url() {
+        // Bundlers emit `import.meta.url` to find the assets that sit beside a
+        // module. Without it, the whole module fails to compile and every
+        // script that depends on it never runs.
+        let result = run_document_scripts(
+            r#"<html><body><script type="module">
+                import.meta.marked = true;
+                document.title = [typeof import.meta.url, String(import.meta.marked)].join("|");
+            </script></body></html>"#,
+            "http://localhost/page.html",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("string|true"));
     }
 
     #[test]

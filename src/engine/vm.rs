@@ -1419,6 +1419,8 @@ pub struct Vm {
     string_cache: HashMap<String, GcRef<JsString>>,
     fuel: u32,
     object_prototype: Option<GcRef<JsObject>>,
+    /// One `import.meta` per module URL.
+    import_meta: HashMap<String, GcRef<JsObject>>,
     function_prototype: Option<GcRef<JsObject>>,
     array_prototype: Option<GcRef<JsObject>>,
     string_prototype: Option<GcRef<JsObject>>,
@@ -1756,6 +1758,7 @@ impl Vm {
             string_cache: HashMap::new(),
             fuel: 1_000_000,
             object_prototype: None,
+            import_meta: HashMap::new(),
             function_prototype: None,
             array_prototype: None,
             string_prototype: None,
@@ -2504,6 +2507,36 @@ impl Vm {
                     }
                 };
                 self.stack.push(value);
+            }
+            Opcode::ImportMeta(index) => {
+                let Some(Constant::String(url)) =
+                    self.current_proto()?.constants.get(index as usize).cloned()
+                else {
+                    return Err(VmError::RangeError(format!(
+                        "import.meta url constant {index} out of range"
+                    )));
+                };
+                let object = match self.import_meta.get(&url) {
+                    Some(existing) => *existing,
+                    None => {
+                        // The same object every time this module asks, so a
+                        // property one part of it sets is there for the rest.
+                        let proto = self.object_prototype_ref();
+                        let object = self.allocate_ordinary_object(Some(proto));
+                        let url_value = self.make_string_value(&url);
+                        self.define_data_property(
+                            object,
+                            PropertyKey::from("url"),
+                            url_value,
+                            true,
+                            true,
+                            true,
+                        );
+                        self.import_meta.insert(url.clone(), object);
+                        object
+                    }
+                };
+                self.stack.push(Value::Object(object));
             }
             Opcode::LoadUndefined => self.stack.push(Value::Undefined),
             Opcode::LoadNull => self.stack.push(Value::Null),
