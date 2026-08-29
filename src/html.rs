@@ -1828,7 +1828,13 @@ fn tokenize(input: &str) -> Vec<Token> {
             index += 2;
             skip_whitespace(input, &mut index);
             let name_start = index;
-            while index < bytes.len() && is_tag_name_char(bytes[index]) {
+            // The name runs until whitespace, a slash or `>`; nothing else ends
+            // it. `</p<p>` names one tag called `p<p`, which closes nothing --
+            // so the paragraph stays open and the text after it stays inside.
+            while index < bytes.len()
+                && !bytes[index].is_ascii_whitespace()
+                && !matches!(bytes[index], b'/' | b'>')
+            {
                 index += 1;
             }
             let name = input[name_start..index].to_ascii_lowercase();
@@ -1948,6 +1954,13 @@ fn tokenize(input: &str) -> Vec<Token> {
             if !rest.is_empty() {
                 tokens.push(Token::Text(rest.to_string()));
             }
+            break;
+        }
+
+        // A tag the file ends in the middle of never becomes an element: the
+        // standard drops it, and so `<di` at the end of a document leaves
+        // nothing behind rather than an element nobody wrote.
+        if !input[name_start..].contains('>') {
             break;
         }
 
