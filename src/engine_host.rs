@@ -1559,15 +1559,12 @@ impl BrowserHost {
     /// Parse an HTML fragment and build arena nodes for its top-level children
     /// (returned detached — the caller decides where they go).
     fn build_fragment_children(&mut self, html: &str) -> Vec<usize> {
-        let fragment = parse_document(html);
-        match &fragment {
-            Node::Element(element) => element
-                .children
-                .iter()
-                .map(|child| self.build_from_node(child))
-                .collect(),
-            Node::Text(_) => vec![self.build_from_node(&fragment)],
-        }
+        // A fragment, not a document: `innerHTML = '<span>x</span>'` puts a
+        // span inside the element, not a whole `<html><head></head><body>`.
+        crate::html::parse_fragment(html)
+            .iter()
+            .map(|child| self.build_from_node(child))
+            .collect()
     }
 
     fn parse_and_set_inner_html(&mut self, parent: usize, html: &str) {
@@ -1578,10 +1575,9 @@ impl BrowserHost {
         self.nodes[parent].children.clear();
 
         // Parse the fragment via the real HTML parser, then graft its children.
-        let fragment = parse_document(html);
-        if let Node::Element(element) = &fragment {
-            let child_indices: Vec<usize> = element
-                .children
+        let fragment_children = crate::html::parse_fragment(html);
+        {
+            let child_indices: Vec<usize> = fragment_children
                 .iter()
                 .map(|child| self.build_from_node(child))
                 .collect();
@@ -2136,10 +2132,9 @@ impl Host for BrowserHost {
                     .body_idx()
                     .or_else(|| self.html_idx())
                     .unwrap_or(self.document);
-                let fragment = parse_document(&html);
-                if let Node::Element(element) = &fragment {
-                    let child_indices: Vec<usize> = element
-                        .children
+                let fragment_children = crate::html::parse_fragment(&html);
+                {
+                    let child_indices: Vec<usize> = fragment_children
                         .iter()
                         .map(|child| self.build_from_node(child))
                         .collect();

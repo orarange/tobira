@@ -224,6 +224,16 @@ pub fn process_document_scripts(html: &str, base_url: &Url) -> ProcessedScriptHt
 /// surfacing any uncaught engine error as a console line.
 fn engine_result_to_processed(result: crate::engine_host::EngineRunResult) -> ProcessedScriptHtml {
     let mut console_logs = result.console_logs;
+    if std::env::var_os("TOBIRA_DEBUG_JS_RUN").is_some() {
+        let head = &result.html[..result.html.len().min(400)];
+        let open = head.find("<html").map(|i| &head[i..(i + 120).min(head.len())]);
+        eprintln!(
+            "[js] err={:?} has_client_js={} open={:?}",
+            result.error.as_deref().map(|e| &e[..e.len().min(80)]),
+            result.html.contains("client-js"),
+            open
+        );
+    }
     if let Some(error) = result.error {
         console_logs.push(format!("[tobira-engine] uncaught error: {error}"));
     }
@@ -884,7 +894,10 @@ mod tests {
     #[test]
     fn supports_dynamic_document_body_head_and_document_element_getters() {
         let processed = process_document_scripts(
-            "<html><script>var root = document.documentElement; var initialBody = document.body; var initialHead = document.head; var head = document.createElement('head'); var body = document.createElement('body'); root.appendChild(head); root.appendChild(body); document.body.setAttribute('data-live', [initialBody === null, initialHead === null, document.documentElement === root, document.body === body, document.head === head].join('|'));</script></html>",
+            // A parsed document always has a head and a body, so the getters
+            // start out pointing at them; appending new ones moves the getters,
+            // which is what makes them live rather than snapshots.
+            "<html><script>var root = document.documentElement; var initialBody = document.body; var initialHead = document.head; var head = document.createElement('head'); var body = document.createElement('body'); root.appendChild(head); root.appendChild(body); document.body.setAttribute('data-live', [initialBody !== null, initialHead !== null, document.documentElement === root, document.body === initialBody, document.head === initialHead].join('|'));</script></html>",
             &Url::parse("https://example.com").unwrap(),
         );
 

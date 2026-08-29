@@ -5943,7 +5943,7 @@ mod tests {
                     <div style=\"height:1000px;background:#222222\"></div>";
         let styled = build_styled_tree(
             &parse_document(html),
-            &parse_stylesheet(""),
+            &parse_stylesheet("body { margin: 0 }"),
             1280,
             &InteractiveState::default(),
         );
@@ -6010,7 +6010,7 @@ mod tests {
                     <div style=\"height:1000px;background:#00ff00\"></div>";
         let styled = build_styled_tree(
             &parse_document(html),
-            &parse_stylesheet(""),
+            &parse_stylesheet("body { margin: 0 }"),
             1280,
             &InteractiveState::default(),
         );

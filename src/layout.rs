@@ -8094,7 +8094,11 @@ mod percentage_sizing_tests {
 
     fn text_runs(css: &str, html: &str) -> Vec<TextCommand> {
         let doc = parse_document(html);
-        let sheet = parse_stylesheet(css);
+        // These measure the geometry inside the page, so the UA's 8px page
+        // margin is taken out of the way. The margin itself is browser
+        // behaviour and is checked where it belongs; carried here it would just
+        // add 8 to every expectation.
+        let sheet = parse_stylesheet(&format!("body {{ margin: 0 }} {css}"));
         let styled = build_styled_tree(&doc, &sheet, 1280, &InteractiveState::default());
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
@@ -9496,8 +9500,8 @@ mod tests {
         );
         let item = probe_rect(&layout, 0x123456).expect("the item should be painted");
 
-        // 8px of body margin, then (600 - 100) / 2 of free space.
-        assert_eq!(item.x, 258, "a wrapped line must honour justify-content: center");
+        // (600 - 100) / 2 of free space.
+        assert_eq!(item.x, 250, "a wrapped line must honour justify-content: center");
     }
 
     #[test]
@@ -10306,7 +10310,10 @@ mod tests {
         let document = parse_document(html);
         let styled = build_styled_tree(
             &document,
-            &parse_stylesheet(""),
+            // The UA's 8px page margin is real browser behaviour and is checked
+            // where it belongs; these probes measure the geometry inside the page,
+            // so it is taken out of the way rather than added to every expectation.
+            &parse_stylesheet("body { margin: 0 }"),
             1280,
             &crate::css::InteractiveState::default(),
         );
@@ -11355,7 +11362,7 @@ mod tests {
 
         let html = r#"<div style="overflow:hidden;height:50px;background:#ffffff"><div style="height:100px;background:#ff0000">Content</div></div>"#;
         let doc = parse_document(html);
-        let stylesheet = parse_stylesheet("");
+        let stylesheet = parse_stylesheet("body { margin: 0 }");
         let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
@@ -11642,7 +11649,8 @@ mod tests {
 
         let html = r#"<div class="page"><div class="c">CONTENT</div></div>"#;
         let stylesheet = parse_stylesheet(
-            r#".page { display: grid;
+            r#"body { margin: 0 }
+               .page { display: grid;
                       grid-template-columns: [pad-start] 40px [content-start] 1fr [content-end] 40px [pad-end]; }
                .c { grid-column: content; }"#,
         );
