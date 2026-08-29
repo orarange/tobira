@@ -1606,6 +1606,7 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
     let mut body = Element::new("body");
     let mut loose: Vec<Node> = Vec::new();
     let mut before_head: Vec<Node> = Vec::new();
+    let mut body_at: Option<usize> = None;
     for child in html.children.drain(..) {
         match child {
             // A second `<body>` tag does not start a second body. Its
@@ -1618,6 +1619,11 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
                 head.children.extend(element.children);
             }
             Node::Element(element) if element.tag_name == "body" => {
+                // Where the body was written, so that what came before it can
+                // still go to the head and what came after cannot.
+                if body_at.is_none() {
+                    body_at = Some(loose.len());
+                }
                 for (name, value) in element.attributes {
                     body.attributes.entry(name).or_insert(value);
                 }
@@ -1630,9 +1636,13 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
     // Before any body content, head-only elements go to the head; once
     // something else has appeared, everything that follows is body content --
     // which is what "after head" means.
-    let mut seen_body_content = !body.children.is_empty();
-    // Whatever was written after `</body>` is body content, whatever its name.
-    let head_only_until = loose.len().saturating_sub(extras.trailing_body);
+    let mut seen_body_content = false;
+    // Whatever was written after `</body>`, or after the `<body>` tag itself,
+    // is body content whatever its name.
+    let head_only_until = loose
+        .len()
+        .saturating_sub(extras.trailing_body)
+        .min(body_at.unwrap_or(usize::MAX));
     for (position, node) in loose.into_iter().enumerate() {
         if position >= head_only_until {
             seen_body_content = true;
@@ -2843,6 +2853,19 @@ mod tests {
             panic!("the second div should be inside the first");
         };
         assert_eq!(inner.tag_name, "div");
+    }
+
+    #[test]
+    fn a_title_before_the_body_tag_still_goes_to_the_head() {
+        // The body already having content must not send everything written
+        // before the `<body>` tag into it.
+        let document = parse_document("<title>T</title><body><div>x</div></body>");
+        let head = head_of(&document);
+        let Node::Element(title) = &head.children[0] else {
+            panic!("the title should be in the head");
+        };
+        assert_eq!(title.tag_name, "title");
+        assert_eq!(body_of(&document).children.len(), 1);
     }
 
     #[test]
