@@ -1731,7 +1731,7 @@ impl<'a> super::FunctionCompiler<'a> {
             Some(name.clone()),
             declaration.parameters(),
             declaration.body(),
-            declaration.body().strict(),
+            declaration.body().strict() || self.is_strict,
             declaration.is_async(),
             declaration.is_generator(),
             false,

@@ -6447,6 +6447,20 @@ impl Vm {
             }
         }
 
+        // A function that is not strict and is called with no receiver sees the
+        // global object as `this`. Bundles lean on it to find the global:
+        // `(function(){ return this })()` is how a UMD wrapper and regenerator
+        // both look one up, and `undefined` there makes the next property read
+        // throw before any of the module has run.
+        let this_value = match this_value {
+            Value::Undefined | Value::Null if !closure.proto.is_strict => self
+                .globals
+                .get("window")
+                .cloned()
+                .unwrap_or(Value::Undefined),
+            other => other,
+        };
+
         Ok(CallFrame {
             proto: closure.proto,
             ip: 0,

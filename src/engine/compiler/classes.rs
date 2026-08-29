@@ -94,7 +94,7 @@ impl<'a> super::FunctionCompiler<'a> {
                 name.clone(),
                 constructor.parameters(),
                 constructor.body(),
-                constructor.body().strict(),
+                true, // a class body is strict code, always
                 false,
                 false,
                 false,
@@ -244,7 +244,7 @@ impl<'a> super::FunctionCompiler<'a> {
             Some(self.class_element_name_string(method.name())),
             method.parameters(),
             method.body(),
-            method.body().strict(),
+            true, // a class body is strict code, always
             is_async,
             is_generator,
             false,

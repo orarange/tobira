@@ -4043,6 +4043,41 @@ mod tests {
     }
 
     #[test]
+    fn a_sloppy_function_called_bare_sees_the_global_as_this() {
+        // `(function(){ return this })()` is how a UMD wrapper and regenerator
+        // both find the global. Undefined there throws on the next property
+        // read, before any of the module has run.
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                var bare = (function(){ return this })();
+                var strict = (function(){ 'use strict'; return this })();
+                document.title = [bare === window, strict === undefined].join("|");
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("true|true"));
+    }
+
+    #[test]
+    fn strictness_reaches_the_functions_written_inside_it() {
+        // A module is strict code, and so is everything declared in it. The
+        // flag was read off each function's own body, so only a function with
+        // its own directive counted.
+        let result = run_document_scripts(
+            r#"<html><body><script type="module">
+                let inner = typeof (function(){ return this })();
+                class C { m() { return this; } }
+                let method = typeof (new C().m).call(undefined);
+                document.title = [inner, method].join("|");
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("undefined|undefined"));
+    }
+
+    #[test]
     fn a_top_level_var_exists_before_its_own_initializer_runs() {
         // `var _ = _ || {}` is how a bundle opens its namespace. Reading the
         // name being declared has to give undefined, not throw.
