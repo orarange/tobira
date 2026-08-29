@@ -1149,10 +1149,18 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 if builder.is_open("select") {
                     match name.as_str() {
                         "option" | "optgroup" | "hr" | "script" | "template" | "style" => {}
+                        // A table tag ends the select only when there is a
+                        // table around it: a select fostered out of one must
+                        // not swallow the rows that follow. On an ordinary page
+                        // the same tag is simply dropped, like anything else a
+                        // select cannot hold.
+                        "caption" | "table" | "tbody" | "tfoot" | "thead" | "tr" | "td" | "th"
+                            if !builder.is_open("table") =>
+                        {
+                            continue;
+                        }
                         // These end the select and are then read normally --
-                        // the author clearly meant to be past it. A table tag
-                        // does too: a select fostered out of a table must not
-                        // swallow the rows that follow it.
+                        // the author clearly meant to be past it.
                         "select" | "input" | "keygen" | "textarea" | "caption" | "table"
                         | "tbody" | "tfoot" | "thead" | "tr" | "td" | "th" => {
                             builder.close("select");
