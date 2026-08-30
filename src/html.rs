@@ -212,6 +212,9 @@ struct Builder {
     /// Attributes from a `<body>` tag written when the body was already under
     /// way. There is only one body, so they belong to the one being built.
     body_attributes: BTreeMap<String, String>,
+    /// The same for an `<html>` tag written after the document had already
+    /// begun: it names no new element, but it still carries them.
+    html_attributes: BTreeMap<String, String>,
     /// Whether anything that belongs to the body has been written yet.
     ///
     /// Before that, a stray end tag is simply dropped; the rules that invent
@@ -267,6 +270,7 @@ impl Builder {
             // mode and leaves it when a doctype says so.
             quirks: true,
             body_attributes: BTreeMap::new(),
+            html_attributes: BTreeMap::new(),
             body_started: false,
             trailing_body: 0,
             head_children: None,
@@ -1169,6 +1173,7 @@ struct ParseExtras {
     trailing_body: usize,
     head_children: Option<usize>,
     body_attributes: BTreeMap<String, String>,
+    html_attributes: BTreeMap<String, String>,
     document_comments: Vec<Node>,
 }
 
@@ -1293,6 +1298,16 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
 
                 if matches!(name.as_str(), "html" | "body") && builder.is_open(&name) {
                     builder.merge_attributes(&name, attributes);
+                    continue;
+                }
+                // There is one `<html>`, and it is whatever opened the
+                // document. A second one written anywhere else -- inside a
+                // frameset, say -- names no element; only its attributes
+                // survive, folded into the one that exists.
+                if name == "html" && builder.open.len() > 1 {
+                    for (key, value) in attributes {
+                        builder.html_attributes.entry(key).or_insert(value);
+                    }
                     continue;
                 }
                 // There is one head. A second `<head>` while the first is open,
@@ -1469,6 +1484,13 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     builder.frameset_document = true;
                 }
 
+                // A slash before `>` closes the tag only where it means
+                // something: a void element (where it is redundant) or one in
+                // SVG or MathML (where it is XML). On an ordinary HTML element
+                // it is a parse error and nothing more -- `<div id="x"/>` opens
+                // a div that stays open, and the text after it goes inside.
+                let self_closing =
+                    self_closing && (is_void_element(&name) || namespace != Namespace::Html);
                 let starts_scope = starts_formatting_scope(&name);
                 let formatting = is_formatting(&name);
                 let index = builder.insert(BuildKind::Element {
@@ -1712,6 +1734,7 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
         trailing_body: builder.trailing_body,
         head_children: builder.head_children,
         body_attributes: std::mem::take(&mut builder.body_attributes),
+        html_attributes: std::mem::take(&mut builder.html_attributes),
         document_comments: std::mem::take(&mut builder.document_comments),
     };
     (builder.into_tree(), extras)
@@ -1892,6 +1915,9 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
     // Before any body content, head-only elements go to the head; once
     // something else has appeared, everything that follows is body content --
     // which is what "after head" means.
+    for (name, value) in extras.html_attributes {
+        html.attributes.entry(name).or_insert(value);
+    }
     for (name, value) in extras.body_attributes {
         body.attributes.entry(name).or_insert(value);
     }
