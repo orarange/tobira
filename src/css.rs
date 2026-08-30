@@ -921,6 +921,165 @@ impl Default for ClearSide {
 // ComputedStyle
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// One computed property as a browser reports it.
+///
+/// `getComputedStyle` used to be answered from the `style` attribute and a
+/// table of per-tag defaults, so a rule in the page's own stylesheet was
+/// invisible to it: an element the CSS coloured red reported black, and a
+/// class that hid something reported that it was shown. Pages read this
+/// constantly -- to check `display`, to pick up a custom property, to size
+/// something against the current font.
+///
+/// Colours come back as `rgb(r, g, b)` and lengths as `Npx`, which is the
+/// shape a browser answers in and what code parses.
+pub fn computed_property_string(
+    style: &ComputedStyle,
+    property: &str,
+    root_vars: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    // A custom property is answered verbatim, trimmed, the way it was written.
+    //
+    // The ones a page declares on `:root` are kept apart from the tree, in the
+    // stylesheet, so they are looked for there when the element itself has not
+    // been given one -- which is the usual arrangement: a theme declares its
+    // whole palette on `:root` and everything below reads it.
+    if property.starts_with("--") {
+        return style
+            .custom_properties
+            .as_ref()
+            .and_then(|map| map.get(property))
+            .or_else(|| root_vars.get(property))
+            .map(|value| value.trim().to_string());
+    }
+
+    fn colour(value: Color) -> String {
+        let (red, green, blue) = ((value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff);
+        format!("rgb({red}, {green}, {blue})")
+    }
+    fn px(value: u32) -> String {
+        format!("{value}px")
+    }
+    fn signed_px(value: i32) -> String {
+        format!("{value}px")
+    }
+    fn length(value: Option<LengthValue>) -> String {
+        match value {
+            Some(LengthValue::Pixels(value)) => px(value),
+            Some(LengthValue::Percent(percent)) => format!("{percent}%"),
+            _ => "auto".to_string(),
+        }
+    }
+
+    Some(match property {
+        "display" => match style.display {
+            Display::Block => "block",
+            Display::Inline => "inline",
+            Display::InlineBlock => "inline-block",
+            Display::ListItem => "list-item",
+            Display::Contents => "contents",
+            Display::None => "none",
+            Display::Flex => "flex",
+            Display::InlineFlex => "inline-flex",
+            Display::Grid => "grid",
+            Display::InlineGrid => "inline-grid",
+        }
+        .to_string(),
+        // `visibility` is not answered here: it is folded into opacity when
+        // it is parsed, so hidden and fully transparent are the same thing by
+        // the time the style is computed. The caller's own reading stands.
+        "color" => colour(style.color),
+        "background-color" => match style.background_color {
+            Some(value) => colour(value),
+            None => "rgba(0, 0, 0, 0)".to_string(),
+        },
+        "border-color" => colour(style.border_color),
+        "font-size" => px(style.font_size_px),
+        "font-weight" => if style.font_weight { "700" } else { "400" }.to_string(),
+        "font-style" => if style.font_style_italic { "italic" } else { "normal" }.to_string(),
+        "line-height" => {
+            if style.line_height == 0 {
+                "normal".to_string()
+            } else {
+                px(style.font_size_px * style.line_height / 1000)
+            }
+        }
+        "opacity" => format!("{}", style.opacity as f32 / 255.0),
+        "position" => match style.position {
+            Position::Static => "static",
+            Position::Relative => "relative",
+            Position::Absolute => "absolute",
+            Position::Fixed => "fixed",
+            Position::Sticky => "sticky",
+        }
+        .to_string(),
+        "overflow" | "overflow-x" | "overflow-y" => match style.overflow {
+            Overflow::Visible => "visible",
+            Overflow::Hidden => "hidden",
+            Overflow::Scroll => "scroll",
+            Overflow::Auto => "auto",
+        }
+        .to_string(),
+        "float" => match style.float {
+            FloatSide::None => "none",
+            FloatSide::Left => "left",
+            FloatSide::Right => "right",
+        }
+        .to_string(),
+        "text-align" => match style.text_align {
+            TextAlign::Left => "left",
+            TextAlign::Right => "right",
+            TextAlign::Center => "center",
+        }
+        .to_string(),
+        "z-index" => match style.z_index {
+            Some(value) => value.to_string(),
+            None => "auto".to_string(),
+        },
+        "width" => length(style.width),
+        "height" => length(style.height),
+        "margin-top" => signed_px(style.margin.top),
+        "margin-right" => signed_px(style.margin.right),
+        "margin-bottom" => signed_px(style.margin.bottom),
+        "margin-left" => signed_px(style.margin.left),
+        "padding-top" => px(style.padding.top),
+        "padding-right" => px(style.padding.right),
+        "padding-bottom" => px(style.padding.bottom),
+        "padding-left" => px(style.padding.left),
+        "border-top-width" => px(if style.border_style_none { 0 } else { style.border.top }),
+        "border-right-width" => px(if style.border_style_none { 0 } else { style.border.right }),
+        "border-bottom-width" => px(if style.border_style_none { 0 } else { style.border.bottom }),
+        "border-left-width" => px(if style.border_style_none { 0 } else { style.border.left }),
+        "border-radius" => px(style.border_radius),
+        "text-transform" => match style.text_transform {
+            TextTransform::None => "none",
+            TextTransform::Uppercase => "uppercase",
+            TextTransform::Lowercase => "lowercase",
+            TextTransform::Capitalize => "capitalize",
+        }
+        .to_string(),
+        "text-indent" => signed_px(style.text_indent),
+        "letter-spacing" => {
+            if style.letter_spacing == 0 {
+                "normal".to_string()
+            } else {
+                signed_px(style.letter_spacing)
+            }
+        }
+        "white-space" => match style.white_space {
+            WhiteSpaceMode::Normal => "normal",
+            WhiteSpaceMode::Pre => "pre",
+            WhiteSpaceMode::NoWrap => "nowrap",
+        }
+        .to_string(),
+        "background-image" => match &style.background_image_url {
+            Some(url) => format!("url(\"{url}\")"),
+            None => "none".to_string(),
+        },
+        _ => return None,
+    })
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComputedStyle {
     pub display: Display,

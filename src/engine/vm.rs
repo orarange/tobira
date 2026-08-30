@@ -18166,6 +18166,22 @@ impl Vm {
     /// `inherit` walking up), inheritable properties fall back to the parent,
     /// and everything else gets a per-tag UA default.
     fn computed_style_value(&mut self, node: NodeId, prop: &str) -> String {
+        // What the cascade actually worked out, from the layout the page was
+        // given before its scripts ran. It already has the `style` attribute
+        // folded in, so it outranks the reading below -- which only knows the
+        // attribute and a table of per-tag defaults, and so could not see a
+        // single rule the page's own stylesheet wrote.
+        //
+        // It is the answer for the document as it was loaded. A script that
+        // changes a class and reads back straight away still gets the old one;
+        // the box tree it is asking about has not been rebuilt either.
+        if let Ok(DomReadResult::String(value)) = self.host.read_dom(DomRead::ComputedStyle {
+            node,
+            property: prop.to_string(),
+        }) {
+            return value;
+        }
+
         let inline = {
             let style = match self.host.read_dom(DomRead::Attribute {
                 node,

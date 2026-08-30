@@ -312,6 +312,14 @@ pub struct BrowserHost {
     /// viewport coordinates. Stale after a DOM mutation until the next layout
     /// feed (same as a real browser between reflows).
     geometry: HashMap<usize, DomRect>,
+    /// What the cascade worked out for each element, keyed the same way as
+    /// `geometry`. `getComputedStyle` used to be answered from the `style`
+    /// attribute and a table of per-tag defaults, so a rule in the page's
+    /// own stylesheet was invisible to it.
+    computed_styles: HashMap<usize, std::sync::Arc<crate::css::ComputedStyle>>,
+    /// The custom properties the page declares on `:root`, which are held in
+    /// the stylesheet rather than on any element.
+    root_custom_properties: std::collections::BTreeMap<String, String>,
     structural_changes: Vec<DomStructuralChange>,
 }
 
@@ -341,6 +349,8 @@ impl BrowserHost {
             slot_snapshots: HashMap::new(),
             observers: Vec::new(),
             geometry: HashMap::new(),
+            computed_styles: HashMap::new(),
+            root_custom_properties: std::collections::BTreeMap::new(),
             structural_changes: Vec::new(),
         };
         host.document = host.push(DomNode::document());
@@ -785,6 +795,16 @@ impl BrowserHost {
             }
         }
         None
+    }
+
+    /// Feed the cascade's answer for each element, keyed by tobira id.
+    pub fn set_computed_styles(
+        &mut self,
+        styles: Vec<(usize, std::sync::Arc<crate::css::ComputedStyle>)>,
+        root_custom_properties: std::collections::BTreeMap<String, String>,
+    ) {
+        self.computed_styles = styles.into_iter().collect();
+        self.root_custom_properties = root_custom_properties;
     }
 
     /// Feed element geometry from the browser's most recent layout. `rects` is
@@ -2033,6 +2053,22 @@ impl Host for BrowserHost {
             }
             DomRead::BoundingClientRect { node } => {
                 Ok(DomReadResult::Rect(self.bounding_client_rect(node.0 as usize)))
+            }
+            DomRead::ComputedStyle { node, property } => {
+                let found = self
+                    .tobira_id_for_handle(node.0 as usize)
+                    .and_then(|id| self.computed_styles.get(&id))
+                    .and_then(|style| {
+                        crate::css::computed_property_string(
+                            style,
+                            &property,
+                            &self.root_custom_properties,
+                        )
+                    });
+                Ok(match found {
+                    Some(value) => DomReadResult::String(value),
+                    None => DomReadResult::None,
+                })
             }
             // Every element whose box covers the point, deepest and last-drawn
             // first -- which is the order a browser hands them back, and its
@@ -4071,6 +4107,21 @@ const RUNTIME_PRELUDE: &str = r#"
 })();
 "#;
 
+/// Walk the styled tree in the order tobira ids are handed out.
+fn collect_styles(
+    node: &crate::css::StyledNode,
+    next_id: &mut usize,
+    out: &mut Vec<(usize, std::sync::Arc<crate::css::ComputedStyle>)>,
+) {
+    if let crate::css::StyledNode::Element(element) = node {
+        *next_id += 1;
+        out.push((*next_id, element.style.clone()));
+        for child in &element.children {
+            collect_styles(child, next_id, out);
+        }
+    }
+}
+
 impl EngineSession {
     /// Build the runtime, run the document's inline scripts, settle async
     /// deferred work, and return the runtime plus the initial snapshot.
@@ -4079,10 +4130,15 @@ impl EngineSession {
     /// The ids are the same preorder numbering the host hands out, which is
     /// what `set_geometry` is keyed on -- a test in this file pins the two
     /// together.
+    #[allow(clippy::type_complexity)]
     fn layout_geometry(
         html: &str,
         stylesheet_text: &str,
-    ) -> Vec<(usize, f32, f32, f32, f32)> {
+    ) -> (
+        Vec<(usize, f32, f32, f32, f32)>,
+        Vec<(usize, std::sync::Arc<crate::css::ComputedStyle>)>,
+        std::collections::BTreeMap<String, String>,
+    ) {
         let mut document = crate::html::parse_document(html);
         crate::browser::annotate_node_ids(&mut document);
         let viewport = crate::browser::style_viewport_width();
@@ -4100,7 +4156,7 @@ impl EngineSession {
             viewport,
             &mut fonts,
         );
-        layout
+        let rects = layout
             .element_hitboxes
             .iter()
             .map(|box_| {
@@ -4112,7 +4168,12 @@ impl EngineSession {
                     box_.height as f32,
                 )
             })
-            .collect()
+            .collect();
+        // The styled tree is walked in the same preorder the ids are handed
+        // out in, so the two line up without carrying the id in the tree.
+        let mut styles = Vec::new();
+        collect_styles(&styled, &mut 0, &mut styles);
+        (rects, styles, (*stylesheet.root_vars).clone())
     }
 
     pub fn start(html: &str, url: &str) -> (Self, EngineRunResult) {
@@ -4135,7 +4196,9 @@ impl EngineSession {
         stylesheet_text: &str,
     ) -> (Self, EngineRunResult) {
         let mut host = BrowserHost::from_html(html, url);
-        host.set_geometry(&Self::layout_geometry(html, stylesheet_text));
+        let (rects, styles, root_vars) = Self::layout_geometry(html, stylesheet_text);
+        host.set_geometry(&rects);
+        host.set_computed_styles(styles, root_vars);
         // Collect scripts in document order (inline + external `src`) and the base
         // URL to resolve relative `src` against, before the host moves into the Vm.
         let scripts = host.ordered_scripts();
@@ -5245,6 +5308,36 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.title.as_deref(), Some("120|40|box"));
+    }
+
+    #[test]
+    fn computed_style_reads_the_page_stylesheet() {
+        // It used to be answered from the `style` attribute and a table of
+        // per-tag defaults, so a rule the page wrote was invisible: an element
+        // the CSS coloured red reported black, and a class that hid something
+        // reported that it was shown. Checked against Chrome.
+        let result = run_document_scripts_with_styles(
+            r#"<html><body><div id="a">A</div><div id="b">B</div><div id="c" class="up">C</div><script>
+                function look(id) { return getComputedStyle(document.getElementById(id)); }
+                document.title = [
+                    look('a').color,
+                    look('a').fontSize,
+                    look('a').display,
+                    look('b').display,
+                    look('c').marginTop + ' ' + look('c').marginLeft,
+                    look('c').textTransform,
+                    look('c').fontWeight,
+                    look('a').getPropertyValue('--brand').trim(),
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+            ":root{--brand:#0af} #a{color:#c00;font-size:20px;display:inline-block}              #b{display:none} #c{margin:3px 4px 5px 6px} .up{text-transform:uppercase;font-weight:bold}",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(
+            result.title.as_deref(),
+            Some("rgb(204, 0, 0)|20px|inline-block|none|3px 6px|uppercase|700|#0af")
+        );
     }
 
     #[test]

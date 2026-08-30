@@ -270,6 +270,11 @@ pub enum DomRead {
         slot: NodeId,
         flatten: bool,
     },
+    /// One property of an element's computed style, as a browser reports it.
+    ComputedStyle {
+        node: NodeId,
+        property: String,
+    },
     /// The elements whose box covers a point, topmost first.
     ElementsFromPoint {
         x: f32,
