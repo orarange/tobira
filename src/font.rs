@@ -168,6 +168,8 @@ enum GlyphMode {
 #[derive(Debug, Clone, Copy)]
 struct CachedLineMetrics {
     ascent_px: i32,
+    /// How far the face reaches below the baseline, as a positive number.
+    descent_px: u32,
     /// What `line-height: normal` comes to for this face and size: the font's
     /// own ascent, descent and line gap added together.
     normal_line_px: u32,
@@ -384,6 +386,15 @@ impl FontContext {
             .max(1)
     }
 
+    /// How far below the baseline the face reaches, at this size.
+    ///
+    /// Half the leading is added on top of it when a line is taller than the
+    /// letters, which is what puts a line of text in the middle of its own
+    /// box.
+    pub fn descent_px(&mut self, font_size_px: u32, font_family: FontFamilyKind) -> u32 {
+        self.line_metrics(font_size_px, font_family).descent_px
+    }
+
     fn line_metrics(
         &mut self,
         font_size_px: u32,
@@ -404,11 +415,13 @@ impl FontContext {
                 font.horizontal_line_metrics(font_size_px as f32)
                     .map(|line| CachedLineMetrics {
                         ascent_px: line.ascent.ceil() as i32,
+                        descent_px: (-line.descent).ceil().max(0.0) as u32,
                         normal_line_px: line.new_line_size.round().max(1.0) as u32,
                     })
             })
             .unwrap_or(CachedLineMetrics {
                 ascent_px: font_size_px as i32,
+                descent_px: (font_size_px as f32 * 0.21).round() as u32,
                 // No face to ask: the ratio a browser lands on for the common
                 // text faces.
                 normal_line_px: (font_size_px as f32 * 1.15).round().max(1.0) as u32,

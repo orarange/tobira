@@ -433,6 +433,11 @@ pub enum TextAlign {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VerticalAlign {
+    /// The initial value, and the one that decides how nearly every inline box
+    /// sits: hung from the line's baseline. It was missing, and the default was
+    /// `Top`, so a box asking to be aligned to the top could not be told from
+    /// one that had asked for nothing.
+    Baseline,
     Top,
     Middle,
     Bottom,
@@ -1308,7 +1313,7 @@ impl ComputedStyle {
                 .unwrap_or(FontFamilyKind::Sans),
             text_align: parent.map(|s| s.text_align).unwrap_or(TextAlign::Left),
             text_wrap_balance: parent.map(|s| s.text_wrap_balance).unwrap_or(false),
-            vertical_align: VerticalAlign::Top,
+            vertical_align: VerticalAlign::Baseline,
             font_weight: parent.map(|s| s.font_weight).unwrap_or(false),
             underline: parent.map(|s| s.underline).unwrap_or(false),
             line_through: parent.map(|s| s.line_through).unwrap_or(false),
@@ -6405,6 +6410,7 @@ fn parse_text_align(input: &str) -> Option<TextAlign> {
 
 fn parse_vertical_align(input: &str) -> Option<VerticalAlign> {
     match input.trim().to_ascii_lowercase().as_str() {
+        "baseline" => Some(VerticalAlign::Baseline),
         "top" | "text-top" => Some(VerticalAlign::Top),
         "middle" | "center" => Some(VerticalAlign::Middle),
         "bottom" | "text-bottom" => Some(VerticalAlign::Bottom),

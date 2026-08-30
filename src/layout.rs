@@ -751,6 +751,12 @@ impl LayoutContext {
 /// line breaker treat it as one indivisible box, like an image.
 #[derive(Debug, Clone)]
 struct AtomicInline {
+    /// The box's own style, not the container's. `vertical-align` and
+    /// `overflow` decide where it sits on the line and are read off it; the
+    /// line was handed the container's style instead, so a box asking to be
+    /// aligned to the top of the line was hung from the baseline like any
+    /// other.
+    style: Arc<ComputedStyle>,
     commands: Vec<DrawCommand>,
     links: Vec<LinkCommand>,
     controls: Vec<FormControlCommand>,
@@ -921,6 +927,7 @@ impl LineBuilder {
         style: &Arc<ComputedStyle>,
         link_href: Option<&str>,
         link_node_id: Option<usize>,
+        fonts: &mut FontContext,
     ) {
         self.width = self.width.saturating_add(draw_width);
         // An image sits on the text's baseline, so the line still has to leave
@@ -928,7 +935,7 @@ impl LineBuilder {
         // the image alone put the next line's text against its bottom edge.
         self.line_height = self
             .line_height
-            .max(draw_height.saturating_add(below_baseline(style)));
+            .max(draw_height.saturating_add(below_baseline(style, fonts)));
         let image = InlineImageSpec {
             src: src.to_string(),
             draw_width,
@@ -950,14 +957,15 @@ impl LineBuilder {
         });
     }
 
-    fn push_atomic(&mut self, atomic: Box<AtomicInline>, style: &ComputedStyle) {
+    fn push_atomic(&mut self, atomic: Box<AtomicInline>, _container_style: &ComputedStyle) {
         self.width = self.width.saturating_add(atomic.width);
         self.line_height = self.line_height.max(atomic.height);
+        let style = atomic.style.clone();
         self.spans.push(LineSpan {
             text: String::new(),
             width: atomic.width,
             height: atomic.height,
-            style: Arc::new(style.clone()),
+            style,
             link_href: None,
             link_node_id: None,
             control: None,
@@ -2867,6 +2875,7 @@ fn layout_atomic_inline(
     }
 
     Some(AtomicInline {
+        style: element.style.clone(),
         commands: sub_context.commands,
         links: sub_context.links,
         controls: sub_context.controls,
@@ -3635,7 +3644,8 @@ fn layout_table_element(
 
         let content_area_height = cell_height.saturating_sub(padding.saturating_mul(2));
         let vertical_offset = match placement.cell.style.vertical_align {
-            VerticalAlign::Top => 0,
+            // A cell has no line to hang from, so its baseline is its top.
+            VerticalAlign::Baseline | VerticalAlign::Top => 0,
             VerticalAlign::Middle => content_area_height.saturating_sub(layout.content_height) / 2,
             VerticalAlign::Bottom => content_area_height.saturating_sub(layout.content_height),
         };
@@ -3793,10 +3803,39 @@ fn layout_table_element(
             }
             merge_fragment(context, layout, content_x, content_y);
         }
+
+        // The cell's own box. Only block boxes registered one, so asking a
+        // `<td>` where it is answered with zeros -- and a page that measures a
+        // table to line something up against it had nothing to go on.
+        if let Some(node_id) = element_node_id(placement.cell)
+            && !placement.cell.style.pointer_events_none
+        {
+            context.element_hitboxes.push(ElementHitbox {
+                node_id,
+                x: cell_x,
+                y: cell_y,
+                width: cell_width.max(1),
+                height: cell_height.max(1),
+                cursor_kind: placement.cell.style.cursor_kind,
+            });
+        }
     }
 
     let table_height = row_heights.iter().sum::<u32>()
         + spacing.saturating_mul(row_count.saturating_sub(1) as u32);
+    // And the table's own box, for the same reason the cells needed one.
+    if let Some(node_id) = element_node_id(element)
+        && !element.style.pointer_events_none
+    {
+        context.element_hitboxes.push(ElementHitbox {
+            node_id,
+            x: table_x,
+            y: *cursor_y,
+            width: table_width.max(1),
+            height: table_height.max(1),
+            cursor_kind: element.style.cursor_kind,
+        });
+    }
     context.next_control_id = next_control_id;
     context.next_form_id = next_form_id;
     *cursor_y = cursor_y.saturating_add(table_height);
@@ -4926,8 +4965,15 @@ fn layout_nowrap_fragments(
     for fragment in fragments {
         match fragment {
             InlineFragment::Atomic(atomic) => {
+                // The space written before the box is part of the line, the
+                // same as it is before an image. Dropped, `text <span>` came
+                // out four pixels narrower than the page asked for and
+                // everything after it on the line moved left.
+                if pending_space && !line.is_empty() {
+                    line.push_span(" ", &atomic.style, fonts, None, None);
+                }
                 line.push_atomic(atomic.clone(), container_style);
-                pending_space = true;
+                pending_space = false;
             }
             InlineFragment::LineBreak => {
                 // nowrap: ignore line breaks
@@ -4957,6 +5003,7 @@ fn layout_nowrap_fragments(
                     style,
                     link_href.as_deref(),
                     *link_node_id,
+                    fonts,
                 );
                 pending_space = true;
             }
@@ -5139,7 +5186,11 @@ fn layout_normal_fragments_at(
         }
         match fragment {
             InlineFragment::Atomic(atomic) => {
+                if pending_space && !line.is_empty() {
+                    line.push_span(" ", &atomic.style, fonts, None, None);
+                }
                 line.push_atomic(atomic.clone(), container_style);
+                pending_space = false;
             }
             InlineFragment::LineBreak => {
                 if ellipsis_mode {
@@ -5287,6 +5338,7 @@ fn layout_normal_fragments_at(
                     style,
                     link_href.as_deref(),
                     *link_node_id,
+                    fonts,
                 );
                 pending_space = true;
             }
@@ -5534,6 +5586,7 @@ fn layout_preformatted_fragments(
                     style,
                     link_href.as_deref(),
                     *link_node_id,
+                    fonts,
                 );
             }
             InlineFragment::Text {
@@ -5736,9 +5789,10 @@ fn emit_line_impl(
     // Everything on a line is hung from the same baseline. A box taller than
     // the text grows the line downwards, not upwards -- so a 40px badge beside
     // a line of type has its top level with the text's, not its bottom.
-    let strut_below = below_baseline(container_style);
+    let strut_below = below_baseline(container_style, fonts);
     let mut above = text_line_height(container_style, fonts).saturating_sub(strut_below);
     let mut below = strut_below;
+    let mut min_line_height = 0_u32;
     for span in &line.spans {
         if span.control.is_some() {
             // A control is centred on the line rather than hung from it.
@@ -5746,12 +5800,29 @@ fn emit_line_impl(
             below = below.max(span.height - span.height / 2);
             continue;
         }
-        let span_above = if span.atomic.is_some() {
-            atomic_baseline(&span.style, fonts)
+        // A box aligned to the top or the bottom of the line is not hung
+        // from the baseline at all: it only asks the line to be tall enough
+        // for it. Treating those as baseline-aligned added the text's
+        // descenders under a box that was never sitting on the baseline.
+        if span.atomic.is_some()
+            && matches!(span.style.vertical_align, VerticalAlign::Top | VerticalAlign::Bottom)
+        {
+            min_line_height = min_line_height.max(span.height);
+            continue;
+        }
+        let span_above = if let Some(atomic) = &span.atomic {
+            match span.style.vertical_align {
+                // The box's middle sits half an x-height above the baseline.
+                VerticalAlign::Middle => span
+                    .height
+                    .div_ceil(2)
+                    .saturating_add(x_half_height(&span.style)),
+                _ => atomic_span_baseline(atomic, &span.style, span.height, fonts),
+            }
         } else if span.image.is_some() {
             span.height
         } else {
-            text_line_height(&span.style, fonts).saturating_sub(below_baseline(&span.style))
+            text_line_height(&span.style, fonts).saturating_sub(below_baseline(&span.style, fonts))
         };
         // A raised or lowered run is that much further from the baseline, so
         // the line has to make room for it: a superscript on the first line of
@@ -5764,7 +5835,10 @@ fn emit_line_impl(
                 .saturating_add_signed(shift),
         );
     }
-    let line_height = above.saturating_add(below).max(line.line_height.min(above + below).max(1));
+    let line_height = above
+        .saturating_add(below)
+        .max(line.line_height.min(above + below).max(1))
+        .max(min_line_height);
     let baseline = above;
 
     for span in &line.spans {
@@ -5810,8 +5884,24 @@ fn emit_line_impl(
             // line's baseline, not by its bottom edge. Bottom-aligning it
             // dropped a badge or a button a few pixels below the words beside
             // it, and a short one much further.
-            let box_y =
-                cursor_y.saturating_add(baseline.saturating_sub(atomic_baseline(&span.style, fonts)));
+            let box_y = match span.style.vertical_align {
+                VerticalAlign::Top => *cursor_y,
+                VerticalAlign::Bottom => {
+                    cursor_y.saturating_add(line_height.saturating_sub(span.height))
+                }
+                VerticalAlign::Middle => cursor_y
+                    .saturating_add(baseline)
+                    .saturating_sub(span.height.div_ceil(2))
+                    .saturating_sub(x_half_height(&span.style)),
+                VerticalAlign::Baseline => {
+                    cursor_y.saturating_add(baseline.saturating_sub(atomic_span_baseline(
+                        atomic,
+                        &span.style,
+                        span.height,
+                        fonts,
+                    )))
+                }
+            };
             let mut commands = atomic.commands.clone();
             offset_commands(&mut commands, cursor_x, box_y);
             context.commands.append(&mut commands);
@@ -6005,25 +6095,59 @@ fn atomic_baseline(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
         .padding
         .top
         .saturating_add(border)
-        .saturating_add(text_line_height(style, fonts).saturating_sub(below_baseline(style)))
+        .saturating_add(text_line_height(style, fonts).saturating_sub(below_baseline(style, fonts)))
 }
 
 /// The room a line leaves below the baseline for the text's descenders.
 ///
 /// Half of the leading -- the difference between the line height and the space
 /// the letters themselves take -- plus the descent.
-fn below_baseline(style: &ComputedStyle) -> u32 {
+///
+/// Both come off the face rather than off a ratio. Guessed at 1.15em of
+/// letters with a fifth below the baseline, the strut sat two pixels low for
+/// the default sans, which showed up as a line box two pixels too tall around
+/// anything hung from the baseline.
+fn below_baseline(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
     let font_size = style.font_size_px;
+    let descent = fonts.descent_px(font_size, style.font_family);
+    let content = fonts.line_height_px(font_size, style.font_family);
     let line_height = if style.line_height > 0 {
         (font_size as u64 * style.line_height as u64 / 1000) as u32
     } else {
-        font_size.saturating_mul(3) / 2
+        content
     };
-    // Roughly what a sans-serif face asks for: 1.15em of letters, a fifth of
-    // that below the baseline.
-    let content = font_size.saturating_mul(115) / 100;
-    let descent = font_size.saturating_mul(21) / 100;
     line_height.saturating_sub(content) / 2 + descent
+}
+
+/// Half the x-height, which is how far above the baseline a `middle`-aligned
+/// box has its own centre. Taken as a ratio of the font size: the faces a page
+/// actually uses sit around half their em.
+fn x_half_height(style: &ComputedStyle) -> u32 {
+    style.font_size_px.saturating_mul(26) / 100
+}
+
+/// Where an atomic inline's baseline sits inside it.
+///
+/// A box with a line of text in it is hung from that line's baseline. One with
+/// nothing to line up -- an empty box with a size, which is most icons and
+/// spacers -- or one that clips its contents is hung from its bottom edge, so
+/// the line has to make room for the descenders of the text beside it.
+fn atomic_span_baseline(
+    atomic: &AtomicInline,
+    style: &ComputedStyle,
+    height: u32,
+    fonts: &mut FontContext,
+) -> u32 {
+    let has_own_line = matches!(style.overflow, Overflow::Visible)
+        && atomic
+            .commands
+            .iter()
+            .any(|command| matches!(command, DrawCommand::Text(_)));
+    if has_own_line {
+        atomic_baseline(style, fonts)
+    } else {
+        height
+    }
 }
 
 fn text_line_height(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
@@ -11083,6 +11207,28 @@ mod tests {
                 .all(|text| text.x >= 80),
             "the line after the container should still clear the float"
         );
+    }
+
+    #[test]
+    fn an_inline_block_sits_on_the_baseline_and_keeps_the_space_before_it() {
+        // Checked against Chrome: the line around a 40px box is 44 tall,
+        // because the box's bottom sits on the baseline and the text's
+        // descenders still need their room below it. `vertical-align: top`
+        // and `middle` are not hung from the baseline at all, so those lines
+        // are 40. And the space written before the box is part of the line --
+        // dropped, everything after it moved four pixels left.
+        let l = probe_layout_with_css(
+            r#"<html><body>
+                <div style="background:#aa0001">text <span class="box"></span> after</div>
+                <div style="background:#aa0002">text <span class="box" style="vertical-align:top"></span> after</div>
+                <div style="background:#aa0003">text <span class="box" style="vertical-align:middle"></span> after</div>
+            </body></html>"#,
+            ".box{display:inline-block;width:40px;height:40px}",
+            800,
+        );
+        assert_eq!(probe_rect(&l, 0xAA0001).expect("baseline").height, 44);
+        assert_eq!(probe_rect(&l, 0xAA0002).expect("top").height, 40);
+        assert_eq!(probe_rect(&l, 0xAA0003).expect("middle").height, 40);
     }
 
     #[test]
