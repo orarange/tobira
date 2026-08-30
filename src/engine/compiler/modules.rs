@@ -139,7 +139,9 @@ impl<'a> super::FunctionCompiler<'a> {
             BoaExportDeclaration::DefaultAsyncFunctionDeclaration(function) => self
                 .compile_function_declaration_statement(&FunctionDeclaration::AsyncFunction(function))
                 .and_then(|_| self.emit_module_export_name("default", "default")),
-            BoaExportDeclaration::DefaultAsyncGeneratorDeclaration(function) => self.compile_function_declaration_statement(&FunctionDeclaration::AsyncGenerator(function)),
+            BoaExportDeclaration::DefaultAsyncGeneratorDeclaration(function) => self
+                .compile_function_declaration_statement(&FunctionDeclaration::AsyncGenerator(function))
+                .and_then(|_| self.emit_module_export_name("default", "default")),
             BoaExportDeclaration::DefaultClassDeclaration(class_decl) => {
                 self.compile_class_declaration_statement(class_decl.as_ref())?;
                 self.emit_module_export_name("default", "default")
@@ -153,8 +155,9 @@ impl<'a> super::FunctionCompiler<'a> {
                 let export_const = self.add_string_constant("default")?;
                 self.emit(super::Opcode::LoadConst(export_const));
                 self.emit(super::Opcode::GetLocal(slot));
+                // `SetProp` consumes the object, the name and the value and
+                // leaves nothing behind, so there is nothing here to pop.
                 self.emit(super::Opcode::SetProp);
-                self.emit(super::Opcode::Pop);
                 Ok(())
             }
             BoaExportDeclaration::ReExport { .. }
