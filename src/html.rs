@@ -1657,11 +1657,55 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
 }
 
 pub fn parse_fragment(input: &str) -> Vec<Node> {
+    parse_fragment_in("div", input)
+}
+
+/// Parse a fragment as if it were written inside `context_tag`.
+///
+/// The document algorithm always builds `html > head + body`, which is right
+/// for a page and wrong for `el.innerHTML = ...`: a `<body>` tag written in
+/// that string is ignored by a browser, not turned into a body element. It was
+/// kept here, so a page that assigned fetched markup containing a stray
+/// wrapper got the wrapper as a real element in the middle of its own layout.
+///
+/// The context decides how far the unwrapping goes. Inside `<html>` a `<head>`
+/// and a `<body>` are the elements that belong there and are kept; anywhere
+/// else -- which is every ordinary `innerHTML` -- all four wrappers give way to
+/// their contents.
+pub fn parse_fragment_in(context_tag: &str, input: &str) -> Vec<Node> {
     let (tree, _) = parse_document_body(input);
     let Node::Element(root) = tree else {
         return Vec::new();
     };
-    root.children
+    let keeps_sections = context_tag.eq_ignore_ascii_case("html");
+    let mut out = Vec::new();
+    for child in root.children {
+        unwrap_document_shell(child, keeps_sections, &mut out);
+    }
+    out
+}
+
+/// Replace a document wrapper with the nodes inside it.
+fn unwrap_document_shell(node: Node, keeps_sections: bool, out: &mut Vec<Node>) {
+    let Node::Element(element) = node else {
+        out.push(node);
+        return;
+    };
+    let unwrap = match element.tag_name.as_str() {
+        "html" => true,
+        "head" | "body" | "frameset" => !keeps_sections,
+        _ => false,
+    };
+    if !unwrap {
+        out.push(Node::Element(element));
+        return;
+    }
+    // The wrapper is gone, but what it held is not -- and a `<head>` inside a
+    // dropped `<html>` still has to be looked at in turn.
+    let inner_keeps_sections = keeps_sections && element.tag_name == "html";
+    for child in element.children {
+        unwrap_document_shell(child, inner_keeps_sections, out);
+    }
 }
 
 /// Names that belong in `<head>` when they turn up before any body content.

@@ -10708,12 +10708,35 @@ impl Vm {
                     BuiltinId::EvalErrorConstructor => "EvalError",
                     _ => unreachable!(),
                 };
-                Ok(self.create_error_object(
+                let error = self.create_error_object(
                     name,
                     args.first()
                         .map(|value| self.to_string(value))
                         .unwrap_or_default(),
-                ))
+                );
+                // `new Error(message, { cause })`. Libraries chain errors that
+                // way to keep the original around, and read `.cause` back when
+                // they report. The option was parsed away and lost.
+                if let (Value::Object(object), Some(options @ Value::Object(_))) =
+                    (&error, args.get(1))
+                {
+                    let has_cause = self
+                        .get_property_value(options, &PropertyKey::from("cause"))
+                        .map(|value| !matches!(value, Value::Undefined))
+                        .unwrap_or(false);
+                    if has_cause {
+                        let cause = self.get_property_value(options, &PropertyKey::from("cause"))?;
+                        self.define_data_property(
+                            *object,
+                            PropertyKey::from("cause"),
+                            cause,
+                            true,
+                            false,
+                            true,
+                        );
+                    }
+                }
+                Ok(error)
             }
             BuiltinId::ArrayConstructor => {
                 // `Array(n)` with a single non-negative integer creates an array

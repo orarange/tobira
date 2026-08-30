@@ -1589,6 +1589,7 @@ impl BrowserHost {
         // A fragment, not a document: `innerHTML = '<span>x</span>'` puts a
         // span inside the element, not a whole `<html><head></head><body>`.
         crate::html::parse_fragment(html)
+
             .iter()
             .filter_map(|child| self.build_from_node(child))
             .collect()
@@ -1601,8 +1602,11 @@ impl BrowserHost {
         }
         self.nodes[parent].children.clear();
 
-        // Parse the fragment via the real HTML parser, then graft its children.
-        let fragment_children = crate::html::parse_fragment(html);
+        // Parse the fragment via the real HTML parser, then graft its
+        // children. The element it is going into decides whether a `<head>` or
+        // a `<body>` written in the string is an element or is ignored.
+        let context_tag = self.nodes[parent].tag_name().unwrap_or("div").to_string();
+        let fragment_children = crate::html::parse_fragment_in(&context_tag, html);
         {
             let child_indices: Vec<usize> = fragment_children
                 .iter()
@@ -3578,6 +3582,247 @@ const RUNTIME_PRELUDE: &str = r#"
       return rect.width > 0 || rect.height > 0;
     };
   }
+
+  // ---- Blob / File / FileReader / URL.createObjectURL ---------------------
+  // All of it is bytes plus a MIME type, so it is written here rather than in
+  // the engine. Pages build a Blob to hand a generated image or CSV to an
+  // <img> or an <a download>, and read one back with FileReader.
+  if (typeof g.Blob === 'undefined') {
+    var encoder = typeof g.TextEncoder === 'function' ? new g.TextEncoder() : null;
+
+    function bytesOf(part) {
+      if (part == null) return new Uint8Array(0);
+      if (part instanceof Uint8Array) return part;
+      if (part instanceof ArrayBuffer) return new Uint8Array(part.slice(0));
+      if (ArrayBuffer.isView(part)) {
+        return new Uint8Array(part.buffer.slice(part.byteOffset, part.byteOffset + part.byteLength));
+      }
+      if (part && part._tobiraBlobBytes) return part._tobiraBlobBytes;
+      var text = String(part);
+      if (encoder) return encoder.encode(text);
+      // No TextEncoder: fall back to the code units, which is right for the
+      // ASCII a page usually puts in a Blob and wrong above it.
+      var out = new Uint8Array(text.length);
+      for (var i = 0; i < text.length; i++) out[i] = text.charCodeAt(i) & 0xff;
+      return out;
+    }
+
+    function joinBytes(parts) {
+      var chunks = [], total = 0;
+      for (var i = 0; i < (parts || []).length; i++) {
+        var chunk = bytesOf(parts[i]);
+        chunks.push(chunk);
+        total += chunk.length;
+      }
+      var joined = new Uint8Array(total), at = 0;
+      for (var j = 0; j < chunks.length; j++) { joined.set(chunks[j], at); at += chunks[j].length; }
+      return joined;
+    }
+
+    function base64Of(bytes) {
+      var binary = '';
+      for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      return g.btoa(binary);
+    }
+
+    function textOf(bytes) {
+      if (typeof g.TextDecoder === 'function') return new g.TextDecoder().decode(bytes);
+      var out = '';
+      for (var i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+      return out;
+    }
+
+    function Blob(parts, options) {
+      var bytes = joinBytes(parts);
+      Object.defineProperty(this, '_tobiraBlobBytes', { value: bytes });
+      Object.defineProperty(this, 'size', { value: bytes.length, enumerable: true });
+      Object.defineProperty(this, 'type', {
+        value: options && options.type ? String(options.type).toLowerCase() : '',
+        enumerable: true
+      });
+    }
+    Blob.prototype.slice = function (start, end, type) {
+      var bytes = this._tobiraBlobBytes.slice(start === undefined ? 0 : start, end === undefined ? undefined : end);
+      return new Blob([bytes], { type: type === undefined ? '' : type });
+    };
+    Blob.prototype.text = function () { return Promise.resolve(textOf(this._tobiraBlobBytes)); };
+    Blob.prototype.arrayBuffer = function () {
+      var bytes = this._tobiraBlobBytes;
+      return Promise.resolve(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    };
+    Blob.prototype.bytes = function () { return Promise.resolve(this._tobiraBlobBytes.slice()); };
+    g.Blob = Blob;
+
+    function File(parts, name, options) {
+      Blob.call(this, parts, options);
+      Object.defineProperty(this, 'name', { value: String(name), enumerable: true });
+      Object.defineProperty(this, 'lastModified', {
+        value: options && options.lastModified !== undefined ? options.lastModified : Date.now(),
+        enumerable: true
+      });
+    }
+    File.prototype = Object.create(Blob.prototype);
+    File.prototype.constructor = File;
+    g.File = File;
+
+    // Reading is asynchronous in a browser because the bytes may be on disk;
+    // here they are already in hand, so the callbacks fire on the next turn.
+    function FileReader() {
+      this.readyState = 0;
+      this.result = null;
+      this.error = null;
+      this.onload = null;
+      this.onloadend = null;
+      this.onerror = null;
+      this.onprogress = null;
+      this._listeners = {};
+    }
+    FileReader.EMPTY = 0; FileReader.LOADING = 1; FileReader.DONE = 2;
+    FileReader.prototype.addEventListener = function (type, fn) {
+      (this._listeners[type] || (this._listeners[type] = [])).push(fn);
+    };
+    FileReader.prototype.removeEventListener = function (type, fn) {
+      var list = this._listeners[type];
+      if (!list) return;
+      var at = list.indexOf(fn);
+      if (at >= 0) list.splice(at, 1);
+    };
+    FileReader.prototype.abort = function () { this.readyState = 2; };
+    FileReader.prototype._finish = function (result) {
+      var reader = this;
+      reader.readyState = 1;
+      setTimeout(function () {
+        reader.readyState = 2;
+        reader.result = result;
+        var event = { target: reader, type: 'load' };
+        if (typeof reader.onload === 'function') reader.onload(event);
+        (reader._listeners.load || []).forEach(function (fn) { fn(event); });
+        var done = { target: reader, type: 'loadend' };
+        if (typeof reader.onloadend === 'function') reader.onloadend(done);
+        (reader._listeners.loadend || []).forEach(function (fn) { fn(done); });
+      }, 0);
+    };
+    FileReader.prototype.readAsText = function (blob) { this._finish(textOf(blob._tobiraBlobBytes)); };
+    FileReader.prototype.readAsArrayBuffer = function (blob) {
+      var bytes = blob._tobiraBlobBytes;
+      this._finish(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    };
+    FileReader.prototype.readAsDataURL = function (blob) {
+      this._finish('data:' + (blob.type || 'application/octet-stream') + ';base64,' + base64Of(blob._tobiraBlobBytes));
+    };
+    FileReader.prototype.readAsBinaryString = function (blob) {
+      var bytes = blob._tobiraBlobBytes, out = '';
+      for (var i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+      this._finish(out);
+    };
+    g.FileReader = FileReader;
+
+    // A browser hands back `blob:` and keeps the bytes behind it. Nothing here
+    // can fetch such a URL, so the bytes go into the URL itself: an <img> or a
+    // stylesheet pointed at one actually loads, which is what the page wanted.
+    // `revokeObjectURL` then has nothing to release.
+    if (g.URL && typeof g.URL.createObjectURL !== 'function') {
+      g.URL.createObjectURL = function (blob) {
+        if (!blob || !blob._tobiraBlobBytes) return '';
+        return 'data:' + (blob.type || 'application/octet-stream') + ';base64,' + base64Of(blob._tobiraBlobBytes);
+      };
+      g.URL.revokeObjectURL = function () {};
+    }
+  }
+
+  // `ArrayBuffer.isView` tells a typed array or a DataView from a plain buffer.
+  // Every byte-handling library branches on it.
+  if (typeof ArrayBuffer.isView !== 'function') {
+    Object.defineProperty(ArrayBuffer, 'isView', {
+      configurable: true, writable: true,
+      value: function isView(value) {
+        return !!value
+          && typeof value === 'object'
+          && value.buffer instanceof ArrayBuffer
+          && typeof value.byteOffset === 'number';
+      }
+    });
+  }
+
+  // What `Promise.any` throws when every promise rejects.
+  if (typeof g.AggregateError === 'undefined') {
+    function AggregateError(errors, message) {
+      var error = new Error(message === undefined ? '' : message);
+      Object.setPrototypeOf(error, AggregateError.prototype);
+      error.name = 'AggregateError';
+      error.errors = Array.from(errors || []);
+      return error;
+    }
+    AggregateError.prototype = Object.create(Error.prototype);
+    AggregateError.prototype.constructor = AggregateError;
+    AggregateError.prototype.name = 'AggregateError';
+    g.AggregateError = AggregateError;
+  }
+
+  // ---- DOMParser / XMLSerializer -----------------------------------------
+  // Parsing a string of markup into something you can query is how a page
+  // reads a fetched page, a feed, or a template. The engine already has an
+  // HTML parser behind `innerHTML`; this puts a document-shaped face on it.
+  //
+  // What comes back is not a Document -- it has no own `defaultView`, no
+  // stylesheet of its own, and its nodes belong to this document -- but it
+  // answers the questions a page asks of one.
+  if (typeof g.DOMParser === 'undefined' && g.document) {
+    function DOMParser() {}
+    DOMParser.prototype.parseFromString = function (markup, type) {
+      var root = g.document.createElement('html');
+      root.innerHTML = String(markup === undefined ? '' : markup);
+      var body = root.querySelector('body');
+      var head = root.querySelector('head');
+      if (!body) {
+        // No `<body>` in the string: everything written is the body's content.
+        body = g.document.createElement('body');
+        while (root.firstChild) {
+          if (head && root.firstChild === head) { root.removeChild(head); continue; }
+          body.appendChild(root.firstChild);
+        }
+        root.appendChild(body);
+      }
+      if (!head) {
+        head = g.document.createElement('head');
+        root.insertBefore(head, root.firstChild);
+      }
+      var parsed = {
+        documentElement: root,
+        body: body,
+        head: head,
+        nodeType: 9,
+        nodeName: '#document',
+        contentType: type === undefined ? 'text/html' : String(type),
+        get title() { var t = root.querySelector('title'); return t ? t.textContent : ''; },
+        querySelector: function (selectors) { return root.querySelector(selectors); },
+        querySelectorAll: function (selectors) { return root.querySelectorAll(selectors); },
+        getElementById: function (id) { return root.querySelector('#' + id); },
+        getElementsByTagName: function (tag) { return root.querySelectorAll(tag); },
+        getElementsByClassName: function (names) {
+          return root.querySelectorAll('.' + String(names).trim().split(/\s+/).join('.'));
+        },
+        createElement: function (tag) { return g.document.createElement(tag); },
+        createTextNode: function (text) { return g.document.createTextNode(text); },
+        createDocumentFragment: function () { return g.document.createDocumentFragment(); },
+        importNode: function (node, deep) { return node.cloneNode(!!deep); },
+        adoptNode: function (node) { return node; }
+      };
+      return parsed;
+    };
+    g.DOMParser = DOMParser;
+  }
+
+  if (typeof g.XMLSerializer === 'undefined') {
+    function XMLSerializer() {}
+    XMLSerializer.prototype.serializeToString = function (node) {
+      if (!node) return '';
+      if (node.outerHTML !== undefined) return node.outerHTML;
+      if (node.documentElement) return node.documentElement.outerHTML;
+      return node.nodeValue === undefined ? '' : String(node.nodeValue);
+    };
+    g.XMLSerializer = XMLSerializer;
+  }
 })();
 "#;
 
@@ -4562,6 +4807,83 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.title.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn a_fragment_has_no_document_shell_of_its_own() {
+        // Checked against Chrome. Assigning markup that carries a stray
+        // `<body>` used to leave a body element sitting in the middle of the
+        // page; a browser ignores the wrapper and keeps what is inside it.
+        // Inside `<html>` the sections do belong, so they stay.
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                var source = '<html><head><title>T</title></head><body class="b"><p id="x">hi</p></body></html>';
+                var box = document.createElement('div');
+                box.innerHTML = source;
+                var page = document.createElement('html');
+                page.innerHTML = source;
+                document.title = [box.innerHTML, page.innerHTML].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(
+            result.title.as_deref(),
+            Some(
+                r#"<title>T</title><p id="x">hi</p>|<head><title>T</title></head><body class="b"><p id="x">hi</p></body>"#
+            )
+        );
+    }
+
+    #[test]
+    fn a_dom_parser_answers_the_questions_a_document_does() {
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                var source = '<html><head><title>T</title></head><body class="b"><p id="x">hi</p></body></html>';
+                var parsed = new DOMParser().parseFromString(source, 'text/html');
+                var bare = new DOMParser().parseFromString('<p>only</p>', 'text/html');
+                document.title = [
+                    parsed.title,
+                    parsed.body.className,
+                    parsed.getElementById('x').textContent,
+                    parsed.querySelectorAll('p').length,
+                    parsed.documentElement.tagName,
+                    bare.body.textContent,
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("T|b|hi|1|HTML|only"));
+    }
+
+    #[test]
+    fn a_blob_holds_its_bytes_and_reads_them_back() {
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                var blob = new Blob(['hello ', 'world'], { type: 'text/plain' });
+                var mixed = new Blob([new Uint8Array([65, 66]), 'C', new Blob(['D'])]);
+                var file = new File(['abc'], 'x.txt', { type: 'text/plain' });
+                var reader = new FileReader();
+                reader.onload = function () {
+                    document.title = [
+                        blob.size,
+                        blob.type,
+                        blob.slice(0, 5).size,
+                        mixed.size,
+                        file.name + '/' + (file instanceof Blob),
+                        reader.result,
+                    ].join('|');
+                };
+                reader.readAsDataURL(new Blob(['hi'], { type: 'text/plain' }));
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(
+            result.title.as_deref(),
+            Some("11|text/plain|5|4|x.txt/true|data:text/plain;base64,aGk=")
+        );
     }
 
     #[test]
