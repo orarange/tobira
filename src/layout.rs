@@ -1921,6 +1921,23 @@ fn layout_block_element(
     // Spent above the parent, so the child must not add it again.
     context.last_bottom_margin = hoisted_child_margin;
 
+    // What `width` does not cover under the default `content-box`: the box is
+    // the stated width plus its own padding and border. Treated as the whole
+    // box instead, every element that states a width and carries padding came
+    // out narrower than the page asked for -- `width: 200px; padding: 20px`
+    // is 240 wide in a browser, and was 200 here.
+    let surround_x = element
+        .style
+        .padding
+        .left
+        .saturating_add(element.style.padding.right)
+        .saturating_add(if element.style.border_style_none {
+            0
+        } else {
+            element.style.border.left.saturating_add(element.style.border.right)
+        });
+    let widens_by_surround = !matches!(element.style.box_sizing, BoxSizing::BorderBox);
+
     // Resolve explicit width from style.width (LengthValue → px)
     let explicit_width: Option<u32> = settled_main_size.or_else(|| element.style.width.map(|w| match w {
         LengthValue::Pixels(px) => px,
@@ -1948,6 +1965,14 @@ fn layout_block_element(
         }
         LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
         LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, width),
+    })
+    .map(|resolved| {
+        // `fit-content` measured the contents and already counted them.
+        if widens_by_surround && !matches!(element.style.width, Some(LengthValue::FitContent(_))) {
+            resolved.saturating_add(surround_x)
+        } else {
+            resolved
+        }
     }));
 
     // Container-derived width (what the element would be without explicit width)
@@ -8850,11 +8875,13 @@ mod percentage_sizing_tests {
             80,
             "a stated height wins"
         );
-        // The ratio measures the content box, so padding goes on top of it.
+        // The ratio measures the content box, and so does `width`: Chrome
+        // makes this box 680 by 360. The expectation used to read the width as
+        // the whole box, back when this engine did.
         assert_eq!(
             height_of(".frame{width:640px;padding:20px;aspect-ratio:2/1;background:#00ff00}"),
-            340,
-            "600/2 plus 20px of padding at each end"
+            360,
+            "640/2 plus 20px of padding at each end"
         );
     }
 
@@ -10949,6 +10976,30 @@ mod tests {
                 .into_iter()
                 .any(|text| text.x >= 100),
             "the line beside the float should start past it"
+        );
+    }
+
+    #[test]
+    fn width_measures_the_content_box_by_default() {
+        // Checked against Chrome, which makes these 240, 220, 260 and 200.
+        // Read as the whole box, every element that states a width and carries
+        // padding came out narrower than the page asked for.
+        let l = probe_layout(
+            r#"<html><body style="margin:0">
+                <div style="width:200px;padding:20px;background:#aa0001">p</div>
+                <div style="width:200px;border:10px solid #123456;background:#aa0002">b</div>
+                <div style="width:200px;padding:20px;border:10px solid #123456;background:#aa0003">pb</div>
+                <div style="width:200px;padding:20px;border:10px solid #123456;box-sizing:border-box;background:#aa0004">bb</div>
+            </body></html>"#,
+            1000,
+        );
+        assert_eq!(probe_rect(&l, 0xAA0001).expect("padding").width, 240);
+        assert_eq!(probe_rect(&l, 0xAA0002).expect("border").width, 220);
+        assert_eq!(probe_rect(&l, 0xAA0003).expect("both").width, 260);
+        assert_eq!(
+            probe_rect(&l, 0xAA0004).expect("border-box").width,
+            200,
+            "border-box says the stated width already covers them"
         );
     }
 
