@@ -1055,7 +1055,8 @@ fn adjust_svg_tag_name(name: &str) -> Option<&'static str> {
 fn adjust_svg_attribute_name(name: &str) -> Option<&'static str> {
     const NAMES: &[&str] = &[
         "attributeName", "attributeType", "baseFrequency", "baseProfile", "calcMode",
-        "clipPathUnits", "diffuseConstant", "edgeMode", "filterUnits", "glyphRef",
+        "clipPathUnits", "contentScriptType", "contentStyleType", "diffuseConstant", "edgeMode",
+        "externalResourcesRequired", "filterRes", "filterUnits", "glyphRef",
         "gradientTransform", "gradientUnits", "kernelMatrix", "kernelUnitLength", "keyPoints",
         "keySplines", "keyTimes", "lengthAdjust", "limitingConeAngle", "markerHeight",
         "markerUnits", "markerWidth", "maskContentUnits", "maskUnits", "numOctaves",
@@ -2067,15 +2068,40 @@ fn normalise_newlines(input: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(input.replace("\r\n", "\n").replace('\r', "\n"))
 }
 
+/// Whether the tokenizer is reading foreign content right now.
+///
+/// Walks out from the innermost open element to the first one that decides:
+/// an integration point means HTML has started again, and `<svg>` or `<math>`
+/// means it has not. The elements in between -- a `<g>`, a `<path>` -- belong
+/// to whichever of those they sit in.
+fn in_foreign_content(open: &[String]) -> bool {
+    for name in open.iter().rev() {
+        if matches!(
+            name.as_str(),
+            "foreignobject" | "desc" | "title" | "mi" | "mo" | "mn" | "ms" | "mtext"
+        ) {
+            return false;
+        }
+        if matches!(name.as_str(), "svg" | "math") {
+            return true;
+        }
+    }
+    false
+}
+
 fn tokenize(input: &str) -> Vec<Token> {
     let bytes = input.as_bytes();
     let mut index = 0;
     let mut tokens = Vec::new();
-    // How deep we are inside `<svg>` or `<math>`. Only one construct cares:
-    // `<![CDATA[` is a section of literal text there, and a bogus comment
-    // everywhere else. An SVG that carries its own stylesheet is written that
-    // way, so reading it as a comment throws the stylesheet out.
-    let mut foreign_depth = 0usize;
+    // The elements open inside `<svg>` or `<math>`, innermost last.
+    //
+    // Three things read differently there: `<![CDATA[` is literal text rather
+    // than a bogus comment, `<style>` and `<title>` are not raw text, and a NUL
+    // is shown rather than dropped. A depth counter was not enough, because
+    // `<foreignObject>` and MathML's text elements are integration points --
+    // HTML starts again inside them, and all three rules go back to the HTML
+    // ones there.
+    let mut foreign_stack: Vec<String> = Vec::new();
 
     while index < bytes.len() {
         if bytes[index] != b'<' {
@@ -2083,7 +2109,16 @@ fn tokenize(input: &str) -> Vec<Token> {
                 .find('<')
                 .map(|offset| index + offset)
                 .unwrap_or(bytes.len());
-            tokens.push(Token::Text(decode_html_entities(&input[index..next])));
+            // A NUL is dropped in HTML and shown in a drawing or a formula.
+            // Inside an integration point HTML has started again, so it goes
+            // back to being dropped.
+            let raw = &input[index..next];
+            let text = if in_foreign_content(&foreign_stack) {
+                decode_html_entities(&show_nulls(raw))
+            } else {
+                decode_html_entities(raw)
+            };
+            tokens.push(Token::Text(text));
             index = next;
             continue;
         }
@@ -2185,8 +2220,11 @@ fn tokenize(input: &str) -> Vec<Token> {
             }
             let name = input[name_start..index].to_ascii_lowercase();
             consume_until_tag_end(input, &mut index);
-            if matches!(name.as_str(), "svg" | "math") {
-                foreign_depth = foreign_depth.saturating_sub(1);
+            if let Some(position) = foreign_stack
+                .iter()
+                .rposition(|open| open.eq_ignore_ascii_case(&name))
+            {
+                foreign_stack.truncate(position);
             }
             tokens.push(Token::EndTag(name));
             continue;
@@ -2194,7 +2232,7 @@ fn tokenize(input: &str) -> Vec<Token> {
 
         if input[index..].starts_with("<!") {
             let start = index;
-            if foreign_depth > 0 && input[start..].starts_with("<![CDATA[") {
+            if in_foreign_content(&foreign_stack) && input[start..].starts_with("<![CDATA[") {
                 // Everything up to `]]>` is literal, entities included.
                 let body = start + 9;
                 let (text, next) = match input[body..].find("]]>") {
@@ -2310,14 +2348,21 @@ fn tokenize(input: &str) -> Vec<Token> {
             break;
         }
 
-        if !self_closing && matches!(name.as_str(), "svg" | "math") {
-            foreign_depth += 1;
+        // Whether this tag was *written* in foreign content, which is what
+        // decides how it is read. Asked after it has been pushed, an SVG
+        // `<title>` would look like the integration point it opens rather than
+        // the drawing it sits in, and its markup would be read as raw text.
+        let written_in_foreign = in_foreign_content(&foreign_stack);
+        if !self_closing
+            && (!foreign_stack.is_empty() || matches!(name.as_str(), "svg" | "math"))
+        {
+            foreign_stack.push(name.clone());
         }
         // Raw text is an HTML notion. `<style>` and `<title>` inside `<svg>`
         // hold ordinary markup, which is why an SVG stylesheet has to be
         // wrapped in a CDATA section to survive.
         let is_raw_text = !self_closing
-            && foreign_depth == 0
+            && !written_in_foreign
             && (is_raw_text_element(&name) || is_escapable_text_element(&name));
         let decodes = is_escapable_text_element(&name);
         tokens.push(Token::StartTag {
@@ -2832,6 +2877,24 @@ mod tests {
         };
         assert_eq!(frameset.tag_name, "frameset");
         assert_eq!(frameset.children.len(), 1, "only the frame belongs here");
+    }
+
+    #[test]
+    fn html_rules_come_back_inside_an_integration_point() {
+        // `<title>` in a drawing holds markup, so its `<div>` is an element.
+        let document = parse_document("<body><svg><title><div>x</div></title></svg>");
+        let body = body_of(&document);
+        let Node::Element(svg) = &body.children[0] else {
+            panic!("expected the svg");
+        };
+        let Node::Element(title) = &svg.children[0] else {
+            panic!("expected the title");
+        };
+        let Node::Element(division) = &title.children[0] else {
+            panic!("the div should be an element, not text");
+        };
+        assert_eq!(division.tag_name, "div");
+        assert_eq!(division.namespace, super::Namespace::Html);
     }
 
     #[test]
