@@ -2170,17 +2170,35 @@ fn tokenize(input: &str) -> Vec<Token> {
         if input[index..].starts_with("<!--") {
             // An unterminated comment runs to the end of the file, which is
             // what a browser does with it rather than dropping the rest.
-            let (text, next) = match input[index + 4..].find("-->") {
-                Some(offset) => (
-                    input[index + 4..index + 4 + offset].to_string(),
-                    index + 4 + offset + 3,
-                ),
-                // A comment the file ends in the middle of loses the dashes it
-                // was in the middle of writing: `<!--x--` is the comment `x`.
-                None => (
-                    input[index + 4..].trim_end_matches('-').to_string(),
-                    bytes.len(),
-                ),
+            // A comment ends at `--!>` as well as `-->`; the standard calls
+            // the first one a parse error and closes the comment anyway.
+            // `<!-->` and `<!--->` are the empty comment -- the end is allowed
+            // to overlap the start.
+            let body = &input[index + 4..];
+            let early_end = if body.starts_with('>') {
+                Some(1)
+            } else if body.starts_with("->") {
+                Some(2)
+            } else {
+                None
+            };
+            let (text, next) = if let Some(length) = early_end {
+                (String::new(), index + 4 + length)
+            } else {
+                match [body.find("-->").map(|at| (at, 3)), body.find("--!>").map(|at| (at, 4))]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                {
+                    Some((offset, length)) => (
+                        body[..offset].to_string(),
+                        index + 4 + offset + length,
+                    ),
+                    // A comment the file ends in the middle of loses the
+                    // dashes it was in the middle of writing: `<!--x--` is the
+                    // comment `x`.
+                    None => (body.trim_end_matches('-').to_string(), bytes.len()),
+                }
             };
             tokens.push(Token::Comment(text));
             index = next;
@@ -2275,7 +2293,10 @@ fn tokenize(input: &str) -> Vec<Token> {
                 index = next;
                 continue;
             }
-            let is_doctype = input[start..].len() > 9 && input[start + 2..start + 9].eq_ignore_ascii_case("doctype");
+            // Nothing has to separate the word from the name: `<!doctypehtml>`
+            // is a doctype, which is why the length test is `>=` and not `>`.
+            let is_doctype = input[start..].len() >= 9
+                && input[start + 2..start + 9].eq_ignore_ascii_case("doctype");
             if !is_doctype {
                 // `<!` followed by anything that is not a doctype or a comment
                 // is a bogus comment holding the rest up to `>`.
@@ -2286,7 +2307,7 @@ fn tokenize(input: &str) -> Vec<Token> {
             }
             consume_until_tag_end(input, &mut index);
             let raw = &input[start..index];
-            if raw.len() > 9 && raw[2..9].eq_ignore_ascii_case("doctype") {
+            if raw.len() >= 9 && raw[2..9].eq_ignore_ascii_case("doctype") {
                 tokens.push(Token::Doctype(parse_doctype(raw)));
             }
             continue;
@@ -2449,9 +2470,11 @@ fn parse_attribute_value(input: &str, index: &mut usize) -> String {
         }
         value
     } else {
+        // Only whitespace and `>` end an unquoted value; a slash belongs to
+        // it. `<foo bar=qux/>` sets `bar` to "qux/" and is not self-closing.
         let start = *index;
         while *index < bytes.len()
-            && !matches!(bytes[*index], b'>' | b'/' | b' ' | b'\n' | b'\r' | b'\t')
+            && !matches!(bytes[*index], b'>' | b' ' | b'\n' | b'\r' | b'\t')
         {
             *index += 1;
         }
@@ -2467,7 +2490,10 @@ fn skip_whitespace(input: &str, index: &mut usize) {
 }
 
 fn is_tag_name_char(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':' | b'_')
+    // Only whitespace, `/` and `>` end a tag name. Everything else is part of
+    // it, `<` included: `<div<div>` is one element whose name is `div<div`,
+    // and it is an unknown element rather than two divs.
+    !byte.is_ascii_whitespace() && !matches!(byte, b'/' | b'>')
 }
 
 fn is_void_element(name: &str) -> bool {
