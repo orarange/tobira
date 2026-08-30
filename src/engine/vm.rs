@@ -1577,6 +1577,22 @@ const DOM_INTERFACE_NAMES: &[&str] = &[
     "XMLDocument",
     "MediaQueryList",
     "PerformanceEntry",
+    // Node kinds a script names to sort a tree, and the wrappers around
+    // objects the window already hands out. Only ever used as a type tag or
+    // for patching a prototype -- nothing here is constructed, so naming them
+    // cannot send a page down a path we do not support.
+    "DocumentType",
+    "ProcessingInstruction",
+    "CDATASection",
+    "AbstractRange",
+    "Storage",
+    "Performance",
+    "HTMLMediaElement",
+    "SVGSVGElement",
+    "SVGGraphicsElement",
+    "SVGUseElement",
+    "SVGScriptElement",
+    "SVGImageElement",
     // The per-tag interfaces. Scripts reference these by name for feature
     // detection and for `instanceof` guards, and a missing one is a bare
     // `ReferenceError` that takes the whole bundle down -- Yahoo! JAPAN died on
@@ -3560,7 +3576,15 @@ impl Vm {
             .insert("AbortController".to_string(), abort_controller_ctor);
 
         // AbortSignal global object.
-        let abort_signal_ctor = self.allocate_builtin_value(BuiltinId::AbortSignalConstructor, false, None);
+        // `AbortSignal` cannot be called with `new`, but it still has a
+        // prototype -- that is where a page reaches to patch `throwIfAborted`,
+        // and feature detection reads it.
+        let abort_signal_prototype = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+        let abort_signal_ctor = self.allocate_builtin_value(
+            BuiltinId::AbortSignalConstructor,
+            false,
+            Some(abort_signal_prototype),
+        );
         if let Value::Object(abort_signal_ref) = &abort_signal_ctor {
             let abort_method = self.allocate_builtin_method(BuiltinId::AbortSignalAbortStatic);
             self.define_data_property(

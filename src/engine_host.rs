@@ -3155,6 +3155,256 @@ const RUNTIME_PRELUDE: &str = r#"
         + ', ' + formatDate(this, { hour: 'numeric', minute: '2-digit', second: '2-digit' });
     };
   }
+
+  // ---- NodeFilter / TreeWalker / NodeIterator ----------------------------
+  // Traversal is pure DOM walking, so it is written here rather than in the
+  // engine. A consent manager walks the document with a TreeWalker, and a
+  // missing constructor stopped it before it drew anything.
+  if (typeof g.NodeFilter === 'undefined') {
+    var NodeFilter = {
+      FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
+      SHOW_ALL: 0xFFFFFFFF,
+      SHOW_ELEMENT: 0x1, SHOW_ATTRIBUTE: 0x2, SHOW_TEXT: 0x4,
+      SHOW_CDATA_SECTION: 0x8, SHOW_ENTITY_REFERENCE: 0x10, SHOW_ENTITY: 0x20,
+      SHOW_PROCESSING_INSTRUCTION: 0x40, SHOW_COMMENT: 0x80,
+      SHOW_DOCUMENT: 0x100, SHOW_DOCUMENT_TYPE: 0x200,
+      SHOW_DOCUMENT_FRAGMENT: 0x400, SHOW_NOTATION: 0x800
+    };
+    g.NodeFilter = NodeFilter;
+
+    // `whatToShow` is a bit per node type, and the filter only runs on the
+    // types that survive it.
+    function accepts(walker, node) {
+      var bit = 1 << (node.nodeType - 1);
+      if ((walker.whatToShow & bit) === 0) return NodeFilter.FILTER_SKIP;
+      var filter = walker.filter;
+      if (!filter) return NodeFilter.FILTER_ACCEPT;
+      var verdict = typeof filter === 'function'
+        ? filter(node)
+        : filter.acceptNode(node);
+      return verdict === undefined ? NodeFilter.FILTER_ACCEPT : verdict;
+    }
+
+    function defineTraversalFields(walker, root, whatToShow, filter) {
+      // All three are read-only in every browser, and code checks `.root`.
+      Object.defineProperty(walker, 'root', { value: root, enumerable: true });
+      Object.defineProperty(walker, 'whatToShow', {
+        value: whatToShow === undefined ? NodeFilter.SHOW_ALL : (whatToShow >>> 0),
+        enumerable: true
+      });
+      Object.defineProperty(walker, 'filter', {
+        value: filter === undefined ? null : filter,
+        enumerable: true
+      });
+    }
+
+    function TreeWalker(root, whatToShow, filter) {
+      defineTraversalFields(this, root, whatToShow, filter);
+      this.currentNode = root;
+    }
+
+    // firstChild / lastChild: descend into the children, stepping past the
+    // ones the filter skips rather than rejects.
+    function traverseChildren(walker, forward) {
+      var node = forward ? walker.currentNode.firstChild : walker.currentNode.lastChild;
+      while (node) {
+        var verdict = accepts(walker, node);
+        if (verdict === NodeFilter.FILTER_ACCEPT) {
+          walker.currentNode = node;
+          return node;
+        }
+        if (verdict === NodeFilter.FILTER_SKIP) {
+          var child = forward ? node.firstChild : node.lastChild;
+          if (child) { node = child; continue; }
+        }
+        while (node) {
+          var sibling = forward ? node.nextSibling : node.previousSibling;
+          if (sibling) { node = sibling; break; }
+          var parent = node.parentNode;
+          if (!parent || parent === walker.root || parent === walker.currentNode) return null;
+          node = parent;
+        }
+      }
+      return null;
+    }
+
+    function traverseSiblings(walker, forward) {
+      var node = walker.currentNode;
+      if (node === walker.root) return null;
+      while (true) {
+        var sibling = forward ? node.nextSibling : node.previousSibling;
+        while (sibling) {
+          node = sibling;
+          var verdict = accepts(walker, node);
+          if (verdict === NodeFilter.FILTER_ACCEPT) {
+            walker.currentNode = node;
+            return node;
+          }
+          sibling = forward ? node.firstChild : node.lastChild;
+          if (verdict === NodeFilter.FILTER_REJECT || !sibling) {
+            sibling = forward ? node.nextSibling : node.previousSibling;
+          }
+        }
+        node = node.parentNode;
+        if (!node || node === walker.root) return null;
+        if (accepts(walker, node) === NodeFilter.FILTER_ACCEPT) return null;
+      }
+    }
+
+    TreeWalker.prototype.parentNode = function () {
+      var node = this.currentNode;
+      while (node && node !== this.root) {
+        node = node.parentNode;
+        if (node && accepts(this, node) === NodeFilter.FILTER_ACCEPT) {
+          this.currentNode = node;
+          return node;
+        }
+      }
+      return null;
+    };
+    TreeWalker.prototype.firstChild = function () { return traverseChildren(this, true); };
+    TreeWalker.prototype.lastChild = function () { return traverseChildren(this, false); };
+    TreeWalker.prototype.nextSibling = function () { return traverseSiblings(this, true); };
+    TreeWalker.prototype.previousSibling = function () { return traverseSiblings(this, false); };
+
+    TreeWalker.prototype.nextNode = function () {
+      var node = this.currentNode;
+      var verdict = NodeFilter.FILTER_ACCEPT;
+      while (true) {
+        while (verdict !== NodeFilter.FILTER_REJECT && node.firstChild) {
+          node = node.firstChild;
+          verdict = accepts(this, node);
+          if (verdict === NodeFilter.FILTER_ACCEPT) {
+            this.currentNode = node;
+            return node;
+          }
+        }
+        var sibling = null;
+        var ancestor = node;
+        while (ancestor) {
+          if (ancestor === this.root) return null;
+          sibling = ancestor.nextSibling;
+          if (sibling) break;
+          ancestor = ancestor.parentNode;
+        }
+        if (!sibling) return null;
+        node = sibling;
+        verdict = accepts(this, node);
+        if (verdict === NodeFilter.FILTER_ACCEPT) {
+          this.currentNode = node;
+          return node;
+        }
+      }
+    };
+
+    TreeWalker.prototype.previousNode = function () {
+      var node = this.currentNode;
+      while (node !== this.root) {
+        var sibling = node.previousSibling;
+        while (sibling) {
+          node = sibling;
+          var verdict = accepts(this, node);
+          while (verdict !== NodeFilter.FILTER_REJECT && node.lastChild) {
+            node = node.lastChild;
+            verdict = accepts(this, node);
+          }
+          if (verdict === NodeFilter.FILTER_ACCEPT) {
+            this.currentNode = node;
+            return node;
+          }
+          sibling = node.previousSibling;
+        }
+        if (node === this.root || !node.parentNode) return null;
+        node = node.parentNode;
+        if (accepts(this, node) === NodeFilter.FILTER_ACCEPT) {
+          this.currentNode = node;
+          return node;
+        }
+      }
+      return null;
+    };
+
+    g.TreeWalker = TreeWalker;
+
+    // Document order, staying inside the subtree the iterator was rooted at.
+    function followingNode(node, root) {
+      if (node.firstChild) return node.firstChild;
+      while (node) {
+        if (node === root) return null;
+        if (node.nextSibling) return node.nextSibling;
+        node = node.parentNode;
+      }
+      return null;
+    }
+
+    function precedingNode(node, root) {
+      if (node === root) return null;
+      var sibling = node.previousSibling;
+      if (sibling) {
+        while (sibling.lastChild) sibling = sibling.lastChild;
+        return sibling;
+      }
+      return node.parentNode;
+    }
+
+    function NodeIterator(root, whatToShow, filter) {
+      defineTraversalFields(this, root, whatToShow, filter);
+      this.referenceNode = root;
+      this.pointerBeforeReferenceNode = true;
+    }
+
+    // The pointer sits on one side of the reference node, so a step first
+    // moves the pointer and only then the node.
+    function iterate(iterator, forward) {
+      var node = iterator.referenceNode;
+      var before = iterator.pointerBeforeReferenceNode;
+      while (true) {
+        if (forward) {
+          if (!before) {
+            node = followingNode(node, iterator.root);
+            if (!node) return null;
+          } else {
+            before = false;
+          }
+        } else {
+          if (before) {
+            node = precedingNode(node, iterator.root);
+            if (!node) return null;
+          } else {
+            before = true;
+          }
+        }
+        if (accepts(iterator, node) === NodeFilter.FILTER_ACCEPT) break;
+      }
+      iterator.referenceNode = node;
+      iterator.pointerBeforeReferenceNode = before;
+      return node;
+    }
+
+    NodeIterator.prototype.nextNode = function () { return iterate(this, true); };
+    NodeIterator.prototype.previousNode = function () { return iterate(this, false); };
+    // `detach` has done nothing since 2014; it is kept because pages call it.
+    NodeIterator.prototype.detach = function () {};
+
+    g.NodeIterator = NodeIterator;
+
+    if (g.document && typeof g.document.createTreeWalker !== 'function') {
+      g.document.createTreeWalker = function (root, whatToShow, filter) {
+        return new TreeWalker(root, whatToShow, filter);
+      };
+      g.document.createNodeIterator = function (root, whatToShow, filter) {
+        return new NodeIterator(root, whatToShow, filter);
+      };
+    }
+  }
+
+  // `reportError` hands an exception to the page's error handling without
+  // throwing it. Ours only reports it; nothing else observes uncaught errors.
+  if (typeof g.reportError !== 'function') {
+    g.reportError = function (error) {
+      if (g.console && typeof g.console.error === 'function') g.console.error(error);
+    };
+  }
 })();
 "#;
 
@@ -4139,6 +4389,40 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.title.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn a_tree_walker_visits_the_nodes_the_filter_keeps() {
+        // Walking the document with a TreeWalker is how a consent manager and
+        // every rich-text editor read a subtree. `createTreeWalker` did not
+        // exist, so the constructor reference alone stopped the script.
+        let result = run_document_scripts(
+            r#"<html><body><div id="r"><p id="a">one<b id="ab">two</b></p><span id="s">x</span></div><script>
+                function ids(walker) {
+                    var seen = [], node;
+                    while ((node = walker.nextNode())) seen.push(node.id);
+                    return seen.join(',');
+                }
+                var root = document.getElementById('r');
+                var skipped = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, function (node) {
+                    return node.tagName === 'P' ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+                });
+                var walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+                while (walker.nextNode()) {}
+                var back = [];
+                var node;
+                while ((node = walker.previousNode())) back.push(node.id);
+                document.title = [
+                    ids(document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT)),
+                    ids(skipped),
+                    back.join(','),
+                    ids(document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT)),
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("a,ab,s|a|ab,a,r|r,a,ab,s"));
     }
 
     #[test]
