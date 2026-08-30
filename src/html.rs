@@ -972,6 +972,20 @@ fn ensure_table_ancestry(builder: &mut Builder, new_tag: &str) {
                 push(builder, "tr");
             }
         }
+        // These belong to the table itself, so the row or cell that happens to
+        // be open ends first: `<table><tr><caption>` puts the caption beside
+        // the row, not inside it. The standard calls this clearing the stack
+        // back to a table context.
+        "caption" | "colgroup" | "tbody" | "thead" | "tfoot"
+            if builder.is_open("table") =>
+        {
+            while matches!(
+                builder.tag_of(builder.current()),
+                "tr" | "td" | "th" | "tbody" | "thead" | "tfoot" | "caption" | "colgroup"
+            ) {
+                builder.open.pop();
+            }
+        }
         "tr" if builder.tag_of(builder.current()) == "table" => push(builder, "tbody"),
         "col" if builder.tag_of(builder.current()) == "table" => push(builder, "colgroup"),
         _ => {}
@@ -1164,14 +1178,34 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     // A frameset document keeps the whitespace written beside
                     // its frames, and whatever is inside `<noframes>` -- the
                     // page a browser without frames would show.
-                    if is_html_whitespace_only(&text) {
-                        builder.html_comments.push(Node::Text(text));
+                    // Whitespace is kept and everything else dropped, a
+                    // character at a time -- a run that mixes them, like
+                    // the newline before a stray word, keeps its blank part.
+                    let blanks: String = text
+                        .chars()
+                        .filter(|c| matches!(c, '\t' | '\n' | '\u{000C}' | '\r' | ' '))
+                        .collect();
+                    if !blanks.is_empty() {
+                        builder.html_comments.push(Node::Text(blanks));
                     }
                     continue;
                 }
                 // Between the head and the body, whitespace belongs to neither.
-                // A column group holds nothing but columns, text included.
-                if !is_html_whitespace_only(&text) && builder.tag_of(builder.current()) == "colgroup" {
+                // A column group holds nothing but columns, text included --
+                // but the characters are read one at a time, so the blank run
+                // before the first real character is still inside the group.
+                // It is what separates `<colgroup> foo` into a space that
+                // stays and a word that is fostered out of the table.
+                let mut text = text;
+                if !is_html_whitespace_only(&text) && builder.tag_of(builder.current()) == "colgroup"
+                {
+                    let split = text
+                        .find(|c| !matches!(c, '\t' | '\n' | '\u{000C}' | '\r' | ' '))
+                        .unwrap_or(0);
+                    if split > 0 {
+                        builder.insert(BuildKind::Text(text[..split].to_string()));
+                        text = text[split..].to_string();
+                    }
                     builder.open.pop();
                 }
                 if builder.after_head && builder.open.len() == 1 {
@@ -1187,9 +1221,14 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     text
                 };
                 skip_leading_newline = false;
-                if !is_html_whitespace_only(&text) {
+                if !is_html_whitespace_only(&text)
+                    && !(builder.frameset_document && builder.is_open("noframes"))
+                {
                     // Writing anything again puts the parser back in the body,
-                    // however many closing tags came before it.
+                    // however many closing tags came before it. What is inside
+                    // a `<noframes>` is not that: it is the page a browser
+                    // without frames would show, and it says nothing about
+                    // where the parser is.
                     builder.after_body = false;
                     builder.after_html = false;
                 }
@@ -1216,8 +1255,13 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 let mut attributes = attributes;
                 // `after_body` stays set: once `</body>` has been written, what
                 // follows belongs to the body whatever its name. Only the
-                // "after `</html>`" state ends here.
-                builder.after_html = false;
+                // "after `</html>`" state ends here -- except in a frameset
+                // document, where a `<noframes>` written past `</html>` is
+                // read as head content and leaves the state alone, so the
+                // comments around it still belong to the document.
+                if !(builder.frameset_document && name == "noframes") {
+                    builder.after_html = false;
+                }
 
                 // A frameset document holds frames. Markup written beside them
                 // has nowhere to go, so it is dropped rather than drawn.
@@ -1877,16 +1921,21 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
         .frameset_allowed
         .then(|| take_first_frameset(&mut body.children))
         .flatten();
-    // What a frameset document keeps besides its frames: the `<noframes>` a
-    // page leaves for a browser that cannot show them.
-    let mut noframes: Vec<Node> = Vec::new();
+    // What a frameset document keeps beside its frames: the `<noframes>` a
+    // page leaves for a browser that cannot show them, and the comments and
+    // whitespace written between them. Only the noframes were kept, so a
+    // comment after `</frameset>` was thrown away.
+    let mut after_frameset: Vec<Node> = Vec::new();
     let second = match frameset {
         Some(node) => {
-            noframes = body
+            after_frameset = body
                 .children
                 .into_iter()
-                .filter(|child| {
-                    matches!(child, Node::Element(element) if element.tag_name == "noframes")
+                .filter(|child| match child {
+                    Node::Element(element) => element.tag_name == "noframes",
+                    Node::Comment(_) => true,
+                    Node::Text(text) => is_html_whitespace_only(text),
+                    Node::Doctype(_) => false,
                 })
                 .collect();
             node
@@ -1898,7 +1947,7 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
     html_children.push(Node::Element(head));
     html_children.extend(extras.html_whitespace);
     html_children.push(second);
-    html_children.extend(noframes);
+    html_children.extend(after_frameset);
     html.children = html_children;
     html.children.extend(extras.html_comments);
     before_html.push(Node::Element(html));
