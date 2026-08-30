@@ -320,6 +320,11 @@ enum BuiltinId {
     DomClassListReplace,
     DomClassListItem,
     DomClassListToString,
+    DomClassListValues,
+    DomClassListKeys,
+    DomClassListEntries,
+    DomClassListForEach,
+    DomClassListSupports,
     DomNodeInsertAdjacentHtml,
     DomNodeIsSameNode,
     DomNodeIsEqualNode,
@@ -462,6 +467,18 @@ enum BuiltinId {
     DecodeUri,
     RegExpConstructor,
     RegExpProtoTest,
+    RegExpProtoGetSource,
+    RegExpProtoGetFlags,
+    RegExpProtoGetGlobal,
+    RegExpProtoGetIgnoreCase,
+    RegExpProtoGetMultiline,
+    RegExpProtoGetDotAll,
+    RegExpProtoGetSticky,
+    RegExpProtoGetUnicode,
+    RegExpProtoGetUnicodeSets,
+    RegExpProtoGetHasIndices,
+    MapProtoGetSize,
+    SetProtoGetSize,
     RegExpProtoExec,
     RegExpProtoToString,
     StringProtoMatch,
@@ -3758,6 +3775,7 @@ impl Vm {
         self.define_builtin_method(promise_prototype, "catch", BuiltinId::PromiseProtoCatch);
         self.define_builtin_method(promise_prototype, "finally", BuiltinId::PromiseProtoFinally);
 
+        self.define_builtin_getter(map_prototype, "size", BuiltinId::MapProtoGetSize);
         self.define_builtin_method(map_prototype, "set", BuiltinId::MapProtoSet);
         self.define_builtin_method(map_prototype, "get", BuiltinId::MapProtoGet);
         self.define_builtin_method(map_prototype, "has", BuiltinId::MapProtoHas);
@@ -3769,6 +3787,7 @@ impl Vm {
         self.define_builtin_method(map_prototype, "values", BuiltinId::MapProtoValues);
         self.define_symbol_iterator_alias(map_prototype, "entries");
 
+        self.define_builtin_getter(set_prototype, "size", BuiltinId::SetProtoGetSize);
         self.define_builtin_method(set_prototype, "add", BuiltinId::SetProtoAdd);
         self.define_builtin_method(set_prototype, "has", BuiltinId::SetProtoHas);
         self.define_builtin_method(set_prototype, "delete", BuiltinId::SetProtoDelete);
@@ -3946,6 +3965,25 @@ impl Vm {
         self.define_builtin_method(boolean_prototype, "toString", BuiltinId::BooleanProtoToString);
         self.define_builtin_method(boolean_prototype, "valueOf", BuiltinId::BooleanProtoValueOf);
 
+        // The flags are accessors on the prototype, not properties of each
+        // regexp -- which is what a library sees when it takes the engine's own
+        // getters off the built-ins to keep working after a page patches them.
+        // `getOwnPropertyDescriptor(RegExp.prototype, "source").get` was
+        // undefined here, and reading `.get` off it stopped the script.
+        for (name, getter) in [
+            ("source", BuiltinId::RegExpProtoGetSource),
+            ("flags", BuiltinId::RegExpProtoGetFlags),
+            ("global", BuiltinId::RegExpProtoGetGlobal),
+            ("ignoreCase", BuiltinId::RegExpProtoGetIgnoreCase),
+            ("multiline", BuiltinId::RegExpProtoGetMultiline),
+            ("dotAll", BuiltinId::RegExpProtoGetDotAll),
+            ("sticky", BuiltinId::RegExpProtoGetSticky),
+            ("unicode", BuiltinId::RegExpProtoGetUnicode),
+            ("unicodeSets", BuiltinId::RegExpProtoGetUnicodeSets),
+            ("hasIndices", BuiltinId::RegExpProtoGetHasIndices),
+        ] {
+            self.define_builtin_getter(regexp_prototype, name, getter);
+        }
         self.define_builtin_method(regexp_prototype, "test", BuiltinId::RegExpProtoTest);
         self.define_builtin_method(regexp_prototype, "exec", BuiltinId::RegExpProtoExec);
         self.define_builtin_method(regexp_prototype, "toString", BuiltinId::RegExpProtoToString);
@@ -4879,8 +4917,6 @@ impl Vm {
     /// Allocate a RegExp object with `source`/`flags`/`global`/`lastIndex`
     /// properties and the RegExp prototype.
     fn make_regexp_object(&mut self, pattern: &str, flags: &str) -> Value {
-        let source_value = self.make_string_value(pattern);
-        let flags_value = self.make_string_value(flags);
         let object = self.heap.allocate_object(JsObject {
             kind: ObjectKind::RegExp {
                 source: pattern.to_string(),
@@ -4891,27 +4927,11 @@ impl Vm {
             prototype: Some(self.regexp_prototype_ref()),
             ..JsObject::default()
         });
-        for (name, value) in [("source", source_value), ("flags", flags_value)] {
-            self.define_data_property(object, PropertyKey::from(name), value, false, false, false);
-        }
-        for (name, value) in [
-            ("global", Value::Bool(flags.contains('g'))),
-            ("ignoreCase", Value::Bool(flags.contains('i'))),
-            ("multiline", Value::Bool(flags.contains('m'))),
-            // The rest of the flag reflectors. Pages read them to tell how old
-            // an engine is: MediaWiki's compatibility gate asks
-            // `/./.dotAll === false` and, finding `undefined`, decided the
-            // browser was too old to run its scripts -- so Wikipedia served
-            // itself as if JavaScript were off, and its table of contents came
-            // out sprawled across the article.
-            ("dotAll", Value::Bool(flags.contains('s'))),
-            ("sticky", Value::Bool(flags.contains('y'))),
-            ("unicode", Value::Bool(flags.contains('u'))),
-            ("unicodeSets", Value::Bool(flags.contains('v'))),
-            ("hasIndices", Value::Bool(flags.contains('d'))),
-        ] {
-            self.define_data_property(object, PropertyKey::from(name), value, false, false, false);
-        }
+        // `source`, `flags` and the flag reflectors come from the prototype's
+        // accessors; `lastIndex` is the one property a regexp owns. Pages read
+        // the reflectors to tell how old an engine is: MediaWiki's
+        // compatibility gate asks `/./.dotAll === false` and, finding
+        // `undefined`, decided the browser was too old to run its scripts.
         self.define_data_property(
             object,
             PropertyKey::from("lastIndex"),
@@ -5606,6 +5626,25 @@ impl Vm {
                 "Object".to_string()
             }
             Some(tag) => tag.to_string(),
+        }
+    }
+
+    /// Define `name` as a getter-only accessor, the shape every built-in
+    /// accessor has: not enumerable, but configurable and reportable through
+    /// `getOwnPropertyDescriptor`.
+    fn define_builtin_getter(&mut self, object: GcRef<JsObject>, name: &str, builtin: BuiltinId) {
+        let value = self.allocate_builtin_value(builtin, false, None);
+        let Value::Object(function) = value else { return };
+        if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
+            object_data.properties.insert(
+                PropertyKey::from(name),
+                JsPropertyDescriptor::Accessor {
+                    get: Some(function),
+                    set: None,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
         }
     }
 
@@ -11534,6 +11573,63 @@ impl Vm {
                     .ok_or_else(|| VmError::TypeError("Method called on non-RegExp".to_string()))?;
                 Ok(self.make_string_value(&format!("/{source}/{flags}")))
             }
+            // Each flag reads off `this`. `RegExp.prototype` is not itself a
+            // regexp, and the spec answers for it rather than throwing, so
+            // `RegExp.prototype.source` is "(?:)" and its flags are empty.
+            BuiltinId::RegExpProtoGetSource
+            | BuiltinId::RegExpProtoGetFlags
+            | BuiltinId::RegExpProtoGetGlobal
+            | BuiltinId::RegExpProtoGetIgnoreCase
+            | BuiltinId::RegExpProtoGetMultiline
+            | BuiltinId::RegExpProtoGetDotAll
+            | BuiltinId::RegExpProtoGetSticky
+            | BuiltinId::RegExpProtoGetUnicode
+            | BuiltinId::RegExpProtoGetUnicodeSets
+            | BuiltinId::RegExpProtoGetHasIndices => {
+                let on_prototype = matches!(&this_value, Value::Object(object)
+                    if Some(*object) == self.regexp_prototype);
+                let (source, flags) = match self.regexp_source_flags(&this_value) {
+                    Some(pair) => pair,
+                    None if on_prototype => ("(?:)".to_string(), String::new()),
+                    None => {
+                        return Err(VmError::TypeError(
+                            "RegExp flag read on a non-RegExp".to_string(),
+                        ))
+                    }
+                };
+                let flag = |letter: char| Value::Bool(flags.contains(letter));
+                Ok(match builtin {
+                    BuiltinId::RegExpProtoGetSource => self.make_string_value(&source),
+                    BuiltinId::RegExpProtoGetFlags => self.make_string_value(&flags),
+                    BuiltinId::RegExpProtoGetGlobal => flag('g'),
+                    BuiltinId::RegExpProtoGetIgnoreCase => flag('i'),
+                    BuiltinId::RegExpProtoGetMultiline => flag('m'),
+                    BuiltinId::RegExpProtoGetDotAll => flag('s'),
+                    BuiltinId::RegExpProtoGetSticky => flag('y'),
+                    BuiltinId::RegExpProtoGetUnicode => flag('u'),
+                    BuiltinId::RegExpProtoGetUnicodeSets => flag('v'),
+                    _ => flag('d'),
+                })
+            }
+            // The count is kept as a property of each map or set, so this only
+            // has to exist for a caller that wants the accessor itself.
+            BuiltinId::MapProtoGetSize | BuiltinId::SetProtoGetSize => {
+                // Read the count straight off the object. Going through a
+                // normal property lookup would find this same accessor on the
+                // prototype and call it again forever.
+                let own = match &this_value {
+                    Value::Object(object) => {
+                        self.get_own_property_descriptor(*object, &PropertyKey::from("size"))
+                    }
+                    _ => None,
+                };
+                Ok(match own {
+                    Some(JsPropertyDescriptor::Data { value: Value::Number(n), .. }) => {
+                        Value::Number(n)
+                    }
+                    _ => Value::Number(0.0),
+                })
+            }
             BuiltinId::RegExpProtoTest => {
                 let (source, flags) = self
                     .regexp_source_flags(&this_value)
@@ -13791,6 +13887,47 @@ impl Vm {
                 let existing = self.get_dom_attribute(node_id, "class");
                 Ok(self.make_string_value(&existing))
             }
+            // A token list is iterable, and libraries lean on that: a consent
+            // manager collects `Symbol.iterator` off the built-in collections
+            // to tell them apart, and a missing one stops the whole script.
+            BuiltinId::DomClassListValues => {
+                let tokens = self.class_list_token_values(&this_value);
+                Ok(self.make_for_of_iterator(tokens))
+            }
+            BuiltinId::DomClassListKeys => {
+                let count = self.class_list_token_values(&this_value).len();
+                let keys = (0..count).map(|i| Value::Number(i as f64)).collect();
+                Ok(self.make_for_of_iterator(keys))
+            }
+            BuiltinId::DomClassListEntries => {
+                let tokens = self.class_list_token_values(&this_value);
+                let mut entries = Vec::with_capacity(tokens.len());
+                for (index, token) in tokens.into_iter().enumerate() {
+                    entries.push(
+                        self.make_array_from_values(vec![Value::Number(index as f64), token])?,
+                    );
+                }
+                Ok(self.make_for_of_iterator(entries))
+            }
+            BuiltinId::DomClassListForEach => {
+                let callback = args.first().cloned().unwrap_or(Value::Undefined);
+                let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let tokens = self.class_list_token_values(&this_value);
+                for (index, token) in tokens.into_iter().enumerate() {
+                    self.call_value_sync(
+                        callback.clone(),
+                        this_arg.clone(),
+                        vec![token, Value::Number(index as f64), this_value.clone()],
+                    )?;
+                }
+                Ok(Value::Undefined)
+            }
+            // `supports` only means anything for a list with a defined
+            // vocabulary (`rel`, `sandbox`). `classList` has none, so the spec
+            // says throw.
+            BuiltinId::DomClassListSupports => Err(VmError::TypeError(
+                "DOMTokenList has no supported tokens".to_string(),
+            )),
             BuiltinId::DomNodeAttachShadow => {
                 let node_id = self.this_node_id(&this_value);
                 let mode = match args.first() {
@@ -15894,6 +16031,10 @@ impl Vm {
         if matches!(slot.class, HostObjectClass::Other("NamedNodeMap")) {
             return self.get_attrmap_property(slot, key);
         }
+        // A token list is indexed and iterable, so it needs the raw key too.
+        if matches!(slot.class, HostObjectClass::Other("TokenList")) {
+            return self.get_classlist_property(slot, key);
+        }
         let name = match key {
             PropertyKey::String(s) => s.clone(),
             _ => return Ok(Value::Undefined),
@@ -15904,7 +16045,6 @@ impl Vm {
             HostObjectClass::Node | HostObjectClass::EventTarget => {
                 self.get_node_property(slot, name)
             }
-            HostObjectClass::Other("TokenList") => self.get_classlist_property(slot, name),
             HostObjectClass::Other("CSSStyleDeclaration") => self.get_style_property(slot, name),
             HostObjectClass::Other("ComputedStyle") => {
                 self.get_computed_style_object_property(slot, name)
@@ -17482,8 +17622,44 @@ impl Vm {
         }
     }
 
-    fn get_classlist_property(&mut self, slot: HostObjectSlot, name: String) -> Result<Value, VmError> {
+    /// The tokens of the `class` attribute of whatever element `this` wraps.
+    fn class_list_token_values(&mut self, this_value: &Value) -> Vec<Value> {
+        let node_id = self.this_node_id(this_value);
+        let existing = self.get_dom_attribute(node_id, "class");
+        existing
+            .split_whitespace()
+            .map(|token| token.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|token| self.make_string_value(&token))
+            .collect()
+    }
+
+    fn get_classlist_property(
+        &mut self,
+        slot: HostObjectSlot,
+        key: &PropertyKey,
+    ) -> Result<Value, VmError> {
         let node_id = NodeId(slot.handle as u32);
+        let name = match key {
+            PropertyKey::String(s) => s.clone(),
+            // `list[0]` is the token at that position, `undefined` past the end.
+            PropertyKey::Index(index) => {
+                let existing = self.get_dom_attribute(node_id, "class");
+                let token = existing
+                    .split_whitespace()
+                    .nth(*index as usize)
+                    .map(|token| token.to_string());
+                return Ok(match token {
+                    Some(token) => self.make_string_value(&token),
+                    None => Value::Undefined,
+                });
+            }
+            PropertyKey::Symbol(SymbolId(SYMBOL_ITERATOR_ID)) => {
+                return Ok(self.allocate_builtin_method(BuiltinId::DomClassListValues));
+            }
+            PropertyKey::Symbol(_) => return Ok(Value::Undefined),
+        };
         match name.as_str() {
             "length" => {
                 let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() });
@@ -17501,6 +17677,11 @@ impl Vm {
             "replace" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListReplace)),
             "item" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListItem)),
             "toString" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListToString)),
+            "values" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListValues)),
+            "keys" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListKeys)),
+            "entries" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListEntries)),
+            "forEach" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListForEach)),
+            "supports" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListSupports)),
             _ => Ok(Value::Undefined),
         }
     }

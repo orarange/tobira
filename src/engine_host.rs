@@ -4142,6 +4142,75 @@ mod tests {
     }
 
     #[test]
+    fn a_class_list_is_indexed_and_iterable() {
+        // A consent manager reads `Symbol.iterator` off each built-in
+        // collection to tell them apart; `classList` had none, so the script
+        // stopped before the banner was drawn.
+        let result = run_document_scripts(
+            r#"<html><body><div id="t" class="a b c"></div><script>
+                var list = document.getElementById('t').classList;
+                var seen = [];
+                list.forEach(function (token, index) { seen.push(index + ':' + token); });
+                document.title = [
+                    [...list].join(','),
+                    list[0] + '/' + String(list[9]),
+                    Array.from(list.keys()).join(','),
+                    seen.join(','),
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(
+            result.title.as_deref(),
+            Some("a,b,c|a/undefined|0,1,2|0:a,1:b,2:c")
+        );
+    }
+
+    #[test]
+    fn regexp_flags_are_accessors_on_the_prototype() {
+        // Library code takes the engine's own getters off the built-ins so it
+        // keeps working after a page patches them. Reading `.get` off a
+        // descriptor that came back undefined stopped the script.
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                var descriptor = Object.getOwnPropertyDescriptor(RegExp.prototype, 'source');
+                document.title = [
+                    typeof descriptor.get,
+                    descriptor.enumerable,
+                    descriptor.get.call(/xyz/),
+                    RegExp.prototype.source,
+                    /ab+c/gi.flags,
+                    Object.getOwnPropertyNames(/a/g).join(','),
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(
+            result.title.as_deref(),
+            Some("function|false|xyz|(?:)|gi|lastIndex")
+        );
+    }
+
+    #[test]
+    fn a_default_export_of_a_plain_value_leaves_the_stack_alone() {
+        // Writing the export onto the namespace object consumes the object,
+        // the name and the value; the code popped a fourth time afterwards.
+        // The module died before its first statement ran, which is most of
+        // what a bundler emits -- `export default {...}` is everywhere.
+        let result = run_document_scripts(
+            r#"<html><body><script type="module">
+                export default 'D';
+                document.title = 'ran';
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("ran"));
+    }
+
+    #[test]
     fn a_sloppy_function_called_bare_sees_the_global_as_this() {
         // `(function(){ return this })()` is how a UMD wrapper and regenerator
         // both find the global. Undefined there throws on the next property
