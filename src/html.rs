@@ -534,6 +534,22 @@ impl Builder {
         }
     }
 
+    /// Whether this element is where HTML starts again inside a drawing or a
+    /// formula.
+    ///
+    /// A search up the stack stops at one: `</div>` written inside a
+    /// `<foreignObject>` cannot reach the `<div>` outside the drawing.
+    fn is_integration_point(&self, index: usize) -> bool {
+        match self.namespace_of(index) {
+            Namespace::Svg => matches!(self.tag_of(index), "foreignObject" | "desc" | "title"),
+            Namespace::MathMl => matches!(
+                self.tag_of(index),
+                "mi" | "mo" | "mn" | "ms" | "mtext" | "annotation-xml"
+            ),
+            Namespace::Html => false,
+        }
+    }
+
     /// Fold a repeated `<html>` or `<body>` tag into the one already open.
     ///
     /// There is only ever one of each. A second tag adds the attributes the
@@ -1516,6 +1532,20 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                             builder.formatting.truncate(position);
                         }
                     }
+                    // An end tag cannot reach out of a drawing or a formula.
+                    // `<div><svg><foreignObject><p></div>` leaves the div open:
+                    // the search for it stops at the drawing, so the tag is
+                    // dropped and what follows stays where it was written.
+                    if builder
+                        .open
+                        .iter()
+                        .rev()
+                        .take_while(|i| builder.tag_of(**i) != name)
+                        .any(|i| builder.is_integration_point(*i))
+                    {
+                        continue;
+                    }
+
                     // A list item only closes one in the same list. `<ul><li>
                     // <ul></li>` leaves the item open, because the `</li>` has
                     // an inner list in the way, and what follows goes inside
@@ -2877,6 +2907,28 @@ mod tests {
         };
         assert_eq!(frameset.tag_name, "frameset");
         assert_eq!(frameset.children.len(), 1, "only the frame belongs here");
+    }
+
+    #[test]
+    fn a_closing_tag_cannot_reach_out_of_a_drawing() {
+        // The `<div>` is outside the SVG, so `</div>` written inside a
+        // `<foreignObject>` closes nothing and the text stays where it was.
+        let document = parse_document("<body><div><svg><foreignObject><p></div>a");
+        let body = body_of(&document);
+        let Node::Element(division) = &body.children[0] else {
+            panic!("expected the div");
+        };
+        assert_eq!(body.children.len(), 1, "the text belongs inside, not beside");
+        let Node::Element(svg) = &division.children[0] else {
+            panic!("expected the svg");
+        };
+        let Node::Element(object) = &svg.children[0] else {
+            panic!("expected the foreignObject");
+        };
+        let Node::Element(paragraph) = &object.children[0] else {
+            panic!("expected the paragraph");
+        };
+        assert!(matches!(paragraph.children.first(), Some(Node::Text(text)) if text == "a"));
     }
 
     #[test]
