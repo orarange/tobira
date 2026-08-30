@@ -1085,6 +1085,13 @@ pub struct ComputedStyle {
     pub display: Display,
     /// Set only when `display` named a table part.
     pub table_role: TableRole,
+    /// `display: flow-root` -- block-level on the outside, but it lays its own
+    /// contents out, so the floats inside it end at its bottom edge.
+    ///
+    /// Kept beside `display` rather than inside it for the same reason as
+    /// `table_role`: on the outside it is an ordinary block, and every match
+    /// on `display` should go on reading it as one.
+    pub flow_root: bool,
     pub color: Color,
     pub background_color: Option<Color>,
     pub margin: SignedEdgeSizes,
@@ -1285,6 +1292,7 @@ impl ComputedStyle {
             custom_properties: parent.and_then(|s| s.custom_properties.clone()),
             display: default_display(tag_name),
             table_role: TableRole::None,
+            flow_root: false,
             color: parent.map(|s| s.color).unwrap_or(DEFAULT_TEXT_COLOR),
             background_color: None,
             margin: default_margin(tag_name),
@@ -2985,13 +2993,26 @@ fn strip_css_string_quotes(s: &str) -> &str {
 /// aspect-ratio and an inset. As a text node it has nothing to paint and the
 /// illustration simply was not there.
 ///
-/// Only a pseudo carrying a picture becomes an element. Out-of-flow and
-/// background-bearing boxes are exactly the decorative case, and leaving the
-/// text-only ones alone keeps quotes, bullets and icon glyphs laid out the way
-/// they already were.
+/// A pseudo that only says what to write stays a text node -- that keeps
+/// quotes, bullets and icon glyphs laid out the way they already were. One
+/// that asks for a box of its own gets one: a picture to paint, a background,
+/// a size, or a `display` or `clear` that only means anything to a box.
+///
+/// The last of those is the `clearfix`: `::after { content: ""; display:
+/// block; clear: both }`, which is how most of the web holds a container open
+/// around the floats inside it. As a text node it cleared nothing, so
+/// Wikipedia's article body ended at its first line and the infoboxes hung
+/// out over everything below.
 fn pseudo_node(text: String, style: ComputedStyle) -> StyledNode {
-    let is_decorative = style.background_image_url.is_some() || style.background_gradient.is_some();
-    if !is_decorative {
+    let makes_a_box = style.background_image_url.is_some()
+        || style.background_gradient.is_some()
+        || style.background_color.is_some()
+        || !matches!(style.display, Display::Inline)
+        || !matches!(style.clear, ClearSide::None)
+        || !matches!(style.float, FloatSide::None)
+        || style.width.is_some()
+        || style.height.is_some();
+    if !makes_a_box {
         return StyledNode::Text(StyledText { text, style: intern_style(style) });
     }
     let children = if text.is_empty() {
@@ -4145,6 +4166,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             if let Some(display) = parse_display(value) {
                 style.display = display;
                 style.table_role = parse_table_role(value);
+                style.flow_root = value.trim().eq_ignore_ascii_case("flow-root");
             }
         }
         "float" => {

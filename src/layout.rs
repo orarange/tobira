@@ -4583,6 +4583,7 @@ fn layout_mixed_children(
                 reaching.extend_from_slice(&active_floats);
                 reaching
             };
+            let handed_count = handed_down.len();
             let outer_floats = std::mem::replace(&mut context.inherited_floats, handed_down);
             // Number this container's list items so `list-style-type: decimal`
             // has an ordinal to render. Counting here keeps nested lists
@@ -4606,7 +4607,13 @@ fn layout_mixed_children(
                 fonts,
                 current_form.clone(),
             );
+            // Floats the child opened and did not close belong to this box
+            // now: they carry on beside whatever comes next.
+            let escaped: Vec<ActiveFloat> = context
+                .inherited_floats
+                .split_off(handed_count.min(context.inherited_floats.len()));
             context.inherited_floats = outer_floats;
+            active_floats.extend(escaped);
             context.list_ordinal = None;
         } else {
             if let Some(marker) = bullet_pending.take() {
@@ -4642,7 +4649,34 @@ fn layout_mixed_children(
         &element.style,
         &active_floats,
     );
-    *cursor_y = (*cursor_y).max(max_float_bottom(&active_floats));
+    // A float only holds its container open when that container lays its own
+    // contents out -- a scroller, a flex or grid box, a table, `flow-root`, or
+    // one that is floated or taken out of flow itself. A plain block ends at
+    // its last line and the float hangs out below it, which is exactly why
+    // `clearfix` had to be invented.
+    if establishes_block_context(&element.style) {
+        *cursor_y = (*cursor_y).max(max_float_bottom(&active_floats));
+        return;
+    }
+    // A float that outlives this box goes on pushing text aside outside it, so
+    // it is handed back up. Without that, an infobox floated inside an article
+    // stopped mattering the moment the article's own children ran out, and
+    // everything after it was drawn straight over the top.
+    for float in active_floats {
+        if float.bottom > *cursor_y {
+            context.inherited_floats.push(float);
+        }
+    }
+}
+
+/// Whether a box lays its own contents out, so floats inside it end at its
+/// bottom edge rather than hanging past it.
+fn establishes_block_context(style: &ComputedStyle) -> bool {
+    style.flow_root
+        || !matches!(style.overflow, Overflow::Visible)
+        || !matches!(style.display, Display::Block | Display::ListItem)
+        || !matches!(style.float, FloatSide::None)
+        || !matches!(style.position, Position::Static | Position::Relative)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10826,6 +10860,20 @@ mod tests {
         probe_layout_with_images(html, width, &ImageStore::default())
     }
 
+    /// A probe with a stylesheet of its own, for rules that cannot be written
+    /// as an inline style -- a pseudo-element, say.
+    fn probe_layout_with_css(html: &str, css: &str, width: u32) -> super::LayoutDocument {
+        let document = parse_document(html);
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(&format!("body {{ margin: 0 }} {css}")),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        layout_styled_document(&styled, &ImageStore::default(), width, &mut fonts)
+    }
+
     fn probe_layout_with_images(
         html: &str,
         width: u32,
@@ -10977,6 +11025,63 @@ mod tests {
                 .into_iter()
                 .any(|text| text.x >= 100),
             "the line beside the float should start past it"
+        );
+    }
+
+    #[test]
+    fn only_a_box_that_lays_itself_out_holds_its_floats() {
+        // Checked against Chrome: the plain block ends at its own line and the
+        // float hangs out below it (18), while `overflow` and `flow-root` grow
+        // to hold it (100). Growing every container is why `clearfix` was
+        // never needed here -- and why a float stopped mattering the moment
+        // its container ran out.
+        let l = probe_layout(
+            r#"<html><body style="margin:0">
+                <div style="background:#aa0001;width:400px"><div style="float:left;width:80px;height:100px"></div>x</div>
+                <div style="background:#aa0002;width:400px;overflow:hidden"><div style="float:left;width:80px;height:100px"></div>x</div>
+                <div style="background:#aa0003;width:400px;display:flow-root"><div style="float:left;width:80px;height:100px"></div>x</div>
+            </body></html>"#,
+            1000,
+        );
+        assert_eq!(probe_rect(&l, 0xAA0001).expect("plain").height, 18);
+        assert_eq!(probe_rect(&l, 0xAA0002).expect("overflow").height, 100);
+        assert_eq!(probe_rect(&l, 0xAA0003).expect("flow-root").height, 100);
+    }
+
+    #[test]
+    fn a_clearfix_pseudo_element_holds_a_container_open() {
+        // `::after { content: ""; display: block; clear: both }` is how most
+        // of the web does this. Built as a text node it cleared nothing, so
+        // Wikipedia's article body ended at its first line and the infoboxes
+        // hung out over everything below it.
+        let l = probe_layout_with_css(
+            r#"<html><body>
+                <div class="cf" style="background:#aa0004;width:400px"><div style="float:left;width:80px;height:100px"></div>x</div>
+            </body></html>"#,
+            r#".cf::after{content:"";display:block;clear:both}"#,
+            1000,
+        );
+        assert_eq!(probe_rect(&l, 0xAA0004).expect("cleared").height, 100);
+    }
+
+    #[test]
+    fn a_float_goes_on_pushing_text_aside_outside_its_container() {
+        // Once a plain container stopped growing around its floats, one could
+        // outlive the box it was written in -- and the text after it was drawn
+        // straight over the top until the float was handed back up.
+        let l = probe_layout(
+            r#"<html><body style="margin:0">
+                <div><div style="float:left;width:80px;height:100px"></div>x</div>
+                <div>after</div>
+            </body></html>"#,
+            1000,
+        );
+        assert!(
+            l.texts()
+                .into_iter()
+                .filter(|text| text.text.contains("after"))
+                .all(|text| text.x >= 80),
+            "the line after the container should still clear the float"
         );
     }
 
