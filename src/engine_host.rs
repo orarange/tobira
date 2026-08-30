@@ -2034,6 +2034,53 @@ impl Host for BrowserHost {
             DomRead::BoundingClientRect { node } => {
                 Ok(DomReadResult::Rect(self.bounding_client_rect(node.0 as usize)))
             }
+            // Every element whose box covers the point, deepest and last-drawn
+            // first -- which is the order a browser hands them back, and its
+            // first entry is `elementFromPoint`.
+            //
+            // The boxes come from the last layout, so before the first one
+            // there is nothing to hit and the answer is empty. A page asks
+            // this in response to a pointer, by which time there has been one.
+            DomRead::ElementsFromPoint { x, y } => {
+                let point_x = x as f64 + self.scroll_x;
+                let point_y = y as f64 + self.scroll_y;
+                let mut hits: Vec<(usize, usize, NodeId)> = Vec::new();
+                for (order, node) in self.node_order().into_iter().enumerate() {
+                    // The document itself is not an element, so it is never a
+                    // hit -- a browser answers with `<html>` at the outside.
+                    if node.0 as usize == self.document {
+                        continue;
+                    }
+                    let Some(id) = self.tobira_id_for_handle(node.0 as usize) else {
+                        continue;
+                    };
+                    let Some(rect) = self.geometry.get(&id) else {
+                        continue;
+                    };
+                    if point_x >= rect.x
+                        && point_x < rect.x + rect.width
+                        && point_y >= rect.y
+                        && point_y < rect.y + rect.height
+                    {
+                        let mut depth = 0usize;
+                        let mut walk = self.nodes[node.0 as usize].parent;
+                        while let Some(parent) = walk {
+                            depth += 1;
+                            walk = self.nodes[parent].parent;
+                        }
+                        hits.push((depth, order, node));
+                    }
+                }
+                // Topmost first. Without the real paint order to sort on, the
+                // innermost box covering the point is the closest stand-in:
+                // it is the one drawn over its ancestors. Between boxes at the
+                // same depth the later one in the markup wins, which is the
+                // order they paint in.
+                hits.sort_by(|left, right| right.0.cmp(&left.0).then(right.1.cmp(&left.1)));
+                Ok(DomReadResult::Nodes(
+                    hits.into_iter().map(|(_, _, node)| node).collect(),
+                ))
+            }
             DomRead::ScrollMetrics { .. } => Ok(DomReadResult::ScrollMetrics(ScrollMetrics {
                 scroll_left: 0.0,
                 scroll_top: 0.0,
@@ -2693,6 +2740,16 @@ impl ScriptSource {
 
 pub fn run_document_scripts(html: &str, url: &str) -> EngineRunResult {
     EngineSession::start(html, url).1
+}
+
+/// Same, with the CSS the page would have been laid out with -- so a script
+/// that measures anything gets the numbers that stylesheet produces.
+pub fn run_document_scripts_with_styles(
+    html: &str,
+    url: &str,
+    stylesheet_text: &str,
+) -> EngineRunResult {
+    EngineSession::start_with_styles(html, url, stylesheet_text).1
 }
 
 /// A persistent engine-backed runtime over a `BrowserHost`. It keeps the `Vm`
@@ -3990,14 +4047,95 @@ const RUNTIME_PRELUDE: &str = r#"
     g.Range = Range;
     g.document.createRange = function () { return new Range(); };
   }
+
+  // `document.implementation`, which a page reaches for to build a detached
+  // document -- a sanitiser parses untrusted markup into one so that nothing
+  // in it can load or run while it is inspected.
+  if (g.document && g.document.implementation
+      && typeof g.document.implementation.createHTMLDocument !== 'function'
+      && typeof g.DOMParser === 'function') {
+    var implementation = g.document.implementation;
+    implementation.hasFeature = function () { return true; };
+    implementation.createHTMLDocument = function (title) {
+      var head = title === undefined ? '' : '<title>' + String(title) + '</title>';
+      return new g.DOMParser().parseFromString(
+        '<html><head>' + head + '</head><body></body></html>', 'text/html');
+    };
+    implementation.createDocument = function () {
+      return new g.DOMParser().parseFromString('<html><head></head><body></body></html>', 'text/html');
+    };
+    implementation.createDocumentType = function (name, publicId, systemId) {
+      return { name: String(name), publicId: String(publicId || ''), systemId: String(systemId || ''), nodeType: 10 };
+    };
+  }
 })();
 "#;
 
 impl EngineSession {
     /// Build the runtime, run the document's inline scripts, settle async
     /// deferred work, and return the runtime plus the initial snapshot.
+    /// Where every element sits once the page is laid out.
+    ///
+    /// The ids are the same preorder numbering the host hands out, which is
+    /// what `set_geometry` is keyed on -- a test in this file pins the two
+    /// together.
+    fn layout_geometry(
+        html: &str,
+        stylesheet_text: &str,
+    ) -> Vec<(usize, f32, f32, f32, f32)> {
+        let mut document = crate::html::parse_document(html);
+        crate::browser::annotate_node_ids(&mut document);
+        let viewport = crate::browser::style_viewport_width();
+        let stylesheet = crate::css::parse_stylesheet(stylesheet_text);
+        let styled = crate::css::build_styled_tree(
+            &document,
+            &stylesheet,
+            viewport,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = crate::font::FontContext::load();
+        let layout = crate::layout::layout_styled_document(
+            &styled,
+            &crate::image::ImageStore::default(),
+            viewport,
+            &mut fonts,
+        );
+        layout
+            .element_hitboxes
+            .iter()
+            .map(|box_| {
+                (
+                    box_.node_id,
+                    box_.x as f32,
+                    box_.y as f32,
+                    box_.width as f32,
+                    box_.height as f32,
+                )
+            })
+            .collect()
+    }
+
     pub fn start(html: &str, url: &str) -> (Self, EngineRunResult) {
-        let host = BrowserHost::from_html(html, url);
+        Self::start_with_styles(html, url, "")
+    }
+
+    /// Same, given the stylesheet that applies to the page.
+    ///
+    /// The sheet is only used to lay the document out once before any script
+    /// runs, so that `getBoundingClientRect` and everything built on it answer
+    /// with real numbers. Without it every measurement was zero: a sticky
+    /// header worked out that it was at the top of nothing, a dropdown opened
+    /// at the origin, and a carousel sized every slide to nought.
+    ///
+    /// A browser does the same thing in the same order -- a stylesheet blocks
+    /// the scripts after it precisely so that measuring is meaningful.
+    pub fn start_with_styles(
+        html: &str,
+        url: &str,
+        stylesheet_text: &str,
+    ) -> (Self, EngineRunResult) {
+        let mut host = BrowserHost::from_html(html, url);
+        host.set_geometry(&Self::layout_geometry(html, stylesheet_text));
         // Collect scripts in document order (inline + external `src`) and the base
         // URL to resolve relative `src` against, before the host moves into the Vm.
         let scripts = host.ordered_scripts();
@@ -5085,6 +5223,47 @@ mod tests {
             result.title.as_deref(),
             Some("11|text/plain|5|4|x.txt/true|data:text/plain;base64,aGk=")
         );
+    }
+
+    #[test]
+    fn the_page_is_laid_out_before_its_scripts_measure_it() {
+        // Every measurement used to be zero, because the layout only ran after
+        // the scripts had finished: a sticky header worked out that it was at
+        // the top of nothing, and a carousel sized every slide to nought.
+        let result = run_document_scripts_with_styles(
+            r#"<html><body><div id="box">x</div><script>
+                var rect = document.getElementById('box').getBoundingClientRect();
+                var hit = document.elementFromPoint(20, 20);
+                document.title = [
+                    Math.round(rect.width),
+                    Math.round(rect.height),
+                    hit ? hit.id : 'none',
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+            "body{margin:0} #box{width:120px;height:40px}",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("120|40|box"));
+    }
+
+    #[test]
+    fn document_implementation_is_one_object_that_can_build_a_document() {
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                var made = document.implementation.createHTMLDocument('Hi');
+                made.body.innerHTML = '<p id="q">z</p>';
+                document.title = [
+                    document.implementation === document.implementation,
+                    document.implementation.hasFeature('Core', '2.0'),
+                    made.title,
+                    made.getElementById('q').textContent,
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("true|true|Hi|z"));
     }
 
     #[test]

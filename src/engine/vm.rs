@@ -221,6 +221,8 @@ enum BuiltinId {
     DomDocCreateElement,
     DomDocCreateTextNode,
     DomDocCreateComment,
+    DomDocElementFromPoint,
+    DomDocElementsFromPoint,
     NavigatorSendBeacon,
     DomNodeCheckVisibility,
     DomNodeGetAttributeNs,
@@ -1639,6 +1641,8 @@ const DOM_INTERFACE_METHODS: &[(&str, &[(&str, BuiltinId)])] = &[
             ("createElementNS", BuiltinId::DomCreateElementNs),
             ("createTextNode", BuiltinId::DomDocCreateTextNode),
             ("createComment", BuiltinId::DomDocCreateComment),
+            ("elementFromPoint", BuiltinId::DomDocElementFromPoint),
+            ("elementsFromPoint", BuiltinId::DomDocElementsFromPoint),
             ("createDocumentFragment", BuiltinId::DomDocCreateFragment),
             ("getElementById", BuiltinId::DomDocGetElementById),
             ("getElementsByClassName", BuiltinId::DomDocGetElementsByClassName),
@@ -1716,6 +1720,7 @@ const DOM_INTERFACE_NAMES: &[&str] = &[
     // for patching a prototype -- nothing here is constructed, so naming them
     // cannot send a page down a path we do not support.
     "DocumentType",
+    "DOMImplementation",
     "ProcessingInstruction",
     "CDATASection",
     "AbstractRange",
@@ -13552,6 +13557,25 @@ impl Vm {
                 }
                 Ok(Value::Bool(true))
             }
+            BuiltinId::DomDocElementFromPoint | BuiltinId::DomDocElementsFromPoint => {
+                let x = args.first().map(|value| self.to_number(value)).unwrap_or(0.0) as f32;
+                let y = args.get(1).map(|value| self.to_number(value)).unwrap_or(0.0) as f32;
+                let hits = match self.host.read_dom(DomRead::ElementsFromPoint { x, y }) {
+                    Ok(DomReadResult::Nodes(nodes)) => nodes,
+                    _ => Vec::new(),
+                };
+                if matches!(builtin, BuiltinId::DomDocElementFromPoint) {
+                    return Ok(match hits.first() {
+                        Some(node) => self.make_dom_node_value(*node),
+                        None => Value::Null,
+                    });
+                }
+                let values = hits
+                    .into_iter()
+                    .map(|node| self.make_dom_node_value(node))
+                    .collect();
+                self.make_array_from_values(values)
+            }
             BuiltinId::DomDocCreateComment => {
                 let text = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let res = self.host.mutate_dom(DomMutation::CreateComment { window: WindowId(0), data: text });
@@ -17436,6 +17460,12 @@ impl Vm {
             "createElementNS" => Ok(self.allocate_builtin_method(BuiltinId::DomCreateElementNs)),
             "createTextNode" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateTextNode)),
             "createComment" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateComment)),
+            "elementFromPoint" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomDocElementFromPoint))
+            }
+            "elementsFromPoint" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomDocElementsFromPoint))
+            }
             "createDocumentFragment" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateFragment)),
             "write" | "writeln" => Ok(self.allocate_builtin_method(BuiltinId::DomDocWrite)),
             "addEventListener" | "removeEventListener" => {
@@ -17474,8 +17504,17 @@ impl Vm {
                 Ok(Value::Object(self.allocate_ordinary_object(None)))
             }
             "implementation" => {
-                let impl_obj = self.allocate_ordinary_object(None);
-                Ok(Value::Object(impl_obj))
+                // One object, kept: it was rebuilt on every read, so the
+                // methods the runtime prelude puts on it were gone by the next
+                // line and `document.implementation.createHTMLDocument` was
+                // never there.
+                if let Some(existing) = self.window_singletons.get("implementation") {
+                    return Ok(existing.clone());
+                }
+                let impl_obj = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+                let value = Value::Object(impl_obj);
+                self.window_singletons.insert("implementation", value.clone());
+                Ok(value)
             }
             _ => Ok(Value::Undefined),
         }
@@ -19439,6 +19478,8 @@ fn is_dom_managed_document_property(name: &str) -> bool {
             | "activeElement"
             | "createEvent"
             | "createComment"
+            | "elementFromPoint"
+            | "elementsFromPoint"
             | "implementation"
     )
 }

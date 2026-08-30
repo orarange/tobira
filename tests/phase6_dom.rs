@@ -432,6 +432,8 @@ impl Host for TestDom {
             DomRead::ShadowRootMode { .. } => Ok(DomReadResult::String(String::new())),
             DomRead::RootNode { node, .. } => Ok(DomReadResult::Node(node)),
             DomRead::EventPath { node, .. } => Ok(DomReadResult::Nodes(vec![node])),
+            // This fake host keeps no layout, so nothing is ever under a point.
+            DomRead::ElementsFromPoint { .. } => Ok(DomReadResult::Nodes(Vec::new())),
             DomRead::BoundingClientRect { .. } => {
                 Ok(DomReadResult::Rect(tobira_engine::engine::DomRect { x: 0.0, y: 0.0, width: 100.0, height: 20.0 }))
             }

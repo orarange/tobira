@@ -210,7 +210,7 @@ impl JavaScriptSession {
 // already exits cleanly when every sender is dropped (its `recv()` returns
 // `Err` once the page's session goes away), so no explicit shutdown is needed.
 pub fn process_document_scripts(html: &str, base_url: &Url) -> ProcessedScriptHtml {
-    let (processed, session) = start_document_script_session(html, base_url);
+    let (processed, session) = start_document_script_session(html, base_url, String::new());
     drop(session);
     processed
 }
@@ -265,6 +265,7 @@ fn process_document_scripts_with_engine(html: &str, base_url: &Url) -> Processed
 fn start_engine_script_session(
     html: &str,
     base_url: &Url,
+    stylesheet_text: String,
 ) -> (ProcessedScriptHtml, Option<JavaScriptSession>) {
     let html_owned = html.to_string();
     let url_str = base_url.to_string();
@@ -274,8 +275,11 @@ fn start_engine_script_session(
         .name("tobira-engine-js".to_string())
         .stack_size(JS_THREAD_STACK_BYTES)
         .spawn(move || {
-            let (mut session, initial) =
-                crate::engine_host::EngineSession::start(&html_owned, &url_str);
+            let (mut session, initial) = crate::engine_host::EngineSession::start_with_styles(
+                &html_owned,
+                &url_str,
+                &stylesheet_text,
+            );
             let _ = ready_tx.send(engine_result_to_processed(initial));
             while let Ok(command) = command_rx.recv() {
                 match command {
@@ -390,8 +394,9 @@ fn start_engine_script_session(
 pub fn start_document_script_session(
     html: &str,
     base_url: &Url,
+    stylesheet_text: String,
 ) -> (ProcessedScriptHtml, Option<JavaScriptSession>) {
-    start_engine_script_session(html, base_url)
+    start_engine_script_session(html, base_url, stylesheet_text)
 }
 
 fn process_document_scripts_error(html: String, message: String) -> ProcessedScriptHtml {
@@ -513,7 +518,7 @@ mod tests {
             </script>
         </body></html>"#;
         let (initial, session) =
-            start_engine_script_session(html, &Url::parse("http://localhost/").unwrap());
+            start_engine_script_session(html, &Url::parse("http://localhost/").unwrap(), String::new());
         let session = session.expect("engine session present");
         assert!(initial.html.contains(">idle</div>"));
 
@@ -571,7 +576,7 @@ mod tests {
             </script>
         </body></html>"#;
         let (initial, session) =
-            start_engine_script_session(html, &Url::parse("http://localhost/").unwrap());
+            start_engine_script_session(html, &Url::parse("http://localhost/").unwrap(), String::new());
         let session = session.expect("engine session present");
 
         // Use and drop a clone, exactly like set_dom_attribute does.
@@ -818,6 +823,7 @@ mod tests {
         let (processed, session) = start_document_script_session(
             "<html><body><script>document.title = [window.innerWidth, window.innerHeight].join('x'); window.addEventListener('resize', function () { document.title = [window.innerWidth, window.innerHeight].join('x'); });</script></body></html>",
             &Url::parse("https://example.com").unwrap(),
+            String::new(),
         );
 
         assert_eq!(processed.title_override.as_deref(), Some("1280x720"));
@@ -846,6 +852,7 @@ mod tests {
         let (processed, session) = start_document_script_session(
             "<html><body><script>document.title = String(window.scrollY); window.addEventListener('scroll', function () { document.title = String(window.scrollY); });</script></body></html>",
             &Url::parse("https://example.com").unwrap(),
+            String::new(),
         );
 
         assert_eq!(processed.title_override.as_deref(), Some("0"));

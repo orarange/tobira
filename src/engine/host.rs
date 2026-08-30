@@ -270,6 +270,11 @@ pub enum DomRead {
         slot: NodeId,
         flatten: bool,
     },
+    /// The elements whose box covers a point, topmost first.
+    ElementsFromPoint {
+        x: f32,
+        y: f32,
+    },
     BoundingClientRect {
         node: NodeId,
     },

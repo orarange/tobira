@@ -589,6 +589,7 @@ fn load_document_source_with_script_navigation(
     frame_depth: usize,
     script_navigation_depth: usize,
 ) -> Result<LoadedDocumentSource> {
+    forget_fetched_stylesheets();
     let response = fetch(url)?;
     let content_type = response.header("content-type").map(str::to_string);
     let decoded_text = decode_text_response(&response.body, response.header("content-type"));
@@ -598,7 +599,16 @@ fn load_document_source_with_script_navigation(
         &decoded_text,
     )
     .unwrap_or(decoded_text);
-    let (scripted, javascript_session) = start_document_script_session(&text, &response.final_url);
+    // The stylesheet is collected before the scripts run, the way a browser
+    // blocks on one: the page is laid out with it first, so a script that
+    // measures anything gets a real answer instead of zero.
+    let script_stylesheet = {
+        let mut pre = parse_document(&text);
+        annotate_resource_urls(&mut pre, &response.final_url);
+        collect_stylesheet_text(&pre, &response.final_url)
+    };
+    let (scripted, javascript_session) =
+        start_document_script_session(&text, &response.final_url, script_stylesheet);
     if let Some(target) = scripted.navigation_target.as_deref()
         && target != response.final_url.to_string()
         && script_navigation_depth < MAX_SCRIPT_NAVIGATION_DEPTH
@@ -1421,6 +1431,77 @@ fn collect_image_sources_into(node: &Node, output: &mut Vec<String>) {
     }
 }
 
+/// Linked stylesheets already fetched for the page being loaded.
+///
+/// The sheets are collected twice in a load -- once before the scripts run, so
+/// the page can be laid out and measured, and once for the layout that is
+/// drawn -- and there is no HTTP cache behind `fetch`, so without this each
+/// one is pulled over the network twice. Round trips are what makes a page
+/// slow here, so that mattered.
+///
+/// Emptied when a new document starts loading, which is as long as a
+/// stylesheet is worth holding: the request carries `Cache-Control: no-cache`.
+static STYLESHEET_MEMO: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub(crate) fn forget_fetched_stylesheets() {
+    if let Ok(mut memo) = STYLESHEET_MEMO.lock() {
+        memo.clear();
+    }
+}
+
+/// The text of a linked stylesheet, fetched at most once per page load.
+fn fetch_stylesheet_text(url: &Url) -> Option<String> {
+    let key = url.to_string();
+    if let Ok(memo) = STYLESHEET_MEMO.lock()
+        && let Some(text) = memo.get(&key)
+    {
+        return Some(text.clone());
+    }
+    let response = fetch(url).ok()?;
+    let css_text = decode_text_response(&response.body, response.header("content-type"));
+    let css_text = absolutize_css_urls(&css_text, url);
+    if let Ok(mut memo) = STYLESHEET_MEMO.lock() {
+        // A page with hundreds of sheets is not worth holding all of.
+        if memo.len() < 64 {
+            memo.insert(key, css_text.clone());
+        }
+    }
+    Some(css_text)
+}
+
+/// The page's CSS as one string: its own `<style>` blocks and every sheet it
+/// links, in the order the markup writes them.
+///
+/// Text rather than a parsed `Stylesheet` because this crosses to the thread
+/// that runs the scripts, and a parsed sheet shares its custom properties
+/// through an `Rc`. Sheets behind a media query other than `screen` are left
+/// out: answering one needs a viewport, and applying a `print` sheet to the
+/// screen would be worse than leaving it.
+pub(crate) fn collect_stylesheet_text(document: &Node, base_url: &Url) -> String {
+    let mut out = String::new();
+    for style_text in collect_style_blocks(document) {
+        out.push_str(&style_text);
+        out.push('\n');
+    }
+    for (href, media) in collect_stylesheet_links(document) {
+        let media = media.as_deref().map(str::trim).unwrap_or("");
+        if !(media.is_empty() || media.eq_ignore_ascii_case("all") || media.eq_ignore_ascii_case("screen")) {
+            continue;
+        }
+        let Ok(url) = base_url.resolve(&href) else {
+            continue;
+        };
+        let Some(css_text) = fetch_stylesheet_text(&url) else {
+            continue;
+        };
+        out.push_str(&css_text);
+        out.push('\n');
+    }
+    out
+}
+
 fn collect_stylesheet(document: &Node, base_url: &Url) -> Stylesheet {
     let mut stylesheet = Stylesheet::default();
 
@@ -1440,11 +1521,9 @@ fn collect_stylesheet(document: &Node, base_url: &Url) -> Stylesheet {
         let Ok(url) = base_url.resolve(&href) else {
             continue;
         };
-        let Ok(response) = fetch(&url) else {
+        let Some(css_text) = fetch_stylesheet_text(&url) else {
             continue;
         };
-        let css_text = decode_text_response(&response.body, response.header("content-type"));
-        let css_text = absolutize_css_urls(&css_text, &url);
         let mut sheet = parse_stylesheet(&css_text);
         if let Some(condition) = condition {
             sheet.apply_media(condition);
@@ -4039,7 +4118,7 @@ mod tests {
         let html = make_heavy_html(n);
         let runs = 6;
 
-        let (base_processed, base_session) = start_document_script_session(&html, &url);
+        let (base_processed, base_session) = start_document_script_session(&html, &url, String::new());
         let base_page = rebuild_page_from_html(
             &url,
             200,
@@ -4072,7 +4151,7 @@ mod tests {
             .collect();
 
         let build_samples = measure_n(runs, || {
-            let (processed, session) = start_document_script_session(&html, &url);
+            let (processed, session) = start_document_script_session(&html, &url, String::new());
             rebuild_page_from_html(
                 &url,
                 200,
@@ -4102,12 +4181,12 @@ mod tests {
         });
 
         let serialize_samples = measure_n(runs, || {
-            let (_processed, mut session) = start_document_script_session(&html, &url);
+            let (_processed, mut session) = start_document_script_session(&html, &url, String::new());
             session.as_mut().map(|s| s.snapshot())
         });
 
         let apply_samples = measure_n(runs, || {
-            let (processed, session) = start_document_script_session(&html, &url);
+            let (processed, session) = start_document_script_session(&html, &url, String::new());
             let mut page = rebuild_page_from_html(
                 &url,
                 200,
@@ -4125,7 +4204,7 @@ mod tests {
         });
 
         let cycle_samples = measure_n(runs, || {
-            let (processed, session) = start_document_script_session(&html, &url);
+            let (processed, session) = start_document_script_session(&html, &url, String::new());
             let mut page = rebuild_page_from_html(
                 &url,
                 200,
@@ -4527,7 +4606,7 @@ mod tests {
     fn set_dom_attribute_rebuilds_live_page_snapshot() {
         let html = "<html><body><input id=\"name\" value=\"a\"></body></html>";
         let url = Url::parse("https://example.com").unwrap();
-        let (processed, session) = start_document_script_session(html, &url);
+        let (processed, session) = start_document_script_session(html, &url, String::new());
         let mut page = rebuild_page_from_html(
             &url,
             200,
@@ -4556,7 +4635,7 @@ mod tests {
         // rapid scroll), only update the scroll offset.
         let html = "<html><body><p>hi</p></body></html>";
         let url = Url::parse("https://example.com").unwrap();
-        let (processed, session) = start_document_script_session(html, &url);
+        let (processed, session) = start_document_script_session(html, &url, String::new());
         let mut page = rebuild_page_from_html(
             &url,
             200,
@@ -4633,7 +4712,7 @@ mod tests {
             <p class="after">tail</p>
           </body></html>"#;
         let url = Url::parse("https://example.com").unwrap();
-        let (processed, session) = start_document_script_session(initial_html, &url);
+        let (processed, session) = start_document_script_session(initial_html, &url, String::new());
         let mut page = rebuild_page_from_html(
             &url,
             200,
