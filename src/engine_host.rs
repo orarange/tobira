@@ -4272,6 +4272,24 @@ mod tests {
     }
 
     #[test]
+    fn an_attribute_reflecting_property_reads_as_a_string() {
+        // apple.com's locale switcher walks `[hreflang]` and splits each one.
+        // Undefined there stopped the switcher before it drew.
+        let result = run_document_scripts(
+            r##"<html><body><a id="a" hreflang="en-GB" href="#">x</a><a id="b" href="#">y</a><script>
+                document.title = [
+                    document.getElementById('a').hreflang,
+                    JSON.stringify(document.getElementById('b').hreflang)
+                ].join("|");
+            </script></body></html>"##,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        // Absent reads as the empty string, not as undefined.
+        assert_eq!(result.title.as_deref(), Some("en-GB|\"\""));
+    }
+
+    #[test]
     fn a_template_can_be_brought_in_with_import_node() {
         // Cloning a template's content through `importNode` is the usual way a
         // component builds itself.

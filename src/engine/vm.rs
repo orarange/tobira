@@ -17101,9 +17101,26 @@ impl Vm {
             // before the page's header navigation had been built, leaving an
             // empty strip where the menu belongs.
             "lang" | "dir" | "title" | "target" | "rel" | "name" | "alt" | "placeholder"
-            | "accessKey" => {
+            // Names a page is likely to use for something of its own are left
+            // out on purpose: `content` is a `<template>`'s fragment, and
+            // `label` is a field a component gives itself. Reflecting those
+            // here would hide what the page put there.
+            | "accessKey" | "hreflang" | "media" | "httpEquiv" | "charset" | "srcset"
+            | "sizes" | "download" | "accept" | "autocomplete" | "pattern" | "cite"
+            | "dateTime" | "coords" | "shape" | "useMap" | "srclang" | "kind"
+            | "integrity" | "crossOrigin" | "referrerPolicy" | "enctype" | "method"
+            | "wrap" => {
+                // A few of these are spelled differently as attributes.
+                // `<a hreflang>` is the one apple.com reads: its locale
+                // switcher walks `[hreflang]` and splits each one, and an
+                // undefined value stopped the switcher before it drew.
                 let attribute = match name.as_str() {
                     "accessKey" => "accesskey",
+                    "httpEquiv" => "http-equiv",
+                    "dateTime" => "datetime",
+                    "useMap" => "usemap",
+                    "crossOrigin" => "crossorigin",
+                    "referrerPolicy" => "referrerpolicy",
                     other => other,
                 };
                 let value = self.get_dom_attribute(node_id, attribute);
