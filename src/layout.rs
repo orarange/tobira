@@ -2,7 +2,7 @@ use crate::css::{
     BackgroundRepeat, BackgroundSize, BoxSizing, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
     FontFamilyKind, GridEdge, GridTrackSize, LengthValue, ListStyleType, ObjectFit, Overflow, Position, FlexDirection,
     FlexWrap, AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
-    VerticalAlign, WhiteSpaceMode, apply_text_transform, ClearSide, FloatSide,
+    TableRole, VerticalAlign, WhiteSpaceMode, apply_text_transform, ClearSide, FloatSide,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
@@ -591,6 +591,17 @@ pub fn layout_styled_document(
 }
 
 struct LayoutContext {
+    /// Floats opened by an ancestor block container, in page coordinates.
+    ///
+    /// A float shortens the *line boxes* beside it, not the boxes: a plain
+    /// block next to a `float: left` still starts at the container edge and
+    /// still spans the full width -- only its text is pushed aside. Narrowing
+    /// the box instead moved every background and border on the page beside a
+    /// float, which is most sidebars and every pull quote.
+    ///
+    /// A child that establishes its own formatting context is different: that
+    /// one really is narrowed, so nothing is handed down to it.
+    inherited_floats: Vec<ActiveFloat>,
     background_color: Color,
     commands: Vec<DrawCommand>,
     links: Vec<LinkCommand>,
@@ -688,6 +699,7 @@ struct PendingBottom {
 impl Default for LayoutContext {
     fn default() -> Self {
         Self {
+            inherited_floats: Vec::new(),
             background_color: DEFAULT_BACKGROUND_COLOR,
             commands: Vec::new(),
             links: Vec::new(),
@@ -1762,7 +1774,30 @@ fn layout_block_element(
         _ => {}
     }
 
-    if element.tag_name == "table" {
+    // `display: table` is the same layout as a `<table>`: the cells of a row
+    // share the row out between them. Read as a plain block, a set of cells
+    // shrank to their own text and left the rest of the row empty.
+    // A box whose children are all rows or cells is the table they belong to,
+    // whether or not it says so: CSS wraps them in an anonymous table, and a
+    // page that writes only `display: table-cell` on the children relies on
+    // that. Requiring *all* of them keeps mixed content out of a layout that
+    // would drop whatever is not a cell.
+    let wraps_table_parts = {
+        let mut element_children = element.children.iter().filter_map(|child| match child {
+            StyledNode::Element(child) if child.style.display != Display::None => Some(child),
+            _ => None,
+        });
+        let mut any = false;
+        let all_parts = element_children.all(|child| {
+            any = true;
+            matches!(child.style.table_role, TableRole::Row | TableRole::Cell)
+        });
+        any && all_parts
+    };
+    if element.tag_name == "table"
+        || element.style.table_role == TableRole::Table
+        || wraps_table_parts
+    {
         let needs_layer = element.style.opacity < 255
             || element.style.filter_blur_px > 0
             || element.style.filter_brightness != 10000
@@ -3474,7 +3509,16 @@ fn layout_table_element(
     let preferred_table_width = preferred_content_width
         .saturating_add(track_total_spacing)
         .max(1);
-    let table_width = resolve_table_width(element, available_width, preferred_table_width);
+    // An anonymous table -- one CSS wrapped around a run of cells whose
+    // parent never said `display: table` -- is a box of its own inside that
+    // parent, so it shrinks to its cells and does not take the parent's width.
+    let anonymous_table =
+        element.tag_name != "table" && element.style.table_role != TableRole::Table;
+    let table_width = if anonymous_table {
+        preferred_table_width.min(available_width.max(1))
+    } else {
+        resolve_table_width(element, available_width, preferred_table_width)
+    };
     let target_content_width = table_width.saturating_sub(track_total_spacing).max(1);
     if preferred_content_width > target_content_width {
         shrink_column_widths(&mut sizing, preferred_content_width - target_content_width);
@@ -3760,6 +3804,15 @@ struct TableColumnSizing {
 fn collect_table_rows(element: &StyledElement) -> Vec<&StyledElement> {
     let mut rows = Vec::new();
     collect_table_rows_into(element, &mut rows);
+    // Cells written straight inside the table, with no row around them, share
+    // one anonymous row -- which is the table itself standing in for it.
+    if rows.is_empty()
+        && element.children.iter().any(|child| {
+            matches!(child, StyledNode::Element(child) if child.style.table_role == TableRole::Cell)
+        })
+    {
+        rows.push(element);
+    }
     rows
 }
 
@@ -3769,7 +3822,11 @@ fn collect_table_rows_into<'a>(element: &'a StyledElement, output: &mut Vec<&'a 
             match child_element.tag_name.as_str() {
                 "tr" => output.push(child_element),
                 "tbody" | "thead" | "tfoot" => collect_table_rows_into(child_element, output),
-                _ => {}
+                _ => match child_element.style.table_role {
+                    TableRole::Row => output.push(child_element),
+                    TableRole::RowGroup => collect_table_rows_into(child_element, output),
+                    _ => {}
+                },
             }
         }
     }
@@ -3789,7 +3846,8 @@ fn build_table_placements<'a>(rows: &[&'a StyledElement]) -> Vec<TablePlacement<
             .iter()
             .filter_map(|child| match child {
                 StyledNode::Element(element)
-                    if matches!(element.tag_name.as_str(), "td" | "th") =>
+                    if matches!(element.tag_name.as_str(), "td" | "th")
+                        || element.style.table_role == TableRole::Cell =>
                 {
                     Some(element)
                 }
@@ -4348,7 +4406,11 @@ fn layout_mixed_children(
                 },
             );
         }
-        let (avail_x, avail_right) = active_float_edges(active_floats, *cursor_y, x, width);
+        // The container's own floats, plus the ones an ancestor opened that
+        // still reach down here.
+        let mut reaching = context.inherited_floats.clone();
+        reaching.extend_from_slice(active_floats);
+        let (avail_x, avail_right) = active_float_edges(&reaching, *cursor_y, x, width);
         layout_inline_fragments(
             inline_fragments,
             element_style,
@@ -4470,6 +4532,32 @@ fn layout_mixed_children(
             );
             *cursor_y = clear_cursor_y(*cursor_y, child_clear, &active_floats);
             let (avail_x, avail_right) = active_float_edges(&active_floats, *cursor_y, x, width);
+            // A block that lays its own contents out -- a scroller, a flex or
+            // grid container, a table, anything not plain block flow -- keeps
+            // clear of the float, so it is the narrow slot it gets. Everything
+            // else takes the full width and lets its lines be shortened.
+            let child_makes_own_context = match child {
+                StyledNode::Element(child) => {
+                    !matches!(child.style.overflow, Overflow::Visible)
+                        || !matches!(child.style.display, Display::Block | Display::ListItem)
+                        || !matches!(child.style.float, FloatSide::None)
+                        || !matches!(child.style.position, Position::Static | Position::Relative)
+                }
+                _ => false,
+            };
+            let (child_x, child_width) = if child_makes_own_context {
+                (avail_x, avail_right.saturating_sub(avail_x).max(1))
+            } else {
+                (x, width.max(1))
+            };
+            let handed_down = if child_makes_own_context {
+                Vec::new()
+            } else {
+                let mut reaching = context.inherited_floats.clone();
+                reaching.extend_from_slice(&active_floats);
+                reaching
+            };
+            let outer_floats = std::mem::replace(&mut context.inherited_floats, handed_down);
             // Number this container's list items so `list-style-type: decimal`
             // has an ordinal to render. Counting here keeps nested lists
             // independent: each container runs its own pass over its children.
@@ -4484,14 +4572,15 @@ fn layout_mixed_children(
             };
             layout_node(
                 child,
-                avail_x,
-                avail_right.saturating_sub(avail_x).max(1),
+                child_x,
+                child_width,
                 cursor_y,
                 context,
                 images,
                 fonts,
                 current_form.clone(),
             );
+            context.inherited_floats = outer_floats;
             context.list_ordinal = None;
         } else {
             if let Some(marker) = bullet_pending.take() {
@@ -10840,17 +10929,72 @@ mod tests {
     }
 
     #[test]
-    fn float_left_pushes_following_block_right() {
+    fn a_float_shortens_the_lines_beside_it_not_the_block() {
+        // Checked against Chrome: the float is 100 wide at the left edge, and
+        // the block after it is still at x=0 and still the full 320 -- only
+        // its text starts beyond the float. Narrowing the box instead moved
+        // every background and border on the page beside a float.
         let l = probe_layout(
-            r#"<html><body style="margin:0"><div style="float:left;width:100px;height:40px;background:#aa0001"></div><div style="background:#aa0002;height:20px"></div></body></html>"#,
+            r#"<html><body style="margin:0"><div style="float:left;width:100px;height:40px;background:#aa0001"></div><div style="background:#aa0002;height:20px">text</div></body></html>"#,
             320,
         );
         let float_box = probe_rect(&l, 0xAA0001).expect("float rect");
         let flow_box = probe_rect(&l, 0xAA0002).expect("flow rect");
         assert_eq!(float_box.x, 0);
         assert_eq!(float_box.y, 0);
-        assert!(flow_box.x >= 100, "flow box not shortened by float: x={}", flow_box.x);
-        assert!(flow_box.y <= float_box.height, "flow box should stay in the float band or just below it");
+        assert_eq!(flow_box.x, 0, "the block itself is not moved by a float");
+        assert_eq!(flow_box.width, 320, "the block still spans the container");
+        assert!(
+            l.texts()
+                .into_iter()
+                .any(|text| text.x >= 100),
+            "the line beside the float should start past it"
+        );
+    }
+
+    #[test]
+    fn display_table_shares_the_row_out_between_its_cells() {
+        // Checked against Chrome: a 300-wide table with one 100-wide cell
+        // leaves the other 200. Read as plain blocks the cells shrank to their
+        // own text and the rest of the row stayed empty, which is every layout
+        // built the `display: table` way.
+        let l = probe_layout(
+            r#"<html><body style="margin:0">
+                <div style="display:table;width:300px"><div style="display:table-row">
+                    <div style="display:table-cell;background:#aa0001">a</div>
+                    <div style="display:table-cell;width:100px;background:#aa0002">b</div>
+                </div></div>
+            </body></html>"#,
+            1000,
+        );
+        let first = probe_rect(&l, 0xAA0001).expect("first cell");
+        let second = probe_rect(&l, 0xAA0002).expect("second cell");
+        assert_eq!((first.x, first.width), (0, 200));
+        assert_eq!((second.x, second.width), (200, 100));
+    }
+
+    #[test]
+    fn cells_without_a_table_around_them_get_an_anonymous_one() {
+        // Checked against Chrome: the cells sit side by side and the table
+        // they are wrapped in shrinks to them -- it does not take the width of
+        // the box that happens to hold them.
+        let l = probe_layout(
+            r#"<html><body style="margin:0"><div style="width:1000px">
+                <div style="display:table-cell;background:#aa0003">a</div>
+                <div style="display:table-cell;width:100px;background:#aa0004">b</div>
+            </div></body></html>"#,
+            1000,
+        );
+        let first = probe_rect(&l, 0xAA0003).expect("first cell");
+        let second = probe_rect(&l, 0xAA0004).expect("second cell");
+        assert_eq!(first.x, 0);
+        assert!(
+            first.width < 100,
+            "an auto cell shrinks to its text, got {}",
+            first.width
+        );
+        assert_eq!(second.x, first.width, "the cells sit side by side");
+        assert_eq!(second.width, 100);
     }
 
     #[test]

@@ -380,6 +380,25 @@ pub struct InteractiveState {
 // Enums used in ComputedStyle
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Which part of a table an element plays, when CSS says so rather than the
+/// markup.
+///
+/// `display: table` is a real layout, not a synonym for `block`: the cells of a
+/// row share the row out between them, and one with a stated width leaves the
+/// rest to the others. It is kept beside `display` rather than inside it so
+/// that every box that is block-level on the outside still reads as
+/// `Display::Block` and no existing match has to grow a case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TableRole {
+    #[default]
+    None,
+    Table,
+    /// `table-row-group`, `table-header-group`, `table-footer-group`.
+    RowGroup,
+    Row,
+    Cell,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Display {
     Block,
@@ -905,6 +924,8 @@ impl Default for ClearSide {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComputedStyle {
     pub display: Display,
+    /// Set only when `display` named a table part.
+    pub table_role: TableRole,
     pub color: Color,
     pub background_color: Option<Color>,
     pub margin: SignedEdgeSizes,
@@ -1096,6 +1117,7 @@ impl ComputedStyle {
             border_color_transparent: false,
             custom_properties: parent.and_then(|s| s.custom_properties.clone()),
             display: default_display(tag_name),
+            table_role: TableRole::None,
             color: parent.map(|s| s.color).unwrap_or(DEFAULT_TEXT_COLOR),
             background_color: None,
             margin: default_margin(tag_name),
@@ -3943,6 +3965,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         "display" => {
             if let Some(display) = parse_display(value) {
                 style.display = display;
+                style.table_role = parse_table_role(value);
             }
         }
         "float" => {
@@ -5592,9 +5615,22 @@ impl From<&Element> for ElementIdentity {
 // Property parsers
 // ─────────────────────────────────────────────────────────────────────────────
 
+
+/// The table part `display` names, if it names one.
+fn parse_table_role(input: &str) -> TableRole {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "table" | "inline-table" => TableRole::Table,
+        "table-row-group" | "table-header-group" | "table-footer-group" => TableRole::RowGroup,
+        "table-row" => TableRole::Row,
+        "table-cell" => TableRole::Cell,
+        _ => TableRole::None,
+    }
+}
+
 fn parse_display(input: &str) -> Option<Display> {
     match input.trim().to_ascii_lowercase().as_str() {
-        "block" | "flow-root" | "table" | "table-row" => Some(Display::Block),
+        "block" | "flow-root" | "table" | "table-row" | "table-row-group"
+        | "table-header-group" | "table-footer-group" => Some(Display::Block),
         "flex" => Some(Display::Flex),
         "inline-flex" => Some(Display::InlineFlex),
         "grid" => Some(Display::Grid),
@@ -5602,10 +5638,10 @@ fn parse_display(input: &str) -> Option<Display> {
         "inline-block" => Some(Display::InlineBlock),
         "contents" => Some(Display::Contents),
         "inline" => Some(Display::Inline),
-        // A cell is a box that sits beside its siblings and takes a width and a
-        // height of its own. Read as plain inline it took neither, so a layout
-        // built out of `display: table-cell` collapsed to a line of text.
-        "table-cell" => Some(Display::InlineBlock),
+        // Block-level on the outside. Which column it lands in and how wide
+        // it ends up are decided by the table layout, through `table_role`.
+        "table-cell" => Some(Display::Block),
+        "inline-table" => Some(Display::InlineBlock),
         "list-item" => Some(Display::ListItem),
         "none" => Some(Display::None),
         _ => None,
@@ -7498,7 +7534,7 @@ mod tests {
     use super::{
         AlignItems, Display, FlexDirection, FlexWrap, GridEdge, GridTrackSize, JustifyContent,
         LengthValue,
-        Position, RuleIndex, StyledElement, StyledNode, VerticalAlign, WhiteSpaceMode,
+        Position, RuleIndex, StyledElement, StyledNode, TableRole, VerticalAlign, WhiteSpaceMode,
         build_styled_tree, compute_style, parse_calc, parse_color, parse_inline_declarations,
         parse_length, parse_stylesheet, split_at_top_level,
     };
@@ -7687,7 +7723,10 @@ mod tests {
             &super::InteractiveState::default(),
         );
         let cell = find_first_element(&styled, "div").expect("the cell should exist");
-        assert_eq!(cell.style.display, Display::InlineBlock);
+        // Block-level on the outside; which column it lands in and how wide it
+        // ends up are the table layout's business, reached through the role.
+        assert_eq!(cell.style.display, Display::Block);
+        assert_eq!(cell.style.table_role, TableRole::Cell);
     }
 
     #[test]
