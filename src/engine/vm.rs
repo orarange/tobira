@@ -8180,6 +8180,14 @@ impl Vm {
                         };
                     }
                 }
+                // Last, whatever has been put on the interface prototypes.
+                // Host nodes are not linked into those chains, so anything
+                // added to `Element.prototype` -- by this runtime, or by a
+                // page shipping its own polyfill for `closest` or `append` --
+                // was invisible to every element on the page.
+                if let Some(found) = self.dom_interface_prototype_property(slot.class, key)? {
+                    return Ok(found);
+                }
             }
             return Ok(value);
         }
@@ -17518,6 +17526,40 @@ impl Vm {
             }
             _ => Ok(Value::Undefined),
         }
+    }
+
+    /// A property looked up along the DOM interface prototypes a host object
+    /// would inherit from, innermost first.
+    fn dom_interface_prototype_property(
+        &mut self,
+        class: HostObjectClass,
+        key: &PropertyKey,
+    ) -> Result<Option<Value>, VmError> {
+        let chain: &[&str] = match class {
+            HostObjectClass::Document => &["Document", "Node", "EventTarget"],
+            HostObjectClass::Node | HostObjectClass::EventTarget => {
+                &["HTMLElement", "Element", "Node", "EventTarget"]
+            }
+            _ => return Ok(None),
+        };
+        for interface in chain {
+            let Some(Value::Object(ctor)) = self.globals.get(*interface).cloned() else {
+                continue;
+            };
+            let Some(JsPropertyDescriptor::Data {
+                value: Value::Object(prototype),
+                ..
+            }) = self.get_own_property_descriptor(ctor, &PropertyKey::from("prototype"))
+            else {
+                continue;
+            };
+            if let Some(JsPropertyDescriptor::Data { value, .. }) =
+                self.get_own_property_descriptor(prototype, key)
+            {
+                return Ok(Some(value));
+            }
+        }
+        Ok(None)
     }
 
     fn get_node_property(&mut self, slot: HostObjectSlot, name: String) -> Result<Value, VmError> {

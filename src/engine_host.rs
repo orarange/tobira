@@ -4104,6 +4104,233 @@ const RUNTIME_PRELUDE: &str = r#"
       return { name: String(name), publicId: String(publicId || ''), systemId: String(systemId || ''), nodeType: 10 };
     };
   }
+
+  // ---- CSSStyleSheet / adoptedStyleSheets ---------------------------------
+  // A constructed sheet is how a component ships its own CSS without writing
+  // a <style> tag. Here it becomes one: `replaceSync` puts the text into a
+  // style element in the head, which is where the layout reads it from.
+  //
+  // A sheet adopted into a shadow root therefore applies to the whole page
+  // rather than only inside it -- this engine does not scope styles to a
+  // shadow tree either way.
+  // `CSSStyleSheet` already exists as a bare interface object, so what is
+  // tested for is the method that makes it usable.
+  if (g.document && !(g.CSSStyleSheet && g.CSSStyleSheet.prototype
+      && typeof g.CSSStyleSheet.prototype.replaceSync === 'function')) {
+    function CSSStyleSheet(options) {
+      this._element = null;
+      this.cssRules = [];
+      this.rules = this.cssRules;
+      this.disabled = false;
+      this.media = (options && options.media) || '';
+      this.title = (options && options.title) || '';
+    }
+    CSSStyleSheet.prototype._install = function (text) {
+      if (!this._element) {
+        this._element = g.document.createElement('style');
+        this._element.setAttribute('data-tobira-constructed', '');
+        var head = g.document.head || g.document.documentElement;
+        if (head) head.appendChild(this._element);
+      }
+      this._element.textContent = text;
+    };
+    CSSStyleSheet.prototype.replaceSync = function (text) {
+      this._install(String(text === undefined ? '' : text));
+    };
+    CSSStyleSheet.prototype.replace = function (text) {
+      this.replaceSync(text);
+      return Promise.resolve(this);
+    };
+    CSSStyleSheet.prototype.insertRule = function (rule, index) {
+      var at = index === undefined ? this.cssRules.length : index;
+      this.cssRules.splice(at, 0, rule);
+      this._install(this.cssRules.join('\n'));
+      return at;
+    };
+    CSSStyleSheet.prototype.deleteRule = function (index) {
+      this.cssRules.splice(index, 1);
+      this._install(this.cssRules.join('\n'));
+    };
+    g.CSSStyleSheet = CSSStyleSheet;
+
+    // Assigning the list is bookkeeping: the sheets applied when they were
+    // written, because a host object cannot carry a setter here.
+    if (!g.document.adoptedStyleSheets) g.document.adoptedStyleSheets = [];
+    if (g.ShadowRoot && g.ShadowRoot.prototype && !('adoptedStyleSheets' in g.ShadowRoot.prototype)) {
+      g.ShadowRoot.prototype.adoptedStyleSheets = [];
+    }
+  }
+
+  // ---- Element.animate ----------------------------------------------------
+  // Nothing here animates. A page that asks for one is describing where the
+  // element should end up, so it is put there at once and the animation
+  // reports itself as finished. Anything waiting on `finished` carries on,
+  // which is what stops an entrance animation from leaving the page blank.
+  if (g.Element && g.Element.prototype && typeof g.Element.prototype.animate !== 'function') {
+    function Animation(element, target, options) {
+      var animation = this;
+      this.currentTime = 0;
+      this.playState = 'finished';
+      this.playbackRate = 1;
+      this.id = (options && options.id) || '';
+      this.effect = { target: element, getTiming: function () { return options || {}; } };
+      this.onfinish = null;
+      this.oncancel = null;
+      this.finished = Promise.resolve(this);
+      this.ready = Promise.resolve(this);
+      // The handler is usually attached on the line after the call, so the
+      // finish is announced on the next turn rather than during it.
+      setTimeout(function () {
+        if (typeof animation.onfinish === 'function') {
+          animation.onfinish({ target: animation, type: 'finish' });
+        }
+      }, 0);
+      this._settled = target;
+    }
+    Animation.prototype.play = function () {};
+    Animation.prototype.pause = function () { this.playState = 'paused'; };
+    Animation.prototype.finish = function () { this.playState = 'finished'; };
+    Animation.prototype.reverse = function () {};
+    Animation.prototype.updatePlaybackRate = function (rate) { this.playbackRate = rate; };
+    Animation.prototype.cancel = function () {
+      this.playState = 'idle';
+      if (typeof this.oncancel === 'function') this.oncancel({ target: this, type: 'cancel' });
+    };
+    Animation.prototype.addEventListener = function (type, fn) {
+      if (type === 'finish') setTimeout(function () { fn({ type: 'finish' }); }, 0);
+    };
+    Animation.prototype.removeEventListener = function () {};
+
+    // `animate` takes either a list of keyframes or an object of arrays. The
+    // last frame is where the element ends up.
+    function lastFrame(keyframes) {
+      if (!keyframes) return null;
+      if (Array.isArray(keyframes)) return keyframes[keyframes.length - 1] || null;
+      var frame = {};
+      for (var name in keyframes) {
+        if (!Object.prototype.hasOwnProperty.call(keyframes, name)) continue;
+        var value = keyframes[name];
+        frame[name] = Array.isArray(value) ? value[value.length - 1] : value;
+      }
+      return frame;
+    }
+
+    g.Element.prototype.animate = function (keyframes, options) {
+      var frame = lastFrame(keyframes);
+      if (frame) {
+        for (var name in frame) {
+          if (!Object.prototype.hasOwnProperty.call(frame, name)) continue;
+          if (name === 'offset' || name === 'easing' || name === 'composite') continue;
+          try { this.style[name] = frame[name]; } catch (e) {}
+        }
+      }
+      return new Animation(this, frame, options);
+    };
+    g.Element.prototype.getAnimations = function () { return []; };
+    if (g.document && typeof g.document.getAnimations !== 'function') {
+      g.document.getAnimations = function () { return []; };
+    }
+    g.Animation = Animation;
+  }
+
+  // ---- navigator.clipboard ------------------------------------------------
+  // There is no system clipboard behind this, so what a page writes is what it
+  // reads back. A "copy" button that awaits the write and then says so works;
+  // the text simply does not leave the page.
+  if (g.navigator && !g.navigator.clipboard) {
+    var clipboardText = '';
+    g.navigator.clipboard = {
+      writeText: function (text) { clipboardText = String(text); return Promise.resolve(); },
+      readText: function () { return Promise.resolve(clipboardText); },
+      write: function () { return Promise.resolve(); },
+      read: function () { return Promise.resolve([]); }
+    };
+  }
+
+  // ---- Intl.Segmenter -----------------------------------------------------
+  // Splitting text into characters, words or sentences. Only the boundaries
+  // are worked out here, not a full Unicode break: a grapheme keeps a
+  // surrogate pair and its combining marks together, a word is a run of
+  // letters and digits, and a sentence ends at `.`, `?`, `!` or their
+  // full-width forms.
+  if (g.Intl && typeof g.Intl.Segmenter === 'undefined') {
+    function Segmenter(locales, options) {
+      this._granularity = (options && options.granularity) || 'grapheme';
+      this.resolvedOptions = function () {
+        return { locale: (Array.isArray(locales) ? locales[0] : locales) || 'en', granularity: this._granularity };
+      };
+    }
+
+    function isCombining(code) {
+      return (code >= 0x0300 && code <= 0x036f)
+        || (code >= 0x1ab0 && code <= 0x1aff)
+        || (code >= 0x20d0 && code <= 0x20ff)
+        || (code >= 0xfe00 && code <= 0xfe0f)
+        || (code >= 0xfe20 && code <= 0xfe2f);
+    }
+    function isWordChar(ch) {
+      return /[0-9A-Za-z_À-ɏͰ-῿Ⰰ-퟿豈-﷏]/.test(ch);
+    }
+
+    function graphemes(text) {
+      var out = [], at = 0;
+      while (at < text.length) {
+        var start = at;
+        var code = text.codePointAt(at);
+        at += code > 0xffff ? 2 : 1;
+        while (at < text.length && isCombining(text.charCodeAt(at))) at++;
+        out.push({ segment: text.slice(start, at), index: start, input: text });
+      }
+      return out;
+    }
+
+    function words(text) {
+      var out = [], at = 0;
+      while (at < text.length) {
+        var start = at;
+        var wordLike = isWordChar(text[at]);
+        while (at < text.length && isWordChar(text[at]) === wordLike) at++;
+        out.push({ segment: text.slice(start, at), index: start, input: text, isWordLike: wordLike });
+      }
+      return out;
+    }
+
+    function sentences(text) {
+      var out = [], start = 0;
+      for (var at = 0; at < text.length; at++) {
+        if ('.?!。？！'.indexOf(text[at]) < 0) continue;
+        var end = at + 1;
+        while (end < text.length && /\s/.test(text[end])) end++;
+        out.push({ segment: text.slice(start, end), index: start, input: text });
+        start = end;
+        at = end - 1;
+      }
+      if (start < text.length) out.push({ segment: text.slice(start), index: start, input: text });
+      return out;
+    }
+
+    Segmenter.prototype.segment = function (input) {
+      var text = String(input);
+      var granularity = this._granularity;
+      var pieces = granularity === 'word' ? words(text)
+        : granularity === 'sentence' ? sentences(text)
+        : graphemes(text);
+      var result = {
+        containing: function (index) {
+          for (var i = 0; i < pieces.length; i++) {
+            if (index >= pieces[i].index && index < pieces[i].index + pieces[i].segment.length) return pieces[i];
+          }
+          return undefined;
+        }
+      };
+      result[Symbol.iterator] = function () { return pieces[Symbol.iterator](); };
+      return result;
+    };
+    Segmenter.supportedLocalesOf = function (locales) {
+      return Array.isArray(locales) ? locales.slice() : (locales ? [locales] : []);
+    };
+    g.Intl.Segmenter = Segmenter;
+  }
 })();
 "#;
 
@@ -5308,6 +5535,65 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.title.as_deref(), Some("120|40|box"));
+    }
+
+    #[test]
+    fn an_element_sees_what_is_put_on_its_interface_prototype() {
+        // Host nodes are not linked into those prototype chains, so anything
+        // added to `Element.prototype` -- by this runtime, or by a page
+        // shipping its own polyfill for `closest` or `append` -- reached no
+        // element at all.
+        let result = run_document_scripts(
+            r#"<html><body><div id="a">A</div><script>
+                Element.prototype.__mine = function () { return 'proto:' + this.id; };
+                Node.prototype.__flag = 7;
+                var element = document.getElementById('a');
+                document.title = [element.__mine(), element.__flag].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("proto:a|7"));
+    }
+
+    #[test]
+    fn a_constructed_stylesheet_reaches_the_page() {
+        let result = run_document_scripts(
+            r#"<html><body><div id="zz">Z</div><script>
+                var sheet = new CSSStyleSheet();
+                sheet.replaceSync('#zz{color:rgb(1, 2, 3)}');
+                document.adoptedStyleSheets = [sheet];
+                document.title = [
+                    typeof sheet.replaceSync,
+                    document.adoptedStyleSheets.length,
+                    document.head.querySelectorAll('style').length,
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("function|1|1"));
+    }
+
+    #[test]
+    fn intl_segmenter_splits_text_the_three_ways() {
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                var words = new Intl.Segmenter('en', { granularity: 'word' });
+                var sentences = new Intl.Segmenter('en', { granularity: 'sentence' });
+                document.title = [
+                    Array.from(words.segment('Hi there, you'))
+                        .filter(function (piece) { return piece.isWordLike; })
+                        .map(function (piece) { return piece.segment; })
+                        .join('|'),
+                    Array.from(new Intl.Segmenter().segment('áb')).length,
+                    Array.from(sentences.segment('One. Two! Three')).length,
+                ].join('/');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("Hi|there|you/2/3"));
     }
 
     #[test]
