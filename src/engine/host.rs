@@ -50,6 +50,7 @@ pub enum NodeKind {
     Document,
     Element,
     Text,
+    Comment,
     DocumentFragment,
     ShadowRoot,
 }
@@ -298,6 +299,10 @@ pub enum DomMutation {
         local_name: String,
     },
     CreateTextNode {
+        window: WindowId,
+        data: String,
+    },
+    CreateComment {
         window: WindowId,
         data: String,
     },

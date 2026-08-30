@@ -172,6 +172,10 @@ enum DomNodeKind {
     Document,
     Element(String), // lowercased tag name
     Text(String),
+    /// `<!-- ... -->`. Not drawn, but very much part of the tree: a server
+    /// -rendered React or Vue page marks its boundaries with comments and
+    /// walks to them when it hydrates, so dropping them moved every marker.
+    Comment(String),
     Fragment,
     /// A shadow root attached to `host` (arena index). `open` is its mode.
     ShadowRoot { host: usize, open: bool },
@@ -205,6 +209,14 @@ impl DomNode {
     fn text(data: &str) -> Self {
         Self {
             kind: DomNodeKind::Text(data.to_string()),
+            parent: None,
+            children: Vec::new(),
+            attrs: BTreeMap::new(),
+        }
+    }
+    fn comment(data: &str) -> Self {
+        Self {
+            kind: DomNodeKind::Comment(data.to_string()),
             parent: None,
             children: Vec::new(),
             attrs: BTreeMap::new(),
@@ -364,7 +376,10 @@ impl BrowserHost {
             // real one -- a default of zero is the *document*, and attaching
             // that under an element makes the tree a ring, which the first walk
             // over it rides until the stack runs out.
-            Node::Comment(_) | Node::Doctype(_) => None,
+            // The doctype is still left out: nothing reads it through this
+            // DOM, and `document.doctype` is answered elsewhere.
+            Node::Doctype(_) => None,
+            Node::Comment(text) => Some(self.push(DomNode::comment(text))),
             Node::Text(text) => Some(self.push(DomNode::text(text))),
             Node::Element(element) => {
                 let idx = self.push(DomNode::element(&element.tag_name));
@@ -630,6 +645,9 @@ impl BrowserHost {
     fn collect_text(&self, idx: usize) -> String {
         match &self.nodes[idx].kind {
             DomNodeKind::Text(text) => text.clone(),
+            // A comment adds nothing to an ancestor's text. Its own
+            // `textContent` is its data, and the read below answers that.
+            DomNodeKind::Comment(_) => String::new(),
             _ => {
                 let mut out = String::new();
                 for &child in &self.nodes[idx].children {
@@ -672,6 +690,9 @@ impl BrowserHost {
                 out.push_str(&format!("</{tag}>"));
                 out
             }
+            // Written back as it was: the round trip through this string is
+            // how the layout tree is rebuilt, so a lost comment is a lost node.
+            DomNodeKind::Comment(text) => format!("<!--{text}-->"),
             // Shadow content is not part of the light-DOM snapshot.
             DomNodeKind::ShadowRoot { .. } => String::new(),
             DomNodeKind::Document | DomNodeKind::Fragment => self.inner_html(idx),
@@ -1883,6 +1904,7 @@ impl Host for BrowserHost {
                     DomNodeKind::Document => NodeKind::Document,
                     DomNodeKind::Element(_) => NodeKind::Element,
                     DomNodeKind::Text(_) => NodeKind::Text,
+                    DomNodeKind::Comment(_) => NodeKind::Comment,
                     DomNodeKind::Fragment | DomNodeKind::ShadowRoot { .. } => {
                         NodeKind::DocumentFragment
                     }
@@ -1897,6 +1919,7 @@ impl Host for BrowserHost {
                     DomNodeKind::Document => "#document".to_string(),
                     DomNodeKind::Element(tag) => tag.to_uppercase(),
                     DomNodeKind::Text(_) => "#text".to_string(),
+                    DomNodeKind::Comment(_) => "#comment".to_string(),
                     DomNodeKind::Fragment => "#document-fragment".to_string(),
                     DomNodeKind::ShadowRoot { .. } => "#document-fragment".to_string(),
                 };
@@ -1907,7 +1930,9 @@ impl Host for BrowserHost {
                     return Err(HostError::InvalidHandle);
                 }
                 match &self.nodes[node.0 as usize].kind {
-                    DomNodeKind::Text(text) => Ok(DomReadResult::String(text.clone())),
+                    DomNodeKind::Text(text) | DomNodeKind::Comment(text) => {
+                        Ok(DomReadResult::String(text.clone()))
+                    }
                     _ => Ok(DomReadResult::None),
                 }
             }
@@ -1915,7 +1940,11 @@ impl Host for BrowserHost {
                 if !node_exists(node.0 as usize) {
                     return Err(HostError::InvalidHandle);
                 }
-                Ok(DomReadResult::String(self.collect_text(node.0 as usize)))
+                let idx = node.0 as usize;
+                if let DomNodeKind::Comment(text) = &self.nodes[idx].kind {
+                    return Ok(DomReadResult::String(text.clone()));
+                }
+                Ok(DomReadResult::String(self.collect_text(idx)))
             }
             DomRead::InnerHtml { node } => {
                 if !node_exists(node.0 as usize) {
@@ -2023,6 +2052,10 @@ impl Host for BrowserHost {
                 let idx = self.push(DomNode::text(&data));
                 Ok(DomMutationResult::Node(NodeId(idx as u32)))
             }
+            DomMutation::CreateComment { data, .. } => {
+                let idx = self.push(DomNode::comment(&data));
+                Ok(DomMutationResult::Node(NodeId(idx as u32)))
+            }
             DomMutation::CreateDocumentFragment { .. } => {
                 let idx = self.push(DomNode::fragment());
                 Ok(DomMutationResult::Node(NodeId(idx as u32)))
@@ -2046,7 +2079,9 @@ impl Host for BrowserHost {
                 // setTextContent fast-path does `firstChild.nodeValue = text` on the
                 // text node, so getting this wrong leaves the UI stuck on its
                 // initial text after every state update.)
-                if let DomNodeKind::Text(text) = &mut self.nodes[idx].kind {
+                if let DomNodeKind::Text(text) | DomNodeKind::Comment(text) =
+                    &mut self.nodes[idx].kind
+                {
                     let old = std::mem::replace(text, value);
                     self.record_characterdata_mutation(idx, &old);
                     return Ok(DomMutationResult::None);
@@ -4389,6 +4424,36 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.title.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn comments_are_nodes_in_the_tree() {
+        // A server-rendered React or Vue page marks its boundaries with
+        // comments and walks to them when it hydrates. They were dropped on
+        // the way into this DOM, so every marker moved and every walk landed
+        // on the wrong node.
+        let result = run_document_scripts(
+            r#"<html><body><div id="r">a<!--mark-->b</div><script>
+                var root = document.getElementById('r');
+                var kinds = [];
+                for (var i = 0; i < root.childNodes.length; i++) kinds.push(root.childNodes[i].nodeType);
+                var added = document.createComment('hi');
+                root.appendChild(added);
+                document.title = [
+                    kinds.join(','),
+                    root.childNodes[1].data,
+                    root.textContent,
+                    added.nodeType + '/' + added.nodeName + '/' + added.data,
+                    root.innerHTML,
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(
+            result.title.as_deref(),
+            Some("3,8,3|mark|ab|8/#comment/hi|a<!--mark-->b<!--hi-->")
+        );
     }
 
     #[test]

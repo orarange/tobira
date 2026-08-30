@@ -220,6 +220,7 @@ enum BuiltinId {
     DomDocGetElementsByTagName,
     DomDocCreateElement,
     DomDocCreateTextNode,
+    DomDocCreateComment,
     DomDocCreateFragment,
     DomDocWrite,
     DomInterfaceConstructor,
@@ -13325,6 +13326,11 @@ impl Vm {
                 let res = self.host.mutate_dom(DomMutation::CreateTextNode { window: WindowId(0), data: text });
                 Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
             }
+            BuiltinId::DomDocCreateComment => {
+                let text = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let res = self.host.mutate_dom(DomMutation::CreateComment { window: WindowId(0), data: text });
+                Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+            }
             BuiltinId::DomDocCreateFragment => {
                 let res = self.host.mutate_dom(DomMutation::CreateDocumentFragment { window: WindowId(0) });
                 Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
@@ -17108,6 +17114,7 @@ impl Vm {
             "createElement" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateElement)),
             "createElementNS" => Ok(self.allocate_builtin_method(BuiltinId::DomCreateElementNs)),
             "createTextNode" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateTextNode)),
+            "createComment" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateComment)),
             "createDocumentFragment" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateFragment)),
             "write" | "writeln" => Ok(self.allocate_builtin_method(BuiltinId::DomDocWrite)),
             "addEventListener" | "removeEventListener" => {
@@ -17162,6 +17169,7 @@ impl Vm {
                     Ok(DomReadResult::Kind(k)) => Value::Number(match k {
                         NodeKind::Element => 1.0,
                         NodeKind::Text => 3.0,
+                        NodeKind::Comment => 8.0,
                         NodeKind::Document => 9.0,
                         _ => 11.0,
                     }),
@@ -17482,7 +17490,7 @@ impl Vm {
                 // CharacterData length (text nodes) vs child count elsewhere.
                 if matches!(
                     self.host.read_dom(DomRead::NodeKind { node: node_id }),
-                    Ok(DomReadResult::Kind(NodeKind::Text))
+                    Ok(DomReadResult::Kind(NodeKind::Text | NodeKind::Comment))
                 ) {
                     let text = match self.host.read_dom(DomRead::NodeValue { node: node_id }) {
                         Ok(DomReadResult::String(s)) => s,

@@ -455,6 +455,12 @@ impl Host for TestDom {
                 let idx = self.push(TestNode::new_text(&data));
                 Ok(DomMutationResult::Node(NodeId(idx as u32)))
             }
+            // This fake host has no comment kind; a text node is close enough
+            // for what the tests here exercise.
+            DomMutation::CreateComment { data, .. } => {
+                let idx = self.push(TestNode::new_text(&data));
+                Ok(DomMutationResult::Node(NodeId(idx as u32)))
+            }
             DomMutation::CreateDocumentFragment { .. } => {
                 let idx = self.push(TestNode::new_fragment());
                 Ok(DomMutationResult::Node(NodeId(idx as u32)))
