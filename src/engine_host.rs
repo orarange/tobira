@@ -3823,6 +3823,173 @@ const RUNTIME_PRELUDE: &str = r#"
     };
     g.XMLSerializer = XMLSerializer;
   }
+
+  // ---- Range --------------------------------------------------------------
+  // A pair of points in the tree. Editors and highlighters walk one; libraries
+  // reach for `createContextualFragment` as the fast way from a string of
+  // markup to nodes, and `document.createRange()` returning undefined stopped
+  // all of it on the first line.
+  if (g.document && typeof g.document.createRange !== 'function') {
+    function Range() {
+      this.startContainer = g.document;
+      this.startOffset = 0;
+      this.endContainer = g.document;
+      this.endOffset = 0;
+      this.collapsed = true;
+    }
+    Range.START_TO_START = 0; Range.START_TO_END = 1;
+    Range.END_TO_END = 2; Range.END_TO_START = 3;
+
+    function childrenOf(node) {
+      var kids = [], list = node.childNodes;
+      for (var i = 0; i < list.length; i++) kids.push(list[i]);
+      return kids;
+    }
+
+    function indexIn(node) {
+      var parent = node.parentNode;
+      if (!parent) return 0;
+      var kids = childrenOf(parent);
+      for (var i = 0; i < kids.length; i++) if (kids[i] === node) return i;
+      return 0;
+    }
+
+    function settle(range) {
+      range.collapsed = range.startContainer === range.endContainer
+        && range.startOffset === range.endOffset;
+    }
+
+    Range.prototype.setStart = function (node, offset) {
+      this.startContainer = node; this.startOffset = offset | 0; settle(this);
+    };
+    Range.prototype.setEnd = function (node, offset) {
+      this.endContainer = node; this.endOffset = offset | 0; settle(this);
+    };
+    Range.prototype.setStartBefore = function (node) { this.setStart(node.parentNode, indexIn(node)); };
+    Range.prototype.setStartAfter = function (node) { this.setStart(node.parentNode, indexIn(node) + 1); };
+    Range.prototype.setEndBefore = function (node) { this.setEnd(node.parentNode, indexIn(node)); };
+    Range.prototype.setEndAfter = function (node) { this.setEnd(node.parentNode, indexIn(node) + 1); };
+    Range.prototype.selectNode = function (node) {
+      this.setStartBefore(node); this.setEndAfter(node);
+    };
+    Range.prototype.selectNodeContents = function (node) {
+      this.setStart(node, 0);
+      this.setEnd(node, node.nodeType === 3 ? String(node.data || '').length : node.childNodes.length);
+    };
+    Range.prototype.collapse = function (toStart) {
+      if (toStart) { this.endContainer = this.startContainer; this.endOffset = this.startOffset; }
+      else { this.startContainer = this.endContainer; this.startOffset = this.endOffset; }
+      settle(this);
+    };
+    Range.prototype.cloneRange = function () {
+      var copy = new Range();
+      copy.setStart(this.startContainer, this.startOffset);
+      copy.setEnd(this.endContainer, this.endOffset);
+      return copy;
+    };
+    Range.prototype.detach = function () {};
+
+    Object.defineProperty(Range.prototype, 'commonAncestorContainer', {
+      configurable: true,
+      get: function () {
+        var seen = [], walk = this.startContainer;
+        while (walk) { seen.push(walk); walk = walk.parentNode; }
+        walk = this.endContainer;
+        while (walk) {
+          if (seen.indexOf(walk) >= 0) return walk;
+          walk = walk.parentNode;
+        }
+        return g.document;
+      }
+    });
+
+    // The nodes the range covers, for the case both ends share a parent --
+    // which is what `selectNodeContents` and every sibling span produce.
+    function coveredNodes(range) {
+      if (range.startContainer !== range.endContainer) return null;
+      var kids = childrenOf(range.startContainer);
+      return kids.slice(range.startOffset, range.endOffset);
+    }
+
+    Range.prototype.cloneContents = function () {
+      var fragment = g.document.createDocumentFragment();
+      var nodes = coveredNodes(this);
+      if (!nodes) return fragment;
+      for (var i = 0; i < nodes.length; i++) fragment.appendChild(nodes[i].cloneNode(true));
+      return fragment;
+    };
+    Range.prototype.extractContents = function () {
+      var fragment = g.document.createDocumentFragment();
+      var nodes = coveredNodes(this);
+      if (!nodes) return fragment;
+      for (var i = 0; i < nodes.length; i++) fragment.appendChild(nodes[i]);
+      this.collapse(true);
+      return fragment;
+    };
+    Range.prototype.deleteContents = function () {
+      var nodes = coveredNodes(this);
+      if (!nodes) return;
+      for (var i = 0; i < nodes.length; i++) {
+        if (nodes[i].parentNode) nodes[i].parentNode.removeChild(nodes[i]);
+      }
+      this.collapse(true);
+    };
+    Range.prototype.insertNode = function (node) {
+      var parent = this.startContainer;
+      var kids = childrenOf(parent);
+      var reference = kids[this.startOffset] || null;
+      parent.insertBefore(node, reference);
+    };
+    Range.prototype.surroundContents = function (wrapper) {
+      var contents = this.extractContents();
+      wrapper.appendChild(contents);
+      this.insertNode(wrapper);
+    };
+    Range.prototype.toString = function () {
+      var nodes = coveredNodes(this);
+      if (!nodes) return '';
+      var text = '';
+      for (var i = 0; i < nodes.length; i++) text += nodes[i].textContent || '';
+      return text;
+    };
+    // The rectangle around what the range covers, taken from the nodes in it.
+    Range.prototype.getBoundingClientRect = function () {
+      var nodes = coveredNodes(this) || [];
+      var left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        var box = node.getBoundingClientRect
+          ? node.getBoundingClientRect()
+          : (node.parentNode && node.parentNode.getBoundingClientRect
+              ? node.parentNode.getBoundingClientRect() : null);
+        if (!box) continue;
+        left = Math.min(left, box.left); top = Math.min(top, box.top);
+        right = Math.max(right, box.right); bottom = Math.max(bottom, box.bottom);
+      }
+      if (left === Infinity) return { x: 0, y: 0, left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+      return {
+        x: left, y: top, left: left, top: top, right: right, bottom: bottom,
+        width: right - left, height: bottom - top
+      };
+    };
+    Range.prototype.getClientRects = function () { return [this.getBoundingClientRect()]; };
+    // The reason most libraries hold a Range at all: markup to nodes in one
+    // step, parsed in the context of the element the range starts in.
+    Range.prototype.createContextualFragment = function (markup) {
+      var context = this.startContainer;
+      if (context && context.nodeType === 3) context = context.parentNode;
+      var holder = g.document.createElement(
+        context && context.tagName ? context.tagName.toLowerCase() : 'div'
+      );
+      holder.innerHTML = String(markup === undefined ? '' : markup);
+      var fragment = g.document.createDocumentFragment();
+      while (holder.firstChild) fragment.appendChild(holder.firstChild);
+      return fragment;
+    };
+
+    g.Range = Range;
+    g.document.createRange = function () { return new Range(); };
+  }
 })();
 "#;
 
@@ -4833,6 +5000,40 @@ mod tests {
                 r#"<title>T</title><p id="x">hi</p>|<head><title>T</title></head><body class="b"><p id="x">hi</p></body>"#
             )
         );
+    }
+
+    #[test]
+    fn a_range_covers_the_nodes_between_its_two_points() {
+        // Checked against Chrome. `createContextualFragment` is what most
+        // libraries hold a range for -- markup to nodes in one step -- and
+        // `document.createRange` returning undefined stopped them on the first
+        // line.
+        let result = run_document_scripts(
+            r#"<html><body><div id="host"><span>A</span><span>B</span><span>C</span></div><script>
+                var host = document.getElementById('host');
+                var whole = document.createRange();
+                whole.selectNodeContents(host);
+                var part = document.createRange();
+                part.setStart(host, 0);
+                part.setEnd(host, 2);
+                var box = document.createElement('div');
+                box.innerHTML = '<u>1</u><u>2</u><u>3</u>';
+                var cut = document.createRange();
+                cut.setStart(box, 0);
+                cut.setEnd(box, 2);
+                var taken = cut.extractContents();
+                document.title = [
+                    whole.toString(),
+                    part.toString(),
+                    whole.createContextualFragment('<i>x</i><b>y</b>').childNodes.length,
+                    taken.childNodes.length + '/' + box.childNodes.length,
+                    whole.commonAncestorContainer.id,
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("ABC|AB|2|2/1|host"));
     }
 
     #[test]
