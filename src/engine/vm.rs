@@ -223,6 +223,10 @@ enum BuiltinId {
     DomDocCreateComment,
     NavigatorSendBeacon,
     DomNodeCheckVisibility,
+    DomNodeGetAttributeNs,
+    DomNodeSetAttributeNs,
+    DomNodeHasAttributeNs,
+    DomNodeRemoveAttributeNs,
     DomDocCreateFragment,
     DomDocWrite,
     DomInterfaceConstructor,
@@ -1602,6 +1606,10 @@ const DOM_INTERFACE_METHODS: &[(&str, &[(&str, BuiltinId)])] = &[
             ("getBoundingClientRect", BuiltinId::DomNodeGetBoundingClientRect),
             ("getClientRects", BuiltinId::DomNodeGetClientRects),
             ("checkVisibility", BuiltinId::DomNodeCheckVisibility),
+            ("getAttributeNS", BuiltinId::DomNodeGetAttributeNs),
+            ("setAttributeNS", BuiltinId::DomNodeSetAttributeNs),
+            ("hasAttributeNS", BuiltinId::DomNodeHasAttributeNs),
+            ("removeAttributeNS", BuiltinId::DomNodeRemoveAttributeNs),
             ("insertAdjacentHTML", BuiltinId::DomNodeInsertAdjacentHtml),
             ("insertAdjacentElement", BuiltinId::DomNodeInsertAdjacentElement),
             ("insertAdjacentText", BuiltinId::DomNodeInsertAdjacentText),
@@ -13831,6 +13839,46 @@ impl Vm {
                 )?;
                 Ok(Value::Undefined)
             }
+            // The namespaced forms. Markup writes `xlink:href`, and script
+            // that walks an SVG asks for it by namespace; both name the same
+            // attribute, so both find it.
+            BuiltinId::DomNodeGetAttributeNs
+            | BuiltinId::DomNodeSetAttributeNs
+            | BuiltinId::DomNodeHasAttributeNs
+            | BuiltinId::DomNodeRemoveAttributeNs => {
+                let node_id = self.this_node_id(&this_value);
+                let namespace = args.first().cloned().unwrap_or(Value::Null);
+                let local = args.get(1).map(|value| self.to_string(value)).unwrap_or_default();
+                let name = self.namespaced_attribute_name(&namespace, &local);
+                match builtin {
+                    BuiltinId::DomNodeSetAttributeNs => {
+                        let value = args.get(2).map(|value| self.to_string(value)).unwrap_or_default();
+                        let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                            node: node_id,
+                            name,
+                            value,
+                        });
+                        Ok(Value::Undefined)
+                    }
+                    BuiltinId::DomNodeRemoveAttributeNs => {
+                        let _ = self
+                            .host
+                            .mutate_dom(DomMutation::RemoveAttribute { node: node_id, name });
+                        Ok(Value::Undefined)
+                    }
+                    _ => {
+                        let found =
+                            self.host.read_dom(DomRead::Attribute { node: node_id, name });
+                        if matches!(builtin, BuiltinId::DomNodeHasAttributeNs) {
+                            return Ok(Value::Bool(matches!(found, Ok(DomReadResult::String(_)))));
+                        }
+                        Ok(match found {
+                            Ok(DomReadResult::String(value)) => self.make_string_value(&value),
+                            _ => Value::Null,
+                        })
+                    }
+                }
+            }
             BuiltinId::DomNodeGetAttribute => {
                 let node_id = self.this_node_id(&this_value);
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -16136,6 +16184,35 @@ impl Vm {
         children.get(position + 1).copied()
     }
 
+    /// The name an attribute is stored under, given a namespace and a local
+    /// name.
+    ///
+    /// Attributes are kept under the name as written, so `xlink:href` is the
+    /// key for the XLink `href`. SVG code reaches for it both ways -- markup
+    /// writes `xlink:href`, script asks `getAttributeNS(XLINK, "href")` -- and
+    /// this maps the second onto the first. A null namespace is the plain
+    /// name, which is the overwhelmingly common case.
+    fn namespaced_attribute_name(&mut self, namespace: &Value, local: &str) -> String {
+        let namespace = match namespace {
+            Value::Null | Value::Undefined => String::new(),
+            other => self.to_string(other),
+        };
+        let prefix = match namespace.as_str() {
+            "" => return local.to_string(),
+            "http://www.w3.org/1999/xlink" => "xlink",
+            "http://www.w3.org/XML/1998/namespace" => "xml",
+            "http://www.w3.org/2000/xmlns/" => "xmlns",
+            // Any other namespace has no prefix this DOM knows; the local name
+            // on its own is the closest thing to the attribute it means.
+            _ => return local.to_string(),
+        };
+        // A local name that already carries the prefix is left alone.
+        if local.starts_with(prefix) && local[prefix.len()..].starts_with(':') {
+            return local.to_string();
+        }
+        format!("{prefix}:{local}")
+    }
+
     fn node_tag_is(&self, node_id: NodeId, tag: &str) -> bool {
         self.get_node_name(node_id).eq_ignore_ascii_case(tag)
     }
@@ -17480,6 +17557,12 @@ impl Vm {
             "replaceWith" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeReplaceWith)),
             "getClientRects" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeGetClientRects)),
             "checkVisibility" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeCheckVisibility)),
+            "getAttributeNS" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeGetAttributeNs)),
+            "setAttributeNS" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeSetAttributeNs)),
+            "hasAttributeNS" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeHasAttributeNs)),
+            "removeAttributeNS" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemoveAttributeNs))
+            }
             "id" => {
                 let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "id".to_string() });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })

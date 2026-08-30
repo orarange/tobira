@@ -2519,6 +2519,35 @@ fn is_html_whitespace_only(text: &str) -> bool {
         .all(|character| matches!(character, '\t' | '\n' | '\u{000C}' | '\r' | ' '))
 }
 
+/// The namespace prefix a foreign attribute belongs to, if it is one of the
+/// fixed set the standard adjusts.
+///
+/// Inside `<svg>` and `<math>`, a handful of prefixed names are real
+/// namespaced attributes rather than names that merely contain a colon:
+/// `xlink:href` on an SVG `<use>` is the `href` attribute in the XLink
+/// namespace. The same text written on an HTML element is just a name.
+///
+/// The attribute is stored under the name as written, so `getAttribute` still
+/// answers for `xlink:href` -- which is what a page asks for, and what Chrome
+/// answers. What the prefix decides is how the attribute is *named*: the
+/// prefix and the local name are two separate things once it is namespaced.
+pub fn foreign_attribute_parts(name: &str) -> Option<(&'static str, &'static str)> {
+    Some(match name {
+        "xlink:actuate" => ("xlink", "actuate"),
+        "xlink:arcrole" => ("xlink", "arcrole"),
+        "xlink:href" => ("xlink", "href"),
+        "xlink:role" => ("xlink", "role"),
+        "xlink:show" => ("xlink", "show"),
+        "xlink:title" => ("xlink", "title"),
+        "xlink:type" => ("xlink", "type"),
+        "xml:base" => ("xml", "base"),
+        "xml:lang" => ("xml", "lang"),
+        "xml:space" => ("xml", "space"),
+        "xmlns:xlink" => ("xmlns", "xlink"),
+        _ => return None,
+    })
+}
+
 fn is_tag_name_char(byte: u8) -> bool {
     // Only whitespace, `/` and `>` end a tag name. Everything else is part of
     // it, `<` included: `<div<div>` is one element whose name is `div<div`,
@@ -4068,6 +4097,16 @@ mod html5lib_conformance {
                 };
                 out.push_str(&format!("| {pad}<{prefix}{}>\n", element.tag_name));
                 for (name, value) in &element.attributes {
+                    // html5lib writes a namespaced attribute as prefix, space,
+                    // local name -- `xlink href` rather than `xlink:href`.
+                    // Only foreign content has them; the same text on an HTML
+                    // element is an ordinary name with a colon in it.
+                    let written = match element.namespace {
+                        super::Namespace::Html => None,
+                        _ => super::foreign_attribute_parts(name)
+                            .map(|(prefix, local)| format!("{prefix} {local}")),
+                    };
+                    let name = written.as_deref().unwrap_or(name);
                     out.push_str(&format!("| {pad}  {name}=\"{value}\"\n"));
                 }
                 for child in &element.children {

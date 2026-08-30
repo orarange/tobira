@@ -4565,6 +4565,36 @@ mod tests {
     }
 
     #[test]
+    fn namespaced_attributes_are_reachable_both_ways() {
+        // An SVG `<use>` writes `xlink:href` in the markup and script asks for
+        // it by namespace. Both name the same attribute; checked against
+        // Chrome, which answers exactly this.
+        let result = run_document_scripts(
+            r##"<html><body><svg><use id="u" xlink:href="#icon" href="#other"/></svg><script>
+                var XLINK = 'http://www.w3.org/1999/xlink';
+                var use = document.getElementById('u');
+                var before = [
+                    use.getAttribute('xlink:href'),
+                    use.getAttributeNS(XLINK, 'href'),
+                    use.hasAttributeNS(XLINK, 'href'),
+                    String(use.getAttributeNS(null, 'href')),
+                ];
+                use.setAttributeNS(XLINK, 'href', '#new');
+                before.push(use.getAttribute('xlink:href'));
+                use.removeAttributeNS(XLINK, 'href');
+                before.push(String(use.getAttribute('xlink:href')));
+                document.title = before.join('|');
+            </script></body></html>"##,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(
+            result.title.as_deref(),
+            Some("#icon|#icon|true|#other|#new|null")
+        );
+    }
+
+    #[test]
     fn the_window_hands_back_the_same_navigator_every_time() {
         // `navigator` was rebuilt on every read, so `navigator === navigator`
         // was false and a polyfill assigning to it was gone by the next line.
