@@ -168,6 +168,9 @@ enum GlyphMode {
 #[derive(Debug, Clone, Copy)]
 struct CachedLineMetrics {
     ascent_px: i32,
+    /// What `line-height: normal` comes to for this face and size: the font's
+    /// own ascent, descent and line gap added together.
+    normal_line_px: u32,
 }
 
 impl FontContext {
@@ -369,13 +372,16 @@ impl FontContext {
         total.round() as u32
     }
 
+    /// `line-height: normal`, which is the face's own recommended line
+    /// spacing -- ascent plus descent plus line gap.
+    ///
+    /// It was a third of the font size added to the ascent, which for Arial at
+    /// 16px gives 21 where a browser gives 18. Three pixels a line does not
+    /// look like much until a long article has two thousand of them.
     pub fn line_height_px(&mut self, font_size_px: u32, font_family: FontFamilyKind) -> u32 {
-        let ascent = self
-            .line_metrics(font_size_px, font_family)
-            .ascent_px
-            .max(font_size_px as i32);
-        let gap = (font_size_px / 3).max(4);
-        ascent.max(0) as u32 + gap
+        self.line_metrics(font_size_px, font_family)
+            .normal_line_px
+            .max(1)
     }
 
     fn line_metrics(
@@ -398,10 +404,14 @@ impl FontContext {
                 font.horizontal_line_metrics(font_size_px as f32)
                     .map(|line| CachedLineMetrics {
                         ascent_px: line.ascent.ceil() as i32,
+                        normal_line_px: line.new_line_size.round().max(1.0) as u32,
                     })
             })
             .unwrap_or(CachedLineMetrics {
                 ascent_px: font_size_px as i32,
+                // No face to ask: the ratio a browser lands on for the common
+                // text faces.
+                normal_line_px: (font_size_px as f32 * 1.15).round().max(1.0) as u32,
             });
 
         self.line_metrics_cache.insert(key, metrics);
@@ -1055,6 +1065,28 @@ mod lazy_loading_tests {
         // The regular request keeps its own cache entry and its own stack.
         let regular = fonts.cached_glyph('A', 32, FontFamilyKind::Sans, false);
         assert!(!regular.synthetic_bold);
+    }
+
+    /// `line-height: normal` is the face's own recommended spacing, which for
+    /// the default sans at 16px is what Chrome reports: 18px, not 21.
+    #[test]
+    fn normal_line_height_follows_the_face() {
+        let mut fonts = FontContext::load();
+        fonts.ensure_family_loaded(FontFamilyKind::Sans, false);
+        if fonts.sans_fonts.is_empty() {
+            return; // no system fonts available
+        }
+        let line = fonts.line_height_px(16, FontFamilyKind::Sans);
+        assert!(
+            (17..=19).contains(&line),
+            "16px sans should give a line of about 18px, got {line}"
+        );
+        // It scales with the size rather than sitting on a fixed gap.
+        let doubled = fonts.line_height_px(32, FontFamilyKind::Sans);
+        assert!(
+            doubled >= line * 2 - 2 && doubled <= line * 2 + 2,
+            "32px should be about double 16px: {line} vs {doubled}"
+        );
     }
 
     /// A family with no installed candidate borrows sans rather than cloning it;
