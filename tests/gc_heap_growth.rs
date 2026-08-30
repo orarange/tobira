@@ -27,8 +27,15 @@ fn fresh_vm_starts_small() {
     // event and structural DOM interfaces. Each is a constructor and a
     // prototype, so roughly 60 objects and well under 50 KB against a ~51 MB
     // resident baseline; without them real pages die on a bare ReferenceError.
+    //
+    // 2026-08-30: 619 -> 726. The DOM interface prototypes now carry the
+    // methods a page can borrow off them (`Element.prototype.matches.call`),
+    // which allocates each builtin at startup rather than on first use; plus
+    // twelve more interface names, RegExp's ten flag getters, and a prototype
+    // for AbortSignal. The methods are shared with the instance path, so this
+    // is a one-off cost, not one that grows with the page.
     assert!(
-        live < 700,
+        live < 800,
         "fresh VM should start small, got {live} live objects"
     );
 }

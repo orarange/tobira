@@ -3440,6 +3440,79 @@ const RUNTIME_PRELUDE: &str = r#"
       if (g.console && typeof g.console.error === 'function') g.console.error(error);
     };
   }
+
+  // ---- Recent standard-library statics -----------------------------------
+  // All four are 2023-2024 additions that bundlers now emit without a
+  // fallback, so a missing one is a bare TypeError partway through a chunk.
+  if (typeof Object.groupBy !== 'function') {
+    Object.defineProperty(Object, 'groupBy', {
+      configurable: true, writable: true,
+      value: function groupBy(items, callback) {
+        // The result has a null prototype, so a key like "toString" is a
+        // group rather than a collision with an inherited method.
+        var groups = Object.create(null);
+        var index = 0;
+        for (var item of items) {
+          var key = callback(item, index++);
+          if (!groups[key]) groups[key] = [];
+          groups[key].push(item);
+        }
+        return groups;
+      }
+    });
+  }
+
+  if (typeof Map.groupBy !== 'function') {
+    Object.defineProperty(Map, 'groupBy', {
+      configurable: true, writable: true,
+      value: function groupBy(items, callback) {
+        var groups = new Map();
+        var index = 0;
+        for (var item of items) {
+          var key = callback(item, index++);
+          var bucket = groups.get(key);
+          if (!bucket) { bucket = []; groups.set(key, bucket); }
+          bucket.push(item);
+        }
+        return groups;
+      }
+    });
+  }
+
+  if (typeof Promise.withResolvers !== 'function') {
+    Object.defineProperty(Promise, 'withResolvers', {
+      configurable: true, writable: true,
+      value: function withResolvers() {
+        var resolve, reject;
+        var promise = new this(function (res, rej) { resolve = res; reject = rej; });
+        return { promise: promise, resolve: resolve, reject: reject };
+      }
+    });
+  }
+
+  if (typeof Array.fromAsync !== 'function') {
+    Object.defineProperty(Array, 'fromAsync', {
+      configurable: true, writable: true,
+      value: async function fromAsync(items, mapper, thisArg) {
+        var out = [];
+        var index = 0;
+        var asyncIterator = items && items[Symbol.asyncIterator];
+        if (typeof asyncIterator === 'function') {
+          for await (var value of items) {
+            out.push(mapper ? await mapper.call(thisArg, value, index++) : value);
+          }
+          return out;
+        }
+        // Anything else is walked synchronously, awaiting each value: a plain
+        // array of promises is the common case.
+        for (var item of (items || [])) {
+          var awaited = await item;
+          out.push(mapper ? await mapper.call(thisArg, awaited, index++) : awaited);
+        }
+        return out;
+      }
+    });
+  }
 })();
 "#;
 
@@ -4424,6 +4497,54 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.title.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn dom_methods_can_be_borrowed_off_the_interface_prototype() {
+        // A hardened library takes `Element.prototype.matches` once and calls
+        // it with an element as `this` forever after, so that nothing a page
+        // does to the element can redirect it. The prototypes were empty, so
+        // that pattern threw on its first line.
+        let result = run_document_scripts(
+            r#"<html><body><div id="r" class="box"><p id="p">x</p></div><script>
+                var el = document.getElementById('p');
+                var root = document.getElementById('r');
+                document.title = [
+                    Element.prototype.matches.call(el, '#p'),
+                    Element.prototype.closest.call(el, '#r').id,
+                    Node.prototype.contains.call(root, el),
+                    Element.prototype.getAttribute.call(root, 'class'),
+                    el.matches === Element.prototype.matches,
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("true|r|true|box|true"));
+    }
+
+    #[test]
+    fn the_recent_library_statics_are_present() {
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                var grouped = Object.groupBy([1, 2, 3, 4], function (n) { return n % 2 ? 'odd' : 'even'; });
+                var byKey = Map.groupBy([1, 2, 3], function (n) { return n > 1; });
+                var deferred = Promise.withResolvers();
+                document.title = [
+                    JSON.stringify(grouped),
+                    Object.getPrototypeOf(grouped) === null,
+                    byKey.get(true).join(',') + '/' + byKey.get(false).join(','),
+                    typeof deferred.promise + ',' + typeof deferred.resolve,
+                    typeof Array.fromAsync,
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(
+            result.title.as_deref(),
+            Some(r#"{"odd":[1,3],"even":[2,4]}|true|2,3/1|object,function|function"#)
+        );
     }
 
     #[test]

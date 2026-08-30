@@ -1540,6 +1540,122 @@ struct CustomElementDef {
 
 /// DOM interface names exposed as global constructors for `instanceof`. `Event`
 /// and `CustomEvent` are intentionally omitted — they already exist as globals.
+
+/// The methods each DOM interface's prototype carries.
+///
+/// Host nodes answer these themselves, so an instance never reaches the
+/// prototype -- but a page does. Hardened libraries take `Element.prototype
+/// .matches` once and call it with an element as `this` for the rest of their
+/// life, so that nothing a page does to the element can redirect them. An
+/// empty prototype makes that pattern throw on the very first line.
+///
+/// The same builtin is handed out here and on the instance, so
+/// `el.matches === Element.prototype.matches`, as in a browser.
+const DOM_INTERFACE_METHODS: &[(&str, &[(&str, BuiltinId)])] = &[
+    (
+        "EventTarget",
+        &[
+            ("addEventListener", BuiltinId::DomNodeAddEventListener),
+            ("removeEventListener", BuiltinId::DomNodeRemoveEventListener),
+            ("dispatchEvent", BuiltinId::DomNodeDispatchEvent),
+        ],
+    ),
+    (
+        "Node",
+        &[
+            ("appendChild", BuiltinId::DomNodeAppendChild),
+            ("insertBefore", BuiltinId::DomNodeInsertBefore),
+            ("removeChild", BuiltinId::DomNodeRemoveChild),
+            ("replaceChild", BuiltinId::DomNodeReplaceChild),
+            ("cloneNode", BuiltinId::DomNodeCloneNode),
+            ("contains", BuiltinId::DomNodeContains),
+            ("hasChildNodes", BuiltinId::DomNodeHasChildNodes),
+            ("isEqualNode", BuiltinId::DomNodeIsEqualNode),
+            ("isSameNode", BuiltinId::DomNodeIsSameNode),
+            ("getRootNode", BuiltinId::DomNodeGetRootNode),
+            ("normalize", BuiltinId::DomNodeNormalize),
+        ],
+    ),
+    (
+        "Element",
+        &[
+            ("matches", BuiltinId::DomNodeMatches),
+            ("webkitMatchesSelector", BuiltinId::DomNodeMatches),
+            ("closest", BuiltinId::DomNodeClosest),
+            ("querySelector", BuiltinId::DomNodeQuerySelector),
+            ("querySelectorAll", BuiltinId::DomNodeQuerySelectorAll),
+            ("getAttribute", BuiltinId::DomNodeGetAttribute),
+            ("setAttribute", BuiltinId::DomNodeSetAttribute),
+            ("removeAttribute", BuiltinId::DomNodeRemoveAttribute),
+            ("hasAttribute", BuiltinId::DomNodeHasAttribute),
+            ("hasAttributes", BuiltinId::DomNodeHasAttributes),
+            ("getAttributeNames", BuiltinId::DomNodeGetAttributeNames),
+            ("toggleAttribute", BuiltinId::DomNodeToggleAttribute),
+            ("getBoundingClientRect", BuiltinId::DomNodeGetBoundingClientRect),
+            ("getClientRects", BuiltinId::DomNodeGetClientRects),
+            ("insertAdjacentHTML", BuiltinId::DomNodeInsertAdjacentHtml),
+            ("insertAdjacentElement", BuiltinId::DomNodeInsertAdjacentElement),
+            ("insertAdjacentText", BuiltinId::DomNodeInsertAdjacentText),
+            ("scrollIntoView", BuiltinId::DomNodeScrollIntoView),
+            ("attachShadow", BuiltinId::DomNodeAttachShadow),
+            ("remove", BuiltinId::DomNodeRemove),
+            ("after", BuiltinId::DomNodeAfter),
+            ("before", BuiltinId::DomNodeBefore),
+            ("replaceWith", BuiltinId::DomNodeReplaceWith),
+            ("append", BuiltinId::DomNodeAppendChild),
+            ("prepend", BuiltinId::DomNodePrepend),
+            ("replaceChildren", BuiltinId::DomNodeReplaceChildren),
+        ],
+    ),
+    (
+        "HTMLElement",
+        &[
+            ("focus", BuiltinId::DomNodeFocus),
+            ("blur", BuiltinId::DomNodeBlur),
+            ("click", BuiltinId::DomNodeClick),
+        ],
+    ),
+    (
+        "Document",
+        &[
+            ("createElement", BuiltinId::DomDocCreateElement),
+            ("createElementNS", BuiltinId::DomCreateElementNs),
+            ("createTextNode", BuiltinId::DomDocCreateTextNode),
+            ("createComment", BuiltinId::DomDocCreateComment),
+            ("createDocumentFragment", BuiltinId::DomDocCreateFragment),
+            ("getElementById", BuiltinId::DomDocGetElementById),
+            ("getElementsByClassName", BuiltinId::DomDocGetElementsByClassName),
+            ("getElementsByTagName", BuiltinId::DomDocGetElementsByTagName),
+            ("querySelector", BuiltinId::DomDocQuerySelector),
+            ("querySelectorAll", BuiltinId::DomDocQuerySelectorAll),
+        ],
+    ),
+    ("Text", &[("splitText", BuiltinId::DomNodeSplitText)]),
+    (
+        "DOMTokenList",
+        &[
+            ("add", BuiltinId::DomClassListAdd),
+            ("remove", BuiltinId::DomClassListRemove),
+            ("contains", BuiltinId::DomClassListContains),
+            ("toggle", BuiltinId::DomClassListToggle),
+            ("replace", BuiltinId::DomClassListReplace),
+            ("item", BuiltinId::DomClassListItem),
+            ("values", BuiltinId::DomClassListValues),
+            ("keys", BuiltinId::DomClassListKeys),
+            ("entries", BuiltinId::DomClassListEntries),
+            ("forEach", BuiltinId::DomClassListForEach),
+        ],
+    ),
+    (
+        "CSSStyleDeclaration",
+        &[
+            ("getPropertyValue", BuiltinId::DomStyleGetProperty),
+            ("setProperty", BuiltinId::DomStyleSetProperty),
+            ("removeProperty", BuiltinId::DomStyleRemoveProperty),
+        ],
+    ),
+];
+
 const DOM_INTERFACE_NAMES: &[&str] = &[
     "EventTarget",
     "Node",
@@ -3730,6 +3846,24 @@ impl Vm {
                 false,
                 false,
             );
+            // The methods a page can borrow off the prototype and call with
+            // an element as `this`.
+            if let Some((_, methods)) = DOM_INTERFACE_METHODS
+                .iter()
+                .find(|(name, _)| *name == iface)
+            {
+                for (method_name, builtin) in *methods {
+                    let function = self.allocate_builtin_method(*builtin);
+                    self.define_data_property(
+                        proto,
+                        PropertyKey::from(*method_name),
+                        function,
+                        true,
+                        false,
+                        true,
+                    );
+                }
+            }
             self.dom_interface_ctors.insert(ctor.raw(), iface);
             self.globals.insert(iface.to_string(), Value::Object(ctor));
         }
