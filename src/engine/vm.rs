@@ -221,6 +221,8 @@ enum BuiltinId {
     DomDocCreateElement,
     DomDocCreateTextNode,
     DomDocCreateComment,
+    NavigatorSendBeacon,
+    DomNodeCheckVisibility,
     DomDocCreateFragment,
     DomDocWrite,
     DomInterfaceConstructor,
@@ -1503,6 +1505,12 @@ pub struct Vm {
     /// Cache for stateless builtin method values (constructable=false, prototype=None).
     /// Avoids a heap allocation on every DOM property access like element.appendChild.
     builtin_method_cache: HashMap<BuiltinId, Value>,
+    /// `navigator`, `screen` and `CSS`, kept so every read hands back the
+    /// same object. They were rebuilt on each access, which made
+    /// `navigator === navigator` false and quietly threw away anything a
+    /// page put on them: a polyfill assigning `navigator.sendBeacon` was
+    /// gone again by the next line.
+    window_singletons: HashMap<&'static str, Value>,
     /// Next id handed out by `Symbol()`. Ids below `FIRST_USER_SYMBOL` are
     /// reserved for well-known symbols (e.g. Symbol.iterator).
     next_symbol_id: u32,
@@ -1593,6 +1601,7 @@ const DOM_INTERFACE_METHODS: &[(&str, &[(&str, BuiltinId)])] = &[
             ("toggleAttribute", BuiltinId::DomNodeToggleAttribute),
             ("getBoundingClientRect", BuiltinId::DomNodeGetBoundingClientRect),
             ("getClientRects", BuiltinId::DomNodeGetClientRects),
+            ("checkVisibility", BuiltinId::DomNodeCheckVisibility),
             ("insertAdjacentHTML", BuiltinId::DomNodeInsertAdjacentHtml),
             ("insertAdjacentElement", BuiltinId::DomNodeInsertAdjacentElement),
             ("insertAdjacentText", BuiltinId::DomNodeInsertAdjacentText),
@@ -1960,6 +1969,7 @@ impl Vm {
             delivering_slotchange: false,
             node_wrappers: HashMap::new(),
             builtin_method_cache: HashMap::new(),
+            window_singletons: HashMap::new(),
             next_symbol_id: FIRST_USER_SYMBOL,
             symbol_descriptions: HashMap::new(),
             symbol_registry: HashMap::new(),
@@ -13460,6 +13470,57 @@ impl Vm {
                 let res = self.host.mutate_dom(DomMutation::CreateTextNode { window: WindowId(0), data: text });
                 Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
             }
+            BuiltinId::NavigatorSendBeacon => {
+                let url = args.first().cloned().unwrap_or(Value::Undefined);
+                let options = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+                let method = self.make_string_value("POST");
+                self.define_data_property(options, PropertyKey::from("method"), method, true, true, true);
+                if let Some(body) = args.get(1) {
+                    self.define_data_property(options, PropertyKey::from("body"), body.clone(), true, true, true);
+                }
+                self.define_data_property(options, PropertyKey::from("keepalive"), Value::Bool(true), true, true, true);
+                match self.builtin_fetch(&[url, Value::Object(options)]) {
+                    Ok(_) => Ok(Value::Bool(true)),
+                    Err(_) => Ok(Value::Bool(false)),
+                }
+            }
+            // What the box tree already knows: a box with no size, or one
+            // turned off by `display` or `visibility`, is not visible.
+            BuiltinId::DomNodeCheckVisibility => {
+                let options = args.first().cloned().unwrap_or(Value::Undefined);
+                let node_id = self.this_node_id(&this_value);
+                let asked = |vm: &mut Self, name: &str| -> bool {
+                    if !matches!(options, Value::Object(_)) {
+                        return false;
+                    }
+                    match vm.get_property_value(&options, &PropertyKey::from(name)) {
+                        Ok(value) => vm.is_truthy(&value),
+                        Err(_) => false,
+                    }
+                };
+                // The question is whether the element has a box at all, not
+                // how big one is: a zero-sized element is still visible. So
+                // walk up looking for a `display: none`, which takes the whole
+                // subtree out of the box tree.
+                let mut walk = Some(node_id);
+                while let Some(current) = walk {
+                    if self.computed_style_value(current, "display") == "none" {
+                        return Ok(Value::Bool(false));
+                    }
+                    walk = self.parent_node_id(current);
+                }
+                if asked(self, "visibilityProperty")
+                    && self.computed_style_value(node_id, "visibility") == "hidden"
+                {
+                    return Ok(Value::Bool(false));
+                }
+                if asked(self, "opacityProperty")
+                    && self.computed_style_value(node_id, "opacity") == "0"
+                {
+                    return Ok(Value::Bool(false));
+                }
+                Ok(Value::Bool(true))
+            }
             BuiltinId::DomDocCreateComment => {
                 let text = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let res = self.host.mutate_dom(DomMutation::CreateComment { window: WindowId(0), data: text });
@@ -16923,14 +16984,21 @@ impl Vm {
                 // one while setting up its header navigation, and a missing
                 // `CSS` threw before the menu had been built, leaving an empty
                 // strip where it belongs.
+                if let Some(existing) = self.window_singletons.get("CSS") {
+                    return Ok(existing.clone());
+                }
                 let css = self.allocate_ordinary_object(None);
                 let supports = self.allocate_builtin_method(BuiltinId::CssSupports);
                 self.define_data_property(css, PropertyKey::from("supports"), supports, true, true, true);
                 let escape = self.allocate_builtin_method(BuiltinId::CssEscape);
                 self.define_data_property(css, PropertyKey::from("escape"), escape, true, true, true);
+                self.window_singletons.insert("CSS", Value::Object(css));
                 Ok(Value::Object(css))
             }
             "navigator" => {
+                if let Some(existing) = self.window_singletons.get("navigator") {
+                    return Ok(existing.clone());
+                }
                 let nav = self.allocate_ordinary_object(None);
                 // Feature-detection code reads these without checking they are
                 // there. firefox.com's site script starts with
@@ -16988,12 +17056,31 @@ impl Vm {
                     true,
                     true,
                 );
+                // A beacon normally outlives the page; this one is an ordinary
+                // request, which is close enough while the page is still open
+                // -- and it genuinely sends, rather than reporting success and
+                // dropping what analytics handed it.
+                let beacon = self.allocate_builtin_method(BuiltinId::NavigatorSendBeacon);
+                self.define_data_property(
+                    nav,
+                    PropertyKey::from("sendBeacon"),
+                    beacon,
+                    true,
+                    true,
+                    true,
+                );
+                self.window_singletons
+                    .insert("navigator", Value::Object(nav));
                 Ok(Value::Object(nav))
             }
             "screen" => {
+                if let Some(existing) = self.window_singletons.get("screen") {
+                    return Ok(existing.clone());
+                }
                 let scr = self.allocate_ordinary_object(None);
                 self.define_data_property(scr, PropertyKey::from("width"), Value::Number(1920.0), true, true, true);
                 self.define_data_property(scr, PropertyKey::from("height"), Value::Number(1080.0), true, true, true);
+                self.window_singletons.insert("screen", Value::Object(scr));
                 Ok(Value::Object(scr))
             }
             "history" => Ok(self.make_host_object(HostObjectSlot {
@@ -17392,6 +17479,7 @@ impl Vm {
             "before" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeBefore)),
             "replaceWith" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeReplaceWith)),
             "getClientRects" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeGetClientRects)),
+            "checkVisibility" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeCheckVisibility)),
             "id" => {
                 let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "id".to_string() });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })

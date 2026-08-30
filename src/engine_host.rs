@@ -3513,6 +3513,71 @@ const RUNTIME_PRELUDE: &str = r#"
       }
     });
   }
+
+  // ---- document.fonts ----------------------------------------------------
+  // Pages gate their first paint on `document.fonts.ready`, and a missing one
+  // throws before anything is shown. This engine loads no web fonts -- text is
+  // drawn with the faces the system already has -- so the set is empty and
+  // settled from the start, which is what "ready" means here.
+  if (g.document && !g.document.fonts) {
+    var fontFaces = new Set();
+    var fontFaceSet = {
+      status: 'loaded',
+      size: 0,
+      // Resolves with the set itself, as the spec says, so
+      // `document.fonts.ready.then(fonts => fonts.check(...))` works.
+      ready: null,
+      check: function () { return true; },
+      load: function () { return Promise.resolve([]); },
+      add: function (face) { fontFaces.add(face); this.size = fontFaces.size; return this; },
+      delete: function (face) { var had = fontFaces.delete(face); this.size = fontFaces.size; return had; },
+      clear: function () { fontFaces.clear(); this.size = 0; },
+      has: function (face) { return fontFaces.has(face); },
+      forEach: function (fn, thisArg) { fontFaces.forEach(fn, thisArg); },
+      values: function () { return fontFaces.values(); },
+      keys: function () { return fontFaces.values(); },
+      entries: function () { return fontFaces.entries(); },
+      addEventListener: function () {},
+      removeEventListener: function () {},
+      onloadingdone: null
+    };
+    fontFaceSet.ready = Promise.resolve(fontFaceSet);
+    fontFaceSet[Symbol.iterator] = function () { return fontFaces.values(); };
+    g.document.fonts = fontFaceSet;
+  }
+
+  // ---- navigator odds and ends -------------------------------------------
+  if (g.navigator && typeof g.navigator.sendBeacon !== 'function') {
+    // A real beacon outlives the page; this one is an ordinary request, which
+    // is close enough while the page is still open -- and it genuinely sends,
+    // rather than reporting success and dropping the payload.
+    g.navigator.sendBeacon = function (url, data) {
+      try {
+        if (typeof g.fetch === 'function') {
+          g.fetch(url, { method: 'POST', body: data, keepalive: true }).catch(function () {});
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    };
+  }
+
+  // `checkVisibility` answers what the box tree already knows: a box with no
+  // size, or one turned off by `display` or `visibility`, is not visible.
+  if (g.Element && g.Element.prototype && typeof g.Element.prototype.checkVisibility !== 'function') {
+    g.Element.prototype.checkVisibility = function (options) {
+      var settings = options || {};
+      var style = g.getComputedStyle ? g.getComputedStyle(this) : null;
+      if (style) {
+        if (style.display === 'none') return false;
+        if (settings.visibilityProperty && style.visibility === 'hidden') return false;
+        if (settings.contentVisibilityAuto && style.contentVisibility === 'hidden') return false;
+        if (settings.opacityProperty && String(style.opacity) === '0') return false;
+      }
+      var rect = this.getBoundingClientRect();
+      return rect.width > 0 || rect.height > 0;
+    };
+  }
 })();
 "#;
 
@@ -4497,6 +4562,70 @@ mod tests {
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
         assert_eq!(result.title.as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn the_window_hands_back_the_same_navigator_every_time() {
+        // `navigator` was rebuilt on every read, so `navigator === navigator`
+        // was false and a polyfill assigning to it was gone by the next line.
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                navigator.__probe = 5;
+                document.title = [
+                    navigator === navigator,
+                    navigator.__probe,
+                    screen === screen,
+                    CSS === CSS,
+                    typeof navigator.sendBeacon,
+                ].join('|');
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("true|5|true|true|function"));
+    }
+
+    #[test]
+    fn check_visibility_asks_whether_there_is_a_box() {
+        // Not how big the box is -- a zero-sized element is visible. Only
+        // `display: none`, on the element or above it, takes it out of the
+        // tree; `visibility` and `opacity` count only when asked for.
+        let result = run_document_scripts(
+            r#"<html><body>
+                <div id="v" style="width:50px;height:20px">v</div>
+                <div id="n" style="display:none">n</div>
+                <div style="display:none"><span id="deep">d</span></div>
+                <div id="h" style="visibility:hidden">h</div>
+                <script>
+                    function look(id, options) { return document.getElementById(id).checkVisibility(options); }
+                    document.title = [
+                        look('v'),
+                        look('n'),
+                        look('deep'),
+                        look('h'),
+                        look('h', { visibilityProperty: true }),
+                    ].join('|');
+                </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("true|false|false|true|false"));
+    }
+
+    #[test]
+    fn document_fonts_is_settled_from_the_start() {
+        // Pages gate their first paint on `document.fonts.ready`. No web fonts
+        // are loaded here, so the set is empty and already settled.
+        let result = run_document_scripts(
+            r#"<html><body><script>
+                document.fonts.ready.then(function (fonts) {
+                    document.title = [fonts === document.fonts, fonts.status, fonts.check('16px Arial')].join('|');
+                });
+            </script></body></html>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("true|loaded|true"));
     }
 
     #[test]
