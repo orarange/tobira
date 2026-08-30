@@ -960,6 +960,12 @@ fn ensure_table_ancestry(builder: &mut Builder, new_tag: &str) {
 
     match new_tag {
         "td" | "th" => {
+            // Straight inside a table, with nothing but stray markup between:
+            // whatever is open above the table is not part of it and ends
+            // here. `<table><a>1<td>` fosters the `<a>` out of the table, and
+            // without this the cell went inside that `<a>` instead of into
+            // the table it was written in.
+            clear_to_table_context(builder);
             // A cell ends a caption: the caption is the table's title, not a
             // place cells can go.
             if builder.tag_of(builder.current()) == "caption" {
@@ -986,7 +992,12 @@ fn ensure_table_ancestry(builder: &mut Builder, new_tag: &str) {
                 builder.open.pop();
             }
         }
-        "tr" if builder.tag_of(builder.current()) == "table" => push(builder, "tbody"),
+        "tr" => {
+            clear_to_table_context(builder);
+            if builder.tag_of(builder.current()) == "table" {
+                push(builder, "tbody");
+            }
+        }
         "col" if builder.tag_of(builder.current()) == "table" => push(builder, "colgroup"),
         _ => {}
     }
@@ -1425,7 +1436,13 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 // `<applet>`, `<marquee>` and `<object>` re-open the
                 // formatting in force before they put their own marker down, so
                 // a `<b>` outside one still reaches inside it.
-                if !is_special(&name) || starts_formatting_scope(&name) {
+                // A cell or a caption puts a marker down and opens; it does
+                // not rebuild the formatting around it first. Rebuilding put
+                // the `<a>` that had been fostered out of a table back on top
+                // of the stack, and the cell went inside it instead of into
+                // the table it was written in. `<applet>`, `<marquee>` and
+                // `<object>` do rebuild, then mark.
+                if !is_special(&name) || matches!(name.as_str(), "applet" | "marquee" | "object") {
                     builder.reconstruct_formatting();
                 }
 
@@ -2009,6 +2026,38 @@ fn closes_enclosing(builder: &Builder, target: &str, boundaries: &[&str]) -> boo
 /// Certain start tags close currently open elements of the same category
 /// before they are inserted: a new `<td>` ends the open `<td>`, a new `<li>`
 /// ends the open `<li>`.
+/// Whether the parser is straight inside a table -- a table is open and
+/// nothing between it and here belongs to the table's own structure.
+///
+/// That is the standard's "in table" insertion mode. What sits above the table
+/// in that state is stray markup that was fostered out of it, and a cell or a
+/// row written next ends it.
+fn in_bare_table(builder: &Builder) -> bool {
+    let Some(table_at) = builder
+        .open
+        .iter()
+        .rposition(|&node| builder.tag_of(node) == "table")
+    else {
+        return false;
+    };
+    builder.open[table_at + 1..].iter().all(|&node| {
+        !matches!(
+            builder.tag_of(node),
+            "tbody" | "thead" | "tfoot" | "tr" | "td" | "th" | "caption" | "colgroup" | "template"
+        )
+    })
+}
+
+/// Pop whatever sits above the table when the parser is straight inside one.
+fn clear_to_table_context(builder: &mut Builder) {
+    if !in_bare_table(builder) {
+        return;
+    }
+    while builder.open.len() > 1 && builder.tag_of(builder.current()) != "table" {
+        builder.open.pop();
+    }
+}
+
 fn maybe_auto_close(builder: &mut Builder, new_tag: &str) {
     // Anything that is not head content ends the head, whether or not the
     // markup wrote `</head>`. Without this, `<html><head><body>` left the body
