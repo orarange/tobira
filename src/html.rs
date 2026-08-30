@@ -383,7 +383,6 @@ impl Builder {
                     | "script"
                     | "template"
                     | "form"
-                    | "input"
             ),
         }
     }
@@ -420,7 +419,20 @@ impl Builder {
         let fostered = match &kind {
             // Whitespace alone is allowed to stay: it draws nothing, and
             // moving it would put a stray gap above every table.
-            BuildKind::Text(text) => !text.trim().is_empty() && self.needs_fostering(None),
+            BuildKind::Text(text) => !is_html_whitespace_only(text) && self.needs_fostering(None),
+            // Only an input that really is hidden stays inside the table.
+            // The value is matched as written, with no trimming: a `type` of
+            // " hidden" is not the hidden type, and `hidDEN` is.
+            BuildKind::Element {
+                tag_name,
+                attributes,
+                ..
+            } if tag_name == "input" => {
+                let hidden = attributes
+                    .get("type")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("hidden"));
+                !hidden && self.needs_fostering(None)
+            }
             BuildKind::Element { tag_name, .. } => self.needs_fostering(Some(tag_name)),
             _ => false,
         };
@@ -1152,18 +1164,18 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     // A frameset document keeps the whitespace written beside
                     // its frames, and whatever is inside `<noframes>` -- the
                     // page a browser without frames would show.
-                    if text.trim().is_empty() {
+                    if is_html_whitespace_only(&text) {
                         builder.html_comments.push(Node::Text(text));
                     }
                     continue;
                 }
                 // Between the head and the body, whitespace belongs to neither.
                 // A column group holds nothing but columns, text included.
-                if !text.trim().is_empty() && builder.tag_of(builder.current()) == "colgroup" {
+                if !is_html_whitespace_only(&text) && builder.tag_of(builder.current()) == "colgroup" {
                     builder.open.pop();
                 }
                 if builder.after_head && builder.open.len() == 1 {
-                    if text.trim().is_empty() {
+                    if is_html_whitespace_only(&text) {
                         builder.html_whitespace.push(Node::Text(text));
                         continue;
                     }
@@ -1175,7 +1187,7 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     text
                 };
                 skip_leading_newline = false;
-                if !text.trim().is_empty() {
+                if !is_html_whitespace_only(&text) {
                     // Writing anything again puts the parser back in the body,
                     // however many closing tags came before it.
                     builder.after_body = false;
@@ -1185,7 +1197,7 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     // Text on the page settles it: a later frameset would have
                     // to discard what the reader can already see. Text in the
                     // head does not count, since none of it is shown.
-                    if !builder.is_open("head") && text.trim().is_empty() == false {
+                    if !builder.is_open("head") && !is_html_whitespace_only(&text) {
                         builder.frameset_ok = false;
                     }
                     // Text belongs inside whatever formatting is still in
@@ -1226,6 +1238,13 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
 
                 if matches!(name.as_str(), "html" | "body") && builder.is_open(&name) {
                     builder.merge_attributes(&name, attributes);
+                    continue;
+                }
+                // There is one head. A second `<head>` while the first is open,
+                // or after it has been closed, is dropped -- writing it did not
+                // nest a head inside a head in any browser.
+                if name == "head" && (builder.is_open("head") || builder.after_head) {
+                    builder.merge_attributes("head", attributes);
                     continue;
                 }
                 // A second `<body>` tag once the body is under way does not open
@@ -1698,7 +1717,7 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
         match &child {
             Node::Doctype(_) if !seen_content => before_html.push(child),
             Node::Comment(_) if !seen_content => before_html.push(child),
-            Node::Text(text) if !seen_content && text.trim().is_empty() => {}
+            Node::Text(text) if !seen_content && is_html_whitespace_only(text) => {}
             _ => {
                 seen_content = true;
                 rest.push(child);
@@ -1789,7 +1808,7 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
             }
             // Whitespace before the body starts is dropped, as it is in the
             // "before head" and "in head" modes.
-            Node::Text(text) if !seen_body_content && text.trim().is_empty() => {}
+            Node::Text(text) if !seen_body_content && is_html_whitespace_only(text) => {}
             // A comment written between two things that belong in the head
             // belongs there too, and does not start the body. One that comes
             // before the head has anything in it is earlier still: it sits in
@@ -2487,6 +2506,17 @@ fn skip_whitespace(input: &str, index: &mut usize) {
     while *index < bytes.len() && bytes[*index].is_ascii_whitespace() {
         *index += 1;
     }
+}
+
+/// Whether the text is nothing but HTML whitespace.
+///
+/// The standard counts exactly five characters -- tab, line feed, form feed,
+/// carriage return and space. Rust's `char::is_whitespace` follows Unicode and
+/// counts many more, so a run made only of `&nbsp;` or `&ThickSpace;` read as
+/// blank and the tree builder threw it away.
+fn is_html_whitespace_only(text: &str) -> bool {
+    text.chars()
+        .all(|character| matches!(character, '\t' | '\n' | '\u{000C}' | '\r' | ' '))
 }
 
 fn is_tag_name_char(byte: u8) -> bool {
