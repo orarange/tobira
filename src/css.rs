@@ -1107,6 +1107,14 @@ pub struct ComputedStyle {
     pub transform_origin_x: u32,
     /// transform-origin Y in permille of element height (500 = 50% = center)
     pub transform_origin_y: u32,
+    /// The `cellpadding` attribute of the table this element sits in.
+    ///
+    /// Not a CSS property. It is carried down the tree because the
+    /// attribute is written on the table and decides the padding of every
+    /// cell under it -- the standard maps it to a UA rule scoped to that
+    /// table, which is why a `td { padding }` in the page overrides it
+    /// rather than adding to it.
+    pub table_cellpadding: Option<u32>,
 }
 
 impl ComputedStyle {
@@ -1124,6 +1132,7 @@ impl ComputedStyle {
             margin_left_auto: false,
             margin_right_auto: false,
             padding: EdgeSizes::default(),
+            table_cellpadding: parent.and_then(|parent| parent.table_cellpadding),
             width: None,
             height: None,
             font_size_px: parent_font_size,
@@ -1311,6 +1320,17 @@ impl ComputedStyle {
             }
             "td" | "th" => {
                 style.vertical_align = VerticalAlign::Middle;
+                // The UA stylesheet gives a cell a pixel on every side,
+                // and `cellpadding` on the table replaces that number.
+                // Both sit below the page's own rules, so a `td { padding }`
+                // anywhere in the page wins.
+                let inset = style.table_cellpadding.unwrap_or(1);
+                style.padding = EdgeSizes {
+                    top: inset,
+                    right: inset,
+                    bottom: inset,
+                    left: inset,
+                };
             }
             // The room a list leaves for its own markers. Without it the
             // bullets sat in the margin of the page and the text started at
@@ -4771,6 +4791,12 @@ fn default_margin(tag_name: &str) -> SignedEdgeSizes {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_font_size: u32) {
+    if element.tag_name == "table" {
+        style.table_cellpadding = element
+            .attribute("cellpadding")
+            .and_then(|value| value.trim().parse::<u32>().ok());
+    }
+
     if let Some(width) = element
         .attribute("width")
         .and_then(|value| parse_length_value(value, parent_font_size))

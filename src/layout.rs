@@ -3524,7 +3524,11 @@ fn layout_table_element(
     }
 
     let spacing = parse_dimension_attribute(element.attributes.get("cellspacing")).unwrap_or(0);
-    let padding = parse_dimension_attribute(element.attributes.get("cellpadding")).unwrap_or(0);
+    // `cellpadding` is now the cells' own padding, set where the UA stylesheet
+    // sits so the page can override it. Adding it again here counted it twice:
+    // Hacker News grew 131px, so the UA default was dropped instead -- which
+    // left every cell two pixels short of what a browser gives it.
+    let padding = 0;
     let available_width = width.max(1);
     let track_total_spacing = spacing.saturating_mul(column_count.saturating_sub(1) as u32);
     let content_limit = available_width.saturating_sub(track_total_spacing).max(1);
@@ -4155,15 +4159,12 @@ fn layout_table_cell(
     let content_height = cursor_y
         .saturating_add(surround_y.saturating_sub(inset_top))
         .max(1);
+    // A cell's `height` is a floor on the whole box, padding included, whatever
+    // `box-sizing` says -- checked against Chrome, which makes
+    // `height:60px;padding:10px` a 60-tall cell, not an 80-tall one. Every cell
+    // in a row is then stretched to the tallest of them anyway.
     let content_height = match cell.style.height {
-        Some(LengthValue::Pixels(px)) => {
-            let stated = if matches!(cell.style.box_sizing, BoxSizing::BorderBox) {
-                px
-            } else {
-                px.saturating_add(surround_y)
-            };
-            content_height.max(stated)
-        }
+        Some(LengthValue::Pixels(px)) => content_height.max(px),
         _ => content_height,
     };
 
@@ -11000,6 +11001,34 @@ mod tests {
             probe_rect(&l, 0xAA0004).expect("border-box").width,
             200,
             "border-box says the stated width already covers them"
+        );
+    }
+
+    #[test]
+    fn cellpadding_sits_where_the_ua_stylesheet_does() {
+        // Checked against Chrome: a plain cell is 11x20 around a 9x18 word (a
+        // pixel a side), `cellpadding=10` makes it 29x38, and a `td { padding }`
+        // in the page replaces the attribute rather than adding to it: 21x30.
+        // Counting the attribute again in the table layout made Hacker News
+        // 131px taller, and dropping the UA pixel to compensate left every
+        // cell two short.
+        let l = probe_layout(
+            r#"<html><body style="margin:0">
+                <table cellspacing="0"><tr><td style="background:#aa0001">a</td></tr></table>
+                <table cellpadding="10" cellspacing="0"><tr><td style="background:#aa0002">a</td></tr></table>
+                <table cellpadding="10" cellspacing="0"><tr><td style="background:#aa0003;padding:6px">a</td></tr></table>
+            </body></html>"#,
+            600,
+        );
+        let plain = probe_rect(&l, 0xAA0001).expect("plain cell");
+        let attribute = probe_rect(&l, 0xAA0002).expect("cellpadding cell");
+        let styled = probe_rect(&l, 0xAA0003).expect("styled cell");
+        assert_eq!((plain.width, plain.height), (11, 20));
+        assert_eq!((attribute.width, attribute.height), (29, 38));
+        assert_eq!(
+            (styled.width, styled.height),
+            (21, 30),
+            "the page's own padding replaces the attribute"
         );
     }
 
