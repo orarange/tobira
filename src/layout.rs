@@ -580,6 +580,44 @@ pub fn layout_styled_document(
         context.commands.extend(cmds);
     }
 
+    // The inline elements' boxes, now that every line has a place. An outer
+    // element covers everything its inner ones do, so the unions are folded
+    // up the chain before they are handed out.
+    let inline_rects = std::mem::take(&mut context.inline_rects);
+    let inline_parents = std::mem::take(&mut context.inline_parents);
+    let mut folded = inline_rects.clone();
+    for (node_id, rect) in &inline_rects {
+        let mut walk = inline_parents.get(node_id).copied();
+        // An element cannot be inside itself; the depth guard is against a
+        // parent map that somehow loops.
+        let mut hops = 0;
+        while let Some(parent) = walk {
+            hops += 1;
+            if hops > 64 {
+                break;
+            }
+            if let Some(outer) = folded.get_mut(&parent) {
+                outer.0 = outer.0.min(rect.0);
+                outer.1 = outer.1.min(rect.1);
+                outer.2 = outer.2.max(rect.2);
+                outer.3 = outer.3.max(rect.3);
+            }
+            walk = inline_parents.get(&parent).copied();
+        }
+    }
+    for (node_id, (left, top, right, bottom, cursor_kind)) in folded {
+        context.element_hitboxes.push(ElementHitbox {
+            node_id: node_id as usize,
+            x: left,
+            y: top,
+            // An element that wrote nothing is zero wide, as a browser
+            // reports it, and cannot be hit.
+            width: right.saturating_sub(left),
+            height: bottom.saturating_sub(top).max(1),
+            cursor_kind,
+        });
+    }
+
     LayoutDocument {
         background_color: canvas_bg,
         content_height: cursor_y,
@@ -591,6 +629,16 @@ pub fn layout_styled_document(
 }
 
 struct LayoutContext {
+    /// The box each inline element covers, gathered as the lines are placed
+    /// and turned into hit boxes once the page is laid out. An element that
+    /// wraps over several lines ends up with the box around all of them,
+    /// which is what a browser reports for one.
+    inline_rects: std::collections::HashMap<u32, (u32, u32, u32, u32, CursorKind)>,
+    /// Which inline element each one is written inside, so an outer `<span>`
+    /// covers everything its inner ones do.
+    inline_parents: std::collections::HashMap<u32, u32>,
+    /// The inline element being walked, while the runs are collected.
+    current_inline_owner: Option<u32>,
     /// Floats opened by an ancestor block container, in page coordinates.
     ///
     /// A float shortens the *line boxes* beside it, not the boxes: a plain
@@ -699,6 +747,9 @@ struct PendingBottom {
 impl Default for LayoutContext {
     fn default() -> Self {
         Self {
+            inline_rects: std::collections::HashMap::new(),
+            inline_parents: std::collections::HashMap::new(),
+            current_inline_owner: None,
             inherited_floats: Vec::new(),
             background_color: DEFAULT_BACKGROUND_COLOR,
             commands: Vec::new(),
@@ -784,6 +835,15 @@ enum InlineFragment {
     },
     Control(Box<FormControlSpec>),
     LineBreak,
+    /// Where an inline element begins and ends among the runs.
+    ///
+    /// An inline box is not a box the layout builds -- its text belongs to
+    /// whatever line it lands on -- so there was nothing to ask where a
+    /// `<span>` was, and every one of them reported itself at the origin with
+    /// no size. These two travel with the runs and are turned into a box once
+    /// the line they sit on has a position.
+    BoxStart(u32),
+    BoxEnd(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -818,6 +878,14 @@ struct LineSpan {
 #[derive(Debug, Default)]
 struct LineBuilder {
     spans: Vec<LineSpan>,
+    /// Where each inline element begins and ends among the runs, as
+    /// `(run index, byte offset into that run, element, is the start)`.
+    ///
+    /// A place inside a run rather than between two, because two runs of the
+    /// same style are merged into one and measuring a word in two pieces
+    /// rounds twice -- which moved where lines broke. The offset lets the mark
+    /// survive the merge.
+    markers: Vec<(usize, usize, u32, bool)>,
     width: u32,
     line_height: u32,
 }
@@ -875,6 +943,12 @@ impl LineBuilder {
         let height = text_line_height(style, fonts);
         self.line_height = self.line_height.max(height);
 
+        // Marks waiting in front of a run that is about to be merged into
+        // the one before it move with it: they name the place inside the
+        // merged run where the element begins or ends.
+        let boundary = self.spans.len();
+        let merging_into = boundary.saturating_sub(1);
+        let merged_offset = self.spans.last().map(|span| span.text.len()).unwrap_or(0);
         if let Some(last) = self.spans.last_mut() {
             if last.control.is_none()
                 && last.image.is_none()
@@ -885,6 +959,12 @@ impl LineBuilder {
             {
                 last.text.push_str(text);
                 last.width = last.width.saturating_add(width);
+                for marker in self.markers.iter_mut() {
+                    if marker.0 == boundary {
+                        marker.0 = merging_into;
+                        marker.1 = merged_offset;
+                    }
+                }
                 return;
             }
         }
@@ -955,6 +1035,28 @@ impl LineBuilder {
             image: Some(Box::new(image)),
             atomic: None,
         });
+    }
+
+    /// A single space, measured in the container's font.
+    ///
+    /// Reuses whatever style the line already holds so that a space does not
+    /// copy a `ComputedStyle` -- 520 bytes -- of its own.
+    fn push_space(&mut self, container_style: &ComputedStyle, fonts: &mut FontContext) {
+        let style = self
+            .spans
+            .last()
+            .map(|span| span.style.clone())
+            .unwrap_or_else(|| Arc::new(container_style.clone()));
+        self.push_span(" ", &style, fonts, None, None);
+    }
+
+    /// Note that an inline element begins or ends here.
+    ///
+    /// Kept beside the runs rather than among them: a mark in the list would
+    /// stop two runs of the same style from being merged, and measuring a
+    /// word in two pieces rounds twice, which moved where lines broke.
+    fn push_marker(&mut self, node_id: u32, open: bool) {
+        self.markers.push((self.spans.len(), 0, node_id, open));
     }
 
     fn push_atomic(&mut self, atomic: Box<AtomicInline>, _container_style: &ComputedStyle) {
@@ -4455,6 +4557,12 @@ fn layout_mixed_children(
             && element_style.white_space != WhiteSpaceMode::Pre
             && inline_fragments.iter().all(|fragment| {
                 matches!(fragment, InlineFragment::Text { text, .. } if text.trim().is_empty())
+                    // A mark for where an inline element starts or ends is not
+                    // content, so it does not stop a blank run from being blank.
+                    || matches!(
+                        fragment,
+                        InlineFragment::BoxStart(_) | InlineFragment::BoxEnd(_)
+                    )
             })
         {
             inline_fragments.clear();
@@ -4843,6 +4951,22 @@ fn collect_inline_fragments(
                         return;
                     }
 
+                    // Mark where this element's own text begins and ends, so
+                    // the box it covers can be worked out once the lines it
+                    // lands on have been placed.
+                    let marked = element_node_id(element)
+                        .filter(|_| !element.style.pointer_events_none)
+                        .and_then(|id| u32::try_from(id).ok());
+                    if let Some(node_id) = marked {
+                        output.push(InlineFragment::BoxStart(node_id));
+                        if let Some(parent) = context.current_inline_owner {
+                            context.inline_parents.insert(node_id, parent);
+                        }
+                    }
+                    let outer_owner = context.current_inline_owner;
+                    if marked.is_some() {
+                        context.current_inline_owner = marked;
+                    }
                     for child in &element.children {
                         collect_inline_fragments(
                             child,
@@ -4855,6 +4979,10 @@ fn collect_inline_fragments(
                             fonts,
                             available_width,
                         );
+                    }
+                    context.current_inline_owner = outer_owner;
+                    if let Some(node_id) = marked {
+                        output.push(InlineFragment::BoxEnd(node_id));
                     }
                 }
                 Display::InlineBlock => {
@@ -4975,6 +5103,18 @@ fn layout_nowrap_fragments(
                 line.push_atomic(atomic.clone(), container_style);
                 pending_space = false;
             }
+            // Zero width, drawn as nothing: it only says where an inline
+            // element begins or ends on this line. A space still owed from
+            // the run before is written first, so it belongs to whatever the
+            // element was written beside rather than to the element itself.
+            InlineFragment::BoxStart(node_id) => {
+                if pending_space && !line.is_empty() {
+                    line.push_space(container_style, fonts);
+                    pending_space = false;
+                }
+                line.push_marker(*node_id, true);
+            }
+            InlineFragment::BoxEnd(node_id) => line.push_marker(*node_id, false),
             InlineFragment::LineBreak => {
                 // nowrap: ignore line breaks
             }
@@ -5139,7 +5279,15 @@ fn layout_normal_fragments(
     // leave more behind than the trial run knows how to take back.
     let plain_text = fragments
         .iter()
-        .all(|fragment| matches!(fragment, InlineFragment::Text { .. } | InlineFragment::LineBreak));
+        .all(|fragment| {
+            matches!(
+                fragment,
+                InlineFragment::Text { .. }
+                    | InlineFragment::LineBreak
+                    | InlineFragment::BoxStart(_)
+                    | InlineFragment::BoxEnd(_)
+            )
+        });
     if container_style.text_wrap_balance && plain_text && width > 0 {
         let balanced =
             balanced_wrap_width(fragments, container_style, x, width, *cursor_y, context, fonts);
@@ -5192,6 +5340,18 @@ fn layout_normal_fragments_at(
                 line.push_atomic(atomic.clone(), container_style);
                 pending_space = false;
             }
+            // Zero width, drawn as nothing: it only says where an inline
+            // element begins or ends on this line. A space still owed from
+            // the run before is written first, so it belongs to whatever the
+            // element was written beside rather than to the element itself.
+            InlineFragment::BoxStart(node_id) => {
+                if pending_space && !line.is_empty() {
+                    line.push_space(container_style, fonts);
+                    pending_space = false;
+                }
+                line.push_marker(*node_id, true);
+            }
+            InlineFragment::BoxEnd(node_id) => line.push_marker(*node_id, false),
             InlineFragment::LineBreak => {
                 if ellipsis_mode {
                     // In ellipsis mode, ignore line breaks
@@ -5547,6 +5707,10 @@ fn layout_preformatted_fragments(
                 }
                 line.push_atomic(atomic.clone(), container_style);
             }
+            // Zero width, drawn as nothing: it only says where an inline
+            // element begins or ends on this line.
+            InlineFragment::BoxStart(node_id) => line.push_marker(*node_id, true),
+            InlineFragment::BoxEnd(node_id) => line.push_marker(*node_id, false),
             InlineFragment::LineBreak => {
                 emit_line_with_indent(
                     &mut line, container_style, x, width, cursor_y, context, fonts,
@@ -5742,6 +5906,53 @@ fn emit_line(
     emit_line_impl(line, container_style, x, width, cursor_y, context, fonts, 0);
 }
 
+/// Open or close the inline elements whose marks sit in front of run
+/// `span_index`, and note where the edge falls.
+fn apply_inline_marks(
+    markers: &[(usize, usize, u32, bool)],
+    span_index: usize,
+    span: Option<&LineSpan>,
+    cursor_x: u32,
+    line_top: u32,
+    strut_height: u32,
+    fonts: &mut FontContext,
+    open_inlines: &mut Vec<u32>,
+    context: &mut LayoutContext,
+) {
+    for (at, offset, node_id, open) in markers {
+        if *at != span_index {
+            continue;
+        }
+        // A mark inside a run stands where the text before it ends.
+        let cursor_x = match span {
+            Some(span) if *offset > 0 && *offset <= span.text.len() => cursor_x
+                .saturating_add(text_width(&span.style, &span.text[..*offset], fonts)),
+            _ => cursor_x,
+        };
+        if *open {
+            let entry = context.inline_rects.entry(*node_id).or_insert((
+                cursor_x,
+                line_top,
+                cursor_x,
+                line_top,
+                CursorKind::Auto,
+            ));
+            entry.0 = entry.0.min(cursor_x);
+            open_inlines.push(*node_id);
+        } else {
+            if let Some(entry) = context.inline_rects.get_mut(node_id) {
+                entry.2 = entry.2.max(cursor_x);
+                // An element that wrote nothing still has the height of a
+                // line of its own text, which is what a browser reports.
+                if entry.3 == entry.1 {
+                    entry.3 = entry.1.saturating_add(strut_height);
+                }
+            }
+            open_inlines.retain(|id| id != node_id);
+        }
+    }
+}
+
 fn emit_line_impl(
     line: &mut LineBuilder,
     container_style: &ComputedStyle,
@@ -5754,6 +5965,10 @@ fn emit_line_impl(
 ) {
     context.lines_emitted = context.lines_emitted.saturating_add(1);
     if line.is_empty() {
+        // Marks left on a line with nothing else on it belong to an inline
+        // element that wrote no content; they are dropped rather than carried
+        // into the next line, where they would name the wrong place.
+        line.spans.clear();
         *cursor_y = cursor_y.saturating_add(text_line_height(container_style, fonts));
         return;
     }
@@ -5771,6 +5986,7 @@ fn emit_line_impl(
                 .max(text_line_height(container_style, fonts)),
         );
         line.spans.clear();
+        line.markers.clear();
         line.width = 0;
         line.line_height = 0;
         return;
@@ -5840,8 +6056,52 @@ fn emit_line_impl(
         .max(line.line_height.min(above + below).max(1))
         .max(min_line_height);
     let baseline = above;
+    let strut_content = text_line_height(container_style, fonts);
+    // The inline elements whose runs are being walked right now.
+    let mut open_inlines: Vec<u32> = Vec::new();
 
-    for span in &line.spans {
+    for (span_index, span) in line.spans.iter().enumerate() {
+        // An inline element's box grows to hold wherever its runs land. The
+        // opening mark fixes its left edge, the closing one its right; the
+        // height comes from the runs between them, not from the line, so a
+        // small `<sup>` on a tall line reports its own size.
+        apply_inline_marks(
+            &line.markers,
+            span_index,
+            Some(span),
+            cursor_x,
+            *cursor_y,
+            strut_content,
+            fonts,
+            &mut open_inlines,
+            context,
+        );
+        // Every run inside an open element pushes its box out to hold it.
+        if !open_inlines.is_empty() {
+            let run_height = if span.atomic.is_some() || span.image.is_some() {
+                span.height
+            } else {
+                text_line_height(&span.style, fonts)
+            };
+            let run_above = if span.atomic.is_some() || span.image.is_some() {
+                span.height
+            } else {
+                run_height.saturating_sub(below_baseline(&span.style, fonts))
+            };
+            let top = cursor_y
+                .saturating_add(baseline)
+                .saturating_sub(run_above)
+                .saturating_add_signed(span.style.baseline_shift);
+            let bottom = top.saturating_add(run_height);
+            let right = cursor_x.saturating_add(span.width);
+            for node_id in &open_inlines {
+                if let Some(entry) = context.inline_rects.get_mut(node_id) {
+                    entry.1 = entry.1.min(top);
+                    entry.2 = entry.2.max(right);
+                    entry.3 = entry.3.max(bottom);
+                }
+            }
+        }
         if let Some(control) = &span.control {
             let control_y = cursor_y.saturating_add(line_height.saturating_sub(span.height) / 2);
             let (background_color, border_color, native_chrome) = control_colors(control);
@@ -6046,9 +6306,22 @@ fn emit_line_impl(
 
         cursor_x = cursor_x.saturating_add(span.width);
     }
+    // Marks that close after the last run on the line.
+    apply_inline_marks(
+        &line.markers,
+        line.spans.len(),
+        None,
+        cursor_x,
+        *cursor_y,
+        strut_content,
+        fonts,
+        &mut open_inlines,
+        context,
+    );
 
     *cursor_y = cursor_y.saturating_add(line_height);
     line.spans.clear();
+    line.markers.clear();
     line.width = 0;
     line.line_height = 0;
 }

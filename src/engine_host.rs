@@ -5516,6 +5516,33 @@ mod tests {
     }
 
     #[test]
+    fn an_inline_element_can_be_measured() {
+        // An inline box is not a box the layout builds -- its text belongs to
+        // whatever line it lands on -- so asking a `<span>` where it was
+        // answered with the origin and no size, which is no use to a tooltip
+        // or a highlight trying to sit against one. Checked against Chrome,
+        // which gives these x=0 w=27 and x=31 w=25, and the nested pair
+        // x=9 w=26 and x=18 w=8.
+        let result = run_document_scripts_with_styles(
+            r#"<html><body>
+                <div><span id="one">one</span> <span id="two">two</span></div>
+                <div>a<span id="outer">b<span id="inner">c</span>d</span>e</div>
+                <script>
+                    function box(id) {
+                        var r = document.getElementById(id).getBoundingClientRect();
+                        return Math.round(r.x) + ':' + Math.round(r.width);
+                    }
+                    document.title = [box('one'), box('two'), box('outer'), box('inner')].join('|');
+                </script>
+            </body></html>"#,
+            "http://localhost/",
+            "body{margin:0;font:16px Arial}",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("0:27|31:25|9:26|18:8"));
+    }
+
+    #[test]
     fn the_page_is_laid_out_before_its_scripts_measure_it() {
         // Every measurement used to be zero, because the layout only ran after
         // the scripts had finished: a sticky header worked out that it was at
