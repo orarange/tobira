@@ -2636,7 +2636,7 @@ struct TextEditorState {
 }
 
 #[derive(Debug, Clone)]
-struct FocusedPageInput {
+pub(crate) struct FocusedPageInput {
     // While a page input is focused, this native editor state is the immediate
     // source of truth; sync_page_input_value keeps the DOM attribute in step.
     control_id: usize,
@@ -2916,7 +2916,7 @@ impl TextEditorState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HitTarget {
+pub(crate) enum HitTarget {
     None,
     TitleBar,
     AddressBar,
@@ -4320,7 +4320,7 @@ fn draw_select_chevron(
     }
 }
 
-fn paint_layout(
+pub(crate) fn paint_layout(
     page_images: Option<&ImageStore>,
     fonts: &mut FontContext,
     buffer: &mut [u32],

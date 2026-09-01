@@ -53,7 +53,9 @@ fn run() -> Result<()> {
     let program = args.next().unwrap_or_else(|| "scratch_browser".to_string());
     let mut cli_mode = false;
     let mut dump_styled = false;
+    let mut screenshot: Option<String> = None;
     let mut raw_url = None;
+    let mut expect_screenshot_path = false;
 
     for arg in args {
         match arg.as_str() {
@@ -64,12 +66,25 @@ fn run() -> Result<()> {
             "--cli" => cli_mode = true,
             "--gui" => cli_mode = false,
             "--dump-styled" => dump_styled = true,
+            "--screenshot" => expect_screenshot_path = true,
+            _ if expect_screenshot_path => {
+                screenshot = Some(arg);
+                expect_screenshot_path = false;
+            }
             _ if raw_url.is_none() => raw_url = Some(arg),
             _ => {
                 print_usage(&program);
                 return Ok(());
             }
         }
+    }
+
+    if let Some(path) = screenshot {
+        let Some(raw_url) = raw_url.clone() else {
+            print_usage(&program);
+            return Ok(());
+        };
+        return write_screenshot(&Url::parse(&raw_url)?, &path);
     }
 
     if dump_styled {
@@ -105,6 +120,76 @@ fn run() -> Result<()> {
 /// Debug: load a page, then report how much of the styled tree is hidden
 /// (display:none) vs visible, and how the layout engine sizes it. Distinguishes
 /// "content is in the DOM but CSS/JS hides it" from "layout collapses it".
+
+/// Render the page to a PNG, so it can be looked at rather than only measured.
+///
+/// The numbers a layout reports and the picture it draws are two different
+/// things: a box can be in exactly the right place and still be painted in the
+/// wrong colour, behind something else, or not at all.
+fn write_screenshot(url: &Url, path: &str) -> Result<()> {
+    browser::set_style_viewport_width(dump_width());
+    let page = load_page_for_cli(url)?;
+    let mut fonts = font::FontContext::load();
+    let layout = layout::layout_styled_document(
+        &page.styled_document,
+        &page.images,
+        dump_width(),
+        &mut fonts,
+    );
+    let width = dump_width();
+    let height = shot_height().min(layout.content_height.max(1));
+    let mut buffer = vec![layout.background_color | 0xff00_0000; (width * height) as usize];
+    let mut scratch: Vec<Vec<u32>> = Vec::new();
+    gui::paint_layout(
+        Some(&page.images),
+        &mut fonts,
+        &mut buffer,
+        width,
+        height,
+        0,
+        0,
+        height,
+        0,
+        &layout,
+        None,
+        gui::HitTarget::None,
+        &mut scratch,
+    );
+    let mut pixels = Vec::with_capacity(buffer.len() * 3);
+    for value in &buffer {
+        pixels.push((value >> 16) as u8);
+        pixels.push((value >> 8) as u8);
+        pixels.push(*value as u8);
+    }
+    // `::image` is the crate; `image` on its own is this program's own module.
+    let picture: ::image::ImageBuffer<::image::Rgb<u8>, Vec<u8>> =
+        ::image::ImageBuffer::from_raw(width, height, pixels)
+        .ok_or_else(|| error::BrowserError::message("could not build the image"))?;
+    picture
+        .save(path)
+        .map_err(|err| error::BrowserError::message(format!("could not write {path}: {err}")))?;
+    println!("wrote {path} ({width}x{height}, page is {} tall)", layout.content_height);
+    Ok(())
+}
+
+/// The width a dump or a screenshot is laid out at.
+fn dump_width() -> u32 {
+    std::env::var("TOBIRA_DUMP_WIDTH")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|width| *width > 0)
+        .unwrap_or(1280)
+}
+
+/// How tall a screenshot is. A whole long page is a lot of pixels to look at.
+fn shot_height() -> u32 {
+    std::env::var("TOBIRA_SHOT_HEIGHT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|height| *height > 0)
+        .unwrap_or(2000)
+}
+
 fn dump_styled_layout(url: &Url) -> Result<()> {
     use css::{Display, StyledNode};
     // Media queries are answered at this width; styling at a different one

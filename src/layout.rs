@@ -714,6 +714,9 @@ struct LayoutContext {
     /// The height is only known when an ancestor states one, so a percentage
     /// `top` falls back to zero rather than to a guess.
     containing_block_size: (u32, u32),
+    /// Whether the block being laid out is a `<center>`, whose block-level
+    /// children -- a table above all -- sit in the middle of it.
+    centres_its_children: bool,
     /// The window's width. A `position: fixed` box is placed against the
     /// viewport, not against whatever block it happens to be written in --
     /// `right: 5px` on a page whose body is narrower than the window put the
@@ -773,6 +776,7 @@ impl Default for LayoutContext {
             stretch_cross_size: None,
             list_ordinal: None,
             containing_block_size: (0, 0),
+            centres_its_children: false,
             viewport_width: 0,
             next_stacking_seq: 0,
             lines_emitted: 0,
@@ -3677,6 +3681,14 @@ fn layout_table_element(
         .iter()
         .sum::<u32>()
         .saturating_add(track_total_spacing);
+    // Where the table sits in the room it was given. `align` still decides it
+    // on an old page; `margin: 0 auto` is how a modern one says the same
+    // thing; and a `<center>` around it centres it, which is the whole point
+    // of that element and how most of the pre-CSS web is laid out. Hacker News
+    // is a `<center>` holding one 85%-wide table, and without this it sat
+    // against the left edge instead of in the middle of the window.
+    let centred = element.style.margin_left_auto && element.style.margin_right_auto
+        || context.centres_its_children;
     let table_x = match element
         .attributes
         .get("align")
@@ -3684,6 +3696,7 @@ fn layout_table_element(
     {
         Some(value) if value == "center" => x.saturating_add(width.saturating_sub(table_width) / 2),
         Some(value) if value == "right" => x.saturating_add(width.saturating_sub(table_width)),
+        _ if centred => x.saturating_add(width.saturating_sub(table_width) / 2),
         _ => x,
     };
 
@@ -4539,6 +4552,9 @@ fn layout_mixed_children(
     let mut bullet_pending = marker;
     let mut list_ordinal = 0_u32;
     let mut active_floats: Vec<ActiveFloat> = Vec::new();
+    // `<center>` centres the blocks inside it, not just its text.
+    let outer_centring = context.centres_its_children;
+    context.centres_its_children = element.tag_name == "center";
 
     let flush_inline = |inline_fragments: &mut Vec<InlineFragment>,
                         bullet_pending: &mut Option<String>,
@@ -4808,6 +4824,7 @@ fn layout_mixed_children(
     // one that is floated or taken out of flow itself. A plain block ends at
     // its last line and the float hangs out below it, which is exactly why
     // `clearfix` had to be invented.
+    context.centres_its_children = outer_centring;
     if establishes_block_context(&element.style) {
         *cursor_y = (*cursor_y).max(max_float_bottom(&active_floats));
         return;
@@ -6463,11 +6480,17 @@ fn parse_span_attribute(value: Option<&String>) -> usize {
 }
 
 fn resolve_table_width(element: &StyledElement, available_width: u32, preferred_width: u32) -> u32 {
+    // A stated width is the width. The columns are squeezed into it -- that is
+    // what the shrink pass below is for -- rather than the table growing to
+    // whatever its contents would have liked. Taking the larger of the two made
+    // `<table width="85%">` span the whole page whenever its text was wide
+    // enough, which is every page laid out the old way: Hacker News came out
+    // edge to edge instead of the centred column it is.
     specified_length(element, element.style.width, "width")
         .map(|length| resolve_length_value(length, available_width))
-        .map(|resolved| resolved.max(preferred_width))
         .unwrap_or(preferred_width)
         .min(available_width.max(1))
+        .max(1)
 }
 
 fn measure_cell_preferred_width(
@@ -11645,6 +11668,25 @@ mod tests {
             200,
             "border-box says the stated width already covers them"
         );
+    }
+
+    #[test]
+    fn a_stated_table_width_is_the_width() {
+        // The columns are squeezed into it; the table does not grow to what
+        // its contents would have liked. Taking the larger of the two made
+        // `<table width="85%">` span the whole page whenever its text was wide
+        // enough -- which is every page laid out the old way.
+        let l = probe_layout(
+            r#"<html><body style="margin:0">
+                <center><table width="50%" cellspacing="0"><tr>
+                    <td style="background:#aa0001">a very long run of text that would rather be wider</td>
+                </tr></table></center>
+            </body></html>"#,
+            1000,
+        );
+        let cell = probe_rect(&l, 0xAA0001).expect("cell");
+        assert_eq!(cell.width, 500, "the table takes the width it was given");
+        assert_eq!(cell.x, 250, "and a <center> puts it in the middle");
     }
 
     #[test]
