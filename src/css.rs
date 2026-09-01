@@ -1286,6 +1286,12 @@ pub struct ComputedStyle {
     /// table, which is why a `td { padding }` in the page overrides it
     /// rather than adding to it.
     pub table_cellpadding: Option<u32>,
+    /// The gap between columns.
+    ///
+    /// `gap` sets two: the first length is between rows, the second
+    /// between columns, and one length sets both. Only the first was
+    /// kept, so `gap: 10px 20px` put ten pixels everywhere.
+    pub column_gap: u32,
 }
 
 impl ComputedStyle {
@@ -1305,6 +1311,7 @@ impl ComputedStyle {
             margin_right_auto: false,
             padding: EdgeSizes::default(),
             table_cellpadding: parent.and_then(|parent| parent.table_cellpadding),
+            column_gap: 0,
             width: None,
             height: None,
             font_size_px: parent_font_size,
@@ -4704,20 +4711,30 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         // `gap: <row> <column>`. This engine keeps one gap, so the row value
         // wins and a single value sets both -- which is how nearly every sheet
         // writes it.
-        "gap" | "grid-gap" | "row-gap" | "grid-row-gap" => {
-            let first = split_value_components(value)
-                .into_iter()
-                .next()
-                .unwrap_or_default();
-            if let Some(px) = parse_length(&first, parent_font_size) {
+        "row-gap" | "grid-row-gap" => {
+            if let Some(px) = parse_length(value.trim(), parent_font_size) {
                 style.gap = px;
+            }
+        }
+        "gap" | "grid-gap" => {
+            let parts = split_value_components(value);
+            let rows = parts.first().and_then(|part| parse_length(part, parent_font_size));
+            let columns = parts
+                .get(1)
+                .and_then(|part| parse_length(part, parent_font_size))
+                .or(rows);
+            if let Some(px) = rows {
+                style.gap = px;
+            }
+            if let Some(px) = columns {
+                style.column_gap = px;
             }
         }
         // A column gap on its own was dropped, so items written with only
         // `column-gap` sat flush against each other.
         "column-gap" | "grid-column-gap" => {
             if let Some(px) = parse_length(value, parent_font_size) {
-                style.gap = px;
+                style.column_gap = px;
             }
         }
         // ── Grid properties ──────────────────────────────────────────────────

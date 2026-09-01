@@ -5516,6 +5516,53 @@ mod tests {
     }
 
     #[test]
+    fn a_flex_or_grid_container_can_be_measured() {
+        // Only ordinary blocks and table cells registered a box, so asking a
+        // flex or grid container where it was -- which is most of the
+        // structure of a modern page -- answered with the origin and nothing.
+        let result = run_document_scripts_with_styles(
+            r#"<html><body>
+                <div id="flex"><div></div><div></div></div>
+                <div id="grid"><div></div><div></div></div>
+                <script>
+                    function box(id) {
+                        var r = document.getElementById(id).getBoundingClientRect();
+                        return Math.round(r.width) + 'x' + Math.round(r.height);
+                    }
+                    document.title = [box('flex'), box('grid')].join('|');
+                </script>
+            </body></html>"#,
+            "http://localhost/",
+            "body{margin:0}#flex{display:flex;width:200px;height:30px}             #grid{display:grid;grid-template-columns:1fr 1fr;width:150px}             #grid>div{height:20px}",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("200x30|150x20"));
+    }
+
+    #[test]
+    fn gap_names_two_gaps() {
+        // `gap: <row> <column>`. Only the first length was kept, so
+        // `gap: 10px 20px` put ten pixels everywhere. Checked against Chrome,
+        // which puts the second item at x=100 and the wrapped third at y=20.
+        let result = run_document_scripts_with_styles(
+            r#"<html><body>
+                <div id="wrap"><div id="a"></div><div id="b"></div><div id="c"></div></div>
+                <script>
+                    function at(id) {
+                        var r = document.getElementById(id).getBoundingClientRect();
+                        return Math.round(r.x) + ':' + Math.round(r.y);
+                    }
+                    document.title = [at('a'), at('b'), at('c')].join('|');
+                </script>
+            </body></html>"#,
+            "http://localhost/",
+            "body{margin:0}#wrap{display:flex;gap:10px 20px;flex-wrap:wrap;width:200px}             #wrap>div{width:80px;height:10px}",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        assert_eq!(result.title.as_deref(), Some("0:0|100:0|0:20"));
+    }
+
+    #[test]
     fn an_inline_element_can_be_measured() {
         // An inline box is not a box the layout builds -- its text belongs to
         // whatever line it lands on -- so asking a `<span>` where it was

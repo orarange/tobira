@@ -553,6 +553,7 @@ pub fn layout_styled_document(
         ..LayoutContext::default()
     };
     let mut cursor_y = 0;
+    context.viewport_width = viewport_width;
 
     layout_node(
         document,
@@ -713,6 +714,11 @@ struct LayoutContext {
     /// The height is only known when an ancestor states one, so a percentage
     /// `top` falls back to zero rather than to a guess.
     containing_block_size: (u32, u32),
+    /// The window's width. A `position: fixed` box is placed against the
+    /// viewport, not against whatever block it happens to be written in --
+    /// `right: 5px` on a page whose body is narrower than the window put the
+    /// box at the body's edge instead of the window's.
+    viewport_width: u32,
     /// How many line boxes have been emitted, ever.
     ///
     /// Only differences matter: `text-wrap: balance` lays a run out at a trial
@@ -767,6 +773,7 @@ impl Default for LayoutContext {
             stretch_cross_size: None,
             list_ordinal: None,
             containing_block_size: (0, 0),
+            viewport_width: 0,
             next_stacking_seq: 0,
             lines_emitted: 0,
             pending_bottom: Vec::new(),
@@ -6503,7 +6510,7 @@ fn measure_cell_preferred_width(
             // firefox.com's header menu titles are a label and a chevron 4px
             // apart, and every one of them broke over two lines.
             if in_a_row && inline_width > 0 {
-                inline_width = inline_width.saturating_add(cell.style.gap);
+                inline_width = inline_width.saturating_add(cell.style.column_gap);
             }
             inline_width = inline_width.saturating_add(child_width);
         }
@@ -6742,7 +6749,7 @@ fn measure_node_preferred_width(
                         .collect();
                     let gaps = element
                         .style
-                        .gap
+                        .column_gap
                         .saturating_mul(visible.len().saturating_sub(1) as u32);
                     visible.iter().fold(gaps, |total, width| total.saturating_add(*width))
                 }
@@ -6992,6 +6999,16 @@ fn layout_positioned_element(
     } else {
         context.containing_block_origin
     };
+    // A fixed box is placed against the window, not against whatever block it
+    // happens to be written in: `right: 5px` on a page whose body is narrower
+    // than the window belongs at the window's edge.
+    let container_width = if element.style.position == Position::Fixed
+        && context.viewport_width > 0
+    {
+        context.viewport_width
+    } else {
+        container_width
+    };
     // With `top`/`left` auto the box keeps its *static position* -- where it
     // would have sat in flow -- rather than jumping to the containing block's
     // corner. Yahoo! JAPAN marks each headline with an absolutely positioned
@@ -7019,7 +7036,17 @@ fn layout_positioned_element(
     // `left` / `right` resolve against the containing block's width, `top` /
     // `bottom` against its height. The height is only known when an ancestor
     // states one, so a percentage `top` falls back to zero.
-    let (cb_width, cb_height) = {
+    let (cb_width, cb_height) = if element.style.position == Position::Fixed {
+        // The viewport is the containing block, whatever is around it.
+        (
+            if context.viewport_width == 0 {
+                container_width
+            } else {
+                context.viewport_width
+            },
+            0,
+        )
+    } else {
         let (width, height) = context.containing_block_size;
         (if width == 0 { container_width } else { width }, height)
     };
@@ -7184,7 +7211,33 @@ fn layout_positioned_element(
 // Grid layout
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn layout_grid_container(
+    element: &StyledElement,
+    x: u32,
+    available_width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+    current_form: Option<FormContext>,
+) {
+    let top = *cursor_y;
+    layout_grid_container_inner(
+        element,
+        x,
+        available_width,
+        cursor_y,
+        context,
+        images,
+        fonts,
+        current_form,
+    );
+    record_container_box(element, x, available_width, top, *cursor_y, context);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_grid_container_inner(
     element: &StyledElement,
     x: u32,
     available_width: u32,
@@ -7231,7 +7284,8 @@ fn layout_grid_container(
         .max(1);
 
     // ── Resolve column widths ──────────────────────────────────────────────
-    let gap = element.style.gap;
+    let gap = element.style.column_gap;
+    let row_gap = element.style.gap;
     let areas = element.style.grid_template_areas.as_deref();
     let line_names = element.style.grid_line_names.as_deref();
     let col_tracks = &element.style.grid_template_columns;
@@ -7667,7 +7721,7 @@ fn layout_grid_container(
     let stated_height = definite_height(&element.style);
     if stated_height > 0 && !row_heights.is_empty() {
         let rows_total: u32 =
-            row_heights.iter().sum::<u32>() + gap * max_row.saturating_sub(1) as u32;
+            row_heights.iter().sum::<u32>() + row_gap * max_row.saturating_sub(1) as u32;
         if stated_height > rows_total {
             let share = (stated_height - rows_total) / row_heights.len() as u32;
             for height in row_heights.iter_mut() {
@@ -7685,7 +7739,7 @@ fn layout_grid_container(
         };
         let cell_y: u32 = {
             let y_offset: u32 = row_heights[..item.row].iter().sum::<u32>()
-                + gap * item.row as u32;
+                + row_gap * item.row as u32;
             content_top + y_offset
         };
 
@@ -7703,7 +7757,7 @@ fn layout_grid_container(
         let row_height: u32 = {
             let end = (item.row + item.row_span).min(row_heights.len());
             let rows: u32 = row_heights[item.row.min(row_heights.len())..end].iter().sum();
-            rows + gap * end.saturating_sub(item.row).saturating_sub(1) as u32
+            rows + row_gap * end.saturating_sub(item.row).saturating_sub(1) as u32
         };
         let free = row_height.saturating_sub(item.measured_height);
         let mut item_y = cell_y
@@ -7740,7 +7794,7 @@ fn layout_grid_container(
     // `height: var(--navigation-height)` (4.125rem) and got whatever its items
     // added up to instead, which left a tall empty band under the nav bar.
     let rows_h: u32 = row_heights.iter().sum::<u32>()
-        + gap * max_row.saturating_sub(1) as u32;
+        + row_gap * max_row.saturating_sub(1) as u32;
     let total_h = if stated_height > 0 { stated_height } else { rows_h };
     let content_bottom = content_top + total_h;
     let background_bottom = content_bottom
@@ -8218,7 +8272,63 @@ fn flex_item_content_width(
     result
 }
 
+/// A flex container's own box, for anything that asks where it is.
+///
+/// Only ordinary blocks and table cells registered one, so `getBoundingClientRect`
+/// on a flex or grid container -- which is most of the structure of a modern
+/// page -- answered with the origin and no size.
+#[allow(clippy::too_many_arguments)]
 fn layout_flex_container(
+    element: &StyledElement,
+    x: u32,
+    width: u32,
+    cursor_y: &mut u32,
+    context: &mut LayoutContext,
+    images: &ImageStore,
+    fonts: &mut FontContext,
+    current_form: Option<FormContext>,
+) {
+    let top = *cursor_y;
+    layout_flex_container_inner(element, x, width, cursor_y, context, images, fonts, current_form);
+    record_container_box(element, x, width, top, *cursor_y, context);
+}
+
+fn record_container_box(
+    element: &StyledElement,
+    x: u32,
+    width: u32,
+    top: u32,
+    bottom: u32,
+    context: &mut LayoutContext,
+) {
+    if element.style.pointer_events_none {
+        return;
+    }
+    let Some(node_id) = element_node_id(element) else {
+        return;
+    };
+    let left = offset_x_by_margin(x, element.style.margin.left);
+    // The same width the container laid itself out at, so the box that is
+    // reported is the box that was drawn.
+    let available =
+        outer_width_with_margins(width, element.style.margin.left, element.style.margin.right);
+    let outer_width = match element.style.width {
+        Some(LengthValue::Pixels(px)) => px,
+        Some(LengthValue::Percent(percent)) => (available as u64 * percent as u64 / 100) as u32,
+        _ => available,
+    };
+    context.element_hitboxes.push(ElementHitbox {
+        node_id,
+        x: left,
+        y: top,
+        width: outer_width.max(1),
+        height: bottom.saturating_sub(top).max(1),
+        cursor_kind: element.style.cursor_kind,
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_flex_container_inner(
     element: &StyledElement,
     x: u32,
     width: u32,
@@ -8264,8 +8374,14 @@ fn layout_flex_container(
         .saturating_add(border_top)
         .saturating_add(element.style.padding.top);
 
-    let gap = element.style.gap;
     let is_row = matches!(element.style.flex_direction, FlexDirection::Row | FlexDirection::RowReverse);
+    // Along the row the gap between items is the column gap; down a column it
+    // is the row gap.
+    let gap = if is_row {
+        element.style.column_gap
+    } else {
+        element.style.gap
+    };
 
     // Collect visible flex items (only element children, not text nodes).
     // An out-of-flow child is not a flex item -- it takes no space on the line
@@ -8704,7 +8820,10 @@ fn layout_flex_container(
                 // flex-wrap: greedily break items into lines that fit the
                 // container width, then lay each line out flex-start with
                 // per-line cross-axis alignment.
-                let gap = element.style.gap;
+                let gap = element.style.column_gap;
+                // Between the wrapped lines it is the row gap, not the one
+                // between the items on a line.
+                let line_spacing = element.style.gap;
                 let widths: Vec<u32> = item_widths.clone();
                 if std::env::var_os("TOBIRA_DEBUG_FLEX").is_some() {
                     eprintln!(
@@ -8759,10 +8878,10 @@ fn layout_flex_container(
                         // gap between lines stays the declared one.
                         cx = cx.saturating_add(w).saturating_add(item_gap);
                     }
-                    line_y = line_y.saturating_add(line_h).saturating_add(gap);
+                    line_y = line_y.saturating_add(line_h).saturating_add(line_spacing);
                 }
                 if !lines.is_empty() {
-                    line_y = line_y.saturating_sub(gap); // drop trailing row gap
+                    line_y = line_y.saturating_sub(line_spacing); // drop trailing row gap
                 }
                 *cursor_y = line_y
                     .saturating_add(element.style.padding.bottom)
