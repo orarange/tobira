@@ -106,6 +106,89 @@ fn synthetic_bold_smear(font_size_px: u32) -> u32 {
     (font_size_px / 24).max(1)
 }
 
+/// The file behind each family a page is likely to name, as `(name, regular,
+/// bold)`. Only faces Windows actually ships, plus the two substitutions every
+/// browser makes: Helvetica is drawn with Arial and Courier with Courier New,
+/// which is what those names have meant on Windows for thirty years.
+///
+/// A name that is not here falls through to the generic kinds, which is also
+/// what happens when the file turns out not to be installed.
+const WINDOWS_FAMILY_FILES: &[(&str, &str, &str)] = &[
+    ("arial", "arial.ttf", "arialbd.ttf"),
+    ("helvetica", "arial.ttf", "arialbd.ttf"),
+    ("helvetica neue", "arial.ttf", "arialbd.ttf"),
+    ("arial black", "ariblk.ttf", "ariblk.ttf"),
+    ("verdana", "verdana.ttf", "verdanab.ttf"),
+    ("tahoma", "tahoma.ttf", "tahomabd.ttf"),
+    ("segoe ui", "segoeui.ttf", "segoeuib.ttf"),
+    ("calibri", "calibri.ttf", "calibrib.ttf"),
+    ("candara", "candara.ttf", "candarab.ttf"),
+    ("corbel", "corbel.ttf", "corbelb.ttf"),
+    ("trebuchet ms", "trebuc.ttf", "trebucbd.ttf"),
+    ("comic sans ms", "comic.ttf", "comicbd.ttf"),
+    ("impact", "impact.ttf", "impact.ttf"),
+    ("georgia", "georgia.ttf", "georgiab.ttf"),
+    ("times new roman", "times.ttf", "timesbd.ttf"),
+    ("times", "times.ttf", "timesbd.ttf"),
+    ("cambria", "cambria.ttc", "cambriab.ttf"),
+    ("constantia", "constan.ttf", "constanb.ttf"),
+    ("palatino linotype", "pala.ttf", "palab.ttf"),
+    ("book antiqua", "pala.ttf", "palab.ttf"),
+    ("garamond", "GARA.TTF", "GARABD.TTF"),
+    ("courier new", "cour.ttf", "courbd.ttf"),
+    ("courier", "cour.ttf", "courbd.ttf"),
+    ("consolas", "consola.ttf", "consolab.ttf"),
+    ("lucida console", "lucon.ttf", "lucon.ttf"),
+    ("cascadia mono", "CascadiaMono.ttf", "CascadiaMono.ttf"),
+    ("cascadia code", "CascadiaCode.ttf", "CascadiaCode.ttf"),
+    ("ms gothic", "msgothic.ttc", "msgothic.ttc"),
+    ("meiryo", "meiryo.ttc", "meiryob.ttc"),
+    ("yu gothic", "YuGothR.ttc", "YuGothB.ttc"),
+    ("ms pgothic", "msgothic.ttc", "msgothic.ttc"),
+    ("yu mincho", "yumin.ttf", "yuminb.ttf"),
+    ("ms mincho", "msmincho.ttc", "msmincho.ttc"),
+];
+
+/// Whether this machine has the named family, so the page can be drawn in it.
+///
+/// Remembered: this is asked once per `font-family` declaration in every
+/// stylesheet on the page, and each answer would otherwise be a trip to the
+/// filesystem.
+pub fn family_is_installed(lowercase_name: &str) -> bool {
+    static KNOWN: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, bool>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(known) = KNOWN.lock()
+        && let Some(answer) = known.get(lowercase_name)
+    {
+        return *answer;
+    }
+    let answer = named_family_file(lowercase_name, false).is_some();
+    if let Ok(mut known) = KNOWN.lock() {
+        known.insert(lowercase_name.to_string(), answer);
+    }
+    answer
+}
+
+/// The path to a named family's file, if it is installed.
+fn named_family_file(lowercase_name: &str, bold: bool) -> Option<PathBuf> {
+    let (_, regular, bold_file) = WINDOWS_FAMILY_FILES
+        .iter()
+        .find(|(name, _, _)| *name == lowercase_name)?;
+    let file = if bold { bold_file } else { regular };
+    let path = windows_font_dir()?.join(file);
+    path.is_file().then_some(path)
+}
+
+/// Where Windows keeps its fonts.
+fn windows_font_dir() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    Some(PathBuf::from(root).join("Fonts"))
+}
+
 pub struct FontContext {
     sans_fonts: Vec<Font>,
     monospace_fonts: Vec<Font>,
@@ -122,6 +205,10 @@ pub struct FontContext {
     sans_bold_pending: VecDeque<PathBuf>,
     monospace_bold_pending: VecDeque<PathBuf>,
     serif_bold_pending: VecDeque<PathBuf>,
+    /// The faces loaded for families the page named, keyed by family and
+    /// weight. Kept in a map rather than in fields of their own because there
+    /// is no telling in advance which families a page will ask for.
+    named_fonts: HashMap<(u16, bool), Vec<Font>>,
     glyph_cache: HashMap<GlyphKey, CachedGlyph>,
     line_metrics_cache: HashMap<(FontFamilyKind, u32), CachedLineMetrics>,
 }
@@ -198,6 +285,7 @@ impl FontContext {
                 true,
             )),
             serif_bold_pending: VecDeque::from(font_candidates(FontFamilyKind::Serif, true)),
+            named_fonts: HashMap::new(),
             glyph_cache: HashMap::new(),
             line_metrics_cache: HashMap::new(),
         }
@@ -559,7 +647,19 @@ impl FontContext {
     }
 
     fn fonts_for(&self, font_family: FontFamilyKind, bold: bool) -> &[Font] {
+        if let FontFamilyKind::Named(id) = font_family {
+            if let Some(fonts) = self.named_fonts.get(&(id, bold))
+                && !fonts.is_empty()
+            {
+                return fonts;
+            }
+            // The face is not there (or has no bold cut): sans stands in, the
+            // same way an unknown generic family does.
+            return if bold { &[] } else { &self.sans_fonts };
+        }
         let fonts = match (font_family, bold) {
+            // Handled above; the arm is only here to satisfy the match.
+            (FontFamilyKind::Named(_), _) => &self.sans_fonts,
             (FontFamilyKind::Sans, false) => &self.sans_fonts,
             (FontFamilyKind::Sans, true) => &self.sans_bold_fonts,
             (FontFamilyKind::Serif, false) => &self.serif_fonts,
@@ -584,6 +684,21 @@ impl FontContext {
     /// Read this family's first available font if it has none yet. Callers that
     /// only need metrics (rather than a specific glyph) go through here.
     fn ensure_family_loaded(&mut self, font_family: FontFamilyKind, bold: bool) {
+        if let FontFamilyKind::Named(id) = font_family {
+            if self.named_fonts.contains_key(&(id, bold)) {
+                return;
+            }
+            let loaded = crate::css::font_family_name(font_family)
+                .and_then(|name| named_family_file(&name, bold))
+                .and_then(|path| load_font_file(&path))
+                .map(|font| vec![font])
+                .unwrap_or_default();
+            self.named_fonts.insert((id, bold), loaded);
+            // Whatever the named face lacks -- a glyph, a bold cut -- comes off
+            // the sans stack, so that has to be there too.
+            self.ensure_family_loaded(FontFamilyKind::Sans, false);
+            return;
+        }
         let (fonts, pending) = self.slots(font_family, bold);
         if !fonts.is_empty() {
             return;
@@ -606,6 +721,9 @@ impl FontContext {
     fn slots(&mut self, font_family: FontFamilyKind, bold: bool)
     -> (&mut Vec<Font>, &mut VecDeque<PathBuf>) {
         match (font_family, bold) {
+            // A named family is not held in these slots; the caller deals with
+            // it before reaching here.
+            (FontFamilyKind::Named(_), _) => (&mut self.sans_fonts, &mut self.sans_pending),
             (FontFamilyKind::Sans, false) => (&mut self.sans_fonts, &mut self.sans_pending),
             (FontFamilyKind::Sans, true) => {
                 (&mut self.sans_bold_fonts, &mut self.sans_bold_pending)
@@ -662,10 +780,11 @@ pub fn estimated_glyph_advance_px(
     font_size_px: u32,
     font_family: FontFamilyKind,
 ) -> u32 {
+    // Only used when no face could be loaded at all, so a named family is
+    // guessed at the same width as the proportional ones.
     let base = match font_family {
-        FontFamilyKind::Sans => ((font_size_px as f32) * 0.56).round() as u32,
-        FontFamilyKind::Serif => ((font_size_px as f32) * 0.56).round() as u32,
         FontFamilyKind::Monospace => ((font_size_px as f32) * 0.62).round() as u32,
+        _ => ((font_size_px as f32) * 0.56).round() as u32,
     }
     .max(MIN_ADVANCE_PX);
 
@@ -686,6 +805,8 @@ fn font_candidates(font_family: FontFamilyKind, bold: bool) -> Vec<PathBuf> {
             .unwrap_or_else(|| PathBuf::from("C:\\Windows"));
         let fonts_dir = windows_root.join("Fonts");
         let files = match (font_family, bold) {
+            // A named family finds its own file; these are the generic stacks.
+            (FontFamilyKind::Named(_), _) => WINDOWS_SANS_FONT_FILES,
             (FontFamilyKind::Sans, false) => WINDOWS_SANS_FONT_FILES,
             (FontFamilyKind::Sans, true) => WINDOWS_SANS_BOLD_FONT_FILES,
             (FontFamilyKind::Serif, false) => WINDOWS_SERIF_FONT_FILES,
@@ -698,6 +819,9 @@ fn font_candidates(font_family: FontFamilyKind, bold: bool) -> Vec<PathBuf> {
     }
 
     let files = match (font_family, bold) {
+        // A named family is only looked up by file on Windows; elsewhere it
+        // falls back to the generic stacks.
+        (FontFamilyKind::Named(_), _) => UNIX_SANS_FONT_PATHS,
         (FontFamilyKind::Sans, false) => UNIX_SANS_FONT_PATHS,
         (FontFamilyKind::Sans, true) => UNIX_SANS_BOLD_FONT_PATHS,
         (FontFamilyKind::Serif, false) => UNIX_SERIF_FONT_PATHS,

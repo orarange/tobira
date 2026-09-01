@@ -455,6 +455,41 @@ pub enum FontFamilyKind {
     Sans,
     Serif,
     Monospace,
+    /// A family the page named and this machine has, held as a number so the
+    /// style stays small and copyable. `font_family_name` turns it back.
+    ///
+    /// Every name used to collapse into one of the three kinds above, so a
+    /// page asking for Verdana or Georgia got the same face as one asking for
+    /// Arial -- different letter shapes, different widths, and every line a
+    /// little wider or narrower than the page was written for.
+    Named(u16),
+}
+
+/// The family names seen so far, in the order they were first met.
+static FAMILY_NAMES: std::sync::LazyLock<std::sync::Mutex<Vec<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// The number standing for a family name, assigning one if it is new.
+fn intern_family_name(name: &str) -> Option<FontFamilyKind> {
+    let mut names = FAMILY_NAMES.lock().ok()?;
+    if let Some(at) = names.iter().position(|held| held == name) {
+        return Some(FontFamilyKind::Named(at as u16));
+    }
+    // A page with hundreds of distinct families is not worth holding all of;
+    // the rest fall back to the generic kinds.
+    if names.len() >= u16::MAX as usize {
+        return None;
+    }
+    names.push(name.to_string());
+    Some(FontFamilyKind::Named((names.len() - 1) as u16))
+}
+
+/// The name behind a `Named` family.
+pub fn font_family_name(family: FontFamilyKind) -> Option<String> {
+    let FontFamilyKind::Named(at) = family else {
+        return None;
+    };
+    FAMILY_NAMES.lock().ok()?.get(at as usize).cloned()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6736,10 +6771,15 @@ fn parse_font_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size
             style.font_size_px = size.max(8);
             continue;
         }
-        // font-family
-        if let Some(ff) = parse_font_family(token) {
-            style.font_family = ff;
+        // Everything from here on is the family list, and it is read whole:
+        // split on whitespace, `font: 16px "Times New Roman"` came apart into
+        // three tokens and the last one -- `roman"` -- decided the face.
+        if let Some(at) = v.find(token) {
+            if let Some(family) = parse_font_family(&v[at..]) {
+                style.font_family = family;
+            }
         }
+        break;
     }
 }
 
@@ -6869,10 +6909,35 @@ fn parse_legacy_font_size(input: &str, parent_font_size: u32) -> Option<u32> {
 }
 
 fn parse_font_family(input: &str) -> Option<FontFamilyKind> {
+    // The list is read in order and the first name this machine has wins,
+    // which is what a browser does. A generic keyword ends the search: nothing
+    // after `sans-serif` is ever reached.
+    for part in split_at_top_level(input, ',') {
+        let name = part.trim().trim_matches(['"', '\'']).trim();
+        if name.is_empty() {
+            continue;
+        }
+        let lowered = name.to_ascii_lowercase();
+        match lowered.as_str() {
+            "serif" => return Some(FontFamilyKind::Serif),
+            "monospace" | "ui-monospace" => return Some(FontFamilyKind::Monospace),
+            "sans-serif" | "system-ui" | "ui-sans-serif" | "-apple-system"
+            | "blinkmacsystemfont" | "inherit" | "initial" => {
+                return Some(FontFamilyKind::Sans);
+            }
+            "cursive" | "fantasy" | "ui-serif" => return Some(FontFamilyKind::Serif),
+            _ => {}
+        }
+        if crate::font::family_is_installed(&lowered) {
+            return intern_family_name(&lowered);
+        }
+    }
+    // Nothing named is here. Guess a kind from the words, the way this used to
+    // work for everything.
     let value = input.trim().to_ascii_lowercase();
     if value.contains("mono") || value.contains("code") || value.contains("console") {
         Some(FontFamilyKind::Monospace)
-    } else if value.contains("georgia") || value.contains("times") || value == "serif" {
+    } else if value.contains("georgia") || value.contains("times") || value.contains("serif") {
         Some(FontFamilyKind::Serif)
     } else if !value.is_empty() {
         Some(FontFamilyKind::Sans)

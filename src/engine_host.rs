@@ -5516,6 +5516,44 @@ mod tests {
     }
 
     #[test]
+    fn a_named_font_family_is_the_face_that_is_drawn() {
+        // Every name collapsed into one of three kinds, so a page asking for
+        // Verdana got the same face as one asking for Arial -- different
+        // letters, different widths, every line a little off. Checked against
+        // Chrome: this word is 121 wide in Arial and 141 in Verdana.
+        let result = run_document_scripts_with_styles(
+            r#"<html><body>
+                <div><span id="arial">Hamburgefonstiv</span></div>
+                <div><span id="verdana">Hamburgefonstiv</span></div>
+                <div><span id="quoted">Hamburgefonstiv</span></div>
+                <script>
+                    function wide(id) {
+                        return Math.round(document.getElementById(id).getBoundingClientRect().width);
+                    }
+                    document.title = [wide('arial'), wide('verdana'), wide('quoted')].join('|');
+                </script>
+            </body></html>"#,
+            "http://localhost/",
+            "body{margin:0}span{display:inline-block}             #arial{font:16px Arial}#verdana{font:16px Verdana}             #quoted{font:16px \"Times New Roman\"}",
+        );
+        assert!(result.error.is_none(), "error: {:?}", result.error);
+        let title = result.title.as_deref().unwrap_or_default();
+        let widths: Vec<u32> = title
+            .split('|')
+            .filter_map(|part| part.parse().ok())
+            .collect();
+        assert_eq!(widths.len(), 3, "title: {title}");
+        assert!(
+            widths[1] > widths[0],
+            "Verdana is wider than Arial: {title}"
+        );
+        assert!(
+            widths[2] < widths[0],
+            "Times New Roman is narrower than Arial, and its quoted name has              to survive the `font` shorthand: {title}"
+        );
+    }
+
+    #[test]
     fn a_flex_or_grid_container_can_be_measured() {
         // Only ordinary blocks and table cells registered a box, so asking a
         // flex or grid container where it was -- which is most of the
