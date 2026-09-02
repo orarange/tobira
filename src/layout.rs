@@ -2967,16 +2967,23 @@ fn layout_atomic_inline(
         ..LayoutContext::default()
     };
     let mut cursor_y = 0;
-    layout_block_element(
-        element,
-        0,
-        width,
-        &mut cursor_y,
-        &mut sub_context,
-        images,
-        fonts,
-        current_form,
-    );
+    // An image is drawn by its own routine; the block one paints the box
+    // around it and nothing inside. `layout_node` picks between them, but
+    // going through that would come straight back here for an inline-block.
+    if element.tag_name == "img" {
+        layout_image_element(element, 0, width, &mut cursor_y, &mut sub_context, images, fonts);
+    } else {
+        layout_block_element(
+            element,
+            0,
+            width,
+            &mut cursor_y,
+            &mut sub_context,
+            images,
+            fonts,
+            current_form,
+        );
+    }
     context.next_control_id = sub_context.next_control_id;
     context.next_form_id = sub_context.next_form_id;
     // Out-of-flow descendants were collected against the page, not this box;
@@ -5021,12 +5028,30 @@ fn collect_inline_fragments(
                         output.push(InlineFragment::Atomic(Box::new(atomic)));
                     }
                 }
+                // A block-level box written inside an inline one. The standard
+                // splits the inline around it and gives the block a line of its
+                // own; this puts it on the line as a box instead, which lands
+                // in the same place for the shape that actually occurs --
+                // `<a><img style="display:block"></a>`, which is how a logo or
+                // a card thumbnail is written. Dropped, the picture simply was
+                // not there: Hacker News lost its Y.
                 Display::Block
                 | Display::ListItem
                 | Display::Flex
                 | Display::InlineFlex
                 | Display::Grid
-                | Display::InlineGrid => {}
+                | Display::InlineGrid => {
+                    if let Some(atomic) = layout_atomic_inline(
+                        element,
+                        available_width,
+                        context,
+                        images,
+                        fonts,
+                        current_form,
+                    ) {
+                        output.push(InlineFragment::Atomic(Box::new(atomic)));
+                    }
+                }
             }
         }
     }

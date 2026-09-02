@@ -4121,17 +4121,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.color = color;
             }
         }
-        "background" => {
-            let v = value.trim();
-            let lowered = v.to_ascii_lowercase();
-            if lowered.contains("linear-gradient(") || lowered.contains("radial-gradient(") {
-                style.background_gradient = parse_linear_gradient(v);
-            } else if v.to_ascii_lowercase().starts_with("url(") {
-                style.background_image_url = extract_url(v);
-            } else {
-                style.background_color = parse_color(v);
-            }
-        }
+        "background" => apply_background_shorthand(style, value),
         "background-color" => {
             // `currentColor` is whatever `color` is on this element, which is
             // how an icon drawn as a masked box takes the colour of the text
@@ -4143,7 +4133,15 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             };
         }
         "background-image" => {
-            let v = value.trim();
+            // Commas separate layers here too, and the first is on top. Read
+            // as one value, `url("icon.svg"), linear-gradient(…)` ran the url
+            // parser over the whole string: it saw the closing paren of the
+            // gradient as its own and came away with nonsense for a URL.
+            let layers = split_at_top_level(value, ',');
+            let v = layers
+                .first()
+                .map(|layer| layer.trim())
+                .unwrap_or(value.trim());
             let vl = v.to_ascii_lowercase();
             if vl == "none" {
                 style.background_gradient = None;
@@ -7583,6 +7581,174 @@ fn find_url(value: &str) -> Option<String> {
     let rest = &value[start..];
     let end = rest.find(')')?;
     extract_url(&rest[..=end])
+}
+
+/// `background: <color> <image> <repeat> <position>/<size> …`, in any order.
+///
+/// Only a value that was nothing but a colour, a gradient or a bare `url(...)`
+/// used to be understood -- and the url form had to end at the closing paren,
+/// so the `background: url(icon.svg) no-repeat` that half the web writes set
+/// nothing at all and the icon was never drawn.
+fn apply_background_shorthand(style: &mut ComputedStyle, value: &str) {
+    // Commas separate layers, and the first one is painted on top. Only that
+    // one is drawn here: Hacker News writes its vote arrow as
+    // `url("triangle.svg"), linear-gradient(transparent, transparent)`, and
+    // reading the whole thing as one declaration let the transparent gradient
+    // stand in for the picture -- so the arrows were nowhere.
+    let first_layer = split_at_top_level(value, ',');
+    let value = first_layer
+        .first()
+        .map(|layer| layer.trim())
+        .unwrap_or(value.trim());
+
+    // A shorthand sets everything it can name, so what it leaves out goes back
+    // to its initial value rather than keeping whatever came before.
+    style.background_image_url = None;
+    style.background_gradient = None;
+    style.background_color = None;
+    style.background_repeat = BackgroundRepeat::Repeat;
+    style.background_size = BackgroundSize::Auto;
+
+    let position_percent = |token: &str| -> Option<u32> {
+        match token {
+            "left" | "top" => Some(0),
+            "center" => Some(50),
+            "right" | "bottom" => Some(100),
+            other => other
+                .strip_suffix('%')
+                .and_then(|number| number.parse::<f32>().ok())
+                .map(|percent| percent.clamp(0.0, 100.0).round() as u32),
+        }
+    };
+
+    let mut positions: Vec<u32> = Vec::new();
+    for component in split_value_components(value) {
+        let token = component.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let lowered = token.to_ascii_lowercase();
+
+        // An image is recognised before anything else. A slash means position
+        // and size elsewhere, but an absolute url is full of them -- read as a
+        // position, `url(https://…/icon.svg)` set no image at all, so every
+        // icon named by a linked stylesheet went missing while the same rule
+        // written inline worked.
+        if lowered.contains("gradient(") {
+            style.background_gradient = parse_linear_gradient(token);
+            continue;
+        }
+        if lowered.starts_with("url(") {
+            style.background_image_url = extract_url(token);
+            continue;
+        }
+
+        // `<position>/<size>` travel together.
+        if let Some((left, right)) = lowered.split_once('/') {
+            if let Some(percent) = position_percent(left.trim()) {
+                positions.push(percent);
+            }
+            style.background_size = match right.trim() {
+                "cover" => BackgroundSize::Cover,
+                "contain" => BackgroundSize::Contain,
+                _ => BackgroundSize::Auto,
+            };
+            continue;
+        }
+        match lowered.as_str() {
+            "no-repeat" => {
+                style.background_repeat = BackgroundRepeat::NoRepeat;
+                continue;
+            }
+            "repeat-x" => {
+                style.background_repeat = BackgroundRepeat::RepeatX;
+                continue;
+            }
+            "repeat-y" => {
+                style.background_repeat = BackgroundRepeat::RepeatY;
+                continue;
+            }
+            "repeat" | "round" | "space" => {
+                style.background_repeat = BackgroundRepeat::Repeat;
+                continue;
+            }
+            "cover" => {
+                style.background_size = BackgroundSize::Cover;
+                continue;
+            }
+            "contain" => {
+                style.background_size = BackgroundSize::Contain;
+                continue;
+            }
+            // Where the image scrolls and which box it is measured against are
+            // not modelled; naming them must not be read as a colour.
+            "fixed" | "scroll" | "local" | "border-box" | "padding-box" | "content-box"
+            | "none" => continue,
+            _ => {}
+        }
+        if let Some(percent) = position_percent(&lowered) {
+            positions.push(percent);
+            continue;
+        }
+        if let Some(color) = parse_color(token) {
+            style.background_color = Some(color);
+        }
+    }
+
+    // `background-position` is x then y, and one value sets x with y centred.
+    if let Some(x) = positions.first() {
+        style.background_position_x = *x;
+        style.background_position_y = positions.get(1).copied().unwrap_or(50);
+    }
+}
+
+#[cfg(test)]
+mod background_shorthand_tests {
+    use super::{BackgroundRepeat, ComputedStyle, apply_background_shorthand};
+
+    fn shorthand(value: &str) -> ComputedStyle {
+        let mut style = ComputedStyle::for_element("div", None);
+        apply_background_shorthand(&mut style, value);
+        style
+    }
+
+    #[test]
+    fn a_url_beside_other_words_is_still_the_image() {
+        // The whole value had to be nothing but `url(...)`, ending at the
+        // closing paren, so the `background: url(icon.svg) no-repeat` that
+        // half the web writes set nothing and the icon was never drawn.
+        let style = shorthand("url(icon.svg) no-repeat");
+        assert_eq!(style.background_image_url.as_deref(), Some("icon.svg"));
+        assert_eq!(style.background_repeat, BackgroundRepeat::NoRepeat);
+    }
+
+    #[test]
+    fn an_absolute_url_is_not_read_as_a_position() {
+        // `<position>/<size>` is written with a slash, and a url is full of
+        // them: every icon named by a linked stylesheet -- where the url has
+        // been made absolute -- went missing.
+        let style = shorthand("url(\"https://example.com/i/icon.svg\") no-repeat center/contain");
+        assert_eq!(
+            style.background_image_url.as_deref(),
+            Some("https://example.com/i/icon.svg")
+        );
+    }
+
+    #[test]
+    fn the_first_layer_is_the_one_that_shows() {
+        // Hacker News writes its vote arrow as a picture with a transparent
+        // gradient behind it; read as one value, the gradient stood in for the
+        // picture and the arrows were nowhere.
+        let style = shorthand("url(triangle.svg), linear-gradient(transparent, transparent) no-repeat");
+        assert_eq!(style.background_image_url.as_deref(), Some("triangle.svg"));
+    }
+
+    #[test]
+    fn a_colour_beside_an_image_is_still_read() {
+        let style = shorthand("#ff6600 url(icon.svg) no-repeat");
+        assert_eq!(style.background_image_url.as_deref(), Some("icon.svg"));
+        assert!(style.background_color.is_some());
+    }
 }
 
 fn extract_url(value: &str) -> Option<String> {
