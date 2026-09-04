@@ -1476,7 +1476,11 @@ pub struct Vm {
     /// `p.catch(...)`. Without it a `catch is not a function` says nothing
     /// about which object came up short, which is most of the work when the
     /// call site is minified.
-    pending_call_receiver: Option<String>,
+    ///
+    /// The receiver itself, not a description of it: describing costs O(own
+    /// properties) and is wanted only when the call actually fails. Cloning a
+    /// `Value` is a pointer copy.
+    pending_call_receiver: Option<Value>,
     current_script_src: Option<String>,
     current_script_node: Option<NodeId>,
     heap: Heap,
@@ -3477,7 +3481,7 @@ impl Vm {
                     self.pending_call_name = Some(name.clone());
                     PropertyKey::from(name)
                 };
-                self.pending_call_receiver = Some(self.describe_receiver(&object));
+                self.pending_call_receiver = Some(object.clone());
                 let callee = self.get_property_value(&object, &key)?;
                 self.stack.push(callee);
                 self.stack.push(object);
@@ -3490,7 +3494,7 @@ impl Vm {
                     Value::Number(number) => Some(self.to_string(&Value::Number(*number))),
                     _ => None,
                 };
-                self.pending_call_receiver = Some(self.describe_receiver(&object));
+                self.pending_call_receiver = Some(object.clone());
                 let callee = self.get_property_value(&object, &self.to_property_key(&key)?)?;
                 self.stack.push(callee);
                 self.stack.push(object);
@@ -5946,8 +5950,19 @@ impl Vm {
     /// A short description of a call's receiver for error messages: its tag plus
     /// the own property names it does have, which is usually enough to see what
     /// it actually is when the call site has been minified.
-    fn describe_receiver(&mut self, value: &Value) -> String {
-        let tag = self.object_to_string_tag(value);
+    /// Describe a call's receiver for an error message: its tag plus a few of
+    /// its own keys.
+    ///
+    /// Takes `&self` and never invokes a `Symbol.toStringTag` getter, for two
+    /// reasons. It runs on the error path only, where re-entering JS to format
+    /// a message risks throwing a second time on top of the first. And staying
+    /// on a shared borrow is what lets `resolve_callable` call this lazily —
+    /// it used to be computed eagerly on EVERY method call, by `GetPropForCall`,
+    /// which meant cloning and sorting the receiver's whole key list per call.
+    /// Calls on a 400-property object were 16x slower than on a 1-property one
+    /// purely from building a string that was then almost always discarded.
+    fn describe_receiver(&self, value: &Value) -> String {
+        let tag = self.object_tag_without_to_string_tag(value);
         let Value::Object(object) = value else {
             return tag;
         };
@@ -5983,6 +5998,25 @@ impl Vm {
     /// core-js's `RegExp.prototype.sticky` getter uses exactly that check and
     /// threw "Incompatible receiver" when it failed, killing whole bundles.
     fn object_to_string_tag(&mut self, value: &Value) -> String {
+        // Step 15: an explicit `Symbol.toStringTag` string wins over the
+        // built-in tag, which is how user classes and most modern built-ins
+        // (Map, Set, Promise, ...) name themselves. Only objects are asked --
+        // primitives report their wrapper's tag below without a lookup.
+        if let Value::Object(object) = value {
+            let tag_key = PropertyKey::Symbol(SymbolId(SYMBOL_TO_STRING_TAG_ID));
+            if let Ok(Value::String(tag)) =
+                self.get_property_value(&Value::Object(*object), &tag_key)
+            {
+                return self.string_text(tag);
+            }
+        }
+        self.object_tag_without_to_string_tag(value)
+    }
+
+    /// Everything `object_to_string_tag` does except consulting
+    /// `Symbol.toStringTag`, which is the only part that can run user code.
+    /// Split out so diagnostics can build a tag from a shared borrow.
+    fn object_tag_without_to_string_tag(&self, value: &Value) -> String {
         // Steps 1-2: the two values that never reach ToObject.
         let object = match value {
             Value::Undefined => return "Undefined".to_string(),
@@ -5994,14 +6028,6 @@ impl Vm {
             Value::Symbol(_) => return "Symbol".to_string(),
             Value::Object(object) => *object,
         };
-
-        // Step 15: an explicit `Symbol.toStringTag` string wins over the
-        // built-in tag, which is how user classes and most modern built-ins
-        // (Map, Set, Promise, ...) name themselves.
-        let tag_key = PropertyKey::Symbol(SymbolId(SYMBOL_TO_STRING_TAG_ID));
-        if let Ok(Value::String(tag)) = self.get_property_value(&Value::Object(object), &tag_key) {
-            return self.string_text(tag);
-        }
 
         let builtin = self
             .heap
@@ -7504,6 +7530,7 @@ impl Vm {
                 };
                 let message = match (&self.pending_call_name, &self.pending_call_receiver) {
                     (Some(name), Some(receiver)) => {
+                        let receiver = self.describe_receiver(receiver);
                         format!("{name} is not a function ({described}) on {receiver}")
                     }
                     (Some(name), None) => format!("{name} is not a function ({described})"),
