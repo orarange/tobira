@@ -1,0 +1,53 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:1000px}
+.row{display:flex;width:600px;background:#eee}
+#f1{flex:1}#f2{flex:2}#f3{width:100px;flex:none}
+.gap{display:flex;width:600px;gap:20px}
+#g1{flex:1}#g2{flex:1}
+.col{display:flex;flex-direction:column;height:200px;width:100px}
+#c1{flex:1}#c2{height:50px}
+.wrap{display:flex;flex-wrap:wrap;width:250px}
+.wrap>div{width:100px;height:20px}
+.center{display:flex;justify-content:center;align-items:center;width:400px;height:100px}
+#ci{width:50px;height:20px}
+.grid{display:grid;grid-template-columns:1fr 2fr 100px;width:600px;gap:10px}
+.grid>div{height:20px}
+.grid2{display:grid;grid-template-columns:repeat(3,1fr);width:300px}
+.grid2>div{height:10px}
+#ib1,#ib2{display:inline-block;width:60px}
+#ib1{height:40px;vertical-align:top}
+#ib2{height:20px;vertical-align:middle}
+#rel{position:relative;left:30px;top:10px;width:40px;height:20px}
+#abs{position:absolute;left:100px;top:400px;width:50px;height:30px}
+#absparent{position:relative;width:200px;height:60px;margin-top:20px}
+#absin{position:absolute;right:10px;bottom:5px;width:30px;height:10px}
+#mw{max-width:200px;width:400px;height:10px}
+#mnw{min-width:300px;width:100px;height:10px}
+#calc{width:calc(100% - 40px);height:10px}
+#pct{width:50%;height:10px}
+#emm{width:10em;font-size:20px;height:10px}
+#vw{width:50vw;height:10px}
+#ar{width:200px;aspect-ratio:4/1}
+</style></head><body>
+<div class="row"><div id="f1">a</div><div id="f2">b</div><div id="f3">c</div></div>
+<div class="gap"><div id="g1">a</div><div id="g2">b</div></div>
+<div class="col"><div id="c1">a</div><div id="c2">b</div></div>
+<div class="wrap"><div id="w1"></div><div id="w2"></div><div id="w3"></div></div>
+<div class="center"><div id="ci"></div></div>
+<div class="grid"><div id="gr1"></div><div id="gr2"></div><div id="gr3"></div></div>
+<div class="grid2"><div id="ga"></div><div id="gb"></div><div id="gc"></div></div>
+<div><span id="ib1"></span><span id="ib2"></span></div>
+<div id="rel"></div>
+<div id="absparent"><div id="absin"></div></div>
+<div id="mw"></div><div id="mnw"></div><div id="calc"></div><div id="pct"></div>
+<div id="emm"></div><div id="vw"></div><div id="ar"></div>
+<div id="abs"></div>
+<pre id="out"></pre>
+<script>
+var ids='f1 f2 f3 g1 g2 c1 c2 w1 w2 w3 ci gr1 gr2 gr3 ga gb gc ib1 ib2 rel absparent absin mw mnw calc pct emm vw ar'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var e=document.getElementById(id); if(!e) return id+'=?';
+  var r=e.getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>

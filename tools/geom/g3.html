@@ -1,0 +1,23 @@
+<html><head><style>body{margin:0;font:16px Arial;width:800px}
+.b{background:#eee}
+#d1{}
+#d2{}
+#d3{}
+#d4{}
+#s1{display:inline-block;width:40px;height:40px;background:#ccc}
+#s2{display:inline-block;width:40px;height:40px;background:#ccc;vertical-align:top}
+#s3{display:inline-block;width:40px;height:40px;background:#ccc;vertical-align:middle}
+#sup1{}
+</style></head><body>
+<div id="d1" class="b">text <span id="s1"></span> after</div>
+<div id="d2" class="b">text <span id="s2"></span> after</div>
+<div id="d3" class="b">text <span id="s3"></span> after</div>
+<div id="d4" class="b">x<sup id="sup1">2</sup>y</div>
+<pre id="out"></pre>
+<script>
+var ids='d1 d2 d3 d4 s1 s2 s3'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>

@@ -18,197 +18,220 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - **PR title** — When opening a pull request, always include the agent's name in the title.
   Example: `[Claude] fix CSS calc() precedence` / `[Codex] add image lazy-loading`
 
-## Current Snapshot
+## いまの状態（2026-09-04）
 
-- Date: `2026-08-25`
-- Repo / package name: `tobira`
-- Working branch: `master`
-- Workflow:
-  - use the shared checkout the user pointed at unless a dedicated worktree is explicitly requested
-  - keep the handoff notes current when switching between sessions or collaborating agents
-  - **this checkout is a normal git repo as of 2026-08-07. Do NOT convert it back to a worktree** (see the 2026-08-07 session log entry — the parent repo was deleted and took the object database with it)
-  - **push after every work cluster.** As of 2026-08-23 `origin/master` is current.
-- Verification status:
-- `cargo test`: `867` passing / `0` failed / `9` ignored across `64` suites on `2026-08-25` (Windows checkout). All 9 ignored are deliberate, not disabled failures: 6 React UMD printf diagnostics, 1 needing a local static server, 1 heavy-DOM benchmark, 1 manual large-bundle parse.
-- `cargo build`: success on `2026-08-25` (release, 1m57s; use `RUSTFLAGS='-C debuginfo=0'` to dodge OneDrive PDB locks). 16 warnings, all dead-code.
-- North star / current goal:
-  - Chromeと同程度の実用感を目指し、Google/YouTubeなどの複雑なサイトをsynthetic fallbackに頼らず閲覧・操作できるようにする
-  - Scope caveat: "閲覧・操作" means rendering the page's DOM/CSS and running its JS — **not** video playback. The `softbuffer` CPU renderer has no GPU compositing or media decode, so smooth YouTube *video* is out of scope for the current rendering backend (a separate, much larger effort: codecs + GPU).
-  - priority order: WebComponents / shadow DOM details -> DOM mutation to reflow / hit-test sync -> fetch/XHR / history / storage browser-grade behavior -> real-site stability checks
-- Current implementation highlights:
-  - hand-rolled `http://` and `https://` client with redirects and compressed response decoding
-  - custom HTML parser and DOM-like tree
-  - CSS engine with broader selector and expression support than the original README says
-    - descendant / child selectors
-    - attribute selectors
-    - `:first-child`, `:last-child`, `:nth-child(...)`, `:not(...)`
-    - `@media` handling
-    - `calc(...)`
-    - `rgba(...)` blending
-  - CSS Phase 5 baseline is treated as complete on the Claude `claude/phase5-css` branch; Codex should not duplicate the parser/layout engine and should treat Phase 6 as the remaining CSS surface.
-  - software-rendered GUI with custom title bar and address bar
-  - page loading now runs on a dedicated background worker and content rendering runs on a separate worker, so the window chrome stays responsive while pages load
-  - no loading-screen UI; the chrome remains interactive and the content area updates when the background work finishes
-  - blank startup page and direct URL entry
-  - address bar editing shortcuts including `Ctrl+A`, `Ctrl+C`, `Ctrl+X`, and `Ctrl+V`
-  - clickable links in the rendered page
-  - first-class GUI page controls for:
-    - text inputs
-    - buttons
-    - caret / selection / clipboard shortcuts
-    - IME cursor placement
-    - basic `GET` form submission with relative action resolution and query encoding
-    - focused-input keyboard event delivery for `keydown` / `keyup`
-    - live GUI typing synchronized into DOM-backed `value`
-  - page keyboard events:
-    - focused page inputs receive bubbling `keydown` / `keyup`
-    - key metadata includes `key`, `code`, modifier flags, and `repeat`
-  - page and viewport state now stay in sync through JS-facing accessors for:
-    - `window.innerWidth` / `window.innerHeight`
-    - `window.scrollY` / `window.pageYOffset`
-    - `document.activeElement`
-    - `window.scrollTo(...)`, `window.scrollBy(...)`, and `scrollTop` setters on DOM nodes
-  - Node introspection and mutation helpers are now much closer to browser DOM behavior:
-    - `nodeType`, `nodeName`, `nodeValue`, `firstChild`, `lastChild`, `previousSibling`, `nextSibling`, `isConnected`
-    - `cloneNode(...)`, `replaceChild(...)`, `removeChild(...)`
-    - `append(...)`, `prepend(...)`, `before(...)`, `after(...)`, `replaceWith(...)`, `replaceChildren(...)`
-    - `document.createDocumentFragment(...)` with fragment flattening on insertion
-  - page event listeners now support capture + bubbling, plus `once` listeners and capture-sensitive `removeEventListener(...)`
-  - shadow DOM / WebComponents now have `customElements`, `attachShadow(...)`, `slot.assignedNodes(...)` / `slot.assignedElements(...)` with `flatten`, `assignedSlot`, `slotchange`, and shadow-boundary event retargeting with `Event.composedPath()`
-  - guarded JavaScript execution through a from-scratch bytecode engine (`src/engine/`): self-built compiler + VM + tracing GC heap. Only `boa_ast`/`boa_parser`/`boa_interner` remain, as the parser front-end; the boa runtime (`boa_engine`/`boa_gc`) was removed (2026-06-12). JS values and DOM nodes live in one unified GC heap, so there is no JS-GC ↔ DOM lifetime-sync problem.
-  - lightweight mutable DOM bridge with:
-    - `querySelector(...)`, `querySelectorAll(...)`, `getElementById(...)`
-    - `createElement(...)`, `createTextNode(...)`
-    - `appendChild(...)`, `insertBefore(...)`, `remove()`
-    - dynamic `document.body`, `document.head`, and `document.documentElement`
-    - `hasAttribute(...)`, `hasAttributes(...)`, `getAttributeNames(...)`, `toggleAttribute(...)`
-    - `matches(...)`, `closest(...)`, `contains(...)`
-    - `firstElementChild`, `lastElementChild`, `previousElementSibling`, `nextElementSibling`
-    - `innerHTML`, `textContent`, `classList`, `id`, `className`
-    - `classList.value`, `classList.length`, `classList.item(...)`, `classList.toString()`, `classList.replace(...)`
-    - `element.attributes` as a live NamedNodeMap-style collection with `length`, `item(...)`, `getNamedItem(...)`, and array-like iteration
-    - `document.write(...)` with recursive script expansion
-    - DOM mutations serialized back into the HTML pipeline after JS runs
-    - reflected `value`, `src`, `href`, `rel`, `type`, `name`, `content`
-  - JS execution / runtime support for:
-    - dedicated larger-stack worker thread
-    - queued host-task plumbing for `queueMicrotask(...)`, `setTimeout(...)`, `setInterval(...)`, and `requestAnimationFrame(...)`
-    - Promise job flushing (drained after top-level script eval via `context.run_jobs()`)
-    - lightweight `fetch(...)` with response headers iteration
-    - lightweight `XMLHttpRequest` with `getResponseHeader(...)` / `getAllResponseHeaders()`
-    - loop-iteration runtime budget for runaway scripts
-    - same-origin request and redirect guards
-    - script-driven `location.href` follow-up navigation
-    - origin-scoped `localStorage`, `sessionStorage`, and `document.cookie`
-  - browser chrome history controls for back/forward navigation across full document loads
-  - browser-level history entries now remember scroll positions and restore them on back/forward
-  - same-document history entries now expose `history.state` and dispatch `popstate` / `hashchange`
-  - same-document history back/forward now restores the stored scroll position for each entry
-  - browser chrome no longer blocks on page loading; navigation and rendering completion are delivered back to the UI thread through user events
-  - layout cache invalidates on viewport width or page revision changes
-  - GUI-driven DOM attribute updates now push a fresh runtime snapshot back into the page, so mutation notifications can invalidate reflow immediately
-  - local demo pages under `demo/` for CSS, JS, DOM mutation, form handling, event plumbing, keyboard event logging, storage/cookies, and scroll control
-  - layout injects synthetic `data-tobira-node-id` attributes so page events can target ordinary rendered elements
-  - inline `element.style` mutations now reflect through `cssText`, `setProperty(...)`, and common style accessors for text, size, and border properties
-  - `getComputedStyle(...)` snapshots now expose common layout-sensitive values for DOM-driven callers
-  - site-specific rendering paths for:
-    - YouTube watch pages
-    - YouTube home shell / cards / nudge UI
-    - lightweight Google shell
-    - legacy frame/table-heavy pages such as the Abe Hiroshi site
-  - generic YouTube home / non-watch pages now take a synthetic fast path before the heavy JS session so the app does not spin on the full app shell
-  - generic `google.com` and `youtube.com` now try the real JS/HTML path before synthetic fallback
-  - living JS roadmap tracked in `docs/JS_ROADMAP.md`
+- ブランチ `master`。`origin/master` と同期済み。この文書を書いた時点の HEAD は
+  `c55a5b5`（`tools/geom/` の移設とこの文書のコミットが直後に乗る）。
+- `cargo build --release` 通る。警告は dead_code のみ。
+  OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
+- `cargo test --release` → **1126 通過 / 0 落ち**。
+  数え方: `cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result" | awk '{p+=$4; f+=$6} END {print p, f}'`
+  （`tr -d '\000'` は必須。出力に NUL が混ざって grep が binary 扱いする）
+- html5lib 木構築適合 **1192/1229 (97.0%)**。
+  `cargo test --release --bin tobira -- tree_construction_conformance --nocapture`
+  が `.dat` ごとの内訳を出す。合計は自分で足す。`TOBIRA_H5_FILE=<名前>` で一本に絞れる。
+- 動作確認できとる範囲（`--screenshot` で目視、JS エラーは `TOBIRA_DEBUG_CONSOLE=1`）:
+  - **一致に近い**: ja.wikipedia.org、abehiroshi.la.coocan.jp、news.ycombinator.com（投票矢印を除く）
+  - **中身は出るが意匠が甘い**: react.dev、vuejs.org、developer.mozilla.org
+  - 上記いずれも未捕捉 JS エラー 0。
+  - 確認しとらん: 認証の要る頁、フォーム POST、動画、Google/YouTube の実経路
+    （`src/browser.rs` に synthetic fallback が残っとる。実物とは別物と思うこと）
 
-## Important Modules
+### 測り方・見方
 
-- `src/browser.rs`
-  Main page-loading pipeline, site-specific rewrites, legacy page handling, YouTube/Google synthetic documents.
-- `src/css.rs`
-  CSS parser, selector matching, computed styles, `@media`, `calc(...)`, color parsing.
-- `src/layout.rs`
-  Layout pipeline, text flow, tables, image placement, background drawing, link hitbox generation.
-- `src/gui.rs`
-  Custom chrome, address bar state, input handling, hover/click navigation, rendering integration.
-- `src/js.rs`
-  Sandboxed JS execution policy plus the mutable DOM bridge used during script execution.
-- `src/html.rs`
-  Hand-rolled HTML parser. Now preserves raw text for `script` / `style` / `title` / `textarea`, which matters for JS and CSS correctness.
-- `src/http.rs`
-  HTTP/TLS fetch layer and browser-like request headers.
-- `src/site_state.rs`
-  Shared origin-scoped storage and cookie registry used by HTTP and JS.
+```powershell
+cargo run -- https://example.com/            # GUI
+cargo run --release -- --cli <url>           # テキスト出力
+./target/release/tobira --dump-styled <url>  # 箱の一覧（cmd[] は12個で切れる。数を信じるな）
+./target/release/tobira --screenshot out.png <url>   # PNG。TOBIRA_SHOT_HEIGHT で高さ
+```
 
-## Recent Commit Landmarks
+主な環境変数: `TOBIRA_DEBUG_CONSOLE`（console と未捕捉エラー）、`TOBIRA_TRACE_STACK`、
+`TOBIRA_DUMP_BOXES` / `TOBIRA_DUMP_DEPTH` / `TOBIRA_DUMP_WIDTH`、`TOBIRA_SHOT_HEIGHT`、
+`TOBIRA_DEBUG_IMAGES` / `_ATOMIC` / `_FLEX` / `_PAINT` / `_TABLE` / `_CSS`、
+`TOBIRA_H5_FILE`、`TOBIRA_INCREMENTAL_RESTYLE`。
 
-- `04bfc2f` engine: switch JS regex backend from `regex` crate to `regress` (look-ahead/-behind/backrefs; fixes react.dev's gtag regex)
-- `bac4893` engine: Annex B `{__proto__: value}` object-literal proto setting (fixes rust-lang.org highlight.js crash)
-- `896bf94` engine: `Object.*` introspection coerces primitives (ToObject, ES2015+)
-- `e4d1737` engine: ES module imports are live bindings (fixes circular deps) — part of the ES-module series `ce9ffbf`/`5059803`/`eee72e5`/`27923e9` (vuejs.org renders end-to-end)
-- (Major arc since Phase 5 CSS: the JS backend was rewritten from the boa runtime to a from-scratch bytecode engine — `src/engine/` — with ES2015+ coverage. The campaign drives real pages by following each uncaught error and filling the missing API; CLEAN: example.com / Hacker News / Wikipedia / web.dev / vuejs.org / rust-lang.org.)
-- `1616499` mutation notifications and history scroll restoration implementation complete (Codex JS/Event capture)
-- `e2558bf` docs: update HANDOFF + CSS_ROADMAP for Phase 5 completion (Claude Phase 5 CSS)
-- `0e81ade` feat: Phase 5 Batch 6 — filter, ::placeholder/::selection, @supports/@layer, no-op props — PR #49
-- `737409a` feat: Phase 5 Batch 5 — min/max-content, fit-content(), sticky, cursor, pointer-events
-- `dccc1d1` feat: Phase 5 Batch 4 — CSS Grid layout (fr/repeat/auto-placement)
-- `b14996d` feat: Phase 5 Batch 3 — inline-flex, align-content, flex-flow, :checked/:disabled
-- `7ce1272` feat: Phase 5 Batch 2 — :hover/:focus/:active + element hitboxes + GUI re-layout
-- `de7dbb5` feat: Phase 5 Batch 1 — clamp/min/max, aspect-ratio, object-fit, content:attr()
-- `7af71f3` dom traversal api implementation complete (Codex JS/Event capture)
-- `0cf8113` viewport sync and active element support complete (Codex JS/Event)
-- `f51ddca` [Claude] fix: restore lost types, Copilot review fixes (form-context, clipping, offscreen, box-shadow) — PR #47 merged
-- `1df11f6` live input value sync implementation complete
-- `c64f16a` event listener capture groundwork complete
-- `48f7141` Merge branch 'codex/codex' into master (resolved conflicts)
-- `4b2c68b` Claude/phase2 css (#41)
-- `91cc671` Merge branch `claude/modest-pascal-9bf652`
-- `5952827` page form controls feature implementation complete
-- `d159cf0` dom backed javascript support implementation complete
+Chrome との突き合わせは `tools/geom/`（README 参照）。参照ブラウザは **Chrome ヘッドレス**。
+Edge は 2026-08-27 の更新以降 `--dump-dom` が無出力になったので使えん。
 
-## Known Gaps / Likely Next Work
+**数値だけ見るな。** 表が指定幅を無視する件も `<center>` が表を中央寄せせん件も、
+`--screenshot` を足して目で見るまで一つも見つからんかった。修正のたびに一枚撮ること。
 
-- README capability list is partially stale; prefer this file for the latest snapshot.
-- JS support is still far from a full browser DOM / framework runtime.
-- GUI-to-page event delivery now covers capture + bubbling `click`, `input`, `change`, `submit`, `keydown`, and `keyup`, plus target-only `focus` and `blur`; passive listener semantics are in place, and `location.hash` plus `history.pushState(...)` / `replaceState(...)` now support soft navigation without a reload, while the rest of the option matrix and back/forward stack still need depth.
-- Native page input typing now syncs `value` into the JS DOM.
-- DOM traversal APIs now include `matches(...)`, `closest(...)`, `contains(...)`, and element sibling / child accessors for event delegation and framework-style code paths.
-- The richer `attributes` / `dataset` surface still needs deeper parity, even though `element.attributes` is now a live collection and `hasAttributes(...)` / `toggleAttribute(...)` now exist.
-- `MutationObserver` now fires for `attributes`, `childList`, and `characterData`, and the JS layer also exposes browser-style event constructors (`Event`, `CustomEvent`, `KeyboardEvent`, `InputEvent`, `MouseEvent`, `FocusEvent`, `SubmitEvent`) plus `AbortController` / `AbortSignal`.
-- text nodes now expose browser-like `CharacterData` helpers including `data`, `length`, `nodeValue`, and `splitText(...)`.
-- Framework-facing browser APIs still need a lot more depth.
-- History / back-forward replay still needs depth beyond the current scroll restoration work.
-- Script-driven scrolling now has basic window / DOM setter support, and full-document / same-document history scroll restoration is in place.
-- Modern app-shell sites still need more DOM APIs, richer history replay, and CSS Phase 6 visual effects / advanced rendering.
-- Incremental reflow still needs deeper invalidation for more DOM/style mutations.
-- The inline style bridge still needs broader CSS property coverage and more computed-style parity to be browser-grade, but the core CSS parser/layout baseline is already part of the shared codebase.
-- Form support is still limited to simple text-like fields and `GET` submission; `POST`, checkboxes, radios, and file inputs are not wired yet.
-- The `XMLHttpRequest` shim is enough for lightweight callers, but prototype / `instanceof` semantics are still incomplete.
-- Actual media playback and a true YouTube watch experience are still incomplete.
-- CSS Phase 5 baseline is already part of the shared codebase; remaining CSS work is mostly the Phase 6 visual-effects / advanced-rendering surface.
-- CSS Phase 6 items remain: `transform: scale/rotate` rendering, `animation`/`@keyframes`, `transition`, `grid-template-areas` / `grid-area` (named areas), RTL text. (`filter: blur()` is **done** - see the CSS roadmap's Phase 6 Batch 1; this line used to list it as outstanding.)
-- **Named grid areas break real pages.** MDN's home page nests two grids (`.homepage` / `.homepage-header`) laid out with `grid-template-areas` + `grid-area: <name>`. We drop both, the items fall back to auto-placement, the `h1` lands in a narrow track, and the CJK heading renders one character per line. The CSS roadmap still files this under "Low" priority; it should be higher.
-- **The CSS worklist is now measurable.** `TOBIRA_DEBUG_CSS=1 tobira --dump-styled <url>` prints a ranked list of the declarations the engine parsed and then threw away (`css::unsupported_property_report()`). Recurring cheap wins across real sites: logical properties (`margin-inline*`, `padding-inline/block`, `inset`), individual corner radii (`border-top-left-radius` and friends - only the shorthand works today), the `-webkit-text-decoration` alias, wrapping (`word-wrap` / `overflow-wrap` / `word-break`), `counter-increment` / `counter-reset`, and table `border-collapse` / `border-spacing`. `transition-*` / `animation-*` dominate the counts but are the known no-animation-runtime gap - do not let the raw numbers set the priority.
-- JS support still needs storage/cookies, richer history/back-forward, and more DOM depth for app-shell sites.
-- text node `characterData` mutation notifications and `splitText(...)` are now in place for common DOM edit flows.
+## 設計判断とその理由
 
-## Useful Commands
+- **スクリプトを走らせる前にレイアウトを済ませる**（`engine_host.rs:4465 start_with_styles`）
+  `getBoundingClientRect` が 0 を返すと、寸法を見て分岐する現代の頁は軒並み死ぬ。
+  そこで HTML と stylesheet から先に `layout_geometry` を回し、その矩形と計算済み
+  スタイルを host に積んでからスクリプトを起こす。実頁の JS が通るようになった最大の要因。
+  代償: スクリプトが DOM をいじった後の再レイアウトは反映されん。今は「初期状態の幾何」だけ。
+- **stylesheet は文字列で渡す**（`browser.rs:1530 collect_stylesheet_text`）
+  パース済みの `Stylesheet` は `Rc` を抱えとってスレッドを越えられん。JS はワーカー
+  スレッドで走るので、テキストのまま渡して向こうで parse し直す。二度手間やが安全。
+  `STYLESHEET_MEMO`（`browser.rs:1492`）で取得だけは使い回す。
+- **`getComputedStyle` は host に問い合わせる**（`vm.rs` の `computed_style_value` →
+  `DomRead::ComputedStyle`、`engine_host.rs:2083`）
+  以前は `style` 属性とタグ既定しか見とらんかった。カスケードの結果を返さんと
+  「クラスで色を付けて JS で読む」という普通の書き方が全部外れる。
+- **font family は名前で引く**（`css.rs:7168 parse_font_family` → `FontFamilyKind::Named(u16)`、
+  `font.rs:120 WINDOWS_FAMILY_FILES`）
+  総称（serif/sans/mono）に丸めとると Georgia も Verdana も同じ絵になって字幅がずれる。
+  インターン済みの id で持ち、`family_is_installed` が実在を確かめてから採用する。
+  **字ごとに fallback する**のが肝（`font.rs:668 fonts_for` を `cached_glyph` 側で
+  `[named, Sans]` の順に回す）。Georgia に日本語は無いので、これが無いと日本語版
+  Wikipedia の見出しが全部豆腐になる。実際なった。
+- **インライン箱の矩形は「run 番号 + バイト位置」で印を打つ**
+  （`layout.rs:1099 push_marker` → `layout.rs:6474 apply_inline_marks`）
+  理由は下の「試してダメやった方法」参照。
+- **`<isindex>` は追わん**と決めた。html5lib の残りに数件あるが、現実の頁に無い。
+- **省リソースは第二目標**。2026-08-23 に「まず実用ブラウザ」へ方針変更済み。
+  メモリのために正しさを落とす判断はもうしとらん。
+
+## 試してダメやった方法
+
+- **インライン印を `LineSpan` として積む** — run の統合が壊れた。span を分けると
+  丸めが二回入って行分けが変わり、Wikipedia の重なりが 90 → 120 に増えた。
+- **印を run 番号だけで持つ** — 隣り合う span が統合されると番号がずれ、別の要素の
+  箱が返る。**最終形**は `(run index, byte offset)` の組で、`push_span`
+  （`layout.rs:970`）の中に統合時の付け替えを入れてある。ここは触るなら慎重に。
+- **`maybe_auto_close`（`html.rs:2266`）に `"td" | "th" | "tr" if in_bare_table(...)` の
+  腕を足して、その中で `maybe_auto_close` を呼ぶ** — 同じタグで無限再帰。
+  html5lib が 1184 → 1115 に落ちた。今は `clear_to_table_context`（`html.rs:2257`）を
+  既存の腕に畳み込んである。
+- **`resolve_table_width` で `.max(preferred_width)` を取る**（`layout.rs:7021`）—
+  指定幅が中身の幅に負けて、`width="600"` の表が中身なりに広がっとった。外した。
+- **`extract_url` を「値が `)` で終わる」前提で書く** — `background: url(x.svg) no-repeat`
+  が丸ごと外れる。さらに `<position>/<size>` のスラッシュ判定を url 判定より先に
+  置くと、絶対 URL の `https://…` がスラッシュ持ちなので位置と誤読される。
+  インライン `<style>`（相対パス）だけ動いて linked stylesheet が動かん、という
+  紛らわしい症状になる。今は `apply_background_shorthand`（`css.rs:7876`）で層ごとに分解。
+- **ヒアドキュメント（`python - <<'PYEOF'`）でパッチ script を流す** — バックスラッシュが
+  一段食われて `\n` や `\u{...}` が壊れる。**必ず Write でファイルに書いてから実行する。**
+  また、`sub()` 失敗で `sys.exit` すると最後の `write` に到達せず、それまでの成功分が
+  黙って消える。パッチ script は全部 subst してから一度だけ書くこと。
+- **`image` を `use` する** — ローカルモジュール `src/image.rs` と衝突する。
+  crate のほうは `::image::` と書く。
+
+## 未確定・仮実装
+
+- **属性の名前空間**は実体として持っとらん。`xlink:href` などは正規化した名前で
+  照合しとるだけ。大抵の頁は通るが、`getAttributeNS` の厳密な挙動とは違う。
+- **`transform`** は translate をレイアウト時、scale/rotate を描画時に効かせとる。
+  絵は合うようになった（`layout.rs:3328 transformed_layer_bounds`）が、
+  `scale()` と `translate()` を並べると 15px ずれる。設計として割れとる。
+- **`transform: scale` した箱の hitbox が 0**。描画は直したが測る側が変換前を見とる。
+- **`overflow: auto` / `scroll` は `Hidden` とほぼ同じ扱い**。巻物は無い。
+  さらに親より広い子は押し込まれる（あふれん）。MDN の崩れはこれ。
+- **巻物の幅**: Chrome は版面から 16px 引く。tobira は 10px の巻物を上に重ねて
+  全幅で組む。`vw` / `vh` / `position: fixed` が Chrome と 16px 違う原因。
+  どちらに寄せるか未決。
+- **`document.fonts`、`Element.animate`、`navigator.clipboard`、`Intl.Segmenter`、
+  `CSSStyleSheet` / `adoptedStyleSheets`、Blob / File / FileReader、DOMParser** は
+  `engine_host.rs:2845 RUNTIME_PRELUDE` の JS 実装。形だけ合わせた張りぼてで、
+  実際には何も起きんものが多い（`animate` は最終状態を即座に適用、
+  `URL.createObjectURL` は `data:` URL を返す）。存在チェックを通すためのもの。
+- **`checkVisibility`** は prelude 版と native 版（`DomNodeCheckVisibility`）が両方ある。
+  native が勝つ。prelude 側は消し忘れ。
+- **CSS の遷移とアニメーション**は丸ごと無い。最終状態が即座に出る。
+- **表のセル背景を二度塗っとる**。半透明を重ねると濃くなる。
+- **差分 restyle** は既定 ON（`TOBIRA_INCREMENTAL_RESTYLE`）。
+  `docs/JS_ROADMAP.md` の Phase5 に「blocker」と書いてあるのは古い記述。
+
+## 次の一手（優先順）
+
+1. **`overflow` があふれるようにする** — `src/layout.rs`。
+   `Overflow::Auto` / `Scroll` が今 `Hidden` と同じ道を通っとる（`layout.rs:2700`、
+   `layout.rs:3703` の `element.style.overflow == Overflow::Hidden` の判定周り）。
+   まず「子の幅を親に丸めるのをやめる」だけで MDN の崩れは改善するはず。
+   巻物 UI まではいらん。クリップだけ正しくして、はみ出しを許す。
+2. **インライン箱の高さが 1px 高い** — ここが一番割に合う。
+   `cmp.py g4.html` の落ち 9 件のうち **7 件は高さが `x17` であるべきところ
+   `x18` になっとるだけ**（`s1` `s2` `w1` `w2` `long` `e1`、それと空 div の
+   `800x0` が `800x1`）。原因は行の芯の丸め — `font.rs:474 line_height_px` が
+   face の `new_line_size` をそのまま切り上げとる。Chrome は ascent + descent を
+   別々に丸めて足す。ここを合わせるだけで g4 は 5/14 → 11〜12/14 になるはず。
+   `layout.rs:6946 below_baseline` と対で見ること。
+3. **インライン箱の矩形の残り（g2 / g4）** — 1px を直した後に残るのはこれ。
+   `layout.rs:6474 apply_inline_marks` が `inline_rects` を作り、
+   `layout_styled_document`（`layout.rs:564`）の末尾で親へ union しながら
+   `ElementHitbox` に流す。残るのは
+   (a) 空白だけの div の中の空 `<span>` が y=0 に落ちる（`e2`: Chrome は `0,18`）
+   (b) 行をまたぐ `<span>`（Chrome は複数矩形、こっちは union 一個）
+   (c) `<a>` の x が 3px ずれる（`lnk`: chrome `63,36` / tobira `60,36`）——
+   直前の `<i>` の後の空白の幅。
+4. **`transform` の hitbox** — `layout.rs:3328 transformed_layer_bounds` が層の
+   大きさは出しとるので、同じ値を `record_container_box`（`layout.rs:9005`）に
+   渡して hitbox にも反映させる。scale と translate の適用段を揃えるのは
+   その後（設計判断が要る。translate も描画時に寄せるほうが筋がええ）。
+5. **HN の投票矢印** — 未解明。`triangle.svg` の取得は成功しとる
+   （`TOBIRA_DEBUG_IMAGES=1` で "style image ok"）。同じ CSS と入れ子を
+   合成頁で作ると出る。次は `TOBIRA_DEBUG_PAINT=1` で描画命令が生成されて
+   おるかどうかから切り分ける。命令が無いならレイアウト、あるなら描画。
+6. **CSS transition / animation** — 一番でかい未実装。`@keyframes` のパース、
+   時間軸、再描画の駆動が要る。着手するなら独立した回を丸ごと使うこと。
+7. **html5lib 残り 37 件** — 大半は adoption agency の深いところ。
+   `TOBIRA_H5_FILE=adoption01.dat` から。費用対効果は 1〜6 より低い。
+
+## 主なモジュール
+
+| ファイル | 中身 |
+|---|---|
+| `src/browser.rs` | 頁の読み込み、synthetic fallback（YouTube/Google/frameset）、stylesheet 収集 |
+| `src/html.rs` | 手書き HTML パーサ。末尾に `mod html5lib_conformance` |
+| `src/css.rs` | パーサ、セレクタ照合、`ComputedStyle`、`@media`、`calc()`、色 |
+| `src/layout.rs` | レイアウト全部。約 14,000 行。テキスト整形・表・flex・grid・描画命令 |
+| `src/font.rs` | face の読み込みとグリフ。名前付き family、字ごとの fallback |
+| `src/gui.rs` | 窓、アドレス欄、当たり判定、`paint_layout` |
+| `src/main.rs` | CLI。`--cli` / `--dump-styled` / `--screenshot` |
+| `src/engine/` | 自作 JS エンジン（コンパイラ + VM + GC）。boa は parser front-end のみ |
+| `src/engine_host.rs` | DOM ↔ JS の橋。`RUNTIME_PRELUDE`、`start_with_styles` |
+| `src/js.rs` | スクリプト実行の入り口とポリシー |
+| `tools/geom/` | Chrome 突き合わせ用の合成頁と `cmp.py` |
+
+## 作業の流儀
+
+- `git add -A` は使わん。`git add -u` か、パスを明示。
+- commit message は `git commit -F <tempfile>`（日本語が壊れるため）。
+- 性能を測るときは必ず `--release`。デバッグビルドの数字は意味が無い。
+- PowerShell script に日本語パスを直書きせん。`[Environment]::GetFolderPath('MyDocuments')`。
+- backup の robocopy は `/E`。**`/MIR` は使わん**（消える）。
+- 引いた Web 標準は `Z:\vscode\tobira-specs\` に md で残す。実装前に `INDEX.md` を見る。
+- 履歴を失ったら、まず `Z:\vscode\` のアーカイブを見る（2026-08-07 の事故はそこから復旧した）。
+
+## よく使うコマンド
 
 ```powershell
 cargo run
-cargo run -- https://www.youtube.com/
-cargo run -- --cli https://www.youtube.com/
-cargo test
-cargo build
-git status --short
+cargo run --release -- --cli https://news.ycombinator.com/
+cargo test --release
 git log --oneline -n 20
 
-# AI branch merge loop (runs every 5 min, merges codex/* and claude/* if tests pass)
+# Chrome 突き合わせ
+python -m http.server 8731 --directory tools/geom
+python tools/geom/cmp.py g4.html
+
+# AI branch merge loop（5分ごとに codex/* と claude/* をテストが通れば merge）
 .\scripts\merge-loop.ps1 -IntervalSeconds 300
-# Single cycle (dry-run preview)
 .\scripts\merge-loop.ps1 -Once -DryRun
 ```
 
 ## Session Log
+
+### 2026-09-04 - Claude (Chrome parity campaign: 2d2dfbc..c55a5b5, 34 commits)
+
+上の各節（いまの状態 / 設計判断 / 試してダメやった方法 / 未確定 / 次の一手）が
+この回の成果物やと思ってええ。ここには経緯だけ残す。
+
+- 出発点は「html5lib の残り」と「未実装 API」を潰す自律ループ。途中から
+  Chrome と合成頁で幾何を突き合わせる方式に切り替えた（`tools/geom/`）。
+- 数値: html5lib 1162 → 1192/1229、テスト 1097 → 1126 通過（落ち 0）。
+- 途中でユーザーに「見た目とか確認しながら進めてる？」と指摘された。
+  そのとおり数値しか見とらんかった。`--screenshot` を足して目で見るようにしたら
+  即座に二つ（表の指定幅、`<center>` と表）出てきた。**この指摘は効いた。**
+- 最後に入れた「名前付き font family」が日本語 Wikipedia の見出しを豆腐にする
+  退化を生んで、字ごとの fallback で直した（`c55a5b5`）。
+  名前で face を引く変更を入れるときは、必ず CJK の頁を一枚撮ること。
+- `tools/geom/` はこの回まで session 限りの一時ディレクトリにあった。
+  次のセッションで消えるのでリポジトリへ移した。
 
 ### 2026-08-23 - Claude (repo tidy; Web Storage and document.cookie actually wired)
 

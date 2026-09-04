@@ -1,0 +1,54 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:900px}
+div{background:#eee}
+#mn{width:min(300px,50%);height:10px}
+#mx{width:max(200px,10%);height:10px}
+#cl{width:clamp(100px,50%,200px);height:10px}
+#sticky{position:sticky;top:0;width:100px;height:20px}
+#ovf{width:100px;height:40px;overflow:auto}
+#ovfin{width:300px;height:10px}
+.has-parent p{color:#000}
+.has-parent:has(> .flag){background:#cfc}
+#hasbox{width:120px;height:10px}
+#gcol{display:grid;grid-template-columns:subgrid;width:200px}
+#gauto{display:grid;grid-auto-flow:column;grid-auto-columns:50px;width:300px}
+#gauto>div{height:10px}
+#pi{display:grid;place-items:center;width:200px;height:60px}
+#pichild{width:40px;height:20px}
+#ar2{width:150px;aspect-ratio:3/2}
+#objf{width:80px;height:40px;object-fit:cover}
+#rot{width:60px;height:20px;transform:rotate(0deg)}
+#scl{width:60px;height:20px;transform:scale(2)}
+#tx{width:60px;height:20px;transform:translateX(30px)}
+#shad{width:50px;height:20px;box-shadow:0 0 10px #000}
+#rad{width:50px;height:20px;border-radius:8px}
+#gap2{display:flex;gap:10px 20px;flex-wrap:wrap;width:200px}
+#gap2>div{width:80px;height:10px}
+#mar{margin:10px auto;width:100px;height:10px}
+#negmar{margin-top:-5px;width:100px;height:10px}
+#inlblk{display:inline-block;width:30px;height:10px}
+#fixed{position:fixed;top:5px;right:5px;width:20px;height:20px}
+#col2{columns:2;width:200px}
+</style></head><body>
+<div id="mn"></div><div id="mx"></div><div id="cl"></div>
+<div id="sticky"></div>
+<div id="ovf"><div id="ovfin"></div></div>
+<div class="has-parent" id="hasbox"><span class="flag"></span></div>
+<div id="gauto"><div id="ga1"></div><div id="ga2"></div></div>
+<div id="pi"><div id="pichild"></div></div>
+<div id="ar2"></div>
+<div id="rot"></div><div id="scl"></div><div id="tx"></div>
+<div id="shad"></div><div id="rad"></div>
+<div id="gap2"><div id="q1"></div><div id="q2"></div><div id="q3"></div></div>
+<div id="mar"></div><div id="negmar"></div>
+<div><span id="inlblk"></span></div>
+<div id="fixed"></div>
+<pre id="out"></pre>
+<script>
+var ids='mn mx cl sticky ovf ovfin hasbox gauto ga1 ga2 pi pichild ar2 rot scl tx shad rad gap2 q1 q2 q3 mar negmar inlblk fixed'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var e=document.getElementById(id); if(!e) return id+' ?';
+  var r=e.getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>

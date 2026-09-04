@@ -1,0 +1,17 @@
+<html><head><style>body{margin:0;font:16px Arial;width:800px}div{background:#eee}</style></head><body>
+<div id="a">before<span id="e1"></span>after</div>
+<div id="b">
+  <span id="e2"></span>
+</div>
+<div id="c"><span id="s1">one</span> <span id="s2">two</span></div>
+<div id="d"><b>bold</b> <i>ital</i> <a href="#" id="lnk">link</a></div>
+<div id="f">a<span id="w1">b<span id="w2">c</span>d</span>e</div>
+<div id="g"><span id="long">wrapping text that goes over two lines in a narrow box</span></div>
+<pre id="out"></pre>
+<script>
+var ids='a b c d f g e1 e2 s1 s2 lnk w1 w2 long'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>

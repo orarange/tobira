@@ -1,0 +1,35 @@
+<html><head><style>body{margin:0}
+span{display:inline-block}
+#arial{font:16px Arial}
+#verdana{font:16px Verdana}
+#georgia{font:16px Georgia}
+#times{font:16px "Times New Roman"}
+#courier{font:16px "Courier New"}
+#tahoma{font:16px Tahoma}
+#trebuchet{font:16px "Trebuchet MS"}
+#comic{font:16px "Comic Sans MS"}
+#impact{font:16px Impact}
+#unknown{font:16px "Nonexistent Face",Georgia}
+#generic{font:16px sans-serif}
+#mono{font:16px monospace}
+</style></head><body>
+<div><span id="arial">Hamburgefonstiv</span></div>
+<div><span id="verdana">Hamburgefonstiv</span></div>
+<div><span id="georgia">Hamburgefonstiv</span></div>
+<div><span id="times">Hamburgefonstiv</span></div>
+<div><span id="courier">Hamburgefonstiv</span></div>
+<div><span id="tahoma">Hamburgefonstiv</span></div>
+<div><span id="trebuchet">Hamburgefonstiv</span></div>
+<div><span id="comic">Hamburgefonstiv</span></div>
+<div><span id="impact">Hamburgefonstiv</span></div>
+<div><span id="unknown">Hamburgefonstiv</span></div>
+<div><span id="generic">Hamburgefonstiv</span></div>
+<div><span id="mono">Hamburgefonstiv</span></div>
+<pre id="out"></pre>
+<script>
+var ids='arial verdana georgia times courier tahoma trebuchet comic impact unknown generic mono'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' '+Math.round(r.width);
+}).join('\n');
+</script></body></html>

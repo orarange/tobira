@@ -1,0 +1,55 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+.b{background:#eee}
+#nowrap{white-space:nowrap;width:100px}
+#pre{white-space:pre;width:100px}
+#wrap1{width:120px}
+#ls{letter-spacing:3px}
+#ws{word-spacing:10px}
+#ti{text-indent:30px;width:300px}
+#up{text-transform:uppercase}
+#el{width:80px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#sup{font-size:16px}
+#ul1{width:300px}
+#ol1{width:300px}
+#img1{width:40px;height:40px;background:#ccc;display:inline-block}
+#t1{border-collapse:collapse;width:400px}
+#t1 td{border:1px solid #000;padding:2px}
+#cs{}
+#big{font-size:32px}
+#small{font-size:10px}
+#lh2{line-height:2;font-size:16px;width:200px}
+#lh30{line-height:30px;width:200px}
+#brk{width:60px;overflow-wrap:break-word}
+#inl{background:#ddd}
+#nest{background:#cfc}
+</style></head><body>
+<div id="nowrap" class="b">one two three four</div>
+<div id="pre" class="b">a  b
+c</div>
+<div id="wrap1" class="b">alpha beta gamma delta</div>
+<div id="ls" class="b">abcde</div>
+<div id="ws" class="b">a b c</div>
+<div id="ti" class="b">indented text here</div>
+<div id="up" class="b">mixed Case</div>
+<div id="el" class="b">a very long line of text</div>
+<div class="b">x<sup id="sup">2</sup>y</div>
+<ul id="ul1"><li>item one</li><li>item two</li></ul>
+<ol id="ol1"><li>first</li><li>second</li></ol>
+<div class="b">text <span id="img1"></span> after</div>
+<table id="t1"><tr><td id="td1">a</td><td id="td2" colspan="2">b</td></tr><tr><td>c</td><td>d</td><td>e</td></tr></table>
+<div id="big" class="b">Big</div>
+<div id="small" class="b">Small</div>
+<div id="lh2" class="b">two lines of text that wrap here</div>
+<div id="lh30" class="b">thirty</div>
+<div id="brk" class="b">supercalifragilistic</div>
+<div class="b"><span id="inl">inline <span id="nest">nested</span></span></div>
+<pre id="out"></pre>
+<script>
+var ids='nowrap pre wrap1 ls ws ti up el sup ul1 ol1 img1 t1 td1 td2 big small lh2 lh30 brk inl nest'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var e=document.getElementById(id); if(!e) return id+' ?';
+  var r=e.getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>
