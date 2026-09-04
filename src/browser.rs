@@ -4319,7 +4319,7 @@ mod tests {
             html_source: String::new(),
             styled_document: StyledNode::Text(crate::css::StyledText {
                 text: String::new(),
-                style: std::sync::Arc::new(crate::css::ComputedStyle { break_long_words: false, baseline_shift: 0, table_role: crate::css::TableRole::None, flow_root: false, table_cellpadding: None, column_gap: 0,
+                style: std::sync::Arc::new(crate::css::ComputedStyle { break_long_words: false, baseline_shift: 0, table_role: crate::css::TableRole::None, flow_root: false, table_cellpadding: None, column_gap: 0, grid_auto_flow_column: false, justify_items: crate::css::AlignItems::Stretch,
                     display: crate::css::Display::Inline,
                     color: crate::css::DEFAULT_TEXT_COLOR,
                     background_color: None,
@@ -4528,7 +4528,7 @@ mod tests {
             html_source: "<html><body>Hello</body></html>".to_string(),
             styled_document: StyledNode::Text(crate::css::StyledText {
                 text: "Hello".to_string(),
-                style: std::sync::Arc::new(crate::css::ComputedStyle { break_long_words: false, baseline_shift: 0, table_role: crate::css::TableRole::None, flow_root: false, table_cellpadding: None, column_gap: 0,
+                style: std::sync::Arc::new(crate::css::ComputedStyle { break_long_words: false, baseline_shift: 0, table_role: crate::css::TableRole::None, flow_root: false, table_cellpadding: None, column_gap: 0, grid_auto_flow_column: false, justify_items: crate::css::AlignItems::Stretch,
                     display: crate::css::Display::Inline,
                     color: crate::css::DEFAULT_TEXT_COLOR,
                     background_color: None,
@@ -5056,7 +5056,7 @@ mod tests {
     fn parse_styled_text(text: &str) -> StyledNode {
         crate::css::StyledNode::Text(crate::css::StyledText {
             text: text.to_string(),
-            style: std::sync::Arc::new(crate::css::ComputedStyle { break_long_words: false, baseline_shift: 0, table_role: crate::css::TableRole::None, flow_root: false, table_cellpadding: None, column_gap: 0,
+            style: std::sync::Arc::new(crate::css::ComputedStyle { break_long_words: false, baseline_shift: 0, table_role: crate::css::TableRole::None, flow_root: false, table_cellpadding: None, column_gap: 0, grid_auto_flow_column: false, justify_items: crate::css::AlignItems::Stretch,
                 display: crate::css::Display::Inline,
                 color: crate::css::DEFAULT_TEXT_COLOR,
                 background_color: None,

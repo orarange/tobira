@@ -3081,6 +3081,62 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
 /// mirrored to the other or the two paths will silently diverge.
 /// A shared helper taking a `&mut LayoutContext` (sub-context vs parent context)
 /// would eliminate the duplication.
+/// How much room a scaled or rotated box needs, and where its contents sit
+/// inside it.
+///
+/// The layer is drawn into a buffer its own size and then transformed in
+/// place, so anything the transform pushes outside that buffer is cut off. A
+/// box scaled to twice its size filled the same rectangle it always had -- for
+/// a plain block of colour that looks like nothing happened at all -- and a
+/// rotated one lost its corners.
+///
+/// Returns `(shift_x, shift_y, width, height)`: how far the contents move
+/// inside the enlarged layer, and how big that layer has to be.
+fn transformed_layer_bounds(style: &ComputedStyle, width: u32, height: u32) -> (u32, u32, u32, u32) {
+    let scale_x = if style.transform_scale_x == 0 {
+        1.0
+    } else {
+        style.transform_scale_x as f32 / 1000.0
+    };
+    let scale_y = if style.transform_scale_y == 0 {
+        1.0
+    } else {
+        style.transform_scale_y as f32 / 1000.0
+    };
+    let angle = (style.transform_rotate_millideg as f32 / 1000.0).to_radians();
+    let (sin, cos) = angle.sin_cos();
+    let origin_x = style.transform_origin_x as f32 / 1000.0 * width as f32;
+    let origin_y = style.transform_origin_y as f32 / 1000.0 * height as f32;
+
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for (x, y) in [
+        (0.0, 0.0),
+        (width as f32, 0.0),
+        (0.0, height as f32),
+        (width as f32, height as f32),
+    ] {
+        let (dx, dy) = (x - origin_x, y - origin_y);
+        let (sx, sy) = (dx * scale_x, dy * scale_y);
+        let moved_x = origin_x + sx * cos - sy * sin;
+        let moved_y = origin_y + sx * sin + sy * cos;
+        min_x = min_x.min(moved_x);
+        min_y = min_y.min(moved_y);
+        max_x = max_x.max(moved_x);
+        max_y = max_y.max(moved_y);
+    }
+
+    // Only grow: the box keeps the place the flow gave it, and the extra room
+    // is added around it.
+    let shift_x = (-min_x).max(0.0).ceil() as u32;
+    let shift_y = (-min_y).max(0.0).ceil() as u32;
+    let grown_width = (max_x.max(width as f32).ceil() as u32).saturating_add(shift_x);
+    let grown_height = (max_y.max(height as f32).ceil() as u32).saturating_add(shift_y);
+    (shift_x, shift_y, grown_width.max(1), grown_height.max(1))
+}
+
 fn layout_block_element_as_layer(
     element: &StyledElement,
     outer_x: u32,
@@ -3417,20 +3473,47 @@ fn layout_block_element_as_layer(
     // Rebase sub-commands to layer-relative coordinates before wrapping
     rebase_commands(&mut sub_context.commands, outer_x, background_top);
 
+    // A scaled or rotated box is drawn into a buffer of its own and then
+    // transformed in place, so the layer has to be big enough to hold where
+    // the transform puts things. The contents move with it, and the point the
+    // transform turns about moves with them.
+    let box_width = outer_width.max(1);
+    let (shift_x, shift_y, layer_width, layer_height) =
+        transformed_layer_bounds(&element.style, box_width, final_height);
+    if shift_x > 0 || shift_y > 0 {
+        offset_commands(&mut sub_context.commands, shift_x, shift_y);
+    }
+    let origin_x = if layer_width > 0 {
+        ((element.style.transform_origin_x as u64 * box_width as u64 / 1000
+            + shift_x as u64)
+            * 1000
+            / layer_width as u64) as u32
+    } else {
+        element.style.transform_origin_x
+    };
+    let origin_y = if layer_height > 0 {
+        ((element.style.transform_origin_y as u64 * final_height as u64 / 1000
+            + shift_y as u64)
+            * 1000
+            / layer_height as u64) as u32
+    } else {
+        element.style.transform_origin_y
+    };
+
     // Wrap sub-context commands in a LayerCommand and push to parent
     context.commands.push(DrawCommand::Layer(LayerCommand {
-        x: outer_x,
-        y: background_top,
-        width: outer_width.max(1),
-        height: final_height,
+        x: outer_x.saturating_sub(shift_x),
+        y: background_top.saturating_sub(shift_y),
+        width: layer_width,
+        height: layer_height,
         opacity: element.style.opacity,
         blur_px: element.style.filter_blur_px,
         brightness: element.style.filter_brightness,
         scale_x: element.style.transform_scale_x,
         scale_y: element.style.transform_scale_y,
         rotate_millideg: element.style.transform_rotate_millideg,
-        origin_x: element.style.transform_origin_x,
-        origin_y: element.style.transform_origin_y,
+        origin_x,
+        origin_y,
         commands: sub_context.commands,
     }));
 
@@ -7355,6 +7438,10 @@ fn layout_grid_container_inner(
     // Widths are resolved after placement, because a content-sized track cannot
     // be measured until we know which items are in it.
     let n_cols = tracks.len().max(1);
+    // `grid-auto-flow: column` lays the items along a row, each one making a
+    // column of its own. Without a template there is one column, so the items
+    // came out stacked at the full width -- the opposite of what was asked.
+    let flow_column = element.style.grid_auto_flow_column;
 
     // ── Collect grid items ─────────────────────────────────────────────────
     // Absolutely positioned children are out of flow and take no grid slot.
@@ -7379,6 +7466,23 @@ fn layout_grid_container_inner(
             Some(el)
         })
         .collect();
+
+    // Flowing along a row makes a column per item, sized by
+    // `grid-auto-columns`, whenever the template does not already name enough.
+    let (tracks, n_cols) = if flow_column && children.len() > tracks.len() {
+        let widened: Vec<GridTrackSize> = (0..children.len())
+            .map(|i| {
+                tracks
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| element.style.grid_auto_columns.clone())
+            })
+            .collect();
+        let count = widened.len().max(1);
+        (widened, count)
+    } else {
+        (tracks, n_cols)
+    };
 
     // ── Auto-place items into grid cells ──────────────────────────────────
     let mut col_cursor = 0usize;
@@ -7490,7 +7594,9 @@ fn layout_grid_container_inner(
             }
             col_cursor = c + col_span;
             row_cursor = r;
-            if col_cursor >= n_cols {
+            // Along a row the cursor only moves sideways; it wraps to the next
+            // row when the columns run out, the same as the other direction.
+            if col_cursor >= n_cols && !flow_column {
                 col_cursor = 0;
                 row_cursor += 1;
             }
@@ -7816,6 +7922,28 @@ fn layout_grid_container_inner(
                 // stretch then fills it, which is handled below.
                 AlignItems::Stretch | AlignItems::FlexStart | AlignItems::Baseline => 0,
             };
+        // `justify-items` does the same across the cell. Unread, an item told
+        // to sit in the middle of its column started at the left edge.
+        let justify = element.style.justify_items;
+        let (item_x, item_width) = if matches!(justify, AlignItems::Stretch | AlignItems::Baseline)
+        {
+            (cell_x, item.cell_width)
+        } else {
+            let natural = measure_node_preferred_width(
+                &StyledNode::Element(item.element.clone()),
+                images,
+                fonts,
+            )
+            .min(item.cell_width)
+            .max(1);
+            let free = item.cell_width.saturating_sub(natural);
+            let offset = match justify {
+                AlignItems::Center => free / 2,
+                AlignItems::FlexEnd => free,
+                _ => 0,
+            };
+            (cell_x.saturating_add(offset), natural)
+        };
         let item_form = form_context_for_element(item.element, context, current_form.clone());
         // A grid item fills its row unless it says otherwise. Left to size
         // itself, each of the four cards across firefox.com's front page ended
@@ -7826,8 +7954,8 @@ fn layout_grid_container_inner(
         }
         layout_block_element(
             item.element,
-            cell_x,
-            item.cell_width,
+            item_x,
+            item_width,
             &mut item_y,
             context,
             images,
@@ -11693,6 +11821,68 @@ mod tests {
             200,
             "border-box says the stated width already covers them"
         );
+    }
+
+    #[test]
+    fn a_transformed_box_gets_room_for_where_it_ends_up() {
+        // The layer is drawn into a buffer its own size and then transformed in
+        // place, so a box scaled to twice its size filled the same rectangle it
+        // always had -- for a plain block of colour that looks like nothing
+        // happened. Chrome makes this one 120x40.
+        let l = probe_layout(
+            r#"<html><body style="margin:0">
+                <div style="height:60px"><div style="width:60px;height:20px;background:#aa0001;transform:scale(2)"></div></div>
+            </body></html>"#,
+            1000,
+        );
+        let layers = l
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                super::DrawCommand::Layer(layer) => Some((layer.width, layer.height)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            layers.iter().any(|(w, h)| *w >= 120 && *h >= 40),
+            "the layer has to hold the scaled box: {layers:?}"
+        );
+    }
+
+    #[test]
+    fn grid_auto_flow_column_lays_items_along_a_row() {
+        // Without a template there is one column, so the items came out
+        // stacked at the full width -- the opposite of what was asked.
+        // Chrome puts these at x=0 and x=50, both 50 wide.
+        let l = probe_layout(
+            r#"<html><body style="margin:0">
+                <div style="display:grid;grid-auto-flow:column;grid-auto-columns:50px;width:300px">
+                    <div style="height:10px;background:#aa0002"></div>
+                    <div style="height:10px;background:#aa0003"></div>
+                </div>
+            </body></html>"#,
+            1000,
+        );
+        let first = probe_rect(&l, 0xAA0002).expect("first");
+        let second = probe_rect(&l, 0xAA0003).expect("second");
+        assert_eq!((first.x, first.width), (0, 50));
+        assert_eq!((second.x, second.width), (50, 50));
+        assert_eq!(first.y, second.y, "both sit on the same row");
+    }
+
+    #[test]
+    fn place_items_centres_an_item_in_its_cell() {
+        // Chrome puts this at x=80 in a 200-wide grid.
+        let l = probe_layout(
+            r#"<html><body style="margin:0">
+                <div style="display:grid;place-items:center;width:200px;height:60px">
+                    <div style="width:40px;height:20px;background:#aa0004"></div>
+                </div>
+            </body></html>"#,
+            1000,
+        );
+        let item = probe_rect(&l, 0xAA0004).expect("item");
+        assert_eq!(item.x, 80);
     }
 
     #[test]

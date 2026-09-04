@@ -1327,6 +1327,14 @@ pub struct ComputedStyle {
     /// between columns, and one length sets both. Only the first was
     /// kept, so `gap: 10px 20px` put ten pixels everywhere.
     pub column_gap: u32,
+    /// `grid-auto-flow: column` -- items are laid along a row rather than
+    /// down a column, each one making a new column as it goes.
+    ///
+    /// Unread, a grid with no template stacked its items one per row at
+    /// the full width, which is the opposite of what the page asked for.
+    pub grid_auto_flow_column: bool,
+    /// `justify-items` -- where an item sits across its own cell.
+    pub justify_items: AlignItems,
 }
 
 impl ComputedStyle {
@@ -1347,6 +1355,8 @@ impl ComputedStyle {
             padding: EdgeSizes::default(),
             table_cellpadding: parent.and_then(|parent| parent.table_cellpadding),
             column_gap: 0,
+            grid_auto_flow_column: false,
+            justify_items: AlignItems::Stretch,
             width: None,
             height: None,
             font_size_px: parent_font_size,
@@ -4619,13 +4629,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             };
         }
         "align-items" => {
-            style.align_items = match value.trim().to_ascii_lowercase().as_str() {
-                "flex-start" | "start" => AlignItems::FlexStart,
-                "flex-end" | "end" => AlignItems::FlexEnd,
-                "center" => AlignItems::Center,
-                "baseline" => AlignItems::Baseline,
-                _ => AlignItems::Stretch,
-            };
+            style.align_items = parse_align_items(value).unwrap_or(AlignItems::Stretch);
         }
         "justify-content" => {
             style.justify_content = match value.trim().to_ascii_lowercase().as_str() {
@@ -4783,6 +4787,26 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             let (tracks, line_names) = parse_grid_track_list(value, parent_font_size);
             style.grid_template_rows = tracks;
             set_grid_line_names(style, line_names, true);
+        }
+        "grid-auto-flow" => {
+            let v = value.trim().to_ascii_lowercase();
+            style.grid_auto_flow_column = v.split_whitespace().any(|word| word == "column");
+        }
+        // `place-items: <align> <justify>`, with one value setting both.
+        "place-items" => {
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            if let Some(align) = parts.first().and_then(|word| parse_align_items(word)) {
+                style.align_items = align;
+            }
+            let justify = parts.get(1).or(parts.first());
+            if let Some(justify) = justify.and_then(|word| parse_align_items(word)) {
+                style.justify_items = justify;
+            }
+        }
+        "justify-items" => {
+            if let Some(justify) = parse_align_items(value.trim()) {
+                style.justify_items = justify;
+            }
         }
         "grid-auto-rows" => {
             style.grid_auto_rows = parse_grid_track_size(value.trim(), parent_font_size)
@@ -6456,6 +6480,19 @@ fn parse_text_align(input: &str) -> Option<TextAlign> {
         "right" | "end" => Some(TextAlign::Right),
         _ => None,
     }
+}
+
+/// One of the `align-items` keywords, shared with `justify-items` and the
+/// `place-items` shorthand, which name the same set.
+fn parse_align_items(value: &str) -> Option<AlignItems> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "flex-start" | "start" | "self-start" | "left" => AlignItems::FlexStart,
+        "flex-end" | "end" | "self-end" | "right" => AlignItems::FlexEnd,
+        "center" => AlignItems::Center,
+        "baseline" => AlignItems::Baseline,
+        "stretch" | "normal" => AlignItems::Stretch,
+        _ => return None,
+    })
 }
 
 fn parse_vertical_align(input: &str) -> Option<VerticalAlign> {
