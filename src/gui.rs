@@ -4573,8 +4573,11 @@ fn render_commands(
                     if let Some(decoded) = images.get(&image.src) {
                         // min_y = offset_y prevents images from bleeding into the chrome UI
                         let min_y = offset_y as i32;
-                        if image.tile {
-                            // Tiled background: draw at natural size, repeated across element
+                        // A background that repeats, or one whose size was
+                        // given as a length, goes through the tiling painter --
+                        // `no-repeat` is just one tile. Everything else keeps
+                        // the older stretch-to-box path untouched.
+                        if image.repeat_x || image.repeat_y || image.background_size.is_some() {
                             let sx = offset_x as i32 + image.x as i32;
                             let sy = offset_y as i32 + image.y as i32 - scroll_y as i32;
                             draw_tiled_image(
@@ -4586,6 +4589,11 @@ fn render_commands(
                                 image.width,
                                 image.height,
                                 decoded,
+                                image.repeat_x,
+                                image.repeat_y,
+                                image.background_size,
+                                image.object_position_x,
+                                image.object_position_y,
                                 min_y,
                             );
                         } else {
@@ -5645,6 +5653,20 @@ fn draw_rect_outline(
 /// x and y are signed so callers can pass scroll-adjusted coords that may be negative.
 /// min_y is the minimum buffer y that may be written (pass offset_y to prevent drawing
 /// into the chrome / UI area above the content viewport).
+/// Paint a background image into the box at `(x, y, draw_width, draw_height)`.
+///
+/// One function covers every combination because they are the same operation
+/// with different repeat counts: `no-repeat` is one tile, `repeat-x` is one row.
+/// Splitting them is how the two axes drift apart.
+///
+/// Nothing is emitted per tile -- the whole box is filled by sampling, so a 1px
+/// image on a 1920x1080 box costs one command and no allocation, not two
+/// million commands.
+///
+/// `background_size` is the size of ONE tile in px when the stylesheet named a
+/// length; `None` means the image's natural size. A `None` height keeps the
+/// image's aspect ratio, which is what `background-size: 10px` asks for.
+#[allow(clippy::too_many_arguments)]
 fn draw_tiled_image(
     buffer: &mut [u32],
     buf_width: u32,
@@ -5654,13 +5676,37 @@ fn draw_tiled_image(
     draw_width: u32,
     draw_height: u32,
     image: &DecodedImage,
+    repeat_x: bool,
+    repeat_y: bool,
+    background_size: Option<(u32, Option<u32>)>,
+    position_x_percent: u32,
+    position_y_percent: u32,
     min_y: i32,
 ) {
-    let tile_w = image.width as i32;
-    let tile_h = image.height as i32;
-    if tile_w == 0 || tile_h == 0 || draw_width == 0 || draw_height == 0 {
+    if image.width == 0 || image.height == 0 || draw_width == 0 || draw_height == 0 {
         return;
     }
+
+    // How big one tile is on screen.
+    let (tile_w, tile_h) = match background_size {
+        Some((w, Some(h))) => (w.max(1), h.max(1)),
+        Some((w, None)) => {
+            let w = w.max(1);
+            let scaled = (w as u64 * image.height as u64 / image.width as u64) as u32;
+            (w, scaled.max(1))
+        }
+        None => (image.width, image.height),
+    };
+    let tile_w = tile_w as i32;
+    let tile_h = tile_h as i32;
+
+    // Where the first tile sits. `background-position` places the image inside
+    // the box on an axis it does not repeat on; on a repeating axis it only
+    // shifts the phase of the pattern.
+    let origin_x = x + i32::from(draw_width > tile_w as u32)
+        * ((draw_width as i64 - tile_w as i64) * position_x_percent as i64 / 100) as i32;
+    let origin_y = y + i32::from(draw_height > tile_h as u32)
+        * ((draw_height as i64 - tile_h as i64) * position_y_percent as i64 / 100) as i32;
 
     let start_x = x.max(0) as u32;
     let start_y = y.max(min_y) as u32;
@@ -5668,10 +5714,30 @@ fn draw_tiled_image(
     let end_y = (y + draw_height as i32).max(0).min(buf_height as i32) as u32;
 
     for sy in start_y..end_y {
+        // Which row of the tile this screen row shows, or nothing when the axis
+        // does not repeat and we are past the single tile.
+        let dy = sy as i32 - origin_y;
+        let ty = if repeat_y {
+            dy.rem_euclid(tile_h)
+        } else if (0..tile_h).contains(&dy) {
+            dy
+        } else {
+            continue;
+        };
         for sx in start_x..end_x {
-            // Compute offset within this tile using rem_euclid to handle negative x/y
-            let px = ((sx as i32 - x).rem_euclid(tile_w)) as u32;
-            let py = ((sy as i32 - y).rem_euclid(tile_h)) as u32;
+            let dx = sx as i32 - origin_x;
+            let tx = if repeat_x {
+                dx.rem_euclid(tile_w)
+            } else if (0..tile_w).contains(&dx) {
+                dx
+            } else {
+                continue;
+            };
+            // Nearest-neighbour from the tile back into the source image.
+            let px = (tx as u32 as u64 * image.width as u64 / tile_w as u64) as u32;
+            let py = (ty as u32 as u64 * image.height as u64 / tile_h as u64) as u32;
+            let px = px.min(image.width - 1);
+            let py = py.min(image.height - 1);
             let src_idx = (py * image.width + px) as usize * 4;
             if src_idx + 3 >= image.rgba.len() {
                 continue;

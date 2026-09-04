@@ -29,10 +29,18 @@ the same thing: how many rectangles an inline box owns and where they split.
 どれも無関係やった。`arrow2.html` が背景の書き方を分ける。`arrow3.html` が
 `background-repeat` だけを変える。`arrow4.html` が SVG と PNG で比べる。
 
-結論: **`background-repeat: repeat`（CSS の初期値）が敷き詰めをせん。**
-塗り側で `ObjectFit::None` に落としとるので（`layout.rs:2409` ほか3箇所）、
-原寸の一枚を切り抜いて置くだけになり、`background-size` もその経路では捨てられる。
-単色の画像やと区別がつかんが、箱より大きい画像やと切り抜かれた隅だけが出る。
-HN は 10x10 の箱に 32x32 の SVG なので、隅が空白で丸ごと消えて見えとった。
+結論: **`background-size` の長さ指定が丸ごと落ちとった。** `BackgroundSize` に
+長さの変種が無く、`background-size: 10px` が `Auto` に化けとった。そこへ
+`background-repeat: repeat`（CSS の初期値。HN の `no-repeat` は 2 層目にあるので
+1 層目には効かん、これは仕様どおり）が重なると、画像は原寸で敷かれる。
+HN は 10x10 の箱に 32x32 の SVG なので、見えとる左上 10x10 が空白で、
+矢印が丸ごと消えて見えとった。2026-09-05 に修正済み。
+
+途中で「敷き詰めが未実装」と読んだが**それは違うかった**。敷き詰め自体は
+`draw_tiled_image` で動いとって、原寸で敷くのが問題やった。単色の PNG やと
+埋まって見えるので、そこで止まると原因を取り違える。
+
+**期待値は Chrome で確定させること。** `arrow3.html` の r4 は Chrome でも空白で、
+それが正しい。「全部出たら勝ち」やない。
 
 `dot.png` は 8x8 の赤一色、`triangle.svg` は HN から取ってきた実物。

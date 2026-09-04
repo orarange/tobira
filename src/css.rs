@@ -537,11 +537,22 @@ pub struct LinearGradient {
 // BackgroundSize / BackgroundRepeat
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackgroundSize {
     Auto,
     Cover,
     Contain,
+    /// An explicit length, in px. `height: None` is `auto`: scale to keep the
+    /// image's own aspect ratio.
+    ///
+    /// Until 2026-09-04 there was no such variant, so `background-size: 10px`
+    /// parsed as `Auto` and was simply lost. With `background-repeat: repeat`
+    /// (the CSS initial value) the image was then tiled at its natural size,
+    /// and an icon larger than its box showed nothing but a blank corner --
+    /// which is where Hacker News's vote arrows went.
+    ///
+    /// Percentages are still not handled and fall back to `Auto`.
+    Fixed { width: u32, height: Option<u32> },
 }
 
 impl Default for BackgroundSize {
@@ -556,6 +567,33 @@ pub enum BackgroundRepeat {
     NoRepeat,
     RepeatX,
     RepeatY,
+}
+
+impl BackgroundRepeat {
+    /// Which axes the image repeats on, as `(x, y)`.
+    ///
+    /// Both axes come out of one place so that `repeat-x` and `repeat-y`
+    /// cannot drift apart from `repeat`: they are the same tiling with one
+    /// count pinned to 1.
+    pub fn axes(self) -> (bool, bool) {
+        match self {
+            Self::Repeat => (true, true),
+            Self::RepeatX => (true, false),
+            Self::RepeatY => (false, true),
+            Self::NoRepeat => (false, false),
+        }
+    }
+}
+
+impl BackgroundSize {
+    /// The explicit size, if one was named. `None` for `auto`, `cover` and
+    /// `contain`, which are resolved against the box instead.
+    pub fn fixed(self) -> Option<(u32, Option<u32>)> {
+        match self {
+            Self::Fixed { width, height } => Some((width, height)),
+            Self::Auto | Self::Cover | Self::Contain => None,
+        }
+    }
 }
 
 impl Default for BackgroundRepeat {
@@ -1473,8 +1511,12 @@ impl ComputedStyle {
             mask_image_url: None,
             background_size: BackgroundSize::Auto,
             background_repeat: BackgroundRepeat::Repeat,
-            background_position_x: 50,
-            background_position_y: 50,
+            // The CSS initial value for `background-position` is `0% 0%`.
+            // It was 50 here, copied from `object-position` (whose initial
+            // value really is 50%), and that difference was invisible only
+            // because a background image was always stretched to its box.
+            background_position_x: 0,
+            background_position_y: 0,
             // new fields – most not inherited
             float: FloatSide::None,
             clear: ClearSide::None,
@@ -4349,7 +4391,8 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.background_size = match v.as_str() {
                 "cover" => BackgroundSize::Cover,
                 "contain" => BackgroundSize::Contain,
-                _ => BackgroundSize::Auto,
+                other => parse_background_size_lengths(other, style.font_size_px)
+                    .unwrap_or(BackgroundSize::Auto),
             };
         }
         "background-repeat" => {
@@ -7873,6 +7916,36 @@ fn find_url(value: &str) -> Option<String> {
 /// used to be understood -- and the url form had to end at the closing paren,
 /// so the `background: url(icon.svg) no-repeat` that half the web writes set
 /// nothing at all and the icon was never drawn.
+/// `background-size: 10px`, `10px 20px`, `10px auto`. Returns `None` for
+/// anything else (a percentage, a keyword) so the caller can fall back.
+fn parse_background_size_lengths(value: &str, font_size_px: u32) -> Option<BackgroundSize> {
+    // A percentage here is a share of the BOX, which is not known at parse
+    // time. `parse_length` would happily read it as a share of the font size
+    // instead -- `background-size: 50%` came out as 8px. Leave it to `Auto`.
+    let length = |token: &str| -> Option<u32> {
+        if token.ends_with('%') {
+            return None;
+        }
+        parse_length(token, font_size_px)
+    };
+    let mut parts = value.split_whitespace();
+    let first = parts.next()?;
+    if first == "auto" {
+        return None;
+    }
+    let width = length(first)?;
+    let height = match parts.next() {
+        None => None,
+        Some("auto") => None,
+        Some(second) => Some(length(second)?),
+    };
+    // A third component is not a background-size.
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(BackgroundSize::Fixed { width, height })
+}
+
 fn apply_background_shorthand(style: &mut ComputedStyle, value: &str) {
     // Commas separate layers, and the first one is painted on top. Only that
     // one is drawn here: Hacker News writes its vote arrow as
@@ -7935,7 +8008,8 @@ fn apply_background_shorthand(style: &mut ComputedStyle, value: &str) {
             style.background_size = match right.trim() {
                 "cover" => BackgroundSize::Cover,
                 "contain" => BackgroundSize::Contain,
-                _ => BackgroundSize::Auto,
+                other => parse_background_size_lengths(other, style.font_size_px)
+                    .unwrap_or(BackgroundSize::Auto),
             };
             continue;
         }
@@ -7988,7 +8062,114 @@ fn apply_background_shorthand(style: &mut ComputedStyle, value: &str) {
 
 #[cfg(test)]
 mod background_shorthand_tests {
-    use super::{BackgroundRepeat, ComputedStyle, apply_background_shorthand};
+    use super::{
+        BackgroundRepeat, BackgroundSize, ComputedStyle, Declaration, apply_background_shorthand,
+        apply_declaration,
+    };
+
+    fn declared(name: &str, value: &str) -> ComputedStyle {
+        let mut style = ComputedStyle::for_element("div", None);
+        let declaration = Declaration {
+            property: name.to_string(),
+            value: value.to_string(),
+            important: false,
+        };
+        apply_declaration(&mut style, &declaration, 16);
+        style
+    }
+
+    /// Hacker News writes its vote arrow as a 10px-wide background on a 10x10
+    /// box. `background-size` had no length variant, so the 10px was dropped,
+    /// the 32x32 SVG was tiled at its natural size (`repeat` being the initial
+    /// value), and the visible corner of the tile was blank -- the arrows were
+    /// simply not there. Nothing threw; the page just quietly lacked them.
+    #[test]
+    fn background_size_takes_a_length() {
+        assert_eq!(
+            declared("background-size", "10px").background_size,
+            BackgroundSize::Fixed {
+                width: 10,
+                height: None
+            }
+        );
+        assert_eq!(
+            declared("background-size", "10px 20px").background_size,
+            BackgroundSize::Fixed {
+                width: 10,
+                height: Some(20)
+            }
+        );
+        assert_eq!(
+            declared("background-size", "10px auto").background_size,
+            BackgroundSize::Fixed {
+                width: 10,
+                height: None
+            }
+        );
+        // Keywords keep working, and anything not understood stays `Auto`
+        // rather than becoming a bogus size.
+        assert_eq!(
+            declared("background-size", "cover").background_size,
+            BackgroundSize::Cover
+        );
+        assert_eq!(
+            declared("background-size", "contain").background_size,
+            BackgroundSize::Contain
+        );
+        assert_eq!(
+            declared("background-size", "auto").background_size,
+            BackgroundSize::Auto
+        );
+        assert_eq!(
+            declared("background-size", "50%").background_size,
+            BackgroundSize::Auto
+        );
+    }
+
+    /// The CSS initial value is `0% 0%`. It was 50 here, borrowed from
+    /// `object-position`, which put the first tile in the middle of the box.
+    #[test]
+    fn background_position_starts_at_the_origin() {
+        let style = ComputedStyle::for_element("div", None);
+        assert_eq!(style.background_position_x, 0);
+        assert_eq!(style.background_position_y, 0);
+        // `object-position` really does start centred; it must not have moved.
+        assert_eq!(style.object_position_x, 50);
+        assert_eq!(style.object_position_y, 50);
+    }
+
+    /// Both axes come from one place so `repeat-x` cannot drift from `repeat`.
+    #[test]
+    fn repeat_axes() {
+        assert_eq!(BackgroundRepeat::Repeat.axes(), (true, true));
+        assert_eq!(BackgroundRepeat::RepeatX.axes(), (true, false));
+        assert_eq!(BackgroundRepeat::RepeatY.axes(), (false, true));
+        assert_eq!(BackgroundRepeat::NoRepeat.axes(), (false, false));
+    }
+
+    /// HN's own declaration, verbatim. The first layer is the picture, and the
+    /// `no-repeat` belongs to the second one -- so the image really does repeat,
+    /// which is what Chrome does too. The size comes from a separate longhand.
+    #[test]
+    fn hacker_news_vote_arrow() {
+        let style =
+            shorthand("url(\"triangle.svg\"), linear-gradient(transparent, transparent) no-repeat");
+        assert_eq!(style.background_image_url.as_deref(), Some("triangle.svg"));
+        assert_eq!(style.background_repeat, BackgroundRepeat::Repeat);
+    }
+
+    #[test]
+    fn a_length_size_inside_the_shorthand() {
+        let style = shorthand("url(icon.svg) center/10px no-repeat");
+        assert_eq!(style.background_image_url.as_deref(), Some("icon.svg"));
+        assert_eq!(
+            style.background_size,
+            BackgroundSize::Fixed {
+                width: 10,
+                height: None
+            }
+        );
+    }
 
     fn shorthand(value: &str) -> ComputedStyle {
         let mut style = ComputedStyle::for_element("div", None);

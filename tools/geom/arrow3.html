@@ -12,7 +12,10 @@
  .r5 { background-image: url("triangle.svg"); background-repeat: repeat-x; background-size: 10px; }
  .big { width: 40px; height: 40px; }
 </style></head><body>
-<p class="lbl">Same image, only background-repeat differs.</p>
+<p class="lbl">Same image, only background-repeat differs.<br>
+Verified against Chrome 2026-09-05: every row shows a triangle EXCEPT r4.<br>
+r4 is a 10x10 box tiling a 32x32 image at its natural size, so the visible
+corner of the tile is blank -- Chrome renders it empty too. Do not "fix" it.</p>
 <table>
 <tr><td class="lbl">r1 no-repeat + size</td><td><div class="s r1"></div></td></tr>
 <tr><td class="lbl">r2 repeat + size</td><td><div class="s r2"></div></td></tr>

@@ -10,3 +10,6 @@ tests/fixtures/react/*.development.js
 
 # repomix generated bundles
 repomix-output*.xml
+
+# cmp.py hands Chrome a throwaway profile; it lands here.
+tools/geom/cud/
