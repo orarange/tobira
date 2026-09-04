@@ -838,7 +838,7 @@ fn expand_frames(document: &Node, base_url: &Url, frame_depth: usize) -> Result<
     }
 
     let title = document_title(document).unwrap_or_else(|| "Tobira".to_string());
-    Ok(Some(synthetic_document(&title, body_children)))
+    Ok(Some(synthetic_frameset_document(&title, body_children)))
 }
 
 fn first_frameset(node: &Node) -> Option<&Element> {
@@ -942,7 +942,7 @@ fn expand_frameset(
         body_children.pop();
     }
 
-    Ok(Some(synthetic_document(&title, body_children)))
+    Ok(Some(synthetic_frameset_document(&title, body_children)))
 }
 
 fn collect_frame_specs(document: &Node) -> Vec<FrameSpec> {
@@ -1031,6 +1031,29 @@ fn hr_node() -> Node {
     })
 }
 
+/// The same, for a page whose whole content is a frameset.
+///
+/// A frameset fills the window: there is no page margin around it, and the
+/// eight pixels a body normally carries pushed every frame down and to the
+/// right of where a browser puts them.
+fn synthetic_frameset_document(title: &str, body_children: Vec<Node>) -> Node {
+    let mut document = synthetic_document(title, body_children);
+    if let Node::Element(root) = &mut document
+        && let Some(Node::Element(html)) = root.children.first_mut()
+    {
+        for child in &mut html.children {
+            if let Node::Element(element) = child
+                && element.tag_name == "body"
+            {
+                element
+                    .attributes
+                    .insert("style".to_string(), "margin:0".to_string());
+            }
+        }
+    }
+    document
+}
+
 fn synthetic_document(title: &str, body_children: Vec<Node>) -> Node {
     Node::Element(Element { namespace: Default::default(),
         tag_name: "document".to_string(),
@@ -1083,7 +1106,7 @@ fn synthetic_frameset_columns_document(
         })
         .collect();
 
-    synthetic_document(
+    synthetic_frameset_document(
         title,
         vec![Node::Element(Element { namespace: Default::default(),
             tag_name: "table".to_string(),
@@ -1124,7 +1147,7 @@ fn synthetic_frameset_rows_document(
         })
         .collect();
 
-    synthetic_document(
+    synthetic_frameset_document(
         title,
         vec![Node::Element(Element { namespace: Default::default(),
             tag_name: "table".to_string(),
@@ -4448,6 +4471,37 @@ mod tests {
 
         assert_eq!(stylesheet.rules.len(), 1);
         assert_eq!(document_title(&document), Some("Demo".to_string()));
+    }
+
+    #[test]
+    #[test]
+    fn a_frameset_fills_the_window() {
+        // A frameset is the whole page: there is no margin around it. The eight
+        // pixels a body normally carries pushed every frame down and to the
+        // right of where a browser puts them -- on abehiroshi.la.coocan.jp the
+        // left column started at 8,8 instead of 0,0 and came out 5px wide of
+        // the 230 Chrome gives it.
+        let document = super::synthetic_frameset_columns_document(
+            "Demo",
+            &[super::FrameTrack::Percent(18), super::FrameTrack::Percent(82)],
+            vec![
+                (vec![Node::Text("left".to_string())], std::collections::BTreeMap::new()),
+                (vec![Node::Text("right".to_string())], std::collections::BTreeMap::new()),
+            ],
+        );
+        let mut found = None;
+        fn walk(node: &Node, found: &mut Option<String>) {
+            if let Node::Element(element) = node {
+                if element.tag_name == "body" {
+                    *found = element.attributes.get("style").cloned();
+                }
+                for child in &element.children {
+                    walk(child, found);
+                }
+            }
+        }
+        walk(&document, &mut found);
+        assert_eq!(found.as_deref(), Some("margin:0"));
     }
 
     #[test]
