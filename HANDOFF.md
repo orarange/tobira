@@ -20,7 +20,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## いまの状態（2026-09-04）
 
-- ブランチ `master`。この文書を書いた時点の HEAD は `6b879fa`
+- ブランチ `master`。この文書を書いた時点の HEAD は `4448441`
   （この文書のコミットが直後に乗る）。
 - `cargo build --release` 通る。警告は dead_code のみ。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
@@ -44,8 +44,17 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 cargo run -- https://example.com/            # GUI
 cargo run --release -- --cli <url>           # テキスト出力
 ./target/release/tobira --dump-styled <url>  # 箱の一覧（cmd[] は12個で切れる。数を信じるな）
+TOBIRA_DUMP_DEPTH=40 ./target/release/tobira --dump-styled <url>   # 深いところまで
 ./target/release/tobira --screenshot out.png <url>   # PNG。TOBIRA_SHOT_HEIGHT で高さ
 ```
+
+**`--dump-styled` は既定で浅い。** 何もせんと HN でも 59 行しか出ん。
+「その要素の箱が無い」と読める出力は、たいてい木が切れとるだけや
+（2026-09-04 に一回これで誤診しとる）。深いところを見るときは必ず
+`TOBIRA_DUMP_DEPTH` を上げること。
+一行に出るのは `bg=`（背景色）、`bgimg=`（背景画像の URL）、`size=`（指定された
+width/height）、`mask=`。`bg=none bgimg=<url>` なら「規則は当たっとって画像も
+決まっとる」ので、外れとるのは塗りかレイアウトの側や。
 
 主な環境変数: `TOBIRA_DEBUG_CONSOLE`（console と未捕捉エラー）、`TOBIRA_TRACE_STACK`、
 `TOBIRA_DUMP_BOXES` / `TOBIRA_DUMP_DEPTH` / `TOBIRA_DUMP_WIDTH`、`TOBIRA_SHOT_HEIGHT`、
@@ -242,15 +251,18 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    大きさは出しとるので、同じ値を `record_container_box`（`layout.rs:9005`）に
    渡して hitbox にも反映させる。scale と translate の適用段を揃えるのは
    その後（設計判断が要る。translate も描画時に寄せるほうが筋がええ）。
-5. **HN の投票矢印** — 未解明。`triangle.svg` の取得は成功しとる
-   （`TOBIRA_DEBUG_IMAGES=1` で "style image ok"）。同じ CSS と入れ子を
-   合成頁で作ると出る。
-   **2026-09-04 に二つ分かった。** (a) closure バグが原因やろかと疑うたが、
-   直しても矢印は出んかった。別件。(b) `--dump-styled` に `votearrow` の箱が
-   **一つも出とらん**。画像は取れとって箱が無いので、描画やのうて
-   **箱の生成**の側や。HN の形は `<a><div class='votearrow'></div></a>` で、
-   中身が空・`width:10px;height:10px`・背景画像だけの塊。
-   次はその形を合成頁で最小再現すること。
+5. **`background-repeat: repeat` が敷き詰めをせん** — 2026-09-04 に
+   「HN の投票矢印」を追って行き着いた真因。矢印はこれの一例でしかない。
+   塗り側が repeat 系を `ObjectFit::None` に落としとるので
+   （`layout.rs:2409`、`3609`、`4158`、`4289`）、原寸の一枚を切り抜いて
+   置くだけになり、`background-size` もその経路では捨てられる。
+   単色の画像やと区別がつかんが、箱より大きい画像やと切り抜かれた隅しか出ん。
+   HN は 10x10 の箱に 32x32 の SVG なので隅が空白で、丸ごと消えて見えとった。
+   **`repeat` は CSS の初期値**なので、背景画像を置いて `no-repeat` と
+   書かん頁は全部これを踏む。
+   直し方: 敷き詰めを実装し、そのうえで `background-size` を効かせる。
+   最小再現は `tools/geom/arrow*.html`（README 参照）。
+   なお、closure バグ（2026-09-04 に修正）が原因やろかと疑うたが無関係やった。
 6. **CSS transition / animation** — 一番でかい未実装。`@keyframes` のパース、
    時間軸、再描画の駆動が要る。着手するなら独立した回を丸ごと使うこと。
    **fuel をターンごとにする修正（2026-09-04）を入れる前にこれを作っとったら、
@@ -311,6 +323,34 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-09-04 - Claude (HN の矢印 → background-repeat: 4448441)
+
+矢印を追ったら、はるかに広い穴に行き当たった。詳しくはコミットと
+`tools/geom/README.md`。ここには外した推測を残す。**全部外れとる。**
+
+- 「インラインの中のブロック（`<a>` の中の `<div>`）が怪しい」— 外れ。
+  同じ入れ子でも背景が色なら四角が出る。
+- 「中身が空やから箱が消えとる」— 外れ。箱はある。
+- 「表や `<center>` が効いとる」— 外れ。表の外でも同じ。
+- 「多層の短縮形が壊れとる」— **半分だけ当たり**。短縮形は 1 層目しか
+  読まんので、HN のように `no-repeat` が 2 層目にあると効かず `repeat` の
+  ままになる。これ自体は CSS 的に正しい挙動で、落ちとるのは repeat の塗り。
+  ここで止めとったら間違った場所を直しとった。
+
+- **一回はっきり誤診した。** `--dump-styled | grep votearrow` が空やったので
+  「箱が生成されとらん」と判断して、前回の HANDOFF にもそう書いた。実際は
+  dump が既定で浅く、木が途中で切れとっただけ。`TOBIRA_DUMP_DEPTH` を上げたら
+  箱も `bgimg=triangle.svg` も普通に在った。**出力が無いことを、物が無いことの
+  証拠にしたらあかん。** 道具の既定値を先に確かめること。
+- 続けて `bg=` が background-color しか出しとらんことにも気づいたので、
+  `bgimg=` と `size=` を dump に足した。見た目が背景画像だけの箱は、
+  これが無いと未設定の箱と見分けがつかん。
+- 軸を一つずつ外した頁を並べて撮る、というやり方が効いた。形の軸（表・
+  `<center>`・`<a>`・空要素）を全部外してもまだ落ちる、というのが分かった
+  時点で、探す場所がレイアウトから塗りへ移った。
+- 最後、SVG と PNG を並べたのが決め手。PNG（単色）やと repeat でも埋まって
+  見えるので「塗られとる」と読めてまう。**単色の検体は敷き詰めの検証に使えん。**
 
 ### 2026-09-04 - Claude (ループ本体の束縛: 6b879fa)
 
