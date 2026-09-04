@@ -20,11 +20,12 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## いまの状態（2026-09-04）
 
-- ブランチ `master`。この文書を書いた時点の HEAD は `8c081ee`
+- ブランチ `master`。この文書を書いた時点の HEAD は `35f6ce1`
   （この文書のコミットが直後に乗る）。
 - `cargo build --release` 通る。警告は dead_code のみ。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1129 通過 / 0 落ち**。
+- `cargo test --release` → **1134 通過 / 0 落ち**。
+  `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
   数え方: `cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result" | awk '{p+=$4; f+=$6} END {print p, f}'`
   （`tr -d '\000'` は必須。出力に NUL が混ざって grep が binary 扱いする）
 - html5lib 木構築適合 **1192/1229 (97.0%)**。
@@ -65,6 +66,14 @@ host 側で入れとるだけで、エンジン本体には無い。素の Vm �
 本当に穴かどうかは `EngineSession` 経由か、実頁を `TOBIRA_DEBUG_CONSOLE=1` で
 見て判断すること。逆に、コンパイラで落ちるもの（bigint・`with`・`#x in o`・
 `o?.#x`・オブジェクトリテラルのメソッド内 `super`）はプレリュードでは救えん。
+
+**JS を触ったら `TOBIRA_GC_VERIFY=1` で一度回す。** GC が「回収せずに印だけ
+付ける」モードになり、印の付いた cell を後から読んだら
+`[gc-verify] a root holding this reference was not traced` が出る。挙動は
+変わらんので、実頁を開くのにも使える。ルートの取りこぼしは stale な GcRef が
+`None` を返すだけで落ちんため、症状が原因から遠い。**新しく Value や GcRef を
+持つ入れ物を足したときは必ずこれを回すこと。** 全テストと実頁 5 枚で報告 0 が
+今の状態。
 
 **エンジンの速さを測るなら受け手の幅を変えて測る。** 呼び出し 20,000 回を
 receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理が
@@ -107,6 +116,23 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
   流し（snapshot に乗る）、`TOBIRA_DEBUG_CONSOLE` なら backtrace 付きで stderr にも出す。
   `take_job_errors` で host が引き取る。`run_due_jobs` が返すのは
   **走った**仕事の数で、投げた callback は数えん。
+- **GC のルートは型で強制する**（`src/engine/trace.rs`）
+  `Trace` の実装は列挙を網羅 match で書き（`_ =>` 禁止）、構造体は全項目分解で
+  書く（`..` 禁止）。`Vm::trace_roots` は `Vm` の 61 フィールドを一つ残らず
+  並べてあり、参照を持たんものは `_` に理由付きで束ねてある。**フィールドや
+  variant を足すとビルドが止まる。** 止まったらそれが仕掛けの作動や。
+  辿るか、`_` にして「参照を持たん」と書くか、どちらかを決めること。
+- **GC を起こしてええ場所は二箇所だけ**（`vm.rs` の `maybe_collect_garbage`）
+  解釈ループの先頭と、event loop のターンの境目。しかも `reentry_depth == 0`
+  のときだけ（`call_value_sync` と `invoke_builtin` で上げる）。
+  理由: `Array.prototype.map` が結果を Rust の `Vec` に溜めながら JS を
+  呼び戻す最中は、その `Vec` の中身をどのルートからも辿れん。
+  **allocate の中で走らせたらあかん。**
+- **`callables` と `string_cache` は弱い、DOM 側の表は強い**
+  前者を強くすると全ての関数と全ての intern 済み文字列が不死になって、
+  回収するものがほぼ無うなる。後者（`event_listeners`・`node_wrappers`・
+  `mutation_observers`・`dom_interface_ctors`）を弱くすると、頁が要素に付けた
+  expando が二回の読みの間で消える。寿命は DOM 側が持つ。
 - **`<isindex>` は追わん**と決めた。html5lib の残りに数件あるが、現実の頁に無い。
 - **省リソースは第二目標**。2026-08-23 に「まず実用ブラウザ」へ方針変更済み。
   メモリのために正しさを落とす判断はもうしとらん。
@@ -160,16 +186,32 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
 - **表のセル背景を二度塗っとる**。半透明を重ねると濃くなる。
 - **差分 restyle** は既定 ON（`TOBIRA_INCREMENTAL_RESTYLE`）。
   `docs/JS_ROADMAP.md` の Phase5 に「blocker」と書いてあるのは古い記述。
-- **JS の GC は一度も走らん**。`heap.rs` に `GcColor`・`RootSet`・`free_for_gc` は
-  書いてあるが**呼び出し元が無い**。頁を捨てるまでヒープは単調増加。
-  `tests/gc_heap_growth.rs` がその現状を仕様として書き留めとる。
-- **文字列は作った端から永久に intern される**（`vm.rs` の `make_string_value`）。
-  動的に作った文字列も `string_cache` に入り、key として String をもう一部持つ。
-  `s += 'x'` を n 回まわすと途中経過が全部残って O(n²)（n=2000 で 2MB、cache 側で更に同量）。
+- **ループ本体で宣言した `const` / `let` を捕まえた closure が全部同じ束縛を見る。**
+  2026-09-04 に GC の作業中に見つけた既存バグ。GC とは無関係（GC を入れる前の
+  コードでも同じ）。
+  ```js
+  const f=[]; for(let i=0;i<3;i++){ f.push(()=>i); }        // 0,1,2  正しい
+  const f=[]; for(let i=0;i<3;i++){ const n=i; f.push(()=>n); } // 2,2,2  誤り
+  ```
+  `let` でも、ブロックで囲んでも、`while` でも同じ。ループ変数自身は
+  `FreshenLocal`（`chunk.rs`）で毎周新しい枠をもらうが、**本体で宣言した
+  束縛にはそれが無い**。`for (…) { const item = items[i]; el.addEventListener(
+  'click', () => use(item)); }` という実頁で一番よくある書き方が丸ごと壊れる
+  ので、優先度は高い。「次の一手」の 7 番。
+- **文字列は intern される**（`vm.rs` の `make_string_value`）。GC が入って
+  `string_cache` は弱表になったので漏れはせんが、cache は key として String を
+  もう一部持っとる（intern 済みの分が 2 倍）。
   合わせて `string_text` が**毎回全長を clone** する。`if (s)` の真偽判定でもコピーが走る。
   `s.length` は `chars().count()`、`s[i]` は `chars().nth(i)` で両方 O(n)。
+  ここは `Value::String` の表現に手が入るので独立した回が要る。
 - **`Map` / `Set` は `Vec` の線形走査**（`value.rs` の `ObjectKind::Map`）。
   n=500 で 28ms、1000 で 104ms、2000 で 427ms ときれいに O(n²)。
+- **GC は世界を止める単純な mark-sweep**。増分でも世代別でもない。今は
+  収集一回が短い（実頁で目に見える停止は出とらん）が、live 集合が大きい頁で
+  引っかかるようなら最初に手を入れるのはここ。
+- **収集の閾値は「生き残りの 2 倍、最低 4096 枠 / 1MB」**（`vm.rs` の
+  `rearm_gc_threshold`）。つまり最大でそのぶんのゴミは常に抱えとる。
+  `s += 'x'` が n によらず 0.1〜1.7MB に収まるのはこの閾値のせい。
 - **inline cache も hidden class も無い**。`PropertyKey::String(String)` なので
   `a.b` のたびに String を確保する。ディスパッチループは `Opcode` を二度 clone
   しとる（`Opcode` の中身は全部スカラーなので `Copy` を derive できるはず）。
@@ -209,17 +251,19 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    時間軸、再描画の駆動が要る。着手するなら独立した回を丸ごと使うこと。
    **fuel をターンごとにする修正（2026-09-04）を入れる前にこれを作っとったら、
    完成した瞬間に「二分で止まる」を踏んどった。** 今は踏まん。
-7. **文字列の intern をやめる** — `vm.rs` の `make_string_value`。
-   リテラルだけ intern して、実行時に作った文字列は素通しにする。
-   `string_text` が全長 clone を返しとるのも合わせて（`&str` を返すか、
-   長さだけ要る場面は長さだけ引く）。頁を開きっぱなしで膨らむ問題の主犯。
+7. **ループ本体の束縛を毎周新しくする** — 上の「未確定」参照。
+   `()=>i` は正しいのに `const n=i; ()=>n` が壊れる。実頁で一番よくある
+   listener の書き方が丸ごと外れるので、ここが今いちばん割に合う。
+   ループ変数に効いとる `FreshenLocal` を、本体で宣言されて捕獲された
+   束縛にも出す。`compiler/statements.rs` のループ生成と
+   `compiler/scope.rs` を対で見ること。
 8. **`Map` / `Set` を索引化** — `Vec` の線形走査をやめる。
    キーが `Value` なので単純に `HashMap` にはできん（NaN と -0、
    オブジェクトの同一性）。挿入順は保つこと。
-9. **JS の GC** — `heap.rs` に道具は揃っとるが繋がっとらん。
-   ルートは VM のスタック・フレーム・globals・`node_wrappers`・
-   `event_listeners`・各種 prototype・observer の登録簿と広い。
-   独立した回が要る。7 と 8 を先にやるほうが安い。
+9. **文字列の表現** — `string_text` の全長 clone、`s.length` の
+   `chars().count()`、`s[i]` の `chars().nth(i)`。`Value::String` の
+   表現に手が入るので独立した回が要る。GC が入った今、これは漏れやのうて
+   速さの話。
 10. **html5lib 残り 37 件** — 大半は adoption agency の深いところ。
    `TOBIRA_H5_FILE=adoption01.dat` から。費用対効果は他より低い。
 
@@ -234,7 +278,9 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
 | `src/font.rs` | face の読み込みとグリフ。名前付き family、字ごとの fallback |
 | `src/gui.rs` | 窓、アドレス欄、当たり判定、`paint_layout` |
 | `src/main.rs` | CLI。`--cli` / `--dump-styled` / `--screenshot` |
-| `src/engine/` | 自作 JS エンジン（コンパイラ + VM + ヒープ）。boa は parser front-end のみ。手書きの字句解析器は無い（`lexer.rs` は死んどったので 2026-09-04 に削除） |
+| `src/engine/` | 自作 JS エンジン（コンパイラ + VM + GC）。boa は parser front-end のみ。手書きの字句解析器は無い（`lexer.rs` は死んどったので 2026-09-04 に削除） |
+| `src/engine/trace.rs` | GC の到達可能性。**ここが壊れると事故が遠くで出る**。書き方の決まりは冒頭のコメント |
+| `src/engine/heap.rs` | arena、世代番号、掃除、`TOBIRA_GC_VERIFY` の印 |
 | `src/engine_host.rs` | DOM ↔ JS の橋。`RUNTIME_PRELUDE`、`start_with_styles` |
 | `src/js.rs` | スクリプト実行の入り口とポリシー |
 | `tools/geom/` | Chrome 突き合わせ用の合成頁と `cmp.py` |
@@ -267,6 +313,26 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-09-04 - Claude (GC を繋ぐ: 35f6ce1)
+
+- 出発点は「文字列の intern をやめれば漏れが止まる」という筋やったが、
+  **実験したら間違いやった**。cache を切った版と比べると、`s += 'x'` の
+  n²/2 は 1 バイトも減らん（arena 側に積まれとるため）うえ、同じ文字列を
+  繰り返し作る頁では 88〜250 倍悪化した。cache は漏れの原因やのうて、
+  GC が無いことへの緩和策やった。**着手前に対照を取ったから気づけた。**
+  真犯人は GC が無いこと一つ。
+- ルート列挙は「今あるもの」より「これから増えるもの」が事故る、という
+  指摘を受けて、型で強制する形にした（網羅 match と全項目分解）。
+  これは実際に何度も効いた。書いとる最中に `Vm` へフィールドを足すたび
+  ビルドが止まって、辿るかどうかを毎回決めさせられた。
+- `TOBIRA_GC_VERIFY` は**自分の実装の穴を一つ見つけた**。検証モードだけ
+  弱表を掃除しとらんかったせいで誤検知が 4 件出た。検証の仕掛けが自分の嘘で
+  鳴るのが一番あかんので、掃除は両モードでやるようにした。
+- 途中で**既存の closure バグ**を踏んだ（ループ本体の `const` を捕まえた
+  closure が全部同じ束縛を見る）。GC とは無関係で、入れる前のコードでも
+  再現する。GC のコミットに混ぜると濁るので別にして、「次の一手」の 7 番に
+  積んだ。テストのほうを壊れとらん書き方に変えてある。
 
 ### 2026-09-04 - Claude (JS エンジンの棚卸し: 64b87f7..8c081ee)
 
