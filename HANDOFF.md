@@ -20,11 +20,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## いまの状態（2026-09-04）
 
-- ブランチ `master`。この文書を書いた時点の HEAD は `35f6ce1`
+- ブランチ `master`。この文書を書いた時点の HEAD は `6b879fa`
   （この文書のコミットが直後に乗る）。
 - `cargo build --release` 通る。警告は dead_code のみ。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1134 通過 / 0 落ち**。
+- `cargo test --release` → **1145 通過 / 0 落ち**。
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
   数え方: `cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result" | awk '{p+=$4; f+=$6} END {print p, f}'`
   （`tr -d '\000'` は必須。出力に NUL が混ざって grep が binary 扱いする）
@@ -116,6 +116,17 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
   流し（snapshot に乗る）、`TOBIRA_DEBUG_CONSOLE` なら backtrace 付きで stderr にも出す。
   `take_job_errors` で host が引き取る。`run_due_jobs` が返すのは
   **走った**仕事の数で、投げた callback は数えん。
+- **周回ごとの束縛は「宣言された枠 ∩ 捕獲された枠」だけ**
+  （`compiler/statements.rs` の `begin_loop_body` / `end_loop_body`）
+  ループ変数は元から `FreshenLocal` をもらっとったが、本体で宣言した
+  `let`/`const` はもらっとらんかった（2026-09-04 に修正）。
+  `declare_block_scoped` が囲んでいるループ本体に枠を記録し、本体を畳んだ後で
+  「その本体で作られた入れ子関数の upvalue descriptor（`is_local=true`）」と
+  積を取る。**閉包を作らんループには命令が一つも増えん。**
+  `var` は `declare_function_scoped` を通るので記録されん。関数スコープで
+  一つの束縛が正しいので、**ここに var を混ぜたら今正しいものが壊れる。**
+  `while` と `do-while` だけ `continue` の着地点をずらしてある（この二つは
+  continue がループ先頭／条件へ飛ぶので、本体末尾の freshen を飛び越すため）。
 - **GC のルートは型で強制する**（`src/engine/trace.rs`）
   `Trace` の実装は列挙を網羅 match で書き（`_ =>` 禁止）、構造体は全項目分解で
   書く（`..` 禁止）。`Vm::trace_roots` は `Vm` の 61 フィールドを一つ残らず
@@ -186,18 +197,6 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
 - **表のセル背景を二度塗っとる**。半透明を重ねると濃くなる。
 - **差分 restyle** は既定 ON（`TOBIRA_INCREMENTAL_RESTYLE`）。
   `docs/JS_ROADMAP.md` の Phase5 に「blocker」と書いてあるのは古い記述。
-- **ループ本体で宣言した `const` / `let` を捕まえた closure が全部同じ束縛を見る。**
-  2026-09-04 に GC の作業中に見つけた既存バグ。GC とは無関係（GC を入れる前の
-  コードでも同じ）。
-  ```js
-  const f=[]; for(let i=0;i<3;i++){ f.push(()=>i); }        // 0,1,2  正しい
-  const f=[]; for(let i=0;i<3;i++){ const n=i; f.push(()=>n); } // 2,2,2  誤り
-  ```
-  `let` でも、ブロックで囲んでも、`while` でも同じ。ループ変数自身は
-  `FreshenLocal`（`chunk.rs`）で毎周新しい枠をもらうが、**本体で宣言した
-  束縛にはそれが無い**。`for (…) { const item = items[i]; el.addEventListener(
-  'click', () => use(item)); }` という実頁で一番よくある書き方が丸ごと壊れる
-  ので、優先度は高い。「次の一手」の 7 番。
 - **文字列は intern される**（`vm.rs` の `make_string_value`）。GC が入って
   `string_cache` は弱表になったので漏れはせんが、cache は key として String を
   もう一部持っとる（intern 済みの分が 2 倍）。
@@ -245,26 +244,25 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    その後（設計判断が要る。translate も描画時に寄せるほうが筋がええ）。
 5. **HN の投票矢印** — 未解明。`triangle.svg` の取得は成功しとる
    （`TOBIRA_DEBUG_IMAGES=1` で "style image ok"）。同じ CSS と入れ子を
-   合成頁で作ると出る。次は `TOBIRA_DEBUG_PAINT=1` で描画命令が生成されて
-   おるかどうかから切り分ける。命令が無いならレイアウト、あるなら描画。
+   合成頁で作ると出る。
+   **2026-09-04 に二つ分かった。** (a) closure バグが原因やろかと疑うたが、
+   直しても矢印は出んかった。別件。(b) `--dump-styled` に `votearrow` の箱が
+   **一つも出とらん**。画像は取れとって箱が無いので、描画やのうて
+   **箱の生成**の側や。HN の形は `<a><div class='votearrow'></div></a>` で、
+   中身が空・`width:10px;height:10px`・背景画像だけの塊。
+   次はその形を合成頁で最小再現すること。
 6. **CSS transition / animation** — 一番でかい未実装。`@keyframes` のパース、
    時間軸、再描画の駆動が要る。着手するなら独立した回を丸ごと使うこと。
    **fuel をターンごとにする修正（2026-09-04）を入れる前にこれを作っとったら、
    完成した瞬間に「二分で止まる」を踏んどった。** 今は踏まん。
-7. **ループ本体の束縛を毎周新しくする** — 上の「未確定」参照。
-   `()=>i` は正しいのに `const n=i; ()=>n` が壊れる。実頁で一番よくある
-   listener の書き方が丸ごと外れるので、ここが今いちばん割に合う。
-   ループ変数に効いとる `FreshenLocal` を、本体で宣言されて捕獲された
-   束縛にも出す。`compiler/statements.rs` のループ生成と
-   `compiler/scope.rs` を対で見ること。
-8. **`Map` / `Set` を索引化** — `Vec` の線形走査をやめる。
+7. **`Map` / `Set` を索引化** — `Vec` の線形走査をやめる。
    キーが `Value` なので単純に `HashMap` にはできん（NaN と -0、
    オブジェクトの同一性）。挿入順は保つこと。
-9. **文字列の表現** — `string_text` の全長 clone、`s.length` の
+8. **文字列の表現** — `string_text` の全長 clone、`s.length` の
    `chars().count()`、`s[i]` の `chars().nth(i)`。`Value::String` の
    表現に手が入るので独立した回が要る。GC が入った今、これは漏れやのうて
    速さの話。
-10. **html5lib 残り 37 件** — 大半は adoption agency の深いところ。
+9. **html5lib 残り 37 件** — 大半は adoption agency の深いところ。
    `TOBIRA_H5_FILE=adoption01.dat` から。費用対効果は他より低い。
 
 ## 主なモジュール
@@ -313,6 +311,23 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-09-04 - Claude (ループ本体の束縛: 6b879fa)
+
+- GC の回で踏んだ closure バグを直した。詳しくはコミットに書いた。
+- **この種の壊れ方が一番たちが悪い**、というのがこの回の教訓。投げん、
+  console にも出ん、頁は表示される。ただ listener が全部最後の要素を見る。
+  「未捕捉 JS エラー 0」を合格基準にしとると素通りする。
+  これまで「一致に近い」と判定してきた頁も、当たり判定は確かめとらん。
+- 直す前に 22 形の検体を作ったのが効いた。`var n=i` が 222、`for(var i)` が
+  333 で**正しい**（関数スコープ）ことに気づけたのはこれのおかげで、
+  素朴に「本体で確保された枠を全部新しくする」と書いとったら、今正しい
+  ものを壊しとった。**直す前に「変えたらあかんもの」を先に固定すること。**
+- 費用の心配（閉包を作らんループが毎周払うのでは）は、捕獲の情報が
+  upvalue descriptor にそのまま在ったので回避できた。時間やのうて
+  **命令数**で確かめてある（閉包なしのループは +0）。
+- HN の投票矢印はこれでは直らんかった。ただ `--dump-styled` に箱が
+  一つも出とらんことが分かったので、切り分けは一つ進んだ（次の一手 5 番）。
 
 ### 2026-09-04 - Claude (GC を繋ぐ: 35f6ce1)
 
