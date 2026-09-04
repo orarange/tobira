@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>repeat with a raster image</title>
+<style>
+ body{font-family:Verdana,sans-serif;font-size:10pt}
+ div.b{width:40px;height:40px;border:1px solid #ccc;margin:4px 0}
+ .lbl{font-size:8pt;color:#666}
+ .p1{background-image:url("dot.png");background-repeat:no-repeat}
+ .p2{background-image:url("dot.png");background-repeat:repeat}
+ .p3{background-image:url("dot.png")}
+ .s1{background-image:url("triangle.svg");background-repeat:no-repeat}
+ .s2{background-image:url("triangle.svg");background-repeat:repeat}
+</style></head><body>
+<p class="lbl">40x40 boxes. dot.png is 8x8 red; triangle.svg is 32x32.</p>
+<div class="lbl">p1 png no-repeat</div><div class="b p1"></div>
+<div class="lbl">p2 png repeat (should tile 5x5)</div><div class="b p2"></div>
+<div class="lbl">p3 png, repeat by default</div><div class="b p3"></div>
+<div class="lbl">s1 svg no-repeat</div><div class="b s1"></div>
+<div class="lbl">s2 svg repeat</div><div class="b s2"></div>
+</body></html>

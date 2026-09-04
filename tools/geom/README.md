@@ -22,3 +22,17 @@ python tools/geom/cmp.py g4.html
 Scores are from 2026-09-04 at 1280px. They are not asserted anywhere — this is
 a hand-run tool, not a test. `g2` and `g4` are the weak pair and both are about
 the same thing: how many rectangles an inline box owns and where they split.
+
+## arrow*.html — HN の投票矢印がなぜ出んかったか（2026-09-04）
+
+`arrow.html` が形の軸（表・`<center>`・`<a>` の中の `<div>`・空要素）を一つずつ外す。
+どれも無関係やった。`arrow2.html` が背景の書き方を分ける。`arrow3.html` が
+`background-repeat` だけを変える。`arrow4.html` が SVG と PNG で比べる。
+
+結論: **`background-repeat: repeat`（CSS の初期値）が敷き詰めをせん。**
+塗り側で `ObjectFit::None` に落としとるので（`layout.rs:2409` ほか3箇所）、
+原寸の一枚を切り抜いて置くだけになり、`background-size` もその経路では捨てられる。
+単色の画像やと区別がつかんが、箱より大きい画像やと切り抜かれた隅だけが出る。
+HN は 10x10 の箱に 32x32 の SVG なので、隅が空白で丸ごと消えて見えとった。
+
+`dot.png` は 8x8 の赤一色、`triangle.svg` は HN から取ってきた実物。

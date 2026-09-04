@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>votearrow minimal repro</title>
+<style>
+  body { font-family: Verdana, sans-serif; font-size: 10pt; }
+  /* HN's real rule, copied verbatim from news.css. */
+  .votearrow {
+    width:      10px;
+    height:     10px;
+    border:     0px;
+    margin:     3px 2px 6px;
+    background: url("triangle.svg"), linear-gradient(transparent, transparent) no-repeat;
+    background-size: 10px;
+  }
+  /* Variants that peel one thing off at a time. */
+  .single-layer { background: url("triangle.svg") no-repeat; background-size: 10px; }
+  .colour-only  { background: #f00; }
+  .no-size      { background: url("triangle.svg") no-repeat; }
+  td { border: 1px solid #ccc; }
+  .lbl { font-size: 8pt; color: #666; }
+</style>
+</head>
+<body>
+
+<p class="lbl">Each row is one variant. Anything that shows a grey triangle works.</p>
+
+<table border="0">
+  <tr><td class="lbl">1 exact HN shape<br>td &gt; center &gt; a &gt; div</td>
+      <td><center><a href="#"><div class="votearrow" title="upvote"></div></a></center></td></tr>
+
+  <tr><td class="lbl">2 no &lt;a&gt; wrapper<br>td &gt; center &gt; div</td>
+      <td><center><div class="votearrow"></div></center></td></tr>
+
+  <tr><td class="lbl">3 no &lt;center&gt;<br>td &gt; a &gt; div</td>
+      <td><a href="#"><div class="votearrow"></div></a></td></tr>
+
+  <tr><td class="lbl">4 &lt;a&gt; made block<br>td &gt; a(block) &gt; div</td>
+      <td><a href="#" style="display:block"><div class="votearrow"></div></a></td></tr>
+
+  <tr><td class="lbl">5 bare div in td<br>td &gt; div</td>
+      <td><div class="votearrow"></div></td></tr>
+
+  <tr><td class="lbl">6 div has text<br>td &gt; a &gt; div("x")</td>
+      <td><a href="#"><div class="votearrow">x</div></a></td></tr>
+
+  <tr><td class="lbl">7 single-layer bg<br>td &gt; a &gt; div</td>
+      <td><a href="#"><div class="votearrow single-layer"></div></a></td></tr>
+
+  <tr><td class="lbl">8 background COLOUR<br>td &gt; a &gt; div</td>
+      <td><a href="#"><div class="votearrow colour-only"></div></a></td></tr>
+
+  <tr><td class="lbl">9 no background-size<br>td &gt; a &gt; div</td>
+      <td><a href="#"><div class="votearrow no-size"></div></a></td></tr>
+
+  <tr><td class="lbl">10 span(inline) &gt; div<br>not an &lt;a&gt;</td>
+      <td><span><div class="votearrow"></div></span></td></tr>
+
+  <tr><td class="lbl">11 &lt;a&gt; &gt; span(inline-block)</td>
+      <td><a href="#"><span class="votearrow" style="display:inline-block"></span></a></td></tr>
+
+  <tr><td class="lbl">12 &lt;img&gt; for comparison</td>
+      <td><a href="#"><img src="triangle.svg" width="10" height="10"></a></td></tr>
+</table>
+
+<p class="lbl">Outside any table, same variants:</p>
+<div>13 a &gt; div: <a href="#"><div class="votearrow"></div></a></div>
+<div>14 bare div: <div class="votearrow"></div></div>
+<div>15 colour, a &gt; div: <a href="#"><div class="votearrow colour-only"></div></a></div>
+
+</body>
+</html>

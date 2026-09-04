@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>votearrow: which part of the background</title>
+<style>
+  body { font-family: Verdana, sans-serif; font-size: 10pt; }
+  div.s { width: 10px; height: 10px; margin: 3px 2px 6px; border: 0px; }
+  .lbl { font-size: 8pt; color: #666; }
+  td { border: 1px solid #ddd; padding: 2px 6px; }
+
+  /* A: single image layer -- known to work */
+  .a { background: url("triangle.svg") no-repeat; background-size: 10px; }
+  /* B: HN's exact declaration -- known to fail */
+  .b { background: url("triangle.svg"), linear-gradient(transparent, transparent) no-repeat;
+       background-size: 10px; }
+  /* C: two image layers, no gradient */
+  .c { background: url("triangle.svg"), url("triangle.svg") no-repeat; background-size: 10px; }
+  /* D: same two layers via the longhand */
+  .d { background-image: url("triangle.svg"), linear-gradient(transparent, transparent);
+       background-repeat: no-repeat; background-size: 10px; }
+  /* E: longhand, one layer */
+  .e { background-image: url("triangle.svg"); background-repeat: no-repeat; background-size: 10px; }
+  /* F: the gradient layer on its own */
+  .f { background: linear-gradient(transparent, transparent) no-repeat; background-size: 10px; }
+  /* G: B but the gradient is opaque red -- shows which layer wins */
+  .g { background: url("triangle.svg"), linear-gradient(red, red) no-repeat; background-size: 10px; }
+  /* H: gradient FIRST, image second */
+  .h { background: linear-gradient(transparent, transparent), url("triangle.svg") no-repeat;
+       background-size: 10px; }
+  /* I: B without background-size */
+  .i { background: url("triangle.svg"), linear-gradient(transparent, transparent) no-repeat; }
+  /* J: B with an opaque background-color underneath */
+  .j { background: url("triangle.svg"), linear-gradient(transparent, transparent) no-repeat #eee;
+       background-size: 10px; }
+</style>
+</head>
+<body>
+<p class="lbl">A grey triangle = the image painted. Row A is the control that works.</p>
+<table>
+<tr><td class="lbl">A single image layer</td><td><div class="s a"></div></td></tr>
+<tr><td class="lbl">B HN exact (img, gradient)</td><td><div class="s b"></div></td></tr>
+<tr><td class="lbl">C two image layers</td><td><div class="s c"></div></td></tr>
+<tr><td class="lbl">D longhand, img + gradient</td><td><div class="s d"></div></td></tr>
+<tr><td class="lbl">E longhand, one image</td><td><div class="s e"></div></td></tr>
+<tr><td class="lbl">F gradient alone</td><td><div class="s f"></div></td></tr>
+<tr><td class="lbl">G img + OPAQUE RED gradient</td><td><div class="s g"></div></td></tr>
+<tr><td class="lbl">H gradient first, img second</td><td><div class="s h"></div></td></tr>
+<tr><td class="lbl">I B without background-size</td><td><div class="s i"></div></td></tr>
+<tr><td class="lbl">J B plus a #eee colour</td><td><div class="s j"></div></td></tr>
+</table>
+</body>
+</html>

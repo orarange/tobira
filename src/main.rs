@@ -252,7 +252,7 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                         // Padding and margin decide most of a page's spacing, and
                         // reading them back from a stylesheet is guesswork once
                         // shorthands, logical names and the cascade are in play.
-                        "{}<{} class=\"{}\" display={:?} position={:?} bg={} color={:#08x} fs={} opacity={} pad={},{},{},{} mar={},{},{},{} minh={} mask={} style=\"{}\">{}",
+                        "{}<{} class=\"{}\" display={:?} position={:?} bg={} bgimg={} size={:?},{:?} color={:#08x} fs={} opacity={} pad={},{},{},{} mar={},{},{},{} minh={} mask={} style=\"{}\">{}",
                         "  ".repeat(depth),
                         e.tag_name,
                         cls,
@@ -266,6 +266,15 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                             Some(c) => format!("{c:#08x}"),
                             None => "none".to_string(),
                         },
+                        // background-color alone was not enough: a box whose
+                        // whole appearance IS a background image (an icon, a
+                        // sprite) looked identical to an unstyled one here, and
+                        // that cost a wrong turn chasing HN's vote arrows.
+                        e.style.background_image_url.as_deref().unwrap_or("-"),
+                        // A declared width/height that never took effect is the
+                        // other way an icon-sized box vanishes.
+                        e.style.width,
+                        e.style.height,
                         e.style.color,
                         e.style.font_size_px,
                         e.style.opacity,
