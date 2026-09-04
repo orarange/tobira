@@ -1,8 +1,12 @@
 use tobira_engine::engine::{Compiler, Heap, Parser, Vm};
 
 fn run(src: &str) -> Result<(), String> {
-    let p = Parser::new(src).parse().map_err(|e| format!("PARSE: {e:?}"))?;
-    let c = Compiler::new(&p).compile().map_err(|e| format!("COMPILE: {e:?}"))?;
+    let p = Parser::new(src)
+        .parse()
+        .map_err(|e| format!("PARSE: {e:?}"))?;
+    let c = Compiler::new(&p)
+        .compile()
+        .map_err(|e| format!("COMPILE: {e:?}"))?;
     Vm::new(Heap::new())
         .execute(&c)
         .map(|_| ())

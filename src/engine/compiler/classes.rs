@@ -2,8 +2,8 @@ use boa_ast::function::PrivateFieldDefinition;
 
 use super::super::ast::{
     ClassDeclarationNode, ClassElementNameNode, ClassElementNode, ClassExpressionNode,
-    ClassFieldDefinitionNode, ClassMethodDefinitionNode, ExpressionNode,
-    MethodDefinitionKindNode, SuperCallExpression, SuperPropertyAccessNode,
+    ClassFieldDefinitionNode, ClassMethodDefinitionNode, ExpressionNode, MethodDefinitionKindNode,
+    SuperCallExpression, SuperPropertyAccessNode,
 };
 use super::super::chunk::Opcode;
 use super::{
@@ -150,7 +150,8 @@ impl<'a> super::FunctionCompiler<'a> {
                 ClassElementNode::PrivateFieldDefinition(_) => {}
                 ClassElementNode::PrivateStaticFieldDefinition(field) => {
                     self.emit(Opcode::GetLocal(class_slot));
-                    let constant = self.add_string_constant(self.private_field_key(field.name()))?;
+                    let constant =
+                        self.add_string_constant(self.private_field_key(field.name()))?;
                     self.emit(Opcode::LoadConst(constant));
                     if let Some(initializer) = field.initializer() {
                         self.compile_expression(initializer)?;
@@ -343,7 +344,10 @@ impl<'a> super::FunctionCompiler<'a> {
         Ok(())
     }
 
-    pub(super) fn compile_super_call(&mut self, call: &SuperCallExpression) -> Result<(), CompileError> {
+    pub(super) fn compile_super_call(
+        &mut self,
+        call: &SuperCallExpression,
+    ) -> Result<(), CompileError> {
         if call
             .arguments()
             .iter()

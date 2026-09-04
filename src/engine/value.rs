@@ -390,14 +390,10 @@ impl std::fmt::Debug for ObjectKind {
                 .finish(),
             Self::Map(entries) => f.debug_tuple("Map").field(entries).finish(),
             Self::Set(values) => f.debug_tuple("Set").field(values).finish(),
-            Self::UrlSearchParams(pairs) => {
-                f.debug_tuple("UrlSearchParams").field(pairs).finish()
-            }
+            Self::UrlSearchParams(pairs) => f.debug_tuple("UrlSearchParams").field(pairs).finish(),
             Self::Headers(pairs) => f.debug_tuple("Headers").field(pairs).finish(),
             Self::FormData(pairs) => f.debug_tuple("FormData").field(pairs).finish(),
-            Self::ArrayBuffer(bytes) => {
-                f.debug_tuple("ArrayBuffer").field(&bytes.len()).finish()
-            }
+            Self::ArrayBuffer(bytes) => f.debug_tuple("ArrayBuffer").field(&bytes.len()).finish(),
             Self::TypedArray {
                 kind,
                 byte_offset,
@@ -411,10 +407,9 @@ impl std::fmt::Debug for ObjectKind {
                 .finish(),
             Self::WeakMap(entries) => f.debug_tuple("WeakMap").field(entries).finish(),
             Self::WeakSet(values) => f.debug_tuple("WeakSet").field(values).finish(),
-            Self::LazyIterator { done, .. } => f
-                .debug_struct("LazyIterator")
-                .field("done", done)
-                .finish(),
+            Self::LazyIterator { done, .. } => {
+                f.debug_struct("LazyIterator").field("done", done).finish()
+            }
             Self::ForOfIterator { values, index } => f
                 .debug_struct("ForOfIterator")
                 .field("values", values)

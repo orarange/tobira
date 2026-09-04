@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use serde_json::Value;
 
 use crate::css::{
-    build_styled_tree, build_styled_tree_incremental, InteractiveState, StyledNode, Stylesheet,
+    InteractiveState, StyledNode, Stylesheet, build_styled_tree, build_styled_tree_incremental,
     parse_media_condition, parse_stylesheet,
 };
 use crate::error::Result;
@@ -100,7 +100,8 @@ impl BrowserPage {
             && !self.node_order.is_empty()
         {
             let old_node_order: Vec<u32> = self.node_order.iter().map(|id| id.0 as u32).collect();
-            let new_node_order: Vec<u32> = snapshot.node_order.iter().map(|id| id.0 as u32).collect();
+            let new_node_order: Vec<u32> =
+                snapshot.node_order.iter().map(|id| id.0 as u32).collect();
             rebuild_page_from_html_incremental(
                 &url,
                 self.status_code,
@@ -455,15 +456,14 @@ fn rebuild_page_from_document(
     let stylesheet = collect_stylesheet(&document, url);
     let mut images = collect_image_resources(&document);
     let rendered = include_rendered_output.then(|| render_document(&document));
-    let styled_document = styled_document
-        .unwrap_or_else(|| {
-            build_styled_tree(
-                &document,
-                &stylesheet,
-                style_viewport_width(),
-                &InteractiveState::default(),
-            )
-        });
+    let styled_document = styled_document.unwrap_or_else(|| {
+        build_styled_tree(
+            &document,
+            &stylesheet,
+            style_viewport_width(),
+            &InteractiveState::default(),
+        )
+    });
     collect_styled_background_images(&styled_document, url, &mut images);
 
     BrowserPage {
@@ -552,7 +552,7 @@ fn rebuild_page_from_html_incremental(
 
 fn incremental_restyle_enabled() -> bool {
     #[cfg(test)]
-#[cfg(test)]
+    #[cfg(test)]
     if INCREMENTAL_RESTYLE_OVERRIDE_SET.load(std::sync::atomic::Ordering::Relaxed) {
         return INCREMENTAL_RESTYLE_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
     }
@@ -562,7 +562,10 @@ fn incremental_restyle_enabled() -> bool {
     // to force the old always-full-rebuild path.
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        !matches!(std::env::var("TOBIRA_INCREMENTAL_RESTYLE").as_deref(), Ok("0"))
+        !matches!(
+            std::env::var("TOBIRA_INCREMENTAL_RESTYLE").as_deref(),
+            Ok("0")
+        )
     })
 }
 
@@ -668,7 +671,9 @@ fn synthesize_non_html_document(
 
     if media_type.starts_with("image/") {
         let src = escape_html_attribute(&final_url.to_string());
-        return Some(format!("<html><body><img src=\"{src}\" alt=\"\"></body></html>"));
+        return Some(format!(
+            "<html><body><img src=\"{src}\" alt=\"\"></body></html>"
+        ));
     }
 
     if media_type == "text/plain" {
@@ -979,7 +984,8 @@ fn collect_frame_specs_into(node: &Node, output: &mut Vec<FrameSpec>) {
 }
 
 fn section_heading_node(title: &str) -> Node {
-    Node::Element(Element { namespace: Default::default(),
+    Node::Element(Element {
+        namespace: Default::default(),
         tag_name: "h2".to_string(),
         attributes: BTreeMap::new(),
         children: vec![Node::Text(title.to_string())],
@@ -1024,7 +1030,8 @@ fn frame_display_priority(frame: &FrameSpec) -> u8 {
 }
 
 fn hr_node() -> Node {
-    Node::Element(Element { namespace: Default::default(),
+    Node::Element(Element {
+        namespace: Default::default(),
         tag_name: "hr".to_string(),
         attributes: BTreeMap::new(),
         children: Vec::new(),
@@ -1055,23 +1062,28 @@ fn synthetic_frameset_document(title: &str, body_children: Vec<Node>) -> Node {
 }
 
 fn synthetic_document(title: &str, body_children: Vec<Node>) -> Node {
-    Node::Element(Element { namespace: Default::default(),
+    Node::Element(Element {
+        namespace: Default::default(),
         tag_name: "document".to_string(),
         attributes: BTreeMap::new(),
-        children: vec![Node::Element(Element { namespace: Default::default(),
+        children: vec![Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "html".to_string(),
             attributes: BTreeMap::new(),
             children: vec![
-                Node::Element(Element { namespace: Default::default(),
+                Node::Element(Element {
+                    namespace: Default::default(),
                     tag_name: "head".to_string(),
                     attributes: BTreeMap::new(),
-                    children: vec![Node::Element(Element { namespace: Default::default(),
+                    children: vec![Node::Element(Element {
+                        namespace: Default::default(),
                         tag_name: "title".to_string(),
                         attributes: BTreeMap::new(),
                         children: vec![Node::Text(title.to_string())],
                     })],
                 }),
-                Node::Element(Element { namespace: Default::default(),
+                Node::Element(Element {
+                    namespace: Default::default(),
                     tag_name: "body".to_string(),
                     attributes: BTreeMap::new(),
                     children: body_children,
@@ -1098,7 +1110,8 @@ fn synthetic_frameset_columns_document(
                     attrs.insert(key.to_string(), val.clone());
                 }
             }
-            Node::Element(Element { namespace: Default::default(),
+            Node::Element(Element {
+                namespace: Default::default(),
                 tag_name: "td".to_string(),
                 attributes: attrs,
                 children,
@@ -1108,10 +1121,12 @@ fn synthetic_frameset_columns_document(
 
     synthetic_frameset_document(
         title,
-        vec![Node::Element(Element { namespace: Default::default(),
+        vec![Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "table".to_string(),
             attributes: full_width_table_attributes(),
-            children: vec![Node::Element(Element { namespace: Default::default(),
+            children: vec![Node::Element(Element {
+                namespace: Default::default(),
                 tag_name: "tr".to_string(),
                 attributes: BTreeMap::new(),
                 children: cells,
@@ -1135,10 +1150,12 @@ fn synthetic_frameset_rows_document(
                     td_attrs.insert(key.to_string(), val.clone());
                 }
             }
-            Node::Element(Element { namespace: Default::default(),
+            Node::Element(Element {
+                namespace: Default::default(),
                 tag_name: "tr".to_string(),
                 attributes: row_attributes(track),
-                children: vec![Node::Element(Element { namespace: Default::default(),
+                children: vec![Node::Element(Element {
+                    namespace: Default::default(),
                     tag_name: "td".to_string(),
                     attributes: td_attrs,
                     children,
@@ -1149,7 +1166,8 @@ fn synthetic_frameset_rows_document(
 
     synthetic_frameset_document(
         title,
-        vec![Node::Element(Element { namespace: Default::default(),
+        vec![Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "table".to_string(),
             attributes: full_width_table_attributes(),
             children: rows,
@@ -1400,9 +1418,12 @@ fn collect_styled_background_images(styled: &StyledNode, base_url: &Url, images:
         StyledNode::Element(element) => {
             // A mask is fetched like any other background image: it decides the
             // shape the element's colour is painted in.
-            for url_str in [&element.style.background_image_url, &element.style.mask_image_url]
-                .into_iter()
-                .flatten()
+            for url_str in [
+                &element.style.background_image_url,
+                &element.style.mask_image_url,
+            ]
+            .into_iter()
+            .flatten()
             {
                 // `was_attempted`, not `get`: a URL that failed to fetch or
                 // decode must not be retried for every other element that
@@ -1418,7 +1439,11 @@ fn collect_styled_background_images(styled: &StyledNode, base_url: &Url, images:
                     if std::env::var_os("TOBIRA_DEBUG_IMAGES").is_some() {
                         eprintln!(
                             "style image {} {url_str}",
-                            if decoded.is_some() { "ok    " } else { "FAILED" },
+                            if decoded.is_some() {
+                                "ok    "
+                            } else {
+                                "FAILED"
+                            },
                         );
                     }
                     match decoded {
@@ -1510,7 +1535,10 @@ pub(crate) fn collect_stylesheet_text(document: &Node, base_url: &Url) -> String
     }
     for (href, media) in collect_stylesheet_links(document) {
         let media = media.as_deref().map(str::trim).unwrap_or("");
-        if !(media.is_empty() || media.eq_ignore_ascii_case("all") || media.eq_ignore_ascii_case("screen")) {
+        if !(media.is_empty()
+            || media.eq_ignore_ascii_case("all")
+            || media.eq_ignore_ascii_case("screen"))
+        {
             continue;
         }
         let Ok(url) = base_url.resolve(&href) else {
@@ -1613,13 +1641,13 @@ fn absolutize_css_urls(css: &str, base: &Url) -> String {
         };
         // `data:` carries the image itself, and a fragment points inside this
         // very document (an SVG filter, say) -- neither is a place to fetch.
-        let rewritten = if inner.is_empty()
-            || inner.starts_with("data:")
-            || inner.starts_with('#')
+        let rewritten = if inner.is_empty() || inner.starts_with("data:") || inner.starts_with('#')
         {
             None
         } else {
-            base.resolve(inner).ok().map(|resolved| resolved.to_string())
+            base.resolve(inner)
+                .ok()
+                .map(|resolved| resolved.to_string())
         };
         match (rewritten, quote) {
             (Some(value), Some(q)) => {
@@ -2053,7 +2081,8 @@ fn extract_youtube_watch_data(document: &Node, html: &str, url: &Url) -> Option<
 fn build_youtube_watch_document(data: &YouTubeWatchData) -> Node {
     let mut left_column = vec![simple_text_element("h1", &data.title)];
     if let Some(thumbnail_url) = &data.thumbnail_url {
-        left_column.push(Node::Element(Element { namespace: Default::default(),
+        left_column.push(Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "img".to_string(),
             attributes: BTreeMap::from([
                 ("src".to_string(), thumbnail_url.clone()),
@@ -2121,7 +2150,8 @@ fn build_youtube_watch_document(data: &YouTubeWatchData) -> Node {
 
     synthetic_document(
         &data.title,
-        vec![Node::Element(Element { namespace: Default::default(),
+        vec![Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "table".to_string(),
             attributes: BTreeMap::from([
                 ("width".to_string(), "100%".to_string()),
@@ -2129,11 +2159,13 @@ fn build_youtube_watch_document(data: &YouTubeWatchData) -> Node {
                 ("cellpadding".to_string(), "0".to_string()),
                 ("cellspacing".to_string(), "16".to_string()),
             ]),
-            children: vec![Node::Element(Element { namespace: Default::default(),
+            children: vec![Node::Element(Element {
+                namespace: Default::default(),
                 tag_name: "tr".to_string(),
                 attributes: BTreeMap::new(),
                 children: vec![
-                    Node::Element(Element { namespace: Default::default(),
+                    Node::Element(Element {
+                        namespace: Default::default(),
                         tag_name: "td".to_string(),
                         attributes: BTreeMap::from([
                             ("width".to_string(), "70%".to_string()),
@@ -2141,7 +2173,8 @@ fn build_youtube_watch_document(data: &YouTubeWatchData) -> Node {
                         ]),
                         children: left_column,
                     }),
-                    Node::Element(Element { namespace: Default::default(),
+                    Node::Element(Element {
+                        namespace: Default::default(),
                         tag_name: "td".to_string(),
                         attributes: BTreeMap::from([
                             ("width".to_string(), "30%".to_string()),
@@ -2183,13 +2216,15 @@ fn build_youtube_generic_document_from_html(html: &str, url: &Url) -> Node {
     if !watch_links.is_empty() {
         body_children.push(hr_node());
         body_children.push(simple_text_element("h2", "Watch Links"));
-        body_children.push(Node::Element(Element { namespace: Default::default(),
+        body_children.push(Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "ul".to_string(),
             attributes: BTreeMap::new(),
             children: watch_links
                 .into_iter()
                 .map(|href| {
-                    Node::Element(Element { namespace: Default::default(),
+                    Node::Element(Element {
+                        namespace: Default::default(),
                         tag_name: "li".to_string(),
                         attributes: BTreeMap::new(),
                         children: vec![Node::Text(href)],
@@ -2396,7 +2431,8 @@ fn build_youtube_home_document(data: &YouTubeHomeData, url: &Url) -> Node {
         topbar_actions.push(simple_text_element("p", login));
     }
 
-    let topbar = Node::Element(Element { namespace: Default::default(),
+    let topbar = Node::Element(Element {
+        namespace: Default::default(),
         tag_name: "table".to_string(),
         attributes: BTreeMap::from([
             ("width".to_string(), "100%".to_string()),
@@ -2405,11 +2441,13 @@ fn build_youtube_home_document(data: &YouTubeHomeData, url: &Url) -> Node {
             ("cellspacing".to_string(), "0".to_string()),
             ("bgcolor".to_string(), "#ffffff".to_string()),
         ]),
-        children: vec![Node::Element(Element { namespace: Default::default(),
+        children: vec![Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "tr".to_string(),
             attributes: BTreeMap::new(),
             children: vec![
-                Node::Element(Element { namespace: Default::default(),
+                Node::Element(Element {
+                    namespace: Default::default(),
                     tag_name: "td".to_string(),
                     attributes: BTreeMap::from([
                         ("width".to_string(), "18%".to_string()),
@@ -2417,13 +2455,15 @@ fn build_youtube_home_document(data: &YouTubeHomeData, url: &Url) -> Node {
                     ]),
                     children: vec![simple_text_element("h2", "YouTube")],
                 }),
-                Node::Element(Element { namespace: Default::default(),
+                Node::Element(Element {
+                    namespace: Default::default(),
                     tag_name: "td".to_string(),
                     attributes: BTreeMap::from([
                         ("width".to_string(), "60%".to_string()),
                         ("valign".to_string(), "middle".to_string()),
                     ]),
-                    children: vec![Node::Element(Element { namespace: Default::default(),
+                    children: vec![Node::Element(Element {
+                        namespace: Default::default(),
                         tag_name: "table".to_string(),
                         attributes: BTreeMap::from([
                             ("width".to_string(), "100%".to_string()),
@@ -2432,10 +2472,12 @@ fn build_youtube_home_document(data: &YouTubeHomeData, url: &Url) -> Node {
                             ("cellspacing".to_string(), "0".to_string()),
                             ("bgcolor".to_string(), "#f1f1f1".to_string()),
                         ]),
-                        children: vec![Node::Element(Element { namespace: Default::default(),
+                        children: vec![Node::Element(Element {
+                            namespace: Default::default(),
                             tag_name: "tr".to_string(),
                             attributes: BTreeMap::new(),
-                            children: vec![Node::Element(Element { namespace: Default::default(),
+                            children: vec![Node::Element(Element {
+                                namespace: Default::default(),
                                 tag_name: "td".to_string(),
                                 attributes: BTreeMap::new(),
                                 children: vec![simple_text_element(
@@ -2448,7 +2490,8 @@ fn build_youtube_home_document(data: &YouTubeHomeData, url: &Url) -> Node {
                         })],
                     })],
                 }),
-                Node::Element(Element { namespace: Default::default(),
+                Node::Element(Element {
+                    namespace: Default::default(),
                     tag_name: "td".to_string(),
                     attributes: BTreeMap::from([
                         ("width".to_string(), "22%".to_string()),
@@ -2493,7 +2536,8 @@ fn build_youtube_home_document(data: &YouTubeHomeData, url: &Url) -> Node {
         vec![
             topbar,
             hr_node(),
-            Node::Element(Element { namespace: Default::default(),
+            Node::Element(Element {
+                namespace: Default::default(),
                 tag_name: "table".to_string(),
                 attributes: BTreeMap::from([
                     ("width".to_string(), "100%".to_string()),
@@ -2501,11 +2545,13 @@ fn build_youtube_home_document(data: &YouTubeHomeData, url: &Url) -> Node {
                     ("cellpadding".to_string(), "0".to_string()),
                     ("cellspacing".to_string(), "20".to_string()),
                 ]),
-                children: vec![Node::Element(Element { namespace: Default::default(),
+                children: vec![Node::Element(Element {
+                    namespace: Default::default(),
                     tag_name: "tr".to_string(),
                     attributes: BTreeMap::new(),
                     children: vec![
-                        Node::Element(Element { namespace: Default::default(),
+                        Node::Element(Element {
+                            namespace: Default::default(),
                             tag_name: "td".to_string(),
                             attributes: BTreeMap::from([
                                 ("width".to_string(), "18%".to_string()),
@@ -2514,7 +2560,8 @@ fn build_youtube_home_document(data: &YouTubeHomeData, url: &Url) -> Node {
                             ]),
                             children: sidebar_children,
                         }),
-                        Node::Element(Element { namespace: Default::default(),
+                        Node::Element(Element {
+                            namespace: Default::default(),
                             tag_name: "td".to_string(),
                             attributes: BTreeMap::from([
                                 ("width".to_string(), "82%".to_string()),
@@ -2534,7 +2581,8 @@ fn build_youtube_feed_grid(videos: &[YouTubeRelatedVideo]) -> Node {
     for chunk in videos.chunks(3) {
         let mut cells = Vec::new();
         for video in chunk {
-            cells.push(Node::Element(Element { namespace: Default::default(),
+            cells.push(Node::Element(Element {
+                namespace: Default::default(),
                 tag_name: "td".to_string(),
                 attributes: BTreeMap::from([
                     ("width".to_string(), "33%".to_string()),
@@ -2543,14 +2591,16 @@ fn build_youtube_feed_grid(videos: &[YouTubeRelatedVideo]) -> Node {
                 children: vec![build_youtube_feed_card(video)],
             }));
         }
-        rows.push(Node::Element(Element { namespace: Default::default(),
+        rows.push(Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "tr".to_string(),
             attributes: BTreeMap::new(),
             children: cells,
         }));
     }
 
-    Node::Element(Element { namespace: Default::default(),
+    Node::Element(Element {
+        namespace: Default::default(),
         tag_name: "table".to_string(),
         attributes: BTreeMap::from([
             ("width".to_string(), "100%".to_string()),
@@ -2565,7 +2615,8 @@ fn build_youtube_feed_grid(videos: &[YouTubeRelatedVideo]) -> Node {
 fn build_youtube_feed_card(video: &YouTubeRelatedVideo) -> Node {
     let mut children = Vec::new();
     if let Some(thumbnail_url) = &video.thumbnail_url {
-        children.push(Node::Element(Element { namespace: Default::default(),
+        children.push(Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "img".to_string(),
             attributes: BTreeMap::from([
                 ("src".to_string(), thumbnail_url.clone()),
@@ -2582,7 +2633,8 @@ fn build_youtube_feed_card(video: &YouTubeRelatedVideo) -> Node {
     push_detail(&mut children, "Published", video.published.as_deref());
     push_detail(&mut children, "Length", video.duration.as_deref());
 
-    let card = Node::Element(Element { namespace: Default::default(),
+    let card = Node::Element(Element {
+        namespace: Default::default(),
         tag_name: "table".to_string(),
         attributes: BTreeMap::from([
             ("width".to_string(), "100%".to_string()),
@@ -2591,10 +2643,12 @@ fn build_youtube_feed_card(video: &YouTubeRelatedVideo) -> Node {
             ("cellspacing".to_string(), "0".to_string()),
             ("bgcolor".to_string(), "#ffffff".to_string()),
         ]),
-        children: vec![Node::Element(Element { namespace: Default::default(),
+        children: vec![Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "tr".to_string(),
             attributes: BTreeMap::new(),
-            children: vec![Node::Element(Element { namespace: Default::default(),
+            children: vec![Node::Element(Element {
+                namespace: Default::default(),
                 tag_name: "td".to_string(),
                 attributes: BTreeMap::from([("valign".to_string(), "top".to_string())]),
                 children,
@@ -2603,7 +2657,8 @@ fn build_youtube_feed_card(video: &YouTubeRelatedVideo) -> Node {
     });
 
     if let Some(url) = &video.url {
-        Node::Element(Element { namespace: Default::default(),
+        Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "a".to_string(),
             attributes: BTreeMap::from([
                 ("href".to_string(), url.clone()),
@@ -2612,7 +2667,8 @@ fn build_youtube_feed_card(video: &YouTubeRelatedVideo) -> Node {
             children: vec![card, hr_node()],
         })
     } else {
-        Node::Element(Element { namespace: Default::default(),
+        Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "div".to_string(),
             attributes: BTreeMap::new(),
             children: vec![card, hr_node()],
@@ -2633,7 +2689,8 @@ fn build_youtube_nudge_card(data: &YouTubeHomeData) -> Node {
         "→ トレンド動画を見る (View Trending)",
     ));
 
-    Node::Element(Element { namespace: Default::default(),
+    Node::Element(Element {
+        namespace: Default::default(),
         tag_name: "table".to_string(),
         attributes: BTreeMap::from([
             ("width".to_string(), "100%".to_string()),
@@ -2641,16 +2698,19 @@ fn build_youtube_nudge_card(data: &YouTubeHomeData) -> Node {
             ("cellpadding".to_string(), "0".to_string()),
             ("cellspacing".to_string(), "0".to_string()),
         ]),
-        children: vec![Node::Element(Element { namespace: Default::default(),
+        children: vec![Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "tr".to_string(),
             attributes: BTreeMap::new(),
             children: vec![
-                Node::Element(Element { namespace: Default::default(),
+                Node::Element(Element {
+                    namespace: Default::default(),
                     tag_name: "td".to_string(),
                     attributes: BTreeMap::from([("width".to_string(), "20%".to_string())]),
                     children: Vec::new(),
                 }),
-                Node::Element(Element { namespace: Default::default(),
+                Node::Element(Element {
+                    namespace: Default::default(),
                     tag_name: "td".to_string(),
                     attributes: BTreeMap::from([
                         ("width".to_string(), "60%".to_string()),
@@ -2659,7 +2719,8 @@ fn build_youtube_nudge_card(data: &YouTubeHomeData) -> Node {
                     ]),
                     children: content,
                 }),
-                Node::Element(Element { namespace: Default::default(),
+                Node::Element(Element {
+                    namespace: Default::default(),
                     tag_name: "td".to_string(),
                     attributes: BTreeMap::from([("width".to_string(), "20%".to_string())]),
                     children: Vec::new(),
@@ -2674,7 +2735,8 @@ fn build_youtube_chip_bar(chips: &[String]) -> Node {
         .iter()
         .take(6)
         .map(|chip| {
-            Node::Element(Element { namespace: Default::default(),
+            Node::Element(Element {
+                namespace: Default::default(),
                 tag_name: "td".to_string(),
                 attributes: BTreeMap::from([
                     ("bgcolor".to_string(), "#f1f1f1".to_string()),
@@ -2686,7 +2748,8 @@ fn build_youtube_chip_bar(chips: &[String]) -> Node {
         })
         .collect();
 
-    Node::Element(Element { namespace: Default::default(),
+    Node::Element(Element {
+        namespace: Default::default(),
         tag_name: "table".to_string(),
         attributes: BTreeMap::from([
             ("width".to_string(), "100%".to_string()),
@@ -2694,7 +2757,8 @@ fn build_youtube_chip_bar(chips: &[String]) -> Node {
             ("cellpadding".to_string(), "6".to_string()),
             ("cellspacing".to_string(), "8".to_string()),
         ]),
-        children: vec![Node::Element(Element { namespace: Default::default(),
+        children: vec![Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "tr".to_string(),
             attributes: BTreeMap::new(),
             children,
@@ -2805,13 +2869,15 @@ fn build_related_video_node(video: &YouTubeRelatedVideo) -> Node {
 
     let mut row_children = Vec::new();
     if let Some(thumbnail_url) = &video.thumbnail_url {
-        row_children.push(Node::Element(Element { namespace: Default::default(),
+        row_children.push(Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "td".to_string(),
             attributes: BTreeMap::from([
                 ("width".to_string(), "180".to_string()),
                 ("valign".to_string(), "top".to_string()),
             ]),
-            children: vec![Node::Element(Element { namespace: Default::default(),
+            children: vec![Node::Element(Element {
+                namespace: Default::default(),
                 tag_name: "img".to_string(),
                 attributes: BTreeMap::from([
                     ("src".to_string(), thumbnail_url.clone()),
@@ -2823,13 +2889,15 @@ fn build_related_video_node(video: &YouTubeRelatedVideo) -> Node {
             })],
         }));
     }
-    row_children.push(Node::Element(Element { namespace: Default::default(),
+    row_children.push(Node::Element(Element {
+        namespace: Default::default(),
         tag_name: "td".to_string(),
         attributes: BTreeMap::from([("valign".to_string(), "top".to_string())]),
         children: detail_children,
     }));
 
-    let card = Node::Element(Element { namespace: Default::default(),
+    let card = Node::Element(Element {
+        namespace: Default::default(),
         tag_name: "table".to_string(),
         attributes: BTreeMap::from([
             ("width".to_string(), "100%".to_string()),
@@ -2837,7 +2905,8 @@ fn build_related_video_node(video: &YouTubeRelatedVideo) -> Node {
             ("cellpadding".to_string(), "0".to_string()),
             ("cellspacing".to_string(), "8".to_string()),
         ]),
-        children: vec![Node::Element(Element { namespace: Default::default(),
+        children: vec![Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "tr".to_string(),
             attributes: BTreeMap::new(),
             children: row_children,
@@ -2845,7 +2914,8 @@ fn build_related_video_node(video: &YouTubeRelatedVideo) -> Node {
     });
 
     if let Some(url) = &video.url {
-        Node::Element(Element { namespace: Default::default(),
+        Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "a".to_string(),
             attributes: BTreeMap::from([
                 ("href".to_string(), url.clone()),
@@ -2854,7 +2924,8 @@ fn build_related_video_node(video: &YouTubeRelatedVideo) -> Node {
             children: vec![card, hr_node()],
         })
     } else {
-        Node::Element(Element { namespace: Default::default(),
+        Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "div".to_string(),
             attributes: BTreeMap::new(),
             children: vec![card, hr_node()],
@@ -2863,7 +2934,8 @@ fn build_related_video_node(video: &YouTubeRelatedVideo) -> Node {
 }
 
 fn simple_text_element(tag_name: &str, text: &str) -> Node {
-    Node::Element(Element { namespace: Default::default(),
+    Node::Element(Element {
+        namespace: Default::default(),
         tag_name: tag_name.to_string(),
         attributes: BTreeMap::new(),
         children: vec![Node::Text(text.to_string())],
@@ -2871,10 +2943,12 @@ fn simple_text_element(tag_name: &str, text: &str) -> Node {
 }
 
 fn link_element(href: &str, text: &str) -> Node {
-    Node::Element(Element { namespace: Default::default(),
+    Node::Element(Element {
+        namespace: Default::default(),
         tag_name: "p".to_string(),
         attributes: BTreeMap::new(),
-        children: vec![Node::Element(Element { namespace: Default::default(),
+        children: vec![Node::Element(Element {
+            namespace: Default::default(),
             tag_name: "a".to_string(),
             attributes: BTreeMap::from([("href".to_string(), href.to_string())]),
             children: vec![Node::Text(text.to_string())],
@@ -3650,8 +3724,14 @@ mod css_url_tests {
 
         let out = absolutize_css_urls(css, &sheet);
 
-        assert!(out.contains("\"https://cdn.example.com/media/img/fox.svg\""), "{out}");
-        assert!(out.contains("url(https://cdn.example.com/css/icons/chevron.svg)"), "{out}");
+        assert!(
+            out.contains("\"https://cdn.example.com/media/img/fox.svg\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("url(https://cdn.example.com/css/icons/chevron.svg)"),
+            "{out}"
+        );
         // Neither of these names a place to fetch from.
         assert!(out.contains("'data:image/svg+xml,<svg/>'"), "{out}");
         assert!(out.contains("url(#blur)"), "{out}");
@@ -3700,19 +3780,18 @@ mod frame_expansion_tests {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use std::hint::black_box;
     use std::fmt::Write as _;
+    use std::hint::black_box;
     use std::time::{Duration, Instant};
 
     use super::{
-        BrowserPage, build_site_specific_document, build_youtube_generic_document_from_html,
-        collect_frame_specs, collect_stylesheet, document_has_meaningful_body, document_title,
-        extract_body_children, rebuild_page_from_html, should_follow_script_navigation,
-        synthetic_document, annotate_node_ids, set_incremental_restyle_override,
-        synthesize_non_html_document, annotate_resource_urls,
+        BrowserPage, annotate_node_ids, annotate_resource_urls, build_site_specific_document,
+        build_youtube_generic_document_from_html, collect_frame_specs, collect_stylesheet,
+        document_has_meaningful_body, document_title, extract_body_children,
+        rebuild_page_from_html, set_incremental_restyle_override, should_follow_script_navigation,
+        synthesize_non_html_document, synthetic_document,
     };
     use crate::css::{InteractiveState, StyledNode, build_styled_tree};
     use crate::html::{Node, parse_document};
@@ -3725,7 +3804,9 @@ mod tests {
         let html = synthesize_non_html_document(Some("image/jpeg"), &url, "").unwrap();
 
         assert!(
-            html.contains("<img src=\"https://example.com/image.jpg?x=1&amp;name=&quot;cat&quot;\"")
+            html.contains(
+                "<img src=\"https://example.com/image.jpg?x=1&amp;name=&quot;cat&quot;\""
+            )
         );
         assert!(html.contains("alt=\"\""));
     }
@@ -3749,7 +3830,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(html.contains("<pre>before &lt;script&gt;alert(1)&lt;/script&gt; &amp; after</pre>"));
+        assert!(
+            html.contains("<pre>before &lt;script&gt;alert(1)&lt;/script&gt; &amp; after</pre>")
+        );
     }
 
     #[test]
@@ -4039,11 +4122,26 @@ mod tests {
             html.push_str(state);
             html.push_str("\">");
 
-            write!(&mut html, "<{} class=\"summary\" data-kind=\"{}\">", lead_tag, kind).unwrap();
-            write!(&mut html, "{}", "A varied subtree with list, metadata, links, and controls.").unwrap();
+            write!(
+                &mut html,
+                "<{} class=\"summary\" data-kind=\"{}\">",
+                lead_tag, kind
+            )
+            .unwrap();
+            write!(
+                &mut html,
+                "{}",
+                "A varied subtree with list, metadata, links, and controls."
+            )
+            .unwrap();
             write!(&mut html, "</{}>", lead_tag).unwrap();
 
-            write!(&mut html, "<{} class=\"list\" data-kind=\"secondary\">", list_tag).unwrap();
+            write!(
+                &mut html,
+                "<{} class=\"list\" data-kind=\"secondary\">",
+                list_tag
+            )
+            .unwrap();
             for j in 0..3 {
                 let item_state = if (k + j) % 4 == 0 { "active" } else { "idle" };
                 let item_kind = if j == 0 { "primary" } else { "secondary" };
@@ -4063,7 +4161,12 @@ mod tests {
                     item_state, j
                 )
                 .unwrap();
-                write!(&mut html, "<span class=\"avatar\" aria-hidden=\"true\">{}</span>", if j == 0 { "◎" } else { "◌" }).unwrap();
+                write!(
+                    &mut html,
+                    "<span class=\"avatar\" aria-hidden=\"true\">{}</span>",
+                    if j == 0 { "◎" } else { "◌" }
+                )
+                .unwrap();
                 write!(
                     &mut html,
                     "<span class=\"meta\" data-kind=\"{}\" data-state=\"{}\">meta {}/{} </span>",
@@ -4078,7 +4181,9 @@ mod tests {
                 )
                 .unwrap();
                 if j == 2 {
-                    html.push_str("<button class=\"btn btn-ghost\" data-state=\"idle\">Open</button>");
+                    html.push_str(
+                        "<button class=\"btn btn-ghost\" data-state=\"idle\">Open</button>",
+                    );
                 }
                 html.push_str("</li>");
             }
@@ -4141,7 +4246,8 @@ mod tests {
         let html = make_heavy_html(n);
         let runs = 6;
 
-        let (base_processed, base_session) = start_document_script_session(&html, &url, String::new());
+        let (base_processed, base_session) =
+            start_document_script_session(&html, &url, String::new());
         let base_page = rebuild_page_from_html(
             &url,
             200,
@@ -4204,7 +4310,8 @@ mod tests {
         });
 
         let serialize_samples = measure_n(runs, || {
-            let (_processed, mut session) = start_document_script_session(&html, &url, String::new());
+            let (_processed, mut session) =
+                start_document_script_session(&html, &url, String::new());
             session.as_mut().map(|s| s.snapshot())
         });
 
@@ -4292,7 +4399,9 @@ mod tests {
         }
 
         println!("=== tobira heavy-DOM benchmark (release) ===");
-        println!("N        build(ms)  parse(ms)  style(ms)  serialize(ms)  apply(ms)  cycle(ms)  cycle_inc(ms)");
+        println!(
+            "N        build(ms)  parse(ms)  style(ms)  serialize(ms)  apply(ms)  cycle(ms)  cycle_inc(ms)"
+        );
         println!("        build = initial parse + styled tree rebuild");
         println!("        parse = parse_document() only");
         println!("        style = build_styled_tree() only");
@@ -4319,7 +4428,15 @@ mod tests {
             html_source: String::new(),
             styled_document: StyledNode::Text(crate::css::StyledText {
                 text: String::new(),
-                style: std::sync::Arc::new(crate::css::ComputedStyle { break_long_words: false, baseline_shift: 0, table_role: crate::css::TableRole::None, flow_root: false, table_cellpadding: None, column_gap: 0, grid_auto_flow_column: false, justify_items: crate::css::AlignItems::Stretch,
+                style: std::sync::Arc::new(crate::css::ComputedStyle {
+                    break_long_words: false,
+                    baseline_shift: 0,
+                    table_role: crate::css::TableRole::None,
+                    flow_root: false,
+                    table_cellpadding: None,
+                    column_gap: 0,
+                    grid_auto_flow_column: false,
+                    justify_items: crate::css::AlignItems::Stretch,
                     display: crate::css::Display::Inline,
                     color: crate::css::DEFAULT_TEXT_COLOR,
                     background_color: None,
@@ -4332,7 +4449,7 @@ mod tests {
                     font_size_px: 16,
                     font_family: crate::css::FontFamilyKind::Sans,
                     text_align: crate::css::TextAlign::Left,
-                text_wrap_balance: false,
+                    text_wrap_balance: false,
                     vertical_align: crate::css::VerticalAlign::Top,
                     font_weight: false,
                     underline: false,
@@ -4483,10 +4600,19 @@ mod tests {
         // the 230 Chrome gives it.
         let document = super::synthetic_frameset_columns_document(
             "Demo",
-            &[super::FrameTrack::Percent(18), super::FrameTrack::Percent(82)],
+            &[
+                super::FrameTrack::Percent(18),
+                super::FrameTrack::Percent(82),
+            ],
             vec![
-                (vec![Node::Text("left".to_string())], std::collections::BTreeMap::new()),
-                (vec![Node::Text("right".to_string())], std::collections::BTreeMap::new()),
+                (
+                    vec![Node::Text("left".to_string())],
+                    std::collections::BTreeMap::new(),
+                ),
+                (
+                    vec![Node::Text("right".to_string())],
+                    std::collections::BTreeMap::new(),
+                ),
             ],
         );
         let mut found = None;
@@ -4528,7 +4654,15 @@ mod tests {
             html_source: "<html><body>Hello</body></html>".to_string(),
             styled_document: StyledNode::Text(crate::css::StyledText {
                 text: "Hello".to_string(),
-                style: std::sync::Arc::new(crate::css::ComputedStyle { break_long_words: false, baseline_shift: 0, table_role: crate::css::TableRole::None, flow_root: false, table_cellpadding: None, column_gap: 0, grid_auto_flow_column: false, justify_items: crate::css::AlignItems::Stretch,
+                style: std::sync::Arc::new(crate::css::ComputedStyle {
+                    break_long_words: false,
+                    baseline_shift: 0,
+                    table_role: crate::css::TableRole::None,
+                    flow_root: false,
+                    table_cellpadding: None,
+                    column_gap: 0,
+                    grid_auto_flow_column: false,
+                    justify_items: crate::css::AlignItems::Stretch,
                     display: crate::css::Display::Inline,
                     color: crate::css::DEFAULT_TEXT_COLOR,
                     background_color: None,
@@ -4541,7 +4675,7 @@ mod tests {
                     font_size_px: 16,
                     font_family: crate::css::FontFamilyKind::Sans,
                     text_align: crate::css::TextAlign::Left,
-                text_wrap_balance: false,
+                    text_wrap_balance: false,
                     vertical_align: crate::css::VerticalAlign::Top,
                     font_weight: false,
                     underline: false,
@@ -4787,8 +4921,12 @@ mod tests {
         let mut rebuilt_doc = parse_document(&page.html_source);
         annotate_node_ids(&mut rebuilt_doc);
         let rebuilt_sheet = collect_stylesheet(&rebuilt_doc, &url);
-        let rebuilt_style =
-            build_styled_tree(&rebuilt_doc, &rebuilt_sheet, 1280, &InteractiveState::default());
+        let rebuilt_style = build_styled_tree(
+            &rebuilt_doc,
+            &rebuilt_sheet,
+            1280,
+            &InteractiveState::default(),
+        );
         assert_eq!(page.styled_document, rebuilt_style);
 
         // A snapshot whose HTML changes a <style> must fall back to a full
@@ -5056,7 +5194,15 @@ mod tests {
     fn parse_styled_text(text: &str) -> StyledNode {
         crate::css::StyledNode::Text(crate::css::StyledText {
             text: text.to_string(),
-            style: std::sync::Arc::new(crate::css::ComputedStyle { break_long_words: false, baseline_shift: 0, table_role: crate::css::TableRole::None, flow_root: false, table_cellpadding: None, column_gap: 0, grid_auto_flow_column: false, justify_items: crate::css::AlignItems::Stretch,
+            style: std::sync::Arc::new(crate::css::ComputedStyle {
+                break_long_words: false,
+                baseline_shift: 0,
+                table_role: crate::css::TableRole::None,
+                flow_root: false,
+                table_cellpadding: None,
+                column_gap: 0,
+                grid_auto_flow_column: false,
+                justify_items: crate::css::AlignItems::Stretch,
                 display: crate::css::Display::Inline,
                 color: crate::css::DEFAULT_TEXT_COLOR,
                 background_color: None,

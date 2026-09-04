@@ -359,7 +359,10 @@ mod tests {
         );
         assert_eq!(storage_length(StorageKind::Local, &origin), 1);
         // `storage_keys` is what the host bridge calls to back `Storage.key(n)`.
-        assert_eq!(storage_keys(StorageKind::Local, &origin), vec!["theme".to_string()]);
+        assert_eq!(
+            storage_keys(StorageKind::Local, &origin),
+            vec!["theme".to_string()]
+        );
         assert_eq!(
             storage_get_item(StorageKind::Local, &other_origin, "theme"),
             None

@@ -11,7 +11,8 @@ fn execute(source: &str) -> (Vm, Result<Value, VmError>) {
 fn backtrace_for_error(source: &str) -> String {
     let (mut vm, result) = execute(source);
     result.expect_err("script should throw");
-    vm.take_last_backtrace().expect("backtrace should be captured")
+    vm.take_last_backtrace()
+        .expect("backtrace should be captured")
 }
 
 fn frame_position(backtrace: &str, frame: &str) -> (u32, u32) {
@@ -19,8 +20,12 @@ fn frame_position(backtrace: &str, frame: &str) -> (u32, u32) {
         .lines()
         .find(|line| line.contains(frame))
         .unwrap_or_else(|| panic!("missing frame {frame} in {backtrace}"));
-    let open = line.rfind('(').unwrap_or_else(|| panic!("missing position in {line}"));
-    let close = line.rfind(')').unwrap_or_else(|| panic!("missing position in {line}"));
+    let open = line
+        .rfind('(')
+        .unwrap_or_else(|| panic!("missing position in {line}"));
+    let close = line
+        .rfind(')')
+        .unwrap_or_else(|| panic!("missing position in {line}"));
     let (line_number, column_number) = line[open + 1..close]
         .split_once(':')
         .unwrap_or_else(|| panic!("bad position in {line}"));

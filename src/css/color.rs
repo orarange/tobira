@@ -84,7 +84,10 @@ pub fn parse_color(input: &str) -> Option<Color> {
     // washes the lower half of its front page purple is written entirely in it.
     // Unparsed, that half of the page came out white with dark text on it.
     for (name, polar) in [("oklch(", true), ("oklab(", false)] {
-        if let Some(arguments) = value.strip_prefix(name).and_then(|rest| rest.strip_suffix(')')) {
+        if let Some(arguments) = value
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
             return parse_oklab(arguments, polar);
         }
     }

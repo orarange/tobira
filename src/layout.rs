@@ -1,8 +1,9 @@
 use crate::css::{
-    BackgroundRepeat, BackgroundSize, BoxSizing, Color, ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display,
-    FontFamilyKind, GridEdge, GridTrackSize, LengthValue, ListStyleType, ObjectFit, Overflow, Position, FlexDirection,
-    FlexWrap, AlignItems, AlignSelf, JustifyContent, StyledElement, StyledNode, TextAlign, TextTransform,
-    TableRole, VerticalAlign, WhiteSpaceMode, apply_text_transform, ClearSide, FloatSide,
+    AlignItems, AlignSelf, BackgroundRepeat, BackgroundSize, BoxSizing, ClearSide, Color,
+    ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display, FlexDirection, FlexWrap,
+    FloatSide, FontFamilyKind, GridEdge, GridTrackSize, JustifyContent, LengthValue, ListStyleType,
+    ObjectFit, Overflow, Position, StyledElement, StyledNode, TableRole, TextAlign, TextTransform,
+    VerticalAlign, WhiteSpaceMode, apply_text_transform,
 };
 use crate::font::FontContext;
 use crate::image::ImageStore;
@@ -164,14 +165,14 @@ pub struct LayerCommand {
     pub width: u32,
     pub height: u32,
     pub opacity: u8,
-    pub blur_px: u32,       // CSS filter: blur() radius; 0 = no blur
-    pub brightness: u32,    // CSS filter: brightness() in 1/10000; 10000 = no change
+    pub blur_px: u32,    // CSS filter: blur() radius; 0 = no blur
+    pub brightness: u32, // CSS filter: brightness() in 1/10000; 10000 = no change
     // CSS transform (applied during composite)
-    pub scale_x: u32,          // millis: 1000 = 1.0. 0 = no scale (treated as 1000)
-    pub scale_y: u32,          // millis: 1000 = 1.0. 0 = no scale (treated as 1000)
-    pub rotate_millideg: i32,  // rotation in millidegrees. 0 = no rotation
-    pub origin_x: u32,         // transform-origin X as permille of width (500 = 50% = center)
-    pub origin_y: u32,         // transform-origin Y as permille of height (500 = 50% = center)
+    pub scale_x: u32,         // millis: 1000 = 1.0. 0 = no scale (treated as 1000)
+    pub scale_y: u32,         // millis: 1000 = 1.0. 0 = no scale (treated as 1000)
+    pub rotate_millideg: i32, // rotation in millidegrees. 0 = no rotation
+    pub origin_x: u32,        // transform-origin X as permille of width (500 = 50% = center)
+    pub origin_y: u32,        // transform-origin Y as permille of height (500 = 50% = center)
     pub commands: Vec<DrawCommand>,
 }
 
@@ -341,10 +342,18 @@ fn collect_texts(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec<
                 out.push(t2);
             }
             DrawCommand::Layer(l) => {
-                out.extend(collect_texts(&l.commands, offset_x.saturating_add(l.x), offset_y.saturating_add(l.y)));
+                out.extend(collect_texts(
+                    &l.commands,
+                    offset_x.saturating_add(l.x),
+                    offset_y.saturating_add(l.y),
+                ));
             }
             DrawCommand::Sticky(s) => {
-                out.extend(collect_texts(&s.layer.commands, offset_x.saturating_add(s.layer.x), offset_y.saturating_add(s.layer.y)));
+                out.extend(collect_texts(
+                    &s.layer.commands,
+                    offset_x.saturating_add(s.layer.x),
+                    offset_y.saturating_add(s.layer.y),
+                ));
             }
             _ => {}
         }
@@ -363,10 +372,18 @@ fn collect_rects(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec<
                 out.push(r2);
             }
             DrawCommand::Layer(l) => {
-                out.extend(collect_rects(&l.commands, offset_x.saturating_add(l.x), offset_y.saturating_add(l.y)));
+                out.extend(collect_rects(
+                    &l.commands,
+                    offset_x.saturating_add(l.x),
+                    offset_y.saturating_add(l.y),
+                ));
             }
             DrawCommand::Sticky(s) => {
-                out.extend(collect_rects(&s.layer.commands, offset_x.saturating_add(s.layer.x), offset_y.saturating_add(s.layer.y)));
+                out.extend(collect_rects(
+                    &s.layer.commands,
+                    offset_x.saturating_add(s.layer.x),
+                    offset_y.saturating_add(s.layer.y),
+                ));
             }
             _ => {}
         }
@@ -385,10 +402,18 @@ fn collect_images(commands: &[DrawCommand], offset_x: u32, offset_y: u32) -> Vec
                 out.push(i2);
             }
             DrawCommand::Layer(l) => {
-                out.extend(collect_images(&l.commands, offset_x.saturating_add(l.x), offset_y.saturating_add(l.y)));
+                out.extend(collect_images(
+                    &l.commands,
+                    offset_x.saturating_add(l.x),
+                    offset_y.saturating_add(l.y),
+                ));
             }
             DrawCommand::Sticky(s) => {
-                out.extend(collect_images(&s.layer.commands, offset_x.saturating_add(s.layer.x), offset_y.saturating_add(s.layer.y)));
+                out.extend(collect_images(
+                    &s.layer.commands,
+                    offset_x.saturating_add(s.layer.x),
+                    offset_y.saturating_add(s.layer.y),
+                ));
             }
             _ => {}
         }
@@ -440,7 +465,7 @@ pub struct ImageCommand {
     pub object_fit: ObjectFit,
     pub object_position_x: u32,
     pub object_position_y: u32,
-    pub tile: bool,  // true = background-repeat tile at natural size
+    pub tile: bool, // true = background-repeat tile at natural size
     /// When set, only the image's shape is used: every pixel it covers is
     /// painted in this colour. That is what `mask-image` asks for, and how a
     /// page draws an icon that takes the colour of the text around it.
@@ -536,7 +561,6 @@ fn extract_body_background(node: &StyledNode) -> Option<u32> {
     None
 }
 
-
 pub fn layout_styled_document(
     document: &StyledNode,
     images: &ImageStore,
@@ -573,8 +597,14 @@ pub fn layout_styled_document(
     positioned.sort_by(|(left, _), (right, _)| left.cmp(right));
     if std::env::var_os("TOBIRA_DEBUG_PAINT").is_some() {
         for (path, commands) in &positioned {
-            let first = commands.first().map(|c| format!("{c:?}").chars().take(80).collect::<String>());
-            eprintln!("z{path:?} n={} {}", commands.len(), first.unwrap_or_default());
+            let first = commands
+                .first()
+                .map(|c| format!("{c:?}").chars().take(80).collect::<String>());
+            eprintln!(
+                "z{path:?} n={} {}",
+                commands.len(),
+                first.unwrap_or_default()
+            );
         }
     }
     for (_, cmds) in positioned {
@@ -1387,7 +1417,8 @@ fn measure_form_control(control: &FormControlSpec, fonts: &mut FontContext) -> (
             };
             let text = text_width(&control.style, widest, fonts);
             (
-                text.saturating_add(SELECT_PADDING_X * 2 + SELECT_CHEVRON_WIDTH).max(72),
+                text.saturating_add(SELECT_PADDING_X * 2 + SELECT_CHEVRON_WIDTH)
+                    .max(72),
                 height,
             )
         }
@@ -1520,8 +1551,19 @@ fn layout_node(
             }
 
             // Handle positioned elements (absolute/fixed) — they don't contribute to flow
-            if element.style.position == Position::Absolute || element.style.position == Position::Fixed {
-                layout_positioned_element(element, x, width, cursor_y, context, images, fonts, current_form.clone());
+            if element.style.position == Position::Absolute
+                || element.style.position == Position::Fixed
+            {
+                layout_positioned_element(
+                    element,
+                    x,
+                    width,
+                    cursor_y,
+                    context,
+                    images,
+                    fonts,
+                    current_form.clone(),
+                );
                 return;
             }
 
@@ -1550,8 +1592,14 @@ fn layout_node(
                     }
                 }
                 Display::Inline => {
-                    let fragments =
-                        flatten_inline_fragments(node, context, current_form.clone(), images, fonts, width);
+                    let fragments = flatten_inline_fragments(
+                        node,
+                        context,
+                        current_form.clone(),
+                        images,
+                        fonts,
+                        width,
+                    );
                     layout_inline_fragments(
                         &fragments,
                         &element.style,
@@ -1604,7 +1652,16 @@ fn layout_node(
                 }
                 Display::Flex => {
                     let current_form = form_context_for_element(element, context, current_form);
-                    layout_flex_container(element, x, width, cursor_y, context, images, fonts, current_form.clone());
+                    layout_flex_container(
+                        element,
+                        x,
+                        width,
+                        cursor_y,
+                        context,
+                        images,
+                        fonts,
+                        current_form.clone(),
+                    );
                 }
                 Display::InlineFlex => {
                     // Inline-level: as wide as its contents, not as wide as the
@@ -1614,15 +1671,24 @@ fn layout_node(
                     // than sitting centred at 246px, and its 32px border radius
                     // turned the 100px-tall result into an oval.
                     let current_form = form_context_for_element(element, context, current_form);
-                    let inline_width = element.style.width
+                    let inline_width = element
+                        .style
+                        .width
                         .map(|w| match w {
                             LengthValue::Pixels(px) => px,
                             LengthValue::Percent(pct) => (width as f32 * pct as f32 / 100.0) as u32,
                             LengthValue::MinContent => 0,
                             LengthValue::MaxContent => width,
                             LengthValue::FitContent(max_px) => width.min(max_px),
-                            LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
-                            LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, width),
+                            LengthValue::Calc {
+                                percent_hundredths,
+                                px,
+                            } => crate::css::resolve_calc(percent_hundredths, px, width),
+                            LengthValue::Bounded {
+                                lower,
+                                value,
+                                upper,
+                            } => crate::css::resolve_bounded(lower, value, upper, width),
                         })
                         .unwrap_or_else(|| {
                             // A plain measurement, not a trial layout: laying the
@@ -1645,26 +1711,62 @@ fn layout_node(
                         TextAlign::Right => width.saturating_sub(inline_width),
                         TextAlign::Left => 0,
                     };
-                    layout_flex_container(element, x.saturating_add(offset), inline_width, cursor_y, context, images, fonts, current_form.clone());
+                    layout_flex_container(
+                        element,
+                        x.saturating_add(offset),
+                        inline_width,
+                        cursor_y,
+                        context,
+                        images,
+                        fonts,
+                        current_form.clone(),
+                    );
                 }
                 Display::Grid => {
                     let current_form = form_context_for_element(element, context, current_form);
-                    layout_grid_container(element, x, width, cursor_y, context, images, fonts, current_form);
+                    layout_grid_container(
+                        element,
+                        x,
+                        width,
+                        cursor_y,
+                        context,
+                        images,
+                        fonts,
+                        current_form,
+                    );
                 }
                 Display::InlineGrid => {
                     let current_form = form_context_for_element(element, context, current_form);
-                    let inline_width = element.style.width
+                    let inline_width = element
+                        .style
+                        .width
                         .map(|w| match w {
                             LengthValue::Pixels(px) => px,
                             LengthValue::Percent(pct) => (width as f32 * pct as f32 / 100.0) as u32,
                             LengthValue::MinContent => 0,
                             LengthValue::MaxContent => width,
                             LengthValue::FitContent(max_px) => width.min(max_px),
-                            LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
-                            LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, width),
+                            LengthValue::Calc {
+                                percent_hundredths,
+                                px,
+                            } => crate::css::resolve_calc(percent_hundredths, px, width),
+                            LengthValue::Bounded {
+                                lower,
+                                value,
+                                upper,
+                            } => crate::css::resolve_bounded(lower, value, upper, width),
                         })
                         .unwrap_or(width);
-                    layout_grid_container(element, x, inline_width, cursor_y, context, images, fonts, current_form);
+                    layout_grid_container(
+                        element,
+                        x,
+                        inline_width,
+                        cursor_y,
+                        context,
+                        images,
+                        fonts,
+                        current_form,
+                    );
                 }
             }
         }
@@ -1722,7 +1824,13 @@ fn explicit_box_height(
     cursor_y: &mut u32,
     container_height: Option<u32>,
 ) -> u32 {
-    let height = specified_box_height(style, background_top, content_height, cursor_y, container_height);
+    let height = specified_box_height(
+        style,
+        background_top,
+        content_height,
+        cursor_y,
+        container_height,
+    );
 
     // `min-height` holds the box open when its contents come to less. It was
     // parsed and then never read: firefox.com's front-page cards ask for
@@ -1886,9 +1994,27 @@ fn layout_block_element(
             // spending it here.
             context.stretch_cross_size = settled_cross_size;
             if matches!(element.style.display, Display::Flex | Display::InlineFlex) {
-                layout_flex_container(element, x, width, cursor_y, context, images, fonts, current_form);
+                layout_flex_container(
+                    element,
+                    x,
+                    width,
+                    cursor_y,
+                    context,
+                    images,
+                    fonts,
+                    current_form,
+                );
             } else {
-                layout_grid_container(element, x, width, cursor_y, context, images, fonts, current_form);
+                layout_grid_container(
+                    element,
+                    x,
+                    width,
+                    cursor_y,
+                    context,
+                    images,
+                    fonts,
+                    current_form,
+                );
             }
             return;
         }
@@ -1935,7 +2061,16 @@ fn layout_block_element(
             sub_context.next_form_id = context.next_form_id;
 
             let y_before = *cursor_y;
-            layout_table_element(element, x, width, cursor_y, &mut sub_context, images, fonts, current_form.clone());
+            layout_table_element(
+                element,
+                x,
+                width,
+                cursor_y,
+                &mut sub_context,
+                images,
+                fonts,
+                current_form.clone(),
+            );
             let table_height = cursor_y.saturating_sub(y_before).max(1);
             rebase_commands(&mut sub_context.commands, x, y_before);
             context.commands.push(DrawCommand::Layer(LayerCommand {
@@ -1955,11 +2090,22 @@ fn layout_block_element(
             }));
             context.links.extend(sub_context.links);
             context.controls.extend(sub_context.controls);
-            context.element_hitboxes.extend(sub_context.element_hitboxes);
+            context
+                .element_hitboxes
+                .extend(sub_context.element_hitboxes);
             context.next_control_id = sub_context.next_control_id;
             context.next_form_id = sub_context.next_form_id;
         } else {
-            layout_table_element(element, x, width, cursor_y, context, images, fonts, current_form);
+            layout_table_element(
+                element,
+                x,
+                width,
+                cursor_y,
+                context,
+                images,
+                fonts,
+                current_form,
+            );
         }
         return;
     }
@@ -2055,51 +2201,79 @@ fn layout_block_element(
         .saturating_add(if element.style.border_style_none {
             0
         } else {
-            element.style.border.left.saturating_add(element.style.border.right)
+            element
+                .style
+                .border
+                .left
+                .saturating_add(element.style.border.right)
         });
     let widens_by_surround = !matches!(element.style.box_sizing, BoxSizing::BorderBox);
 
     // Resolve explicit width from style.width (LengthValue → px)
-    let explicit_width: Option<u32> = settled_main_size.or_else(|| element.style.width.map(|w| match w {
-        LengthValue::Pixels(px) => px,
-        LengthValue::Percent(pct) => (width as u64 * pct as u64 / 100).min(width as u64) as u32,
-        LengthValue::MinContent => 0,
-        LengthValue::MaxContent => width,
-        // `fit-content` is the contents' own width, within what the container
-        // offers -- not the container's width. Treated as the latter, a box that
-        // asks to shrink filled the line instead: firefox.com sizes its carousel
-        // frame that way and it spanned the section rather than hugging the
-        // picture.
-        LengthValue::FitContent(cap) => {
-            let surround = element.style.padding.left
-                + element.style.padding.right
-                + if element.style.border_style_none {
-                    0
+    let explicit_width: Option<u32> = settled_main_size.or_else(|| {
+        element
+            .style
+            .width
+            .map(|w| match w {
+                LengthValue::Pixels(px) => px,
+                LengthValue::Percent(pct) => {
+                    (width as u64 * pct as u64 / 100).min(width as u64) as u32
+                }
+                LengthValue::MinContent => 0,
+                LengthValue::MaxContent => width,
+                // `fit-content` is the contents' own width, within what the container
+                // offers -- not the container's width. Treated as the latter, a box that
+                // asks to shrink filled the line instead: firefox.com sizes its carousel
+                // frame that way and it spanned the section rather than hugging the
+                // picture.
+                LengthValue::FitContent(cap) => {
+                    let surround = element.style.padding.left
+                        + element.style.padding.right
+                        + if element.style.border_style_none {
+                            0
+                        } else {
+                            element.style.border.left + element.style.border.right
+                        };
+                    measure_cell_preferred_width(element, 0, images, fonts)
+                        .saturating_add(surround)
+                        .min(cap)
+                        .min(width)
+                        .max(1)
+                }
+                LengthValue::Calc {
+                    percent_hundredths,
+                    px,
+                } => crate::css::resolve_calc(percent_hundredths, px, width),
+                LengthValue::Bounded {
+                    lower,
+                    value,
+                    upper,
+                } => crate::css::resolve_bounded(lower, value, upper, width),
+            })
+            .map(|resolved| {
+                // `fit-content` measured the contents and already counted them.
+                if widens_by_surround
+                    && !matches!(element.style.width, Some(LengthValue::FitContent(_)))
+                {
+                    resolved.saturating_add(surround_x)
                 } else {
-                    element.style.border.left + element.style.border.right
-                };
-            measure_cell_preferred_width(element, 0, images, fonts)
-                .saturating_add(surround)
-                .min(cap)
-                .min(width)
-                .max(1)
-        }
-        LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, width),
-        LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, width),
-    })
-    .map(|resolved| {
-        // `fit-content` measured the contents and already counted them.
-        if widens_by_surround && !matches!(element.style.width, Some(LengthValue::FitContent(_))) {
-            resolved.saturating_add(surround_x)
-        } else {
-            resolved
-        }
-    }));
+                    resolved
+                }
+            })
+    });
 
     // Container-derived width (what the element would be without explicit width)
     let container_derived_width = {
-        let ml = if element.style.margin_left_auto { 0 } else { element.style.margin.left };
-        let mr = if element.style.margin_right_auto { 0 } else { element.style.margin.right };
+        let ml = if element.style.margin_left_auto {
+            0
+        } else {
+            element.style.margin.left
+        };
+        let mr = if element.style.margin_right_auto {
+            0
+        } else {
+            element.style.margin.right
+        };
         // `max-width` / `min-width` percentages resolve against the containing
         // block, not the font size. Resolving them at parse time against the
         // font size turned the extremely common `max-width: 100%` into 16px,
@@ -2168,7 +2342,15 @@ fn layout_block_element(
         || element.style.transform_rotate_millideg != 0;
     if needs_layer {
         layout_block_element_as_layer(
-            element, outer_x, outer_width, background_top, cursor_y, context, images, fonts, current_form,
+            element,
+            outer_x,
+            outer_width,
+            background_top,
+            cursor_y,
+            context,
+            images,
+            fonts,
+            current_form,
         );
         *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
         return;
@@ -2222,9 +2404,13 @@ fn layout_block_element(
     };
 
     // Insert background image placeholder BEFORE children so it renders behind them.
-    let bg_img_tile = matches!(element.style.background_repeat,
-        BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
-    let bg_img_object_fit = if bg_img_tile { ObjectFit::None } else {
+    let bg_img_tile = matches!(
+        element.style.background_repeat,
+        BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY
+    );
+    let bg_img_object_fit = if bg_img_tile {
+        ObjectFit::None
+    } else {
         match element.style.background_size {
             BackgroundSize::Cover => ObjectFit::Cover,
             BackgroundSize::Contain => ObjectFit::Contain,
@@ -2461,7 +2647,12 @@ fn layout_block_element(
 
     if let Some(shadow_idx) = shadow_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = context.commands.get_mut(shadow_idx) {
-            let blur = element.style.box_shadow.as_ref().map(|s| s.blur).unwrap_or(0);
+            let blur = element
+                .style
+                .box_shadow
+                .as_ref()
+                .map(|s| s.blur)
+                .unwrap_or(0);
             rect.height = background_height.saturating_add(blur.saturating_mul(2));
         }
     }
@@ -2478,20 +2669,26 @@ fn layout_block_element(
 
     // Emit gradient overlay if background_gradient is set
     if let Some(ref gradient) = element.style.background_gradient {
-        let stops: Vec<GradientStop> = gradient.stops.iter().map(|(c, p)| GradientStop {
-            color: *c,
-            position: *p,
-        }).collect();
-        context.commands.push(DrawCommand::Gradient(GradientCommand {
-            x: outer_x,
-            y: background_top,
-            width: outer_width.max(1),
-            height: background_height,
-            border_radius: element.style.border_radius,
-            angle_deg_x1000: gradient.angle_deg_x1000,
-            radial: gradient.radial,
-            stops,
-        }));
+        let stops: Vec<GradientStop> = gradient
+            .stops
+            .iter()
+            .map(|(c, p)| GradientStop {
+                color: *c,
+                position: *p,
+            })
+            .collect();
+        context
+            .commands
+            .push(DrawCommand::Gradient(GradientCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: background_height,
+                border_radius: element.style.border_radius,
+                angle_deg_x1000: gradient.angle_deg_x1000,
+                radial: gradient.radial,
+                stops,
+            }));
     }
 
     // Restore parent background color after children are rendered
@@ -2501,13 +2698,24 @@ fn layout_block_element(
     // Use clip_start_idx (captured before children were laid out) so that child
     // commands are correctly filtered even when there is no background rect.
     if element.style.overflow == Overflow::Hidden {
-        let clip_height = element.style.height
+        let clip_height = element
+            .style
+            .height
             .map(|lv| match lv {
                 LengthValue::Pixels(px) => px,
                 LengthValue::Percent(_) => background_height, // can't resolve % without context
-                LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => background_height,
-                LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, background_height),
-                LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, background_height),
+                LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => {
+                    background_height
+                }
+                LengthValue::Calc {
+                    percent_hundredths,
+                    px,
+                } => crate::css::resolve_calc(percent_hundredths, px, background_height),
+                LengthValue::Bounded {
+                    lower,
+                    value,
+                    upper,
+                } => crate::css::resolve_bounded(lower, value, upper, background_height),
             })
             .unwrap_or(background_height);
         clip_commands_to_box(
@@ -2632,7 +2840,8 @@ fn layout_block_element(
             .map(|length| resolve_offset(length, context.containing_block_size.1))
         {
             let height = cursor_y.saturating_sub(background_top).max(1);
-            let mut sticky_cmds: Vec<DrawCommand> = context.commands.drain(block_cmd_start..).collect();
+            let mut sticky_cmds: Vec<DrawCommand> =
+                context.commands.drain(block_cmd_start..).collect();
             rebase_commands(&mut sticky_cmds, outer_x, background_top);
             context.commands.push(DrawCommand::Sticky(StickyCommand {
                 normal_y: background_top,
@@ -2817,90 +3026,103 @@ fn clip_commands_to_box(
     let clip_y2 = clip_y.saturating_add(clip_h);
 
     let tail = commands.split_off(start);
-    let clamped: Vec<DrawCommand> = tail.into_iter().filter_map(|cmd| {
-        let fonts = &mut *fonts;
-        match cmd {
-            DrawCommand::Rect(mut r) => {
-                let rx2 = r.x.saturating_add(r.width);
-                let ry2 = r.y.saturating_add(r.height);
-                // entirely outside?
-                if r.x >= clip_x2 || r.y >= clip_y2 || rx2 <= clip_x || ry2 <= clip_y {
-                    return None;
+    let clamped: Vec<DrawCommand> = tail
+        .into_iter()
+        .filter_map(|cmd| {
+            let fonts = &mut *fonts;
+            match cmd {
+                DrawCommand::Rect(mut r) => {
+                    let rx2 = r.x.saturating_add(r.width);
+                    let ry2 = r.y.saturating_add(r.height);
+                    // entirely outside?
+                    if r.x >= clip_x2 || r.y >= clip_y2 || rx2 <= clip_x || ry2 <= clip_y {
+                        return None;
+                    }
+                    // clamp to clip box
+                    let new_x = r.x.max(clip_x);
+                    let new_y = r.y.max(clip_y);
+                    let new_x2 = rx2.min(clip_x2);
+                    let new_y2 = ry2.min(clip_y2);
+                    r.x = new_x;
+                    r.y = new_y;
+                    r.width = new_x2.saturating_sub(new_x).max(1);
+                    r.height = new_y2.saturating_sub(new_y).max(1);
+                    Some(DrawCommand::Rect(r))
                 }
-                // clamp to clip box
-                let new_x = r.x.max(clip_x);
-                let new_y = r.y.max(clip_y);
-                let new_x2 = rx2.min(clip_x2);
-                let new_y2 = ry2.min(clip_y2);
-                r.x = new_x; r.y = new_y;
-                r.width = new_x2.saturating_sub(new_x).max(1);
-                r.height = new_y2.saturating_sub(new_y).max(1);
-                Some(DrawCommand::Rect(r))
-            }
-            DrawCommand::Image(img) => {
-                let ix2 = img.x.saturating_add(img.width as i32).max(0) as u32;
-                let iy2 = img.y.saturating_add(img.height);
-                // Only discard entirely-outside images; don't resize (clamping x/y/width/height
-                // would rescale the full image into a smaller rect instead of cropping it).
-                // Pixel-accurate cropping would require source-rect support in the renderer.
-                if img.x.max(0) as u32 >= clip_x2 || img.y >= clip_y2 || ix2 <= clip_x || iy2 <= clip_y {
-                    None
-                } else {
-                    Some(DrawCommand::Image(img))
+                DrawCommand::Image(img) => {
+                    let ix2 = img.x.saturating_add(img.width as i32).max(0) as u32;
+                    let iy2 = img.y.saturating_add(img.height);
+                    // Only discard entirely-outside images; don't resize (clamping x/y/width/height
+                    // would rescale the full image into a smaller rect instead of cropping it).
+                    // Pixel-accurate cropping would require source-rect support in the renderer.
+                    if img.x.max(0) as u32 >= clip_x2
+                        || img.y >= clip_y2
+                        || ix2 <= clip_x
+                        || iy2 <= clip_y
+                    {
+                        None
+                    } else {
+                        Some(DrawCommand::Image(img))
+                    }
+                }
+                DrawCommand::Layer(mut l) => {
+                    let lx2 = l.x.saturating_add(l.width);
+                    let ly2 = l.y.saturating_add(l.height);
+                    if l.x >= clip_x2 || l.y >= clip_y2 || lx2 <= clip_x || ly2 <= clip_y {
+                        return None;
+                    }
+                    // Clamp width/height only — do NOT change x/y.
+                    // Changing x/y would shift the layer's screen position without rebasing inner
+                    // commands (which are layer-relative), causing them to render at the wrong position.
+                    // The compositor clips at the layer's dimensions, so reducing width/height is enough
+                    // to limit the visible area.
+                    l.width = lx2.min(clip_x2).saturating_sub(l.x).max(1);
+                    l.height = ly2.min(clip_y2).saturating_sub(l.y).max(1);
+                    Some(DrawCommand::Layer(l))
+                }
+                DrawCommand::Text(t) => {
+                    let ty2 = t.y.saturating_add(t.line_height_px);
+                    let tx2 = t.x.saturating_add(t.width);
+                    if t.x >= clip_x2 || t.y >= clip_y2 || tx2 <= clip_x || ty2 <= clip_y {
+                        None
+                    } else {
+                        clip_text_to_box(t, clip_x, clip_x2, fonts).map(DrawCommand::Text)
+                    }
+                }
+                DrawCommand::Gradient(mut g) => {
+                    let gx2 = g.x.saturating_add(g.width);
+                    let gy2 = g.y.saturating_add(g.height);
+                    if g.x >= clip_x2 || g.y >= clip_y2 || gx2 <= clip_x || gy2 <= clip_y {
+                        return None;
+                    }
+                    let new_x = g.x.max(clip_x);
+                    let new_y = g.y.max(clip_y);
+                    let new_x2 = gx2.min(clip_x2);
+                    let new_y2 = gy2.min(clip_y2);
+                    g.x = new_x;
+                    g.y = new_y;
+                    g.width = new_x2.saturating_sub(new_x).max(1);
+                    g.height = new_y2.saturating_sub(new_y).max(1);
+                    Some(DrawCommand::Gradient(g))
+                }
+                DrawCommand::Sticky(mut s) => {
+                    let lx2 = s.layer.x.saturating_add(s.layer.width);
+                    let ly2 = s.layer.y.saturating_add(s.layer.height);
+                    if s.layer.x >= clip_x2
+                        || s.layer.y >= clip_y2
+                        || lx2 <= clip_x
+                        || ly2 <= clip_y
+                    {
+                        return None;
+                    }
+                    // Clamp width/height only — same as Layer arm
+                    s.layer.width = lx2.min(clip_x2).saturating_sub(s.layer.x).max(1);
+                    s.layer.height = ly2.min(clip_y2).saturating_sub(s.layer.y).max(1);
+                    Some(DrawCommand::Sticky(s))
                 }
             }
-            DrawCommand::Layer(mut l) => {
-                let lx2 = l.x.saturating_add(l.width);
-                let ly2 = l.y.saturating_add(l.height);
-                if l.x >= clip_x2 || l.y >= clip_y2 || lx2 <= clip_x || ly2 <= clip_y {
-                    return None;
-                }
-                // Clamp width/height only — do NOT change x/y.
-                // Changing x/y would shift the layer's screen position without rebasing inner
-                // commands (which are layer-relative), causing them to render at the wrong position.
-                // The compositor clips at the layer's dimensions, so reducing width/height is enough
-                // to limit the visible area.
-                l.width = lx2.min(clip_x2).saturating_sub(l.x).max(1);
-                l.height = ly2.min(clip_y2).saturating_sub(l.y).max(1);
-                Some(DrawCommand::Layer(l))
-            }
-            DrawCommand::Text(t) => {
-                let ty2 = t.y.saturating_add(t.line_height_px);
-                let tx2 = t.x.saturating_add(t.width);
-                if t.x >= clip_x2 || t.y >= clip_y2 || tx2 <= clip_x || ty2 <= clip_y {
-                    None
-                } else {
-                    clip_text_to_box(t, clip_x, clip_x2, fonts).map(DrawCommand::Text)
-                }
-            }
-            DrawCommand::Gradient(mut g) => {
-                let gx2 = g.x.saturating_add(g.width);
-                let gy2 = g.y.saturating_add(g.height);
-                if g.x >= clip_x2 || g.y >= clip_y2 || gx2 <= clip_x || gy2 <= clip_y {
-                    return None;
-                }
-                let new_x = g.x.max(clip_x);
-                let new_y = g.y.max(clip_y);
-                let new_x2 = gx2.min(clip_x2);
-                let new_y2 = gy2.min(clip_y2);
-                g.x = new_x; g.y = new_y;
-                g.width = new_x2.saturating_sub(new_x).max(1);
-                g.height = new_y2.saturating_sub(new_y).max(1);
-                Some(DrawCommand::Gradient(g))
-            }
-            DrawCommand::Sticky(mut s) => {
-                let lx2 = s.layer.x.saturating_add(s.layer.width);
-                let ly2 = s.layer.y.saturating_add(s.layer.height);
-                if s.layer.x >= clip_x2 || s.layer.y >= clip_y2 || lx2 <= clip_x || ly2 <= clip_y {
-                    return None;
-                }
-                // Clamp width/height only — same as Layer arm
-                s.layer.width = lx2.min(clip_x2).saturating_sub(s.layer.x).max(1);
-                s.layer.height = ly2.min(clip_y2).saturating_sub(s.layer.y).max(1);
-                Some(DrawCommand::Sticky(s))
-            }
-        }
-    }).collect();
+        })
+        .collect();
     commands.extend(clamped);
 }
 
@@ -2956,7 +3178,10 @@ fn layout_atomic_inline(
         eprintln!(
             "atomic <{}> class={:?} avail={available_width} -> {width}",
             element.tag_name,
-            element.attributes.get("class").map(|c| c.chars().take(24).collect::<String>()),
+            element
+                .attributes
+                .get("class")
+                .map(|c| c.chars().take(24).collect::<String>()),
         );
     }
 
@@ -2971,7 +3196,15 @@ fn layout_atomic_inline(
     // around it and nothing inside. `layout_node` picks between them, but
     // going through that would come straight back here for an inline-block.
     if element.tag_name == "img" {
-        layout_image_element(element, 0, width, &mut cursor_y, &mut sub_context, images, fonts);
+        layout_image_element(
+            element,
+            0,
+            width,
+            &mut cursor_y,
+            &mut sub_context,
+            images,
+            fonts,
+        );
     } else {
         layout_block_element(
             element,
@@ -3092,7 +3325,11 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
 ///
 /// Returns `(shift_x, shift_y, width, height)`: how far the contents move
 /// inside the enlarged layer, and how big that layer has to be.
-fn transformed_layer_bounds(style: &ComputedStyle, width: u32, height: u32) -> (u32, u32, u32, u32) {
+fn transformed_layer_bounds(
+    style: &ComputedStyle,
+    width: u32,
+    height: u32,
+) -> (u32, u32, u32, u32) {
     let scale_x = if style.transform_scale_x == 0 {
         1.0
     } else {
@@ -3165,8 +3402,7 @@ fn layout_block_element_as_layer(
         // saturating_sub(outer_x, background_top), which clamps negative offsets to 0 and
         // corrupts the shadow position. By clamping to the element box we lose shadow that
         // extends above/left of the element, but avoid rebase corruption.
-        let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64)
-            .max(outer_x as i64) as u32; // don't go left of element
+        let sx = (outer_x as i64 + shadow.offset_x as i64 - blur as i64).max(outer_x as i64) as u32; // don't go left of element
         let sy = (background_top as i64 + shadow.offset_y as i64 - blur as i64)
             .max(background_top as i64) as u32; // don't go above element
         let sw = outer_width.saturating_add(blur.saturating_mul(2)).max(1);
@@ -3327,7 +3563,12 @@ fn layout_block_element_as_layer(
 
     if let Some(shadow_idx) = shadow_cmd_index {
         if let Some(DrawCommand::Rect(rect)) = sub_context.commands.get_mut(shadow_idx) {
-            let blur = element.style.box_shadow.as_ref().map(|s| s.blur).unwrap_or(0);
+            let blur = element
+                .style
+                .box_shadow
+                .as_ref()
+                .map(|s| s.blur)
+                .unwrap_or(0);
             rect.height = final_height.saturating_add(blur.saturating_mul(2));
         }
     }
@@ -3339,25 +3580,34 @@ fn layout_block_element_as_layer(
 
     // Emit gradient overlay if background_gradient is set
     if let Some(ref gradient) = element.style.background_gradient {
-        let stops: Vec<GradientStop> = gradient.stops.iter().map(|(c, p)| GradientStop {
-            color: *c,
-            position: *p,
-        }).collect();
-        sub_context.commands.push(DrawCommand::Gradient(GradientCommand {
-            x: outer_x,
-            y: background_top,
-            width: outer_width.max(1),
-            height: final_height,
-            border_radius: element.style.border_radius,
-            angle_deg_x1000: gradient.angle_deg_x1000,
-            radial: gradient.radial,
-            stops,
-        }));
+        let stops: Vec<GradientStop> = gradient
+            .stops
+            .iter()
+            .map(|(c, p)| GradientStop {
+                color: *c,
+                position: *p,
+            })
+            .collect();
+        sub_context
+            .commands
+            .push(DrawCommand::Gradient(GradientCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: final_height,
+                border_radius: element.style.border_radius,
+                angle_deg_x1000: gradient.angle_deg_x1000,
+                radial: gradient.radial,
+                stops,
+            }));
     }
 
     // Emit background image if background_image_url is set
     if let Some(ref url) = element.style.background_image_url {
-        let tile = matches!(element.style.background_repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
+        let tile = matches!(
+            element.style.background_repeat,
+            BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY
+        );
         let object_fit = if tile {
             ObjectFit::None
         } else {
@@ -3436,7 +3686,8 @@ fn layout_block_element_as_layer(
             }));
         }
         if border_right_w > 0 {
-            sub_context.commands.push(DrawCommand::Rect(RectCommand {                x: outer_x
+            sub_context.commands.push(DrawCommand::Rect(RectCommand {
+                x: outer_x
                     .saturating_add(outer_width)
                     .saturating_sub(border_right_w),
                 y: background_top,
@@ -3450,13 +3701,24 @@ fn layout_block_element_as_layer(
 
     // overflow: hidden — clip child commands within the element box
     if element.style.overflow == Overflow::Hidden {
-        let clip_height = element.style.height
+        let clip_height = element
+            .style
+            .height
             .map(|lv| match lv {
                 LengthValue::Pixels(px) => px,
                 LengthValue::Percent(_) => final_height,
-                LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => final_height,
-                LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, final_height),
-                LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, final_height),
+                LengthValue::MinContent | LengthValue::MaxContent | LengthValue::FitContent(_) => {
+                    final_height
+                }
+                LengthValue::Calc {
+                    percent_hundredths,
+                    px,
+                } => crate::css::resolve_calc(percent_hundredths, px, final_height),
+                LengthValue::Bounded {
+                    lower,
+                    value,
+                    upper,
+                } => crate::css::resolve_bounded(lower, value, upper, final_height),
             })
             .unwrap_or(final_height);
         clip_commands_to_box(
@@ -3484,16 +3746,14 @@ fn layout_block_element_as_layer(
         offset_commands(&mut sub_context.commands, shift_x, shift_y);
     }
     let origin_x = if layer_width > 0 {
-        ((element.style.transform_origin_x as u64 * box_width as u64 / 1000
-            + shift_x as u64)
+        ((element.style.transform_origin_x as u64 * box_width as u64 / 1000 + shift_x as u64)
             * 1000
             / layer_width as u64) as u32
     } else {
         element.style.transform_origin_x
     };
     let origin_y = if layer_height > 0 {
-        ((element.style.transform_origin_y as u64 * final_height as u64 / 1000
-            + shift_y as u64)
+        ((element.style.transform_origin_y as u64 * final_height as u64 / 1000 + shift_y as u64)
             * 1000
             / layer_height as u64) as u32
     } else {
@@ -3520,7 +3780,9 @@ fn layout_block_element_as_layer(
     // Propagate links, controls, and element hitboxes from sub_context to parent
     context.links.extend(sub_context.links);
     context.controls.extend(sub_context.controls);
-    context.element_hitboxes.extend(sub_context.element_hitboxes);
+    context
+        .element_hitboxes
+        .extend(sub_context.element_hitboxes);
     context.next_control_id = sub_context.next_control_id;
     context.next_form_id = sub_context.next_form_id;
 }
@@ -3568,7 +3830,10 @@ fn layout_image_element(
     if off_canvas {
         // Indented clear off the canvas: nothing to paint, though the box still
         // takes up its height below.
-    } else if element.style.opacity < 255 || element.style.filter_blur_px > 0 || element.style.filter_brightness != 10000 {
+    } else if element.style.opacity < 255
+        || element.style.filter_blur_px > 0
+        || element.style.filter_brightness != 10000
+    {
         // Wrap the image in a LayerCommand so opacity/filters are applied correctly
         let img_cmd = DrawCommand::Image(ImageCommand {
             x: 0,
@@ -3797,7 +4062,10 @@ fn layout_table_element(
         let span_width = span_width(&column_widths, placement.column_index, placement.colspan)
             .saturating_add(spacing.saturating_mul(placement.colspan.saturating_sub(1) as u32));
         let inner_width = span_width.saturating_sub(padding.saturating_mul(2)).max(1);
-        let cell_backdrop = placement.cell.style.background_color
+        let cell_backdrop = placement
+            .cell
+            .style
+            .background_color
             .unwrap_or(context.background_color);
         let layout = layout_table_cell(
             placement.cell,
@@ -3863,7 +4131,9 @@ fn layout_table_element(
         };
 
         let content_x = cell_x.saturating_add(padding);
-        let content_y = cell_y.saturating_add(padding).saturating_add(vertical_offset);
+        let content_y = cell_y
+            .saturating_add(padding)
+            .saturating_add(vertical_offset);
 
         if placement.cell.style.opacity < 255 {
             // Wrap cell content in a LayerCommand for opacity compositing.
@@ -3883,7 +4153,12 @@ fn layout_table_element(
                 }));
             }
             if let Some(ref url) = placement.cell.style.background_image_url {
-                let tile = matches!(placement.cell.style.background_repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
+                let tile = matches!(
+                    placement.cell.style.background_repeat,
+                    BackgroundRepeat::Repeat
+                        | BackgroundRepeat::RepeatX
+                        | BackgroundRepeat::RepeatY
+                );
                 let object_fit = if tile {
                     ObjectFit::None
                 } else {
@@ -3930,48 +4205,67 @@ fn layout_table_element(
                 commands: layer_commands,
             }));
             // Links are content-relative; shift by cell position + padding/valign
-            context.links.extend(layout.links.iter().map(|link| LinkCommand {
-                node_id: link.node_id,
-                x: link.x.saturating_add(cell_x).saturating_add(padding),
-                y: link.y.saturating_add(cell_y).saturating_add(padding).saturating_add(vertical_offset),
-                width: link.width,
-                height: link.height,
-                href: link.href.clone(),
+            context.links.extend(layout.links.iter().map(|link| {
+                LinkCommand {
+                    node_id: link.node_id,
+                    x: link.x.saturating_add(cell_x).saturating_add(padding),
+                    y: link
+                        .y
+                        .saturating_add(cell_y)
+                        .saturating_add(padding)
+                        .saturating_add(vertical_offset),
+                    width: link.width,
+                    height: link.height,
+                    href: link.href.clone(),
+                }
             }));
-            context.controls.extend(layout.controls.iter().map(|ctrl| FormControlCommand {
-                id: ctrl.id,
-                node_id: ctrl.node_id,
-                form_node_id: ctrl.form_node_id,
-                kind: ctrl.kind,
-                x: ctrl.x.saturating_add(cell_x).saturating_add(padding),
-                y: ctrl.y.saturating_add(cell_y).saturating_add(padding).saturating_add(vertical_offset),
-                width: ctrl.width,
-                height: ctrl.height,
-                name: ctrl.name.clone(),
-                value: ctrl.value.clone(),
-                label: ctrl.label.clone(),
-                placeholder: ctrl.placeholder.clone(),
-                form_id: ctrl.form_id,
-                form_action: ctrl.form_action.clone(),
-                form_method: ctrl.form_method.clone(),
-                activates_submit: ctrl.activates_submit,
-                disabled: ctrl.disabled,
-                masked: ctrl.masked,
-                font_size_px: ctrl.font_size_px,
-                font_family: ctrl.font_family,
-                text_color: ctrl.text_color,
-                background_color: ctrl.background_color,
-                border_color: ctrl.border_color,
-                native_chrome: ctrl.native_chrome,
+            context.controls.extend(layout.controls.iter().map(|ctrl| {
+                FormControlCommand {
+                    id: ctrl.id,
+                    node_id: ctrl.node_id,
+                    form_node_id: ctrl.form_node_id,
+                    kind: ctrl.kind,
+                    x: ctrl.x.saturating_add(cell_x).saturating_add(padding),
+                    y: ctrl
+                        .y
+                        .saturating_add(cell_y)
+                        .saturating_add(padding)
+                        .saturating_add(vertical_offset),
+                    width: ctrl.width,
+                    height: ctrl.height,
+                    name: ctrl.name.clone(),
+                    value: ctrl.value.clone(),
+                    label: ctrl.label.clone(),
+                    placeholder: ctrl.placeholder.clone(),
+                    form_id: ctrl.form_id,
+                    form_action: ctrl.form_action.clone(),
+                    form_method: ctrl.form_method.clone(),
+                    activates_submit: ctrl.activates_submit,
+                    disabled: ctrl.disabled,
+                    masked: ctrl.masked,
+                    font_size_px: ctrl.font_size_px,
+                    font_family: ctrl.font_family,
+                    text_color: ctrl.text_color,
+                    background_color: ctrl.background_color,
+                    border_color: ctrl.border_color,
+                    native_chrome: ctrl.native_chrome,
+                }
             }));
-            context.element_hitboxes.extend(layout.element_hitboxes.iter().map(|h| ElementHitbox {
-                node_id: h.node_id,
-                x: h.x.saturating_add(cell_x).saturating_add(padding),
-                y: h.y.saturating_add(cell_y).saturating_add(padding).saturating_add(vertical_offset),
-                width: h.width,
-                height: h.height,
-                cursor_kind: h.cursor_kind,
-            }));
+            context
+                .element_hitboxes
+                .extend(layout.element_hitboxes.iter().map(|h| {
+                    ElementHitbox {
+                        node_id: h.node_id,
+                        x: h.x.saturating_add(cell_x).saturating_add(padding),
+                        y: h.y
+                            .saturating_add(cell_y)
+                            .saturating_add(padding)
+                            .saturating_add(vertical_offset),
+                        width: h.width,
+                        height: h.height,
+                        cursor_kind: h.cursor_kind,
+                    }
+                }));
         } else {
             // opacity == 255: emit background rect directly into parent context
             if let Some(background_color) = placement.cell.style.background_color {
@@ -3990,7 +4284,12 @@ fn layout_table_element(
                 }));
             }
             if let Some(ref url) = placement.cell.style.background_image_url {
-                let tile = matches!(placement.cell.style.background_repeat, BackgroundRepeat::Repeat | BackgroundRepeat::RepeatX | BackgroundRepeat::RepeatY);
+                let tile = matches!(
+                    placement.cell.style.background_repeat,
+                    BackgroundRepeat::Repeat
+                        | BackgroundRepeat::RepeatX
+                        | BackgroundRepeat::RepeatY
+                );
                 let object_fit = if tile {
                     ObjectFit::None
                 } else {
@@ -4228,7 +4527,9 @@ fn compute_column_widths(
     // the screen, and it is the first thing worth seeing when one comes out the
     // wrong width. `TOBIRA_DEBUG_TABLE` prints it.
     if std::env::var("TOBIRA_DEBUG_TABLE").is_ok() {
-        eprintln!("table columns: widths={widths:?} mins={mins:?} locked={locked:?} available={available_width}");
+        eprintln!(
+            "table columns: widths={widths:?} mins={mins:?} locked={locked:?} available={available_width}"
+        );
     }
     // A column is never narrower than the narrowest its content can be. A cell
     // that asks for `width: 1%` -- which is how a table says "as narrow as it
@@ -4437,7 +4738,9 @@ fn merge_fragment(
     offset_y: u32,
 ) {
     for cmd in &fragment.commands {
-        context.commands.push(offset_draw_command(cmd, offset_x, offset_y));
+        context
+            .commands
+            .push(offset_draw_command(cmd, offset_x, offset_y));
     }
     context
         .links
@@ -4591,10 +4894,18 @@ struct ActiveFloat {
     width: u32,
 }
 
-fn active_float_edges(active_floats: &[ActiveFloat], cursor_y: u32, x: u32, width: u32) -> (u32, u32) {
+fn active_float_edges(
+    active_floats: &[ActiveFloat],
+    cursor_y: u32,
+    x: u32,
+    width: u32,
+) -> (u32, u32) {
     let mut left_edge = x;
     let mut right_edge = x.saturating_add(width);
-    for float in active_floats.iter().filter(|f| f.top <= cursor_y && cursor_y < f.bottom) {
+    for float in active_floats
+        .iter()
+        .filter(|f| f.top <= cursor_y && cursor_y < f.bottom)
+    {
         match float.side {
             FloatSide::Left => left_edge = left_edge.max(float.x.saturating_add(float.width)),
             FloatSide::Right => right_edge = right_edge.min(float.x),
@@ -4742,7 +5053,16 @@ fn layout_mixed_children(
             );
 
             let Some(style) = child_style else {
-                layout_node(child, x, width, cursor_y, context, images, fonts, current_form.clone());
+                layout_node(
+                    child,
+                    x,
+                    width,
+                    cursor_y,
+                    context,
+                    images,
+                    fonts,
+                    current_form.clone(),
+                );
                 continue;
             };
 
@@ -5036,8 +5356,12 @@ fn collect_inline_fragments(
                     if element.tag_name == "img" {
                         if let Some(src) = resolved_image_source(element) {
                             if let Some(image) = images.get(src) {
-                                let (draw_width, draw_height) =
-                                    image_dimensions(element, image.width, image.height, available_width.max(1));
+                                let (draw_width, draw_height) = image_dimensions(
+                                    element,
+                                    image.width,
+                                    image.height,
+                                    available_width.max(1),
+                                );
                                 output.push(InlineFragment::Image {
                                     src: src.to_string(),
                                     draw_width,
@@ -5279,9 +5603,22 @@ fn layout_nowrap_fragments(
                 );
                 pending_space = true;
             }
-            InlineFragment::Text { text, style, link_href, link_node_id } => {
-                let starts_with_whitespace = text.chars().next().map(char::is_whitespace).unwrap_or(false);
-                let ends_with_whitespace = text.chars().last().map(char::is_whitespace).unwrap_or(false);
+            InlineFragment::Text {
+                text,
+                style,
+                link_href,
+                link_node_id,
+            } => {
+                let starts_with_whitespace = text
+                    .chars()
+                    .next()
+                    .map(char::is_whitespace)
+                    .unwrap_or(false);
+                let ends_with_whitespace = text
+                    .chars()
+                    .last()
+                    .map(char::is_whitespace)
+                    .unwrap_or(false);
                 let words = line_break_segments(text);
                 let mut needs_space = pending_space || starts_with_whitespace;
                 for (index, (word, space_before)) in words.into_iter().enumerate() {
@@ -5294,7 +5631,8 @@ fn layout_nowrap_fragments(
                     line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
                     needs_space = true;
                 }
-                pending_space = ends_with_whitespace || (text.chars().any(char::is_whitespace) && line.is_empty());
+                pending_space = ends_with_whitespace
+                    || (text.chars().any(char::is_whitespace) && line.is_empty());
             }
         }
     }
@@ -5378,7 +5716,15 @@ fn balanced_wrap_width(
     // the run, and a paragraph does not want it in the first place.
     const MAX_BALANCED_LINES: usize = 10;
 
-    let lines = trial_line_count(fragments, container_style, x, width, cursor_y, context, fonts);
+    let lines = trial_line_count(
+        fragments,
+        container_style,
+        x,
+        width,
+        cursor_y,
+        context,
+        fonts,
+    );
     if lines < 2 || lines > MAX_BALANCED_LINES {
         return width;
     }
@@ -5409,20 +5755,25 @@ fn layout_normal_fragments(
     // sit in: a centred heading stays centred on the original column. Only
     // plain text is balanced -- an image or a form control in the run would
     // leave more behind than the trial run knows how to take back.
-    let plain_text = fragments
-        .iter()
-        .all(|fragment| {
-            matches!(
-                fragment,
-                InlineFragment::Text { .. }
-                    | InlineFragment::LineBreak
-                    | InlineFragment::BoxStart(_)
-                    | InlineFragment::BoxEnd(_)
-            )
-        });
+    let plain_text = fragments.iter().all(|fragment| {
+        matches!(
+            fragment,
+            InlineFragment::Text { .. }
+                | InlineFragment::LineBreak
+                | InlineFragment::BoxStart(_)
+                | InlineFragment::BoxEnd(_)
+        )
+    });
     if container_style.text_wrap_balance && plain_text && width > 0 {
-        let balanced =
-            balanced_wrap_width(fragments, container_style, x, width, *cursor_y, context, fonts);
+        let balanced = balanced_wrap_width(
+            fragments,
+            container_style,
+            x,
+            width,
+            *cursor_y,
+            context,
+            fonts,
+        );
         if balanced < width {
             let slack = width - balanced;
             let offset = match container_style.text_align {
@@ -5441,7 +5792,15 @@ fn layout_normal_fragments(
             );
         }
     }
-    layout_normal_fragments_at(fragments, container_style, x, width, cursor_y, context, fonts);
+    layout_normal_fragments_at(
+        fragments,
+        container_style,
+        x,
+        width,
+        cursor_y,
+        context,
+        fonts,
+    );
 }
 
 fn layout_normal_fragments_at(
@@ -5453,7 +5812,8 @@ fn layout_normal_fragments_at(
     context: &mut LayoutContext,
     fonts: &mut FontContext,
 ) {
-    let ellipsis_mode = container_style.text_overflow_ellipsis && container_style.overflow == Overflow::Hidden;
+    let ellipsis_mode =
+        container_style.text_overflow_ellipsis && container_style.overflow == Overflow::Hidden;
     let mut line = LineBuilder::default();
     let mut pending_space = false;
     let text_indent = container_style.text_indent;
@@ -5516,7 +5876,12 @@ fn layout_normal_fragments_at(
                     if line.width.saturating_add(space_width) > effective_width {
                         if ellipsis_mode {
                             // Apply ellipsis and stop
-                            apply_ellipsis_to_line(&mut line, effective_width, container_style, fonts);
+                            apply_ellipsis_to_line(
+                                &mut line,
+                                effective_width,
+                                container_style,
+                                fonts,
+                            );
                             ellipsis_done = true;
                             break 'outer;
                         }
@@ -5580,7 +5945,12 @@ fn layout_normal_fragments_at(
                     let space_width = char_width(style, ' ', fonts);
                     if line.width.saturating_add(space_width) > effective_width {
                         if ellipsis_mode {
-                            apply_ellipsis_to_line(&mut line, effective_width, container_style, fonts);
+                            apply_ellipsis_to_line(
+                                &mut line,
+                                effective_width,
+                                container_style,
+                                fonts,
+                            );
                             ellipsis_done = true;
                             break 'outer;
                         }
@@ -5640,8 +6010,16 @@ fn layout_normal_fragments_at(
                 link_href,
                 link_node_id,
             } => {
-                let starts_with_whitespace = text.chars().next().map(char::is_whitespace).unwrap_or(false);
-                let ends_with_whitespace = text.chars().last().map(char::is_whitespace).unwrap_or(false);
+                let starts_with_whitespace = text
+                    .chars()
+                    .next()
+                    .map(char::is_whitespace)
+                    .unwrap_or(false);
+                let ends_with_whitespace = text
+                    .chars()
+                    .last()
+                    .map(char::is_whitespace)
+                    .unwrap_or(false);
                 let words = line_break_segments(text);
                 let mut needs_space = pending_space || starts_with_whitespace;
 
@@ -5662,7 +6040,12 @@ fn layout_normal_fragments_at(
                         let space_width = char_width(style, ' ', fonts);
                         if line.width.saturating_add(space_width) > effective_width {
                             if ellipsis_mode {
-                                apply_ellipsis_to_line(&mut line, effective_width, container_style, fonts);
+                                apply_ellipsis_to_line(
+                                    &mut line,
+                                    effective_width,
+                                    container_style,
+                                    fonts,
+                                );
                                 ellipsis_done = true;
                                 break;
                             }
@@ -5682,7 +6065,9 @@ fn layout_normal_fragments_at(
                         }
                     }
 
-                    if ellipsis_done { break; }
+                    if ellipsis_done {
+                        break;
+                    }
 
                     let effective_width2 = if first_line && line.is_empty() {
                         width_after_indent(width, text_indent)
@@ -5696,10 +6081,20 @@ fn layout_normal_fragments_at(
                         let ellipsis_width = text_width(style, "...", fonts);
                         if line.width.saturating_add(word_width) > effective_width2 {
                             // Word doesn't fit - apply ellipsis to current line
-                            apply_ellipsis_to_line(&mut line, effective_width2, container_style, fonts);
+                            apply_ellipsis_to_line(
+                                &mut line,
+                                effective_width2,
+                                container_style,
+                                fonts,
+                            );
                             ellipsis_done = true;
                             break;
-                        } else if line.width.saturating_add(word_width).saturating_add(ellipsis_width) > effective_width2 {
+                        } else if line
+                            .width
+                            .saturating_add(word_width)
+                            .saturating_add(ellipsis_width)
+                            > effective_width2
+                        {
                             // Word fits but we can't guarantee another word will fit - add it
                             line.push_span(word, style, fonts, link_href.as_deref(), *link_node_id);
                             needs_space = true;
@@ -5725,7 +6120,8 @@ fn layout_normal_fragments_at(
                     }
                 }
 
-                pending_space = ends_with_whitespace || (text.chars().any(char::is_whitespace) && line.is_empty());
+                pending_space = ends_with_whitespace
+                    || (text.chars().any(char::is_whitespace) && line.is_empty());
             }
         }
     }
@@ -5779,7 +6175,8 @@ fn apply_ellipsis_to_line(
                 let mut truncated_text = String::new();
                 let mut tw = 0u32;
                 for ch in span.text.chars() {
-                    let cw = fonts.glyph_advance_px(ch, span.style.font_size_px, span.style.font_family);
+                    let cw =
+                        fonts.glyph_advance_px(ch, span.style.font_size_px, span.style.font_family);
                     if tw.saturating_add(cw) > available {
                         break;
                     }
@@ -5832,7 +6229,13 @@ fn layout_preformatted_fragments(
                 // whole rather than overflowing the current one.
                 if !line.is_empty() && line.width.saturating_add(atomic.width) > width {
                     emit_line_with_indent(
-                        &mut line, container_style, x, width, cursor_y, context, fonts,
+                        &mut line,
+                        container_style,
+                        x,
+                        width,
+                        cursor_y,
+                        context,
+                        fonts,
                         if first_line { text_indent } else { 0 },
                     );
                     first_line = false;
@@ -5845,7 +6248,13 @@ fn layout_preformatted_fragments(
             InlineFragment::BoxEnd(node_id) => line.push_marker(*node_id, false),
             InlineFragment::LineBreak => {
                 emit_line_with_indent(
-                    &mut line, container_style, x, width, cursor_y, context, fonts,
+                    &mut line,
+                    container_style,
+                    x,
+                    width,
+                    cursor_y,
+                    context,
+                    fonts,
                     if first_line { text_indent } else { 0 },
                 );
                 first_line = false;
@@ -5860,7 +6269,13 @@ fn layout_preformatted_fragments(
                 // Only emit current line if the control won't fit inline
                 if !line.is_empty() && line.width.saturating_add(control_width) > effective_width {
                     emit_line_with_indent(
-                        &mut line, container_style, x, width, cursor_y, context, fonts,
+                        &mut line,
+                        container_style,
+                        x,
+                        width,
+                        cursor_y,
+                        context,
+                        fonts,
                         if first_line { text_indent } else { 0 },
                     );
                     first_line = false;
@@ -5894,7 +6309,13 @@ fn layout_preformatted_fragments(
                 for character in text.chars() {
                     if character == '\n' {
                         emit_line_with_indent(
-                            &mut line, container_style, x, width, cursor_y, context, fonts,
+                            &mut line,
+                            container_style,
+                            x,
+                            width,
+                            cursor_y,
+                            context,
+                            fonts,
                             if first_line { text_indent } else { 0 },
                         );
                         first_line = false;
@@ -5902,10 +6323,20 @@ fn layout_preformatted_fragments(
                     }
 
                     let character_width = char_width(style, character, fonts);
-                    let eff_w = if first_line { width_after_indent(width, text_indent) } else { width };
+                    let eff_w = if first_line {
+                        width_after_indent(width, text_indent)
+                    } else {
+                        width
+                    };
                     if !line.is_empty() && line.width.saturating_add(character_width) > eff_w {
                         emit_line_with_indent(
-                            &mut line, container_style, x, width, cursor_y, context, fonts,
+                            &mut line,
+                            container_style,
+                            x,
+                            width,
+                            cursor_y,
+                            context,
+                            fonts,
                             if first_line { text_indent } else { 0 },
                         );
                         first_line = false;
@@ -6057,8 +6488,9 @@ fn apply_inline_marks(
         }
         // A mark inside a run stands where the text before it ends.
         let cursor_x = match span {
-            Some(span) if *offset > 0 && *offset <= span.text.len() => cursor_x
-                .saturating_add(text_width(&span.style, &span.text[..*offset], fonts)),
+            Some(span) if *offset > 0 && *offset <= span.text.len() => {
+                cursor_x.saturating_add(text_width(&span.style, &span.text[..*offset], fonts))
+            }
             _ => cursor_x,
         };
         if *open {
@@ -6153,7 +6585,10 @@ fn emit_line_impl(
         // for it. Treating those as baseline-aligned added the text's
         // descenders under a box that was never sitting on the baseline.
         if span.atomic.is_some()
-            && matches!(span.style.vertical_align, VerticalAlign::Top | VerticalAlign::Bottom)
+            && matches!(
+                span.style.vertical_align,
+                VerticalAlign::Top | VerticalAlign::Bottom
+            )
         {
             min_line_height = min_line_height.max(span.height);
             continue;
@@ -6285,14 +6720,9 @@ fn emit_line_impl(
                     .saturating_add(baseline)
                     .saturating_sub(span.height.div_ceil(2))
                     .saturating_sub(x_half_height(&span.style)),
-                VerticalAlign::Baseline => {
-                    cursor_y.saturating_add(baseline.saturating_sub(atomic_span_baseline(
-                        atomic,
-                        &span.style,
-                        span.height,
-                        fonts,
-                    )))
-                }
+                VerticalAlign::Baseline => cursor_y.saturating_add(baseline.saturating_sub(
+                    atomic_span_baseline(atomic, &span.style, span.height, fonts),
+                )),
             };
             let mut commands = atomic.commands.clone();
             offset_commands(&mut commands, cursor_x, box_y);
@@ -6391,7 +6821,8 @@ fn emit_line_impl(
         // the block-level backdrop — ignoring any inline content painted underneath.
         // This is an intentional approximation (see css.rs nested_inline_opacity test).
         if let Some(background_color) = span.style.background_color {
-            let blended_bg = apply_opacity(background_color, context.background_color, span_opacity);
+            let blended_bg =
+                apply_opacity(background_color, context.background_color, span_opacity);
             context.commands.push(DrawCommand::Rect(RectCommand {
                 x: cursor_x,
                 y: *cursor_y,
@@ -6624,7 +7055,8 @@ fn measure_cell_preferred_width(
             continue;
         }
 
-        if matches!(child, StyledNode::Element(StyledElement { tag_name, .. }) if tag_name == "br") {
+        if matches!(child, StyledNode::Element(StyledElement { tag_name, .. }) if tag_name == "br")
+        {
             max_width = max_width.max(inline_width);
             inline_width = 0;
             continue;
@@ -6789,7 +7221,8 @@ fn breaks_between(previous: Option<char>, next: char) -> bool {
     if !is_ideographic(previous) && !is_ideographic(next) {
         return false;
     }
-    const NO_BREAK_BEFORE: &str = "、。，．・：；？！ー〜ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ）］｝」』】〉》〕";
+    const NO_BREAK_BEFORE: &str =
+        "、。，．・：；？！ー〜ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ）］｝」』】〉》〕";
     const NO_BREAK_AFTER: &str = "（［｛「『【〈《〔";
     !NO_BREAK_BEFORE.contains(next) && !NO_BREAK_AFTER.contains(previous)
 }
@@ -6844,8 +7277,15 @@ fn measure_node_preferred_width(
                         LengthValue::Percent(value) => value.saturating_mul(8),
                         LengthValue::MinContent => 0,
                         LengthValue::MaxContent | LengthValue::FitContent(_) => u32::MAX / 2,
-                        LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, u32::MAX / 2),
-                        LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, u32::MAX / 2),
+                        LengthValue::Calc {
+                            percent_hundredths,
+                            px,
+                        } => crate::css::resolve_calc(percent_hundredths, px, u32::MAX / 2),
+                        LengthValue::Bounded {
+                            lower,
+                            value,
+                            upper,
+                        } => crate::css::resolve_bounded(lower, value, upper, u32::MAX / 2),
                     })
                     .unwrap_or_else(|| {
                         collect_table_rows(element)
@@ -6882,9 +7322,11 @@ fn measure_node_preferred_width(
                         .style
                         .column_gap
                         .saturating_mul(visible.len().saturating_sub(1) as u32);
-                    visible.iter().fold(gaps, |total, width| total.saturating_add(*width))
+                    visible
+                        .iter()
+                        .fold(gaps, |total, width| total.saturating_add(*width))
                 }
-                    .max(1)
+                .max(1)
             } else {
                 // A block box breaks a line only at a block-level child, so its
                 // max-content width is the widest *line*, not the widest child.
@@ -6944,11 +7386,7 @@ fn measure_node_preferred_width(
     }
 }
 
-fn measure_node_min_width(
-    node: &StyledNode,
-    images: &ImageStore,
-    fonts: &mut FontContext,
-) -> u32 {
+fn measure_node_min_width(node: &StyledNode, images: &ImageStore, fonts: &mut FontContext) -> u32 {
     match node {
         // The narrowest a run of text can be made is its longest unbreakable
         // piece -- its longest word. Measuring one character instead said any
@@ -7068,13 +7506,16 @@ fn resolve_offset(length: LengthValue, basis: u32) -> i32 {
     match length {
         LengthValue::Pixels(px) => px.min(i32::MAX as u32) as i32,
         LengthValue::Percent(percent) => ((basis as i64 * percent as i64) / 100) as i32,
-        LengthValue::Calc { percent_hundredths, px } => {
-            ((basis as i64 * percent_hundredths as i64) / 10_000 + px as i64)
-                .clamp(i32::MIN as i64, i32::MAX as i64) as i32
-        }
-        LengthValue::Bounded { lower, value, upper } => {
-            crate::css::resolve_bounded(lower, value, upper, basis).min(i32::MAX as u32) as i32
-        }
+        LengthValue::Calc {
+            percent_hundredths,
+            px,
+        } => ((basis as i64 * percent_hundredths as i64) / 10_000 + px as i64)
+            .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        LengthValue::Bounded {
+            lower,
+            value,
+            upper,
+        } => crate::css::resolve_bounded(lower, value, upper, basis).min(i32::MAX as u32) as i32,
         LengthValue::MinContent => 0,
         LengthValue::MaxContent => basis.min(i32::MAX as u32) as i32,
         LengthValue::FitContent(px) => basis.min(px).min(i32::MAX as u32) as i32,
@@ -7088,8 +7529,15 @@ fn resolve_length_value(length: LengthValue, available_width: u32) -> u32 {
         LengthValue::MinContent => 0,
         LengthValue::MaxContent => available_width,
         LengthValue::FitContent(max_px) => available_width.min(max_px),
-        LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(percent_hundredths, px, available_width),
-        LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(lower, value, upper, available_width),
+        LengthValue::Calc {
+            percent_hundredths,
+            px,
+        } => crate::css::resolve_calc(percent_hundredths, px, available_width),
+        LengthValue::Bounded {
+            lower,
+            value,
+            upper,
+        } => crate::css::resolve_bounded(lower, value, upper, available_width),
     }
 }
 
@@ -7133,8 +7581,7 @@ fn layout_positioned_element(
     // A fixed box is placed against the window, not against whatever block it
     // happens to be written in: `right: 5px` on a page whose body is narrower
     // than the window belongs at the window's edge.
-    let container_width = if element.style.position == Position::Fixed
-        && context.viewport_width > 0
+    let container_width = if element.style.position == Position::Fixed && context.viewport_width > 0
     {
         context.viewport_width
     } else {
@@ -7160,8 +7607,15 @@ fn layout_positioned_element(
         LengthValue::MinContent => 0,
         LengthValue::MaxContent => container_width,
         LengthValue::FitContent(max_px) => container_width.min(*max_px),
-        LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(*percent_hundredths, *px, container_width),
-        LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(*lower, *value, *upper, container_width),
+        LengthValue::Calc {
+            percent_hundredths,
+            px,
+        } => crate::css::resolve_calc(*percent_hundredths, *px, container_width),
+        LengthValue::Bounded {
+            lower,
+            value,
+            upper,
+        } => crate::css::resolve_bounded(*lower, *value, *upper, container_width),
     });
 
     // `left` / `right` resolve against the containing block's width, `top` /
@@ -7181,9 +7635,18 @@ fn layout_positioned_element(
         let (width, height) = context.containing_block_size;
         (if width == 0 { container_width } else { width }, height)
     };
-    let left = element.style.left.map(|length| resolve_offset(length, cb_width));
-    let right = element.style.right.map(|length| resolve_offset(length, cb_width));
-    let top = element.style.top.map(|length| resolve_offset(length, cb_height));
+    let left = element
+        .style
+        .left
+        .map(|length| resolve_offset(length, cb_width));
+    let right = element
+        .style
+        .right
+        .map(|length| resolve_offset(length, cb_width));
+    let top = element
+        .style
+        .top
+        .map(|length| resolve_offset(length, cb_height));
 
     let elem_width = match (specified_width, left, right) {
         (Some(width), _, _) => width,
@@ -7211,7 +7674,10 @@ fn layout_positioned_element(
         .max_width
         .map(|length| resolve_length_value(length, container_width))
         .unwrap_or(u32::MAX);
-    let elem_width = elem_width.min(max_width).max(min_width.min(max_width)).max(1);
+    let elem_width = elem_width
+        .min(max_width)
+        .max(min_width.min(max_width))
+        .max(1);
 
     let signed_x = match (left, right) {
         (Some(left), _) => base_x as i64 + left as i64,
@@ -7242,7 +7708,10 @@ fn layout_positioned_element(
         eprintln!(
             "abspos <{}> class={:?} base=({base_x},{base_y}) cb=({cb_width},{cb_height}) left={left:?} top={top:?} right={right:?} bottom={:?} -> {x},{cursor_y}",
             element.tag_name,
-            element.attributes.get("class").map(|c| c.chars().take(30).collect::<String>()),
+            element
+                .attributes
+                .get("class")
+                .map(|c| c.chars().take(30).collect::<String>()),
             element.style.bottom,
         );
     }
@@ -7279,7 +7748,16 @@ fn layout_positioned_element(
         }
         _ => element,
     };
-    layout_block_element(element, x, elem_width, &mut cursor_y, &mut sub_context, images, fonts, current_form);
+    layout_block_element(
+        element,
+        x,
+        elem_width,
+        &mut cursor_y,
+        &mut sub_context,
+        images,
+        fonts,
+        current_form,
+    );
     let box_height = cursor_y.saturating_sub(box_top);
 
     // Parking a box above the viewport is the standard way to hide a skip link:
@@ -7294,14 +7772,11 @@ fn layout_positioned_element(
         return;
     }
 
-    let z = vec![(
-        element.style.z_index.unwrap_or(0),
-        {
-            let seq = context.next_stacking_seq;
-            context.next_stacking_seq = context.next_stacking_seq.saturating_add(1);
-            seq
-        },
-    )];
+    let z = vec![(element.style.z_index.unwrap_or(0), {
+        let seq = context.next_stacking_seq;
+        context.next_stacking_seq = context.next_stacking_seq.saturating_add(1);
+        seq
+    })];
     let slot = context.positioned_commands.len();
     let links_from = context.links.len();
     let controls_from = context.controls.len();
@@ -7316,7 +7791,9 @@ fn layout_positioned_element(
     context.positioned_commands.push((z, commands));
     context.links.extend(sub_context.links);
     context.controls.extend(sub_context.controls);
-    context.element_hitboxes.extend(sub_context.element_hitboxes);
+    context
+        .element_hitboxes
+        .extend(sub_context.element_hitboxes);
 
     // Anchored to the bottom: hand it to the containing block to finish once it
     // knows its own height.
@@ -7408,7 +7885,11 @@ fn layout_grid_container_inner(
         0
     };
     let content_x = outer_x
-        .saturating_add(if !element.style.border_style_none { element.style.border.left } else { 0 })
+        .saturating_add(if !element.style.border_style_none {
+            element.style.border.left
+        } else {
+            0
+        })
         .saturating_add(element.style.padding.left);
     let content_width = outer_width
         .saturating_sub(border_v + element.style.padding.left + element.style.padding.right)
@@ -7566,10 +8047,11 @@ fn layout_grid_container_inner(
             let r = row_start.unwrap_or_else(|| {
                 let mut r = row_cursor;
                 loop {
-                    let fits = (c..c + col_span).all(|cc| {
-                        (r..r + row_span).all(|rr| !occupied.contains(&(rr, cc)))
-                    });
-                    if fits { return r; }
+                    let fits = (c..c + col_span)
+                        .all(|cc| (r..r + row_span).all(|rr| !occupied.contains(&(rr, cc))));
+                    if fits {
+                        return r;
+                    }
                     r += 1;
                 }
             });
@@ -7582,10 +8064,11 @@ fn layout_grid_container_inner(
                     c = 0;
                     r += 1;
                 }
-                let fits = (c..c + col_span).all(|cc| {
-                    (r..r + row_span).all(|rr| !occupied.contains(&(rr, cc)))
-                });
-                if fits { break; }
+                let fits = (c..c + col_span)
+                    .all(|cc| (r..r + row_span).all(|rr| !occupied.contains(&(rr, cc))));
+                if fits {
+                    break;
+                }
                 c += 1;
                 if c + col_span > n_cols {
                     c = 0;
@@ -7795,7 +8278,11 @@ fn layout_grid_container_inner(
 
     // Background placeholder
     let bg_cmd_index = if let Some(bg) = fill_color(&element.style) {
-        let blended = apply_opacity(bg, context.background_color, element.style.effective_opacity);
+        let blended = apply_opacity(
+            bg,
+            context.background_color,
+            element.style.effective_opacity,
+        );
         context.commands.push(DrawCommand::Rect(RectCommand {
             x: outer_x,
             y: background_top,
@@ -7808,8 +8295,6 @@ fn layout_grid_container_inner(
     } else {
         None
     };
-
-
 
     // The tinted mask image, the counterpart to `fill_color` refusing to fill a
     // masked box. Only the block paths emitted this, so an icon inside a flex or
@@ -7849,23 +8334,29 @@ fn layout_grid_container_inner(
                 position: *position,
             })
             .collect();
-        context.commands.push(DrawCommand::Gradient(GradientCommand {
-            x: outer_x,
-            y: background_top,
-            width: outer_width.max(1),
-            height: 1,
-            border_radius: element.style.border_radius,
-            angle_deg_x1000: gradient.angle_deg_x1000,
-            radial: gradient.radial,
-            stops,
-        }));
+        context
+            .commands
+            .push(DrawCommand::Gradient(GradientCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: 1,
+                border_radius: element.style.border_radius,
+                angle_deg_x1000: gradient.angle_deg_x1000,
+                radial: gradient.radial,
+                stops,
+            }));
         Some(context.commands.len() - 1)
     } else {
         None
     };
 
     let content_top = background_top
-        .saturating_add(if !element.style.border_style_none { element.style.border.top } else { 0 })
+        .saturating_add(if !element.style.border_style_none {
+            element.style.border.top
+        } else {
+            0
+        })
         .saturating_add(element.style.padding.top);
 
     // A stated height taller than the rows themselves is shared out over them
@@ -7887,13 +8378,12 @@ fn layout_grid_container_inner(
     // ── Render items ──────────────────────────────────────────────────────
     for item in &measured {
         let cell_x: u32 = {
-            let x_offset: u32 = col_widths[..item.col].iter().sum::<u32>()
-                + gap * item.col as u32;
+            let x_offset: u32 = col_widths[..item.col].iter().sum::<u32>() + gap * item.col as u32;
             content_x + x_offset
         };
         let cell_y: u32 = {
-            let y_offset: u32 = row_heights[..item.row].iter().sum::<u32>()
-                + row_gap * item.row as u32;
+            let y_offset: u32 =
+                row_heights[..item.row].iter().sum::<u32>() + row_gap * item.row as u32;
             content_top + y_offset
         };
 
@@ -7910,7 +8400,9 @@ fn layout_grid_container_inner(
         };
         let row_height: u32 = {
             let end = (item.row + item.row_span).min(row_heights.len());
-            let rows: u32 = row_heights[item.row.min(row_heights.len())..end].iter().sum();
+            let rows: u32 = row_heights[item.row.min(row_heights.len())..end]
+                .iter()
+                .sum();
             rows + row_gap * end.saturating_sub(item.row).saturating_sub(1) as u32
         };
         let free = row_height.saturating_sub(item.measured_height);
@@ -7969,13 +8461,20 @@ fn layout_grid_container_inner(
     // still sizing itself purely by content. MDN's `.navigation` asks for
     // `height: var(--navigation-height)` (4.125rem) and got whatever its items
     // added up to instead, which left a tall empty band under the nav bar.
-    let rows_h: u32 = row_heights.iter().sum::<u32>()
-        + row_gap * max_row.saturating_sub(1) as u32;
-    let total_h = if stated_height > 0 { stated_height } else { rows_h };
+    let rows_h: u32 = row_heights.iter().sum::<u32>() + row_gap * max_row.saturating_sub(1) as u32;
+    let total_h = if stated_height > 0 {
+        stated_height
+    } else {
+        rows_h
+    };
     let content_bottom = content_top + total_h;
     let background_bottom = content_bottom
         .saturating_add(element.style.padding.bottom)
-        .saturating_add(if !element.style.border_style_none { element.style.border.bottom } else { 0 });
+        .saturating_add(if !element.style.border_style_none {
+            element.style.border.bottom
+        } else {
+            0
+        });
 
     // Fix background rect height
     if let Some(idx) = bg_cmd_index {
@@ -7989,7 +8488,6 @@ fn layout_grid_container_inner(
         gradient.height = (background_bottom - background_top).max(1);
     }
 
-
     // Draw border
     if !element.style.border_style_none && !element.style.border_color_transparent {
         let bc = apply_opacity(
@@ -7998,10 +8496,26 @@ fn layout_grid_container_inner(
             element.style.effective_opacity,
         );
         let background_height = background_bottom.saturating_sub(background_top).max(1);
-            let border_top_h = if border_h > 0 { element.style.border.top } else { 0 };
-        let border_bottom_h = if border_h > 0 { element.style.border.bottom } else { 0 };
-        let border_left_w = if border_v > 0 { element.style.border.left } else { 0 };
-        let border_right_w = if border_v > 0 { element.style.border.right } else { 0 };
+        let border_top_h = if border_h > 0 {
+            element.style.border.top
+        } else {
+            0
+        };
+        let border_bottom_h = if border_h > 0 {
+            element.style.border.bottom
+        } else {
+            0
+        };
+        let border_left_w = if border_v > 0 {
+            element.style.border.left
+        } else {
+            0
+        };
+        let border_right_w = if border_v > 0 {
+            element.style.border.right
+        } else {
+            0
+        };
 
         // Which element drew this? Border rects all look alike in the command
         // dump, and tracking one back to its rule is otherwise guesswork.
@@ -8049,7 +8563,9 @@ fn layout_grid_container_inner(
         }
         if border_right_w > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x.saturating_add(outer_width).saturating_sub(border_right_w),
+                x: outer_x
+                    .saturating_add(outer_width)
+                    .saturating_sub(border_right_w),
                 y: background_top,
                 width: border_right_w,
                 height: background_height,
@@ -8257,28 +8773,30 @@ fn column_grown_heights(
     // and otherwise the height its own content comes to.
     let bases: Vec<u32> = children
         .iter()
-        .map(|child| match (&child.style.height, &child.style.flex_basis) {
-            (Some(LengthValue::Pixels(px)), _) => *px,
-            (_, Some(LengthValue::Pixels(px))) => *px,
-            _ => {
-                let mut probe = LayoutContext {
-                    background_color: background,
-                    ..LayoutContext::default()
-                };
-                let mut y = 0;
-                layout_block_element(
-                    child,
-                    0,
-                    content_width.max(1),
-                    &mut y,
-                    &mut probe,
-                    images,
-                    fonts,
-                    None,
-                );
-                y
-            }
-        })
+        .map(
+            |child| match (&child.style.height, &child.style.flex_basis) {
+                (Some(LengthValue::Pixels(px)), _) => *px,
+                (_, Some(LengthValue::Pixels(px))) => *px,
+                _ => {
+                    let mut probe = LayoutContext {
+                        background_color: background,
+                        ..LayoutContext::default()
+                    };
+                    let mut y = 0;
+                    layout_block_element(
+                        child,
+                        0,
+                        content_width.max(1),
+                        &mut y,
+                        &mut probe,
+                        images,
+                        fonts,
+                        None,
+                    );
+                    y
+                }
+            },
+        )
         .collect();
 
     let total_gap = gap.saturating_mul(children.len().saturating_sub(1) as u32);
@@ -8439,10 +8957,16 @@ fn flex_item_content_width(
         eprintln!(
             "item <{}> class={:?} avail={avail_width} intrinsic={intrinsic} painted={w} -> {result} pad=({},{}) border=({},{}) margin=({},{})",
             child.tag_name,
-            child.attributes.get("class").map(|c| c.chars().take(24).collect::<String>()),
-            child.style.padding.left, child.style.padding.right,
-            child.style.border.left, child.style.border.right,
-            child.style.margin.left, child.style.margin.right,
+            child
+                .attributes
+                .get("class")
+                .map(|c| c.chars().take(24).collect::<String>()),
+            child.style.padding.left,
+            child.style.padding.right,
+            child.style.border.left,
+            child.style.border.right,
+            child.style.margin.left,
+            child.style.margin.right,
         );
     }
     result
@@ -8465,7 +8989,16 @@ fn layout_flex_container(
     current_form: Option<FormContext>,
 ) {
     let top = *cursor_y;
-    layout_flex_container_inner(element, x, width, cursor_y, context, images, fonts, current_form);
+    layout_flex_container_inner(
+        element,
+        x,
+        width,
+        cursor_y,
+        context,
+        images,
+        fonts,
+        current_form,
+    );
     record_container_box(element, x, width, top, *cursor_y, context);
 }
 
@@ -8522,7 +9055,8 @@ fn layout_flex_container_inner(
     let pending_margin = std::mem::take(&mut context.last_bottom_margin);
     let collapsed_top = collapse_margins(pending_margin, element.style.margin.top);
     *cursor_y = advance_by_margin(*cursor_y, collapsed_top - pending_margin);
-    let avail_width = outer_width_with_margins(width, element.style.margin.left, element.style.margin.right);
+    let avail_width =
+        outer_width_with_margins(width, element.style.margin.left, element.style.margin.right);
     // Honor an explicit width on the flex container (needed for flex-wrap to know
     // where lines break); otherwise take the available width.
     let outer_width = match element.style.width {
@@ -8535,22 +9069,43 @@ fn layout_flex_container_inner(
     let background_top = *cursor_y;
 
     let settled_cross_size = context.stretch_cross_size.take();
-    let border_left = if !element.style.border_style_none { element.style.border.left } else { 0 };
-    let border_right = if !element.style.border_style_none { element.style.border.right } else { 0 };
-    let border_top = if !element.style.border_style_none { element.style.border.top } else { 0 };
-    let border_bottom_sz = if !element.style.border_style_none { element.style.border.bottom } else { 0 };
+    let border_left = if !element.style.border_style_none {
+        element.style.border.left
+    } else {
+        0
+    };
+    let border_right = if !element.style.border_style_none {
+        element.style.border.right
+    } else {
+        0
+    };
+    let border_top = if !element.style.border_style_none {
+        element.style.border.top
+    } else {
+        0
+    };
+    let border_bottom_sz = if !element.style.border_style_none {
+        element.style.border.bottom
+    } else {
+        0
+    };
 
     let content_x = outer_x
         .saturating_add(border_left)
         .saturating_add(element.style.padding.left);
     let content_width = outer_width
-        .saturating_sub(border_left + border_right + element.style.padding.left + element.style.padding.right)
+        .saturating_sub(
+            border_left + border_right + element.style.padding.left + element.style.padding.right,
+        )
         .max(1);
     let content_y = background_top
         .saturating_add(border_top)
         .saturating_add(element.style.padding.top);
 
-    let is_row = matches!(element.style.flex_direction, FlexDirection::Row | FlexDirection::RowReverse);
+    let is_row = matches!(
+        element.style.flex_direction,
+        FlexDirection::Row | FlexDirection::RowReverse
+    );
     // Along the row the gap between items is the column gap; down a column it
     // is the row gap.
     let gap = if is_row {
@@ -8615,22 +9170,26 @@ fn layout_flex_container_inner(
 
     let mut out_of_flow: Vec<&StyledElement> = Vec::new();
     let mut anonymous_next = anonymous.iter();
-    let mut children: Vec<&StyledElement> = element.children.iter().filter_map(|child| {
-        let StyledNode::Element(el) = child else {
-            return match child {
-                StyledNode::Text(text) if !text.text.trim().is_empty() => anonymous_next.next(),
-                _ => None,
+    let mut children: Vec<&StyledElement> = element
+        .children
+        .iter()
+        .filter_map(|child| {
+            let StyledNode::Element(el) = child else {
+                return match child {
+                    StyledNode::Text(text) if !text.text.trim().is_empty() => anonymous_next.next(),
+                    _ => None,
+                };
             };
-        };
-        if el.style.display == Display::None {
-            return None;
-        }
-        if matches!(el.style.position, Position::Absolute | Position::Fixed) {
-            out_of_flow.push(el);
-            return None;
-        }
-        Some(el)
-    }).collect();
+            if el.style.display == Display::None {
+                return None;
+            }
+            if matches!(el.style.position, Position::Absolute | Position::Fixed) {
+                out_of_flow.push(el);
+                return None;
+            }
+            Some(el)
+        })
+        .collect();
 
     // `order` re-sequences the items without touching the document, and a
     // reverse direction lays them out from the far end. Neither was
@@ -8672,10 +9231,16 @@ fn layout_flex_container_inner(
 
     // Reserve a slot for background rect — insert placeholder now, update height later
     let bg_cmd_index = if let Some(background_color) = fill_color(&element.style) {
-        let blended = apply_opacity(background_color, context.background_color, element.style.effective_opacity);
+        let blended = apply_opacity(
+            background_color,
+            context.background_color,
+            element.style.effective_opacity,
+        );
         context.commands.push(DrawCommand::Rect(RectCommand {
-            x: outer_x, y: background_top,
-            width: outer_width.max(1), height: 1,
+            x: outer_x,
+            y: background_top,
+            width: outer_width.max(1),
+            height: 1,
             color: blended,
             border_radius: element.style.border_radius,
         }));
@@ -8683,7 +9248,6 @@ fn layout_flex_container_inner(
     } else {
         None
     };
-
 
     // The tinted mask image, the counterpart to `fill_color` refusing to fill a
     // masked box. Only the block paths emitted this, so an icon inside a flex or
@@ -8723,16 +9287,18 @@ fn layout_flex_container_inner(
                 position: *position,
             })
             .collect();
-        context.commands.push(DrawCommand::Gradient(GradientCommand {
-            x: outer_x,
-            y: background_top,
-            width: outer_width.max(1),
-            height: 1,
-            border_radius: element.style.border_radius,
-            angle_deg_x1000: gradient.angle_deg_x1000,
-            radial: gradient.radial,
-            stops,
-        }));
+        context
+            .commands
+            .push(DrawCommand::Gradient(GradientCommand {
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: 1,
+                border_radius: element.style.border_radius,
+                angle_deg_x1000: gradient.angle_deg_x1000,
+                radial: gradient.radial,
+                stops,
+            }));
         Some(context.commands.len() - 1)
     } else {
         None
@@ -8758,8 +9324,15 @@ fn layout_flex_container_inner(
                     LengthValue::MinContent => 0,
                     LengthValue::MaxContent => content_width,
                     LengthValue::FitContent(max_px) => content_width.min(*max_px),
-                    LengthValue::Calc { percent_hundredths, px } => crate::css::resolve_calc(*percent_hundredths, *px, content_width),
-                    LengthValue::Bounded { lower, value, upper } => crate::css::resolve_bounded(*lower, *value, *upper, content_width),
+                    LengthValue::Calc {
+                        percent_hundredths,
+                        px,
+                    } => crate::css::resolve_calc(*percent_hundredths, *px, content_width),
+                    LengthValue::Bounded {
+                        lower,
+                        value,
+                        upper,
+                    } => crate::css::resolve_bounded(*lower, *value, *upper, content_width),
                 }
             };
 
@@ -8873,8 +9446,7 @@ fn layout_flex_container_inner(
                     // the first a pixel to the left of where it belongs.
                     for (i, child) in children.iter().enumerate() {
                         if child.style.flex_grow > 0 {
-                            let numerator =
-                                free as u64 * child.style.flex_grow as u64;
+                            let numerator = free as u64 * child.style.flex_grow as u64;
                             let denominator = total_grow as u64;
                             let share = ((numerator + denominator / 2) / denominator) as u32;
                             item_widths[i] = item_widths[i].saturating_add(share);
@@ -8915,9 +9487,9 @@ fn layout_flex_container_inner(
             // just within the items (vertical centering in a fixed-height row).
             let container_cross_height = match element.style.height {
                 Some(LengthValue::Pixels(px)) => Some(px),
-                Some(LengthValue::Percent(p)) => {
-                    context.container_height.map(|ch| (ch as u64 * p as u64 / 100) as u32)
-                }
+                Some(LengthValue::Percent(p)) => context
+                    .container_height
+                    .map(|ch| (ch as u64 * p as u64 / 100) as u32),
                 _ => None,
             }
             // A stated height is the border box when the page says so, and the
@@ -8969,14 +9541,24 @@ fn layout_flex_container_inner(
                     eprintln!(
                         "flexrow <{}> class={:?} x={x} avail={width} outer_x={outer_x} outer_w={outer_width} auto=({},{}) content_x={content_x} w={content_width} items={:?}",
                         element.tag_name,
-                        element.attributes.get("class").map(|c| c.chars().take(28).collect::<String>()),
+                        element
+                            .attributes
+                            .get("class")
+                            .map(|c| c.chars().take(28).collect::<String>()),
                         element.style.margin_left_auto,
                         element.style.margin_right_auto,
-                        children.iter().zip(item_widths.iter()).map(|(c, w)| (
-                            c.tag_name.clone(),
-                            c.attributes.get("class").map(|s| s.chars().take(16).collect::<String>()).unwrap_or_default(),
-                            *w,
-                        )).collect::<Vec<_>>(),
+                        children
+                            .iter()
+                            .zip(item_widths.iter())
+                            .map(|(c, w)| (
+                                c.tag_name.clone(),
+                                c.attributes
+                                    .get("class")
+                                    .map(|s| s.chars().take(16).collect::<String>())
+                                    .unwrap_or_default(),
+                                *w,
+                            ))
+                            .collect::<Vec<_>>(),
                     );
                 }
                 for (i, child) in children.iter().enumerate() {
@@ -8985,11 +9567,22 @@ fn layout_flex_container_inner(
                     let mut child_y = content_y.saturating_add(child_y_offset);
                     let child_form = form_context_for_element(child, context, current_form.clone());
                     context.flex_item_main_size = Some(child_w);
-                    context.stretch_cross_size = stretch_target(child, element.style.align_items, max_height);
-                    layout_block_element(child, cursor_x, child_w, &mut child_y, context, images, fonts, child_form);
+                    context.stretch_cross_size =
+                        stretch_target(child, element.style.align_items, max_height);
+                    layout_block_element(
+                        child,
+                        cursor_x,
+                        child_w,
+                        &mut child_y,
+                        context,
+                        images,
+                        fonts,
+                        child_form,
+                    );
                     cursor_x = cursor_x.saturating_add(child_w).saturating_add(item_gap);
                 }
-                *cursor_y = content_y.saturating_add(max_height)
+                *cursor_y = content_y
+                    .saturating_add(max_height)
                     .saturating_add(element.style.padding.bottom)
                     .saturating_add(border_bottom_sz);
             } else {
@@ -9005,14 +9598,21 @@ fn layout_flex_container_inner(
                     eprintln!(
                         "flexwrap <{}> class={:?} w={content_width} gap={gap} widths={widths:?}",
                         element.tag_name,
-                        element.attributes.get("class").map(|c| c.chars().take(28).collect::<String>()),
+                        element
+                            .attributes
+                            .get("class")
+                            .map(|c| c.chars().take(28).collect::<String>()),
                     );
                 }
                 let mut lines: Vec<Vec<usize>> = vec![Vec::new()];
                 let mut line_w = 0u32;
                 for (i, &w) in widths.iter().enumerate() {
                     let line = lines.last_mut().expect("at least one line");
-                    let add = if line.is_empty() { w } else { w.saturating_add(gap) };
+                    let add = if line.is_empty() {
+                        w
+                    } else {
+                        w.saturating_add(gap)
+                    };
                     if !line.is_empty() && line_w.saturating_add(add) > content_width {
                         lines.push(vec![i]);
                         line_w = w;
@@ -9046,10 +9646,14 @@ fn layout_flex_container_inner(
                         let w = widths[i];
                         let yoff = child_cross_offset(child, line_h, item_heights[i]);
                         let mut cy = line_y.saturating_add(yoff);
-                        let child_form = form_context_for_element(child, context, current_form.clone());
+                        let child_form =
+                            form_context_for_element(child, context, current_form.clone());
                         context.flex_item_main_size = Some(w);
-                        context.stretch_cross_size = stretch_target(child, element.style.align_items, line_h);
-                        layout_block_element(child, cx, w, &mut cy, context, images, fonts, child_form);
+                        context.stretch_cross_size =
+                            stretch_target(child, element.style.align_items, line_h);
+                        layout_block_element(
+                            child, cx, w, &mut cy, context, images, fonts, child_form,
+                        );
                         // `item_gap` only spaces items along the line; the row
                         // gap between lines stays the declared one.
                         cx = cx.saturating_add(w).saturating_add(item_gap);
@@ -9113,16 +9717,28 @@ fn layout_flex_container_inner(
                     }
                     None => child,
                 };
-                layout_block_element(child, child_x, child_width, cursor_y, context, images, fonts, child_form);
+                layout_block_element(
+                    child,
+                    child_x,
+                    child_width,
+                    cursor_y,
+                    context,
+                    images,
+                    fonts,
+                    child_form,
+                );
                 if i < children.len() - 1 {
                     *cursor_y = cursor_y.saturating_add(gap);
                 }
             }
-            *cursor_y = cursor_y.saturating_add(element.style.padding.bottom)
+            *cursor_y = cursor_y
+                .saturating_add(element.style.padding.bottom)
                 .saturating_add(border_bottom_sz);
         }
     } else {
-        *cursor_y = content_y.saturating_add(element.style.padding.bottom).saturating_add(border_bottom_sz);
+        *cursor_y = content_y
+            .saturating_add(element.style.padding.bottom)
+            .saturating_add(border_bottom_sz);
     }
 
     // An item that fills its line is that tall whatever its own contents come
@@ -9154,7 +9770,11 @@ fn layout_flex_container_inner(
             let border = if element.style.border_style_none {
                 0
             } else {
-                element.style.border.top.saturating_add(element.style.border.bottom)
+                element
+                    .style
+                    .border
+                    .top
+                    .saturating_add(element.style.border.bottom)
             };
             px.saturating_add(element.style.padding.top)
                 .saturating_add(element.style.padding.bottom)
@@ -9212,7 +9832,11 @@ fn layout_flex_container_inner(
 
     // Draw borders
     if !element.style.border_style_none && !element.style.border_color_transparent {
-        let bc = apply_opacity(element.style.border_color, context.background_color, element.style.effective_opacity);
+        let bc = apply_opacity(
+            element.style.border_color,
+            context.background_color,
+            element.style.effective_opacity,
+        );
         if std::env::var_os("TOBIRA_DEBUG_BORDERS").is_some()
             && border_top + border_bottom_sz + border_left + border_right > 0
         {
@@ -9227,31 +9851,44 @@ fn layout_flex_container_inner(
         }
         if border_top > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x, y: background_top,
-                width: outer_width.max(1), height: border_top,
-                color: bc, border_radius: element.style.border_radius,
+                x: outer_x,
+                y: background_top,
+                width: outer_width.max(1),
+                height: border_top,
+                color: bc,
+                border_radius: element.style.border_radius,
             }));
         }
         if border_bottom_sz > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x, y: cursor_y.saturating_sub(border_bottom_sz),
-                width: outer_width.max(1), height: border_bottom_sz,
-                color: bc, border_radius: element.style.border_radius,
+                x: outer_x,
+                y: cursor_y.saturating_sub(border_bottom_sz),
+                width: outer_width.max(1),
+                height: border_bottom_sz,
+                color: bc,
+                border_radius: element.style.border_radius,
             }));
         }
         if border_left > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x, y: background_top,
-                width: border_left, height: background_height,
-                color: bc, border_radius: 0,
+                x: outer_x,
+                y: background_top,
+                width: border_left,
+                height: background_height,
+                color: bc,
+                border_radius: 0,
             }));
         }
         if border_right > 0 {
             context.commands.push(DrawCommand::Rect(RectCommand {
-                x: outer_x.saturating_add(outer_width).saturating_sub(border_right),
+                x: outer_x
+                    .saturating_add(outer_width)
+                    .saturating_sub(border_right),
                 y: background_top,
-                width: border_right, height: background_height,
-                color: bc, border_radius: 0,
+                width: border_right,
+                height: background_height,
+                color: bc,
+                border_radius: 0,
             }));
         }
     }
@@ -9314,13 +9951,22 @@ fn justify_content_offsets(
     n: u32,
 ) -> (u32, u32) {
     // Returns (start_offset, gap_between_items)
-    let free = container_w.saturating_sub(total_fixed).saturating_sub(total_gap);
+    let free = container_w
+        .saturating_sub(total_fixed)
+        .saturating_sub(total_gap);
     let base_gap = if n > 1 { total_gap / (n - 1) } else { 0 };
     match justify {
         JustifyContent::FlexStart => (0, base_gap),
         JustifyContent::FlexEnd => (free, base_gap),
         JustifyContent::Center => (free / 2, base_gap),
-        JustifyContent::SpaceBetween => (0, if n > 1 { (free + total_gap) / (n - 1) } else { 0 }),
+        JustifyContent::SpaceBetween => (
+            0,
+            if n > 1 {
+                (free + total_gap) / (n - 1)
+            } else {
+                0
+            },
+        ),
         JustifyContent::SpaceAround => {
             let per = free / n.max(1);
             (per / 2, per + base_gap)
@@ -9331,8 +9977,6 @@ fn justify_content_offsets(
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod percentage_sizing_tests {
@@ -9538,7 +10182,8 @@ mod percentage_sizing_tests {
     #[test]
     fn fit_content_shrinks_to_the_contents() {
         let width_of = |css: &str| {
-            let doc = parse_document("<div style=\"width:800px\"><div class=\"b\">SHORT</div></div>");
+            let doc =
+                parse_document("<div style=\"width:800px\"><div class=\"b\">SHORT</div></div>");
             let sheet = parse_stylesheet(css);
             let styled = build_styled_tree(&doc, &sheet, 1280, &InteractiveState::default());
             let mut fonts = FontContext::load();
@@ -9638,7 +10283,10 @@ mod percentage_sizing_tests {
             })
             .collect();
         let tallest = panels.iter().copied().max().unwrap_or(0);
-        assert!(tallest > 23, "the wrapped card is more than one line: {panels:?}");
+        assert!(
+            tallest > 23,
+            "the wrapped card is more than one line: {panels:?}"
+        );
         assert_eq!(
             panels.iter().filter(|height| **height == tallest).count(),
             2,
@@ -9675,9 +10323,13 @@ mod percentage_sizing_tests {
             let tallest = heights.iter().copied().max().unwrap_or(0);
             (tallest, heights.iter().filter(|h| **h == tallest).count())
         };
-        let (tall, both) =
-            tallest_count(heights(".row{display:flex;width:400px}.c{width:120px;background:#00ff00}"));
-        assert!(tall > 23, "the wrapped card is more than one line tall: {tall}");
+        let (tall, both) = tallest_count(heights(
+            ".row{display:flex;width:400px}.c{width:120px;background:#00ff00}",
+        ));
+        assert!(
+            tall > 23,
+            "the wrapped card is more than one line tall: {tall}"
+        );
         assert_eq!(both, 2, "both cards reach the height of their line");
         let (_, one) = tallest_count(heights(
             ".row{display:flex;width:400px;align-items:flex-start}.c{width:120px;background:#00ff00}",
@@ -9854,7 +10506,10 @@ mod percentage_sizing_tests {
             ".row{display:flex}.logo{width:120px;overflow:hidden;text-indent:-9999px;white-space:nowrap}",
             "<div style=\"width:600px\" class=\"row\"><a class=\"logo\">Firefox</a></div>",
         );
-        assert!(runs.is_empty(), "the flex item must take the indent: {runs:?}");
+        assert!(
+            runs.is_empty(),
+            "the flex item must take the indent: {runs:?}"
+        );
     }
 
     fn images_painted(css: &str, html: &str) -> usize {
@@ -9884,15 +10539,17 @@ mod percentage_sizing_tests {
     /// on top of the other.
     #[test]
     fn a_negative_indent_hides_an_image_too() {
-        const HTML: &str =
-            "<div style=\"width:600px\"><div class=\"logo\"><img src=\"logo.png\" width=\"120\" height=\"40\"></div></div>";
+        const HTML: &str = "<div style=\"width:600px\"><div class=\"logo\"><img src=\"logo.png\" width=\"120\" height=\"40\"></div></div>";
         assert_eq!(
             images_painted(".logo{width:120px}", HTML),
             1,
             "control: an unindented image paints"
         );
         assert_eq!(
-            images_painted(".logo{width:120px;overflow:hidden;text-indent:-9999px}", HTML),
+            images_painted(
+                ".logo{width:120px;overflow:hidden;text-indent:-9999px}",
+                HTML
+            ),
             0,
             "an indented image must not paint"
         );
@@ -9936,7 +10593,10 @@ mod percentage_sizing_tests {
             "<div class=\"row\" style=\"width:600px\">\u{88f8}<span>\u{4ed8}</span></div>",
         );
         let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
-        assert!(shown.contains('\u{88f8}'), "the bare text must survive: {runs:?}");
+        assert!(
+            shown.contains('\u{88f8}'),
+            "the bare text must survive: {runs:?}"
+        );
         assert!(shown.contains('\u{4ed8}'));
     }
 
@@ -9947,10 +10607,7 @@ mod percentage_sizing_tests {
     /// stray `]` was drawn after every menu entry and every row of the contents.
     #[test]
     fn an_unmodelled_pseudo_class_matches_nothing() {
-        let runs = text_runs(
-            "a:has(+ b)::after{content:\"X\"}",
-            "<div><a>L</a></div>",
-        );
+        let runs = text_runs("a:has(+ b)::after{content:\"X\"}", "<div><a>L</a></div>");
         let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
         assert_eq!(shown, "L", "the rule must not apply: {runs:?}");
     }
@@ -9964,10 +10621,7 @@ mod percentage_sizing_tests {
     /// into `*::after`, stamping an underscore after the text of every element.
     #[test]
     fn a_grouping_pseudo_class_matches_only_its_argument() {
-        let unmatched = text_runs(
-            "a:is(.x, .y)::after{content:\"X\"}",
-            "<div><a>L</a></div>",
-        );
+        let unmatched = text_runs("a:is(.x, .y)::after{content:\"X\"}", "<div><a>L</a></div>");
         let shown: String = unmatched.iter().map(|run| run.text.as_str()).collect();
         assert_eq!(shown, "L", "a class-less <a> must not match: {unmatched:?}");
 
@@ -9976,7 +10630,10 @@ mod percentage_sizing_tests {
             "<div><a class=\"y\">L</a></div>",
         );
         let shown: String = matched.iter().map(|run| run.text.as_str()).collect();
-        assert_eq!(shown, "LX", "one of the alternatives must match: {matched:?}");
+        assert_eq!(
+            shown, "LX",
+            "one of the alternatives must match: {matched:?}"
+        );
     }
 
     /// The argument may be a whole descendant chain, and may sit on its own with
@@ -9995,7 +10652,10 @@ mod percentage_sizing_tests {
             "<div><h1>L</h1><p>P</p></div>",
         );
         let shown: String = outside.iter().map(|run| run.text.as_str()).collect();
-        assert_eq!(shown, "LP", "an h1 outside .hero must not match: {outside:?}");
+        assert_eq!(
+            shown, "LP",
+            "an h1 outside .hero must not match: {outside:?}"
+        );
     }
 
     /// The `content` value is a list that may end with `/ <string>`, which is
@@ -10016,12 +10676,12 @@ mod percentage_sizing_tests {
     /// characters: `\a0` is a non-breaking space.
     #[test]
     fn content_escapes_are_resolved() {
-        let runs = text_runs(
-            "a::after{content:\"\\a0 \\2022 \"}",
-            "<div><a>L</a></div>",
-        );
+        let runs = text_runs("a::after{content:\"\\a0 \\2022 \"}", "<div><a>L</a></div>");
         let shown: String = runs.iter().map(|run| run.text.as_str()).collect();
-        assert!(shown.contains('\u{2022}'), "expected a bullet, got {shown:?}");
+        assert!(
+            shown.contains('\u{2022}'),
+            "expected a bullet, got {shown:?}"
+        );
         assert!(!shown.contains('\\'), "no backslash survives: {shown:?}");
     }
 
@@ -10038,8 +10698,14 @@ mod percentage_sizing_tests {
             "<div class=\"host\"><div style=\"height:200px\">\u{4e2d}</div>\
              <div class=\"pin\">\u{4e0b}</div></div>",
         );
-        let pinned = runs.iter().find(|run| run.text == "\u{4e0b}").expect("pinned");
-        let above = runs.iter().find(|run| run.text == "\u{4e2d}").expect("above");
+        let pinned = runs
+            .iter()
+            .find(|run| run.text == "\u{4e0b}")
+            .expect("pinned");
+        let above = runs
+            .iter()
+            .find(|run| run.text == "\u{4e2d}")
+            .expect("above");
         assert!(
             pinned.y > above.y + 100,
             "the box belongs at the foot of a 200px block: {runs:?}"
@@ -10093,8 +10759,14 @@ mod percentage_sizing_tests {
             "<div class=\"row\" style=\"width:600px\">\
              <div>\u{4e00}</div><div class=\"pin\">\u{5370}</div><div>\u{4e8c}</div></div>",
         );
-        let first = runs.iter().find(|run| run.text == "\u{4e00}").expect("first");
-        let second = runs.iter().find(|run| run.text == "\u{4e8c}").expect("second");
+        let first = runs
+            .iter()
+            .find(|run| run.text == "\u{4e00}")
+            .expect("first");
+        let second = runs
+            .iter()
+            .find(|run| run.text == "\u{4e8c}")
+            .expect("second");
         assert!(
             second.x.saturating_sub(first.x) < 40,
             "the two items sit next to each other: {runs:?}"
@@ -10111,7 +10783,10 @@ mod percentage_sizing_tests {
             ".band{display:flex;width:200px;margin-left:auto;margin-right:auto}",
             "<div style=\"width:600px\"><div class=\"band\">\u{5e2f}</div></div>",
         );
-        let band = runs.iter().find(|run| run.text == "\u{5e2f}").expect("band");
+        let band = runs
+            .iter()
+            .find(|run| run.text == "\u{5e2f}")
+            .expect("band");
         assert!(
             (190..=210).contains(&band.x),
             "a 200px band in 600px starts at 200px, got x={}",
@@ -10131,7 +10806,10 @@ mod percentage_sizing_tests {
             "<div class=\"row\" style=\"width:600px\">\
              <div><span class=\"icon\"></span></div><div>\u{5f8c}</div></div>",
         );
-        let after = runs.iter().find(|run| run.text == "\u{5f8c}").expect("label");
+        let after = runs
+            .iter()
+            .find(|run| run.text == "\u{5f8c}")
+            .expect("label");
         assert!(
             after.x >= 120,
             "the empty icon holds its 120px, so the label starts past it: {after:?}"
@@ -10156,7 +10834,10 @@ mod percentage_sizing_tests {
             ys.windows(2).all(|pair| pair[0] == pair[1]),
             "16 + 25 + 16 + 25 + 16 fits in 200px: {runs:?}"
         );
-        let last = runs.iter().find(|run| run.text == "\u{4e09}").expect("third");
+        let last = runs
+            .iter()
+            .find(|run| run.text == "\u{4e09}")
+            .expect("third");
         assert!(
             last.x >= 82,
             "each separator contributes its margin and border: {last:?}"
@@ -10176,8 +10857,14 @@ mod percentage_sizing_tests {
              <div class=\"cell\">\u{4e00}</div><div class=\"cell\">\u{4e8c}</div>\
              <div class=\"cell\">\u{4e09}</div></div>",
         );
-        let first = runs.iter().find(|run| run.text == "\u{4e00}").expect("first");
-        let last = runs.iter().find(|run| run.text == "\u{4e09}").expect("last");
+        let first = runs
+            .iter()
+            .find(|run| run.text == "\u{4e00}")
+            .expect("first");
+        let last = runs
+            .iter()
+            .find(|run| run.text == "\u{4e09}")
+            .expect("last");
         assert_eq!(first.y, last.y, "all three belong on one line: {runs:?}");
         assert!(
             last.x < 200,
@@ -10210,7 +10897,8 @@ mod percentage_sizing_tests {
     /// and was squeezed to 132px, which wrapped every headline onto three lines.
     #[test]
     fn flex_shrink_zero_keeps_an_items_width() {
-        const HEADLINE: &str = "\u{3042}\u{3044}\u{3046}\u{3048}\u{304a}\u{304b}\u{304d}\u{304f}\u{3051}\u{3053}";
+        const HEADLINE: &str =
+            "\u{3042}\u{3044}\u{3046}\u{3048}\u{304a}\u{304b}\u{304d}\u{304f}\u{3051}\u{3053}";
         let html = format!(
             "<div class=\"row\" style=\"width:300px\">\
              <div class=\"fixed\">{HEADLINE}</div>\
@@ -10243,7 +10931,10 @@ mod percentage_sizing_tests {
         let texts: Vec<&str> = runs.iter().map(|run| run.text.as_str()).collect();
         assert_eq!(
             texts,
-            vec!["\u{30db}\u{30fc}\u{30e0}\u{30da}\u{30fc}\u{30b8}\u{306b}\u{8a2d}\u{5b9a}\u{3059}\u{308b}", "\u{30d8}\u{30eb}\u{30d7}"],
+            vec![
+                "\u{30db}\u{30fc}\u{30e0}\u{30da}\u{30fc}\u{30b8}\u{306b}\u{8a2d}\u{5b9a}\u{3059}\u{308b}",
+                "\u{30d8}\u{30eb}\u{30d7}"
+            ],
             "the row fits in 280px, so nothing may wrap"
         );
     }
@@ -10260,8 +10951,14 @@ mod percentage_sizing_tests {
             "<div class=\"outer\" style=\"width:600px\"><div class=\"inner\">\
              <span>\u{4e00}</span><span>\u{4e8c}</span></div></div>",
         );
-        let first = runs.iter().find(|run| run.text == "\u{4e00}").expect("first");
-        let second = runs.iter().find(|run| run.text == "\u{4e8c}").expect("second");
+        let first = runs
+            .iter()
+            .find(|run| run.text == "\u{4e00}")
+            .expect("first");
+        let second = runs
+            .iter()
+            .find(|run| run.text == "\u{4e8c}")
+            .expect("second");
         assert_eq!(
             first.y, second.y,
             "the inner container is a flex row, not a block: {runs:?}"
@@ -10296,8 +10993,14 @@ mod percentage_sizing_tests {
             "<div class=\"row\" style=\"width:600px\">\
              <span>\u{4e00}</span><span>\u{4e8c}</span></div>",
         );
-        let first = runs.iter().find(|run| run.text == "\u{4e00}").expect("first");
-        let second = runs.iter().find(|run| run.text == "\u{4e8c}").expect("second");
+        let first = runs
+            .iter()
+            .find(|run| run.text == "\u{4e00}")
+            .expect("first");
+        let second = runs
+            .iter()
+            .find(|run| run.text == "\u{4e8c}")
+            .expect("second");
         assert!(
             second.x < first.x,
             "document order is reversed on screen: {runs:?}"
@@ -10336,7 +11039,10 @@ mod percentage_sizing_tests {
             "<div style=\"width:600px\"><span class=\"card\">\
              <div><span>38</span><span>\u{2103}</span></div></span></div>",
         );
-        let value = runs.iter().find(|run| run.text.contains("38")).expect("value");
+        let value = runs
+            .iter()
+            .find(|run| run.text.contains("38"))
+            .expect("value");
         let unit = runs
             .iter()
             .find(|run| run.text.contains('\u{2103}'))
@@ -10392,7 +11098,11 @@ mod percentage_sizing_tests {
              \u{5730}\u{57df}\u{60c5}\u{5831}</span></div>",
         );
         let texts: Vec<&str> = runs.iter().map(|run| run.text.as_str()).collect();
-        assert_eq!(texts, vec!["\u{5730}\u{57df}\u{60c5}\u{5831}"], "must not wrap");
+        assert_eq!(
+            texts,
+            vec!["\u{5730}\u{57df}\u{60c5}\u{5831}"],
+            "must not wrap"
+        );
     }
 
     /// It stays inline-level on the outside: two of them sit on one line.
@@ -10464,7 +11174,10 @@ mod percentage_sizing_tests {
              <div class=\"narrow\">ホームページに設定する</div>\
              <div>後</div></div>",
         );
-        let after = runs.iter().find(|run| run.text == "後").expect("second item");
+        let after = runs
+            .iter()
+            .find(|run| run.text == "後")
+            .expect("second item");
         assert!(
             after.x >= 300,
             "the second item must start past the clamped first one, got x={}",
@@ -10636,9 +11349,7 @@ mod percentage_sizing_tests {
             "suppressing the marker must also drop its indent"
         );
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -10672,7 +11383,10 @@ mod tests {
             })
             .expect("the gradient should be painted");
 
-        assert!(gradient.radial, "radial-gradient must not be drawn as a linear one");
+        assert!(
+            gradient.radial,
+            "radial-gradient must not be drawn as a linear one"
+        );
         assert_eq!(gradient.width, 200);
     }
 
@@ -10730,9 +11444,13 @@ mod tests {
             balanced_widths.len(),
             "balancing must not change the line count"
         );
-        assert!(plain_widths.len() >= 2, "the sample has to wrap: {plain_widths:?}");
+        assert!(
+            plain_widths.len() >= 2,
+            "the sample has to wrap: {plain_widths:?}"
+        );
 
-        let spread = |w: &[u32]| w.iter().max().copied().unwrap_or(0) - w.iter().min().copied().unwrap_or(0);
+        let spread =
+            |w: &[u32]| w.iter().max().copied().unwrap_or(0) - w.iter().min().copied().unwrap_or(0);
         assert!(
             spread(&balanced_widths) < spread(&plain_widths),
             "balanced lines should be closer in length: {balanced_widths:?} vs {plain_widths:?}"
@@ -10751,7 +11469,10 @@ mod tests {
         let item = probe_rect(&layout, 0x123456).expect("the item should be painted");
 
         // (600 - 100) / 2 of free space.
-        assert_eq!(item.x, 250, "a wrapped line must honour justify-content: center");
+        assert_eq!(
+            item.x, 250,
+            "a wrapped line must honour justify-content: center"
+        );
     }
 
     #[test]
@@ -10770,8 +11491,15 @@ mod tests {
             .find(|control| matches!(control.kind, super::FormControlKind::Select))
             .expect("the select should register a control");
 
-        assert_eq!(control.value, "Deutsch (Deutschland)", "the selected option shows");
-        assert!(control.width > 100, "wide enough for the longest option: {}", control.width);
+        assert_eq!(
+            control.value, "Deutsch (Deutschland)",
+            "the selected option shows"
+        );
+        assert!(
+            control.width > 100,
+            "wide enough for the longest option: {}",
+            control.width
+        );
         assert!(control.height >= 28);
     }
 
@@ -10830,7 +11558,10 @@ mod tests {
         // The containing block starts at the body's 8px margin and is 400 wide,
         // so the box's right edge lands at 208 and its left at -92.
         assert!(art.x < 0, "the box must keep its true position: {}", art.x);
-        assert_eq!(art.width, 300, "and its full width, so the art is not stretched");
+        assert_eq!(
+            art.width, 300,
+            "and its full width, so the art is not stretched"
+        );
     }
 
     #[test]
@@ -10907,7 +11638,9 @@ mod tests {
         }
         // The flex <input> must register as a TextInput control too.
         assert!(
-            l.controls.iter().any(|c| matches!(c.kind, super::FormControlKind::TextInput)),
+            l.controls
+                .iter()
+                .any(|c| matches!(c.kind, super::FormControlKind::TextInput)),
             "flex <input> did not register as a text-input control"
         );
     }
@@ -10925,20 +11658,43 @@ mod tests {
             640,
         );
         let by_label = |label: &str| -> super::FormControlCommand {
-            l.controls.iter().find(|c| c.label == label).cloned()
+            l.controls
+                .iter()
+                .find(|c| c.label == label)
+                .cloned()
                 .unwrap_or_else(|| panic!("control {label:?} missing"))
         };
         let minus = by_label("minus");
         let plus = by_label("plus");
         let reset = by_label("reset");
         // Packed left in order, each only as wide as its content (< 120px).
-        assert!(minus.x < plus.x && plus.x < reset.x, "buttons not in row order: {} {} {}", minus.x, plus.x, reset.x);
+        assert!(
+            minus.x < plus.x && plus.x < reset.x,
+            "buttons not in row order: {} {} {}",
+            minus.x,
+            plus.x,
+            reset.x
+        );
         assert!(plus.x < 200, "buttons stretched/spread: plus.x={}", plus.x);
-        assert!(minus.width < 120 && plus.width < 120, "button too wide: {} {}", minus.width, plus.width);
+        assert!(
+            minus.width < 120 && plus.width < 120,
+            "button too wide: {} {}",
+            minus.width,
+            plus.width
+        );
         // space-between: the delete button stays within the 640px container.
         let del = by_label("del");
-        assert!(del.x + del.width <= 640, "space-between item off-screen: del.x={} w={}", del.x, del.width);
-        assert!(del.x > 400, "space-between item not pushed right: del.x={}", del.x);
+        assert!(
+            del.x + del.width <= 640,
+            "space-between item off-screen: del.x={} w={}",
+            del.x,
+            del.width
+        );
+        assert!(
+            del.x > 400,
+            "space-between item not pushed right: del.x={}",
+            del.x
+        );
     }
 
     /// Diagnostic: dump form-control + element-hitbox geometry for flex-laid-out
@@ -10970,7 +11726,14 @@ mod tests {
         println!("=== all rects (paint): {} ===", l.commands.len());
         for cmd in &l.commands {
             if let DrawCommand::Rect(r) = cmd {
-                println!("rect x={} y={} w={} h={} color=#{:06x}", r.x, r.y, r.width, r.height, r.color & 0xFFFFFF);
+                println!(
+                    "rect x={} y={} w={} h={} color=#{:06x}",
+                    r.x,
+                    r.y,
+                    r.width,
+                    r.height,
+                    r.color & 0xFFFFFF
+                );
             }
         }
     }
@@ -10989,20 +11752,42 @@ mod tests {
         let mut fonts = FontContext::load();
 
         let normal = {
-            let styled = build_styled_tree(&document, &parse_stylesheet(css), 700, &crate::css::InteractiveState::default());
+            let styled = build_styled_tree(
+                &document,
+                &parse_stylesheet(css),
+                700,
+                &crate::css::InteractiveState::default(),
+            );
             layout_styled_document(&styled, &ImageStore::default(), 700, &mut fonts)
         };
-        let nb = normal.controls.iter().find(|c| c.label == "Go").expect("button");
+        let nb = normal
+            .controls
+            .iter()
+            .find(|c| c.label == "Go")
+            .expect("button");
         assert_eq!(nb.background_color, 0x3457D5, "resting background from CSS");
-        assert!(!nb.native_chrome, "CSS-styled button must not be native chrome");
+        assert!(
+            !nb.native_chrome,
+            "CSS-styled button must not be native chrome"
+        );
 
         let hovered = {
-            let interactive = crate::css::InteractiveState { hovered_node_id: Some(2), ..Default::default() };
+            let interactive = crate::css::InteractiveState {
+                hovered_node_id: Some(2),
+                ..Default::default()
+            };
             let styled = build_styled_tree(&document, &parse_stylesheet(css), 700, &interactive);
             layout_styled_document(&styled, &ImageStore::default(), 700, &mut fonts)
         };
-        let hb = hovered.controls.iter().find(|c| c.label == "Go").expect("button");
-        assert_eq!(hb.background_color, 0x2742A8, "hover background from :hover rule");
+        let hb = hovered
+            .controls
+            .iter()
+            .find(|c| c.label == "Go")
+            .expect("button");
+        assert_eq!(
+            hb.background_color, 0x2742A8,
+            "hover background from :hover rule"
+        );
     }
 
     /// Diagnostic: replicate the React demo's counter section exactly (flex row
@@ -11042,10 +11827,22 @@ mod tests {
                 match cmd {
                     super::DrawCommand::Text(t) => println!(
                         "{:indent$}TEXT {:?} x={} y={} w={} size={}",
-                        "", t.text, t.x, t.y, t.width, t.font_size_px, indent = depth * 2
+                        "",
+                        t.text,
+                        t.x,
+                        t.y,
+                        t.width,
+                        t.font_size_px,
+                        indent = depth * 2
                     ),
                     super::DrawCommand::Layer(layer) => {
-                        println!("{:indent$}LAYER x={} y={}", "", layer.x, layer.y, indent = depth * 2);
+                        println!(
+                            "{:indent$}LAYER x={} y={}",
+                            "",
+                            layer.x,
+                            layer.y,
+                            indent = depth * 2
+                        );
                         dump(&layer.commands, depth + 1);
                     }
                     _ => {}
@@ -11056,19 +11853,41 @@ mod tests {
         for c in &l.controls {
             println!(
                 "CONTROL {:?} label={:?} x={} y={} w={} h={} font={} bg=#{:06x} text=#{:06x} border=#{:06x}",
-                c.kind, c.label, c.x, c.y, c.width, c.height, c.font_size_px,
-                c.background_color, c.text_color, c.border_color
+                c.kind,
+                c.label,
+                c.x,
+                c.y,
+                c.width,
+                c.height,
+                c.font_size_px,
+                c.background_color,
+                c.text_color,
+                c.border_color
             );
         }
         // CSS-authored colors must reach the control: the demo's blue buttons
         // (background #3457d5, white text, border #3457d5) and the ghost variant
         // (white bg, blue text).
-        let minus = l.controls.iter().find(|c| c.label == "−").expect("minus button");
-        assert_eq!(minus.background_color, 0x3457D5, "button background from CSS");
+        let minus = l
+            .controls
+            .iter()
+            .find(|c| c.label == "−")
+            .expect("minus button");
+        assert_eq!(
+            minus.background_color, 0x3457D5,
+            "button background from CSS"
+        );
         assert_eq!(minus.text_color, 0xFFFFFF, "button text color from CSS");
         assert_eq!(minus.border_color, 0x3457D5, "button border from CSS");
-        let ghost = l.controls.iter().find(|c| c.label == "リセット").expect("ghost button");
-        assert_eq!(ghost.background_color, 0xFFFFFF, "ghost background from CSS");
+        let ghost = l
+            .controls
+            .iter()
+            .find(|c| c.label == "リセット")
+            .expect("ghost button");
+        assert_eq!(
+            ghost.background_color, 0xFFFFFF,
+            "ghost background from CSS"
+        );
         assert_eq!(ghost.text_color, 0x3457D5, "ghost text from CSS");
     }
 
@@ -11081,7 +11900,10 @@ mod tests {
         let first = probe_rect(&l, 0xBB0002).expect("first rect");
         let second = probe_rect(&l, 0xBB0003).expect("second rect");
         assert_eq!(first.y, 10, "first child should start after 10px padding");
-        assert!(second.y >= first.y + first.height, "second child should stack below the first");
+        assert!(
+            second.y >= first.y + first.height,
+            "second child should stack below the first"
+        );
     }
 
     #[test]
@@ -11091,7 +11913,11 @@ mod tests {
             400,
         );
         let box_ = probe_rect(&l, 0xBB0004).expect("percent-width rect");
-        assert!((box_.width as i32 - 200).abs() <= 2, "50% of 400px should be about 200px, got {}", box_.width);
+        assert!(
+            (box_.width as i32 - 200).abs() <= 2,
+            "50% of 400px should be about 200px, got {}",
+            box_.width
+        );
     }
 
     #[test]
@@ -11113,7 +11939,10 @@ mod tests {
         let a = probe_rect(&l, 0xBB0008).expect("first flex item");
         let b = probe_rect(&l, 0xBB0009).expect("second flex item");
         assert_eq!(a.x, 0, "flex row should start at x=0");
-        assert!((b.x as i32 - (a.x + 80) as i32).abs() <= 2, "second item should follow the first horizontally");
+        assert!(
+            (b.x as i32 - (a.x + 80) as i32).abs() <= 2,
+            "second item should follow the first horizontally"
+        );
     }
 
     #[test]
@@ -11124,7 +11953,10 @@ mod tests {
         );
         let a = probe_rect(&l, 0xBB000B).expect("first flex item");
         let b = probe_rect(&l, 0xBB000C).expect("second flex item");
-        assert!((b.x as i32 - (a.x + a.width + 10) as i32).abs() <= 2, "flex gap should add 10px between items");
+        assert!(
+            (b.x as i32 - (a.x + a.width + 10) as i32).abs() <= 2,
+            "flex gap should add 10px between items"
+        );
     }
 
     #[test]
@@ -11136,7 +11968,11 @@ mod tests {
         let a = probe_rect(&l, 0xBB000E).expect("first grid cell");
         let b = probe_rect(&l, 0xBB000F).expect("second grid cell");
         assert_eq!(a.x, 0, "first grid cell should start at x=0");
-        assert!((b.x as i32 - 100).abs() <= 2, "second grid cell should start at x=100, got {}", b.x);
+        assert!(
+            (b.x as i32 - 100).abs() <= 2,
+            "second grid cell should start at x=100, got {}",
+            b.x
+        );
     }
 
     #[test]
@@ -11389,7 +12225,11 @@ mod tests {
             400,
         );
         let shifted = probe_rect(&l, 0xBB0012).expect("relative box");
-        assert!(shifted.x >= 15, "relative left offset should shift box right, got x={}", shifted.x);
+        assert!(
+            shifted.x >= 15,
+            "relative left offset should shift box right, got x={}",
+            shifted.x
+        );
     }
 
     /// Adjoining vertical margins make one gap the size of the larger, not both
@@ -11460,7 +12300,11 @@ mod tests {
             probe_rect(&l, 0xBB0025).expect("box").height
         };
         assert_eq!(height_of("min-height:200px"), 200, "a plain block");
-        assert_eq!(height_of("display:flex;min-height:200px"), 200, "and a flex one");
+        assert_eq!(
+            height_of("display:flex;min-height:200px"),
+            200,
+            "and a flex one"
+        );
         // The property measures the content box unless the element says
         // otherwise, and almost every page says `border-box` in its reset.
         assert_eq!(
@@ -11585,7 +12429,10 @@ mod tests {
         layout_styled_document(&styled, images, width, &mut fonts)
     }
 
-    fn probe_rect(layout: &super::LayoutDocument, color: u32) -> Result<super::RectCommand, String> {
+    fn probe_rect(
+        layout: &super::LayoutDocument,
+        color: u32,
+    ) -> Result<super::RectCommand, String> {
         layout
             .rects()
             .into_iter()
@@ -11713,9 +12560,7 @@ mod tests {
         assert_eq!(flow_box.x, 0, "the block itself is not moved by a float");
         assert_eq!(flow_box.width, 320, "the block still spans the container");
         assert!(
-            l.texts()
-                .into_iter()
-                .any(|text| text.x >= 100),
+            l.texts().into_iter().any(|text| text.x >= 100),
             "the line beside the float should start past it"
         );
     }
@@ -11985,7 +12830,10 @@ mod tests {
         );
         let float_box = probe_rect(&l, 0xAA0003).expect("float rect");
         let cleared = probe_rect(&l, 0xAA0004).expect("cleared rect");
-        assert!(cleared.y >= float_box.y.saturating_add(float_box.height), "clear:both did not move below float");
+        assert!(
+            cleared.y >= float_box.y.saturating_add(float_box.height),
+            "clear:both did not move below float"
+        );
     }
 
     #[test]
@@ -11996,7 +12844,10 @@ mod tests {
         );
         let a = probe_rect(&l, 0xAA0005).expect("first rect");
         let b = probe_rect(&l, 0xAA0006).expect("second rect");
-        assert!(b.y >= a.y.saturating_add(a.height), "blocks no longer stack vertically");
+        assert!(
+            b.y >= a.y.saturating_add(a.height),
+            "blocks no longer stack vertically"
+        );
         assert_eq!(a.x, 0);
         assert_eq!(b.x, 0);
     }
@@ -12009,8 +12860,14 @@ mod tests {
         );
         let first = probe_rect(&l, 0xAA0009).expect("first rect");
         let second = probe_rect(&l, 0xAA000A).expect("second rect");
-        assert!(second.y < first.y.saturating_add(first.height), "negative top margin did not pull the second block up");
-        assert_eq!(second.y, first.y, "expected the second block to overlap the first by 20px");
+        assert!(
+            second.y < first.y.saturating_add(first.height),
+            "negative top margin did not pull the second block up"
+        );
+        assert_eq!(
+            second.y, first.y,
+            "expected the second block to overlap the first by 20px"
+        );
     }
 
     #[test]
@@ -12020,7 +12877,10 @@ mod tests {
             320,
         );
         let box_ = probe_rect(&l, 0xAA000B).expect("box rect");
-        assert_eq!(box_.x, 0, "negative left margin should clamp at the viewport edge");
+        assert_eq!(
+            box_.x, 0,
+            "negative left margin should clamp at the viewport edge"
+        );
     }
 
     #[test]
@@ -12031,7 +12891,11 @@ mod tests {
         );
         let first = probe_rect(&l, 0xAA000C).expect("first rect");
         let second = probe_rect(&l, 0xAA000D).expect("second rect");
-        assert_eq!(second.y, first.y.saturating_add(first.height).saturating_add(30), "positive margin-top changed");
+        assert_eq!(
+            second.y,
+            first.y.saturating_add(first.height).saturating_add(30),
+            "positive margin-top changed"
+        );
     }
 
     #[test]
@@ -12041,8 +12905,14 @@ mod tests {
             320,
         );
         let box_ = probe_rect(&l, 0xAA000E).expect("box rect");
-        assert_eq!(box_.x, 0, "negative horizontal margin should clamp x at zero");
-        assert!(box_.width >= 40, "negative margins should not shrink the available width");
+        assert_eq!(
+            box_.x, 0,
+            "negative horizontal margin should clamp x at zero"
+        );
+        assert!(
+            box_.width >= 40,
+            "negative margins should not shrink the available width"
+        );
     }
 
     #[test]
@@ -12053,8 +12923,14 @@ mod tests {
         );
         let degraded = probe_rect(&l, 0xAA0007).expect("degraded rect");
         let next = probe_rect(&l, 0xAA0008).expect("next rect");
-        assert_eq!(degraded.x, 0, "auto-width non-img float should fall back to normal block flow");
-        assert!(next.y >= degraded.y.saturating_add(degraded.height), "fallback block should keep vertical flow");
+        assert_eq!(
+            degraded.x, 0,
+            "auto-width non-img float should fall back to normal block flow"
+        );
+        assert!(
+            next.y >= degraded.y.saturating_add(degraded.height),
+            "fallback block should keep vertical flow"
+        );
     }
 
     #[test]
@@ -12128,7 +13004,10 @@ mod tests {
                     return Err(format!("grow item width={} (want ~300)", a.width));
                 }
                 if b.x <= a.x {
-                    return Err(format!("second item not after first: a.x={} b.x={}", a.x, b.x));
+                    return Err(format!(
+                        "second item not after first: a.x={} b.x={}",
+                        a.x, b.x
+                    ));
                 }
                 Ok(())
             }),
@@ -12150,7 +13029,10 @@ mod tests {
                 );
                 let a = probe_rect(&l, 0xAA000B)?;
                 if !near(a.x, 80, 12) || !near(a.y, 50, 12) {
-                    return Err(format!("absolute pos wrong: ({},{}) want (~80,~50)", a.x, a.y));
+                    return Err(format!(
+                        "absolute pos wrong: ({},{}) want (~80,~50)",
+                        a.x, a.y
+                    ));
                 }
                 Ok(())
             }),
@@ -12195,7 +13077,11 @@ mod tests {
                 let a = probe_rect(&l, 0xAA000F)?;
                 let b = probe_rect(&l, 0xAA0010)?;
                 if !near(b.x, a.x + a.width + 20, 12) {
-                    return Err(format!("gap not applied: a.x+w={} b.x={}", a.x + a.width, b.x));
+                    return Err(format!(
+                        "gap not applied: a.x+w={} b.x={}",
+                        a.x + a.width,
+                        b.x
+                    ));
                 }
                 Ok(())
             }),
@@ -12219,7 +13105,10 @@ mod tests {
                 let a = probe_rect(&l, 0xAA0014)?;
                 let b = probe_rect(&l, 0xAA0015)?;
                 if b.x <= a.x {
-                    return Err(format!("grid columns not side by side: a.x={} b.x={}", a.x, b.x));
+                    return Err(format!(
+                        "grid columns not side by side: a.x={} b.x={}",
+                        a.x, b.x
+                    ));
                 }
                 Ok(())
             }),
@@ -12230,7 +13119,10 @@ mod tests {
                 );
                 let a = probe_rect(&l, 0xAA0016)?;
                 if a.width < 190 {
-                    return Err(format!("min-width not applied: width={} (want >=200)", a.width));
+                    return Err(format!(
+                        "min-width not applied: width={} (want >=200)",
+                        a.width
+                    ));
                 }
                 Ok(())
             }),
@@ -12241,7 +13133,10 @@ mod tests {
                 );
                 let a = probe_rect(&l, 0xAA0017)?;
                 if a.width > 320 {
-                    return Err(format!("max-width not capping: width={} (want ~300)", a.width));
+                    return Err(format!(
+                        "max-width not capping: width={} (want ~300)",
+                        a.width
+                    ));
                 }
                 Ok(())
             }),
@@ -12268,7 +13163,10 @@ mod tests {
                     return Err(format!("logo not at left: x={}", logo.x));
                 }
                 if link2.x + link2.width < 520 {
-                    return Err(format!("nav links not pushed right: last right edge={}", link2.x + link2.width));
+                    return Err(format!(
+                        "nav links not pushed right: last right edge={}",
+                        link2.x + link2.width
+                    ));
                 }
                 Ok(())
             }),
@@ -12283,7 +13181,11 @@ mod tests {
             }
         }
         let total = cases.len();
-        println!("\n=== layout probe: {}/{} passed ===", total - failures.len(), total);
+        println!(
+            "\n=== layout probe: {}/{} passed ===",
+            total - failures.len(),
+            total
+        );
         for (name, err) in &failures {
             println!("  [layout] {name}: {err}");
         }
@@ -12299,10 +13201,18 @@ mod tests {
         let mut ys: Vec<u32> = l.texts().iter().map(|t| t.y).collect();
         ys.sort_unstable();
         ys.dedup();
-        assert!(ys.len() >= 2, "paragraph should wrap to multiple lines, got ys={ys:?}");
+        assert!(
+            ys.len() >= 2,
+            "paragraph should wrap to multiple lines, got ys={ys:?}"
+        );
         // Consecutive distinct line tops must differ by at least half a line —
         // overlapping lines would sit within a few px of each other.
-        let line_h = l.texts().iter().map(|t| t.line_height_px).max().unwrap_or(16);
+        let line_h = l
+            .texts()
+            .iter()
+            .map(|t| t.line_height_px)
+            .max()
+            .unwrap_or(16);
         for pair in ys.windows(2) {
             let gap = pair[1] - pair[0];
             assert!(
@@ -12317,7 +13227,12 @@ mod tests {
     fn hides_display_none_content() {
         let document = parse_document("<div><p>Hello</p><span class=\"hide\">Nope</span></div>");
         let stylesheet = parse_stylesheet(".hide { display: none; } p { color: #ff0000; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -12513,7 +13428,10 @@ mod tests {
             })
             .expect("the badge should be drawn");
         assert_eq!(badge.y, 0, "its top should be level with the text's");
-        assert_eq!(layout.content_height, 40, "and the line should be as tall as it is");
+        assert_eq!(
+            layout.content_height, 40,
+            "and the line should be as tall as it is"
+        );
     }
 
     #[test]
@@ -12550,7 +13468,10 @@ mod tests {
         );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
-        assert_eq!(layout.content_height, 24, "the sentence should take one line");
+        assert_eq!(
+            layout.content_height, 24,
+            "the sentence should take one line"
+        );
     }
 
     #[test]
@@ -12560,8 +13481,12 @@ mod tests {
 
         // Left whole, it takes two lines: the word on one, "word" on the next.
         let document = parse_document(&format!("<div style=\"width:120px\">{word}</div>"));
-        let styled =
-            build_styled_tree(&document, &sheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &sheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
         assert_eq!(layout.content_height, 48);
@@ -12571,8 +13496,12 @@ mod tests {
         let document = parse_document(&format!(
             "<div style=\"width:120px;overflow-wrap:break-word\">{word}</div>"
         ));
-        let styled =
-            build_styled_tree(&document, &sheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &sheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let layout = layout_styled_document(&styled, &ImageStore::default(), 600, &mut fonts);
         assert_eq!(layout.content_height, 72);
     }
@@ -12744,7 +13673,12 @@ mod tests {
     fn centers_text_when_requested() {
         let document = parse_document("<p>Hello</p>");
         let stylesheet = parse_stylesheet("p { text-align: center; font-size: 16px; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 200, &mut fonts);
 
@@ -12759,7 +13693,12 @@ mod tests {
     fn wraps_text_across_multiple_lines() {
         let document = parse_document("<p>alpha beta gamma delta epsilon</p>");
         let stylesheet = parse_stylesheet("p { font-size: 16px; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 90, &mut fonts);
 
@@ -12776,7 +13715,12 @@ mod tests {
     fn keeps_text_align_inherited() {
         let document = parse_document("<div><p>Hello</p></div>");
         let stylesheet = parse_stylesheet("div { text-align: right; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
 
         let paragraph = match styled {
             crate::css::StyledNode::Element(ref root) => {
@@ -12842,7 +13786,12 @@ mod tests {
     #[test]
     fn places_table_cells_side_by_side() {
         let document = parse_document("<table><tr><td>Left</td><td>Right</td></tr></table>");
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
         let texts = layout.texts();
@@ -12928,8 +13877,14 @@ mod tests {
             .find(|text| text.text == "after")
             .expect("block text should exist");
 
-        assert!(nested.y > text.y, "nested table should stack below inline text");
-        assert!(after.y > nested.y, "following block should stack below nested table");
+        assert!(
+            nested.y > text.y,
+            "nested table should stack below inline text"
+        );
+        assert!(
+            after.y > nested.y,
+            "following block should stack below nested table"
+        );
     }
 
     #[test]
@@ -12937,7 +13892,12 @@ mod tests {
         let document = parse_document(
             "<div><img src=\"https://example.com/pic.jpg\" data-scratch-src=\"https://example.com/pic.jpg\" width=\"40\" height=\"20\"></div>",
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let mut images = ImageStore::default();
         images.insert(
@@ -12982,7 +13942,10 @@ mod tests {
         assert_eq!(image.width, 100);
         assert_eq!(image.height, 140);
         assert!(
-            !layout.texts().iter().any(|text| text.text.contains("[image]")),
+            !layout
+                .texts()
+                .iter()
+                .any(|text| text.text.contains("[image]")),
             "loaded inline image should not fall back to [image] text"
         );
         assert!(
@@ -13006,7 +13969,10 @@ mod tests {
 
         assert!(layout.images().is_empty());
         assert!(
-            layout.texts().iter().any(|text| text.text.contains("[image]")),
+            layout
+                .texts()
+                .iter()
+                .any(|text| text.text.contains("[image]")),
             "missing inline image should keep the [image] fallback"
         );
     }
@@ -13048,7 +14014,12 @@ mod tests {
     fn auto_width_tables_do_not_expand_to_full_container() {
         let document =
             parse_document("<table align=\"center\"><tr><td>Hello</td><td>World</td></tr></table>");
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 500, &mut fonts);
         let texts = layout.texts();
@@ -13070,7 +14041,12 @@ mod tests {
         let document = parse_document(
             "<table><tr><td valign=\"middle\">short</td><td><br><br><br><br><br>tall</td></tr></table>",
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
         let texts = layout.texts();
@@ -13103,7 +14079,10 @@ mod tests {
             .expect("short should exist");
 
         assert!(short.y > a.y, "short should not be top-aligned: {texts:?}");
-        assert!(short.y < c.y, "short should be within the tall cell middle band: {texts:?}");
+        assert!(
+            short.y < c.y,
+            "short should be within the tall cell middle band: {texts:?}"
+        );
     }
 
     #[test]
@@ -13130,7 +14109,12 @@ mod tests {
         let document = parse_document(
             "<table><tr><td rowspan=\"2\">Left</td><td>Top</td></tr><tr><td>Bottom</td></tr></table>",
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
         let texts = layout.texts();
@@ -13150,9 +14134,15 @@ mod tests {
     #[test]
     fn uses_document_background_for_opacity_blending() {
         let document = parse_document("<body><div>Hi</div></body>");
-        let stylesheet =
-            parse_stylesheet("body { background-color: #000000; } div { background-color: #ff0000; opacity: 0.5; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let stylesheet = parse_stylesheet(
+            "body { background-color: #000000; } div { background-color: #ff0000; opacity: 0.5; }",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -13169,9 +14159,10 @@ mod tests {
         // The raw red rect should be inside the layer
         let has_raw_red = layout.commands.iter().any(|cmd| {
             if let DrawCommand::Layer(layer) = cmd {
-                layer.commands.iter().any(|inner| {
-                    matches!(inner, DrawCommand::Rect(r) if r.color == 0xFF0000)
-                })
+                layer
+                    .commands
+                    .iter()
+                    .any(|inner| matches!(inner, DrawCommand::Rect(r) if r.color == 0xFF0000))
             } else {
                 false
             }
@@ -13188,7 +14179,12 @@ mod tests {
         let stylesheet = parse_stylesheet(
             "body { background-color: #000000; } div { opacity: 0.5; } span { opacity: 0.5; color: #ffffff; }",
         );
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -13197,10 +14193,14 @@ mod tests {
         // The text color inside the layer is pre-blended with the span's own opacity (0.5)
         // against the layer's local backdrop (black #000000 from body background).
         // span.opacity=0.5=128, color=white=#ffffff blended against black => ~0x808080
-        let has_layer = layout.commands.iter().any(|cmd| {
-            matches!(cmd, DrawCommand::Layer(_))
-        });
-        assert!(has_layer, "div with opacity: 0.5 should produce a LayerCommand");
+        let has_layer = layout
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, DrawCommand::Layer(_)));
+        assert!(
+            has_layer,
+            "div with opacity: 0.5 should produce a LayerCommand"
+        );
 
         // Text color inside layer should be pre-blended with span's own opacity against the
         // layer's local backdrop color. The layer's backdrop is black (body bg).
@@ -13209,8 +14209,10 @@ mod tests {
         let texts = layout.texts();
         let text = texts.first().expect("text command should exist");
         // The text should be blended with span's 50% opacity against the layer backdrop (black)
-        assert_eq!(text.color, 0x808080,
-            "text inside stacking context should be pre-blended with span's own opacity against layer backdrop");
+        assert_eq!(
+            text.color, 0x808080,
+            "text inside stacking context should be pre-blended with span's own opacity against layer backdrop"
+        );
     }
 
     #[test]
@@ -13218,7 +14220,12 @@ mod tests {
         let document = parse_document(
             r#"<form action="/search"><input name="q" value="rust"><button type="submit">Go</button></form>"#,
         );
-        let styled = build_styled_tree(&document, &parse_stylesheet(""), 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(""),
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 320, &mut fonts);
 
@@ -13250,15 +14257,20 @@ mod tests {
     }
     #[test]
     fn test_overflow_hidden_clips_commands() {
-        use crate::css::{parse_stylesheet, build_styled_tree};
-        use crate::html::parse_document;
+        use crate::css::{build_styled_tree, parse_stylesheet};
         use crate::font::FontContext;
+        use crate::html::parse_document;
         use crate::image::ImageStore;
 
         let html = r#"<div style="overflow:hidden;height:50px;background:#ffffff"><div style="height:100px;background:#ff0000">Content</div></div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("body { margin: 0 }");
-        let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
@@ -13271,38 +14283,53 @@ mod tests {
                 assert!(
                     rect.y.saturating_add(rect.height) <= max_y + 2,
                     "Rect y={} height={} exceeds overflow:hidden boundary y={}",
-                    rect.y, rect.height, max_y
+                    rect.y,
+                    rect.height,
+                    max_y
                 );
             }
         }
     }
     #[test]
     fn test_border_radius_in_rect_command() {
-        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::css::{build_styled_tree, parse_stylesheet};
         use crate::html::parse_document;
 
         let html = r#"<div style="background:#ff0000;border-radius:10px">Hello</div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
 
         let rects = layout.rects();
         let bg_rect = rects.iter().find(|r| r.border_radius == 10);
-        assert!(bg_rect.is_some(), "Should have a rect with border_radius=10");
+        assert!(
+            bg_rect.is_some(),
+            "Should have a rect with border_radius=10"
+        );
         assert_eq!(bg_rect.unwrap().border_radius, 10);
     }
     #[test]
     fn test_box_shadow_generates_shadow_rect() {
-        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::css::{build_styled_tree, parse_stylesheet};
         use crate::html::parse_document;
 
         let html = r#"<div style="background:#ffffff;box-shadow:2px 2px #000000">Hello</div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
@@ -13310,33 +14337,56 @@ mod tests {
         // Should have a black shadow rect
         let rects = layout.rects();
         let shadow_rect = rects.iter().find(|r| r.color == 0x000000);
-        assert!(shadow_rect.is_some(), "Should have a shadow rect with black color");
+        assert!(
+            shadow_rect.is_some(),
+            "Should have a shadow rect with black color"
+        );
     }
 
     #[test]
     fn grid_children_placed_side_by_side() {
-        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::css::{build_styled_tree, parse_stylesheet};
         use crate::html::parse_document;
 
         // 2-column grid: two children should be placed side by side (different x values)
         let html = r#"<div style="display:grid;grid-template-columns:200px 200px;gap:0px;"><div>Left</div><div>Right</div></div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
 
         let texts = layout.texts();
-        let left = texts.iter().find(|t| t.text.contains("Left")).expect("Left text should be rendered");
-        let right = texts.iter().find(|t| t.text.contains("Right")).expect("Right text should be rendered");
+        let left = texts
+            .iter()
+            .find(|t| t.text.contains("Left"))
+            .expect("Left text should be rendered");
+        let right = texts
+            .iter()
+            .find(|t| t.text.contains("Right"))
+            .expect("Right text should be rendered");
 
         // Left and Right should have different x positions (side by side)
-        assert_ne!(left.x, right.x, "Grid children should be placed at different x positions");
+        assert_ne!(
+            left.x, right.x,
+            "Grid children should be placed at different x positions"
+        );
         // Right should be to the right of left
-        assert!(right.x > left.x, "Right item should have a larger x than Left item");
+        assert!(
+            right.x > left.x,
+            "Right item should have a larger x than Left item"
+        );
         // They should be on the same row (same y)
-        assert_eq!(left.y, right.y, "Grid children in the same row should have the same y");
+        assert_eq!(
+            left.y, right.y,
+            "Grid children in the same row should have the same y"
+        );
     }
 
     /// One `LineSpan` is produced per word and one `InlineFragment` per inline
@@ -13364,7 +14414,7 @@ mod tests {
 
     #[test]
     fn grid_row_spanning_item_grows_the_rows_it_covers() {
-        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::css::{build_styled_tree, parse_stylesheet};
         use crate::html::parse_document;
 
         // Column 1 holds a 200px item spanning both rows; column 2 holds two
@@ -13374,14 +14424,25 @@ mod tests {
         let html = r#"<div style="display:grid;grid-template-columns:100px 100px;gap:0px;"><div style="grid-row:span 2;height:200px;">TALL</div><div>B</div><div>C</div></div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 400, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            400,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 400, &mut fonts);
 
         let texts = layout.texts();
-        let b = texts.iter().find(|t| t.text.contains('B')).expect("B should be rendered");
-        let c = texts.iter().find(|t| t.text.contains('C')).expect("C should be rendered");
+        let b = texts
+            .iter()
+            .find(|t| t.text.contains('B'))
+            .expect("B should be rendered");
+        let c = texts
+            .iter()
+            .find(|t| t.text.contains('C'))
+            .expect("C should be rendered");
 
         assert!(c.y > b.y, "C should be on the row below B");
         let row_gap = c.y - b.y;
@@ -13393,21 +14454,35 @@ mod tests {
 
     #[test]
     fn grid_three_column_equal_fr_layout() {
-        use crate::css::{parse_stylesheet, build_styled_tree};
+        use crate::css::{build_styled_tree, parse_stylesheet};
         use crate::html::parse_document;
 
         let html = r#"<div style="display:grid;grid-template-columns:repeat(3,1fr);"><div>A</div><div>B</div><div>C</div></div>"#;
         let doc = parse_document(html);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&doc, &stylesheet, 600, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            600,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 600, &mut fonts);
 
         let texts = layout.texts();
-        let a = texts.iter().find(|t| t.text.contains('A')).expect("A should be rendered");
-        let b = texts.iter().find(|t| t.text.contains('B')).expect("B should be rendered");
-        let c = texts.iter().find(|t| t.text.contains('C')).expect("C should be rendered");
+        let a = texts
+            .iter()
+            .find(|t| t.text.contains('A'))
+            .expect("A should be rendered");
+        let b = texts
+            .iter()
+            .find(|t| t.text.contains('B'))
+            .expect("B should be rendered");
+        let c = texts
+            .iter()
+            .find(|t| t.text.contains('C'))
+            .expect("C should be rendered");
 
         // All three should be on the same row
         assert_eq!(a.y, b.y, "A and B should be on the same row");
@@ -13469,8 +14544,12 @@ mod tests {
                .m { grid-area: main; }"#,
         );
         let doc = parse_document(html);
-        let styled =
-            build_styled_tree(&doc, &stylesheet, 800, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            800,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
@@ -13515,15 +14594,22 @@ mod tests {
                .m { grid-area: main; }"#,
         );
         let doc = parse_document(html);
-        let styled =
-            build_styled_tree(&doc, &stylesheet, 1000, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            1000,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 1000, &mut fonts);
 
         let texts = layout.texts();
         let main_runs: Vec<_> = texts.iter().filter(|t| t.x >= 400).collect();
-        assert!(!main_runs.is_empty(), "the main area should render something");
+        assert!(
+            !main_runs.is_empty(),
+            "the main area should render something"
+        );
 
         // Half of 1000px is plenty for this phrase; if the column had collapsed
         // every run would be a single character.
@@ -13550,8 +14636,12 @@ mod tests {
                .c { grid-column: content; }"#,
         );
         let doc = parse_document(html);
-        let styled =
-            build_styled_tree(&doc, &stylesheet, 1000, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            1000,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 1000, &mut fonts);
@@ -13578,12 +14668,15 @@ mod tests {
         use crate::html::parse_document;
 
         let html = r#"<div class="page"><div class="a">MAIN</div><div class="b">.</div></div>"#;
-        let stylesheet = parse_stylesheet(
-            r#".page { display: grid; grid-template-columns: 1fr min-content; }"#,
-        );
+        let stylesheet =
+            parse_stylesheet(r#".page { display: grid; grid-template-columns: 1fr min-content; }"#);
         let doc = parse_document(html);
-        let styled =
-            build_styled_tree(&doc, &stylesheet, 1000, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &doc,
+            &stylesheet,
+            1000,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 1000, &mut fonts);
@@ -13609,7 +14702,12 @@ mod tests {
 
         let document = parse_document(r#"<div style="filter: blur(4px);">Hello</div>"#);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 320, &mut fonts);
@@ -13627,7 +14725,10 @@ mod tests {
         }
 
         let layers = find_layers(&layout.commands);
-        assert!(!layers.is_empty(), "Expected at least one LayerCommand for filter: blur()");
+        assert!(
+            !layers.is_empty(),
+            "Expected at least one LayerCommand for filter: blur()"
+        );
         assert!(
             layers.iter().any(|l| l.blur_px > 0),
             "Expected a LayerCommand with blur_px > 0, got: {:?}",
@@ -13641,7 +14742,12 @@ mod tests {
 
         let document = parse_document(r#"<div style="filter: brightness(0.5);">Hello</div>"#);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let images = ImageStore::default();
         let layout = layout_styled_document(&styled, &images, 320, &mut fonts);
@@ -13658,7 +14764,10 @@ mod tests {
         }
 
         let layers = find_layers(&layout.commands);
-        assert!(!layers.is_empty(), "Expected at least one LayerCommand for filter: brightness()");
+        assert!(
+            !layers.is_empty(),
+            "Expected at least one LayerCommand for filter: brightness()"
+        );
         assert!(
             layers.iter().any(|l| l.brightness != 10000),
             "Expected a LayerCommand with brightness != 10000, got: {:?}",
@@ -13676,26 +14785,41 @@ mod tests {
     fn block_with_explicit_width_is_constrained() {
         let document = parse_document(r#"<div style="width:200px;background:red;">x</div>"#);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
 
         let rects = layout.rects();
-        let bg = rects.iter().find(|r| r.color == 0xFF0000)
+        let bg = rects
+            .iter()
+            .find(|r| r.color == 0xFF0000)
             .expect("red background rect should exist");
         assert_eq!(bg.width, 200, "div should be 200px wide, got {}", bg.width);
     }
 
     #[test]
     fn margin_auto_centers_block_element() {
-        let document = parse_document(r#"<div style="width:200px;margin:0 auto;background:red;">x</div>"#);
+        let document =
+            parse_document(r#"<div style="width:200px;margin:0 auto;background:red;">x</div>"#);
         let stylesheet = parse_stylesheet("");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &crate::css::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
         let mut fonts = FontContext::load();
         let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
 
         let rects = layout.rects();
-        let bg = rects.iter().find(|r| r.color == 0xFF0000)
+        let bg = rects
+            .iter()
+            .find(|r| r.color == 0xFF0000)
             .expect("red background rect should exist");
         // (800 - 200) / 2 = 300
         assert_eq!(bg.x, 300, "div should be centered at x=300, got {}", bg.x);

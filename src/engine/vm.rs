@@ -9,27 +9,25 @@ use std::{
 
 use serde_json::Value as JsonValue;
 
-use super::js_regex::{JsCaptures, JsRegex};
 use super::chunk::{Chunk, Constant, FunctionProto, Opcode};
 use super::event_loop::{
     EventLoop, MicrotaskJob, RafEntry, TaskEntry, TaskSource, TickResult, TimerEntry,
 };
 use super::heap::{GcRef, Heap, RawGcRef};
 use super::host::{
-    AdjacentPosition,
-    ConsoleLevel, ConsoleMessage, DomMutation, DomMutationResult, DomRead, DomReadResult, FetchBody,
-    FetchMode,
-    FetchRequest, FetchResponse, HistoryAction, Host, HostData, HttpMethod, NavigationAction,
-    NodeId, NodeKind, NoopHost, ObserverId, ObserverKind, ObserverOp, ObserverOptions,
-    ObserverRecord, ObserverResult, SiblingDirection, StorageAreaKind, StorageAreaScope,
-    StorageOp, StorageResult, WindowId,
+    AdjacentPosition, ConsoleLevel, ConsoleMessage, DomMutation, DomMutationResult, DomRead,
+    DomReadResult, FetchBody, FetchMode, FetchRequest, FetchResponse, HistoryAction, Host,
+    HostData, HttpMethod, NavigationAction, NodeId, NodeKind, NoopHost, ObserverId, ObserverKind,
+    ObserverOp, ObserverOptions, ObserverRecord, ObserverResult, SiblingDirection, StorageAreaKind,
+    StorageAreaScope, StorageOp, StorageResult, WindowId,
 };
-use super::verifier::compute_stack_depths;
+use super::js_regex::{JsCaptures, JsRegex};
 use super::value::{
     AsyncContext, AsyncGeneratorRequest, GeneratorState, HostDispatch, HostObjectClass,
     HostObjectSlot, JsObject, JsPropertyDescriptor, JsString, ObjectKind, PromiseReaction,
     PromiseState, PropertyKey, SymbolId, TypedArrayKind, Value,
 };
+use super::verifier::compute_stack_depths;
 
 type ValueCell = Rc<RefCell<Value>>;
 
@@ -741,7 +739,10 @@ fn js_parse_int(text: &str, radix: Option<f64>) -> f64 {
     let rest: String = chars.collect();
     let mut digits = rest.as_str();
     if radix == 16 || radix == 0 {
-        if let Some(stripped) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        if let Some(stripped) = digits
+            .strip_prefix("0x")
+            .or_else(|| digits.strip_prefix("0X"))
+        {
             digits = stripped;
             radix = 16;
         }
@@ -818,7 +819,12 @@ fn number_to_radix_string(number: f64, radix: u32) -> String {
         return "NaN".to_string();
     }
     if !number.is_finite() {
-        return if number > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+        return if number > 0.0 {
+            "Infinity"
+        } else {
+            "-Infinity"
+        }
+        .to_string();
     }
     if !(2..=36).contains(&radix) {
         return number.to_string();
@@ -848,11 +854,7 @@ fn number_to_radix_string(number: f64, radix: u32) -> String {
             count += 1;
         }
     }
-    if negative {
-        format!("-{out}")
-    } else {
-        out
-    }
+    if negative { format!("-{out}") } else { out }
 }
 
 /// Number.prototype.toPrecision(p): format with `p` significant digits.
@@ -882,9 +884,7 @@ fn json_to_pretty_string(value: &JsonValue, indent: &str, depth: usize) -> Strin
         JsonValue::Null => "null".to_string(),
         JsonValue::Bool(boolean) => boolean.to_string(),
         JsonValue::Number(number) => number.to_string(),
-        JsonValue::String(_) => {
-            serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
-        }
+        JsonValue::String(_) => serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string()),
         JsonValue::Array(items) => {
             if items.is_empty() {
                 return "[]".to_string();
@@ -1197,7 +1197,11 @@ fn parse_url_authority(authority: &str) -> Option<(String, String, String, Strin
         }
         _ => (hostport.to_string(), String::new()),
     };
-    let host = if port.is_empty() { hostname.clone() } else { format!("{hostname}:{port}") };
+    let host = if port.is_empty() {
+        hostname.clone()
+    } else {
+        format!("{hostname}:{port}")
+    };
     Some((username, password, hostname, port, host))
 }
 
@@ -1245,7 +1249,14 @@ fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<UrlComponents> {
     let (scheme, rest) = if let Some(pos) = input.find(':') {
         (input[..pos].to_ascii_lowercase(), &input[pos + 1..])
     } else {
-        (base_components.as_ref()?.protocol.trim_end_matches(':').to_string(), input)
+        (
+            base_components
+                .as_ref()?
+                .protocol
+                .trim_end_matches(':')
+                .to_string(),
+            input,
+        )
     };
     let protocol = format!("{scheme}:");
     let mut username = String::new();
@@ -1339,7 +1350,9 @@ fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<UrlComponents> {
     if pathname.is_empty() && is_special_url_scheme(&scheme) {
         pathname = "/".to_string();
     }
-    let origin = if matches!(scheme.as_str(), "http" | "https" | "ws" | "wss" | "ftp") && !hostname.is_empty() {
+    let origin = if matches!(scheme.as_str(), "http" | "https" | "ws" | "wss" | "ftp")
+        && !hostname.is_empty()
+    {
         if port.is_empty() {
             format!("{scheme}://{hostname}")
         } else {
@@ -1365,11 +1378,27 @@ fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<UrlComponents> {
     href.push_str(&pathname);
     href.push_str(&search);
     href.push_str(&hash);
-    Some(UrlComponents { href, protocol, username, password, host, hostname, port, pathname, search, hash, origin })
+    Some(UrlComponents {
+        href,
+        protocol,
+        username,
+        password,
+        host,
+        hostname,
+        port,
+        pathname,
+        search,
+        hash,
+        origin,
+    })
 }
 
 fn is_uri_unreserved(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')')
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+        )
 }
 
 /// `encodeURIComponent` (component=false → also keep `;/?:@&=+$,#` for `encodeURI`).
@@ -1605,7 +1634,10 @@ const DOM_INTERFACE_METHODS: &[(&str, &[(&str, BuiltinId)])] = &[
             ("hasAttributes", BuiltinId::DomNodeHasAttributes),
             ("getAttributeNames", BuiltinId::DomNodeGetAttributeNames),
             ("toggleAttribute", BuiltinId::DomNodeToggleAttribute),
-            ("getBoundingClientRect", BuiltinId::DomNodeGetBoundingClientRect),
+            (
+                "getBoundingClientRect",
+                BuiltinId::DomNodeGetBoundingClientRect,
+            ),
             ("getClientRects", BuiltinId::DomNodeGetClientRects),
             ("checkVisibility", BuiltinId::DomNodeCheckVisibility),
             ("getAttributeNS", BuiltinId::DomNodeGetAttributeNs),
@@ -1613,7 +1645,10 @@ const DOM_INTERFACE_METHODS: &[(&str, &[(&str, BuiltinId)])] = &[
             ("hasAttributeNS", BuiltinId::DomNodeHasAttributeNs),
             ("removeAttributeNS", BuiltinId::DomNodeRemoveAttributeNs),
             ("insertAdjacentHTML", BuiltinId::DomNodeInsertAdjacentHtml),
-            ("insertAdjacentElement", BuiltinId::DomNodeInsertAdjacentElement),
+            (
+                "insertAdjacentElement",
+                BuiltinId::DomNodeInsertAdjacentElement,
+            ),
             ("insertAdjacentText", BuiltinId::DomNodeInsertAdjacentText),
             ("scrollIntoView", BuiltinId::DomNodeScrollIntoView),
             ("attachShadow", BuiltinId::DomNodeAttachShadow),
@@ -1645,8 +1680,14 @@ const DOM_INTERFACE_METHODS: &[(&str, &[(&str, BuiltinId)])] = &[
             ("elementsFromPoint", BuiltinId::DomDocElementsFromPoint),
             ("createDocumentFragment", BuiltinId::DomDocCreateFragment),
             ("getElementById", BuiltinId::DomDocGetElementById),
-            ("getElementsByClassName", BuiltinId::DomDocGetElementsByClassName),
-            ("getElementsByTagName", BuiltinId::DomDocGetElementsByTagName),
+            (
+                "getElementsByClassName",
+                BuiltinId::DomDocGetElementsByClassName,
+            ),
+            (
+                "getElementsByTagName",
+                BuiltinId::DomDocGetElementsByTagName,
+            ),
             ("querySelector", BuiltinId::DomDocQuerySelector),
             ("querySelectorAll", BuiltinId::DomDocQuerySelectorAll),
         ],
@@ -2018,8 +2059,19 @@ impl Vm {
                     _ => "<anonymous>",
                 }
             };
-            if let Some(position) = frame.proto.call_positions.binary_search_by_key(&(frame.ip.saturating_sub(1) as u32), |position| position.code_index).ok().and_then(|index| frame.proto.call_positions.get(index)) {
-                lines.push(format!("    at {name} ({}:{})", position.line, position.column));
+            if let Some(position) = frame
+                .proto
+                .call_positions
+                .binary_search_by_key(&(frame.ip.saturating_sub(1) as u32), |position| {
+                    position.code_index
+                })
+                .ok()
+                .and_then(|index| frame.proto.call_positions.get(index))
+            {
+                lines.push(format!(
+                    "    at {name} ({}:{})",
+                    position.line, position.column
+                ));
             } else {
                 lines.push(format!("    at {name}"));
             }
@@ -2256,9 +2308,23 @@ impl Vm {
             }
         }
         let prevent = self.allocate_builtin_method(BuiltinId::EventPreventDefault);
-        self.define_data_property(event, PropertyKey::from("preventDefault"), prevent, true, true, true);
+        self.define_data_property(
+            event,
+            PropertyKey::from("preventDefault"),
+            prevent,
+            true,
+            true,
+            true,
+        );
         let stop = self.allocate_builtin_method(BuiltinId::EventStopPropagation);
-        self.define_data_property(event, PropertyKey::from("stopPropagation"), stop, true, true, true);
+        self.define_data_property(
+            event,
+            PropertyKey::from("stopPropagation"),
+            stop,
+            true,
+            true,
+            true,
+        );
         let stop_immediate = self.allocate_builtin_method(BuiltinId::EventStopImmediatePropagation);
         self.define_data_property(
             event,
@@ -2269,7 +2335,14 @@ impl Vm {
             true,
         );
         let composed_path = self.allocate_builtin_method(BuiltinId::DomEventComposedPath);
-        self.define_data_property(event, PropertyKey::from("composedPath"), composed_path, true, false, true);
+        self.define_data_property(
+            event,
+            PropertyKey::from("composedPath"),
+            composed_path,
+            true,
+            false,
+            true,
+        );
         event
     }
 
@@ -2350,19 +2423,26 @@ impl Vm {
                     .unwrap_or(Value::Null),
                 None => Value::Null,
             };
-            self.define_data_property(
-                event,
-                PropertyKey::from("detail"),
-                detail,
-                true,
-                true,
-                true,
-            );
+            self.define_data_property(event, PropertyKey::from("detail"), detail, true, true, true);
         }
         let prevent = self.allocate_builtin_method(BuiltinId::EventPreventDefault);
-        self.define_data_property(event, PropertyKey::from("preventDefault"), prevent, true, true, true);
+        self.define_data_property(
+            event,
+            PropertyKey::from("preventDefault"),
+            prevent,
+            true,
+            true,
+            true,
+        );
         let stop = self.allocate_builtin_method(BuiltinId::EventStopPropagation);
-        self.define_data_property(event, PropertyKey::from("stopPropagation"), stop, true, true, true);
+        self.define_data_property(
+            event,
+            PropertyKey::from("stopPropagation"),
+            stop,
+            true,
+            true,
+            true,
+        );
         let stop_immediate = self.allocate_builtin_method(BuiltinId::EventStopImmediatePropagation);
         self.define_data_property(
             event,
@@ -2373,12 +2453,25 @@ impl Vm {
             true,
         );
         let composed_path = self.allocate_builtin_method(BuiltinId::DomEventComposedPath);
-        self.define_data_property(event, PropertyKey::from("composedPath"), composed_path, true, false, true);
+        self.define_data_property(
+            event,
+            PropertyKey::from("composedPath"),
+            composed_path,
+            true,
+            false,
+            true,
+        );
         Ok(Value::Object(event))
     }
 
     pub fn execute(&mut self, chunk: &Chunk) -> Result<Value, VmError> {
-        self.execute_with_this(chunk, self.globals.get("window").cloned().unwrap_or(Value::Undefined))
+        self.execute_with_this(
+            chunk,
+            self.globals
+                .get("window")
+                .cloned()
+                .unwrap_or(Value::Undefined),
+        )
     }
 
     pub fn execute_module(&mut self, chunk: &Chunk) -> Result<Value, VmError> {
@@ -2424,12 +2517,7 @@ impl Vm {
         self.eval_source_with_errors(source, "SyntaxError", true)
     }
 
-    fn eval_compile_error(
-        &mut self,
-        name: &str,
-        message: String,
-        throw_as_value: bool,
-    ) -> VmError {
+    fn eval_compile_error(&mut self, name: &str, message: String, throw_as_value: bool) -> VmError {
         if throw_as_value {
             VmError::Thrown(self.create_error_object(name, message))
         } else {
@@ -2471,7 +2559,11 @@ impl Vm {
         };
         let base_depth = self.frames.len();
         let stack_len = self.stack.len();
-        let global_this = self.globals.get("window").cloned().unwrap_or(Value::Undefined);
+        let global_this = self
+            .globals
+            .get("window")
+            .cloned()
+            .unwrap_or(Value::Undefined);
         self.push_call_frame(closure, Vec::new(), global_this, None)?;
         self.run_until_frame_depth(base_depth)?;
         if self.stack.len() > stack_len {
@@ -2510,7 +2602,6 @@ impl Vm {
                 );
                 self.drain_microtasks();
             }
-
         }
 
         if needs_render {
@@ -2565,7 +2656,10 @@ impl Vm {
     /// The earliest pending timer's due time in ms (heap-min), if any. Lets the
     /// host schedule a wakeup instead of busy-polling.
     pub fn next_timer_due_ms(&self) -> Option<u64> {
-        self.event_loop.timer_heap.peek().map(|entry| entry.0.due_ms)
+        self.event_loop
+            .timer_heap
+            .peek()
+            .map(|entry| entry.0.due_ms)
     }
 
     /// Advance the event loop to `now_ms`: run every timer due by then (plus
@@ -2624,7 +2718,10 @@ impl Vm {
                         .stack_depth_cache
                         .entry(proto_key)
                         .or_insert_with(|| {
-                            (frame.proto.clone(), Rc::new(compute_stack_depths(&frame.proto)))
+                            (
+                                frame.proto.clone(),
+                                Rc::new(compute_stack_depths(&frame.proto)),
+                            )
                         })
                         .1;
                     let expected = table.get(ip).copied().flatten();
@@ -3058,7 +3155,8 @@ impl Vm {
                     &PropertyKey::Symbol(SymbolId(SYMBOL_ASYNC_ITERATOR_ID)),
                 ) {
                     if self.is_callable_value(&async_iter) {
-                        let iterator = self.call_value_sync(async_iter, value.clone(), Vec::new())?;
+                        let iterator =
+                            self.call_value_sync(async_iter, value.clone(), Vec::new())?;
                         self.stack.push(iterator);
                     } else {
                         let iterator = self.allocate_for_of_iterator_adapter(&value)?;
@@ -3173,9 +3271,10 @@ impl Vm {
                     let request = frame.async_gen_request.ok_or_else(|| {
                         VmError::TypeError("async generator request missing".to_string())
                     })?;
-                    let (_, queue) = self.take_async_generator_state(generator).ok_or_else(|| {
-                        VmError::TypeError("yield is only valid inside a generator".to_string())
-                    })?;
+                    let (_, queue) =
+                        self.take_async_generator_state(generator).ok_or_else(|| {
+                            VmError::TypeError("yield is only valid inside a generator".to_string())
+                        })?;
                     let stack = self.stack.split_off(frame.stack_base);
                     let mut frame = frame;
                     frame.async_gen_request = None;
@@ -3190,8 +3289,14 @@ impl Vm {
                     );
                     let result = self.make_iter_result(value, false)?;
                     self.resolve_promise_from_resolution(request, result)?;
-                    if let Some((GeneratorState::Suspended { frame, stack, started }, mut queue)) =
-                        self.take_async_generator_state(generator)
+                    if let Some((
+                        GeneratorState::Suspended {
+                            frame,
+                            stack,
+                            started,
+                        },
+                        mut queue,
+                    )) = self.take_async_generator_state(generator)
                     {
                         if let Some(next_request) = queue.pop_front() {
                             let remaining_queue = queue;
@@ -3206,7 +3311,11 @@ impl Vm {
                         } else {
                             self.set_async_generator_state(
                                 generator,
-                                GeneratorState::Suspended { frame, stack, started },
+                                GeneratorState::Suspended {
+                                    frame,
+                                    stack,
+                                    started,
+                                },
                                 queue,
                             );
                         }
@@ -3417,8 +3526,7 @@ impl Vm {
         let clear_interval = self.allocate_builtin_method(BuiltinId::ClearInterval);
         let request_animation_frame =
             self.allocate_builtin_method(BuiltinId::RequestAnimationFrame);
-        let cancel_animation_frame =
-            self.allocate_builtin_method(BuiltinId::CancelAnimationFrame);
+        let cancel_animation_frame = self.allocate_builtin_method(BuiltinId::CancelAnimationFrame);
         self.globals
             .insert("__callSpread".to_string(), call_spread.clone());
         self.globals
@@ -3571,8 +3679,16 @@ impl Vm {
             "slice",
             BuiltinId::TypedArrayProtoSlice,
         );
-        self.define_builtin_method(typed_array_prototype, "fill", BuiltinId::TypedArrayProtoFill);
-        self.define_builtin_method(typed_array_prototype, "join", BuiltinId::TypedArrayProtoJoin);
+        self.define_builtin_method(
+            typed_array_prototype,
+            "fill",
+            BuiltinId::TypedArrayProtoFill,
+        );
+        self.define_builtin_method(
+            typed_array_prototype,
+            "join",
+            BuiltinId::TypedArrayProtoJoin,
+        );
         self.define_builtin_method(
             typed_array_prototype,
             "indexOf",
@@ -3607,11 +3723,18 @@ impl Vm {
         self.define_symbol_iterator_alias(typed_array_prototype, "values");
 
         self.define_builtin_method(weak_ref_prototype, "deref", BuiltinId::WeakRefDeref);
-        let weak_ref_ctor =
-            self.allocate_builtin_value(BuiltinId::WeakRefConstructor, true, Some(weak_ref_prototype));
+        let weak_ref_ctor = self.allocate_builtin_value(
+            BuiltinId::WeakRefConstructor,
+            true,
+            Some(weak_ref_prototype),
+        );
         self.globals.insert("WeakRef".to_string(), weak_ref_ctor);
 
-        self.define_builtin_method(text_encoder_prototype, "encode", BuiltinId::TextEncoderEncode);
+        self.define_builtin_method(
+            text_encoder_prototype,
+            "encode",
+            BuiltinId::TextEncoderEncode,
+        );
         let text_encoder_ctor = self.allocate_builtin_value(
             BuiltinId::TextEncoderConstructor,
             true,
@@ -3620,7 +3743,11 @@ impl Vm {
         self.globals
             .insert("TextEncoder".to_string(), text_encoder_ctor);
 
-        self.define_builtin_method(text_decoder_prototype, "decode", BuiltinId::TextDecoderDecode);
+        self.define_builtin_method(
+            text_decoder_prototype,
+            "decode",
+            BuiltinId::TextDecoderDecode,
+        );
         let text_decoder_ctor = self.allocate_builtin_value(
             BuiltinId::TextDecoderConstructor,
             true,
@@ -3719,7 +3846,8 @@ impl Vm {
         // `AbortSignal` cannot be called with `new`, but it still has a
         // prototype -- that is where a page reaches to patch `throwIfAborted`,
         // and feature detection reads it.
-        let abort_signal_prototype = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
+        let abort_signal_prototype =
+            self.allocate_ordinary_object(Some(self.object_prototype_ref()));
         let abort_signal_ctor = self.allocate_builtin_value(
             BuiltinId::AbortSignalConstructor,
             false,
@@ -3765,8 +3893,7 @@ impl Vm {
 
         // XMLHttpRequest constructor.
         let xhr_ctor = self.allocate_builtin_value(BuiltinId::XhrConstructor, true, None);
-        self.globals
-            .insert("XMLHttpRequest".to_string(), xhr_ctor);
+        self.globals.insert("XMLHttpRequest".to_string(), xhr_ctor);
 
         // Image constructor.
         let image_ctor = self.allocate_builtin_value(BuiltinId::ImageConstructor, true, None);
@@ -3775,8 +3902,10 @@ impl Vm {
         // IntersectionObserver constructor.
         let intersection_observer_ctor =
             self.allocate_builtin_value(BuiltinId::IntersectionObserverConstructor, true, None);
-        self.globals
-            .insert("IntersectionObserver".to_string(), intersection_observer_ctor);
+        self.globals.insert(
+            "IntersectionObserver".to_string(),
+            intersection_observer_ctor,
+        );
 
         // ResizeObserver constructor.
         let resize_observer_ctor =
@@ -3786,8 +3915,10 @@ impl Vm {
 
         self.globals
             .insert("Promise".to_string(), promise_ctor.clone());
-        self.globals.insert("Number".to_string(), number_ctor.clone());
-        self.globals.insert("String".to_string(), string_ctor.clone());
+        self.globals
+            .insert("Number".to_string(), number_ctor.clone());
+        self.globals
+            .insert("String".to_string(), string_ctor.clone());
         self.globals
             .insert("Boolean".to_string(), boolean_ctor.clone());
         self.globals
@@ -3817,9 +3948,12 @@ impl Vm {
             supports_indexed_properties: false,
             supports_named_properties: false,
         });
-        self.globals.insert("document".to_string(), document_obj.clone());
-        self.globals.insert("window".to_string(), window_obj.clone());
-        self.globals.insert("globalThis".to_string(), window_obj.clone());
+        self.globals
+            .insert("document".to_string(), document_obj.clone());
+        self.globals
+            .insert("window".to_string(), window_obj.clone());
+        self.globals
+            .insert("globalThis".to_string(), window_obj.clone());
         // `self` is an alias for the global object (Window), NOT the document.
         // UMD bundles resolve their global via `global || self` and then attach
         // their exports to it (e.g. `self.React = {}`); pointing `self` at the
@@ -3845,14 +3979,7 @@ impl Vm {
                 Some(proto),
             );
             let name = self.make_string_value(iface);
-            self.define_data_property(
-                ctor,
-                PropertyKey::from("name"),
-                name,
-                false,
-                false,
-                true,
-            );
+            self.define_data_property(ctor, PropertyKey::from("name"), name, false, false, true);
             self.define_data_property(
                 proto,
                 PropertyKey::from("constructor"),
@@ -3900,12 +4027,18 @@ impl Vm {
         // Idle callback globals
         let request_idle = self.allocate_builtin_method(BuiltinId::RequestIdleCallback);
         let cancel_idle = self.allocate_builtin_method(BuiltinId::CancelIdleCallback);
-        self.globals.insert("requestIdleCallback".to_string(), request_idle);
-        self.globals.insert("cancelIdleCallback".to_string(), cancel_idle);
+        self.globals
+            .insert("requestIdleCallback".to_string(), request_idle);
+        self.globals
+            .insert("cancelIdleCallback".to_string(), cancel_idle);
 
         // customElements registry
         let custom_elements_object = self.allocate_ordinary_object(Some(object_prototype));
-        self.define_builtin_method(custom_elements_object, "define", BuiltinId::CustomElementsDefine);
+        self.define_builtin_method(
+            custom_elements_object,
+            "define",
+            BuiltinId::CustomElementsDefine,
+        );
         self.define_builtin_method(custom_elements_object, "get", BuiltinId::CustomElementsGet);
         self.define_builtin_method(
             custom_elements_object,
@@ -3919,9 +4052,9 @@ impl Vm {
 
         // console object
         let console_object = self.allocate_ordinary_object(Some(object_prototype));
-        self.define_builtin_method(console_object, "log",   BuiltinId::ConsoleLog);
-        self.define_builtin_method(console_object, "info",  BuiltinId::ConsoleInfo);
-        self.define_builtin_method(console_object, "warn",  BuiltinId::ConsoleWarn);
+        self.define_builtin_method(console_object, "log", BuiltinId::ConsoleLog);
+        self.define_builtin_method(console_object, "info", BuiltinId::ConsoleInfo);
+        self.define_builtin_method(console_object, "warn", BuiltinId::ConsoleWarn);
         self.define_builtin_method(console_object, "error", BuiltinId::ConsoleError);
         self.globals
             .insert("console".to_string(), Value::Object(console_object));
@@ -4016,13 +4149,21 @@ impl Vm {
         self.define_builtin_method(array_prototype, "splice", BuiltinId::ArrayProtoSplice);
         self.define_builtin_method(array_prototype, "flatMap", BuiltinId::ArrayProtoFlatMap);
         self.define_builtin_method(array_prototype, "fill", BuiltinId::ArrayProtoFill);
-        self.define_builtin_method(array_prototype, "copyWithin", BuiltinId::ArrayProtoCopyWithin);
+        self.define_builtin_method(
+            array_prototype,
+            "copyWithin",
+            BuiltinId::ArrayProtoCopyWithin,
+        );
         self.define_builtin_method(array_prototype, "at", BuiltinId::ArrayProtoAt);
         self.define_builtin_method(array_prototype, "keys", BuiltinId::ArrayProtoKeys);
         self.define_builtin_method(array_prototype, "values", BuiltinId::ArrayProtoValues);
         self.define_builtin_method(array_prototype, "entries", BuiltinId::ArrayProtoEntries);
         self.define_symbol_iterator_alias(array_prototype, "values");
-        self.define_builtin_method(array_prototype, "reduceRight", BuiltinId::ArrayProtoReduceRight);
+        self.define_builtin_method(
+            array_prototype,
+            "reduceRight",
+            BuiltinId::ArrayProtoReduceRight,
+        );
         self.define_builtin_method(array_prototype, "findLast", BuiltinId::ArrayProtoFindLast);
         self.define_builtin_method(
             array_prototype,
@@ -4030,7 +4171,11 @@ impl Vm {
             BuiltinId::ArrayProtoFindLastIndex,
         );
         self.define_builtin_method(array_prototype, "toSorted", BuiltinId::ArrayProtoToSorted);
-        self.define_builtin_method(array_prototype, "toReversed", BuiltinId::ArrayProtoToReversed);
+        self.define_builtin_method(
+            array_prototype,
+            "toReversed",
+            BuiltinId::ArrayProtoToReversed,
+        );
         self.define_builtin_method(array_prototype, "with", BuiltinId::ArrayProtoWith);
 
         self.define_builtin_method(string_prototype, "charAt", BuiltinId::StringProtoCharAt);
@@ -4106,14 +4251,22 @@ impl Vm {
         self.define_builtin_method(string_prototype, "padEnd", BuiltinId::StringProtoPadEnd);
         self.define_builtin_method(string_prototype, "repeat", BuiltinId::StringProtoRepeat);
         self.define_builtin_method(string_prototype, "at", BuiltinId::StringProtoAt);
-        self.define_builtin_method(string_prototype, "normalize", BuiltinId::StringProtoNormalize);
+        self.define_builtin_method(
+            string_prototype,
+            "normalize",
+            BuiltinId::StringProtoNormalize,
+        );
         self.define_builtin_method(
             string_prototype,
             "localeCompare",
             BuiltinId::StringProtoLocaleCompare,
         );
         self.define_builtin_method(string_prototype, "concat", BuiltinId::StringProtoConcat);
-        self.define_builtin_method(string_prototype, "toString", BuiltinId::StringProtoNormalize);
+        self.define_builtin_method(
+            string_prototype,
+            "toString",
+            BuiltinId::StringProtoNormalize,
+        );
         self.define_builtin_method(string_prototype, "valueOf", BuiltinId::StringProtoNormalize);
         let string_iterator = self.allocate_builtin_method(BuiltinId::StringProtoIterator);
         self.define_data_property(
@@ -4144,7 +4297,11 @@ impl Vm {
             BuiltinId::NumberProtoToLocaleString,
         );
 
-        self.define_builtin_method(boolean_prototype, "toString", BuiltinId::BooleanProtoToString);
+        self.define_builtin_method(
+            boolean_prototype,
+            "toString",
+            BuiltinId::BooleanProtoToString,
+        );
         self.define_builtin_method(boolean_prototype, "valueOf", BuiltinId::BooleanProtoValueOf);
 
         // The flags are accessors on the prototype, not properties of each
@@ -4208,7 +4365,11 @@ impl Vm {
             true,
         );
         self.define_builtin_method(generator_prototype, "next", BuiltinId::GeneratorProtoNext);
-        self.define_builtin_method(generator_prototype, "return", BuiltinId::GeneratorProtoReturn);
+        self.define_builtin_method(
+            generator_prototype,
+            "return",
+            BuiltinId::GeneratorProtoReturn,
+        );
         self.define_builtin_method(generator_prototype, "throw", BuiltinId::GeneratorProtoThrow);
         self.define_builtin_method(
             async_generator_prototype,
@@ -4247,7 +4408,10 @@ impl Vm {
         ] {
             self.define_builtin_method(url_search_params_prototype, name, builtin);
         }
-        for (name, builtin) in [("toString", BuiltinId::UrlToString), ("toJSON", BuiltinId::UrlToString)] {
+        for (name, builtin) in [
+            ("toString", BuiltinId::UrlToString),
+            ("toJSON", BuiltinId::UrlToString),
+        ] {
             self.define_builtin_method(url_prototype, name, builtin);
         }
         self.define_builtin_method(url_prototype, "valueOf", BuiltinId::UrlToPrimitive);
@@ -4410,11 +4574,7 @@ impl Vm {
             self.define_builtin_method(number_ref, "isNaN", BuiltinId::NumberIsNaN);
             self.define_builtin_method(number_ref, "isFinite", BuiltinId::NumberIsFinite);
             self.define_builtin_method(number_ref, "isInteger", BuiltinId::NumberIsInteger);
-            self.define_builtin_method(
-                number_ref,
-                "isSafeInteger",
-                BuiltinId::NumberIsSafeInteger,
-            );
+            self.define_builtin_method(number_ref, "isSafeInteger", BuiltinId::NumberIsSafeInteger);
             self.define_builtin_method(number_ref, "parseInt", BuiltinId::NumberParseInt);
             self.define_builtin_method(number_ref, "parseFloat", BuiltinId::NumberParseFloat);
             self.define_data_property(
@@ -4453,16 +4613,8 @@ impl Vm {
         }
 
         if let Some(string_ref) = self.value_object_ref(string_ctor) {
-            self.define_builtin_method(
-                string_ref,
-                "fromCharCode",
-                BuiltinId::StringFromCharCode,
-            );
-            self.define_builtin_method(
-                string_ref,
-                "fromCodePoint",
-                BuiltinId::StringFromCodePoint,
-            );
+            self.define_builtin_method(string_ref, "fromCharCode", BuiltinId::StringFromCharCode);
+            self.define_builtin_method(string_ref, "fromCodePoint", BuiltinId::StringFromCodePoint);
             self.define_builtin_method(string_ref, "raw", BuiltinId::StringRaw);
         }
 
@@ -4520,8 +4672,7 @@ impl Vm {
             true,
             Some(url_search_params_prototype),
         );
-        self.globals
-            .insert("URLSearchParams".to_string(), usp_ctor);
+        self.globals.insert("URLSearchParams".to_string(), usp_ctor);
         let headers_ctor = self.allocate_builtin_value(
             BuiltinId::HeadersConstructor,
             true,
@@ -4534,7 +4685,8 @@ impl Vm {
             Some(form_data_prototype),
         );
         self.globals.insert("FormData".to_string(), form_data_ctor);
-        let url_ctor = self.allocate_builtin_value(BuiltinId::UrlConstructor, true, Some(url_prototype));
+        let url_ctor =
+            self.allocate_builtin_value(BuiltinId::UrlConstructor, true, Some(url_prototype));
         self.globals.insert("URL".to_string(), url_ctor);
 
         if let Some(date_ref) = self.value_object_ref(date_ctor) {
@@ -4624,7 +4776,8 @@ impl Vm {
         self.globals.insert("fetch".to_string(), fetch);
 
         // Global value constants.
-        self.globals.insert("NaN".to_string(), Value::Number(f64::NAN));
+        self.globals
+            .insert("NaN".to_string(), Value::Number(f64::NAN));
         self.globals
             .insert("Infinity".to_string(), Value::Number(f64::INFINITY));
         self.globals
@@ -4657,14 +4810,7 @@ impl Vm {
                 continue;
             }
             let value = self.make_string_value(&name);
-            self.define_data_property(
-                object,
-                PropertyKey::from("name"),
-                value,
-                false,
-                false,
-                true,
-            );
+            self.define_data_property(object, PropertyKey::from("name"), value, false, false, true);
         }
     }
 
@@ -4861,7 +5007,9 @@ impl Vm {
             }
             Some(GeneratorState::Running) => {
                 self.set_generator_state(generator, GeneratorState::Running);
-                Err(VmError::TypeError("generator is already running".to_string()))
+                Err(VmError::TypeError(
+                    "generator is already running".to_string(),
+                ))
             }
             Some(GeneratorState::Suspended {
                 frame,
@@ -4885,7 +5033,8 @@ impl Vm {
                     // Unwinds to the generator's own handler when it has one;
                     // otherwise this returns Err and the throw escapes, leaving
                     // the generator completed.
-                    if let Err(error) = self.handle_runtime_error(VmError::Thrown(value), base_depth)
+                    if let Err(error) =
+                        self.handle_runtime_error(VmError::Thrown(value), base_depth)
                     {
                         self.set_generator_state(generator, GeneratorState::Completed);
                         return Err(error);
@@ -4923,7 +5072,11 @@ impl Vm {
             )),
             Some((GeneratorState::Completed, queue)) => {
                 self.set_async_generator_state(generator, GeneratorState::Completed, queue);
-                let value = if is_return { request.sent } else { Value::Undefined };
+                let value = if is_return {
+                    request.sent
+                } else {
+                    Value::Undefined
+                };
                 let result = self.make_iter_result(value, true)?;
                 self.resolve_promise_from_resolution(request.promise, result)?;
                 Ok(Value::Object(promise))
@@ -4940,14 +5093,8 @@ impl Vm {
                     started,
                 },
                 queue,
-            )) => self.resume_async_generator_suspended(
-                generator,
-                request,
-                frame,
-                stack,
-                started,
-                queue,
-            ),
+            )) => self
+                .resume_async_generator_suspended(generator, request, frame, stack, started, queue),
         }
     }
 
@@ -5007,7 +5154,16 @@ impl Vm {
         let hours = rem % 24;
         let (year, month, day) = civil_from_days(days);
         let weekday = floor_mod(days + 4, 7); // 1970-01-01 was a Thursday
-        Some((year, month - 1, day, hours, minutes, seconds, millis, weekday))
+        Some((
+            year,
+            month - 1,
+            day,
+            hours,
+            minutes,
+            seconds,
+            millis,
+            weekday,
+        ))
     }
 
     fn parse_date_utc_ms(&self, text: &str) -> f64 {
@@ -5080,8 +5236,7 @@ impl Vm {
             }
         };
         let days = days_from_civil(year, month, day);
-        (days * 86_400_000 + hours * 3_600_000 + minutes * 60_000 + seconds * 1000 + millis)
-            as f64
+        (days * 86_400_000 + hours * 3_600_000 + minutes * 60_000 + seconds * 1000 + millis) as f64
     }
 
     /// Return one decomposed Date field by index (0=year .. 7=weekday).
@@ -5223,8 +5378,7 @@ impl Vm {
                     Value::Number(0.0),
                     self.make_string_value(text),
                 ];
-                let replaced =
-                    self.call_value_sync(replacement.clone(), Value::Undefined, args)?;
+                let replaced = self.call_value_sync(replacement.clone(), Value::Undefined, args)?;
                 self.to_string(&replaced)
             } else {
                 expand_string_replacement(&self.to_string(replacement), "")
@@ -5247,8 +5401,7 @@ impl Vm {
                     Value::Number(text[..start].chars().count() as f64),
                     self.make_string_value(text),
                 ];
-                let replaced =
-                    self.call_value_sync(replacement.clone(), Value::Undefined, args)?;
+                let replaced = self.call_value_sync(replacement.clone(), Value::Undefined, args)?;
                 let replaced = self.to_string(&replaced);
                 result.push_str(&replaced);
             } else {
@@ -5288,11 +5441,7 @@ impl Vm {
 
     /// Build a JS match-result array (`[full, ...groups]` with `index`, `input`,
     /// and `groups`) from a regex capture.
-    fn build_match_result(
-        &mut self,
-        caps: &JsCaptures,
-        input: &str,
-    ) -> Result<Value, VmError> {
+    fn build_match_result(&mut self, caps: &JsCaptures, input: &str) -> Result<Value, VmError> {
         let mut items = Vec::with_capacity(caps.len());
         for i in 0..caps.len() {
             match caps.get(i) {
@@ -5344,7 +5493,14 @@ impl Vm {
             }
             Value::Object(groups)
         };
-        self.define_data_property(array_ref, PropertyKey::from("groups"), groups, true, true, true);
+        self.define_data_property(
+            array_ref,
+            PropertyKey::from("groups"),
+            groups,
+            true,
+            true,
+            true,
+        );
         Ok(array)
     }
 
@@ -5767,27 +5923,31 @@ impl Vm {
             return self.string_text(tag);
         }
 
-        let builtin = self.heap.objects().get(object).map(|data| match &data.kind {
-            ObjectKind::Array => "Array",
-            ObjectKind::Function => "Function",
-            ObjectKind::Error => "Error",
-            ObjectKind::RegExp { .. } => "RegExp",
-            ObjectKind::Map(_) => "Map",
-            ObjectKind::Set(_) => "Set",
-            ObjectKind::WeakMap(_) => "WeakMap",
-            ObjectKind::WeakSet(_) => "WeakSet",
-            ObjectKind::Promise(_) => "Promise",
-            ObjectKind::ArrayBuffer(_) => "ArrayBuffer",
-            ObjectKind::TypedArray { kind, .. } => kind.constructor_name(),
-            ObjectKind::Generator(_) => "Generator",
-            ObjectKind::AsyncGenerator { .. } => "AsyncGenerator",
-            ObjectKind::UrlSearchParams(_) => "URLSearchParams",
-            ObjectKind::Headers(_) => "Headers",
-            ObjectKind::FormData(_) => "FormData",
-            ObjectKind::Host(slot) => slot.interface_name,
-            ObjectKind::Exotic(name) => name,
-            _ => "Object",
-        });
+        let builtin = self
+            .heap
+            .objects()
+            .get(object)
+            .map(|data| match &data.kind {
+                ObjectKind::Array => "Array",
+                ObjectKind::Function => "Function",
+                ObjectKind::Error => "Error",
+                ObjectKind::RegExp { .. } => "RegExp",
+                ObjectKind::Map(_) => "Map",
+                ObjectKind::Set(_) => "Set",
+                ObjectKind::WeakMap(_) => "WeakMap",
+                ObjectKind::WeakSet(_) => "WeakSet",
+                ObjectKind::Promise(_) => "Promise",
+                ObjectKind::ArrayBuffer(_) => "ArrayBuffer",
+                ObjectKind::TypedArray { kind, .. } => kind.constructor_name(),
+                ObjectKind::Generator(_) => "Generator",
+                ObjectKind::AsyncGenerator { .. } => "AsyncGenerator",
+                ObjectKind::UrlSearchParams(_) => "URLSearchParams",
+                ObjectKind::Headers(_) => "Headers",
+                ObjectKind::FormData(_) => "FormData",
+                ObjectKind::Host(slot) => slot.interface_name,
+                ObjectKind::Exotic(name) => name,
+                _ => "Object",
+            });
 
         match builtin {
             Some("Object") | None::<&'static str> => {
@@ -5816,7 +5976,9 @@ impl Vm {
     /// `getOwnPropertyDescriptor`.
     fn define_builtin_getter(&mut self, object: GcRef<JsObject>, name: &str, builtin: BuiltinId) {
         let value = self.allocate_builtin_value(builtin, false, None);
-        let Value::Object(function) = value else { return };
+        let Value::Object(function) = value else {
+            return;
+        };
         if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
             object_data.properties.insert(
                 PropertyKey::from(name),
@@ -5929,14 +6091,10 @@ impl Vm {
             }
             VmError::RangeError(message) => self.create_error_object("RangeError", message.clone()),
             VmError::Thrown(value) => value.clone(),
-            VmError::InfiniteLoop => self.create_error_object(
-                "Error",
-                "Maximum loop iteration limit exceeded".to_string(),
-            ),
-            VmError::StackOverflow => self.create_error_object(
-                "RangeError",
-                "Maximum call stack size exceeded".to_string(),
-            ),
+            VmError::InfiniteLoop => self
+                .create_error_object("Error", "Maximum loop iteration limit exceeded".to_string()),
+            VmError::StackOverflow => self
+                .create_error_object("RangeError", "Maximum call stack size exceeded".to_string()),
             VmError::Unimplemented(feature) => {
                 self.create_error_object("Error", format!("unimplemented in phase 5: {feature}"))
             }
@@ -6373,9 +6531,10 @@ impl Vm {
             let iter_result = self.make_iter_result(result, true)?;
             self.resolve_promise_from_resolution(request, iter_result)
                 .and_then(|_| {
-                    let (_state, mut queue) = self.take_async_generator_state(generator).ok_or_else(
-                        || VmError::TypeError("async return without a generator".to_string()),
-                    )?;
+                    let (_state, mut queue) =
+                        self.take_async_generator_state(generator).ok_or_else(|| {
+                            VmError::TypeError("async return without a generator".to_string())
+                        })?;
                     self.settle_async_generator_queue_completed(&mut queue)?;
                     self.set_async_generator_state(generator, GeneratorState::Completed, queue);
                     Ok(())
@@ -6384,9 +6543,10 @@ impl Vm {
             let generator = generator.ok_or_else(|| {
                 VmError::TypeError("async return without a generator".to_string())
             })?;
-            let (_state, mut queue) = self.take_async_generator_state(generator).ok_or_else(|| {
-                VmError::TypeError("async return without a generator".to_string())
-            })?;
+            let (_state, mut queue) =
+                self.take_async_generator_state(generator).ok_or_else(|| {
+                    VmError::TypeError("async return without a generator".to_string())
+                })?;
             self.settle_async_generator_queue_completed(&mut queue)?;
             self.set_async_generator_state(generator, GeneratorState::Completed, queue);
             Ok(())
@@ -6742,9 +6902,9 @@ impl Vm {
                 } else if closure.proto.is_generator {
                     // Calling a generator function does not run the body; it
                     // returns a generator object suspended at the start.
-                    let generator = self.allocate_ordinary_object(Some(self.generator_prototype_ref()));
-                    let mut frame =
-                        self.make_call_frame(closure, args, this_value, None)?;
+                    let generator =
+                        self.allocate_ordinary_object(Some(self.generator_prototype_ref()));
+                    let mut frame = self.make_call_frame(closure, args, this_value, None)?;
                     frame.generator = Some(generator);
                     self.set_generator_state(
                         generator,
@@ -7212,7 +7372,9 @@ impl Vm {
     fn is_constructor_value(&self, value: &Value) -> bool {
         match self.resolve_callable(value) {
             Ok(Callable::Builtin(builtin)) => self.builtin_constructable(builtin),
-            Ok(Callable::Closure(closure)) => !closure.proto.is_async && !closure.proto.is_generator,
+            Ok(Callable::Closure(closure)) => {
+                !closure.proto.is_async && !closure.proto.is_generator
+            }
             Ok(Callable::Bound(bound)) => self.is_constructor_value(&bound.target),
             Ok(
                 Callable::PromiseCapability { .. }
@@ -7265,21 +7427,16 @@ impl Vm {
                     (Some(name), None) => format!("{name} is not a function ({described})"),
                     (None, _) => format!("attempted to call a non-function value ({described})"),
                 };
-                return Err(VmError::TypeError(
-                    message,
-                ));
+                return Err(VmError::TypeError(message));
             }
         };
 
-        self.callables
-            .get(&object.raw())
-            .cloned()
-            .ok_or_else(|| {
-                VmError::TypeError(format!(
-                    "object is not callable ({})",
-                    self.describe_non_callable_object(object)
-                ))
-            })
+        self.callables.get(&object.raw()).cloned().ok_or_else(|| {
+            VmError::TypeError(format!(
+                "object is not callable ({})",
+                self.describe_non_callable_object(object)
+            ))
+        })
     }
 
     fn describe_non_callable_object(&self, object: GcRef<JsObject>) -> String {
@@ -7293,7 +7450,9 @@ impl Vm {
             let len = self.array_length(object);
             let mut preview = Vec::new();
             for i in 0..len.min(8) {
-                let item = match self.get_own_property_descriptor(object, &PropertyKey::from(i.to_string().as_str())) {
+                let item = match self
+                    .get_own_property_descriptor(object, &PropertyKey::from(i.to_string().as_str()))
+                {
                     Some(JsPropertyDescriptor::Data { value, .. }) => match value {
                         Value::String(s) => format!("{:?}", self.string_text(s)),
                         Value::Number(n) => n.to_string(),
@@ -7301,7 +7460,12 @@ impl Vm {
                         Value::Null => "null".to_string(),
                         Value::Undefined => "undefined".to_string(),
                         Value::Symbol(_) => "Symbol()".to_string(),
-                        Value::Object(o) => self.heap.objects().get(o).map(|d| format!("<{}>", Self::object_kind_label(&d.kind))).unwrap_or_else(|| "<obj>".to_string()),
+                        Value::Object(o) => self
+                            .heap
+                            .objects()
+                            .get(o)
+                            .map(|d| format!("<{}>", Self::object_kind_label(&d.kind)))
+                            .unwrap_or_else(|| "<obj>".to_string()),
                     },
                     _ => "<hole>".to_string(),
                 };
@@ -7312,10 +7476,13 @@ impl Vm {
         if let Some(name) = self.own_data_string_property(object, "name") {
             return format!("name {name}, kind {kind}");
         }
-        if let Some((_, JsPropertyDescriptor::Data {
-            value: Value::Object(constructor),
-            ..
-        })) = self.lookup_property_descriptor(object, &PropertyKey::from("constructor"))
+        if let Some((
+            _,
+            JsPropertyDescriptor::Data {
+                value: Value::Object(constructor),
+                ..
+            },
+        )) = self.lookup_property_descriptor(object, &PropertyKey::from("constructor"))
             && let Some(name) = self.own_data_string_property(constructor, "name")
         {
             return format!("constructor {name}, kind {kind}");
@@ -7722,7 +7889,11 @@ impl Vm {
         // Significant digits with the decimal point removed (no leading or
         // trailing zeros, since this is the shortest representation).
         let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
-        let s = if digits.is_empty() { "0" } else { digits.as_str() };
+        let s = if digits.is_empty() {
+            "0"
+        } else {
+            digits.as_str()
+        };
         let k = s.len() as i32;
         // value == s x 10^(n-k); equivalently n == exponent + 1.
         let n = exponent + 1;
@@ -7754,11 +7925,7 @@ impl Vm {
             )
         };
 
-        if negative {
-            format!("-{body}")
-        } else {
-            body
-        }
+        if negative { format!("-{body}") } else { body }
     }
 
     fn strict_equal(&self, lhs: &Value, rhs: &Value) -> bool {
@@ -8041,10 +8208,7 @@ impl Vm {
         }
     }
 
-    fn object_introspection_primitive_prototype_ref(
-        &self,
-        value: &Value,
-    ) -> GcRef<JsObject> {
+    fn object_introspection_primitive_prototype_ref(&self, value: &Value) -> GcRef<JsObject> {
         match value {
             Value::String(_) => self.string_prototype_ref(),
             Value::Number(_) => self.number_prototype_ref(),
@@ -8146,8 +8310,13 @@ impl Vm {
         // Host objects route through the DOM dispatch table first.
         // Copy only HostObjectSlot (Copy type) to avoid expensive ObjectKind::clone()
         // which would clone the Vec contents of Map/Set/Promise objects.
-        let host_slot = self.heap.objects().get(object)
-            .and_then(|o| if let ObjectKind::Host(slot) = o.kind { Some(slot) } else { None });
+        let host_slot = self.heap.objects().get(object).and_then(|o| {
+            if let ObjectKind::Host(slot) = o.kind {
+                Some(slot)
+            } else {
+                None
+            }
+        });
         if let Some(slot) = host_slot {
             let value = self.get_host_property(slot, key)?;
             // Fall back to an own expando property for Node names the DOM doesn't
@@ -8155,7 +8324,9 @@ impl Vm {
             if matches!(value, Value::Undefined)
                 && matches!(
                     slot.class,
-                    HostObjectClass::Node | HostObjectClass::EventTarget | HostObjectClass::Document
+                    HostObjectClass::Node
+                        | HostObjectClass::EventTarget
+                        | HostObjectClass::Document
                 )
             {
                 if let Some(JsPropertyDescriptor::Data { value, .. }) =
@@ -8295,10 +8466,7 @@ impl Vm {
                             for (index, character) in text.chars().enumerate() {
                                 let key = self.make_string_value(&index.to_string());
                                 let value = self.make_string_value(&character.to_string());
-                                entries.push(self.make_array_from_values(vec![
-                                    key,
-                                    value,
-                                ])?);
+                                entries.push(self.make_array_from_values(vec![key, value])?);
                             }
                             self.make_array_from_values(entries)
                         }
@@ -8330,7 +8498,10 @@ impl Vm {
                     names.push(self.property_key_to_string(key));
                 }
             }
-            let values = names.into_iter().map(|name| self.make_string_value(&name)).collect();
+            let values = names
+                .into_iter()
+                .map(|name| self.make_string_value(&name))
+                .collect();
             self.make_array_from_values(values)
         } else {
             match value {
@@ -8347,15 +8518,18 @@ impl Vm {
                 Value::Number(_) | Value::Bool(_) | Value::Symbol(_) => {
                     self.make_array_from_values(Vec::new())
                 }
-                Value::Null | Value::Undefined => Err(VmError::TypeError(format!(
-                    "{context} requires an object"
-                ))),
+                Value::Null | Value::Undefined => {
+                    Err(VmError::TypeError(format!("{context} requires an object")))
+                }
                 Value::Object(_) => unreachable!(),
             }
         }
     }
 
-    fn object_introspection_get_own_property_symbols(&mut self, value: &Value) -> Result<Value, VmError> {
+    fn object_introspection_get_own_property_symbols(
+        &mut self,
+        value: &Value,
+    ) -> Result<Value, VmError> {
         if let Value::Object(object) = value {
             let mut symbols = Vec::new();
             if let Some(object_data) = self.heap.objects().get(*object) {
@@ -8409,9 +8583,9 @@ impl Vm {
                     })
                 }
                 (Value::Number(_) | Value::Bool(_) | Value::Symbol(_), _) => Ok(Value::Undefined),
-                (Value::Null | Value::Undefined, _) => Err(VmError::TypeError(format!(
-                    "{context} requires an object"
-                ))),
+                (Value::Null | Value::Undefined, _) => {
+                    Err(VmError::TypeError(format!("{context} requires an object")))
+                }
                 (Value::String(_), PropertyKey::String(_)) => Ok(Value::Undefined),
                 (Value::String(_), PropertyKey::Symbol(_)) => Ok(Value::Undefined),
                 (Value::Object(_), _) => unreachable!(),
@@ -8435,13 +8609,12 @@ impl Vm {
             Ok(prototype)
         } else {
             match value {
-                Value::String(_)
-                | Value::Number(_)
-                | Value::Bool(_)
-                | Value::Symbol(_) => Ok(Value::Object(self.object_introspection_primitive_prototype_ref(value))),
-                Value::Null | Value::Undefined => Err(VmError::TypeError(format!(
-                    "{context} requires an object"
-                ))),
+                Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Symbol(_) => Ok(
+                    Value::Object(self.object_introspection_primitive_prototype_ref(value)),
+                ),
+                Value::Null | Value::Undefined => {
+                    Err(VmError::TypeError(format!("{context} requires an object")))
+                }
                 Value::Object(_) => unreachable!(),
             }
         }
@@ -8475,13 +8648,21 @@ impl Vm {
 
         // Host objects route writes through the DOM dispatch table.
         // Copy only HostObjectSlot (Copy type) to avoid expensive ObjectKind::clone().
-        let host_slot = self.heap.objects().get(object)
-            .and_then(|o| if let ObjectKind::Host(slot) = o.kind { Some(slot) } else { None });
+        let host_slot = self.heap.objects().get(object).and_then(|o| {
+            if let ObjectKind::Host(slot) = o.kind {
+                Some(slot)
+            } else {
+                None
+            }
+        });
         if let Some(slot) = host_slot {
             // Node expando: a property name the DOM doesn't manage is stored as an
             // ordinary own property on the (interned) node wrapper, so frameworks
             // can stash data on nodes (React fiber keys, etc.).
-            if matches!(slot.class, HostObjectClass::Node | HostObjectClass::EventTarget) {
+            if matches!(
+                slot.class,
+                HostObjectClass::Node | HostObjectClass::EventTarget
+            ) {
                 if let PropertyKey::String(name) = &key {
                     if !is_dom_managed_node_property(name) {
                         self.define_data_property(object, key, value, true, true, true);
@@ -8594,7 +8775,10 @@ impl Vm {
         key: &PropertyKey,
     ) -> Result<(), VmError> {
         // Cheap discriminant check — no Vec clone needed
-        let is_array = matches!(self.heap.objects().get(object).map(|o| &o.kind), Some(ObjectKind::Array));
+        let is_array = matches!(
+            self.heap.objects().get(object).map(|o| &o.kind),
+            Some(ObjectKind::Array)
+        );
         if !is_array {
             return Ok(());
         }
@@ -8795,7 +8979,11 @@ impl Vm {
                 {
                     let v = self.get_property_value(value, &PropertyKey::from("length"))?;
                     let n = self.to_number(&v);
-                    return Ok(if n.is_finite() && n > 0.0 { n as u32 } else { 0 });
+                    return Ok(if n.is_finite() && n > 0.0 {
+                        n as u32
+                    } else {
+                        0
+                    });
                 }
                 Ok(self.array_length(*object))
             }
@@ -8997,7 +9185,10 @@ impl Vm {
     }
 
     fn construct_array_buffer(&mut self, args: &[Value]) -> Result<Value, VmError> {
-        let length = args.first().map(|value| self.to_number(value)).unwrap_or(0.0);
+        let length = args
+            .first()
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0);
         let length = if length.is_finite() && length >= 0.0 {
             length as usize
         } else {
@@ -9013,9 +9204,10 @@ impl Vm {
         let length = self.array_buffer_len(*object);
         let (begin, end) = self.typed_array_range(args, length);
         let source: Vec<u8> = match self.heap.objects().get(*object).map(|o| &o.kind) {
-            Some(ObjectKind::ArrayBuffer(bytes)) => {
-                bytes.get(begin..end).map(<[u8]>::to_vec).unwrap_or_default()
-            }
+            Some(ObjectKind::ArrayBuffer(bytes)) => bytes
+                .get(begin..end)
+                .map(<[u8]>::to_vec)
+                .unwrap_or_default(),
             _ => Vec::new(),
         };
         let new_buffer = self.make_array_buffer(source.len());
@@ -9038,7 +9230,10 @@ impl Vm {
             // new T(buffer, byteOffset?, length?) — a view over an ArrayBuffer.
             Some(Value::Object(object)) if self.is_array_buffer(object) => {
                 let buffer_len = self.array_buffer_len(object);
-                let byte_offset = args.get(1).map(|value| self.to_number(value)).unwrap_or(0.0);
+                let byte_offset = args
+                    .get(1)
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0);
                 let byte_offset = if byte_offset.is_finite() && byte_offset >= 0.0 {
                     byte_offset as usize
                 } else {
@@ -9047,7 +9242,11 @@ impl Vm {
                 let length = match args.get(2) {
                     Some(value) if !matches!(value, Value::Undefined) => {
                         let n = self.to_number(value);
-                        if n.is_finite() && n >= 0.0 { n as usize } else { 0 }
+                        if n.is_finite() && n >= 0.0 {
+                            n as usize
+                        } else {
+                            0
+                        }
                     }
                     _ => buffer_len.saturating_sub(byte_offset) / bytes_per_element,
                 };
@@ -9072,7 +9271,11 @@ impl Vm {
             // new T(length)
             Some(value) => {
                 let n = self.to_number(&value);
-                let length = if n.is_finite() && n >= 0.0 { n as usize } else { 0 };
+                let length = if n.is_finite() && n >= 0.0 {
+                    n as usize
+                } else {
+                    0
+                };
                 let buffer = self.make_array_buffer(length * bytes_per_element);
                 self.make_typed_array(kind, buffer, 0, length)
             }
@@ -9131,11 +9334,7 @@ impl Vm {
         out
     }
 
-    fn typed_array_from(
-        &mut self,
-        kind: TypedArrayKind,
-        args: &[Value],
-    ) -> Result<Value, VmError> {
+    fn typed_array_from(&mut self, kind: TypedArrayKind, args: &[Value]) -> Result<Value, VmError> {
         let source = args.first().cloned().unwrap_or(Value::Undefined);
         let map_fn = args.get(1).cloned();
         let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
@@ -9178,7 +9377,10 @@ impl Vm {
 
     fn typed_array_proto_set(&mut self, this: &Value, args: &[Value]) -> Result<Value, VmError> {
         let source = args.first().cloned().unwrap_or(Value::Undefined);
-        let offset = args.get(1).map(|value| self.to_number(value)).unwrap_or(0.0);
+        let offset = args
+            .get(1)
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0);
         let offset = if offset.is_finite() && offset >= 0.0 {
             offset as usize
         } else {
@@ -9227,7 +9429,10 @@ impl Vm {
         let Some((_, _, _, length)) = self.typed_array_info(this) else {
             return Ok(this.clone());
         };
-        let number = args.first().map(|value| self.to_number(value)).unwrap_or(f64::NAN);
+        let number = args
+            .first()
+            .map(|value| self.to_number(value))
+            .unwrap_or(f64::NAN);
         let rest = if args.len() > 1 { &args[1..] } else { &[] };
         let (start, end) = self.typed_array_range(rest, length);
         for index in start..end {
@@ -9257,11 +9462,17 @@ impl Vm {
         } else {
             Value::Number(-1.0)
         };
-        let target = args.first().map(|value| self.to_number(value)).unwrap_or(f64::NAN);
+        let target = args
+            .first()
+            .map(|value| self.to_number(value))
+            .unwrap_or(f64::NAN);
         let Some((_, _, _, length)) = self.typed_array_info(this) else {
             return Ok(not_found);
         };
-        let from = args.get(1).map(|value| self.to_number(value)).unwrap_or(0.0);
+        let from = args
+            .get(1)
+            .map(|value| self.to_number(value))
+            .unwrap_or(0.0);
         let start = if from.is_finite() && from < 0.0 {
             (length as f64 + from).max(0.0) as usize
         } else if from.is_finite() {
@@ -9296,7 +9507,11 @@ impl Vm {
             self.call_value_sync(
                 callback.clone(),
                 this_arg.clone(),
-                vec![Value::Number(element), Value::Number(index as f64), this.clone()],
+                vec![
+                    Value::Number(element),
+                    Value::Number(index as f64),
+                    this.clone(),
+                ],
             )?;
         }
         Ok(Value::Undefined)
@@ -9315,7 +9530,11 @@ impl Vm {
             let mapped = self.call_value_sync(
                 callback.clone(),
                 this_arg.clone(),
-                vec![Value::Number(element), Value::Number(index as f64), this.clone()],
+                vec![
+                    Value::Number(element),
+                    Value::Number(index as f64),
+                    this.clone(),
+                ],
             )?;
             let number = self.to_number(&mapped);
             self.typed_array_write_element(&view, index, number)?;
@@ -9391,12 +9610,12 @@ impl Vm {
         }
         let (buffer, kind, byte_offset, length) = self.typed_array_info(&value)?;
         match key {
-            PropertyKey::Index(index) => {
-                Some(match self.typed_array_read_element(&value, *index as usize) {
+            PropertyKey::Index(index) => Some(
+                match self.typed_array_read_element(&value, *index as usize) {
                     Some(number) => Value::Number(number),
                     None => Value::Undefined,
-                })
-            }
+                },
+            ),
             PropertyKey::String(name) => match name.as_str() {
                 "length" => Some(Value::Number(length as f64)),
                 "byteLength" => Some(Value::Number((length * kind.bytes_per_element()) as f64)),
@@ -9438,10 +9657,8 @@ impl Vm {
                     .get_property_value(&signal, &PropertyKey::from("aborted"))
                     .unwrap_or(Value::Undefined);
                 if self.is_truthy(&aborted) {
-                    let err = self.create_error_object(
-                        "AbortError",
-                        "The operation was aborted".to_string(),
-                    );
+                    let err = self
+                        .create_error_object("AbortError", "The operation was aborted".to_string());
                     let promise = self.promise_reject_value(err)?;
                     return Ok(Value::Object(promise));
                 }
@@ -9524,7 +9741,14 @@ impl Vm {
         let object = self.allocate_ordinary_object(Some(proto));
         let empty = self.make_string_value("");
         let set = |vm: &mut Self, name: &str, value: Value, enumerable: bool| {
-            vm.define_data_property(object, PropertyKey::from(name), value, true, enumerable, true);
+            vm.define_data_property(
+                object,
+                PropertyKey::from(name),
+                value,
+                true,
+                enumerable,
+                true,
+            );
         };
         set(self, "readyState", Value::Number(0.0), true);
         set(self, "status", Value::Number(0.0), true);
@@ -9595,9 +9819,30 @@ impl Vm {
         let url = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
         let method_v = self.make_string_value(&method);
         let url_v = self.make_string_value(&url);
-        self.define_data_property(obj, PropertyKey::from("__xhrMethod"), method_v, false, false, true);
-        self.define_data_property(obj, PropertyKey::from("__xhrUrl"), url_v, false, false, true);
-        self.define_data_property(obj, PropertyKey::from("readyState"), Value::Number(1.0), true, true, true);
+        self.define_data_property(
+            obj,
+            PropertyKey::from("__xhrMethod"),
+            method_v,
+            false,
+            false,
+            true,
+        );
+        self.define_data_property(
+            obj,
+            PropertyKey::from("__xhrUrl"),
+            url_v,
+            false,
+            false,
+            true,
+        );
+        self.define_data_property(
+            obj,
+            PropertyKey::from("readyState"),
+            Value::Number(1.0),
+            true,
+            true,
+            true,
+        );
         Ok(Value::Undefined)
     }
 
@@ -9680,11 +9925,46 @@ impl Vm {
                     .collect::<Vec<_>>()
                     .join("\r\n");
                 let raw_headers_v = self.make_string_value(&raw_headers);
-                self.define_data_property(obj, PropertyKey::from("__xhrRespHeaders"), raw_headers_v, false, false, true);
-                self.define_data_property(obj, PropertyKey::from("status"), Value::Number(status as f64), true, true, true);
-                self.define_data_property(obj, PropertyKey::from("statusText"), status_text, true, true, true);
-                self.define_data_property(obj, PropertyKey::from("responseText"), text_v.clone(), true, true, true);
-                self.define_data_property(obj, PropertyKey::from("responseURL"), final_url_v, true, true, true);
+                self.define_data_property(
+                    obj,
+                    PropertyKey::from("__xhrRespHeaders"),
+                    raw_headers_v,
+                    false,
+                    false,
+                    true,
+                );
+                self.define_data_property(
+                    obj,
+                    PropertyKey::from("status"),
+                    Value::Number(status as f64),
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    obj,
+                    PropertyKey::from("statusText"),
+                    status_text,
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    obj,
+                    PropertyKey::from("responseText"),
+                    text_v.clone(),
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    obj,
+                    PropertyKey::from("responseURL"),
+                    final_url_v,
+                    true,
+                    true,
+                    true,
+                );
                 // `response` honors responseType === 'json'.
                 let response_type = {
                     let v = self.get_property_value(this, &PropertyKey::from("responseType"))?;
@@ -9698,15 +9978,43 @@ impl Vm {
                 } else {
                     text_v
                 };
-                self.define_data_property(obj, PropertyKey::from("response"), response_value, true, true, true);
-                self.define_data_property(obj, PropertyKey::from("readyState"), Value::Number(4.0), true, true, true);
+                self.define_data_property(
+                    obj,
+                    PropertyKey::from("response"),
+                    response_value,
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    obj,
+                    PropertyKey::from("readyState"),
+                    Value::Number(4.0),
+                    true,
+                    true,
+                    true,
+                );
                 self.xhr_fire(this, "onreadystatechange")?;
                 self.xhr_fire(this, "onload")?;
                 self.xhr_fire(this, "onloadend")?;
             }
             Err(_) => {
-                self.define_data_property(obj, PropertyKey::from("status"), Value::Number(0.0), true, true, true);
-                self.define_data_property(obj, PropertyKey::from("readyState"), Value::Number(4.0), true, true, true);
+                self.define_data_property(
+                    obj,
+                    PropertyKey::from("status"),
+                    Value::Number(0.0),
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    obj,
+                    PropertyKey::from("readyState"),
+                    Value::Number(4.0),
+                    true,
+                    true,
+                    true,
+                );
                 self.xhr_fire(this, "onreadystatechange")?;
                 self.xhr_fire(this, "onerror")?;
                 self.xhr_fire(this, "onloadend")?;
@@ -9805,7 +10113,14 @@ impl Vm {
             );
         }
         let get_method = self.allocate_builtin_method(BuiltinId::HeadersGet);
-        self.define_data_property(object, PropertyKey::from("get"), get_method, true, true, true);
+        self.define_data_property(
+            object,
+            PropertyKey::from("get"),
+            get_method,
+            true,
+            true,
+            true,
+        );
         Value::Object(object)
     }
 
@@ -9834,7 +10149,11 @@ impl Vm {
             }
         }
         let value = self.get_property_value(this, &PropertyKey::from(name.as_str()))?;
-        Ok(if matches!(value, Value::Undefined) { Value::Null } else { value })
+        Ok(if matches!(value, Value::Undefined) {
+            Value::Null
+        } else {
+            value
+        })
     }
 
     fn response_text(&mut self, this: &Value) -> Result<Value, VmError> {
@@ -9899,9 +10218,7 @@ impl Vm {
             _ => false,
         };
 
-        if !snapshot_kind
-            && let Some(kind) = self.lazy_iteration_source(value)?
-        {
+        if !snapshot_kind && let Some(kind) = self.lazy_iteration_source(value)? {
             return Ok(kind);
         }
 
@@ -9961,9 +10278,8 @@ impl Vm {
                         for (name, value) in pairs {
                             let name_value = self.make_string_value(&name);
                             let value_value = self.make_string_value(&value);
-                            entries.push(
-                                self.make_array_from_values(vec![name_value, value_value])?,
-                            );
+                            entries
+                                .push(self.make_array_from_values(vec![name_value, value_value])?);
                         }
                         Ok(entries)
                     }
@@ -9972,13 +10288,14 @@ impl Vm {
                         for (name, value) in pairs {
                             let name_value = self.make_string_value(&name);
                             let value_value = self.make_string_value(&value);
-                            entries.push(
-                                self.make_array_from_values(vec![name_value, value_value])?,
-                            );
+                            entries
+                                .push(self.make_array_from_values(vec![name_value, value_value])?);
                         }
                         Ok(entries)
                     }
-                    ObjectKind::ForOfIterator { values, index } => Ok(values[index.min(values.len())..].to_vec()),
+                    ObjectKind::ForOfIterator { values, index } => {
+                        Ok(values[index.min(values.len())..].to_vec())
+                    }
                     // Spread and friends genuinely want every element, so step
                     // the lazy view to exhaustion.
                     ObjectKind::LazyIterator { .. } => {
@@ -10028,8 +10345,7 @@ impl Vm {
         let mut values = Vec::new();
         // Cap iterations to avoid an unbounded loop on a misbehaving iterator.
         for _ in 0..1_000_000 {
-            let result =
-                self.call_value_sync(next_fn.clone(), iterator.clone(), Vec::new())?;
+            let result = self.call_value_sync(next_fn.clone(), iterator.clone(), Vec::new())?;
             let done = self.get_property_value(&result, &PropertyKey::from("done"))?;
             if self.is_truthy(&done) {
                 break;
@@ -10114,7 +10430,9 @@ impl Vm {
                 // The concrete interface comes from the tag, so
                 // `script instanceof HTMLScriptElement` answers truthfully
                 // rather than only matching the generic HTMLElement.
-                let tag = self.get_node_name(NodeId(handle as u32)).to_ascii_uppercase();
+                let tag = self
+                    .get_node_name(NodeId(handle as u32))
+                    .to_ascii_uppercase();
                 let specific = dom_interface_for_tag(&tag);
                 match specific {
                     "Text" | "Comment" => chain.push("CharacterData"),
@@ -10263,7 +10581,9 @@ impl Vm {
         }
         self.delivering_slotchange = true;
         for _ in 0..8 {
-            let slots = match self.host.mutate_dom(DomMutation::TakeSlotchangeSlots { window: WindowId(0) }) {
+            let slots = match self.host.mutate_dom(DomMutation::TakeSlotchangeSlots {
+                window: WindowId(0),
+            }) {
                 Ok(DomMutationResult::Nodes(ids)) if !ids.is_empty() => ids,
                 _ => break,
             };
@@ -10346,10 +10666,7 @@ impl Vm {
                     "globalThis.{temp_name} = (function anonymous({params}) {{\n{body}\n}});"
                 );
                 self.eval_source(&source)?;
-                Ok(self
-                    .globals
-                    .remove(temp_name)
-                    .unwrap_or(Value::Undefined))
+                Ok(self.globals.remove(temp_name).unwrap_or(Value::Undefined))
             }
             BuiltinId::PromiseResolve => {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
@@ -10547,32 +10864,25 @@ impl Vm {
                     "Object.getOwnPropertyDescriptor",
                 )
             }
-            BuiltinId::ObjectKeys => {
-                self.object_introspection_keys_like(
+            BuiltinId::ObjectKeys => self.object_introspection_keys_like(
+                args.first().unwrap_or(&Value::Undefined),
+                ObjectIntrospectionKind::Keys,
+                "Object.keys",
+            ),
+            BuiltinId::ObjectGetOwnPropertySymbols => self
+                .object_introspection_get_own_property_symbols(
                     args.first().unwrap_or(&Value::Undefined),
-                    ObjectIntrospectionKind::Keys,
-                    "Object.keys",
-                )
-            }
-            BuiltinId::ObjectGetOwnPropertySymbols => {
-                self.object_introspection_get_own_property_symbols(
-                    args.first().unwrap_or(&Value::Undefined),
-                )
-            }
-            BuiltinId::ObjectValues => {
-                self.object_introspection_keys_like(
-                    args.first().unwrap_or(&Value::Undefined),
-                    ObjectIntrospectionKind::Values,
-                    "Object.values",
-                )
-            }
-            BuiltinId::ObjectEntries => {
-                self.object_introspection_keys_like(
-                    args.first().unwrap_or(&Value::Undefined),
-                    ObjectIntrospectionKind::Entries,
-                    "Object.entries",
-                )
-            }
+                ),
+            BuiltinId::ObjectValues => self.object_introspection_keys_like(
+                args.first().unwrap_or(&Value::Undefined),
+                ObjectIntrospectionKind::Values,
+                "Object.values",
+            ),
+            BuiltinId::ObjectEntries => self.object_introspection_keys_like(
+                args.first().unwrap_or(&Value::Undefined),
+                ObjectIntrospectionKind::Entries,
+                "Object.entries",
+            ),
             BuiltinId::ObjectAssign => {
                 let target = self.require_object_ref(
                     args.first().unwrap_or(&Value::Undefined),
@@ -10591,12 +10901,10 @@ impl Vm {
                 }
                 Ok(Value::Object(target))
             }
-            BuiltinId::ObjectGetPrototypeOf => {
-                self.object_introspection_get_prototype_of(
-                    args.first().unwrap_or(&Value::Undefined),
-                    "Object.getPrototypeOf",
-                )
-            }
+            BuiltinId::ObjectGetPrototypeOf => self.object_introspection_get_prototype_of(
+                args.first().unwrap_or(&Value::Undefined),
+                "Object.getPrototypeOf",
+            ),
             BuiltinId::ObjectSetPrototypeOf => {
                 let object = self.require_object_ref(
                     args.first().unwrap_or(&Value::Undefined),
@@ -10616,21 +10924,17 @@ impl Vm {
                 }
                 Ok(Value::Object(object))
             }
-            BuiltinId::ObjectFreeze => {
-                match args.first().cloned().unwrap_or(Value::Undefined) {
-                    Value::Object(object) => {
-                        self.freeze_object(object);
-                        Ok(Value::Object(object))
-                    }
-                    value => Ok(value),
+            BuiltinId::ObjectFreeze => match args.first().cloned().unwrap_or(Value::Undefined) {
+                Value::Object(object) => {
+                    self.freeze_object(object);
+                    Ok(Value::Object(object))
                 }
-            }
-            BuiltinId::ObjectIsFrozen => {
-                match args.first() {
-                    Some(Value::Object(object)) => Ok(Value::Bool(self.is_frozen(*object))),
-                    _ => Ok(Value::Bool(true)),
-                }
-            }
+                value => Ok(value),
+            },
+            BuiltinId::ObjectIsFrozen => match args.first() {
+                Some(Value::Object(object)) => Ok(Value::Bool(self.is_frozen(*object))),
+                _ => Ok(Value::Bool(true)),
+            },
             BuiltinId::ObjectProtoHasOwnProperty => {
                 let object = self.builtin_object_this(&this_value, "hasOwnProperty")?;
                 let key = self.to_property_key(args.first().unwrap_or(&Value::Undefined))?;
@@ -10738,7 +11042,8 @@ impl Vm {
                         .map(|value| !matches!(value, Value::Undefined))
                         .unwrap_or(false);
                     if has_cause {
-                        let cause = self.get_property_value(options, &PropertyKey::from("cause"))?;
+                        let cause =
+                            self.get_property_value(options, &PropertyKey::from("cause"))?;
                         self.define_data_property(
                             *object,
                             PropertyKey::from("cause"),
@@ -10842,13 +11147,19 @@ impl Vm {
                 self.make_event_object(&event_type, args.get(1).cloned(), true)
             }
             BuiltinId::CustomElementsDefine => {
-                let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default().to_ascii_lowercase();
+                let tag = args
+                    .first()
+                    .map(|v| self.to_string(v))
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
                 let class_value = args.get(1).cloned().unwrap_or(Value::Undefined);
                 if tag.is_empty() || !matches!(class_value, Value::Object(_)) {
                     return Ok(Value::Undefined);
                 }
                 // Read the static `observedAttributes` getter (lowercased).
-                let observed = match self.get_property_value(&class_value, &PropertyKey::from("observedAttributes")) {
+                let observed = match self
+                    .get_property_value(&class_value, &PropertyKey::from("observedAttributes"))
+                {
                     Ok(list @ Value::Object(_)) => self
                         .array_like_to_vec(&list)
                         .unwrap_or_default()
@@ -10859,7 +11170,10 @@ impl Vm {
                 };
                 self.custom_elements.insert(
                     tag.clone(),
-                    CustomElementDef { class_value: class_value.clone(), observed },
+                    CustomElementDef {
+                        class_value: class_value.clone(),
+                        observed,
+                    },
                 );
                 // Upgrade existing matching elements in document order.
                 let matches = match self.host.read_dom(DomRead::QuerySelectorAll {
@@ -10877,7 +11191,11 @@ impl Vm {
                 Ok(Value::Undefined)
             }
             BuiltinId::CustomElementsGet => {
-                let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default().to_ascii_lowercase();
+                let tag = args
+                    .first()
+                    .map(|v| self.to_string(v))
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
                 Ok(self
                     .custom_elements
                     .get(&tag)
@@ -10888,39 +11206,65 @@ impl Vm {
                 let proto = self.object_prototype_ref();
                 let signal = self.make_abort_signal(false, Value::Undefined)?;
                 let controller = self.allocate_ordinary_object(Some(proto));
-                self.define_data_property(controller, PropertyKey::from("signal"), Value::Object(signal), true, true, true);
+                self.define_data_property(
+                    controller,
+                    PropertyKey::from("signal"),
+                    Value::Object(signal),
+                    true,
+                    true,
+                    true,
+                );
                 let abort_fn = self.allocate_builtin_method(BuiltinId::AbortControllerAbort);
-                self.define_data_property(controller, PropertyKey::from("abort"), abort_fn, true, false, true);
+                self.define_data_property(
+                    controller,
+                    PropertyKey::from("abort"),
+                    abort_fn,
+                    true,
+                    false,
+                    true,
+                );
                 Ok(Value::Object(controller))
             }
-            BuiltinId::AbortSignalConstructor => self.make_abort_signal(false, Value::Undefined).map(Value::Object),
+            BuiltinId::AbortSignalConstructor => self
+                .make_abort_signal(false, Value::Undefined)
+                .map(Value::Object),
             BuiltinId::AbortSignalAbortStatic => {
                 let reason = args.first().cloned().unwrap_or(Value::Undefined);
                 self.make_abort_signal(true, reason).map(Value::Object)
             }
             BuiltinId::AbortSignalTimeoutStatic => {
                 // Timed abort delivery is not wired into the event loop yet.
-                self.make_abort_signal(false, Value::Undefined).map(Value::Object)
+                self.make_abort_signal(false, Value::Undefined)
+                    .map(Value::Object)
             }
             BuiltinId::AbortSignalAnyStatic => {
-                let values = args.first().map(|v| self.array_like_to_vec(v)).transpose()?.unwrap_or_default();
+                let values = args
+                    .first()
+                    .map(|v| self.array_like_to_vec(v))
+                    .transpose()?
+                    .unwrap_or_default();
                 for value in values {
                     if let Value::Object(signal_ref) = &value {
                         let signal_val = Value::Object(*signal_ref);
-                        let aborted = self.get_property_value(&signal_val, &PropertyKey::from("aborted"))?;
+                        let aborted =
+                            self.get_property_value(&signal_val, &PropertyKey::from("aborted"))?;
                         if self.is_truthy(&aborted) {
-                            let reason = self.get_property_value(&signal_val, &PropertyKey::from("reason"))?;
+                            let reason =
+                                self.get_property_value(&signal_val, &PropertyKey::from("reason"))?;
                             return self.make_abort_signal(true, reason).map(Value::Object);
                         }
                     }
                 }
                 // Future abort subscriptions are not wired yet.
-                self.make_abort_signal(false, Value::Undefined).map(Value::Object)
+                self.make_abort_signal(false, Value::Undefined)
+                    .map(Value::Object)
             }
             BuiltinId::AbortSignalThrowIfAborted => {
-                let aborted = self.get_property_value(&this_value, &PropertyKey::from("aborted"))?;
+                let aborted =
+                    self.get_property_value(&this_value, &PropertyKey::from("aborted"))?;
                 if self.is_truthy(&aborted) {
-                    let reason = self.get_property_value(&this_value, &PropertyKey::from("reason"))?;
+                    let reason =
+                        self.get_property_value(&this_value, &PropertyKey::from("reason"))?;
                     return Err(VmError::Thrown(reason));
                 }
                 Ok(Value::Undefined)
@@ -10931,17 +11275,46 @@ impl Vm {
                     return Ok(Value::Undefined);
                 };
                 let signal_val = Value::Object(signal_ref);
-                let aborted = self.get_property_value(&signal_val, &PropertyKey::from("aborted"))?;
+                let aborted =
+                    self.get_property_value(&signal_val, &PropertyKey::from("aborted"))?;
                 if self.is_truthy(&aborted) {
                     return Ok(Value::Undefined);
                 }
-                self.define_data_property(signal_ref, PropertyKey::from("aborted"), Value::Bool(true), true, true, true);
+                self.define_data_property(
+                    signal_ref,
+                    PropertyKey::from("aborted"),
+                    Value::Bool(true),
+                    true,
+                    true,
+                    true,
+                );
                 let reason = args.first().cloned().unwrap_or(Value::Undefined);
-                self.define_data_property(signal_ref, PropertyKey::from("reason"), reason, true, true, true);
+                self.define_data_property(
+                    signal_ref,
+                    PropertyKey::from("reason"),
+                    reason,
+                    true,
+                    true,
+                    true,
+                );
                 let event = self.make_event_object("abort", None, false)?;
                 if let Value::Object(event_ref) = event {
-                    self.define_data_property(event_ref, PropertyKey::from("target"), signal_val.clone(), true, true, true);
-                    self.define_data_property(event_ref, PropertyKey::from("currentTarget"), signal_val.clone(), true, true, true);
+                    self.define_data_property(
+                        event_ref,
+                        PropertyKey::from("target"),
+                        signal_val.clone(),
+                        true,
+                        true,
+                        true,
+                    );
+                    self.define_data_property(
+                        event_ref,
+                        PropertyKey::from("currentTarget"),
+                        signal_val.clone(),
+                        true,
+                        true,
+                        true,
+                    );
                 }
                 let listeners_val =
                     self.get_property_value(&signal_val, &PropertyKey::from("__abortListeners"))?;
@@ -10951,10 +11324,12 @@ impl Vm {
                 };
                 for listener in listeners {
                     if self.is_callable_value(&listener) {
-                        let _ = self.call_value_sync(listener, signal_val.clone(), vec![event.clone()]);
+                        let _ =
+                            self.call_value_sync(listener, signal_val.clone(), vec![event.clone()]);
                     }
                 }
-                let onabort = self.get_property_value(&signal_val, &PropertyKey::from("onabort"))?;
+                let onabort =
+                    self.get_property_value(&signal_val, &PropertyKey::from("onabort"))?;
                 if self.is_callable_value(&onabort) {
                     let _ = self.call_value_sync(onabort, signal_val.clone(), vec![event]);
                 }
@@ -10973,7 +11348,14 @@ impl Vm {
                     listeners.push(listener);
                     let updated = self.make_array_from_values(listeners)?;
                     if let Value::Object(signal_ref) = &this_value {
-                        self.define_data_property(*signal_ref, PropertyKey::from("__abortListeners"), updated, true, false, true);
+                        self.define_data_property(
+                            *signal_ref,
+                            PropertyKey::from("__abortListeners"),
+                            updated,
+                            true,
+                            false,
+                            true,
+                        );
                     }
                 }
                 Ok(Value::Undefined)
@@ -10992,7 +11374,14 @@ impl Vm {
                             .collect();
                         let updated = self.make_array_from_values(listeners)?;
                         if let Value::Object(signal_ref) = &this_value {
-                            self.define_data_property(*signal_ref, PropertyKey::from("__abortListeners"), updated, true, false, true);
+                            self.define_data_property(
+                                *signal_ref,
+                                PropertyKey::from("__abortListeners"),
+                                updated,
+                                true,
+                                false,
+                                true,
+                            );
                         }
                     }
                 }
@@ -11006,14 +11395,35 @@ impl Vm {
                     for name in ["key", "code"] {
                         let v = self.event_option_string(&options, name);
                         let v = self.make_string_value(&v);
-                        self.define_data_property(event_ref, PropertyKey::from(name), v, true, true, true);
+                        self.define_data_property(
+                            event_ref,
+                            PropertyKey::from(name),
+                            v,
+                            true,
+                            true,
+                            true,
+                        );
                     }
                     for name in ["ctrlKey", "shiftKey", "altKey", "metaKey", "repeat"] {
                         let flag = self.event_option_flag(&options, name);
-                        self.define_data_property(event_ref, PropertyKey::from(name), Value::Bool(flag), true, true, true);
+                        self.define_data_property(
+                            event_ref,
+                            PropertyKey::from(name),
+                            Value::Bool(flag),
+                            true,
+                            true,
+                            true,
+                        );
                     }
                     let location = self.event_option_number(&options, "location");
-                    self.define_data_property(event_ref, PropertyKey::from("location"), Value::Number(location), true, true, true);
+                    self.define_data_property(
+                        event_ref,
+                        PropertyKey::from("location"),
+                        Value::Number(location),
+                        true,
+                        true,
+                        true,
+                    );
                 }
                 Ok(event)
             }
@@ -11022,13 +11432,30 @@ impl Vm {
                 let options = args.get(1).cloned();
                 let event = self.make_event_object(&event_type, options.clone(), false)?;
                 if let Value::Object(event_ref) = event {
-                    for name in ["clientX", "clientY", "screenX", "screenY", "pageX", "pageY", "button", "buttons", "detail"] {
+                    for name in [
+                        "clientX", "clientY", "screenX", "screenY", "pageX", "pageY", "button",
+                        "buttons", "detail",
+                    ] {
                         let n = self.event_option_number(&options, name);
-                        self.define_data_property(event_ref, PropertyKey::from(name), Value::Number(n), true, true, true);
+                        self.define_data_property(
+                            event_ref,
+                            PropertyKey::from(name),
+                            Value::Number(n),
+                            true,
+                            true,
+                            true,
+                        );
                     }
                     for name in ["ctrlKey", "shiftKey", "altKey", "metaKey"] {
                         let flag = self.event_option_flag(&options, name);
-                        self.define_data_property(event_ref, PropertyKey::from(name), Value::Bool(flag), true, true, true);
+                        self.define_data_property(
+                            event_ref,
+                            PropertyKey::from(name),
+                            Value::Bool(flag),
+                            true,
+                            true,
+                            true,
+                        );
                     }
                     let related = match &options {
                         Some(opts) => self
@@ -11036,8 +11463,19 @@ impl Vm {
                             .unwrap_or(Value::Null),
                         None => Value::Null,
                     };
-                    let related = if matches!(related, Value::Undefined) { Value::Null } else { related };
-                    self.define_data_property(event_ref, PropertyKey::from("relatedTarget"), related, true, true, true);
+                    let related = if matches!(related, Value::Undefined) {
+                        Value::Null
+                    } else {
+                        related
+                    };
+                    self.define_data_property(
+                        event_ref,
+                        PropertyKey::from("relatedTarget"),
+                        related,
+                        true,
+                        true,
+                        true,
+                    );
                 }
                 Ok(event)
             }
@@ -11102,9 +11540,7 @@ impl Vm {
             BuiltinId::MutationObserverObserve => {
                 self.mutation_observer_observe(&this_value, &args)
             }
-            BuiltinId::MutationObserverDisconnect => {
-                self.mutation_observer_disconnect(&this_value)
-            }
+            BuiltinId::MutationObserverDisconnect => self.mutation_observer_disconnect(&this_value),
             BuiltinId::MutationObserverTakeRecords => {
                 self.mutation_observer_take_records(&this_value)
             }
@@ -11145,7 +11581,14 @@ impl Vm {
             BuiltinId::XhrSend => self.xhr_send(&this_value, &args),
             BuiltinId::XhrAbort => {
                 if let Value::Object(o) = &this_value {
-                    self.define_data_property(*o, PropertyKey::from("readyState"), Value::Number(0.0), true, true, true);
+                    self.define_data_property(
+                        *o,
+                        PropertyKey::from("readyState"),
+                        Value::Number(0.0),
+                        true,
+                        true,
+                        true,
+                    );
                 }
                 Ok(Value::Undefined)
             }
@@ -11288,9 +11731,7 @@ impl Vm {
                     .iter()
                     .enumerate()
                     .rev()
-                    .find_map(|(index, value)| {
-                        self.strict_equal(value, &needle).then_some(index)
-                    })
+                    .find_map(|(index, value)| self.strict_equal(value, &needle).then_some(index))
                     .map(|index| index as f64)
                     .unwrap_or(-1.0);
                 Ok(Value::Number(index))
@@ -11379,13 +11820,16 @@ impl Vm {
                     None => len - start,
                     Some(value) => {
                         let n = self.to_number(value);
-                        if n.is_nan() || n < 0.0 { 0 } else { (n as usize).min(len - start) }
+                        if n.is_nan() || n < 0.0 {
+                            0
+                        } else {
+                            (n as usize).min(len - start)
+                        }
                     }
                 };
-                let removed: Vec<Value> = values.splice(
-                    start..start + delete_count,
-                    args.iter().skip(2).cloned(),
-                ).collect();
+                let removed: Vec<Value> = values
+                    .splice(start..start + delete_count, args.iter().skip(2).cloned())
+                    .collect();
                 self.replace_array_contents(object, values)?;
                 self.make_array_from_values(removed)
             }
@@ -11421,7 +11865,8 @@ impl Vm {
                     None | Some(Value::Undefined) => len,
                     Some(value) => relative_index(Some(self.to_number(value)), len),
                 };
-                let slice: Vec<Value> = values[start.min(len)..end.min(len).max(start.min(len))].to_vec();
+                let slice: Vec<Value> =
+                    values[start.min(len)..end.min(len).max(start.min(len))].to_vec();
                 for (offset, value) in slice.into_iter().enumerate() {
                     if target + offset >= len {
                         break;
@@ -11457,7 +11902,9 @@ impl Vm {
                 let values = self.array_like_to_vec(&this_value)?;
                 let mut entries = Vec::with_capacity(values.len());
                 for (index, value) in values.into_iter().enumerate() {
-                    entries.push(self.make_array_from_values(vec![Value::Number(index as f64), value])?);
+                    entries.push(
+                        self.make_array_from_values(vec![Value::Number(index as f64), value])?,
+                    );
                 }
                 Ok(self.make_for_of_iterator(entries))
             }
@@ -11505,7 +11952,11 @@ impl Vm {
                     let matched = self.call_value_sync(
                         callback.clone(),
                         Value::Undefined,
-                        vec![values[i].clone(), Value::Number(i as f64), this_value.clone()],
+                        vec![
+                            values[i].clone(),
+                            Value::Number(i as f64),
+                            this_value.clone(),
+                        ],
                     )?;
                     if self.is_truthy(&matched) {
                         return Ok(if return_index {
@@ -11515,7 +11966,11 @@ impl Vm {
                         });
                     }
                 }
-                Ok(if return_index { Value::Number(-1.0) } else { Value::Undefined })
+                Ok(if return_index {
+                    Value::Number(-1.0)
+                } else {
+                    Value::Undefined
+                })
             }
             BuiltinId::StringProtoIterator => {
                 let text = self.builtin_string_this(&this_value)?;
@@ -11614,7 +12069,11 @@ impl Vm {
             BuiltinId::NumberProtoToFixed => {
                 let number = self.to_number(&this_value);
                 let digits = self.number_arg(&args, 0);
-                let digits = if digits.is_nan() { 0 } else { (digits as usize).min(100) };
+                let digits = if digits.is_nan() {
+                    0
+                } else {
+                    (digits as usize).min(100)
+                };
                 Ok(self.make_string_value(&format!("{number:.digits$}")))
             }
             BuiltinId::NumberProtoToPrecision => {
@@ -11643,7 +12102,11 @@ impl Vm {
             }
             BuiltinId::BooleanProtoValueOf => Ok(Value::Bool(self.is_truthy(&this_value))),
             BuiltinId::BooleanProtoToString => {
-                let text = if self.is_truthy(&this_value) { "true" } else { "false" };
+                let text = if self.is_truthy(&this_value) {
+                    "true"
+                } else {
+                    "false"
+                };
                 Ok(self.make_string_value(text))
             }
             BuiltinId::ObjectFromEntries => {
@@ -11658,12 +12121,11 @@ impl Vm {
                 }
                 Ok(Value::Object(object))
             }
-            BuiltinId::ObjectGetOwnPropertyNames => {
-                self.object_introspection_get_own_property_names(
+            BuiltinId::ObjectGetOwnPropertyNames => self
+                .object_introspection_get_own_property_names(
                     args.first().unwrap_or(&Value::Undefined),
                     "Object.getOwnPropertyNames",
-                )
-            }
+                ),
             BuiltinId::ObjectHasOwn => {
                 let target = args.first().cloned().unwrap_or(Value::Undefined);
                 let object = self.require_object_ref(&target, "Object.hasOwn")?;
@@ -11681,18 +12143,16 @@ impl Vm {
                 }
                 Ok(target)
             }
-            BuiltinId::ObjectIsExtensible => {
-                match args.first() {
-                    Some(Value::Object(object)) => Ok(Value::Bool(
-                        self.heap
-                            .objects()
-                            .get(*object)
-                            .map(|o| o.extensible)
-                            .unwrap_or(false),
-                    )),
-                    _ => Ok(Value::Bool(false)),
-                }
-            }
+            BuiltinId::ObjectIsExtensible => match args.first() {
+                Some(Value::Object(object)) => Ok(Value::Bool(
+                    self.heap
+                        .objects()
+                        .get(*object)
+                        .map(|o| o.extensible)
+                        .unwrap_or(false),
+                )),
+                _ => Ok(Value::Bool(false)),
+            },
             BuiltinId::ObjectSeal => {
                 let target = args.first().cloned().unwrap_or(Value::Undefined);
                 if let Value::Object(object) = target {
@@ -11702,18 +12162,16 @@ impl Vm {
                 }
                 Ok(target)
             }
-            BuiltinId::ObjectIsSealed => {
-                match args.first() {
-                    Some(Value::Object(object)) => Ok(Value::Bool(
-                        self.heap
-                            .objects()
-                            .get(*object)
-                            .map(|o| !o.extensible)
-                            .unwrap_or(true),
-                    )),
-                    _ => Ok(Value::Bool(true)),
-                }
-            }
+            BuiltinId::ObjectIsSealed => match args.first() {
+                Some(Value::Object(object)) => Ok(Value::Bool(
+                    self.heap
+                        .objects()
+                        .get(*object)
+                        .map(|o| !o.extensible)
+                        .unwrap_or(true),
+                )),
+                _ => Ok(Value::Bool(true)),
+            },
             BuiltinId::MathSign => {
                 let number = self.number_arg(&args, 0);
                 let result = if number.is_nan() {
@@ -11728,10 +12186,13 @@ impl Vm {
                 Ok(Value::Number(result))
             }
             BuiltinId::MathHypot => {
-                let sum: f64 = args.iter().map(|value| {
-                    let n = self.to_number(value);
-                    n * n
-                }).sum();
+                let sum: f64 = args
+                    .iter()
+                    .map(|value| {
+                        let n = self.to_number(value);
+                        n * n
+                    })
+                    .sum();
                 Ok(Value::Number(sum.sqrt()))
             }
             BuiltinId::MathImul => {
@@ -11756,7 +12217,11 @@ impl Vm {
             }
             BuiltinId::MathClz32 => {
                 let number = self.number_arg(&args, 0);
-                let int = if number.is_finite() { number as i64 as u32 } else { 0 };
+                let int = if number.is_finite() {
+                    number as i64 as u32
+                } else {
+                    0
+                };
                 Ok(Value::Number(int.leading_zeros() as f64))
             }
             BuiltinId::RegExpConstructor => {
@@ -11807,7 +12272,7 @@ impl Vm {
                     None => {
                         return Err(VmError::TypeError(
                             "RegExp flag read on a non-RegExp".to_string(),
-                        ))
+                        ));
                     }
                 };
                 let flag = |letter: char| Value::Bool(flags.contains(letter));
@@ -11837,9 +12302,10 @@ impl Vm {
                     _ => None,
                 };
                 Ok(match own {
-                    Some(JsPropertyDescriptor::Data { value: Value::Number(n), .. }) => {
-                        Value::Number(n)
-                    }
+                    Some(JsPropertyDescriptor::Data {
+                        value: Value::Number(n),
+                        ..
+                    }) => Value::Number(n),
                     _ => Value::Number(0.0),
                 })
             }
@@ -11954,9 +12420,11 @@ impl Vm {
             }
             BuiltinId::SymbolProtoToString => {
                 let description = match &this_value {
-                    Value::Symbol(SymbolId(id)) => {
-                        self.symbol_descriptions.get(id).cloned().unwrap_or_default()
-                    }
+                    Value::Symbol(SymbolId(id)) => self
+                        .symbol_descriptions
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_default(),
                     _ => String::new(),
                 };
                 Ok(self.make_string_value(&format!("Symbol({description})")))
@@ -12032,7 +12500,10 @@ impl Vm {
                 ))
             }
             BuiltinId::DateParse => {
-                let text = args.first().map(|value| self.to_string(value)).unwrap_or_default();
+                let text = args
+                    .first()
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default();
                 Ok(Value::Number(self.parse_date_utc_ms(&text)))
             }
             BuiltinId::DateConstructor => {
@@ -12046,14 +12517,31 @@ impl Vm {
                     _ => {
                         let year = self.number_arg(&args, 0) as i64;
                         let month = self.number_arg(&args, 1) as i64;
-                        let day = if args.len() > 2 { self.number_arg(&args, 2) as i64 } else { 1 };
-                        let hours = if args.len() > 3 { self.number_arg(&args, 3) as i64 } else { 0 };
-                        let minutes =
-                            if args.len() > 4 { self.number_arg(&args, 4) as i64 } else { 0 };
-                        let seconds =
-                            if args.len() > 5 { self.number_arg(&args, 5) as i64 } else { 0 };
-                        let millis =
-                            if args.len() > 6 { self.number_arg(&args, 6) as i64 } else { 0 };
+                        let day = if args.len() > 2 {
+                            self.number_arg(&args, 2) as i64
+                        } else {
+                            1
+                        };
+                        let hours = if args.len() > 3 {
+                            self.number_arg(&args, 3) as i64
+                        } else {
+                            0
+                        };
+                        let minutes = if args.len() > 4 {
+                            self.number_arg(&args, 4) as i64
+                        } else {
+                            0
+                        };
+                        let seconds = if args.len() > 5 {
+                            self.number_arg(&args, 5) as i64
+                        } else {
+                            0
+                        };
+                        let millis = if args.len() > 6 {
+                            self.number_arg(&args, 6) as i64
+                        } else {
+                            0
+                        };
                         let days = days_from_civil(year, month + 1, day);
                         (days * 86_400_000
                             + hours * 3_600_000
@@ -12128,8 +12616,7 @@ impl Vm {
             }
             BuiltinId::AsyncGeneratorProtoIterator => Ok(this_value),
             BuiltinId::ForOfIteratorAdapterNext => {
-                let iterator =
-                    self.require_object_ref(&this_value, "ForOfIteratorAdapter.next")?;
+                let iterator = self.require_object_ref(&this_value, "ForOfIteratorAdapter.next")?;
                 match self.for_of_next(iterator)? {
                     Some(value) => self.make_iter_result(value, false),
                     None => self.make_iter_result(Value::Undefined, true),
@@ -12209,8 +12696,10 @@ impl Vm {
                         let descriptor_value =
                             self.get_property_value(&Value::Object(props), &key)?;
                         let existing = self.get_own_property_descriptor(object, &key);
-                        let descriptor = self
-                            .value_to_property_descriptor_merged(existing.as_ref(), &descriptor_value)?;
+                        let descriptor = self.value_to_property_descriptor_merged(
+                            existing.as_ref(),
+                            &descriptor_value,
+                        )?;
                         if let Some(object_data) = self.heap.objects_mut().get_mut(object) {
                             object_data.properties.insert(key.clone(), descriptor);
                         }
@@ -12264,8 +12753,8 @@ impl Vm {
                 Ok(Value::Bool(true))
             }
             BuiltinId::ReflectHas => {
-                let target =
-                    self.require_object_ref(args.first().unwrap_or(&Value::Undefined), "Reflect.has")?;
+                let target = self
+                    .require_object_ref(args.first().unwrap_or(&Value::Undefined), "Reflect.has")?;
                 let key = self.to_property_key(args.get(1).unwrap_or(&Value::Undefined))?;
                 Ok(Value::Bool(
                     self.lookup_property_descriptor(target, &key).is_some(),
@@ -12473,8 +12962,8 @@ impl Vm {
                         true,
                     );
                 }
-                let search_text = self
-                    .get_property_value(&Value::Object(object), &PropertyKey::from("search"))?;
+                let search_text =
+                    self.get_property_value(&Value::Object(object), &PropertyKey::from("search"))?;
                 let search_pairs = parse_query_string(&self.to_string(&search_text));
                 let search_params = self.heap.allocate_object(JsObject {
                     kind: ObjectKind::UrlSearchParams(search_pairs),
@@ -12492,7 +12981,10 @@ impl Vm {
                 Ok(Value::Object(object))
             }
             BuiltinId::LocationAssign | BuiltinId::LocationReplace => {
-                let url = args.first().map(|value| self.to_string(value)).unwrap_or_default();
+                let url = args
+                    .first()
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default();
                 let replace = matches!(builtin, BuiltinId::LocationReplace);
                 let _ = self.host.navigate(NavigationAction::Navigate {
                     window: WindowId(0),
@@ -12814,8 +13306,10 @@ impl Vm {
                 Ok(self.make_for_of_iterator(values))
             }
             BuiltinId::ProxyConstructor => {
-                let target = self
-                    .require_object_ref(args.first().unwrap_or(&Value::Undefined), "Proxy target")?;
+                let target = self.require_object_ref(
+                    args.first().unwrap_or(&Value::Undefined),
+                    "Proxy target",
+                )?;
                 let handler = self.require_object_ref(
                     args.get(1).unwrap_or(&Value::Undefined),
                     "Proxy handler",
@@ -12900,7 +13394,10 @@ impl Vm {
                 let text = self.builtin_string_this(&this_value)?;
                 let chars = text.chars().collect::<Vec<_>>();
                 let length = chars.len() as f64;
-                let raw_start = args.first().map(|value| self.to_number(value)).unwrap_or(0.0);
+                let raw_start = args
+                    .first()
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0);
                 let start = if raw_start.is_nan() {
                     0.0
                 } else if raw_start < 0.0 {
@@ -13209,9 +13706,7 @@ impl Vm {
                 };
                 // Third argument controls indentation (number of spaces or a string).
                 let indent = match args.get(2) {
-                    Some(Value::Number(n)) if *n >= 1.0 => {
-                        Some(" ".repeat((*n as usize).min(10)))
-                    }
+                    Some(Value::Number(n)) if *n >= 1.0 => Some(" ".repeat((*n as usize).min(10))),
                     Some(Value::String(s)) => {
                         let text = self.string_text(*s);
                         if text.is_empty() {
@@ -13253,12 +13748,15 @@ impl Vm {
                     None => Ok(parsed),
                 }
             }
-            BuiltinId::ConsoleLog | BuiltinId::ConsoleInfo | BuiltinId::ConsoleWarn | BuiltinId::ConsoleError => {
+            BuiltinId::ConsoleLog
+            | BuiltinId::ConsoleInfo
+            | BuiltinId::ConsoleWarn
+            | BuiltinId::ConsoleError => {
                 let level = match builtin {
-                    BuiltinId::ConsoleInfo  => ConsoleLevel::Info,
-                    BuiltinId::ConsoleWarn  => ConsoleLevel::Warn,
+                    BuiltinId::ConsoleInfo => ConsoleLevel::Info,
+                    BuiltinId::ConsoleWarn => ConsoleLevel::Warn,
                     BuiltinId::ConsoleError => ConsoleLevel::Error,
-                    _                       => ConsoleLevel::Log,
+                    _ => ConsoleLevel::Log,
                 };
                 let parts: Vec<String> = args.iter().map(|v| self.to_string(v)).collect();
                 let _ = self.host.console(ConsoleMessage { level, parts });
@@ -13461,8 +13959,14 @@ impl Vm {
                 // Root at the document node itself (boa parity): documentElement
                 // can miss parser-rescued content outside <html>.
                 let root = self.this_node_id(&this_value);
-                let res = self.host.read_dom(DomRead::QuerySelector { root, selectors: sel });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+                let res = self.host.read_dom(DomRead::QuerySelector {
+                    root,
+                    selectors: sel,
+                });
+                Ok(match res {
+                    Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Null,
+                })
             }
             BuiltinId::DomDocQuerySelectorAll | BuiltinId::DomNodeQuerySelectorAll => {
                 let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -13474,12 +13978,22 @@ impl Vm {
                 // Root at the document node itself (boa parity): documentElement
                 // can miss parser-rescued content outside <html>.
                 let root = self.this_node_id(&this_value);
-                let res = self.host.read_dom(DomRead::QuerySelector { root, selectors: sel });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+                let res = self.host.read_dom(DomRead::QuerySelector {
+                    root,
+                    selectors: sel,
+                });
+                Ok(match res {
+                    Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Null,
+                })
             }
             BuiltinId::DomDocGetElementsByClassName => {
                 let cls = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let sel = cls.split_whitespace().map(|c| format!(".{c}")).collect::<Vec<_>>().join("");
+                let sel = cls
+                    .split_whitespace()
+                    .map(|c| format!(".{c}"))
+                    .collect::<Vec<_>>()
+                    .join("");
                 self.query_all_to_array(self.this_node_id(&this_value), sel)
             }
             BuiltinId::DomDocGetElementsByTagName => {
@@ -13489,7 +14003,10 @@ impl Vm {
             BuiltinId::DomDocCreateElement => {
                 let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let lower = tag.to_ascii_lowercase();
-                let res = self.host.mutate_dom(DomMutation::CreateElement { window: WindowId(0), local_name: tag });
+                let res = self.host.mutate_dom(DomMutation::CreateElement {
+                    window: WindowId(0),
+                    local_name: tag,
+                });
                 let Ok(super::host::DomMutationResult::Node(id)) = res else {
                     return Ok(Value::Undefined);
                 };
@@ -13506,23 +14023,56 @@ impl Vm {
                 // namespaces, so create a plain element from the qualified name
                 // (enough for SVG/MathML JS that frameworks emit).
                 let tag = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
-                let res = self.host.mutate_dom(DomMutation::CreateElement { window: WindowId(0), local_name: tag });
-                Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+                let res = self.host.mutate_dom(DomMutation::CreateElement {
+                    window: WindowId(0),
+                    local_name: tag,
+                });
+                Ok(match res {
+                    Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Undefined,
+                })
             }
             BuiltinId::DomDocCreateTextNode => {
                 let text = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let res = self.host.mutate_dom(DomMutation::CreateTextNode { window: WindowId(0), data: text });
-                Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+                let res = self.host.mutate_dom(DomMutation::CreateTextNode {
+                    window: WindowId(0),
+                    data: text,
+                });
+                Ok(match res {
+                    Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Undefined,
+                })
             }
             BuiltinId::NavigatorSendBeacon => {
                 let url = args.first().cloned().unwrap_or(Value::Undefined);
                 let options = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
                 let method = self.make_string_value("POST");
-                self.define_data_property(options, PropertyKey::from("method"), method, true, true, true);
+                self.define_data_property(
+                    options,
+                    PropertyKey::from("method"),
+                    method,
+                    true,
+                    true,
+                    true,
+                );
                 if let Some(body) = args.get(1) {
-                    self.define_data_property(options, PropertyKey::from("body"), body.clone(), true, true, true);
+                    self.define_data_property(
+                        options,
+                        PropertyKey::from("body"),
+                        body.clone(),
+                        true,
+                        true,
+                        true,
+                    );
                 }
-                self.define_data_property(options, PropertyKey::from("keepalive"), Value::Bool(true), true, true, true);
+                self.define_data_property(
+                    options,
+                    PropertyKey::from("keepalive"),
+                    Value::Bool(true),
+                    true,
+                    true,
+                    true,
+                );
                 match self.builtin_fetch(&[url, Value::Object(options)]) {
                     Ok(_) => Ok(Value::Bool(true)),
                     Err(_) => Ok(Value::Bool(false)),
@@ -13566,8 +14116,14 @@ impl Vm {
                 Ok(Value::Bool(true))
             }
             BuiltinId::DomDocElementFromPoint | BuiltinId::DomDocElementsFromPoint => {
-                let x = args.first().map(|value| self.to_number(value)).unwrap_or(0.0) as f32;
-                let y = args.get(1).map(|value| self.to_number(value)).unwrap_or(0.0) as f32;
+                let x = args
+                    .first()
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0) as f32;
+                let y = args
+                    .get(1)
+                    .map(|value| self.to_number(value))
+                    .unwrap_or(0.0) as f32;
                 let hits = match self.host.read_dom(DomRead::ElementsFromPoint { x, y }) {
                     Ok(DomReadResult::Nodes(nodes)) => nodes,
                     _ => Vec::new(),
@@ -13586,15 +14142,30 @@ impl Vm {
             }
             BuiltinId::DomDocCreateComment => {
                 let text = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let res = self.host.mutate_dom(DomMutation::CreateComment { window: WindowId(0), data: text });
-                Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+                let res = self.host.mutate_dom(DomMutation::CreateComment {
+                    window: WindowId(0),
+                    data: text,
+                });
+                Ok(match res {
+                    Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Undefined,
+                })
             }
             BuiltinId::DomDocCreateFragment => {
-                let res = self.host.mutate_dom(DomMutation::CreateDocumentFragment { window: WindowId(0) });
-                Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+                let res = self.host.mutate_dom(DomMutation::CreateDocumentFragment {
+                    window: WindowId(0),
+                });
+                Ok(match res {
+                    Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Undefined,
+                })
             }
             BuiltinId::DomDocWrite => {
-                let html = args.iter().map(|v| self.to_string(v)).collect::<Vec<_>>().join("");
+                let html = args
+                    .iter()
+                    .map(|v| self.to_string(v))
+                    .collect::<Vec<_>>()
+                    .join("");
                 // document.write is recursive: any <script> the write adds
                 // executes immediately. Diff the document's scripts around the
                 // mutation to find what it added.
@@ -13608,7 +14179,10 @@ impl Vm {
                     }
                 };
                 let before = scripts_of(self);
-                let _ = self.host.mutate_dom(DomMutation::WriteHtml { window: WindowId(0), html });
+                let _ = self.host.mutate_dom(DomMutation::WriteHtml {
+                    window: WindowId(0),
+                    html,
+                });
                 let after = scripts_of(self);
                 for id in after.into_iter().filter(|id| !before.contains(id)) {
                     let source = match self.host.read_dom(DomRead::TextContent { node: id }) {
@@ -13627,7 +14201,10 @@ impl Vm {
             BuiltinId::DomNodeAppendChild => {
                 let parent_id = self.this_node_id(&this_value);
                 let child_ids = self.node_ids_from_node_or_string_args(&args);
-                let _ = self.host.mutate_dom(DomMutation::Append { parent: parent_id, children: child_ids.clone() });
+                let _ = self.host.mutate_dom(DomMutation::Append {
+                    parent: parent_id,
+                    children: child_ids.clone(),
+                });
                 for child in child_ids {
                     self.connect_custom_elements(child)?;
                 }
@@ -13740,9 +14317,7 @@ impl Vm {
                     return Ok(Value::Undefined);
                 };
                 let deep = args.get(1).map(|v| self.is_truthy(v)).unwrap_or(false);
-                let res = self
-                    .host
-                    .mutate_dom(DomMutation::CloneNode { node, deep });
+                let res = self.host.mutate_dom(DomMutation::CloneNode { node, deep });
                 Ok(match res {
                     Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id),
                     _ => Value::Undefined,
@@ -13804,18 +14379,25 @@ impl Vm {
             }
             BuiltinId::DomNodeInsertBefore => {
                 let parent_id = self.this_node_id(&this_value);
-                let child_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
+                let child_id = self
+                    .node_id_from_host_val(args.first().unwrap_or(&Value::Undefined))
+                    .unwrap_or(NodeId(0));
                 let ref_id = args.get(1).and_then(|v| self.node_id_from_host_val(v));
-                let _ = self.host.mutate_dom(DomMutation::InsertBefore { parent: parent_id, child: child_id, reference: ref_id });
+                let _ = self.host.mutate_dom(DomMutation::InsertBefore {
+                    parent: parent_id,
+                    child: child_id,
+                    reference: ref_id,
+                });
                 self.connect_custom_elements(child_id)?;
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
             }
             BuiltinId::DomNodePrepend => {
                 let parent_id = self.this_node_id(&this_value);
                 let child_ids = self.node_ids_from_node_or_string_args(&args);
-                let _ = self
-                    .host
-                    .mutate_dom(DomMutation::Prepend { parent: parent_id, children: child_ids.clone() });
+                let _ = self.host.mutate_dom(DomMutation::Prepend {
+                    parent: parent_id,
+                    children: child_ids.clone(),
+                });
                 for child in child_ids {
                     self.connect_custom_elements(child)?;
                 }
@@ -13824,31 +14406,39 @@ impl Vm {
             BuiltinId::DomNodeReplaceChildren => {
                 let parent_id = self.this_node_id(&this_value);
                 let child_ids = self.node_ids_from_node_or_string_args(&args);
-                let existing = match self
-                    .host
-                    .read_dom(DomRead::Children { node: parent_id, elements_only: false })
-                {
+                let existing = match self.host.read_dom(DomRead::Children {
+                    node: parent_id,
+                    elements_only: false,
+                }) {
                     Ok(DomReadResult::Nodes(ids)) => ids,
                     _ => Vec::new(),
                 };
                 for child in existing {
                     let _ = self.host.mutate_dom(DomMutation::Remove { node: child });
                 }
-                let _ = self.host.mutate_dom(DomMutation::Append { parent: parent_id, children: child_ids });
+                let _ = self.host.mutate_dom(DomMutation::Append {
+                    parent: parent_id,
+                    children: child_ids,
+                });
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeHasChildNodes => {
                 let node_id = self.this_node_id(&this_value);
-                let res = self
-                    .host
-                    .read_dom(DomRead::Children { node: node_id, elements_only: false });
-                Ok(Value::Bool(matches!(res, Ok(DomReadResult::Nodes(ids)) if !ids.is_empty())))
+                let res = self.host.read_dom(DomRead::Children {
+                    node: node_id,
+                    elements_only: false,
+                });
+                Ok(Value::Bool(
+                    matches!(res, Ok(DomReadResult::Nodes(ids)) if !ids.is_empty()),
+                ))
             }
             BuiltinId::DomNodeRemoveChild => {
                 // Only detach when the node really is a child of `this` (per
                 // spec removeChild on a non-child throws; we no-op instead).
                 let parent_id = self.this_node_id(&this_value);
-                let child_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
+                let child_id = self
+                    .node_id_from_host_val(args.first().unwrap_or(&Value::Undefined))
+                    .unwrap_or(NodeId(0));
                 let is_child = matches!(
                     self.host.read_dom(DomRead::Parent { node: child_id }),
                     Ok(DomReadResult::Node(p)) if p == parent_id
@@ -13860,16 +14450,30 @@ impl Vm {
             }
             BuiltinId::DomNodeReplaceChild => {
                 let parent_id = self.this_node_id(&this_value);
-                let new_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
-                let old_id = self.node_id_from_host_val(args.get(1).unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
-                let _ = self.host.mutate_dom(DomMutation::ReplaceChild { parent: parent_id, new_child: new_id, old_child: old_id });
+                let new_id = self
+                    .node_id_from_host_val(args.first().unwrap_or(&Value::Undefined))
+                    .unwrap_or(NodeId(0));
+                let old_id = self
+                    .node_id_from_host_val(args.get(1).unwrap_or(&Value::Undefined))
+                    .unwrap_or(NodeId(0));
+                let _ = self.host.mutate_dom(DomMutation::ReplaceChild {
+                    parent: parent_id,
+                    new_child: new_id,
+                    old_child: old_id,
+                });
                 Ok(args.first().cloned().unwrap_or(Value::Undefined))
             }
             BuiltinId::DomNodeCloneNode => {
                 let node_id = self.this_node_id(&this_value);
                 let deep = args.first().map(|v| self.is_truthy(v)).unwrap_or(false);
-                let res = self.host.mutate_dom(DomMutation::CloneNode { node: node_id, deep });
-                Ok(match res { Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Undefined })
+                let res = self.host.mutate_dom(DomMutation::CloneNode {
+                    node: node_id,
+                    deep,
+                });
+                Ok(match res {
+                    Ok(super::host::DomMutationResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Undefined,
+                })
             }
             BuiltinId::DomNodeRemove => {
                 let node_id = self.this_node_id(&this_value);
@@ -13880,11 +14484,18 @@ impl Vm {
                 let node_id = self.this_node_id(&this_value);
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let value = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
-                let old = match self.host.read_dom(DomRead::Attribute { node: node_id, name: name.clone() }) {
+                let old = match self.host.read_dom(DomRead::Attribute {
+                    node: node_id,
+                    name: name.clone(),
+                }) {
                     Ok(DomReadResult::String(s)) => Some(s),
                     _ => None,
                 };
-                let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: name.clone(), value: value.clone() });
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                    node: node_id,
+                    name: name.clone(),
+                    value: value.clone(),
+                });
                 self.fire_attribute_changed_callback(
                     node_id,
                     &this_value,
@@ -13903,11 +14514,17 @@ impl Vm {
             | BuiltinId::DomNodeRemoveAttributeNs => {
                 let node_id = self.this_node_id(&this_value);
                 let namespace = args.first().cloned().unwrap_or(Value::Null);
-                let local = args.get(1).map(|value| self.to_string(value)).unwrap_or_default();
+                let local = args
+                    .get(1)
+                    .map(|value| self.to_string(value))
+                    .unwrap_or_default();
                 let name = self.namespaced_attribute_name(&namespace, &local);
                 match builtin {
                     BuiltinId::DomNodeSetAttributeNs => {
-                        let value = args.get(2).map(|value| self.to_string(value)).unwrap_or_default();
+                        let value = args
+                            .get(2)
+                            .map(|value| self.to_string(value))
+                            .unwrap_or_default();
                         let _ = self.host.mutate_dom(DomMutation::SetAttribute {
                             node: node_id,
                             name,
@@ -13916,14 +14533,17 @@ impl Vm {
                         Ok(Value::Undefined)
                     }
                     BuiltinId::DomNodeRemoveAttributeNs => {
-                        let _ = self
-                            .host
-                            .mutate_dom(DomMutation::RemoveAttribute { node: node_id, name });
+                        let _ = self.host.mutate_dom(DomMutation::RemoveAttribute {
+                            node: node_id,
+                            name,
+                        });
                         Ok(Value::Undefined)
                     }
                     _ => {
-                        let found =
-                            self.host.read_dom(DomRead::Attribute { node: node_id, name });
+                        let found = self.host.read_dom(DomRead::Attribute {
+                            node: node_id,
+                            name,
+                        });
                         if matches!(builtin, BuiltinId::DomNodeHasAttributeNs) {
                             return Ok(Value::Bool(matches!(found, Ok(DomReadResult::String(_)))));
                         }
@@ -13937,8 +14557,14 @@ impl Vm {
             BuiltinId::DomNodeGetAttribute => {
                 let node_id = self.this_node_id(&this_value);
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name });
-                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Null })
+                let res = self.host.read_dom(DomRead::Attribute {
+                    node: node_id,
+                    name,
+                });
+                Ok(match res {
+                    Ok(DomReadResult::String(s)) => self.make_string_value(&s),
+                    _ => Value::Null,
+                })
             }
             BuiltinId::ElementStubGetAttribute => {
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -13948,7 +14574,11 @@ impl Vm {
                     _ => None,
                 };
                 Ok(match value {
-                    Some(JsPropertyDescriptor::Data { value, .. }) if matches!(value, Value::String(_)) => value,
+                    Some(JsPropertyDescriptor::Data { value, .. })
+                        if matches!(value, Value::String(_)) =>
+                    {
+                        value
+                    }
                     None => Value::Null,
                     _ => Value::Null,
                 })
@@ -13960,33 +14590,55 @@ impl Vm {
                     Value::Object(object) => self.get_own_property_descriptor(object, &key),
                     _ => None,
                 };
-                Ok(Value::Bool(matches!(value, Some(JsPropertyDescriptor::Data { value: Value::String(_), .. }))))
+                Ok(Value::Bool(matches!(
+                    value,
+                    Some(JsPropertyDescriptor::Data {
+                        value: Value::String(_),
+                        ..
+                    })
+                )))
             }
             BuiltinId::DomNodeRemoveAttribute => {
                 let node_id = self.this_node_id(&this_value);
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let _ = self.host.mutate_dom(DomMutation::RemoveAttribute { node: node_id, name });
+                let _ = self.host.mutate_dom(DomMutation::RemoveAttribute {
+                    node: node_id,
+                    name,
+                });
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeHasAttribute => {
                 let node_id = self.this_node_id(&this_value);
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name });
+                let res = self.host.read_dom(DomRead::Attribute {
+                    node: node_id,
+                    name,
+                });
                 Ok(Value::Bool(matches!(res, Ok(DomReadResult::String(_)))))
             }
             BuiltinId::DomNodeToggleAttribute => {
                 let node_id = self.this_node_id(&this_value);
                 let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let force = args.get(1).map(|v| self.is_truthy(v));
-                let res = self.host.mutate_dom(DomMutation::ToggleAttribute { node: node_id, name, force });
-                Ok(match res { Ok(super::host::DomMutationResult::Bool(b)) => Value::Bool(b), _ => Value::Bool(false) })
+                let res = self.host.mutate_dom(DomMutation::ToggleAttribute {
+                    node: node_id,
+                    name,
+                    force,
+                });
+                Ok(match res {
+                    Ok(super::host::DomMutationResult::Bool(b)) => Value::Bool(b),
+                    _ => Value::Bool(false),
+                })
             }
             BuiltinId::DomNodeGetAttributeNames => {
                 let node_id = self.this_node_id(&this_value);
-                let res = self.host.read_dom(DomRead::AttributeNames { node: node_id });
+                let res = self
+                    .host
+                    .read_dom(DomRead::AttributeNames { node: node_id });
                 match res {
                     Ok(DomReadResult::StringList(names)) => {
-                        let items: Vec<Value> = names.iter().map(|s| self.make_string_value(s)).collect();
+                        let items: Vec<Value> =
+                            names.iter().map(|s| self.make_string_value(s)).collect();
                         self.make_array_from_values(items)
                     }
                     _ => self.make_array_from_values(vec![]),
@@ -13995,20 +14647,40 @@ impl Vm {
             BuiltinId::DomNodeClosest => {
                 let node_id = self.this_node_id(&this_value);
                 let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let res = self.host.read_dom(DomRead::Closest { node: node_id, selectors: sel });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+                let res = self.host.read_dom(DomRead::Closest {
+                    node: node_id,
+                    selectors: sel,
+                });
+                Ok(match res {
+                    Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Null,
+                })
             }
             BuiltinId::DomNodeMatches => {
                 let node_id = self.this_node_id(&this_value);
                 let sel = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let res = self.host.read_dom(DomRead::Matches { node: node_id, selectors: sel });
-                Ok(match res { Ok(DomReadResult::Bool(b)) => Value::Bool(b), _ => Value::Bool(false) })
+                let res = self.host.read_dom(DomRead::Matches {
+                    node: node_id,
+                    selectors: sel,
+                });
+                Ok(match res {
+                    Ok(DomReadResult::Bool(b)) => Value::Bool(b),
+                    _ => Value::Bool(false),
+                })
             }
             BuiltinId::DomNodeContains => {
                 let ancestor_id = self.this_node_id(&this_value);
-                let descendant_id = self.node_id_from_host_val(args.first().unwrap_or(&Value::Undefined)).unwrap_or(NodeId(0));
-                let res = self.host.read_dom(DomRead::Contains { ancestor: ancestor_id, descendant: descendant_id });
-                Ok(match res { Ok(DomReadResult::Bool(b)) => Value::Bool(b), _ => Value::Bool(false) })
+                let descendant_id = self
+                    .node_id_from_host_val(args.first().unwrap_or(&Value::Undefined))
+                    .unwrap_or(NodeId(0));
+                let res = self.host.read_dom(DomRead::Contains {
+                    ancestor: ancestor_id,
+                    descendant: descendant_id,
+                });
+                Ok(match res {
+                    Ok(DomReadResult::Bool(b)) => Value::Bool(b),
+                    _ => Value::Bool(false),
+                })
             }
             BuiltinId::DomNodeGetBoundingClientRect => {
                 let node_id = self.this_node_id(&this_value);
@@ -14021,7 +14693,14 @@ impl Vm {
                 };
                 let rect_obj = self.allocate_ordinary_object(None);
                 let set = |vm: &mut Self, name: &str, value: f64| {
-                    vm.define_data_property(rect_obj, PropertyKey::from(name), Value::Number(value), true, true, true);
+                    vm.define_data_property(
+                        rect_obj,
+                        PropertyKey::from(name),
+                        Value::Number(value),
+                        true,
+                        true,
+                        true,
+                    );
                 };
                 set(self, "x", x);
                 set(self, "y", y);
@@ -14076,7 +14755,8 @@ impl Vm {
                 Ok(Value::Undefined)
             }
             BuiltinId::DomNodeAddEventListener => {
-                let node_handle = self.node_id_from_host_val(&this_value)
+                let node_handle = self
+                    .node_id_from_host_val(&this_value)
                     .map(|id| id.0)
                     .unwrap_or(0); // 0 = document/window
                 let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -14118,8 +14798,22 @@ impl Vm {
                 };
                 // `target`/`srcElement` stay the dispatch node for the whole
                 // propagation; `currentTarget` updates per node below.
-                self.define_data_property(event_ref, PropertyKey::from("target"), this_value.clone(), true, true, true);
-                self.define_data_property(event_ref, PropertyKey::from("srcElement"), this_value.clone(), true, true, true);
+                self.define_data_property(
+                    event_ref,
+                    PropertyKey::from("target"),
+                    this_value.clone(),
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    event_ref,
+                    PropertyKey::from("srcElement"),
+                    this_value.clone(),
+                    true,
+                    true,
+                    true,
+                );
                 let event = Value::Object(event_ref);
                 let type_value = self.get_property_value(&event, &PropertyKey::from("type"))?;
                 let event_type = self.to_string(&type_value);
@@ -14145,10 +14839,15 @@ impl Vm {
                 for arg in args {
                     let class_to_add = self.to_string(&arg);
                     let existing = self.get_dom_attribute(node_id, "class");
-                    let mut classes: Vec<String> = existing.split_whitespace().map(|s| s.to_string()).collect();
+                    let mut classes: Vec<String> =
+                        existing.split_whitespace().map(|s| s.to_string()).collect();
                     if !classes.iter().any(|c| c == &class_to_add) {
                         classes.push(class_to_add);
-                        let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "class".to_string(), value: classes.join(" ") });
+                        let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                            node: node_id,
+                            name: "class".to_string(),
+                            value: classes.join(" "),
+                        });
                     }
                 }
                 Ok(Value::Undefined)
@@ -14157,18 +14856,25 @@ impl Vm {
                 let node_id = self.this_node_id(&this_value);
                 let names_to_remove: Vec<String> = args.iter().map(|v| self.to_string(v)).collect();
                 let existing = self.get_dom_attribute(node_id, "class");
-                let filtered: Vec<String> = existing.split_whitespace()
+                let filtered: Vec<String> = existing
+                    .split_whitespace()
                     .filter(|c| !names_to_remove.iter().any(|r| r == c))
                     .map(|c| c.to_string())
                     .collect();
-                let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "class".to_string(), value: filtered.join(" ") });
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                    node: node_id,
+                    name: "class".to_string(),
+                    value: filtered.join(" "),
+                });
                 Ok(Value::Undefined)
             }
             BuiltinId::DomClassListContains => {
                 let node_id = self.this_node_id(&this_value);
                 let class_name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let existing = self.get_dom_attribute(node_id, "class");
-                Ok(Value::Bool(existing.split_whitespace().any(|c| c == class_name)))
+                Ok(Value::Bool(
+                    existing.split_whitespace().any(|c| c == class_name),
+                ))
             }
             BuiltinId::DomClassListToggle => {
                 let node_id = self.this_node_id(&this_value);
@@ -14179,12 +14885,28 @@ impl Vm {
                 let should_add = force.unwrap_or(!has);
                 if should_add {
                     if !has {
-                        let new_class = if existing.is_empty() { class_name.clone() } else { format!("{existing} {class_name}") };
-                        let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "class".to_string(), value: new_class });
+                        let new_class = if existing.is_empty() {
+                            class_name.clone()
+                        } else {
+                            format!("{existing} {class_name}")
+                        };
+                        let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                            node: node_id,
+                            name: "class".to_string(),
+                            value: new_class,
+                        });
                     }
                 } else {
-                    let filtered: String = existing.split_whitespace().filter(|c| *c != class_name).collect::<Vec<_>>().join(" ");
-                    let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "class".to_string(), value: filtered });
+                    let filtered: String = existing
+                        .split_whitespace()
+                        .filter(|c| *c != class_name)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                        node: node_id,
+                        name: "class".to_string(),
+                        value: filtered,
+                    });
                 }
                 Ok(Value::Bool(should_add))
             }
@@ -14194,10 +14916,16 @@ impl Vm {
                 let new_cls = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
                 let existing = self.get_dom_attribute(node_id, "class");
                 if existing.split_whitespace().any(|c| c == old_cls) {
-                    let updated: String = existing.split_whitespace()
+                    let updated: String = existing
+                        .split_whitespace()
                         .map(|c| if c == old_cls { new_cls.as_str() } else { c })
-                        .collect::<Vec<_>>().join(" ");
-                    let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "class".to_string(), value: updated });
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                        node: node_id,
+                        name: "class".to_string(),
+                        value: updated,
+                    });
                     Ok(Value::Bool(true))
                 } else {
                     Ok(Value::Bool(false))
@@ -14205,9 +14933,15 @@ impl Vm {
             }
             BuiltinId::DomClassListItem => {
                 let node_id = self.this_node_id(&this_value);
-                let index = args.first().map(|v| self.to_number(v) as usize).unwrap_or(0);
+                let index = args
+                    .first()
+                    .map(|v| self.to_number(v) as usize)
+                    .unwrap_or(0);
                 let existing = self.get_dom_attribute(node_id, "class");
-                let item = existing.split_whitespace().nth(index).map(|s| self.make_string_value(s));
+                let item = existing
+                    .split_whitespace()
+                    .nth(index)
+                    .map(|s| self.make_string_value(s));
                 Ok(item.unwrap_or(Value::Null))
             }
             BuiltinId::DomClassListToString => {
@@ -14266,7 +15000,10 @@ impl Vm {
                     _ => String::new(),
                 };
                 let open = !mode.eq_ignore_ascii_case("closed");
-                match self.host.mutate_dom(DomMutation::AttachShadow { host: node_id, open }) {
+                match self.host.mutate_dom(DomMutation::AttachShadow {
+                    host: node_id,
+                    open,
+                }) {
                     Ok(DomMutationResult::Node(shadow)) => Ok(self.make_dom_node_value(shadow)),
                     _ => Err(VmError::TypeError("attachShadow failed".to_string())),
                 }
@@ -14275,12 +15012,17 @@ impl Vm {
                 let node_id = self.this_node_id(&this_value);
                 let composed = match args.first() {
                     Some(opts @ Value::Object(_)) => {
-                        let v = self.get_property_value(opts, &PropertyKey::from("composed")).unwrap_or(Value::Undefined);
+                        let v = self
+                            .get_property_value(opts, &PropertyKey::from("composed"))
+                            .unwrap_or(Value::Undefined);
                         self.is_truthy(&v)
                     }
                     _ => false,
                 };
-                let res = self.host.read_dom(DomRead::RootNode { node: node_id, composed });
+                let res = self.host.read_dom(DomRead::RootNode {
+                    node: node_id,
+                    composed,
+                });
                 Ok(match res {
                     Ok(DomReadResult::Node(id)) => self.root_node_value(id),
                     _ => Value::Null,
@@ -14290,12 +15032,17 @@ impl Vm {
                 let node_id = self.this_node_id(&this_value);
                 let flatten = match args.first() {
                     Some(opts @ Value::Object(_)) => {
-                        let v = self.get_property_value(opts, &PropertyKey::from("flatten")).unwrap_or(Value::Undefined);
+                        let v = self
+                            .get_property_value(opts, &PropertyKey::from("flatten"))
+                            .unwrap_or(Value::Undefined);
                         self.is_truthy(&v)
                     }
                     _ => false,
                 };
-                let nodes = match self.host.read_dom(DomRead::AssignedNodes { slot: node_id, flatten }) {
+                let nodes = match self.host.read_dom(DomRead::AssignedNodes {
+                    slot: node_id,
+                    flatten,
+                }) {
                     Ok(DomReadResult::Nodes(ids)) => ids,
                     _ => Vec::new(),
                 };
@@ -14315,7 +15062,8 @@ impl Vm {
                 self.make_array_from_values(items)
             }
             BuiltinId::DomEventComposedPath => {
-                let stored = self.get_property_value(&this_value, &PropertyKey::from("__composedPath"))?;
+                let stored =
+                    self.get_property_value(&this_value, &PropertyKey::from("__composedPath"))?;
                 match stored {
                     Value::Object(_) => Ok(stored),
                     _ => self.make_array_from_values(Vec::new()),
@@ -14323,15 +15071,24 @@ impl Vm {
             }
             BuiltinId::DomNodeSplitText => {
                 let node_id = self.this_node_id(&this_value);
-                let offset = args.first().map(|v| self.to_number(v).max(0.0) as usize).unwrap_or(0);
-                match self.host.mutate_dom(DomMutation::SplitText { node: node_id, offset }) {
+                let offset = args
+                    .first()
+                    .map(|v| self.to_number(v).max(0.0) as usize)
+                    .unwrap_or(0);
+                match self.host.mutate_dom(DomMutation::SplitText {
+                    node: node_id,
+                    offset,
+                }) {
                     Ok(DomMutationResult::Node(tail)) => Ok(self.make_dom_node_value(tail)),
                     _ => Err(VmError::TypeError("splitText: not a Text node".to_string())),
                 }
             }
             BuiltinId::DomNodeHasAttributes => {
                 let node_id = self.this_node_id(&this_value);
-                let names = match self.host.read_dom(DomRead::AttributeNames { node: node_id }) {
+                let names = match self
+                    .host
+                    .read_dom(DomRead::AttributeNames { node: node_id })
+                {
                     Ok(DomReadResult::StringList(names)) => names,
                     _ => Vec::new(),
                 };
@@ -14339,12 +15096,18 @@ impl Vm {
             }
             BuiltinId::DomAttrMapItem | BuiltinId::DomAttrMapGetNamedItem => {
                 let node_id = self.this_node_id(&this_value);
-                let names = match self.host.read_dom(DomRead::AttributeNames { node: node_id }) {
+                let names = match self
+                    .host
+                    .read_dom(DomRead::AttributeNames { node: node_id })
+                {
                     Ok(DomReadResult::StringList(names)) => names,
                     _ => Vec::new(),
                 };
                 let found = if matches!(builtin, BuiltinId::DomAttrMapItem) {
-                    let index = args.first().map(|v| self.to_number(v) as usize).unwrap_or(0);
+                    let index = args
+                        .first()
+                        .map(|v| self.to_number(v) as usize)
+                        .unwrap_or(0);
                     names.get(index).cloned()
                 } else {
                     let wanted = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -14374,12 +15137,11 @@ impl Vm {
                 if other == node_id {
                     return Ok(Value::Bool(true));
                 }
-                let outer = |vm: &mut Self, node| {
-                    match vm.host.read_dom(DomRead::OuterHtml { node }) {
+                let outer =
+                    |vm: &mut Self, node| match vm.host.read_dom(DomRead::OuterHtml { node }) {
                         Ok(DomReadResult::String(html)) => Some(html),
                         _ => None,
-                    }
-                };
+                    };
                 let (a, b) = (outer(self, node_id), outer(self, other));
                 Ok(Value::Bool(a.is_some() && a == b))
             }
@@ -14423,7 +15185,11 @@ impl Vm {
                 let val = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
                 let existing = self.get_dom_attribute(node_id, "style");
                 let updated = set_inline_style_prop(&existing, &prop, &val);
-                let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "style".to_string(), value: updated });
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                    node: node_id,
+                    name: "style".to_string(),
+                    value: updated,
+                });
                 Ok(Value::Undefined)
             }
             BuiltinId::DomComputedStyleGetProperty => {
@@ -14439,7 +15205,11 @@ impl Vm {
                 let prop = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let existing = self.get_dom_attribute(node_id, "style");
                 let (updated, removed) = remove_inline_style_prop(&existing, &prop);
-                let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "style".to_string(), value: updated });
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                    node: node_id,
+                    name: "style".to_string(),
+                    value: updated,
+                });
                 Ok(self.make_string_value(&removed))
             }
             // performance.now()
@@ -14451,20 +15221,37 @@ impl Vm {
                     Some(v) => Some(self.to_string(v)),
                 };
                 let action = if matches!(builtin, BuiltinId::HistoryPushState) {
-                    HistoryAction::PushState { window: WindowId(0), url, title, state }
+                    HistoryAction::PushState {
+                        window: WindowId(0),
+                        url,
+                        title,
+                        state,
+                    }
                 } else {
-                    HistoryAction::ReplaceState { window: WindowId(0), url, title, state }
+                    HistoryAction::ReplaceState {
+                        window: WindowId(0),
+                        url,
+                        title,
+                        state,
+                    }
                 };
                 let _ = self.host.history(action);
                 Ok(Value::Undefined)
             }
             BuiltinId::HistoryBack | BuiltinId::HistoryForward | BuiltinId::HistoryGo => {
                 let action = match builtin {
-                    BuiltinId::HistoryBack => HistoryAction::Back { window: WindowId(0) },
-                    BuiltinId::HistoryForward => HistoryAction::Forward { window: WindowId(0) },
+                    BuiltinId::HistoryBack => HistoryAction::Back {
+                        window: WindowId(0),
+                    },
+                    BuiltinId::HistoryForward => HistoryAction::Forward {
+                        window: WindowId(0),
+                    },
                     _ => {
                         let delta = args.first().map(|v| self.to_number(v) as i32).unwrap_or(0);
-                        HistoryAction::Go { window: WindowId(0), delta }
+                        HistoryAction::Go {
+                            window: WindowId(0),
+                            delta,
+                        }
                     }
                 };
                 let outcome = self.host.history(action);
@@ -14488,7 +15275,8 @@ impl Vm {
                     // A digit is fine inside an identifier but not at the front,
                     // where it has to be written as a hex escape.
                     let needs_hex = ch.is_ascii_digit() && index == 0;
-                    let bare = ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || !ch.is_ascii();
+                    let bare =
+                        ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || !ch.is_ascii();
                     if bare && !needs_hex {
                         escaped.push(ch);
                     } else if needs_hex {
@@ -14509,10 +15297,38 @@ impl Vm {
                 let mark = self.allocate_ordinary_object(None);
                 let mark_name = self.make_string_value(&name);
                 let mark_entry_type = self.make_string_value("mark");
-                self.define_data_property(mark, PropertyKey::from("name"), mark_name, true, true, true);
-                self.define_data_property(mark, PropertyKey::from("entryType"), mark_entry_type, true, true, true);
-                self.define_data_property(mark, PropertyKey::from("startTime"), Value::Number(self.host.now().monotonic_ms as f64), true, true, true);
-                self.define_data_property(mark, PropertyKey::from("duration"), Value::Number(0.0), true, true, true);
+                self.define_data_property(
+                    mark,
+                    PropertyKey::from("name"),
+                    mark_name,
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    mark,
+                    PropertyKey::from("entryType"),
+                    mark_entry_type,
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    mark,
+                    PropertyKey::from("startTime"),
+                    Value::Number(self.host.now().monotonic_ms as f64),
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    mark,
+                    PropertyKey::from("duration"),
+                    Value::Number(0.0),
+                    true,
+                    true,
+                    true,
+                );
                 Ok(Value::Object(mark))
             }
             // requestIdleCallback — run callback synchronously
@@ -14521,22 +15337,60 @@ impl Vm {
                 let measure = self.allocate_ordinary_object(None);
                 let measure_name = self.make_string_value(&name);
                 let measure_entry_type = self.make_string_value("measure");
-                self.define_data_property(measure, PropertyKey::from("name"), measure_name, true, true, true);
-                self.define_data_property(measure, PropertyKey::from("entryType"), measure_entry_type, true, true, true);
-                self.define_data_property(measure, PropertyKey::from("startTime"), Value::Number(0.0), true, true, true);
-                self.define_data_property(measure, PropertyKey::from("duration"), Value::Number(0.0), true, true, true);
+                self.define_data_property(
+                    measure,
+                    PropertyKey::from("name"),
+                    measure_name,
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    measure,
+                    PropertyKey::from("entryType"),
+                    measure_entry_type,
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    measure,
+                    PropertyKey::from("startTime"),
+                    Value::Number(0.0),
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    measure,
+                    PropertyKey::from("duration"),
+                    Value::Number(0.0),
+                    true,
+                    true,
+                    true,
+                );
                 Ok(Value::Object(measure))
             }
-            BuiltinId::PerformanceClearMarks | BuiltinId::PerformanceClearMeasures => Ok(Value::Undefined),
-            BuiltinId::PerformanceGetEntries | BuiltinId::PerformanceGetEntriesByName | BuiltinId::PerformanceGetEntriesByType => {
-                self.make_array_from_values(Vec::new())
+            BuiltinId::PerformanceClearMarks | BuiltinId::PerformanceClearMeasures => {
+                Ok(Value::Undefined)
             }
+            BuiltinId::PerformanceGetEntries
+            | BuiltinId::PerformanceGetEntriesByName
+            | BuiltinId::PerformanceGetEntriesByType => self.make_array_from_values(Vec::new()),
             BuiltinId::RequestIdleCallback => {
                 let cb = args.first().cloned().unwrap_or(Value::Undefined);
                 if self.is_callable_value(&cb) {
                     let deadline = self.allocate_ordinary_object(None);
-                    self.define_data_property(deadline, PropertyKey::from("didTimeout"), Value::Bool(false), true, true, true);
-                    let _ = self.call_value_sync(cb, Value::Undefined, vec![Value::Object(deadline)]);
+                    self.define_data_property(
+                        deadline,
+                        PropertyKey::from("didTimeout"),
+                        Value::Bool(false),
+                        true,
+                        true,
+                        true,
+                    );
+                    let _ =
+                        self.call_value_sync(cb, Value::Undefined, vec![Value::Object(deadline)]);
                 }
                 Ok(Value::Number(0.0))
             }
@@ -14569,7 +15423,8 @@ impl Vm {
             }
             BuiltinId::WeakRefConstructor => {
                 let target = args.first().cloned().unwrap_or(Value::Undefined);
-                let target_obj = self.require_object_ref(&target, "WeakRef: target must be an object")?;
+                let target_obj =
+                    self.require_object_ref(&target, "WeakRef: target must be an object")?;
                 let weak_ref = self.allocate_ordinary_object(Some(self.weak_ref_prototype_ref()));
                 self.define_data_property(
                     weak_ref,
@@ -14588,7 +15443,8 @@ impl Vm {
                 Ok(target)
             }
             BuiltinId::TextEncoderConstructor => {
-                let encoder = self.allocate_ordinary_object(Some(self.text_encoder_prototype_ref()));
+                let encoder =
+                    self.allocate_ordinary_object(Some(self.text_encoder_prototype_ref()));
                 let encoding = self.make_string_value("utf-8");
                 self.define_data_property(
                     encoder,
@@ -14609,16 +15465,23 @@ impl Vm {
                 let trimmed = label.trim();
                 // WHATWG Encoding labels for utf-8; it is the only encoding we decode.
                 const UTF8_LABELS: [&str; 6] = [
-                    "unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8",
-                    "utf-8", "utf8", "x-unicode20utf8",
+                    "unicode-1-1-utf-8",
+                    "unicode11utf8",
+                    "unicode20utf8",
+                    "utf-8",
+                    "utf8",
+                    "x-unicode20utf8",
                 ];
-                if !trimmed.is_empty() && !UTF8_LABELS.iter().any(|l| trimmed.eq_ignore_ascii_case(l)) {
+                if !trimmed.is_empty()
+                    && !UTF8_LABELS.iter().any(|l| trimmed.eq_ignore_ascii_case(l))
+                {
                     return Err(VmError::RangeError(format!(
                         "TextDecoder: unsupported encoding label '{label}'"
                     )));
                 }
                 let encoding = "utf-8";
-                let decoder = self.allocate_ordinary_object(Some(self.text_decoder_prototype_ref()));
+                let decoder =
+                    self.allocate_ordinary_object(Some(self.text_decoder_prototype_ref()));
                 let encoding_value = self.make_string_value(encoding);
                 self.define_data_property(
                     decoder,
@@ -14635,7 +15498,9 @@ impl Vm {
                 if matches!(input, Value::Undefined) {
                     return Ok(self.make_string_value(""));
                 }
-                let bytes = if let Some((buffer, kind, byte_offset, length)) = self.typed_array_info(&input) {
+                let bytes = if let Some((buffer, kind, byte_offset, length)) =
+                    self.typed_array_info(&input)
+                {
                     let byte_len = kind.bytes_per_element() * length;
                     match self.heap.objects().get(buffer).map(|o| &o.kind) {
                         Some(ObjectKind::ArrayBuffer(buf)) => buf
@@ -14658,12 +15523,11 @@ impl Vm {
             BuiltinId::StorageGetItem => {
                 let key = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let (kind, scope) = self.storage_context(&this_value);
-                let res = self.host.storage(StorageOp::Get {
-                    kind,
-                    scope,
-                    key,
-                });
-                Ok(match res { Ok(StorageResult::Value(Some(v))) => self.make_string_value(&v), _ => Value::Null })
+                let res = self.host.storage(StorageOp::Get { kind, scope, key });
+                Ok(match res {
+                    Ok(StorageResult::Value(Some(v))) => self.make_string_value(&v),
+                    _ => Value::Null,
+                })
             }
             BuiltinId::StorageSetItem => {
                 let key = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -14680,30 +15544,26 @@ impl Vm {
             BuiltinId::StorageRemoveItem => {
                 let key = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let (kind, scope) = self.storage_context(&this_value);
-                let _ = self.host.storage(StorageOp::Remove {
-                    kind,
-                    scope,
-                    key,
-                });
+                let _ = self.host.storage(StorageOp::Remove { kind, scope, key });
                 Ok(Value::Undefined)
             }
             BuiltinId::StorageClear => {
                 let (kind, scope) = self.storage_context(&this_value);
-                let _ = self.host.storage(StorageOp::Clear {
-                    kind,
-                    scope,
-                });
+                let _ = self.host.storage(StorageOp::Clear { kind, scope });
                 Ok(Value::Undefined)
             }
             BuiltinId::StorageKey => {
-                let index = args.first().map(|v| self.to_number(v) as usize).unwrap_or(0);
+                let index = args
+                    .first()
+                    .map(|v| self.to_number(v) as usize)
+                    .unwrap_or(0);
                 let (kind, scope) = self.storage_context(&this_value);
-                let res = self.host.storage(StorageOp::Keys {
-                    kind,
-                    scope,
-                });
+                let res = self.host.storage(StorageOp::Keys { kind, scope });
                 Ok(match res {
-                    Ok(StorageResult::Keys(keys)) => keys.get(index).map(|k| self.make_string_value(k)).unwrap_or(Value::Null),
+                    Ok(StorageResult::Keys(keys)) => keys
+                        .get(index)
+                        .map(|k| self.make_string_value(k))
+                        .unwrap_or(Value::Null),
                     _ => Value::Null,
                 })
             }
@@ -14719,11 +15579,11 @@ impl Vm {
                     .unwrap_or((0.0, 0.0));
                 let (opt_x, opt_y) = match args.first() {
                     Some(options @ Value::Object(_)) => {
-                        let axis = |vm: &mut Self, key: &str| {
-                            match vm.get_property_value(options, &PropertyKey::from(key)) {
-                                Ok(Value::Undefined) | Err(_) => None,
-                                Ok(v) => Some(vm.to_number(&v)),
-                            }
+                        let axis = |vm: &mut Self, key: &str| match vm
+                            .get_property_value(options, &PropertyKey::from(key))
+                        {
+                            Ok(Value::Undefined) | Err(_) => None,
+                            Ok(v) => Some(vm.to_number(&v)),
                         };
                         (axis(self, "left"), axis(self, "top"))
                     }
@@ -14737,7 +15597,11 @@ impl Vm {
                 } else {
                     (opt_x.unwrap_or(cur_x), opt_y.unwrap_or(cur_y))
                 };
-                let _ = self.host.mutate_dom(DomMutation::SetWindowScroll { window: WindowId(0), x, y });
+                let _ = self.host.mutate_dom(DomMutation::SetWindowScroll {
+                    window: WindowId(0),
+                    x,
+                    y,
+                });
                 Ok(Value::Undefined)
             }
             BuiltinId::WindowGetComputedStyle => {
@@ -14759,10 +15623,31 @@ impl Vm {
                 let result_obj = self.allocate_ordinary_object(None);
                 let media = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let matches = self.host.matches_media(&media).unwrap_or(false);
-                self.define_data_property(result_obj, PropertyKey::from("matches"), Value::Bool(matches), true, true, true);
+                self.define_data_property(
+                    result_obj,
+                    PropertyKey::from("matches"),
+                    Value::Bool(matches),
+                    true,
+                    true,
+                    true,
+                );
                 let media_value = self.make_string_value(&media);
-                self.define_data_property(result_obj, PropertyKey::from("media"), media_value, true, true, true);
-                self.define_data_property(result_obj, PropertyKey::from("onchange"), Value::Null, true, true, true);
+                self.define_data_property(
+                    result_obj,
+                    PropertyKey::from("media"),
+                    media_value,
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    result_obj,
+                    PropertyKey::from("onchange"),
+                    Value::Null,
+                    true,
+                    true,
+                    true,
+                );
                 self.define_builtin_method(result_obj, "addEventListener", BuiltinId::Noop);
                 self.define_builtin_method(result_obj, "removeEventListener", BuiltinId::Noop);
                 self.define_builtin_method(result_obj, "addListener", BuiltinId::Noop);
@@ -14800,7 +15685,8 @@ impl Vm {
     }
 
     fn url_prototype_ref(&self) -> GcRef<JsObject> {
-        self.url_prototype.expect("URL prototype should be installed")
+        self.url_prototype
+            .expect("URL prototype should be installed")
     }
 
     /// Read the (name, value) pairs of a URLSearchParams `this`.
@@ -14833,8 +15719,10 @@ impl Vm {
 
     fn headers_pairs(&self, this_value: &Value) -> Result<Vec<(String, String)>, VmError> {
         if let Value::Object(object) = this_value {
-            if let Some(JsObject { kind: ObjectKind::Headers(pairs), .. }) =
-                self.heap.objects().get(*object)
+            if let Some(JsObject {
+                kind: ObjectKind::Headers(pairs),
+                ..
+            }) = self.heap.objects().get(*object)
             {
                 return Ok(pairs.clone());
             }
@@ -14852,7 +15740,10 @@ impl Vm {
         }
     }
 
-    fn headers_init_pairs(&mut self, init: Option<&Value>) -> Result<Vec<(String, String)>, VmError> {
+    fn headers_init_pairs(
+        &mut self,
+        init: Option<&Value>,
+    ) -> Result<Vec<(String, String)>, VmError> {
         match init {
             None | Some(Value::Undefined) | Some(Value::Null) => Ok(Vec::new()),
             Some(Value::Object(object)) => {
@@ -14925,8 +15816,10 @@ impl Vm {
     fn headers_like_pairs(&self, this_value: Value) -> Result<Vec<(String, String)>, VmError> {
         match this_value {
             Value::Object(object) => {
-                if let Some(JsObject { kind: ObjectKind::Headers(pairs), .. }) =
-                    self.heap.objects().get(object)
+                if let Some(JsObject {
+                    kind: ObjectKind::Headers(pairs),
+                    ..
+                }) = self.heap.objects().get(object)
                 {
                     return Ok(pairs.clone());
                 }
@@ -15022,14 +15915,21 @@ impl Vm {
                 }
                 Ok(Value::Object(new_set))
             }
-            ObjectKind::RegExp { source, flags, .. } => Ok(self.make_regexp_object(&source, &flags)),
+            ObjectKind::RegExp { source, flags, .. } => {
+                Ok(self.make_regexp_object(&source, &flags))
+            }
             _ => {
                 // Plain object: clone own enumerable string/index properties.
                 let new_object = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
                 for key in self.object_own_enumerable_keys(object) {
                     let property = self.get_property_value(&Value::Object(object), &key)?;
                     let cloned = self.structured_clone(&property, depth + 1)?;
-                    self.set_property_on_object(new_object, Value::Object(new_object), key, cloned)?;
+                    self.set_property_on_object(
+                        new_object,
+                        Value::Object(new_object),
+                        key,
+                        cloned,
+                    )?;
                 }
                 Ok(Value::Object(new_object))
             }
@@ -15212,7 +16112,8 @@ impl Vm {
             None => (false, false),
         };
         let enumerable = if has_enumerable {
-            let v = self.get_property_value(&Value::Object(object), &PropertyKey::from("enumerable"))?;
+            let v =
+                self.get_property_value(&Value::Object(object), &PropertyKey::from("enumerable"))?;
             self.is_truthy(&v)
         } else {
             existing_enumerable
@@ -15290,8 +16191,10 @@ impl Vm {
                     existing_value
                 };
                 let writable = if has_writable {
-                    let v = self
-                        .get_property_value(&Value::Object(object), &PropertyKey::from("writable"))?;
+                    let v = self.get_property_value(
+                        &Value::Object(object),
+                        &PropertyKey::from("writable"),
+                    )?;
                     self.is_truthy(&v)
                 } else {
                     existing_writable
@@ -15966,8 +16869,7 @@ impl Vm {
             } else {
                 for property_key in self.object_own_enumerable_keys(object) {
                     let key_string = self.property_key_to_string(&property_key);
-                    let new_value =
-                        self.internalize_json_property(object, &key_string, reviver)?;
+                    let new_value = self.internalize_json_property(object, &key_string, reviver)?;
                     if matches!(new_value, Value::Undefined) {
                         self.delete_property(object, &property_key);
                     } else {
@@ -15982,7 +16884,11 @@ impl Vm {
             }
         }
         let key_value = self.make_string_value(key);
-        self.call_value_sync(reviver.clone(), Value::Object(holder), vec![key_value, value])
+        self.call_value_sync(
+            reviver.clone(),
+            Value::Object(holder),
+            vec![key_value, value],
+        )
     }
 
     // ========================================================================
@@ -16091,12 +16997,11 @@ impl Vm {
         let Some(def) = self.custom_elements.get(tag).cloned() else {
             return Ok(wrapper);
         };
-        let class_proto = match self
-            .get_property_value(&def.class_value, &PropertyKey::from("prototype"))
-        {
-            Ok(Value::Object(proto)) => Some(proto),
-            _ => None,
-        };
+        let class_proto =
+            match self.get_property_value(&def.class_value, &PropertyKey::from("prototype")) {
+                Ok(Value::Object(proto)) => Some(proto),
+                _ => None,
+            };
         if let (Value::Object(wrapper_ref), Some(proto)) = (&wrapper, class_proto) {
             if let Some(data) = self.heap.objects_mut().get_mut(*wrapper_ref) {
                 data.prototype = Some(proto);
@@ -16129,13 +17034,18 @@ impl Vm {
         if !def.observed.iter().any(|a| a == attr_name) {
             return Ok(());
         }
-        let cb = self.get_property_value(wrapper, &PropertyKey::from("attributeChangedCallback"))?;
+        let cb =
+            self.get_property_value(wrapper, &PropertyKey::from("attributeChangedCallback"))?;
         if !self.is_callable_value(&cb) {
             return Ok(());
         }
         let name_v = self.make_string_value(attr_name);
-        let old_v = old_value.map(|v| self.make_string_value(v)).unwrap_or(Value::Null);
-        let new_v = new_value.map(|v| self.make_string_value(v)).unwrap_or(Value::Null);
+        let old_v = old_value
+            .map(|v| self.make_string_value(v))
+            .unwrap_or(Value::Null);
+        let new_v = new_value
+            .map(|v| self.make_string_value(v))
+            .unwrap_or(Value::Null);
         self.call_value_sync(cb, wrapper.clone(), vec![name_v, old_v, new_v])?;
         Ok(())
     }
@@ -16349,9 +17259,13 @@ impl Vm {
     }
 
     fn query_all_to_array(&mut self, root: NodeId, selectors: String) -> Result<Value, VmError> {
-        match self.host.read_dom(DomRead::QuerySelectorAll { root, selectors }) {
+        match self
+            .host
+            .read_dom(DomRead::QuerySelectorAll { root, selectors })
+        {
             Ok(DomReadResult::Nodes(ids)) => {
-                let items: Vec<Value> = ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
+                let items: Vec<Value> =
+                    ids.iter().map(|&id| self.make_dom_node_value(id)).collect();
                 self.make_array_from_values(items)
             }
             _ => self.make_array_from_values(vec![]),
@@ -16418,7 +17332,10 @@ impl Vm {
     /// The attribute names of the node backing a NamedNodeMap host object.
     fn attrmap_names(&mut self, slot: &HostObjectSlot) -> Vec<String> {
         let node_id = NodeId(slot.handle as u32);
-        match self.host.read_dom(DomRead::AttributeNames { node: node_id }) {
+        match self
+            .host
+            .read_dom(DomRead::AttributeNames { node: node_id })
+        {
             Ok(DomReadResult::StringList(names)) => names,
             _ => Vec::new(),
         }
@@ -16436,8 +17353,22 @@ impl Vm {
         let obj = self.allocate_ordinary_object(None);
         let name_v = self.make_string_value(name);
         let value_v = self.make_string_value(&value);
-        self.define_data_property(obj, PropertyKey::from("name"), name_v.clone(), true, true, true);
-        self.define_data_property(obj, PropertyKey::from("localName"), name_v.clone(), true, true, true);
+        self.define_data_property(
+            obj,
+            PropertyKey::from("name"),
+            name_v.clone(),
+            true,
+            true,
+            true,
+        );
+        self.define_data_property(
+            obj,
+            PropertyKey::from("localName"),
+            name_v.clone(),
+            true,
+            true,
+            true,
+        );
         self.define_data_property(obj, PropertyKey::from("nodeName"), name_v, true, true, true);
         self.define_data_property(obj, PropertyKey::from("value"), value_v, true, true, true);
         Value::Object(obj)
@@ -16487,9 +17418,7 @@ impl Vm {
     fn get_observer_property(&mut self, name: String) -> Result<Value, VmError> {
         match name.as_str() {
             "observe" => Ok(self.allocate_builtin_method(BuiltinId::MutationObserverObserve)),
-            "disconnect" => {
-                Ok(self.allocate_builtin_method(BuiltinId::MutationObserverDisconnect))
-            }
+            "disconnect" => Ok(self.allocate_builtin_method(BuiltinId::MutationObserverDisconnect)),
             "takeRecords" => {
                 Ok(self.allocate_builtin_method(BuiltinId::MutationObserverTakeRecords))
             }
@@ -16554,20 +17483,73 @@ impl Vm {
         Ok(instance)
     }
 
-    fn make_abort_signal(&mut self, aborted: bool, reason: Value) -> Result<GcRef<JsObject>, VmError> {
+    fn make_abort_signal(
+        &mut self,
+        aborted: bool,
+        reason: Value,
+    ) -> Result<GcRef<JsObject>, VmError> {
         let proto = self.object_prototype_ref();
         let signal = self.allocate_ordinary_object(Some(proto));
-        self.define_data_property(signal, PropertyKey::from("aborted"), Value::Bool(aborted), true, true, true);
-        self.define_data_property(signal, PropertyKey::from("reason"), reason, true, true, true);
-        self.define_data_property(signal, PropertyKey::from("onabort"), Value::Null, true, true, true);
+        self.define_data_property(
+            signal,
+            PropertyKey::from("aborted"),
+            Value::Bool(aborted),
+            true,
+            true,
+            true,
+        );
+        self.define_data_property(
+            signal,
+            PropertyKey::from("reason"),
+            reason,
+            true,
+            true,
+            true,
+        );
+        self.define_data_property(
+            signal,
+            PropertyKey::from("onabort"),
+            Value::Null,
+            true,
+            true,
+            true,
+        );
         let add = self.allocate_builtin_method(BuiltinId::AbortSignalAddEventListener);
-        self.define_data_property(signal, PropertyKey::from("addEventListener"), add, true, false, true);
+        self.define_data_property(
+            signal,
+            PropertyKey::from("addEventListener"),
+            add,
+            true,
+            false,
+            true,
+        );
         let remove = self.allocate_builtin_method(BuiltinId::AbortSignalRemoveEventListener);
-        self.define_data_property(signal, PropertyKey::from("removeEventListener"), remove, true, false, true);
+        self.define_data_property(
+            signal,
+            PropertyKey::from("removeEventListener"),
+            remove,
+            true,
+            false,
+            true,
+        );
         let throw_if_aborted = self.allocate_builtin_method(BuiltinId::AbortSignalThrowIfAborted);
-        self.define_data_property(signal, PropertyKey::from("throwIfAborted"), throw_if_aborted, true, false, true);
+        self.define_data_property(
+            signal,
+            PropertyKey::from("throwIfAborted"),
+            throw_if_aborted,
+            true,
+            false,
+            true,
+        );
         let listeners = self.make_array_from_values(Vec::new())?;
-        self.define_data_property(signal, PropertyKey::from("__abortListeners"), listeners, true, false, true);
+        self.define_data_property(
+            signal,
+            PropertyKey::from("__abortListeners"),
+            listeners,
+            true,
+            false,
+            true,
+        );
         Ok(signal)
     }
 
@@ -16765,7 +17747,14 @@ impl Vm {
             return Ok(value);
         };
         let target = self.make_dom_node_value(target_id);
-        self.define_data_property(object, PropertyKey::from("target"), target, true, true, true);
+        self.define_data_property(
+            object,
+            PropertyKey::from("target"),
+            target,
+            true,
+            true,
+            true,
+        );
         if kind == ObserverKind::Mutation {
             // Defaults for fields the payload may omit (e.g. addedNodes on an
             // attributes record), so reads never yield `undefined`.
@@ -17085,28 +18074,54 @@ impl Vm {
     fn get_window_property(&mut self, name: String) -> Result<Value, VmError> {
         match name.as_str() {
             // Return the same GcRef as the document global so `window.document === document`
-            "document" => Ok(self.globals.get("document").cloned().unwrap_or(Value::Undefined)),
-            "window" | "self" | "globalThis" | "top" | "parent" => {
-                Ok(self.globals.get("window").cloned().unwrap_or(Value::Undefined))
-            }
+            "document" => Ok(self
+                .globals
+                .get("document")
+                .cloned()
+                .unwrap_or(Value::Undefined)),
+            "window" | "self" | "globalThis" | "top" | "parent" => Ok(self
+                .globals
+                .get("window")
+                .cloned()
+                .unwrap_or(Value::Undefined)),
             "innerWidth" => {
-                let v = self.host.window_metrics(WindowId(0)).map(|m| m.inner_width).unwrap_or(0.0);
+                let v = self
+                    .host
+                    .window_metrics(WindowId(0))
+                    .map(|m| m.inner_width)
+                    .unwrap_or(0.0);
                 Ok(Value::Number(v))
             }
             "innerHeight" => {
-                let v = self.host.window_metrics(WindowId(0)).map(|m| m.inner_height).unwrap_or(0.0);
+                let v = self
+                    .host
+                    .window_metrics(WindowId(0))
+                    .map(|m| m.inner_height)
+                    .unwrap_or(0.0);
                 Ok(Value::Number(v))
             }
             "scrollX" | "pageXOffset" => {
-                let v = self.host.window_metrics(WindowId(0)).map(|m| m.scroll_x).unwrap_or(0.0);
+                let v = self
+                    .host
+                    .window_metrics(WindowId(0))
+                    .map(|m| m.scroll_x)
+                    .unwrap_or(0.0);
                 Ok(Value::Number(v))
             }
             "scrollY" | "pageYOffset" => {
-                let v = self.host.window_metrics(WindowId(0)).map(|m| m.scroll_y).unwrap_or(0.0);
+                let v = self
+                    .host
+                    .window_metrics(WindowId(0))
+                    .map(|m| m.scroll_y)
+                    .unwrap_or(0.0);
                 Ok(Value::Number(v))
             }
             "devicePixelRatio" => {
-                let v = self.host.window_metrics(WindowId(0)).map(|m| m.device_pixel_ratio).unwrap_or(1.0);
+                let v = self
+                    .host
+                    .window_metrics(WindowId(0))
+                    .map(|m| m.device_pixel_ratio)
+                    .unwrap_or(1.0);
                 Ok(Value::Number(v))
             }
             "location" => self.make_location_object(),
@@ -17121,9 +18136,23 @@ impl Vm {
                 }
                 let css = self.allocate_ordinary_object(None);
                 let supports = self.allocate_builtin_method(BuiltinId::CssSupports);
-                self.define_data_property(css, PropertyKey::from("supports"), supports, true, true, true);
+                self.define_data_property(
+                    css,
+                    PropertyKey::from("supports"),
+                    supports,
+                    true,
+                    true,
+                    true,
+                );
                 let escape = self.allocate_builtin_method(BuiltinId::CssEscape);
-                self.define_data_property(css, PropertyKey::from("escape"), escape, true, true, true);
+                self.define_data_property(
+                    css,
+                    PropertyKey::from("escape"),
+                    escape,
+                    true,
+                    true,
+                    true,
+                );
                 self.window_singletons.insert("CSS", Value::Object(css));
                 Ok(Value::Object(css))
             }
@@ -17160,7 +18189,11 @@ impl Vm {
                     true,
                     true,
                 );
-                for (key, value) in [("onLine", true), ("cookieEnabled", true), ("webdriver", false)] {
+                for (key, value) in [
+                    ("onLine", true),
+                    ("cookieEnabled", true),
+                    ("webdriver", false),
+                ] {
                     self.define_data_property(
                         nav,
                         PropertyKey::from(key),
@@ -17210,8 +18243,22 @@ impl Vm {
                     return Ok(existing.clone());
                 }
                 let scr = self.allocate_ordinary_object(None);
-                self.define_data_property(scr, PropertyKey::from("width"), Value::Number(1920.0), true, true, true);
-                self.define_data_property(scr, PropertyKey::from("height"), Value::Number(1080.0), true, true, true);
+                self.define_data_property(
+                    scr,
+                    PropertyKey::from("width"),
+                    Value::Number(1920.0),
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    scr,
+                    PropertyKey::from("height"),
+                    Value::Number(1080.0),
+                    true,
+                    true,
+                    true,
+                );
                 self.window_singletons.insert("screen", Value::Object(scr));
                 Ok(Value::Object(scr))
             }
@@ -17225,7 +18272,9 @@ impl Vm {
             })),
             "scrollTo" | "scroll" => Ok(self.allocate_builtin_method(BuiltinId::WindowScrollTo)),
             "scrollBy" => Ok(self.allocate_builtin_method(BuiltinId::WindowScrollBy)),
-            "getComputedStyle" => Ok(self.allocate_builtin_method(BuiltinId::WindowGetComputedStyle)),
+            "getComputedStyle" => {
+                Ok(self.allocate_builtin_method(BuiltinId::WindowGetComputedStyle))
+            }
             "matchMedia" => Ok(self.allocate_builtin_method(BuiltinId::WindowMatchMedia)),
             "addEventListener" | "removeEventListener" => {
                 Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener))
@@ -17239,27 +18288,102 @@ impl Vm {
                 let perf = self.allocate_ordinary_object(None);
                 let now_fn = self.allocate_builtin_method(BuiltinId::PerformanceNow);
                 self.define_data_property(perf, PropertyKey::from("now"), now_fn, true, true, true);
-                self.define_data_property(perf, PropertyKey::from("timeOrigin"), Value::Number(0.0), true, true, true);
+                self.define_data_property(
+                    perf,
+                    PropertyKey::from("timeOrigin"),
+                    Value::Number(0.0),
+                    true,
+                    true,
+                    true,
+                );
                 let mark_fn = self.allocate_builtin_method(BuiltinId::PerformanceMark);
-                self.define_data_property(perf, PropertyKey::from("mark"), mark_fn, true, true, true);
+                self.define_data_property(
+                    perf,
+                    PropertyKey::from("mark"),
+                    mark_fn,
+                    true,
+                    true,
+                    true,
+                );
                 let measure_fn = self.allocate_builtin_method(BuiltinId::PerformanceMeasure);
-                self.define_data_property(perf, PropertyKey::from("measure"), measure_fn, true, true, true);
+                self.define_data_property(
+                    perf,
+                    PropertyKey::from("measure"),
+                    measure_fn,
+                    true,
+                    true,
+                    true,
+                );
                 let clear_marks_fn = self.allocate_builtin_method(BuiltinId::PerformanceClearMarks);
-                self.define_data_property(perf, PropertyKey::from("clearMarks"), clear_marks_fn, true, true, true);
-                let clear_measures_fn = self.allocate_builtin_method(BuiltinId::PerformanceClearMeasures);
-                self.define_data_property(perf, PropertyKey::from("clearMeasures"), clear_measures_fn, true, true, true);
+                self.define_data_property(
+                    perf,
+                    PropertyKey::from("clearMarks"),
+                    clear_marks_fn,
+                    true,
+                    true,
+                    true,
+                );
+                let clear_measures_fn =
+                    self.allocate_builtin_method(BuiltinId::PerformanceClearMeasures);
+                self.define_data_property(
+                    perf,
+                    PropertyKey::from("clearMeasures"),
+                    clear_measures_fn,
+                    true,
+                    true,
+                    true,
+                );
                 let get_entries_fn = self.allocate_builtin_method(BuiltinId::PerformanceGetEntries);
-                self.define_data_property(perf, PropertyKey::from("getEntries"), get_entries_fn, true, true, true);
-                let get_entries_by_name_fn = self.allocate_builtin_method(BuiltinId::PerformanceGetEntriesByName);
-                self.define_data_property(perf, PropertyKey::from("getEntriesByName"), get_entries_by_name_fn, true, true, true);
-                let get_entries_by_type_fn = self.allocate_builtin_method(BuiltinId::PerformanceGetEntriesByType);
-                self.define_data_property(perf, PropertyKey::from("getEntriesByType"), get_entries_by_type_fn, true, true, true);
+                self.define_data_property(
+                    perf,
+                    PropertyKey::from("getEntries"),
+                    get_entries_fn,
+                    true,
+                    true,
+                    true,
+                );
+                let get_entries_by_name_fn =
+                    self.allocate_builtin_method(BuiltinId::PerformanceGetEntriesByName);
+                self.define_data_property(
+                    perf,
+                    PropertyKey::from("getEntriesByName"),
+                    get_entries_by_name_fn,
+                    true,
+                    true,
+                    true,
+                );
+                let get_entries_by_type_fn =
+                    self.allocate_builtin_method(BuiltinId::PerformanceGetEntriesByType);
+                self.define_data_property(
+                    perf,
+                    PropertyKey::from("getEntriesByType"),
+                    get_entries_by_type_fn,
+                    true,
+                    true,
+                    true,
+                );
                 let timing = self.allocate_ordinary_object(None);
-                self.define_data_property(timing, PropertyKey::from("navigationStart"), Value::Number(0.0), true, true, true);
-                self.define_data_property(perf, PropertyKey::from("timing"), Value::Object(timing), true, true, true);
+                self.define_data_property(
+                    timing,
+                    PropertyKey::from("navigationStart"),
+                    Value::Number(0.0),
+                    true,
+                    true,
+                    true,
+                );
+                self.define_data_property(
+                    perf,
+                    PropertyKey::from("timing"),
+                    Value::Object(timing),
+                    true,
+                    true,
+                    true,
+                );
                 Ok(Value::Object(perf))
             }
-            "requestIdleCallback" => Ok(self.allocate_builtin_method(BuiltinId::RequestIdleCallback)),
+            "requestIdleCallback" => {
+                Ok(self.allocate_builtin_method(BuiltinId::RequestIdleCallback))
+            }
             "cancelIdleCallback" => Ok(self.allocate_builtin_method(BuiltinId::CancelIdleCallback)),
             "btoa" => Ok(self.allocate_builtin_method(BuiltinId::Btoa)),
             "atob" => Ok(self.allocate_builtin_method(BuiltinId::Atob)),
@@ -17275,7 +18399,11 @@ impl Vm {
             }
             "crypto" => {
                 let crypto = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
-                self.define_builtin_method(crypto, "getRandomValues", BuiltinId::CryptoGetRandomValues);
+                self.define_builtin_method(
+                    crypto,
+                    "getRandomValues",
+                    BuiltinId::CryptoGetRandomValues,
+                );
                 self.define_builtin_method(crypto, "randomUUID", BuiltinId::CryptoRandomUUID);
                 Ok(Value::Object(crypto))
             }
@@ -17348,7 +18476,10 @@ impl Vm {
             "length" => {
                 let len = self
                     .host
-                    .history(HistoryAction::Go { window: WindowId(0), delta: 0 })
+                    .history(HistoryAction::Go {
+                        window: WindowId(0),
+                        delta: 0,
+                    })
                     .map(|o| o.length)
                     .unwrap_or(1);
                 Ok(Value::Number(len as f64))
@@ -17356,7 +18487,10 @@ impl Vm {
             "state" => {
                 let state = self
                     .host
-                    .history(HistoryAction::Go { window: WindowId(0), delta: 0 })
+                    .history(HistoryAction::Go {
+                        window: WindowId(0),
+                        delta: 0,
+                    })
                     .ok()
                     .and_then(|o| o.state);
                 Ok(match state {
@@ -17373,32 +18507,56 @@ impl Vm {
             // The document is its own root; per spec its ownerDocument is null.
             "ownerDocument" => Ok(Value::Null),
             "body" => {
-                let res = self.host.read_dom(DomRead::DocumentBody { window: WindowId(0) });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+                let res = self.host.read_dom(DomRead::DocumentBody {
+                    window: WindowId(0),
+                });
+                Ok(match res {
+                    Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Null,
+                })
             }
             "head" => {
-                let res = self.host.read_dom(DomRead::DocumentHead { window: WindowId(0) });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+                let res = self.host.read_dom(DomRead::DocumentHead {
+                    window: WindowId(0),
+                });
+                Ok(match res {
+                    Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Null,
+                })
             }
             // The element a page scrolls: in standards mode that is `<html>`,
             // and scripts read it to find or set the scroll position.
             "documentElement" | "scrollingElement" => {
-                let res = self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+                let res = self.host.read_dom(DomRead::DocumentRoot {
+                    window: WindowId(0),
+                });
+                Ok(match res {
+                    Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Null,
+                })
             }
             "importNode" | "adoptNode" => {
                 Ok(self.allocate_builtin_method(BuiltinId::DomDocImportNode))
             }
             "hasFocus" => Ok(self.allocate_builtin_method(BuiltinId::DomDocHasFocus)),
             "title" => {
-                let head_res = self.host.read_dom(DomRead::DocumentHead { window: WindowId(0) });
+                let head_res = self.host.read_dom(DomRead::DocumentHead {
+                    window: WindowId(0),
+                });
                 match head_res {
                     Ok(DomReadResult::Node(head_id)) => {
-                        let title_res = self.host.read_dom(DomRead::QuerySelector { root: head_id, selectors: "title".to_string() });
+                        let title_res = self.host.read_dom(DomRead::QuerySelector {
+                            root: head_id,
+                            selectors: "title".to_string(),
+                        });
                         match title_res {
                             Ok(DomReadResult::Node(title_id)) => {
-                                let text_res = self.host.read_dom(DomRead::TextContent { node: title_id });
-                                Ok(match text_res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
+                                let text_res =
+                                    self.host.read_dom(DomRead::TextContent { node: title_id });
+                                Ok(match text_res {
+                                    Ok(DomReadResult::String(s)) => self.make_string_value(&s),
+                                    _ => self.make_string_value(""),
+                                })
                             }
                             _ => Ok(self.make_string_value("")),
                         }
@@ -17444,8 +18602,16 @@ impl Vm {
                         true,
                         true,
                     );
-                    self.define_builtin_method(object, "getAttribute", BuiltinId::ElementStubGetAttribute);
-                    self.define_builtin_method(object, "hasAttribute", BuiltinId::ElementStubHasAttribute);
+                    self.define_builtin_method(
+                        object,
+                        "getAttribute",
+                        BuiltinId::ElementStubGetAttribute,
+                    );
+                    self.define_builtin_method(
+                        object,
+                        "hasAttribute",
+                        BuiltinId::ElementStubHasAttribute,
+                    );
                     Ok(Value::Object(object))
                 } else {
                     Ok(Value::Null)
@@ -17453,17 +18619,29 @@ impl Vm {
             }
             "URL" | "documentURI" => {
                 let res = self.host.location(WindowId(0));
-                Ok(match res { Ok(l) => self.make_string_value(&l.href), _ => self.make_string_value("") })
+                Ok(match res {
+                    Ok(l) => self.make_string_value(&l.href),
+                    _ => self.make_string_value(""),
+                })
             }
             "domain" => {
                 let res = self.host.location(WindowId(0));
-                Ok(match res { Ok(l) => self.make_string_value(&l.hostname), _ => self.make_string_value("") })
+                Ok(match res {
+                    Ok(l) => self.make_string_value(&l.hostname),
+                    _ => self.make_string_value(""),
+                })
             }
             "querySelector" => Ok(self.allocate_builtin_method(BuiltinId::DomDocQuerySelector)),
-            "querySelectorAll" => Ok(self.allocate_builtin_method(BuiltinId::DomDocQuerySelectorAll)),
+            "querySelectorAll" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomDocQuerySelectorAll))
+            }
             "getElementById" => Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementById)),
-            "getElementsByClassName" => Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementsByClassName)),
-            "getElementsByTagName" => Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementsByTagName)),
+            "getElementsByClassName" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementsByClassName))
+            }
+            "getElementsByTagName" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementsByTagName))
+            }
             "createElement" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateElement)),
             "createElementNS" => Ok(self.allocate_builtin_method(BuiltinId::DomCreateElementNs)),
             "createTextNode" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateTextNode)),
@@ -17474,7 +18652,9 @@ impl Vm {
             "elementsFromPoint" => {
                 Ok(self.allocate_builtin_method(BuiltinId::DomDocElementsFromPoint))
             }
-            "createDocumentFragment" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateFragment)),
+            "createDocumentFragment" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateFragment))
+            }
             "write" | "writeln" => Ok(self.allocate_builtin_method(BuiltinId::DomDocWrite)),
             "addEventListener" | "removeEventListener" => {
                 Ok(self.allocate_builtin_method(BuiltinId::DomNodeAddEventListener))
@@ -17504,8 +18684,13 @@ impl Vm {
             "hidden" => Ok(Value::Bool(false)),
             "visibilityState" => Ok(self.make_string_value("visible")),
             "activeElement" => {
-                let res = self.host.read_dom(DomRead::ActiveElement { window: WindowId(0) });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+                let res = self.host.read_dom(DomRead::ActiveElement {
+                    window: WindowId(0),
+                });
+                Ok(match res {
+                    Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Null,
+                })
             }
             "createEvent" | "createComment" => {
                 // Return a stub event/comment object
@@ -17521,7 +18706,8 @@ impl Vm {
                 }
                 let impl_obj = self.allocate_ordinary_object(Some(self.object_prototype_ref()));
                 let value = Value::Object(impl_obj);
-                self.window_singletons.insert("implementation", value.clone());
+                self.window_singletons
+                    .insert("implementation", value.clone());
                 Ok(value)
             }
             _ => Ok(Value::Undefined),
@@ -18103,13 +19289,29 @@ impl Vm {
         };
         match name.as_str() {
             "length" => {
-                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() });
-                let cls = match res { Ok(DomReadResult::String(s)) => s, _ => String::new() };
-                Ok(Value::Number(if cls.trim().is_empty() { 0.0 } else { cls.split_whitespace().count() as f64 }))
+                let res = self.host.read_dom(DomRead::Attribute {
+                    node: node_id,
+                    name: "class".to_string(),
+                });
+                let cls = match res {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                Ok(Value::Number(if cls.trim().is_empty() {
+                    0.0
+                } else {
+                    cls.split_whitespace().count() as f64
+                }))
             }
             "value" => {
-                let res = self.host.read_dom(DomRead::Attribute { node: node_id, name: "class".to_string() });
-                Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => self.make_string_value("") })
+                let res = self.host.read_dom(DomRead::Attribute {
+                    node: node_id,
+                    name: "class".to_string(),
+                });
+                Ok(match res {
+                    Ok(DomReadResult::String(s)) => self.make_string_value(&s),
+                    _ => self.make_string_value(""),
+                })
             }
             "add" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListAdd)),
             "remove" => Ok(self.allocate_builtin_method(BuiltinId::DomClassListRemove)),
@@ -18127,11 +19329,7 @@ impl Vm {
         }
     }
 
-    fn get_style_property(
-        &mut self,
-        slot: HostObjectSlot,
-        name: String,
-    ) -> Result<Value, VmError> {
+    fn get_style_property(&mut self, slot: HostObjectSlot, name: String) -> Result<Value, VmError> {
         match name.as_str() {
             "getPropertyValue" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleGetProperty)),
             "setProperty" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleSetProperty)),
@@ -18140,10 +19338,10 @@ impl Vm {
                 // Read a camelCase CSS property back from the inline style attr
                 // (`el.style.color`), or the whole declaration via `cssText`.
                 let node_id = NodeId(slot.handle as u32);
-                let existing = match self
-                    .host
-                    .read_dom(DomRead::Attribute { node: node_id, name: "style".to_string() })
-                {
+                let existing = match self.host.read_dom(DomRead::Attribute {
+                    node: node_id,
+                    name: "style".to_string(),
+                }) {
                     Ok(DomReadResult::String(s)) => s,
                     _ => String::new(),
                 };
@@ -18165,9 +19363,10 @@ impl Vm {
     ) -> Result<Value, VmError> {
         let node_id = NodeId(slot.handle as u32);
         let attr = format!("data-{}", camel_to_css_prop(&name));
-        let res = self
-            .host
-            .read_dom(DomRead::Attribute { node: node_id, name: attr });
+        let res = self.host.read_dom(DomRead::Attribute {
+            node: node_id,
+            name: attr,
+        });
         Ok(match res {
             Ok(DomReadResult::String(s)) => self.make_string_value(&s),
             // Absent data attribute: fall back to Object.prototype so plain
@@ -18236,7 +19435,9 @@ impl Vm {
         };
         if !inline.is_empty() {
             if inline.eq_ignore_ascii_case("inherit") {
-                return self.computed_style_parent_value(node, prop).unwrap_or_default();
+                return self
+                    .computed_style_parent_value(node, prop)
+                    .unwrap_or_default();
             }
             return inline;
         }
@@ -18246,7 +19447,10 @@ impl Vm {
         match prop {
             "display" => {
                 let hidden = matches!(
-                    self.host.read_dom(DomRead::Attribute { node, name: "hidden".to_string() }),
+                    self.host.read_dom(DomRead::Attribute {
+                        node,
+                        name: "hidden".to_string()
+                    }),
                     Ok(DomReadResult::String(_))
                 );
                 if hidden {
@@ -18332,11 +19536,17 @@ impl Vm {
                 let left = self.computed_style_value(node, &l);
                 box_shorthand_value(&top, &right, &bottom, &left)
             }
-            "border-top-width" | "border-right-width" | "border-bottom-width"
+            "border-top-width"
+            | "border-right-width"
+            | "border-bottom-width"
             | "border-left-width" => "0px".to_string(),
-            "border-top-style" | "border-right-style" | "border-bottom-style"
+            "border-top-style"
+            | "border-right-style"
+            | "border-bottom-style"
             | "border-left-style" => "none".to_string(),
-            "border-top-color" | "border-right-color" | "border-bottom-color"
+            "border-top-color"
+            | "border-right-color"
+            | "border-bottom-color"
             | "border-left-color" => "currentcolor".to_string(),
             "vertical-align" => "baseline".to_string(),
             "cursor" => "auto".to_string(),
@@ -18357,38 +19567,105 @@ impl Vm {
         key: PropertyKey,
         value: Value,
     ) -> Result<(), VmError> {
-        let name = match &key { PropertyKey::String(s) => s.clone(), _ => return Ok(()) };
+        let name = match &key {
+            PropertyKey::String(s) => s.clone(),
+            _ => return Ok(()),
+        };
         match slot.class {
             HostObjectClass::Node | HostObjectClass::EventTarget => {
                 let node_id = NodeId(slot.handle as u32);
                 match name.as_str() {
                     "innerHTML" => {
                         let html = self.to_string(&value);
-                        let _ = self.host.mutate_dom(DomMutation::SetInnerHtml { node: node_id, html });
+                        let _ = self.host.mutate_dom(DomMutation::SetInnerHtml {
+                            node: node_id,
+                            html,
+                        });
                         self.connect_custom_elements(node_id)?;
                     }
                     "outerHTML" => {
                         let html = self.to_string(&value);
-                        let _ = self.host.mutate_dom(DomMutation::SetOuterHtml { node: node_id, html });
+                        let _ = self.host.mutate_dom(DomMutation::SetOuterHtml {
+                            node: node_id,
+                            html,
+                        });
                     }
                     "textContent" | "nodeValue" | "data" => {
                         let text = self.to_string(&value);
-                        let _ = self.host.mutate_dom(DomMutation::SetTextContent { node: node_id, value: text });
+                        let _ = self.host.mutate_dom(DomMutation::SetTextContent {
+                            node: node_id,
+                            value: text,
+                        });
                     }
-                    "id" => { let v = self.to_string(&value); let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "id".to_string(), value: v }); }
-                    "className" => { let v = self.to_string(&value); let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "class".to_string(), value: v }); }
-                    "value" => { let v = self.to_string(&value); let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "value".to_string(), value: v }); }
-                    "href" => { let v = self.to_string(&value); let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "href".to_string(), value: v }); }
-                    "src" => { let v = self.to_string(&value); let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "src".to_string(), value: v }); }
+                    "id" => {
+                        let v = self.to_string(&value);
+                        let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                            node: node_id,
+                            name: "id".to_string(),
+                            value: v,
+                        });
+                    }
+                    "className" => {
+                        let v = self.to_string(&value);
+                        let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                            node: node_id,
+                            name: "class".to_string(),
+                            value: v,
+                        });
+                    }
+                    "value" => {
+                        let v = self.to_string(&value);
+                        let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                            node: node_id,
+                            name: "value".to_string(),
+                            value: v,
+                        });
+                    }
+                    "href" => {
+                        let v = self.to_string(&value);
+                        let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                            node: node_id,
+                            name: "href".to_string(),
+                            value: v,
+                        });
+                    }
+                    "src" => {
+                        let v = self.to_string(&value);
+                        let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                            node: node_id,
+                            name: "src".to_string(),
+                            value: v,
+                        });
+                    }
                     "hidden" => {
                         let truthy = self.is_truthy(&value);
-                        if truthy { let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "hidden".to_string(), value: String::new() }); }
-                        else { let _ = self.host.mutate_dom(DomMutation::RemoveAttribute { node: node_id, name: "hidden".to_string() }); }
+                        if truthy {
+                            let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                                node: node_id,
+                                name: "hidden".to_string(),
+                                value: String::new(),
+                            });
+                        } else {
+                            let _ = self.host.mutate_dom(DomMutation::RemoveAttribute {
+                                node: node_id,
+                                name: "hidden".to_string(),
+                            });
+                        }
                     }
                     "disabled" => {
                         let truthy = self.is_truthy(&value);
-                        if truthy { let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "disabled".to_string(), value: String::new() }); }
-                        else { let _ = self.host.mutate_dom(DomMutation::RemoveAttribute { node: node_id, name: "disabled".to_string() }); }
+                        if truthy {
+                            let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                                node: node_id,
+                                name: "disabled".to_string(),
+                                value: String::new(),
+                            });
+                        } else {
+                            let _ = self.host.mutate_dom(DomMutation::RemoveAttribute {
+                                node: node_id,
+                                name: "disabled".to_string(),
+                            });
+                        }
                     }
                     "scrollTop" | "scrollLeft" => {
                         // Only the root element scrolls the window; other
@@ -18404,8 +19681,16 @@ impl Vm {
                                 .window_metrics(WindowId(0))
                                 .map(|m| (m.scroll_x, m.scroll_y))
                                 .unwrap_or((0.0, 0.0));
-                            let (x, y) = if name == "scrollLeft" { (n, cur_y) } else { (cur_x, n) };
-                            let _ = self.host.mutate_dom(DomMutation::SetWindowScroll { window: WindowId(0), x, y });
+                            let (x, y) = if name == "scrollLeft" {
+                                (n, cur_y)
+                            } else {
+                                (cur_x, n)
+                            };
+                            let _ = self.host.mutate_dom(DomMutation::SetWindowScroll {
+                                window: WindowId(0),
+                                x,
+                                y,
+                            });
                         }
                     }
                     _ => {}
@@ -18415,12 +19700,19 @@ impl Vm {
                 let node_id = NodeId(slot.handle as u32);
                 let css_prop = camel_to_css_prop(&name);
                 let new_val = self.to_string(&value);
-                let existing = match self.host.read_dom(DomRead::Attribute { node: node_id, name: "style".to_string() }) {
+                let existing = match self.host.read_dom(DomRead::Attribute {
+                    node: node_id,
+                    name: "style".to_string(),
+                }) {
                     Ok(DomReadResult::String(s)) => s,
                     _ => String::new(),
                 };
                 let updated = set_inline_style_prop(&existing, &css_prop, &new_val);
-                let _ = self.host.mutate_dom(DomMutation::SetAttribute { node: node_id, name: "style".to_string(), value: updated });
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                    node: node_id,
+                    name: "style".to_string(),
+                    value: updated,
+                });
             }
             HostObjectClass::Other("Dataset") => {
                 // `el.dataset.fooBar = v` writes the `data-foo-bar` attribute.
@@ -18450,18 +19742,28 @@ impl Vm {
                 // the element if the document has none.
                 if name == "title" {
                     let text = self.to_string(&value);
-                    let head = match self.host.read_dom(DomRead::DocumentHead { window: WindowId(0) }) {
+                    let head = match self.host.read_dom(DomRead::DocumentHead {
+                        window: WindowId(0),
+                    }) {
                         Ok(DomReadResult::Node(id)) => Some(id),
                         // No <head> yet: create one under documentElement (or
                         // the document itself) — boa creates it on demand too.
                         _ => {
-                            let parent = match self.host.read_dom(DomRead::DocumentRoot { window: WindowId(0) }) {
+                            let parent = match self.host.read_dom(DomRead::DocumentRoot {
+                                window: WindowId(0),
+                            }) {
                                 Ok(DomReadResult::Node(root)) => root,
                                 _ => NodeId(0),
                             };
-                            match self.host.mutate_dom(DomMutation::CreateElement { window: WindowId(0), local_name: "head".to_string() }) {
+                            match self.host.mutate_dom(DomMutation::CreateElement {
+                                window: WindowId(0),
+                                local_name: "head".to_string(),
+                            }) {
                                 Ok(DomMutationResult::Node(h)) => {
-                                    let _ = self.host.mutate_dom(DomMutation::Append { parent, children: vec![h] });
+                                    let _ = self.host.mutate_dom(DomMutation::Append {
+                                        parent,
+                                        children: vec![h],
+                                    });
                                     Some(h)
                                 }
                                 _ => None,
@@ -18469,20 +19771,37 @@ impl Vm {
                         }
                     };
                     let existing = head.and_then(|h| {
-                        match self.host.read_dom(DomRead::QuerySelector { root: h, selectors: "title".to_string() }) {
+                        match self.host.read_dom(DomRead::QuerySelector {
+                            root: h,
+                            selectors: "title".to_string(),
+                        }) {
                             Ok(DomReadResult::Node(id)) => Some(id),
                             _ => None,
                         }
                     });
                     match existing {
                         Some(title) => {
-                            let _ = self.host.mutate_dom(DomMutation::SetTextContent { node: title, value: text });
+                            let _ = self.host.mutate_dom(DomMutation::SetTextContent {
+                                node: title,
+                                value: text,
+                            });
                         }
                         None => {
                             if let Some(head) = head {
-                                if let Ok(DomMutationResult::Node(title)) = self.host.mutate_dom(DomMutation::CreateElement { window: WindowId(0), local_name: "title".to_string() }) {
-                                    let _ = self.host.mutate_dom(DomMutation::Append { parent: head, children: vec![title] });
-                                    let _ = self.host.mutate_dom(DomMutation::SetTextContent { node: title, value: text });
+                                if let Ok(DomMutationResult::Node(title)) =
+                                    self.host.mutate_dom(DomMutation::CreateElement {
+                                        window: WindowId(0),
+                                        local_name: "title".to_string(),
+                                    })
+                                {
+                                    let _ = self.host.mutate_dom(DomMutation::Append {
+                                        parent: head,
+                                        children: vec![title],
+                                    });
+                                    let _ = self.host.mutate_dom(DomMutation::SetTextContent {
+                                        node: title,
+                                        value: text,
+                                    });
                                 }
                             }
                         }
@@ -18514,8 +19833,8 @@ impl Vm {
                             Some((b, h)) => (b, Some(h.to_string())),
                             None => (v.as_str(), None),
                         };
-                        let same_doc = new_hash.is_some()
-                            && (new_base.is_empty() || new_base == cur_base);
+                        let same_doc =
+                            new_hash.is_some() && (new_base.is_empty() || new_base == cur_base);
                         if same_doc {
                             let _ = self.host.navigate(NavigationAction::SetHash {
                                 window: WindowId(0),
@@ -18593,7 +19912,11 @@ impl Vm {
         )
     }
 
-    fn get_storage_property(&mut self, slot: HostObjectSlot, name: String) -> Result<Value, VmError> {
+    fn get_storage_property(
+        &mut self,
+        slot: HostObjectSlot,
+        name: String,
+    ) -> Result<Value, VmError> {
         use super::host::{StorageAreaScope, StorageOp, StorageResult};
         let kind = match slot.handle {
             1 => super::host::StorageAreaKind::Session,
@@ -18606,7 +19929,10 @@ impl Vm {
                     kind,
                     scope: StorageAreaScope::Window(WindowId(0)),
                 });
-                Ok(match res { Ok(StorageResult::Len(n)) => Value::Number(n as f64), _ => Value::Number(0.0) })
+                Ok(match res {
+                    Ok(StorageResult::Len(n)) => Value::Number(n as f64),
+                    _ => Value::Number(0.0),
+                })
             }
             "getItem" => Ok(self.allocate_builtin_method(BuiltinId::StorageGetItem)),
             "setItem" => Ok(self.allocate_builtin_method(BuiltinId::StorageSetItem)),
@@ -18620,7 +19946,10 @@ impl Vm {
                     scope: StorageAreaScope::Window(WindowId(0)),
                     key: name,
                 });
-                Ok(match res { Ok(StorageResult::Value(Some(v))) => self.make_string_value(&v), _ => Value::Null })
+                Ok(match res {
+                    Ok(StorageResult::Value(Some(v))) => self.make_string_value(&v),
+                    _ => Value::Null,
+                })
             }
         }
     }
@@ -18642,8 +19971,8 @@ impl From<String> for PropertyKey {
 mod tests {
     use super::Vm;
     use crate::engine::ast::SourceType;
-    use crate::engine::{Compiler, Heap, JsPropertyDescriptor, Parser, PropertyKey, Value};
     use crate::engine::compiler::ModuleContext;
+    use crate::engine::{Compiler, Heap, JsPropertyDescriptor, Parser, PropertyKey, Value};
 
     fn run_script(source: &str) {
         let program = Parser::new(source).parse().expect("script should parse");
@@ -18887,8 +20216,20 @@ mod tests {
         let c = vm
             .get_own_property_descriptor(self_ns, &PropertyKey::from("C"))
             .expect("C should be exported");
-        assert!(matches!(f, JsPropertyDescriptor::Data { value: Value::Object(_), .. }));
-        assert!(matches!(c, JsPropertyDescriptor::Data { value: Value::Object(_), .. }));
+        assert!(matches!(
+            f,
+            JsPropertyDescriptor::Data {
+                value: Value::Object(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            c,
+            JsPropertyDescriptor::Data {
+                value: Value::Object(_),
+                ..
+            }
+        ));
         assert!(
             vm.get_own_property_descriptor(self_ns, &PropertyKey::from("default"))
                 .is_none()
@@ -18980,7 +20321,10 @@ mod tests {
             .compile()
             .expect("script should compile");
         vm.execute(&chunk).expect("script should execute");
-        assert_eq!(vm.globals.get("__result").cloned(), Some(Value::Number(42.0)));
+        assert_eq!(
+            vm.globals.get("__result").cloned(),
+            Some(Value::Number(42.0))
+        );
     }
 
     #[test]
@@ -19013,7 +20357,10 @@ mod tests {
         let dep_ns = vm.allocate_ordinary_object(None);
         vm.globals.insert(dep_key, Value::Object(dep_ns));
         vm.execute_module(&chunk).expect("module should execute");
-        assert_eq!(vm.globals.get("__shadow").cloned(), Some(Value::Number(7.0)));
+        assert_eq!(
+            vm.globals.get("__shadow").cloned(),
+            Some(Value::Number(7.0))
+        );
     }
 
     #[test]
@@ -19023,9 +20370,30 @@ mod tests {
         let mut vm = Vm::new(Heap::new());
 
         let dep_ns = vm.allocate_ordinary_object(None);
-        vm.define_data_property(dep_ns, PropertyKey::from("a"), Value::Number(1.0), true, true, true);
-        vm.define_data_property(dep_ns, PropertyKey::from("b"), Value::Number(2.0), true, true, true);
-        vm.define_data_property(dep_ns, PropertyKey::from("default"), Value::Number(99.0), true, true, true);
+        vm.define_data_property(
+            dep_ns,
+            PropertyKey::from("a"),
+            Value::Number(1.0),
+            true,
+            true,
+            true,
+        );
+        vm.define_data_property(
+            dep_ns,
+            PropertyKey::from("b"),
+            Value::Number(2.0),
+            true,
+            true,
+            true,
+        );
+        vm.define_data_property(
+            dep_ns,
+            PropertyKey::from("default"),
+            Value::Number(99.0),
+            true,
+            true,
+            true,
+        );
         vm.globals.insert(dep_key.clone(), Value::Object(dep_ns));
         vm.set_global_object(self_key.clone());
 
@@ -19184,8 +20552,14 @@ mod tests {
         let inner = backtrace.find("    at inner").expect("inner frame");
         let outer = backtrace.find("    at outer").expect("outer frame");
         let script = backtrace.find("    at <script>").expect("script frame");
-        assert!(inner < outer, "backtrace order was not innermost-first: {backtrace}");
-        assert!(outer < script, "backtrace order was not innermost-first: {backtrace}");
+        assert!(
+            inner < outer,
+            "backtrace order was not innermost-first: {backtrace}"
+        );
+        assert!(
+            outer < script,
+            "backtrace order was not innermost-first: {backtrace}"
+        );
     }
 
     #[test]
@@ -19199,7 +20573,10 @@ mod tests {
         let message = format!("{error}");
         assert!(message.contains("non-function value"), "{message}");
         assert!(message.contains("undefined"), "{message}");
-        assert!(vm.take_last_backtrace().is_some(), "backtrace should be captured");
+        assert!(
+            vm.take_last_backtrace().is_some(),
+            "backtrace should be captured"
+        );
     }
 
     #[test]
@@ -19240,7 +20617,10 @@ mod tests {
         let message = format!("{error}");
         assert!(message.contains("non-function value"), "{message}");
         assert!(message.contains("undefined"), "{message}");
-        assert!(vm.take_last_backtrace().is_some(), "backtrace should be captured");
+        assert!(
+            vm.take_last_backtrace().is_some(),
+            "backtrace should be captured"
+        );
 
         run_script(
             r#"
@@ -19404,9 +20784,9 @@ mod tests {
     }
 }
 
-    // ----------------------------------------------------------------
-    // Storage helpers
-    // ----------------------------------------------------------------
+// ----------------------------------------------------------------
+// Storage helpers
+// ----------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // CSS inline-style helpers (free functions, no VM state needed)
@@ -19427,8 +20807,16 @@ fn base64_encode(input: &[u8]) -> String {
         let val = (b0 << 16) | (b1 << 8) | b2;
         out.push(BASE64_CHARS[((val >> 18) & 63) as usize] as char);
         out.push(BASE64_CHARS[((val >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { BASE64_CHARS[((val >> 6) & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { BASE64_CHARS[(val & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            BASE64_CHARS[((val >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64_CHARS[(val & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -19647,7 +21035,9 @@ fn set_inline_style_prop(existing: &str, prop: &str, value: &str) -> String {
         .split(';')
         .filter_map(|part| {
             let part = part.trim();
-            if part.is_empty() { return None; }
+            if part.is_empty() {
+                return None;
+            }
             let mut iter = part.splitn(2, ':');
             let k = iter.next()?.trim().to_string();
             let v = iter.next().unwrap_or("").trim().to_string();
@@ -19662,5 +21052,9 @@ fn set_inline_style_prop(existing: &str, prop: &str, value: &str) -> String {
         props.push((prop.to_string(), value.to_string()));
     }
 
-    props.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join("; ")
+    props
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }

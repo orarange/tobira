@@ -27,8 +27,7 @@ fn typeof_window_global_reports_real_type_not_undefined() {
 
 #[test]
 fn get_random_values_writes_integer_typed_array() {
-    run(
-        r#"
+    run(r#"
         const a = new Uint8Array(16);
         const r = crypto.getRandomValues(a);
         assert(r === a);
@@ -38,14 +37,12 @@ fn get_random_values_writes_integer_typed_array() {
             if (a[i] < 0 || a[i] > 255 || (a[i] | 0) !== a[i]) allInRange = false;
         }
         assert(allInRange);
-    "#,
-    );
+    "#);
 }
 
 #[test]
 fn random_uuid_has_version_and_variant_shape() {
-    run(
-        r#"
+    run(r#"
         const u = crypto.randomUUID();
         assert(typeof u === 'string');
         assert(u.length === 36);
@@ -53,14 +50,12 @@ fn random_uuid_has_version_and_variant_shape() {
         assert(u[8] === '-' && u[13] === '-' && u[18] === '-' && u[23] === '-');
         const u2 = crypto.randomUUID();
         assert(u !== u2);
-    "#,
-    );
+    "#);
 }
 
 #[test]
 fn get_random_values_rejects_non_typed_array() {
-    run(
-        r#"
+    run(r#"
         let threw = false;
         try {
             crypto.getRandomValues({});
@@ -68,6 +63,5 @@ fn get_random_values_rejects_non_typed_array() {
             threw = (e instanceof TypeError);
         }
         assert(threw);
-    "#,
-    );
+    "#);
 }

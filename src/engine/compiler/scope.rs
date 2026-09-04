@@ -15,8 +15,13 @@ pub(super) enum ResolvedBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ImportBinding {
-    Named { dep_key: String, export_name: String },
-    Namespace { dep_key: String },
+    Named {
+        dep_key: String,
+        export_name: String,
+    },
+    Namespace {
+        dep_key: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

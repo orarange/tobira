@@ -324,7 +324,11 @@ impl<'a> super::FunctionCompiler<'a> {
         Ok(slot)
     }
 
-    pub(super) fn slice_array_slot(&mut self, source_slot: u16, start: u32) -> Result<u16, CompileError> {
+    pub(super) fn slice_array_slot(
+        &mut self,
+        source_slot: u16,
+        start: u32,
+    ) -> Result<u16, CompileError> {
         let slot = self.allocate_hidden_local()?;
         let property = self.add_string_constant("slice")?;
         let start_constant = self.add_number_constant(start as f64)?;
@@ -357,7 +361,10 @@ impl<'a> super::FunctionCompiler<'a> {
         Ok(())
     }
 
-    pub(super) fn push_undefined_into_array_slot(&mut self, array_slot: u16) -> Result<(), CompileError> {
+    pub(super) fn push_undefined_into_array_slot(
+        &mut self,
+        array_slot: u16,
+    ) -> Result<(), CompileError> {
         let push_name = self.add_string_constant("push")?;
         self.emit(Opcode::GetLocal(array_slot));
         self.emit(Opcode::GetPropForCall(push_name));

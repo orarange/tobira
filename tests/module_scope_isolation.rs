@@ -4,7 +4,11 @@ use tobira_engine::engine::ast::SourceType;
 use tobira_engine::engine::compiler::ModuleContext;
 use tobira_engine::engine::{Compiler, Heap, Parser, Vm};
 
-fn compile_module(source: &str, self_key: String, imports: HashMap<String, String>) -> tobira_engine::engine::Chunk {
+fn compile_module(
+    source: &str,
+    self_key: String,
+    imports: HashMap<String, String>,
+) -> tobira_engine::engine::Chunk {
     let program = Parser::new(source)
         .with_source_type(SourceType::Module)
         .parse()
@@ -41,8 +45,10 @@ fn exec_module_pair(module_a: &str, module_b: &str) -> Vm {
     let mut vm = Vm::new(Heap::new());
     vm.set_global_object(a_key);
     vm.set_global_object(b_key);
-    vm.execute_module(&a_chunk).expect("module A should execute");
-    vm.execute_module(&b_chunk).expect("module B should execute");
+    vm.execute_module(&a_chunk)
+        .expect("module A should execute");
+    vm.execute_module(&b_chunk)
+        .expect("module B should execute");
     vm
 }
 

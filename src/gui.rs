@@ -704,7 +704,10 @@ impl BrowserApp {
         // `scroll_y` can equal `previous_scroll_y` here yet still differ from
         // what's rendered — relying on that comparison alone left the content
         // frozen ("scrolls 24px then snaps back").
-        let rendered_scroll = self.latest_render_frame.as_ref().map(|frame| frame.scroll_y);
+        let rendered_scroll = self
+            .latest_render_frame
+            .as_ref()
+            .map(|frame| frame.scroll_y);
         if self.scroll_y != previous_scroll_y || rendered_scroll != Some(self.scroll_y) {
             self.latest_render_frame = None;
             self.request_content_render();
@@ -945,9 +948,9 @@ impl BrowserApp {
             // Media queries are answered at this width, so the styler has to know
             // it before anything is built or laid out at it.
             crate::browser::set_style_viewport_width(content_width);
-        // Media queries are answered at this width, so the styler has to know
-        // it before anything is built or laid out at it.
-        crate::browser::set_style_viewport_width(content_width);
+            // Media queries are answered at this width, so the styler has to know
+            // it before anything is built or laid out at it.
+            crate::browser::set_style_viewport_width(content_width);
             let interactive = InteractiveState {
                 hovered_node_id: hovered_element,
                 ..Default::default()
@@ -2445,7 +2448,15 @@ impl DocumentView {
                 let rects: Vec<(usize, f32, f32, f32, f32)> = layout
                     .element_hitboxes
                     .iter()
-                    .map(|h| (h.node_id, h.x as f32, h.y as f32, h.width as f32, h.height as f32))
+                    .map(|h| {
+                        (
+                            h.node_id,
+                            h.x as f32,
+                            h.y as f32,
+                            h.width as f32,
+                            h.height as f32,
+                        )
+                    })
                     .collect();
                 page.set_geometry(rects);
             }
@@ -4304,7 +4315,9 @@ fn draw_select_chevron(
     color: u32,
 ) {
     const HALF: u32 = 4;
-    let left = x.saturating_add(SELECT_CHEVRON_WIDTH / 2).saturating_sub(HALF);
+    let left = x
+        .saturating_add(SELECT_CHEVRON_WIDTH / 2)
+        .saturating_sub(HALF);
     let top = centre_y.saturating_sub(HALF / 2);
     for step in 0..=HALF {
         // Two pixels per step, walking in from both ends towards the point.
@@ -4407,21 +4420,15 @@ pub(crate) fn paint_layout(
         track_y
     } else {
         let travel = viewport_height.saturating_sub(thumb_h);
-        let thumb_offset = ((travel as u64) * (clamped_scroll_y as u64) / (max_scroll as u64)) as u32;
+        let thumb_offset =
+            ((travel as u64) * (clamped_scroll_y as u64) / (max_scroll as u64)) as u32;
         track_y.saturating_add(thumb_offset)
     };
     let thumb_x = track_x.saturating_add((SCROLLBAR_WIDTH.saturating_sub(6)) / 2);
     let thumb_w = SCROLLBAR_WIDTH.saturating_sub(6);
     if thumb_w > 0 && thumb_h > 0 {
         draw_rect(
-            buffer,
-            width,
-            height,
-            thumb_x,
-            thumb_y,
-            thumb_w,
-            thumb_h,
-            0xB0B0B0,
+            buffer, width, height, thumb_x, thumb_y, thumb_w, thumb_h, 0xB0B0B0,
         );
     }
 }
@@ -4519,8 +4526,7 @@ fn render_commands(
                 // below collide with it — the "crushed/ghosted toward the top while
                 // scrolling" bug. clip_top = offset_y keeps glyphs from bleeding up
                 // into the chrome (the chrome is painted before the content).
-                let text_draw_y =
-                    offset_y as i64 + text.y as i64 - scroll_y as i64;
+                let text_draw_y = offset_y as i64 + text.y as i64 - scroll_y as i64;
                 let clip_top = offset_y as i32;
                 // Draw text shadow first (behind main text)
                 if let Some(ref shadow) = text.text_shadow {
@@ -5192,8 +5198,11 @@ fn dump_frame_if_asked(layout: &LayoutDocument, styled: &StyledNode, width: u32)
     // behaviour shows up. `--dump-styled` loads its own copy of the page and
     // cannot see this: the carousel on firefox.com is sized and faded by its
     // script writing inline styles, and nothing else says what state it is in.
-    let _ = writeln!(out, "
-=== elements with an inline style ===");
+    let _ = writeln!(
+        out,
+        "
+=== elements with an inline style ==="
+    );
     fn walk(node: &StyledNode, out: &mut String) {
         use std::fmt::Write as _;
         let StyledNode::Element(element) = node else {
@@ -5207,7 +5216,11 @@ fn dump_frame_if_asked(layout: &LayoutDocument, styled: &StyledNode, width: u32)
                 out,
                 "  <{}> class={:?} opacity={} style={:?}",
                 element.tag_name,
-                class.split_whitespace().take(3).collect::<Vec<_>>().join("."),
+                class
+                    .split_whitespace()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join("."),
                 element.style.opacity,
                 inline.chars().take(90).collect::<String>()
             );
@@ -5232,7 +5245,11 @@ fn render_content_frame(
         request.content_width,
         fonts,
     );
-    dump_frame_if_asked(&layout, &request.page.styled_document, request.content_width);
+    dump_frame_if_asked(
+        &layout,
+        &request.page.styled_document,
+        request.content_width,
+    );
     let mut pixels = vec![
         layout.background_color;
         request.content_width as usize * request.viewport_height as usize
@@ -5932,8 +5949,8 @@ mod tests {
 
     #[test]
     fn scroll_renders_correct_vertical_slice() {
-        use super::{render_content_frame, HitTarget, RenderPageSnapshot, RenderRequest};
-        use crate::css::{build_styled_tree, parse_stylesheet, InteractiveState};
+        use super::{HitTarget, RenderPageSnapshot, RenderRequest, render_content_frame};
+        use crate::css::{InteractiveState, build_styled_tree, parse_stylesheet};
         use crate::html::parse_document;
         use crate::image::ImageStore;
 
@@ -5999,8 +6016,8 @@ mod tests {
         // top) must be drawn shifted up and clipped — NOT clamped to the top edge with
         // its full height. Clamping makes it too tall, so it covers the content that
         // should appear below it ("crushed/ghosted toward the top" while scrolling).
-        use super::{render_content_frame, HitTarget, RenderPageSnapshot, RenderRequest};
-        use crate::css::{build_styled_tree, parse_stylesheet, InteractiveState};
+        use super::{HitTarget, RenderPageSnapshot, RenderRequest, render_content_frame};
+        use crate::css::{InteractiveState, build_styled_tree, parse_stylesheet};
         use crate::html::parse_document;
         use crate::image::ImageStore;
 
@@ -6040,9 +6057,8 @@ mod tests {
             let s = row as usize * w;
             frame.pixels[s..s + w].iter().any(|&p| p == color)
         };
-        let first_row = |color: u32| -> Option<u32> {
-            (0..frame.viewport_height).find(|&r| row_has(r, color))
-        };
+        let first_row =
+            |color: u32| -> Option<u32> { (0..frame.viewport_height).find(|&r| row_has(r, color)) };
 
         let marker = 0x00AB_CDEFu32;
         let green = 0x0000_FF00u32;

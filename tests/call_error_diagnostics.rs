@@ -7,7 +7,9 @@ use tobira_engine::engine::{Compiler, Heap, Parser, Vm};
 
 fn error_message(src: &str) -> String {
     let program = Parser::new(src).parse().expect("script should parse");
-    let chunk = Compiler::new(&program).compile().expect("script should compile");
+    let chunk = Compiler::new(&program)
+        .compile()
+        .expect("script should compile");
     let mut vm = Vm::new(Heap::new());
     match vm.execute(&chunk) {
         Ok(_) => panic!("script was expected to fail"),
@@ -20,7 +22,10 @@ fn names_the_receiver_and_its_own_keys() {
     let message = error_message("const o = { a: 1, b: 2 }; o.missing();");
     assert!(message.contains("missing is not a function"), "{message}");
     assert!(message.contains("Object"), "{message}");
-    assert!(message.contains('a') && message.contains('b'), "own keys missing from: {message}");
+    assert!(
+        message.contains('a') && message.contains('b'),
+        "own keys missing from: {message}"
+    );
 }
 
 /// The receiver's tag distinguishes a real Promise from a look-alike, which is
@@ -28,13 +33,19 @@ fn names_the_receiver_and_its_own_keys() {
 #[test]
 fn a_promise_receiver_is_named_as_one() {
     let message = error_message("Promise.resolve(1).notAMethod();");
-    assert!(message.contains("notAMethod is not a function"), "{message}");
+    assert!(
+        message.contains("notAMethod is not a function"),
+        "{message}"
+    );
     assert!(message.contains("Promise"), "{message}");
 
     let message = error_message("({}).catch();");
     assert!(message.contains("catch is not a function"), "{message}");
     assert!(message.contains("Object"), "{message}");
-    assert!(!message.contains("Promise"), "a plain object must not read as a Promise: {message}");
+    assert!(
+        !message.contains("Promise"),
+        "a plain object must not read as a Promise: {message}"
+    );
 }
 
 #[test]

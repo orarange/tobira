@@ -253,7 +253,8 @@ impl Builder {
     fn new() -> Self {
         Self {
             nodes: vec![BuildNode {
-                kind: BuildKind::Element { namespace: Default::default(),
+                kind: BuildKind::Element {
+                    namespace: Default::default(),
                     tag_name: "document".to_string(),
                     attributes: BTreeMap::new(),
                 },
@@ -404,7 +405,10 @@ impl Builder {
             // it rather than the last child of the table.
             let neighbour = if self.needs_fostering(None) {
                 self.enclosing_table().and_then(|(table, parent)| {
-                    let position = self.nodes[parent].children.iter().position(|n| *n == table)?;
+                    let position = self.nodes[parent]
+                        .children
+                        .iter()
+                        .position(|n| *n == table)?;
                     position
                         .checked_sub(1)
                         .and_then(|before| self.nodes[parent].children.get(before).copied())
@@ -575,7 +579,11 @@ impl Builder {
         let Some(&index) = self.open.iter().find(|i| self.tag_of(**i) == target) else {
             return;
         };
-        if let BuildKind::Element { attributes: existing, .. } = &mut self.nodes[index].kind {
+        if let BuildKind::Element {
+            attributes: existing,
+            ..
+        } = &mut self.nodes[index].kind
+        {
             for (name, value) in attributes {
                 existing.entry(name).or_insert(value);
             }
@@ -900,24 +908,100 @@ fn is_formatting(tag: &str) -> bool {
 fn is_special(tag: &str) -> bool {
     matches!(
         tag,
-        "address" | "applet" | "area" | "article" | "aside" | "base" | "basefont" | "bgsound"
-            | "blockquote" | "body" | "br" | "button" | "caption" | "center" | "col"
-            | "colgroup" | "dd" | "details" | "dir" | "div" | "dl" | "dt" | "embed"
-            | "fieldset" | "figcaption" | "figure" | "footer" | "form" | "frame" | "frameset"
-            | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "head" | "header" | "hgroup" | "hr"
-            | "html" | "iframe" | "img" | "input" | "keygen" | "li" | "link" | "listing"
-            | "main" | "marquee" | "menu" | "meta" | "nav" | "noembed" | "noframes"
-            | "noscript" | "object" | "ol" | "p" | "param" | "plaintext" | "pre" | "script"
-            | "search" | "section" | "select" | "source" | "style" | "summary" | "table"
-            | "tbody" | "td" | "template" | "textarea" | "tfoot" | "th" | "thead" | "title"
-            | "tr" | "track" | "ul" | "wbr" | "xmp" | "document"
+        "address"
+            | "applet"
+            | "area"
+            | "article"
+            | "aside"
+            | "base"
+            | "basefont"
+            | "bgsound"
+            | "blockquote"
+            | "body"
+            | "br"
+            | "button"
+            | "caption"
+            | "center"
+            | "col"
+            | "colgroup"
+            | "dd"
+            | "details"
+            | "dir"
+            | "div"
+            | "dl"
+            | "dt"
+            | "embed"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "frame"
+            | "frameset"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "head"
+            | "header"
+            | "hgroup"
+            | "hr"
+            | "html"
+            | "iframe"
+            | "img"
+            | "input"
+            | "keygen"
+            | "li"
+            | "link"
+            | "listing"
+            | "main"
+            | "marquee"
+            | "menu"
+            | "meta"
+            | "nav"
+            | "noembed"
+            | "noframes"
+            | "noscript"
+            | "object"
+            | "ol"
+            | "p"
+            | "param"
+            | "plaintext"
+            | "pre"
+            | "script"
+            | "search"
+            | "section"
+            | "select"
+            | "source"
+            | "style"
+            | "summary"
+            | "table"
+            | "tbody"
+            | "td"
+            | "template"
+            | "textarea"
+            | "tfoot"
+            | "th"
+            | "thead"
+            | "title"
+            | "tr"
+            | "track"
+            | "ul"
+            | "wbr"
+            | "xmp"
+            | "document"
     )
 }
 
 /// Elements that put a marker on the formatting list: formatting does not
 /// reach across one.
 fn starts_formatting_scope(tag: &str) -> bool {
-    matches!(tag, "applet" | "marquee" | "object" | "td" | "th" | "caption" | "template")
+    matches!(
+        tag,
+        "applet" | "marquee" | "object" | "td" | "th" | "caption" | "template"
+    )
 }
 
 /// HTML elements that cannot live inside `<svg>` or `<math>`.
@@ -940,8 +1024,10 @@ fn ensure_table_ancestry(builder: &mut Builder, new_tag: &str) {
     // inside it. `<table><tr><div><td>` puts the div in front of the table --
     // it cannot be drawn there -- and the cell that follows still goes into the
     // row, so the stack is unwound back to the table's own parts first.
-    if matches!(new_tag, "td" | "th" | "tr" | "tbody" | "thead" | "tfoot" | "caption" | "col")
-        && builder.is_open("table")
+    if matches!(
+        new_tag,
+        "td" | "th" | "tr" | "tbody" | "thead" | "tfoot" | "caption" | "col"
+    ) && builder.is_open("table")
     {
         while builder.open.len() > 1
             && !matches!(
@@ -978,7 +1064,10 @@ fn ensure_table_ancestry(builder: &mut Builder, new_tag: &str) {
             if builder.tag_of(builder.current()) == "table" {
                 push(builder, "tbody");
             }
-            if matches!(builder.tag_of(builder.current()), "tbody" | "thead" | "tfoot") {
+            if matches!(
+                builder.tag_of(builder.current()),
+                "tbody" | "thead" | "tfoot"
+            ) {
                 push(builder, "tr");
             }
         }
@@ -986,9 +1075,7 @@ fn ensure_table_ancestry(builder: &mut Builder, new_tag: &str) {
         // be open ends first: `<table><tr><caption>` puts the caption beside
         // the row, not inside it. The standard calls this clearing the stack
         // back to a table context.
-        "caption" | "colgroup" | "tbody" | "thead" | "tfoot"
-            if builder.is_open("table") =>
-        {
+        "caption" | "colgroup" | "tbody" | "thead" | "tfoot" if builder.is_open("table") => {
             while matches!(
                 builder.tag_of(builder.current()),
                 "tr" | "td" | "th" | "tbody" | "thead" | "tfoot" | "caption" | "colgroup"
@@ -1095,13 +1182,42 @@ fn breaks_out_of_foreign_content(tag: &str) -> bool {
 /// the drawing silently loses its coordinate system.
 fn adjust_svg_tag_name(name: &str) -> Option<&'static str> {
     const NAMES: &[&str] = &[
-        "altGlyph", "altGlyphDef", "altGlyphItem", "animateColor", "animateMotion",
-        "animateTransform", "clipPath", "feBlend", "feColorMatrix", "feComponentTransfer",
-        "feComposite", "feConvolveMatrix", "feDiffuseLighting", "feDisplacementMap",
-        "feDistantLight", "feFlood", "feFuncA", "feFuncB", "feFuncG", "feFuncR",
-        "feGaussianBlur", "feImage", "feMerge", "feMergeNode", "feMorphology", "feOffset",
-        "fePointLight", "feSpecularLighting", "feSpotLight", "feTile", "feTurbulence",
-        "foreignObject", "glyphRef", "linearGradient", "radialGradient", "textPath",
+        "altGlyph",
+        "altGlyphDef",
+        "altGlyphItem",
+        "animateColor",
+        "animateMotion",
+        "animateTransform",
+        "clipPath",
+        "feBlend",
+        "feColorMatrix",
+        "feComponentTransfer",
+        "feComposite",
+        "feConvolveMatrix",
+        "feDiffuseLighting",
+        "feDisplacementMap",
+        "feDistantLight",
+        "feFlood",
+        "feFuncA",
+        "feFuncB",
+        "feFuncG",
+        "feFuncR",
+        "feGaussianBlur",
+        "feImage",
+        "feMerge",
+        "feMergeNode",
+        "feMorphology",
+        "feOffset",
+        "fePointLight",
+        "feSpecularLighting",
+        "feSpotLight",
+        "feTile",
+        "feTurbulence",
+        "foreignObject",
+        "glyphRef",
+        "linearGradient",
+        "radialGradient",
+        "textPath",
     ];
     NAMES
         .iter()
@@ -1111,18 +1227,67 @@ fn adjust_svg_tag_name(name: &str) -> Option<&'static str> {
 
 fn adjust_svg_attribute_name(name: &str) -> Option<&'static str> {
     const NAMES: &[&str] = &[
-        "attributeName", "attributeType", "baseFrequency", "baseProfile", "calcMode",
-        "clipPathUnits", "contentScriptType", "contentStyleType", "diffuseConstant", "edgeMode",
-        "externalResourcesRequired", "filterRes", "filterUnits", "glyphRef",
-        "gradientTransform", "gradientUnits", "kernelMatrix", "kernelUnitLength", "keyPoints",
-        "keySplines", "keyTimes", "lengthAdjust", "limitingConeAngle", "markerHeight",
-        "markerUnits", "markerWidth", "maskContentUnits", "maskUnits", "numOctaves",
-        "pathLength", "patternContentUnits", "patternTransform", "patternUnits", "pointsAtX",
-        "pointsAtY", "pointsAtZ", "preserveAlpha", "preserveAspectRatio", "primitiveUnits",
-        "refX", "refY", "repeatCount", "repeatDur", "requiredExtensions", "requiredFeatures",
-        "specularConstant", "specularExponent", "spreadMethod", "startOffset", "stdDeviation",
-        "stitchTiles", "surfaceScale", "systemLanguage", "tableValues", "targetX", "targetY",
-        "textLength", "viewBox", "viewTarget", "xChannelSelector", "yChannelSelector",
+        "attributeName",
+        "attributeType",
+        "baseFrequency",
+        "baseProfile",
+        "calcMode",
+        "clipPathUnits",
+        "contentScriptType",
+        "contentStyleType",
+        "diffuseConstant",
+        "edgeMode",
+        "externalResourcesRequired",
+        "filterRes",
+        "filterUnits",
+        "glyphRef",
+        "gradientTransform",
+        "gradientUnits",
+        "kernelMatrix",
+        "kernelUnitLength",
+        "keyPoints",
+        "keySplines",
+        "keyTimes",
+        "lengthAdjust",
+        "limitingConeAngle",
+        "markerHeight",
+        "markerUnits",
+        "markerWidth",
+        "maskContentUnits",
+        "maskUnits",
+        "numOctaves",
+        "pathLength",
+        "patternContentUnits",
+        "patternTransform",
+        "patternUnits",
+        "pointsAtX",
+        "pointsAtY",
+        "pointsAtZ",
+        "preserveAlpha",
+        "preserveAspectRatio",
+        "primitiveUnits",
+        "refX",
+        "refY",
+        "repeatCount",
+        "repeatDur",
+        "requiredExtensions",
+        "requiredFeatures",
+        "specularConstant",
+        "specularExponent",
+        "spreadMethod",
+        "startOffset",
+        "stdDeviation",
+        "stitchTiles",
+        "surfaceScale",
+        "systemLanguage",
+        "tableValues",
+        "targetX",
+        "targetY",
+        "textLength",
+        "viewBox",
+        "viewTarget",
+        "xChannelSelector",
+        "yChannelSelector",
         "zoomAndPan",
     ];
     NAMES
@@ -1213,7 +1378,8 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 // It is what separates `<colgroup> foo` into a space that
                 // stays and a word that is fostered out of the table.
                 let mut text = text;
-                if !is_html_whitespace_only(&text) && builder.tag_of(builder.current()) == "colgroup"
+                if !is_html_whitespace_only(&text)
+                    && builder.tag_of(builder.current()) == "colgroup"
                 {
                     let split = text
                         .find(|c| !matches!(c, '\t' | '\n' | '\u{000C}' | '\r' | ' '))
@@ -1514,8 +1680,10 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     // The form leaves the stack, but what was opened inside it
                     // stays open: `<form><div></form><div>` puts the second div
                     // inside the first, where it was written.
-                    if let Some(position) =
-                        builder.open.iter().position(|i| builder.tag_of(*i) == "form")
+                    if let Some(position) = builder
+                        .open
+                        .iter()
+                        .position(|i| builder.tag_of(*i) == "form")
                     {
                         builder.open.remove(position);
                         continue;
@@ -1602,7 +1770,8 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     && builder.body_started
                     && !closes_enclosing(&builder, "p", PARAGRAPH_BOUNDARIES_FOR_STRAY)
                 {
-                    builder.insert(BuildKind::Element { namespace: Default::default(),
+                    builder.insert(BuildKind::Element {
+                        namespace: Default::default(),
                         tag_name: "p".to_string(),
                         attributes: BTreeMap::new(),
                     });
@@ -1610,7 +1779,8 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     // The `<br>` this leaves behind is body content, so a
                     // stray `</p>` after it makes an empty paragraph.
                     builder.body_started = true;
-                    builder.insert(BuildKind::Element { namespace: Default::default(),
+                    builder.insert(BuildKind::Element {
+                        namespace: Default::default(),
                         tag_name: "br".to_string(),
                         attributes: BTreeMap::new(),
                     });
@@ -1796,8 +1966,17 @@ fn unwrap_document_shell(node: Node, keeps_sections: bool, out: &mut Vec<Node>) 
 fn is_head_only(name: &str) -> bool {
     matches!(
         name,
-        "base" | "basefont" | "bgsound" | "link" | "meta" | "noframes" | "noscript" | "script"
-            | "style" | "template" | "title"
+        "base"
+            | "basefont"
+            | "bgsound"
+            | "link"
+            | "meta"
+            | "noframes"
+            | "noscript"
+            | "script"
+            | "style"
+            | "template"
+            | "title"
     )
 }
 
@@ -2096,8 +2275,8 @@ fn maybe_auto_close(builder: &mut Builder, new_tag: &str) {
     // search for it does not cross one of these first. `<button>` is on the
     // list, so `<p><button><p>` nests rather than closing the outer one.
     const PARAGRAPH_BOUNDARIES: &[&str] = &[
-        "td", "th", "body", "html", "document", "button", "applet", "caption", "table",
-        "marquee", "object", "template",
+        "td", "th", "body", "html", "document", "button", "applet", "caption", "table", "marquee",
+        "object", "template",
     ];
 
     match new_tag {
@@ -2372,15 +2551,17 @@ fn tokenize(input: &str) -> Vec<Token> {
             let (text, next) = if let Some(length) = early_end {
                 (String::new(), index + 4 + length)
             } else {
-                match [body.find("-->").map(|at| (at, 3)), body.find("--!>").map(|at| (at, 4))]
-                    .into_iter()
-                    .flatten()
-                    .min()
+                match [
+                    body.find("-->").map(|at| (at, 3)),
+                    body.find("--!>").map(|at| (at, 4)),
+                ]
+                .into_iter()
+                .flatten()
+                .min()
                 {
-                    Some((offset, length)) => (
-                        body[..offset].to_string(),
-                        index + 4 + offset + length,
-                    ),
+                    Some((offset, length)) => {
+                        (body[..offset].to_string(), index + 4 + offset + length)
+                    }
                     // A comment the file ends in the middle of loses the
                     // dashes it was in the middle of writing: `<!--x--` is the
                     // comment `x`.
@@ -2516,7 +2697,11 @@ fn tokenize(input: &str) -> Vec<Token> {
         let name = input[name_start..index].to_ascii_lowercase();
         // The standard renames this one rather than honouring it: `<image>`
         // is a misspelling of `<img>` old pages still contain.
-        let name = if name == "image" { "img".to_string() } else { name };
+        let name = if name == "image" {
+            "img".to_string()
+        } else {
+            name
+        };
         let mut attributes = BTreeMap::new();
         let mut self_closing = is_void_element(&name);
 
@@ -2591,9 +2776,7 @@ fn tokenize(input: &str) -> Vec<Token> {
         // `<title>` would look like the integration point it opens rather than
         // the drawing it sits in, and its markup would be read as raw text.
         let written_in_foreign = in_foreign_content(&foreign_stack);
-        if !self_closing
-            && (!foreign_stack.is_empty() || matches!(name.as_str(), "svg" | "math"))
-        {
+        if !self_closing && (!foreign_stack.is_empty() || matches!(name.as_str(), "svg" | "math")) {
             foreign_stack.push(name.clone());
         }
         // Raw text is an HTML notion. `<style>` and `<title>` inside `<svg>`
@@ -2660,8 +2843,7 @@ fn parse_attribute_value(input: &str, index: &mut usize) -> String {
         // Only whitespace and `>` end an unquoted value; a slash belongs to
         // it. `<foo bar=qux/>` sets `bar` to "qux/" and is not self-closing.
         let start = *index;
-        while *index < bytes.len()
-            && !matches!(bytes[*index], b'>' | b' ' | b'\n' | b'\r' | b'\t')
+        while *index < bytes.len() && !matches!(bytes[*index], b'>' | b' ' | b'\n' | b'\r' | b'\t')
         {
             *index += 1;
         }
@@ -3171,7 +3353,11 @@ mod tests {
         let Node::Element(division) = &body.children[0] else {
             panic!("expected the div");
         };
-        assert_eq!(body.children.len(), 1, "the text belongs inside, not beside");
+        assert_eq!(
+            body.children.len(),
+            1,
+            "the text belongs inside, not beside"
+        );
         let Node::Element(svg) = &division.children[0] else {
             panic!("expected the svg");
         };
@@ -3288,7 +3474,11 @@ mod tests {
         let Node::Element(ruby) = &body.children[0] else {
             panic!("expected the ruby");
         };
-        assert_eq!(ruby.children.len(), 2, "the rp should be a sibling of the p");
+        assert_eq!(
+            ruby.children.len(),
+            2,
+            "the rp should be a sibling of the p"
+        );
         let Node::Element(annotation) = &ruby.children[1] else {
             panic!("expected the rp");
         };
@@ -3367,7 +3557,10 @@ mod tests {
             panic!("the div should be in front of the table");
         };
         assert_eq!(division.tag_name, "div");
-        assert!(division.children.is_empty(), "the cell does not belong to it");
+        assert!(
+            division.children.is_empty(),
+            "the cell does not belong to it"
+        );
         let Node::Element(table) = &body.children[1] else {
             panic!("expected the table");
         };
@@ -3488,7 +3681,11 @@ mod tests {
             panic!("expected the inner list");
         };
         assert_eq!(inner.tag_name, "ul");
-        assert_eq!(inner.children.len(), 1, "the second item belongs to the inner list");
+        assert_eq!(
+            inner.children.len(),
+            1,
+            "the second item belongs to the inner list"
+        );
     }
 
     #[test]
@@ -3515,7 +3712,10 @@ mod tests {
         assert_eq!(html.attributes.get("c").map(String::as_str), Some("d"));
         assert_eq!(html.attributes.get("a").map(String::as_str), Some("b"));
         let body = body_of(&document);
-        assert!(body.children.is_empty(), "nothing should have been added to the body");
+        assert!(
+            body.children.is_empty(),
+            "nothing should have been added to the body"
+        );
     }
 
     #[test]
@@ -3581,7 +3781,10 @@ mod tests {
     fn a_second_body_tag_only_adds_the_attributes_the_first_lacks() {
         let document = parse_document("<body one=first><body one=second two=new>");
         let body = body_of(&document);
-        assert_eq!(body.attributes.get("one").map(String::as_str), Some("first"));
+        assert_eq!(
+            body.attributes.get("one").map(String::as_str),
+            Some("first")
+        );
         assert_eq!(body.attributes.get("two").map(String::as_str), Some("new"));
     }
 
@@ -3658,7 +3861,10 @@ mod tests {
             panic!("expected a doctype first");
         };
         assert_eq!(doctype.name, "html");
-        assert_eq!(doctype.public_id.as_deref(), Some("-//W3C//DTD HTML 4.01//EN"));
+        assert_eq!(
+            doctype.public_id.as_deref(),
+            Some("-//W3C//DTD HTML 4.01//EN")
+        );
         assert_eq!(
             doctype.system_id.as_deref(),
             Some("http://www.w3.org/TR/html4/strict.dtd")
@@ -3714,8 +3920,10 @@ mod tests {
 
     #[test]
     fn a_textarea_drops_the_newline_after_its_opening_tag() {
-        let document = parse_document("<body><textarea>
-value</textarea>");
+        let document = parse_document(
+            "<body><textarea>
+value</textarea>",
+        );
         let body = body_of(&document);
         let Node::Element(area) = &body.children[0] else {
             panic!("expected a textarea");
@@ -3789,7 +3997,8 @@ value</textarea>");
         // A word written between `<table>` and its first cell cannot be drawn
         // in a table, so it moves to just before the table instead of
         // disappearing.
-        let document = parse_document("<body><div><table>stray<tr><td>cell</td></tr></table></div>");
+        let document =
+            parse_document("<body><div><table>stray<tr><td>cell</td></tr></table></div>");
         let body = body_of(&document);
         let Node::Element(container) = &body.children[0] else {
             panic!("expected the div");
@@ -3847,7 +4056,10 @@ value</textarea>");
         };
         assert_eq!(svg.namespace, super::Namespace::Svg);
         // SVG is case sensitive, so the folded names have to be put back.
-        assert_eq!(svg.attributes.get("viewBox").map(String::as_str), Some("0 0 1 1"));
+        assert_eq!(
+            svg.attributes.get("viewBox").map(String::as_str),
+            Some("0 0 1 1")
+        );
         let Node::Element(clip) = &svg.children[0] else {
             panic!("expected a clipPath");
         };
@@ -3857,7 +4069,8 @@ value</textarea>");
 
     #[test]
     fn html_starts_again_inside_a_foreign_object() {
-        let document = parse_document("<body><svg><foreignobject><div>x</div></foreignobject></svg>");
+        let document =
+            parse_document("<body><svg><foreignobject><div>x</div></foreignobject></svg>");
         let body = body_of(&document);
         let Node::Element(svg) = &body.children[0] else {
             panic!("expected an svg");
@@ -4119,8 +4332,8 @@ value</textarea>");
     #[test]
     fn handles_lossy_binary_with_non_ascii_after_less_than() {
         let input = String::from_utf8_lossy(&[
-            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x3C, 0xEF, 0xA0,
-            0x80, 0x3C, 0x80, 0x81,
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x3C, 0xEF, 0xA0, 0x80,
+            0x3C, 0x80, 0x81,
         ]);
         let document = parse_document(&input);
         let Node::Element(root) = document else {
@@ -4186,7 +4399,13 @@ mod html5lib_conformance {
             if trimmed.starts_with('#') && !trimmed.starts_with("#document\n") {
                 match trimmed {
                     "#data" => {
-                        flush(&mut cases, &mut data, &mut document, &mut fragment, &mut started);
+                        flush(
+                            &mut cases,
+                            &mut data,
+                            &mut document,
+                            &mut fragment,
+                            &mut started,
+                        );
                         started = true;
                         section = "data".to_string();
                         continue;
@@ -4216,7 +4435,13 @@ mod html5lib_conformance {
                 _ => {}
             }
         }
-        flush(&mut cases, &mut data, &mut document, &mut fragment, &mut started);
+        flush(
+            &mut cases,
+            &mut data,
+            &mut document,
+            &mut fragment,
+            &mut started,
+        );
         cases
     }
 
@@ -4238,8 +4463,10 @@ mod html5lib_conformance {
                 out.push_str(&format!("| {pad}\"{text}\"\n"));
             }
             Node::Comment(text) => {
-                out.push_str(&format!("| {pad}<!-- {text} -->
-"));
+                out.push_str(&format!(
+                    "| {pad}<!-- {text} -->
+"
+                ));
             }
             Node::Doctype(doctype) => {
                 // html5lib prints both identifiers whenever either one
@@ -4337,7 +4564,10 @@ mod html5lib_conformance {
             if got == case.document {
                 passed += 1;
                 entry.0 += 1;
-            } else if focus.as_deref().is_some_and(|want| case.file.starts_with(want)) {
+            } else if focus
+                .as_deref()
+                .is_some_and(|want| case.file.starts_with(want))
+            {
                 // `TOBIRA_H5_FILE=tests1` prints every failure in one file
                 // rather than one sample per file.
                 samples.push(format!(

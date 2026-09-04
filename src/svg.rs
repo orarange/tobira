@@ -77,19 +77,41 @@ struct Transform {
 }
 
 impl Transform {
-    const IDENTITY: Self = Self { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+    const IDENTITY: Self = Self {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: 0.0,
+        f: 0.0,
+    };
 
     fn translate(tx: f32, ty: f32) -> Self {
-        Self { e: tx, f: ty, ..Self::IDENTITY }
+        Self {
+            e: tx,
+            f: ty,
+            ..Self::IDENTITY
+        }
     }
 
     fn scale(sx: f32, sy: f32) -> Self {
-        Self { a: sx, d: sy, ..Self::IDENTITY }
+        Self {
+            a: sx,
+            d: sy,
+            ..Self::IDENTITY
+        }
     }
 
     fn rotate(degrees: f32) -> Self {
         let (sin, cos) = degrees.to_radians().sin_cos();
-        Self { a: cos, b: sin, c: -sin, d: cos, e: 0.0, f: 0.0 }
+        Self {
+            a: cos,
+            b: sin,
+            c: -sin,
+            d: cos,
+            e: 0.0,
+            f: 0.0,
+        }
     }
 
     /// `self` applied after `inner` — the order SVG nests transforms in.
@@ -105,7 +127,10 @@ impl Transform {
     }
 
     fn apply(&self, x: f32, y: f32) -> (f32, f32) {
-        (self.a * x + self.c * y + self.e, self.b * x + self.d * y + self.f)
+        (
+            self.a * x + self.c * y + self.e,
+            self.b * x + self.d * y + self.f,
+        )
     }
 
     /// Roughly how much this transform magnifies lengths — used to pick how
@@ -267,7 +292,11 @@ fn sample_stops(stops: &[(f32, [u8; 4])], t: f32) -> [u8; 4] {
         let (right_offset, right) = pair[1];
         if t >= left_offset && t <= right_offset {
             let span = right_offset - left_offset;
-            let mix = if span <= 1e-6 { 0.0 } else { (t - left_offset) / span };
+            let mix = if span <= 1e-6 {
+                0.0
+            } else {
+                (t - left_offset) / span
+            };
             let mut color = [0_u8; 4];
             for channel in 0..4 {
                 let from = f32::from(left[channel]);
@@ -397,7 +426,10 @@ impl Document {
                 continue;
             };
             let number = |name: &str, fallback: f32| {
-                element.attribute(name).and_then(parse_dimension).unwrap_or(fallback)
+                element
+                    .attribute(name)
+                    .and_then(parse_dimension)
+                    .unwrap_or(fallback)
             };
             // The defaults are the spec's: a linear ramp left to right across
             // the box, or a circle filling it.
@@ -465,7 +497,10 @@ impl Document {
             while stack.len() > 1 && stack.last().is_some_and(|(d, _)| *d >= element.depth) {
                 stack.pop();
             }
-            let inherited = stack.last().map(|(_, s)| s.clone()).unwrap_or(State::root(root));
+            let inherited = stack
+                .last()
+                .map(|(_, s)| s.clone())
+                .unwrap_or(State::root(root));
             let state = inherited.inherit(element, &paints);
 
             if element.name == "g" || element.name == "svg" || element.name == "a" {
@@ -500,7 +535,11 @@ impl Document {
                 if !outlined.is_empty() {
                     // Each segment's quad is filled on its own, so overlapping
                     // ones must not cancel out: non-zero winding keeps them.
-                    shapes.push(Shape { contours: outlined, paint: color, rule: FillRule::NonZero });
+                    shapes.push(Shape {
+                        contours: outlined,
+                        paint: color,
+                        rule: FillRule::NonZero,
+                    });
                 }
             }
         }
@@ -607,7 +646,12 @@ impl State {
 
 fn element_contours(element: &Element, state: &State) -> Option<Vec<Contour>> {
     let transform = state.transform;
-    let number = |name: &str| element.attribute(name).and_then(parse_dimension).unwrap_or(0.0);
+    let number = |name: &str| {
+        element
+            .attribute(name)
+            .and_then(parse_dimension)
+            .unwrap_or(0.0)
+    };
 
     match element.name.as_str() {
         "path" => {
@@ -730,7 +774,11 @@ impl Canvas {
             .filter(|contour| contour.len() >= 3)
             .flat_map(|contour| {
                 let closed = contour.iter().copied().chain(std::iter::once(contour[0]));
-                contour.iter().copied().zip(closed.skip(1)).collect::<Vec<_>>()
+                contour
+                    .iter()
+                    .copied()
+                    .zip(closed.skip(1))
+                    .collect::<Vec<_>>()
             })
             .filter(|((_, y1), (_, y2))| y1 != y2)
             .collect();
@@ -784,11 +832,7 @@ impl Canvas {
                         FillRule::EvenOdd => (pair as i32 + 1) % 2 == 1,
                     };
                     if inside {
-                        self.accumulate(
-                            &mut coverage,
-                            crossings[pair].0,
-                            crossings[pair + 1].0,
-                        );
+                        self.accumulate(&mut coverage, crossings[pair].0, crossings[pair + 1].0);
                     }
                 }
             }
@@ -797,7 +841,9 @@ impl Canvas {
                 let alpha = (value / SUBSAMPLES as f32).clamp(0.0, 1.0);
                 if alpha > 0.002 {
                     let color = solid.unwrap_or_else(|| {
-                        shape.paint.color_at(column as f32 + 0.5, row as f32 + 0.5, bounds)
+                        shape
+                            .paint
+                            .color_at(column as f32 + 0.5, row as f32 + 0.5, bounds)
                     });
                     self.blend(column as u32, row, color, alpha);
                     painted = true;
@@ -1115,7 +1161,12 @@ fn parse_color(value: &str) -> Option<[u8; 4]> {
             .collect();
         return match digits.len() {
             3 => Some([digits[0] * 17, digits[1] * 17, digits[2] * 17, 255]),
-            4 => Some([digits[0] * 17, digits[1] * 17, digits[2] * 17, digits[3] * 17]),
+            4 => Some([
+                digits[0] * 17,
+                digits[1] * 17,
+                digits[2] * 17,
+                digits[3] * 17,
+            ]),
             6 => Some([
                 digits[0] * 16 + digits[1],
                 digits[2] * 16 + digits[3],
@@ -1172,7 +1223,11 @@ fn parse_transform(input: &str) -> Transform {
     let mut rest = input;
 
     while let Some(open) = rest.find('(') {
-        let name = rest[..open].trim().rsplit(|c: char| !c.is_alphabetic()).next().unwrap_or("");
+        let name = rest[..open]
+            .trim()
+            .rsplit(|c: char| !c.is_alphabetic())
+            .next()
+            .unwrap_or("");
         let Some(close) = rest[open..].find(')') else {
             break;
         };
@@ -1188,11 +1243,22 @@ fn parse_transform(input: &str) -> Transform {
             ("rotate", [angle, cx, cy, ..]) => Transform::translate(*cx, *cy)
                 .then(Transform::rotate(*angle))
                 .then(Transform::translate(-cx, -cy)),
-            ("matrix", [a, b, c, d, e, f, ..]) => {
-                Transform { a: *a, b: *b, c: *c, d: *d, e: *e, f: *f }
-            }
-            ("skewx", [angle]) => Transform { c: angle.to_radians().tan(), ..Transform::IDENTITY },
-            ("skewy", [angle]) => Transform { b: angle.to_radians().tan(), ..Transform::IDENTITY },
+            ("matrix", [a, b, c, d, e, f, ..]) => Transform {
+                a: *a,
+                b: *b,
+                c: *c,
+                d: *d,
+                e: *e,
+                f: *f,
+            },
+            ("skewx", [angle]) => Transform {
+                c: angle.to_radians().tan(),
+                ..Transform::IDENTITY
+            },
+            ("skewy", [angle]) => Transform {
+                b: angle.to_radians().tan(),
+                ..Transform::IDENTITY
+            },
             _ => continue,
         };
         result = result.then(step);
@@ -1414,8 +1480,14 @@ impl PathBuilder {
         for step in 1..=self.steps {
             let t = step as f32 / self.steps as f32;
             let u = 1.0 - t;
-            let x = u * u * u * x0 + 3.0 * u * u * t * c1.0 + 3.0 * u * t * t * c2.0 + t * t * t * end.0;
-            let y = u * u * u * y0 + 3.0 * u * u * t * c1.1 + 3.0 * u * t * t * c2.1 + t * t * t * end.1;
+            let x = u * u * u * x0
+                + 3.0 * u * u * t * c1.0
+                + 3.0 * u * t * t * c2.0
+                + t * t * t * end.0;
+            let y = u * u * u * y0
+                + 3.0 * u * u * t * c1.1
+                + 3.0 * u * t * t * c2.1
+                + t * t * t * end.1;
             self.current.push(self.transform.apply(x, y));
         }
         self.cursor = end;
@@ -1473,7 +1545,11 @@ impl PathBuilder {
         let angle = |ux: f32, uy: f32, vx: f32, vy: f32| {
             let dot = ux * vx + uy * vy;
             let len = ((ux * ux + uy * uy) * (vx * vx + vy * vy)).sqrt();
-            let mut value = if len <= 0.0 { 0.0 } else { (dot / len).clamp(-1.0, 1.0).acos() };
+            let mut value = if len <= 0.0 {
+                0.0
+            } else {
+                (dot / len).clamp(-1.0, 1.0).acos()
+            };
             if ux * vy - uy * vx < 0.0 {
                 value = -value;
             }
@@ -1531,10 +1607,9 @@ mod tests {
 
     #[test]
     fn a_path_is_filled_and_its_outside_is_left_clear() {
-        let image = rasterize(
-            "<svg viewBox='0 0 10 10'><path d='M0 0 L10 0 L10 10 Z' fill='#000'/></svg>",
-        )
-        .expect("rasterized");
+        let image =
+            rasterize("<svg viewBox='0 0 10 10'><path d='M0 0 L10 0 L10 10 Z' fill='#000'/></svg>")
+                .expect("rasterized");
         // The triangle covers the top-right half, so the bottom-left corner is
         // untouched and the top-right one is solid.
         assert_eq!(pixel(&image, 1, image.height - 2)[3], 0);
@@ -1568,10 +1643,14 @@ mod tests {
         )
         .expect("the drawing must produce an image");
 
-        let middle = (image.height as usize / 2 * image.width as usize + image.width as usize / 2) * 4;
+        let middle =
+            (image.height as usize / 2 * image.width as usize + image.width as usize / 2) * 4;
         let pixel = &image.rgba[middle..middle + 4];
 
-        assert!(pixel[2] > pixel[0], "the blue rect should still show: {pixel:?}");
+        assert!(
+            pixel[2] > pixel[0],
+            "the blue rect should still show: {pixel:?}"
+        );
     }
 
     #[test]

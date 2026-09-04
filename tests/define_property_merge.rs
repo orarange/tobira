@@ -129,7 +129,9 @@ fn define_properties_merges_each_key() {
 fn object_create_second_argument_error_names_type() {
     // Companion diagnostic: Object.create with a bad prototype should say
     // what it actually received.
-    let program = Parser::new("Object.create(undefined);").parse().expect("parse");
+    let program = Parser::new("Object.create(undefined);")
+        .parse()
+        .expect("parse");
     let chunk = Compiler::new(&program).compile().expect("compile");
     let mut vm = Vm::new(Heap::new());
     let error = vm.execute(&chunk).expect_err("must throw");

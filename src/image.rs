@@ -51,7 +51,9 @@ impl ImageStore {
 /// rather than fetched -- and nothing here understood them, so every such image
 /// was resolved as a relative URL and fetched from the site's own host.
 pub fn decode_data_url(url: &str) -> Option<Vec<u8>> {
-    let rest = url.strip_prefix("data:").or_else(|| url.strip_prefix("DATA:"))?;
+    let rest = url
+        .strip_prefix("data:")
+        .or_else(|| url.strip_prefix("DATA:"))?;
     let (metadata, payload) = rest.split_once(',')?;
     if metadata.to_ascii_lowercase().ends_with(";base64") {
         decode_base64(payload)
@@ -166,7 +168,10 @@ mod tests {
 
         assert!(!store.was_attempted(url));
         store.mark_failed(url.to_string());
-        assert!(store.was_attempted(url), "a failed fetch must not be retried");
+        assert!(
+            store.was_attempted(url),
+            "a failed fetch must not be retried"
+        );
         assert!(store.get(url).is_none(), "it still has no decoded image");
     }
 
@@ -178,7 +183,11 @@ mod tests {
         store.mark_failed(url.to_string());
         store.insert(
             url.to_string(),
-            DecodedImage { width: 1, height: 1, rgba: vec![0, 0, 0, 255] },
+            DecodedImage {
+                width: 1,
+                height: 1,
+                rgba: vec![0, 0, 0, 255],
+            },
         );
         assert!(store.was_attempted(url));
         assert!(store.get(url).is_some());

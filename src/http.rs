@@ -673,7 +673,10 @@ mod tests {
 
     #[test]
     fn chunked_length_needs_the_terminating_chunk() {
-        assert_eq!(chunked_stream_len(&crlf(b"4@@Wiki@@5@@pedia@@0@@@@")), Some(24));
+        assert_eq!(
+            chunked_stream_len(&crlf(b"4@@Wiki@@5@@pedia@@0@@@@")),
+            Some(24)
+        );
         // Same stream with the trailer missing: not complete yet.
         assert_eq!(chunked_stream_len(&crlf(b"4@@Wiki@@5@@pedia@@0@@")), None);
         // Cut mid-chunk.

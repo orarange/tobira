@@ -238,7 +238,10 @@ fn async_generator_queueing_next_calls() {
         p2.then(result => { second = result.value + ":" + result.done; });
         "#,
     );
-    execute_script(&mut vm, "assert(first === '1:false'); assert(second === '2:false');");
+    execute_script(
+        &mut vm,
+        "assert(first === '1:false'); assert(second === '2:false');",
+    );
 }
 
 #[test]

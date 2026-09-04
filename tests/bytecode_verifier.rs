@@ -4,7 +4,9 @@ use tobira_engine::engine::{
 
 fn verify_script(source: &str) {
     let program = Parser::new(source).parse().expect("script should parse");
-    let chunk = Compiler::new(&program).compile().expect("script should compile");
+    let chunk = Compiler::new(&program)
+        .compile()
+        .expect("script should compile");
     verify_stack_balance(&chunk.top_level).expect(source);
 }
 
@@ -13,7 +15,9 @@ fn verify_module(source: &str) {
         .with_source_type(SourceType::Module)
         .parse()
         .expect("module should parse");
-    let chunk = Compiler::new(&program).compile().expect("module should compile");
+    let chunk = Compiler::new(&program)
+        .compile()
+        .expect("module should compile");
     verify_stack_balance(&chunk.top_level).expect(source);
 }
 
@@ -96,10 +100,7 @@ fn linear_effect(opcode: &Opcode) -> Option<(i64, i64)> {
         }
         Opcode::GetPropForCall(_) => (1, 2),
         Opcode::GetIndexForCall => (2, 2),
-        Opcode::Pop
-        | Opcode::SetLocal(_)
-        | Opcode::SetUpvalue(_)
-        | Opcode::SetGlobal(_) => (1, 0),
+        Opcode::Pop | Opcode::SetLocal(_) | Opcode::SetUpvalue(_) | Opcode::SetGlobal(_) => (1, 0),
         Opcode::Neg
         | Opcode::Not
         | Opcode::BitNot
@@ -215,6 +216,8 @@ fn corpus_verifies_stack_balance() {
 fn compute_stack_depths_matches_linear_transitions() {
     let source = "function f(a, b, c) { var g = () => this.x + a + b + c; var h = () => a * b; return g() + h(); }";
     let program = Parser::new(source).parse().expect("script should parse");
-    let chunk = Compiler::new(&program).compile().expect("script should compile");
+    let chunk = Compiler::new(&program)
+        .compile()
+        .expect("script should compile");
     assert_linear_depths(&chunk.top_level);
 }

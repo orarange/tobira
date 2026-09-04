@@ -1,20 +1,26 @@
 use boa_ast::{Spanned, function::PrivateName};
 
-use crate::engine::ast;
-use crate::engine::{ast::{
-    ArithmeticOpNode, AssignOpNode, AssignTargetNode, BinaryOpNode, BitwiseOpNode,
-    ConditionalExpression, ExpressionNode, LiteralKindNode, LogicalOpNode,
-    MethodDefinitionKindNode, ObjectMethodDefinitionNode, ObjectPropertyDefinition,
-    PropertyAccessFieldNode, PropertyNameNode, RelationalOpNode, TaggedTemplateExpression,
-    TemplateElementNode, TemplateLiteralExpression, UnaryOpNode, UpdateOpNode, UpdateTargetNode,
-    MemberExpression, ArrayExpression, ObjectExpression, CallExpression, NewExpression,
-    AssignmentExpression, BinaryExpression, UnaryExpression, UpdateExpression,
-    FormalParameterListNode, FunctionBodyNode, OptionalExpression,
-}, Opcode};
 use super::{CompileError, PropertyOpKind, ResolvedBinding};
+use crate::engine::ast;
+use crate::engine::{
+    Opcode,
+    ast::{
+        ArithmeticOpNode, ArrayExpression, AssignOpNode, AssignTargetNode, AssignmentExpression,
+        BinaryExpression, BinaryOpNode, BitwiseOpNode, CallExpression, ConditionalExpression,
+        ExpressionNode, FormalParameterListNode, FunctionBodyNode, LiteralKindNode, LogicalOpNode,
+        MemberExpression, MethodDefinitionKindNode, NewExpression, ObjectExpression,
+        ObjectMethodDefinitionNode, ObjectPropertyDefinition, OptionalExpression,
+        PropertyAccessFieldNode, PropertyNameNode, RelationalOpNode, TaggedTemplateExpression,
+        TemplateElementNode, TemplateLiteralExpression, UnaryExpression, UnaryOpNode,
+        UpdateExpression, UpdateOpNode, UpdateTargetNode,
+    },
+};
 
 impl<'a> super::FunctionCompiler<'a> {
-    pub(super) fn compile_expression(&mut self, expression: &ExpressionNode) -> Result<(), CompileError> {
+    pub(super) fn compile_expression(
+        &mut self,
+        expression: &ExpressionNode,
+    ) -> Result<(), CompileError> {
         match expression {
             ExpressionNode::This(_) => {
                 match self.resolve_binding("this") {
@@ -48,17 +54,17 @@ impl<'a> super::FunctionCompiler<'a> {
             ExpressionNode::Spread(_) => Err(CompileError::Unimplemented("spread expressions")),
             ExpressionNode::FunctionExpression(function) => self
                 .compile_nested_function_value_bound(
-                function
-                    .name()
-                    .map(|identifier| self.identifier_name(&identifier)),
-                function.parameters(),
-                function.body(),
-                function.body().strict() || self.is_strict,
-                false,
-                false,
-                false,
-                function.has_binding_identifier(),
-            ),
+                    function
+                        .name()
+                        .map(|identifier| self.identifier_name(&identifier)),
+                    function.parameters(),
+                    function.body(),
+                    function.body().strict() || self.is_strict,
+                    false,
+                    false,
+                    false,
+                    function.has_binding_identifier(),
+                ),
             ExpressionNode::ArrowFunction(function) => self.compile_nested_function_value(
                 function
                     .name()
@@ -104,8 +110,8 @@ impl<'a> super::FunctionCompiler<'a> {
                     false,
                     false,
                 ),
-            ExpressionNode::AsyncGeneratorExpression(function) => {
-                self.compile_nested_function_value(
+            ExpressionNode::AsyncGeneratorExpression(function) => self
+                .compile_nested_function_value(
                     function
                         .name()
                         .map(|identifier| self.identifier_name(&identifier)),
@@ -115,8 +121,7 @@ impl<'a> super::FunctionCompiler<'a> {
                     true,
                     true,
                     false,
-                )
-            }
+                ),
             ExpressionNode::ClassExpression(class_expression) => {
                 self.compile_class_expression(class_expression)
             }
@@ -243,40 +248,36 @@ impl<'a> super::FunctionCompiler<'a> {
                     self.emit_load_binding(&name, resolved)?;
                     self.emit(Opcode::SetProp);
                 }
-                ObjectPropertyDefinition::Property(name, value) => {
-                    match name {
-                        PropertyNameNode::Literal(identifier)
-                            if self.identifier_name(&identifier) == "__proto__" =>
-                        {
-                            self.compile_expression(value)?;
-                            self.emit(Opcode::SetObjectLiteralProto);
-                        }
-                        _ => {
-                            self.compile_property_name_value(name)?;
-                            self.compile_expression(value)?;
-                            self.emit(Opcode::SetProp);
-                        }
+                ObjectPropertyDefinition::Property(name, value) => match name {
+                    PropertyNameNode::Literal(identifier)
+                        if self.identifier_name(&identifier) == "__proto__" =>
+                    {
+                        self.compile_expression(value)?;
+                        self.emit(Opcode::SetObjectLiteralProto);
                     }
-                }
-                ObjectPropertyDefinition::MethodDefinition(method) => {
-                    match method.kind() {
-                        MethodDefinitionKindNode::Get => {
-                            self.compile_property_name_value(method.name())?;
-                            self.compile_object_accessor_value(method)?;
-                            self.emit(Opcode::DefineGetter);
-                        }
-                        MethodDefinitionKindNode::Set => {
-                            self.compile_property_name_value(method.name())?;
-                            self.compile_object_accessor_value(method)?;
-                            self.emit(Opcode::DefineSetter);
-                        }
-                        _ => {
-                            self.compile_property_name_value(method.name())?;
-                            self.compile_object_method_value(method)?;
-                            self.emit(Opcode::SetProp);
-                        }
+                    _ => {
+                        self.compile_property_name_value(name)?;
+                        self.compile_expression(value)?;
+                        self.emit(Opcode::SetProp);
                     }
-                }
+                },
+                ObjectPropertyDefinition::MethodDefinition(method) => match method.kind() {
+                    MethodDefinitionKindNode::Get => {
+                        self.compile_property_name_value(method.name())?;
+                        self.compile_object_accessor_value(method)?;
+                        self.emit(Opcode::DefineGetter);
+                    }
+                    MethodDefinitionKindNode::Set => {
+                        self.compile_property_name_value(method.name())?;
+                        self.compile_object_accessor_value(method)?;
+                        self.emit(Opcode::DefineSetter);
+                    }
+                    _ => {
+                        self.compile_property_name_value(method.name())?;
+                        self.compile_object_method_value(method)?;
+                        self.emit(Opcode::SetProp);
+                    }
+                },
                 ObjectPropertyDefinition::SpreadObject(expression) => {
                     self.compile_expression(&expression)?;
                     self.emit(Opcode::CopyDataProperties);
@@ -298,7 +299,10 @@ impl<'a> super::FunctionCompiler<'a> {
         Ok(())
     }
 
-    pub(super) fn compile_property_name_value(&mut self, name: &PropertyNameNode) -> Result<(), CompileError> {
+    pub(super) fn compile_property_name_value(
+        &mut self,
+        name: &PropertyNameNode,
+    ) -> Result<(), CompileError> {
         match name {
             PropertyNameNode::Literal(identifier) => {
                 let constant = self.add_string_constant(self.identifier_name(&identifier))?;
@@ -399,9 +403,7 @@ impl<'a> super::FunctionCompiler<'a> {
                 self.emit(Opcode::GetProp);
                 Ok(())
             }
-            ast::MemberExpression::Super(access) => {
-                self.compile_super_property_access(access)
-            }
+            ast::MemberExpression::Super(access) => self.compile_super_property_access(access),
         }
     }
 
@@ -410,7 +412,10 @@ impl<'a> super::FunctionCompiler<'a> {
         format!("#{}", self.program.resolve_sym(name.description()))
     }
 
-    pub(super) fn compile_literal(&mut self, literal: &LiteralKindNode) -> Result<(), CompileError> {
+    pub(super) fn compile_literal(
+        &mut self,
+        literal: &LiteralKindNode,
+    ) -> Result<(), CompileError> {
         match literal {
             LiteralKindNode::String(sym) => {
                 let index = self.add_string_constant(self.program.resolve_sym(*sym))?;
@@ -722,9 +727,7 @@ impl<'a> super::FunctionCompiler<'a> {
                 self.emit(Opcode::GetPropForCall(constant));
                 Ok(())
             }
-            ast::MemberExpression::Super(access) => {
-                self.compile_super_property_for_call(access)
-            }
+            ast::MemberExpression::Super(access) => self.compile_super_property_for_call(access),
         }
     }
 
@@ -798,7 +801,10 @@ impl<'a> super::FunctionCompiler<'a> {
         Ok(())
     }
 
-    pub(super) fn emit_assignment_operator(&mut self, operator: AssignOpNode) -> Result<(), CompileError> {
+    pub(super) fn emit_assignment_operator(
+        &mut self,
+        operator: AssignOpNode,
+    ) -> Result<(), CompileError> {
         match operator {
             AssignOpNode::Add => {
                 self.emit(Opcode::Add);
@@ -932,8 +938,7 @@ impl<'a> super::FunctionCompiler<'a> {
         &mut self,
         target: &ExpressionNode,
     ) -> Result<(), CompileError> {
-        if let ExpressionNode::PropertyAccess(ast::MemberExpression::Simple(access)) = target
-        {
+        if let ExpressionNode::PropertyAccess(ast::MemberExpression::Simple(access)) = target {
             self.compile_expression(access.target())?;
             match access.field() {
                 PropertyAccessFieldNode::Const(identifier) => {

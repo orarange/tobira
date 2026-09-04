@@ -26,7 +26,6 @@ pub(crate) enum MediaCondition {
     Unknown,
 }
 
-
 /// Whether the desktop is set to a dark colour scheme.
 ///
 /// A browser answers `prefers-color-scheme` from the machine it runs on, and
@@ -93,7 +92,12 @@ pub(crate) fn parse_media_condition(query: &str) -> MediaCondition {
     let q = query.trim().to_ascii_lowercase();
     let parts = split_at_top_level(&q, ',');
     if parts.len() > 1 {
-        return MediaCondition::Any(parts.iter().map(|part| parse_media_condition(part)).collect());
+        return MediaCondition::Any(
+            parts
+                .iter()
+                .map(|part| parse_media_condition(part))
+                .collect(),
+        );
     }
     parse_media_condition_part(&q)
 }
@@ -106,7 +110,12 @@ fn parse_media_condition_part(query: &str) -> MediaCondition {
 
     let parts = split_media_and_conditions(q);
     if parts.len() > 1 {
-        return MediaCondition::All(parts.iter().map(|part| parse_media_condition_part(part)).collect());
+        return MediaCondition::All(
+            parts
+                .iter()
+                .map(|part| parse_media_condition_part(part))
+                .collect(),
+        );
     }
 
     parse_media_atom(q)
@@ -363,7 +372,10 @@ mod color_scheme_tests {
         let light = parse_media_condition("(prefers-color-scheme: light)").matches(1280);
         let dark = parse_media_condition("(prefers-color-scheme: dark)").matches(1280);
 
-        assert_ne!(light, dark, "a desktop is one scheme or the other, not both");
+        assert_ne!(
+            light, dark,
+            "a desktop is one scheme or the other, not both"
+        );
         assert_eq!(
             dark,
             MediaCondition::PrefersColorSchemeDark.matches(1280),

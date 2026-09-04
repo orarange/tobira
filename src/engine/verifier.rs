@@ -108,15 +108,7 @@ fn analyze_stack_depths(
         return Ok(());
     }
 
-    seed_depth(
-        depth_at,
-        worklist,
-        0,
-        0,
-        label,
-        &proto.code,
-        mode,
-    )?;
+    seed_depth(depth_at, worklist, 0, 0, label, &proto.code, mode)?;
 
     for handler in &proto.handlers {
         seed_handler_entries(proto, handler, label, depth_at, worklist, mode)?;
@@ -129,7 +121,12 @@ fn analyze_stack_depths(
         let opcode = &proto.code[ip];
         let (pops, pushes, flow) = stack_effect(opcode);
         if depth < pops {
-            mode.underflow(label, ip, opcode, format!("stack underflow: depth {depth} < pops {pops}"))?;
+            mode.underflow(
+                label,
+                ip,
+                opcode,
+                format!("stack underflow: depth {depth} < pops {pops}"),
+            )?;
             continue;
         }
         let next_depth = depth - pops + pushes;
@@ -150,14 +147,7 @@ fn analyze_stack_depths(
             ControlFlow::Jump(offset) => {
                 let target = jump_target(ip, offset)?;
                 propagate_successor(
-                    proto,
-                    label,
-                    depth_at,
-                    worklist,
-                    target,
-                    next_depth,
-                    opcode,
-                    mode,
+                    proto, label, depth_at, worklist, target, next_depth, opcode, mode,
                 )?;
             }
             ControlFlow::CondJump {
@@ -206,7 +196,9 @@ fn seed_handler_entries(
     worklist: &mut VecDeque<usize>,
     mode: &mut StackDepthMode,
 ) -> Result<(), StackVerifyError> {
-    let Some(&try_start_depth) = depth_at.get(handler.try_start as usize).and_then(|v| v.as_ref())
+    let Some(&try_start_depth) = depth_at
+        .get(handler.try_start as usize)
+        .and_then(|v| v.as_ref())
     else {
         return Ok(());
     };
@@ -374,9 +366,7 @@ fn stack_effect(op: &Opcode) -> (i64, i64, ControlFlow) {
         }
         Opcode::GetPropForCall(_) => (1, 2, ControlFlow::FallThrough),
         Opcode::GetIndexForCall => (2, 2, ControlFlow::FallThrough),
-        Opcode::JumpIfTrue(_)
-        | Opcode::JumpIfFalse(_)
-        | Opcode::JumpIfNullish(_) => {
+        Opcode::JumpIfTrue(_) | Opcode::JumpIfFalse(_) | Opcode::JumpIfNullish(_) => {
             let flow = match op {
                 Opcode::JumpIfTrue(offset) => ControlFlow::CondJump {
                     jump_offset: *offset,
@@ -397,10 +387,9 @@ fn stack_effect(op: &Opcode) -> (i64, i64, ControlFlow) {
             };
             (0, 0, flow)
         }
-        Opcode::Pop
-        | Opcode::SetLocal(_)
-        | Opcode::SetUpvalue(_)
-        | Opcode::SetGlobal(_) => (1, 0, ControlFlow::FallThrough),
+        Opcode::Pop | Opcode::SetLocal(_) | Opcode::SetUpvalue(_) | Opcode::SetGlobal(_) => {
+            (1, 0, ControlFlow::FallThrough)
+        }
         // Unary operators transform the top of stack in place: pop 1, push 1.
         Opcode::Neg
         | Opcode::Not
@@ -448,9 +437,7 @@ fn stack_effect(op: &Opcode) -> (i64, i64, ControlFlow) {
         }
         Opcode::Call(argc) => ((i64::from(*argc) + 2), 1, ControlFlow::FallThrough),
         Opcode::CallSpread(argc) => ((i64::from(*argc) + 2), 1, ControlFlow::FallThrough),
-        Opcode::Return | Opcode::AsyncReturn | Opcode::Throw => {
-            (1, 0, ControlFlow::Terminal)
-        }
+        Opcode::Return | Opcode::AsyncReturn | Opcode::Throw => (1, 0, ControlFlow::Terminal),
         // Await/Yield suspend then resume at the next instruction: they pop the
         // awaited/yielded value and the resume pushes the resolved/sent value
         // (net 0), so execution continues — not terminal. Modelling them as

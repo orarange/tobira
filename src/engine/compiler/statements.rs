@@ -1,10 +1,10 @@
-use crate::engine::ast::*;
-use crate::engine::chunk::{Constant, ExceptionHandler, Opcode};
 use super::{
     BindingNode, BindingStorage, CompileError, ControlContext, DeclarationContext, ExpressionNode,
     FormalParameterListNode, FunctionBodyNode, ImportBinding, IterableLoopInitializerNode,
     PendingPatternInit, ResolvedBinding,
 };
+use crate::engine::ast::*;
+use crate::engine::chunk::{Constant, ExceptionHandler, Opcode};
 
 impl<'a> super::FunctionCompiler<'a> {
     pub(super) fn emit_active_finally_blocks(&mut self) -> Result<(), CompileError> {
@@ -626,7 +626,13 @@ impl<'a> super::FunctionCompiler<'a> {
         }
         self.scopes
             .last()
-            .map(|scope| scope.bindings.values().map(|binding| binding.slot).collect())
+            .map(|scope| {
+                scope
+                    .bindings
+                    .values()
+                    .map(|binding| binding.slot)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -935,24 +941,25 @@ impl<'a> super::FunctionCompiler<'a> {
             ResolvedBinding::Upvalue(slot) => {
                 self.emit(Opcode::GetUpvalue(slot));
             }
-            ResolvedBinding::ModuleImport => {
-                match self.import_bindings.get(name) {
-                    Some(ImportBinding::Named { dep_key, export_name }) => {
-                        let dep_key = dep_key.clone();
-                        let export_name = export_name.clone();
-                        self.emit_module_import_name(&dep_key, &export_name)?;
-                    }
-                    Some(ImportBinding::Namespace { dep_key }) => {
-                        let dep_key = dep_key.clone();
-                        self.emit_module_namespace(&dep_key)?;
-                    }
-                    None => {
-                        return Err(CompileError::message(format!(
-                            "missing import binding for '{name}'"
-                        )));
-                    }
+            ResolvedBinding::ModuleImport => match self.import_bindings.get(name) {
+                Some(ImportBinding::Named {
+                    dep_key,
+                    export_name,
+                }) => {
+                    let dep_key = dep_key.clone();
+                    let export_name = export_name.clone();
+                    self.emit_module_import_name(&dep_key, &export_name)?;
                 }
-            }
+                Some(ImportBinding::Namespace { dep_key }) => {
+                    let dep_key = dep_key.clone();
+                    self.emit_module_namespace(&dep_key)?;
+                }
+                None => {
+                    return Err(CompileError::message(format!(
+                        "missing import binding for '{name}'"
+                    )));
+                }
+            },
             ResolvedBinding::Global => {
                 let index = self.add_string_constant(name)?;
                 self.emit(Opcode::GetGlobal(index));
@@ -986,7 +993,10 @@ impl<'a> super::FunctionCompiler<'a> {
         Ok(())
     }
 
-    pub(super) fn compile_statements(&mut self, statements: &[StatementNode]) -> Result<(), CompileError> {
+    pub(super) fn compile_statements(
+        &mut self,
+        statements: &[StatementNode],
+    ) -> Result<(), CompileError> {
         if self.is_module_top_level() {
             let mut var_names = Vec::new();
             Self::collect_var_names(self.program, statements, &mut var_names);
@@ -1055,7 +1065,10 @@ impl<'a> super::FunctionCompiler<'a> {
 
     /// Allocate slots for the function/var/let/const names declared directly in
     /// this statement list, so hoisted function bodies see them in scope.
-    pub(super) fn predeclare_hoisted(&mut self, statements: &[StatementNode]) -> Result<(), CompileError> {
+    pub(super) fn predeclare_hoisted(
+        &mut self,
+        statements: &[StatementNode],
+    ) -> Result<(), CompileError> {
         for statement in statements {
             match statement {
                 StatementNode::FunctionDeclaration(declaration) => {
@@ -1140,41 +1153,43 @@ impl<'a> super::FunctionCompiler<'a> {
         export: &ExportNamedDeclaration,
     ) -> Result<(), CompileError> {
         match export.0.clone() {
-            boa_ast::declaration::ExportDeclaration::Declaration(declaration) => match declaration {
-                boa_ast::declaration::Declaration::FunctionDeclaration(function) => {
-                    let name = self.identifier_name(&function.name());
-                    self.declare_function_scoped(&name)?;
+            boa_ast::declaration::ExportDeclaration::Declaration(declaration) => {
+                match declaration {
+                    boa_ast::declaration::Declaration::FunctionDeclaration(function) => {
+                        let name = self.identifier_name(&function.name());
+                        self.declare_function_scoped(&name)?;
+                    }
+                    boa_ast::declaration::Declaration::GeneratorDeclaration(function) => {
+                        let name = self.identifier_name(&function.name());
+                        self.declare_function_scoped(&name)?;
+                    }
+                    boa_ast::declaration::Declaration::AsyncFunctionDeclaration(function) => {
+                        let name = self.identifier_name(&function.name());
+                        self.declare_function_scoped(&name)?;
+                    }
+                    boa_ast::declaration::Declaration::AsyncGeneratorDeclaration(function) => {
+                        let name = self.identifier_name(&function.name());
+                        self.declare_function_scoped(&name)?;
+                    }
+                    boa_ast::declaration::Declaration::ClassDeclaration(class_decl) => {
+                        let name = self.identifier_name(&class_decl.name());
+                        self.declare_block_scoped(&name)?;
+                    }
+                    boa_ast::declaration::Declaration::Lexical(lexical) => {
+                        let declaration = match lexical {
+                            boa_ast::declaration::LexicalDeclaration::Let(_) => {
+                                VariableDeclaration::Let(lexical)
+                            }
+                            boa_ast::declaration::LexicalDeclaration::Const(_)
+                            | boa_ast::declaration::LexicalDeclaration::Using(_)
+                            | boa_ast::declaration::LexicalDeclaration::AwaitUsing(_) => {
+                                VariableDeclaration::Const(lexical)
+                            }
+                        };
+                        self.predeclare_variable_declaration(&declaration)?;
+                    }
                 }
-                boa_ast::declaration::Declaration::GeneratorDeclaration(function) => {
-                    let name = self.identifier_name(&function.name());
-                    self.declare_function_scoped(&name)?;
-                }
-                boa_ast::declaration::Declaration::AsyncFunctionDeclaration(function) => {
-                    let name = self.identifier_name(&function.name());
-                    self.declare_function_scoped(&name)?;
-                }
-                boa_ast::declaration::Declaration::AsyncGeneratorDeclaration(function) => {
-                    let name = self.identifier_name(&function.name());
-                    self.declare_function_scoped(&name)?;
-                }
-                boa_ast::declaration::Declaration::ClassDeclaration(class_decl) => {
-                    let name = self.identifier_name(&class_decl.name());
-                    self.declare_block_scoped(&name)?;
-                }
-                boa_ast::declaration::Declaration::Lexical(lexical) => {
-                    let declaration = match lexical {
-                        boa_ast::declaration::LexicalDeclaration::Let(_) => {
-                            VariableDeclaration::Let(lexical)
-                        }
-                        boa_ast::declaration::LexicalDeclaration::Const(_)
-                        | boa_ast::declaration::LexicalDeclaration::Using(_)
-                        | boa_ast::declaration::LexicalDeclaration::AwaitUsing(_) => {
-                            VariableDeclaration::Const(lexical)
-                        }
-                    };
-                    self.predeclare_variable_declaration(&declaration)?;
-                }
-            },
+            }
             boa_ast::declaration::ExportDeclaration::VarStatement(var) => {
                 self.predeclare_variable_declaration(&VariableDeclaration::Var(var))?;
             }
@@ -1213,7 +1228,10 @@ impl<'a> super::FunctionCompiler<'a> {
         Ok(())
     }
 
-    pub(super) fn compile_function_body(&mut self, body: &FunctionBodyNode) -> Result<(), CompileError> {
+    pub(super) fn compile_function_body(
+        &mut self,
+        body: &FunctionBodyNode,
+    ) -> Result<(), CompileError> {
         let statements: Vec<StatementNode> = body
             .statements()
             .iter()
@@ -1242,7 +1260,11 @@ impl<'a> super::FunctionCompiler<'a> {
     /// statements, descending into nested control-flow blocks but NOT into nested
     /// function/class bodies (which have their own scope). Destructuring patterns
     /// are skipped here (handled when the declaration itself is compiled).
-    pub(super) fn collect_var_names(program: &Program, statements: &[StatementNode], out: &mut Vec<String>) {
+    pub(super) fn collect_var_names(
+        program: &Program,
+        statements: &[StatementNode],
+        out: &mut Vec<String>,
+    ) {
         fn push_decl_names(program: &Program, decl: &VariableDeclaration, out: &mut Vec<String>) {
             if !decl.is_var() {
                 return;
@@ -1333,7 +1355,10 @@ impl<'a> super::FunctionCompiler<'a> {
         }
     }
 
-    pub(super) fn compile_statement(&mut self, statement: &StatementNode) -> Result<(), CompileError> {
+    pub(super) fn compile_statement(
+        &mut self,
+        statement: &StatementNode,
+    ) -> Result<(), CompileError> {
         match statement {
             StatementNode::VariableDeclaration(declaration) => {
                 self.compile_variable_declaration(declaration, DeclarationContext::Statement)
@@ -1405,7 +1430,11 @@ impl<'a> super::FunctionCompiler<'a> {
                     Some(name) => self.control_stack.iter_mut().rev().find(|context| {
                         context.is_loop && context.label.as_deref() == Some(name.as_str())
                     }),
-                    None => self.control_stack.iter_mut().rev().find(|context| context.is_loop),
+                    None => self
+                        .control_stack
+                        .iter_mut()
+                        .rev()
+                        .find(|context| context.is_loop),
                 }
                 .ok_or_else(|| CompileError::message("continue used outside a loop"))?;
                 loop_context.continue_jumps.push(jump);
@@ -1424,7 +1453,9 @@ impl<'a> super::FunctionCompiler<'a> {
             StatementNode::ExportDefaultDeclaration(export) => {
                 self.compile_export_default_declaration(export)
             }
-            StatementNode::ExportAllDeclaration(export) => self.compile_export_all_declaration(export),
+            StatementNode::ExportAllDeclaration(export) => {
+                self.compile_export_all_declaration(export)
+            }
             StatementNode::ImportDeclaration(import) => self.compile_import_declaration(import),
             StatementNode::DebuggerStatement => Ok(()),
             StatementNode::WithStatement(_) => Err(CompileError::Unimplemented("with statements")),
@@ -1618,7 +1649,13 @@ impl<'a> super::FunctionCompiler<'a> {
         let loop_slots: Vec<u16> = if uses_lexical_init {
             self.scopes
                 .last()
-                .map(|scope| scope.bindings.values().map(|binding| binding.slot).collect())
+                .map(|scope| {
+                    scope
+                        .bindings
+                        .values()
+                        .map(|binding| binding.slot)
+                        .collect()
+                })
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -1740,6 +1777,4 @@ impl<'a> super::FunctionCompiler<'a> {
         self.emit_store_binding(&name, resolved)?;
         Ok(())
     }
-
-
 }

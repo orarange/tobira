@@ -47,8 +47,12 @@ const WINDOWS_SANS_BOLD_FONT_FILES: &[&str] = &[
     "seguiemj.ttf",
 ];
 
-const WINDOWS_MONOSPACE_BOLD_FONT_FILES: &[&str] =
-    &["consolab.ttf", "CascadiaMono.ttf", "msgothic.ttc", "courbd.ttf"];
+const WINDOWS_MONOSPACE_BOLD_FONT_FILES: &[&str] = &[
+    "consolab.ttf",
+    "CascadiaMono.ttf",
+    "msgothic.ttc",
+    "courbd.ttf",
+];
 
 const WINDOWS_SERIF_BOLD_FONT_FILES: &[&str] = &["georgiab.ttf", "timesbd.ttf"];
 
@@ -155,9 +159,8 @@ const WINDOWS_FAMILY_FILES: &[(&str, &str, &str)] = &[
 /// stylesheet on the page, and each answer would otherwise be a trip to the
 /// filesystem.
 pub fn family_is_installed(lowercase_name: &str) -> bool {
-    static KNOWN: std::sync::LazyLock<
-        std::sync::Mutex<std::collections::HashMap<String, bool>>,
-    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    static KNOWN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Ok(known) = KNOWN.lock()
         && let Some(answer) = known.get(lowercase_name)
     {
@@ -556,7 +559,8 @@ impl FontContext {
         // = U+269B + U+FE0F), zero-width (non-)joiners, and the BOM must render
         // as nothing with zero advance — falling through would draw the bitmap
         // '?' fallback for each (the "??" seen in headings with emoji).
-        if matches!(character, '\u{FE00}'..='\u{FE0F}' | '\u{200B}'..='\u{200D}' | '\u{FEFF}' | '\u{2060}') {
+        if matches!(character, '\u{FE00}'..='\u{FE0F}' | '\u{200B}'..='\u{200D}' | '\u{FEFF}' | '\u{2060}')
+        {
             return CachedGlyph {
                 advance: 0.0,
                 advance_px: 0,
@@ -577,7 +581,11 @@ impl FontContext {
         let mut synthetic_bold = bold;
         if bold {
             self.ensure_font_for(character, font_family, true);
-            if self.fonts_for(font_family, true).iter().any(|font| font.has_glyph(character)) {
+            if self
+                .fonts_for(font_family, true)
+                .iter()
+                .any(|font| font.has_glyph(character))
+            {
                 synthetic_bold = false;
             }
         }
@@ -586,48 +594,59 @@ impl FontContext {
 
         let fallback_advance = estimated_glyph_advance_px(character, font_size_px, font_family);
 
-        for font in self.fonts_for(font_family, stack_is_bold) {
-            if !font.has_glyph(character) {
-                continue;
-            }
+        // The face the page named first, then the general stack. A named face
+        // covers the letters it was made for and no more: Wikipedia asks for
+        // Georgia in its headings, which has no Japanese in it, so every
+        // heading on the Japanese site came out as a row of empty boxes.
+        let mut stacks = vec![font_family];
+        if matches!(font_family, FontFamilyKind::Named(_)) {
+            stacks.push(FontFamilyKind::Sans);
+        }
+        for stack in stacks {
+            self.ensure_family_loaded(stack, stack_is_bold);
+            for font in self.fonts_for(stack, stack_is_bold) {
+                if !font.has_glyph(character) {
+                    continue;
+                }
 
-            let (metrics, bitmap) = font.rasterize(character, font_size_px as f32);
-            let advance = if metrics.advance_width > 0.0 {
-                metrics.advance_width
-            } else {
-                fallback_advance as f32
-            }
-            .max(MIN_ADVANCE_PX as f32);
-            let advance_px = (advance.round() as u32).max(MIN_ADVANCE_PX);
-            if metrics.width == 0 || metrics.height == 0 {
+                let (metrics, bitmap) = font.rasterize(character, font_size_px as f32);
+                let advance = if metrics.advance_width > 0.0 {
+                    metrics.advance_width
+                } else {
+                    fallback_advance as f32
+                }
+                .max(MIN_ADVANCE_PX as f32);
+                let advance_px = (advance.round() as u32).max(MIN_ADVANCE_PX);
+                if metrics.width == 0 || metrics.height == 0 {
+                    return CachedGlyph {
+                        advance,
+                        advance_px,
+                        ascent_px,
+                        synthetic_bold,
+                        mode: GlyphMode::Vector {
+                            width: 0,
+                            height: 0,
+                            xmin: 0,
+                            ymin: 0,
+                            bitmap,
+                        },
+                    };
+                }
+
                 return CachedGlyph {
                     advance,
                     advance_px,
                     ascent_px,
                     synthetic_bold,
                     mode: GlyphMode::Vector {
-                        width: 0,
-                        height: 0,
-                        xmin: 0,
-                        ymin: 0,
+                        width: metrics.width as u32,
+                        height: metrics.height as u32,
+                        xmin: metrics.xmin,
+                        ymin: metrics.ymin,
                         bitmap,
                     },
                 };
             }
-
-            return CachedGlyph {
-                advance,
-                advance_px,
-                ascent_px,
-                synthetic_bold,
-                mode: GlyphMode::Vector {
-                    width: metrics.width as u32,
-                    height: metrics.height as u32,
-                    xmin: metrics.xmin,
-                    ymin: metrics.ymin,
-                    bitmap,
-                },
-            };
         }
 
         let scale = ((font_size_px + 7) / 8).max(1);
@@ -718,8 +737,11 @@ impl FontContext {
         }
     }
 
-    fn slots(&mut self, font_family: FontFamilyKind, bold: bool)
-    -> (&mut Vec<Font>, &mut VecDeque<PathBuf>) {
+    fn slots(
+        &mut self,
+        font_family: FontFamilyKind,
+        bold: bool,
+    ) -> (&mut Vec<Font>, &mut VecDeque<PathBuf>) {
         match (font_family, bold) {
             // A named family is not held in these slots; the caller deals with
             // it before reaching here.
@@ -735,9 +757,10 @@ impl FontContext {
             (FontFamilyKind::Monospace, false) => {
                 (&mut self.monospace_fonts, &mut self.monospace_pending)
             }
-            (FontFamilyKind::Monospace, true) => {
-                (&mut self.monospace_bold_fonts, &mut self.monospace_bold_pending)
-            }
+            (FontFamilyKind::Monospace, true) => (
+                &mut self.monospace_bold_fonts,
+                &mut self.monospace_bold_pending,
+            ),
         }
     }
 
@@ -929,15 +952,7 @@ fn blend_bitmap(
                 continue;
             }
 
-            blend_pixel(
-                buffer,
-                width,
-                height,
-                x + column as i32,
-                py,
-                color,
-                alpha,
-            );
+            blend_pixel(buffer, width, height, x + column as i32, py, color, alpha);
         }
     }
 }
@@ -1075,15 +1090,32 @@ mod tests {
         for ch in ['\u{FE0F}', '\u{200B}', '\u{200D}', '\u{FEFF}'] {
             let with = context.text_width_px(&format!("A{ch}B"), 18, FontFamilyKind::Sans);
             let without = context.text_width_px("AB", 18, FontFamilyKind::Sans);
-            assert_eq!(with, without, "U+{:04X} should have zero advance", ch as u32);
+            assert_eq!(
+                with, without,
+                "U+{:04X} should have zero advance",
+                ch as u32
+            );
         }
         // Drawing a string of only invisibles must leave the buffer untouched.
         let mut buffer = vec![0_u32; 100 * 40];
         context.draw_text(
-            &mut buffer, 100, 40, 4, 4, "\u{FE0F}\u{200D}", 18, 0x00FFFFFF,
-            false, false, false, FontFamilyKind::Sans,
+            &mut buffer,
+            100,
+            40,
+            4,
+            4,
+            "\u{FE0F}\u{200D}",
+            18,
+            0x00FFFFFF,
+            false,
+            false,
+            false,
+            FontFamilyKind::Sans,
         );
-        assert!(buffer.iter().all(|p| *p == 0), "invisible chars painted pixels");
+        assert!(
+            buffer.iter().all(|p| *p == 0),
+            "invisible chars painted pixels"
+        );
     }
 
     /// Symbols outside the text faces (⚛ U+269B) should resolve via the
@@ -1094,8 +1126,18 @@ mod tests {
         let mut context = FontContext::load();
         let mut buffer = vec![0_u32; 100 * 60];
         context.draw_text(
-            &mut buffer, 100, 60, 8, 8, "\u{269B}", 24, 0x00FFFFFF,
-            false, false, false, FontFamilyKind::Sans,
+            &mut buffer,
+            100,
+            60,
+            8,
+            8,
+            "\u{269B}",
+            24,
+            0x00FFFFFF,
+            false,
+            false,
+            false,
+            FontFamilyKind::Sans,
         );
         let painted = buffer.iter().filter(|p| **p != 0).count();
         // The atom symbol is dense (orbital rings); the bitmap '?' fallback is a
@@ -1139,8 +1181,14 @@ mod lazy_loading_tests {
     fn load_reads_no_font_files() {
         let fonts = FontContext::load();
         assert!(fonts.sans_fonts.is_empty(), "sans should load on first use");
-        assert!(fonts.monospace_fonts.is_empty(), "monospace should load on first use");
-        assert!(fonts.serif_fonts.is_empty(), "serif should load on first use");
+        assert!(
+            fonts.monospace_fonts.is_empty(),
+            "monospace should load on first use"
+        );
+        assert!(
+            fonts.serif_fonts.is_empty(),
+            "serif should load on first use"
+        );
         assert!(
             !fonts.sans_pending.is_empty(),
             "the candidate list should still be queued for lazy loading"
@@ -1223,6 +1271,31 @@ mod lazy_loading_tests {
         assert!(
             doubled >= line * 2 - 2 && doubled <= line * 2 + 2,
             "32px should be about double 16px: {line} vs {doubled}"
+        );
+    }
+
+    /// A named face covers the letters it was cut for and no more, so anything
+    /// it lacks comes off the general stack.
+    #[test]
+    fn a_named_face_falls_back_for_letters_it_does_not_have() {
+        let mut fonts = FontContext::load();
+        fonts.ensure_family_loaded(FontFamilyKind::Sans, false);
+        if fonts.sans_fonts.is_empty() {
+            return; // no system fonts available
+        }
+        let Some(georgia) = crate::css::parse_font_family_for_test("Georgia") else {
+            return; // Georgia is not installed here
+        };
+        let FontFamilyKind::Named(_) = georgia else {
+            return; // it fell through to a generic kind
+        };
+        // Georgia has no Japanese in it. Wikipedia asks for it in its headings,
+        // so every heading on the Japanese site came out as empty boxes.
+        let glyph = fonts.cached_glyph('\u{65e5}', 32, georgia, false);
+        assert!(
+            !matches!(glyph.mode, GlyphMode::Bitmap { .. }),
+            "a Japanese character should come off the fallback stack, not the \
+             built-in bitmap"
         );
     }
 

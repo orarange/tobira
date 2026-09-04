@@ -10,8 +10,8 @@ mod image;
 mod js;
 mod layout;
 mod render;
-mod svg;
 mod site_state;
+mod svg;
 mod text;
 mod url;
 
@@ -164,11 +164,14 @@ fn write_screenshot(url: &Url, path: &str) -> Result<()> {
     // `::image` is the crate; `image` on its own is this program's own module.
     let picture: ::image::ImageBuffer<::image::Rgb<u8>, Vec<u8>> =
         ::image::ImageBuffer::from_raw(width, height, pixels)
-        .ok_or_else(|| error::BrowserError::message("could not build the image"))?;
+            .ok_or_else(|| error::BrowserError::message("could not build the image"))?;
     picture
         .save(path)
         .map_err(|err| error::BrowserError::message(format!("could not write {path}: {err}")))?;
-    println!("wrote {path} ({width}x{height}, page is {} tall)", layout.content_height);
+    println!(
+        "wrote {path} ({width}x{height}, page is {} tall)",
+        layout.content_height
+    );
     Ok(())
 }
 
@@ -216,7 +219,12 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                         t.text.chars().take(60).collect::<String>()
                     );
                 }
-                let len = t.text.split_whitespace().collect::<Vec<_>>().join(" ").len();
+                let len = t
+                    .text
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .len();
                 if hidden {
                     stats.3 += len;
                 } else {
@@ -274,7 +282,13 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                         // never arrived" look identical on screen.
                         e.style.mask_image_url.as_deref().unwrap_or("-"),
                         inline,
-                        if matches!(e.style.display, Display::None) { "  [none]" } else if e.style.opacity == 0 { "  [OPACITY:0]" } else { "" },
+                        if matches!(e.style.display, Display::None) {
+                            "  [none]"
+                        } else if e.style.opacity == 0 {
+                            "  [OPACITY:0]"
+                        } else {
+                            ""
+                        },
                     );
                 }
                 for c in &e.children {
@@ -342,11 +356,20 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
     // text it hides and why, so we can tell script/style/head from real content.
     fn subtree_text(node: &StyledNode) -> usize {
         match node {
-            StyledNode::Text(t) => t.text.split_whitespace().collect::<Vec<_>>().join(" ").len(),
+            StyledNode::Text(t) => t
+                .text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .len(),
             StyledNode::Element(e) => e.children.iter().map(subtree_text).sum(),
         }
     }
-    fn find_hidden_roots<'a>(node: &'a StyledNode, hidden: bool, out: &mut Vec<&'a css::StyledElement>) {
+    fn find_hidden_roots<'a>(
+        node: &'a StyledNode,
+        hidden: bool,
+        out: &mut Vec<&'a css::StyledElement>,
+    ) {
         if let StyledNode::Element(e) = node {
             let is_none = matches!(e.style.display, Display::None);
             if is_none && !hidden {
@@ -367,9 +390,20 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
     println!("\n=== top display:none roots (hidden text bytes : tag#id.class | style) ===");
     for (bytes, e) in rooted.iter().take(15) {
         let id = e.attributes.get("id").cloned().unwrap_or_default();
-        let cls: String = e.attributes.get("class").map(|c| c.chars().take(40).collect()).unwrap_or_default();
-        let style: String = e.attributes.get("style").map(|c| c.chars().take(60).collect()).unwrap_or_default();
-        println!("  {:>8} : {}#{}.{} | style=\"{}\"", bytes, e.tag_name, id, cls, style);
+        let cls: String = e
+            .attributes
+            .get("class")
+            .map(|c| c.chars().take(40).collect())
+            .unwrap_or_default();
+        let style: String = e
+            .attributes
+            .get("style")
+            .map(|c| c.chars().take(60).collect())
+            .unwrap_or_default();
+        println!(
+            "  {:>8} : {}#{}.{} | style=\"{}\"",
+            bytes, e.tag_name, id, cls, style
+        );
     }
 
     // What does the visible (non-hidden) text actually say?
@@ -395,7 +429,12 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
     println!("{}", vis.join(" | "));
 
     let mut fonts = font::FontContext::load();
-    let layout = layout::layout_styled_document(&page.styled_document, &page.images, dump_width(), &mut fonts);
+    let layout = layout::layout_styled_document(
+        &page.styled_document,
+        &page.images,
+        dump_width(),
+        &mut fonts,
+    );
     println!("\n=== layout (viewport_width={}) ===", dump_width());
     println!("content_height      = {}", layout.content_height);
     println!("draw commands       = {}", layout.commands.len());
@@ -440,14 +479,24 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
     // are formats the decoder cannot read.
     {
         use std::collections::BTreeMap;
-        fn tally(cmds: &[layout::DrawCommand], counts: &mut BTreeMap<&'static str, u32>, svg: &mut u32, other: &mut u32) {
+        fn tally(
+            cmds: &[layout::DrawCommand],
+            counts: &mut BTreeMap<&'static str, u32>,
+            svg: &mut u32,
+            other: &mut u32,
+        ) {
             for cmd in cmds {
                 let name = match cmd {
                     layout::DrawCommand::Rect(_) => "rect",
                     layout::DrawCommand::Text(_) => "text",
                     layout::DrawCommand::Image(i) => {
-                        let is_svg = i.src.contains("image/svg") || i.src.trim_end().ends_with(".svg");
-                        if is_svg { *svg += 1 } else { *other += 1 }
+                        let is_svg =
+                            i.src.contains("image/svg") || i.src.trim_end().ends_with(".svg");
+                        if is_svg {
+                            *svg += 1
+                        } else {
+                            *other += 1
+                        }
                         "image"
                     }
                     layout::DrawCommand::Gradient(_) => "gradient",
@@ -472,7 +521,10 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
                     match cmd {
                         layout::DrawCommand::Image(i) => println!(
                             "  {:5},{:5} {:4}x{:<4} {}",
-                            i.x, i.y, i.width, i.height,
+                            i.x,
+                            i.y,
+                            i.width,
+                            i.height,
                             i.src.chars().take(60).collect::<String>()
                         ),
                         layout::DrawCommand::Layer(l) => walk(&l.commands),
@@ -535,8 +587,10 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
     // laid out side by side. Any intersection is a positioning bug.
     let texts = layout.texts();
     if std::env::var_os("TOBIRA_DUMP_TEXT").is_some() {
-        println!("
-=== all text runs (x,y wxh size) ===");
+        println!(
+            "
+=== all text runs (x,y wxh size) ==="
+        );
         for t in &texts {
             println!(
                 "  {:5},{:5} {:4}x{:<3} {:2}px : {:?}",
@@ -547,7 +601,9 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
     let mut collisions: Vec<(usize, usize, u32)> = Vec::new();
     for (i, a) in texts.iter().enumerate() {
         for (j, b) in texts.iter().enumerate().skip(i + 1) {
-            let overlap_w = (a.x + a.width).min(b.x + b.width).saturating_sub(a.x.max(b.x));
+            let overlap_w = (a.x + a.width)
+                .min(b.x + b.width)
+                .saturating_sub(a.x.max(b.x));
             let a_bottom = a.y + a.line_height_px;
             let b_bottom = b.y + b.line_height_px;
             let overlap_h = a_bottom.min(b_bottom).saturating_sub(a.y.max(b.y));
@@ -567,8 +623,16 @@ fn dump_styled_layout(url: &Url) -> Result<()> {
         let clip = |t: &str| t.chars().take(24).collect::<String>();
         println!(
             "  {area:7}px^2 : {:?} @ {},{} {}x{}  X  {:?} @ {},{} {}x{}",
-            clip(&a.text), a.x, a.y, a.width, a.line_height_px,
-            clip(&b.text), b.x, b.y, b.width, b.line_height_px,
+            clip(&a.text),
+            a.x,
+            a.y,
+            a.width,
+            a.line_height_px,
+            clip(&b.text),
+            b.x,
+            b.y,
+            b.width,
+            b.line_height_px,
         );
     }
     Ok(())

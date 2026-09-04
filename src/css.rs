@@ -156,7 +156,9 @@ impl RuleIndex {
 
     fn candidates_for(&self, element: &ElementIdentity) -> Vec<usize> {
         let mut candidates = Vec::new();
-        if let Some(id) = &element.id && let Some(values) = self.by_id.get(id) {
+        if let Some(id) = &element.id
+            && let Some(values) = self.by_id.get(id)
+        {
             candidates.extend(values);
         }
         for class_name in &element.classes {
@@ -184,9 +186,21 @@ enum RuleBucket<'a> {
 impl<'a> RuleBucket<'a> {
     fn insert(self, index: &mut RuleIndex, rule_index: usize) {
         match self {
-            RuleBucket::Id(id) => index.by_id.entry(id.to_string()).or_default().push(rule_index),
-            RuleBucket::Class(class) => index.by_class.entry(class.to_string()).or_default().push(rule_index),
-            RuleBucket::Tag(tag) => index.by_tag.entry(tag.to_string()).or_default().push(rule_index),
+            RuleBucket::Id(id) => index
+                .by_id
+                .entry(id.to_string())
+                .or_default()
+                .push(rule_index),
+            RuleBucket::Class(class) => index
+                .by_class
+                .entry(class.to_string())
+                .or_default()
+                .push(rule_index),
+            RuleBucket::Tag(tag) => index
+                .by_tag
+                .entry(tag.to_string())
+                .or_default()
+                .push(rule_index),
             RuleBucket::Universal => index.universal.push(rule_index),
         }
     }
@@ -354,11 +368,12 @@ struct AncestorSlot {
 impl Selector {
     /// Whether any part of this selector asks a `:has()` question.
     fn mentions_has(&self) -> bool {
-        self.parts
-            .iter()
-            .any(|part| part.simple.pseudo_classes.iter().any(|pseudo| {
-                matches!(pseudo, PseudoClass::Has(_))
-            }))
+        self.parts.iter().any(|part| {
+            part.simple
+                .pseudo_classes
+                .iter()
+                .any(|pseudo| matches!(pseudo, PseudoClass::Has(_)))
+        })
     }
 }
 
@@ -672,28 +687,79 @@ pub enum Position {
 }
 
 impl Default for Position {
-    fn default() -> Self { Position::Static }
+    fn default() -> Self {
+        Position::Static
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FlexDirection { Row, Column, RowReverse, ColumnReverse }
-impl Default for FlexDirection { fn default() -> Self { FlexDirection::Row } }
+pub enum FlexDirection {
+    Row,
+    Column,
+    RowReverse,
+    ColumnReverse,
+}
+impl Default for FlexDirection {
+    fn default() -> Self {
+        FlexDirection::Row
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FlexWrap { NoWrap, Wrap, WrapReverse }
-impl Default for FlexWrap { fn default() -> Self { FlexWrap::NoWrap } }
+pub enum FlexWrap {
+    NoWrap,
+    Wrap,
+    WrapReverse,
+}
+impl Default for FlexWrap {
+    fn default() -> Self {
+        FlexWrap::NoWrap
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AlignItems { Stretch, FlexStart, FlexEnd, Center, Baseline }
-impl Default for AlignItems { fn default() -> Self { AlignItems::Stretch } }
+pub enum AlignItems {
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center,
+    Baseline,
+}
+impl Default for AlignItems {
+    fn default() -> Self {
+        AlignItems::Stretch
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum JustifyContent { FlexStart, FlexEnd, Center, SpaceBetween, SpaceAround, SpaceEvenly }
-impl Default for JustifyContent { fn default() -> Self { JustifyContent::FlexStart } }
+pub enum JustifyContent {
+    FlexStart,
+    FlexEnd,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+impl Default for JustifyContent {
+    fn default() -> Self {
+        JustifyContent::FlexStart
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AlignSelf { Auto, Stretch, FlexStart, FlexEnd, Center, Baseline }
-impl Default for AlignSelf { fn default() -> Self { AlignSelf::Auto } }
+pub enum AlignSelf {
+    Auto,
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center,
+    Baseline,
+}
+impl Default for AlignSelf {
+    fn default() -> Self {
+        AlignSelf::Auto
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlignContent {
@@ -704,7 +770,11 @@ pub enum AlignContent {
     SpaceAround,
     Stretch,
 }
-impl Default for AlignContent { fn default() -> Self { AlignContent::Stretch } }
+impl Default for AlignContent {
+    fn default() -> Self {
+        AlignContent::Stretch
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum CursorKind {
@@ -1035,7 +1105,12 @@ pub fn computed_property_string(
         "border-color" => colour(style.border_color),
         "font-size" => px(style.font_size_px),
         "font-weight" => if style.font_weight { "700" } else { "400" }.to_string(),
-        "font-style" => if style.font_style_italic { "italic" } else { "normal" }.to_string(),
+        "font-style" => if style.font_style_italic {
+            "italic"
+        } else {
+            "normal"
+        }
+        .to_string(),
         "line-height" => {
             if style.line_height == 0 {
                 "normal".to_string()
@@ -1085,10 +1160,26 @@ pub fn computed_property_string(
         "padding-right" => px(style.padding.right),
         "padding-bottom" => px(style.padding.bottom),
         "padding-left" => px(style.padding.left),
-        "border-top-width" => px(if style.border_style_none { 0 } else { style.border.top }),
-        "border-right-width" => px(if style.border_style_none { 0 } else { style.border.right }),
-        "border-bottom-width" => px(if style.border_style_none { 0 } else { style.border.bottom }),
-        "border-left-width" => px(if style.border_style_none { 0 } else { style.border.left }),
+        "border-top-width" => px(if style.border_style_none {
+            0
+        } else {
+            style.border.top
+        }),
+        "border-right-width" => px(if style.border_style_none {
+            0
+        } else {
+            style.border.right
+        }),
+        "border-bottom-width" => px(if style.border_style_none {
+            0
+        } else {
+            style.border.bottom
+        }),
+        "border-left-width" => px(if style.border_style_none {
+            0
+        } else {
+            style.border.left
+        }),
         "border-radius" => px(style.border_radius),
         "text-transform" => match style.text_transform {
             TextTransform::None => "none",
@@ -1118,7 +1209,6 @@ pub fn computed_property_string(
         _ => return None,
     })
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComputedStyle {
@@ -1295,9 +1385,9 @@ pub struct ComputedStyle {
     /// container's line names at layout time.
     pub grid_placement_names: Option<Box<GridPlacementNames>>,
     // Filter effects
-    pub filter_blur_px: u32,       // blur() value in pixels, 0 = no blur
-    pub filter_brightness: u32,    // brightness() in percent * 100 (10000 = 100% = no change)
-    pub filter_opacity: u8,        // opacity() as 0-255, 255 = no change
+    pub filter_blur_px: u32,    // blur() value in pixels, 0 = no blur
+    pub filter_brightness: u32, // brightness() in percent * 100 (10000 = 100% = no change)
+    pub filter_opacity: u8,     // opacity() as 0-255, 255 = no change
     // CSS transform (all integer to keep ComputedStyle: Eq)
     /// translate X in pixels (0 = no translate)
     pub transform_translate_x: i32,
@@ -1457,10 +1547,10 @@ impl ComputedStyle {
             // CSS transform
             transform_translate_x: 0,
             transform_translate_y: 0,
-            transform_scale_x: 0,  // 0 = "not set" → treated as 1000 at render time
+            transform_scale_x: 0, // 0 = "not set" → treated as 1000 at render time
             transform_scale_y: 0,
             transform_rotate_millideg: 0,
-            transform_origin_x: 500,  // 50% center
+            transform_origin_x: 500, // 50% center
             transform_origin_y: 500,
         };
 
@@ -1952,7 +2042,9 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                 }
                 for name in inner_stylesheet.layer_order {
                     match outer {
-                        Some(ref outer) => register_layer(&format!("{outer}.{name}"), &mut layer_order),
+                        Some(ref outer) => {
+                            register_layer(&format!("{outer}.{name}"), &mut layer_order)
+                        }
                         None => register_layer(&name, &mut layer_order),
                     }
                 }
@@ -2337,7 +2429,8 @@ fn intern_style(style: ComputedStyle) -> Arc<ComputedStyle> {
 /// ever computed in this process.
 fn prune_style_interner() {
     STYLE_INTERNER.with(|cell| {
-        cell.borrow_mut().retain(|shared| Arc::strong_count(shared) > 1);
+        cell.borrow_mut()
+            .retain(|shared| Arc::strong_count(shared) > 1);
     });
 }
 
@@ -2588,7 +2681,13 @@ fn build_node(
             let all_sibling_ids: Rc<[ElementIdentity]> = element
                 .children
                 .iter()
-                .filter_map(|c| if let Node::Element(e) = c { Some(ElementIdentity::from(e)) } else { None })
+                .filter_map(|c| {
+                    if let Node::Element(e) = c {
+                        Some(ElementIdentity::from(e))
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Vec<_>>()
                 .into();
             let child_element_count = all_sibling_ids.len();
@@ -2769,7 +2868,13 @@ fn build_node_incremental(
             let all_sibling_ids: Rc<[ElementIdentity]> = element
                 .children
                 .iter()
-                .filter_map(|c| if let Node::Element(e) = c { Some(ElementIdentity::from(e)) } else { None })
+                .filter_map(|c| {
+                    if let Node::Element(e) = c {
+                        Some(ElementIdentity::from(e))
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Vec<_>>()
                 .into();
             let child_element_count = all_sibling_ids.len();
@@ -3070,12 +3175,18 @@ fn pseudo_node(text: String, style: ComputedStyle) -> StyledNode {
         || style.width.is_some()
         || style.height.is_some();
     if !makes_a_box {
-        return StyledNode::Text(StyledText { text, style: intern_style(style) });
+        return StyledNode::Text(StyledText {
+            text,
+            style: intern_style(style),
+        });
     }
     let children = if text.is_empty() {
         Vec::new()
     } else {
-        vec![StyledNode::Text(StyledText { text, style: intern_style(style.clone()) })]
+        vec![StyledNode::Text(StyledText {
+            text,
+            style: intern_style(style.clone()),
+        })]
     };
     StyledNode::Element(StyledElement {
         // Not a real tag: nothing may match it as one, and it reads for what it
@@ -3211,7 +3322,9 @@ pub fn compute_placeholder_style(
 
     for rule in &stylesheet.rules {
         if let Some(cond) = &rule.media {
-            if !cond.matches(viewport_width) { continue; }
+            if !cond.matches(viewport_width) {
+                continue;
+            }
         }
         let host_matches = rule.selectors.iter().any(|sel| {
             sel.pseudo_element.as_ref() == Some(&PseudoElement::Placeholder)
@@ -3225,7 +3338,9 @@ pub fn compute_placeholder_style(
                     &InteractiveState::default(),
                 )
         });
-        if !host_matches { continue; }
+        if !host_matches {
+            continue;
+        }
         has_match = true;
         for decl in &rule.declarations {
             apply_declaration(&mut pseudo_style, decl, host_style.font_size_px);
@@ -3320,7 +3435,11 @@ fn compute_style_with_rules(
     for rule_index in candidate_rule_indices {
         let rule = &stylesheet.rules[rule_index];
         // Skip rules where ALL selectors are pseudo-element rules — they are handled by collect_pseudo_content
-        if rule.selectors.iter().all(|sel| sel.pseudo_element.is_some()) {
+        if rule
+            .selectors
+            .iter()
+            .all(|sel| sel.pseudo_element.is_some())
+        {
             continue;
         }
         // Check media condition
@@ -3479,7 +3598,10 @@ fn compute_style_with_rules(
     // so the size has to be settled before the rest are read.
     let mut applicable: Vec<_> = applicable.into_iter().collect();
     applicable.sort_by_key(|(_, _, _, _, declaration)| {
-        u8::from(!matches!(declaration.property.as_str(), "font-size" | "font"))
+        u8::from(!matches!(
+            declaration.property.as_str(),
+            "font-size" | "font"
+        ))
     });
 
     for (_, _, _, _, mut declaration) in applicable {
@@ -3506,7 +3628,9 @@ fn compute_style_with_rules(
                     eprintln!(
                         "decl <{}> class={:?} {}: {:?} -> DROPPED (unresolvable var)",
                         element.tag_name,
-                        element.attribute("class").map(|c| c.split_whitespace().collect::<Vec<_>>().join(".")),
+                        element
+                            .attribute("class")
+                            .map(|c| c.split_whitespace().collect::<Vec<_>>().join(".")),
                         declaration.property,
                         raw_value.unwrap_or_default(),
                     );
@@ -3521,7 +3645,9 @@ fn compute_style_with_rules(
             eprintln!(
                 "decl <{}> class={:?} {}: {:?} -> {:?}",
                 element.tag_name,
-                element.attribute("class").map(|c| c.split_whitespace().collect::<Vec<_>>().join(".")),
+                element
+                    .attribute("class")
+                    .map(|c| c.split_whitespace().collect::<Vec<_>>().join(".")),
                 declaration.property,
                 raw_value.unwrap_or_default(),
                 declaration.value,
@@ -3801,7 +3927,10 @@ fn substitute_vars_at(
             Some((name, tail)) if !tail.is_empty() => {
                 // The fallback is everything after the first comma, with the
                 // separating space dropped.
-                (name.trim().to_string(), Some(tail.join(",").trim().to_string()))
+                (
+                    name.trim().to_string(),
+                    Some(tail.join(",").trim().to_string()),
+                )
             }
             Some((name, _)) => (name.trim().to_string(), None),
             None => (String::new(), None),
@@ -3867,7 +3996,9 @@ fn parse_filter_value(input: &str, style: &mut ComputedStyle) {
     let mut rest = value.as_str();
     while !rest.is_empty() {
         rest = rest.trim_start();
-        if rest.is_empty() { break; }
+        if rest.is_empty() {
+            break;
+        }
 
         if let Some(inner) = rest.strip_prefix("blur(") {
             if let Some(end) = inner.find(')') {
@@ -3875,7 +4006,7 @@ fn parse_filter_value(input: &str, style: &mut ComputedStyle) {
                 if let Some(px) = parse_length(arg.trim(), 16) {
                     style.filter_blur_px = px;
                 }
-                rest = &inner[end+1..];
+                rest = &inner[end + 1..];
                 continue;
             }
         }
@@ -3886,7 +4017,7 @@ fn parse_filter_value(input: &str, style: &mut ComputedStyle) {
                 // If value > 2.0 it's a percentage (e.g. "80%"), otherwise a factor (e.g. "0.8")
                 let factor = if pct <= 2.0 { pct } else { pct / 100.0 };
                 style.filter_brightness = (factor * 10000.0).round() as u32;
-                rest = &inner[end+1..];
+                rest = &inner[end + 1..];
                 continue;
             }
         }
@@ -3896,13 +4027,13 @@ fn parse_filter_value(input: &str, style: &mut ComputedStyle) {
                 let pct = arg.parse::<f32>().ok().unwrap_or(1.0);
                 let factor = if pct <= 1.0 { pct } else { pct / 100.0 };
                 style.filter_opacity = (factor.clamp(0.0, 1.0) * 255.0).round() as u8;
-                rest = &inner[end+1..];
+                rest = &inner[end + 1..];
                 continue;
             }
         }
         if let Some(inner) = rest.strip_prefix("grayscale(") {
             if let Some(end) = inner.find(')') {
-                rest = &inner[end+1..];
+                rest = &inner[end + 1..];
                 continue;
             }
         }
@@ -3933,7 +4064,9 @@ fn parse_transform_into(value: &str, style: &mut ComputedStyle) {
     // Tokenise: split on ')' so each token is like "translateX(30px"
     for token in v.split(')') {
         let token = token.trim();
-        if token.is_empty() { continue; }
+        if token.is_empty() {
+            continue;
+        }
         let (fname, args_str) = if let Some(p) = token.find('(') {
             (&token[..p], &token[p + 1..])
         } else {
@@ -3967,19 +4100,35 @@ fn parse_transform_into(value: &str, style: &mut ComputedStyle) {
                 let sx = args.first().copied().unwrap_or(1.0);
                 let sy = args.get(1).copied().unwrap_or(sx);
                 // Accumulate by multiplying (convert millis → float → multiply → back)
-                let prev_sx = if style.transform_scale_x == 0 { 1.0 } else { style.transform_scale_x as f32 / 1000.0 };
-                let prev_sy = if style.transform_scale_y == 0 { 1.0 } else { style.transform_scale_y as f32 / 1000.0 };
+                let prev_sx = if style.transform_scale_x == 0 {
+                    1.0
+                } else {
+                    style.transform_scale_x as f32 / 1000.0
+                };
+                let prev_sy = if style.transform_scale_y == 0 {
+                    1.0
+                } else {
+                    style.transform_scale_y as f32 / 1000.0
+                };
                 style.transform_scale_x = ((prev_sx * sx) * 1000.0).round() as u32;
                 style.transform_scale_y = ((prev_sy * sy) * 1000.0).round() as u32;
             }
             "scalex" => {
                 let sx = args.first().copied().unwrap_or(1.0);
-                let prev = if style.transform_scale_x == 0 { 1.0 } else { style.transform_scale_x as f32 / 1000.0 };
+                let prev = if style.transform_scale_x == 0 {
+                    1.0
+                } else {
+                    style.transform_scale_x as f32 / 1000.0
+                };
                 style.transform_scale_x = ((prev * sx) * 1000.0).round() as u32;
             }
             "scaley" => {
                 let sy = args.first().copied().unwrap_or(1.0);
-                let prev = if style.transform_scale_y == 0 { 1.0 } else { style.transform_scale_y as f32 / 1000.0 };
+                let prev = if style.transform_scale_y == 0 {
+                    1.0
+                } else {
+                    style.transform_scale_y as f32 / 1000.0
+                };
                 style.transform_scale_y = ((prev * sy) * 1000.0).round() as u32;
             }
             "rotate" | "rotatez" => {
@@ -3997,9 +4146,17 @@ fn parse_transform_length(s: &str) -> Option<f32> {
     if s.ends_with("px") {
         s[..s.len() - 2].trim().parse::<f32>().ok()
     } else if s.ends_with("rem") {
-        s[..s.len() - 3].trim().parse::<f32>().ok().map(|v| v * 16.0)
+        s[..s.len() - 3]
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| v * 16.0)
     } else if s.ends_with("em") {
-        s[..s.len() - 2].trim().parse::<f32>().ok().map(|v| v * 16.0)
+        s[..s.len() - 2]
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| v * 16.0)
     } else if s.ends_with('%') {
         // Can't resolve % without element size — return 0 (ignored)
         Some(0.0)
@@ -4013,24 +4170,37 @@ fn parse_transform_length(s: &str) -> Option<f32> {
 /// Handles: 45deg, 3.14rad, 0.5turn, unitless (treated as deg).
 fn parse_transform_angle(s: &str) -> i32 {
     if s.ends_with("deg") {
-        s[..s.len() - 3].trim().parse::<f32>().ok()
+        s[..s.len() - 3]
+            .trim()
+            .parse::<f32>()
+            .ok()
             .map(|d| (d * 1000.0).round() as i32)
             .unwrap_or(0)
     } else if s.ends_with("grad") {
-        s[..s.len() - 4].trim().parse::<f32>().ok()
+        s[..s.len() - 4]
+            .trim()
+            .parse::<f32>()
+            .ok()
             .map(|g| (g * 0.9 * 1000.0).round() as i32)
             .unwrap_or(0)
     } else if s.ends_with("rad") {
-        s[..s.len() - 3].trim().parse::<f32>().ok()
+        s[..s.len() - 3]
+            .trim()
+            .parse::<f32>()
+            .ok()
             .map(|r| (r.to_degrees() * 1000.0).round() as i32)
             .unwrap_or(0)
     } else if s.ends_with("turn") {
-        s[..s.len() - 4].trim().parse::<f32>().ok()
+        s[..s.len() - 4]
+            .trim()
+            .parse::<f32>()
+            .ok()
             .map(|t| (t * 360_000.0).round() as i32)
             .unwrap_or(0)
     } else {
         // unitless: treat as degrees
-        s.parse::<f32>().ok()
+        s.parse::<f32>()
+            .ok()
             .map(|d| (d * 1000.0).round() as i32)
             .unwrap_or(0)
     }
@@ -4045,7 +4215,9 @@ fn parse_transform_origin_pct(s: &str) -> u32 {
         "right" | "bottom" => 1000,
         other => {
             if other.ends_with('%') {
-                other[..other.len() - 1].parse::<f32>().ok()
+                other[..other.len() - 1]
+                    .parse::<f32>()
+                    .ok()
                     .map(|v| (v * 10.0).round() as u32)
                     .unwrap_or(500)
             } else if other.ends_with("px") {
@@ -4094,8 +4266,8 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
     match declaration.property.as_str() {
         // The two-value logical shorthands. `margin-inline: a b` sets the left
         // and right margins; given one value, both take it.
-        "margin-inline" | "margin-block" | "padding-inline" | "padding-block"
-        | "inset-inline" | "inset-block" => {
+        "margin-inline" | "margin-block" | "padding-inline" | "padding-block" | "inset-inline"
+        | "inset-block" => {
             // Split outside brackets: a plain `split_whitespace` tears
             // `calc(var(--kit-size) + var(--fl-section-v-padding)*2)` into four
             // meaningless words, and the whole declaration is then dropped.
@@ -4609,10 +4781,18 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 );
             }
         }
-        "top" => { style.top = parse_offset(value, parent_font_size); }
-        "right" => { style.right = parse_offset(value, parent_font_size); }
-        "bottom" => { style.bottom = parse_offset(value, parent_font_size); }
-        "left" => { style.left = parse_offset(value, parent_font_size); }
+        "top" => {
+            style.top = parse_offset(value, parent_font_size);
+        }
+        "right" => {
+            style.right = parse_offset(value, parent_font_size);
+        }
+        "bottom" => {
+            style.bottom = parse_offset(value, parent_font_size);
+        }
+        "left" => {
+            style.left = parse_offset(value, parent_font_size);
+        }
         "flex-direction" => {
             style.flex_direction = match value.trim().to_ascii_lowercase().as_str() {
                 "column" => FlexDirection::Column,
@@ -4755,7 +4935,9 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         }
         "gap" | "grid-gap" => {
             let parts = split_value_components(value);
-            let rows = parts.first().and_then(|part| parse_length(part, parent_font_size));
+            let rows = parts
+                .first()
+                .and_then(|part| parse_length(part, parent_font_size));
             let columns = parts
                 .get(1)
                 .and_then(|part| parse_length(part, parent_font_size))
@@ -4855,7 +5037,10 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.aspect_ratio = None;
             } else {
                 let ratio = if let Some((num, den)) = v.split_once('/') {
-                    num.trim().parse::<f32>().ok().zip(den.trim().parse::<f32>().ok())
+                    num.trim()
+                        .parse::<f32>()
+                        .ok()
+                        .zip(den.trim().parse::<f32>().ok())
                         .and_then(|(n, d)| if d != 0.0 { Some(n / d) } else { None })
                 } else {
                     v.trim().parse::<f32>().ok().filter(|&r| r > 0.0)
@@ -4894,17 +5079,38 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         }
         "transform-origin" => {
             let parts: Vec<&str> = value.split_whitespace().collect();
-            style.transform_origin_x = parse_transform_origin_pct(parts.first().copied().unwrap_or("50%"));
-            style.transform_origin_y = parse_transform_origin_pct(parts.get(1).copied().unwrap_or("50%"));
+            style.transform_origin_x =
+                parse_transform_origin_pct(parts.first().copied().unwrap_or("50%"));
+            style.transform_origin_y =
+                parse_transform_origin_pct(parts.get(1).copied().unwrap_or("50%"));
         }
         // No-op properties — parsed to prevent warnings, not yet implemented
-        "scroll-behavior" | "overscroll-behavior" | "overscroll-behavior-x" | "overscroll-behavior-y"
-        | "resize" | "writing-mode" | "text-orientation" | "direction" | "unicode-bidi"
-        | "scroll-snap-type" | "scroll-snap-align" | "scroll-padding" | "scroll-padding-top"
-        | "will-change" | "isolation" | "mix-blend-mode" | "backdrop-filter"
-        | "-webkit-overflow-scrolling" | "touch-action" | "user-select" | "-webkit-user-select"
-        | "appearance" | "-webkit-appearance" | "-moz-appearance"
-        | "contain" | "content-visibility" => {
+        "scroll-behavior"
+        | "overscroll-behavior"
+        | "overscroll-behavior-x"
+        | "overscroll-behavior-y"
+        | "resize"
+        | "writing-mode"
+        | "text-orientation"
+        | "direction"
+        | "unicode-bidi"
+        | "scroll-snap-type"
+        | "scroll-snap-align"
+        | "scroll-padding"
+        | "scroll-padding-top"
+        | "will-change"
+        | "isolation"
+        | "mix-blend-mode"
+        | "backdrop-filter"
+        | "-webkit-overflow-scrolling"
+        | "touch-action"
+        | "user-select"
+        | "-webkit-user-select"
+        | "appearance"
+        | "-webkit-appearance"
+        | "-moz-appearance"
+        | "contain"
+        | "content-visibility" => {
             // Parsed and ignored — no implementation yet
         }
         "object-position" => {
@@ -5243,7 +5449,11 @@ fn parse_selector(input: &str) -> Option<Selector> {
     } else {
         // Extract pseudo_element from the last part's simple selector
         let pseudo_element = parts.last().and_then(|p| p.simple.pseudo_element.clone());
-        Some(Selector { parts, pseudo_element, specificity_override: None })
+        Some(Selector {
+            parts,
+            pseudo_element,
+            specificity_override: None,
+        })
     }
 }
 
@@ -5615,8 +5825,12 @@ impl Selector {
     }
 
     fn specificity(&self) -> usize {
-        self.specificity_override
-            .unwrap_or_else(|| self.parts.iter().map(|part| part.simple.specificity()).sum())
+        self.specificity_override.unwrap_or_else(|| {
+            self.parts
+                .iter()
+                .map(|part| part.simple.specificity())
+                .sum()
+        })
     }
 
     fn matches(
@@ -5649,7 +5863,13 @@ impl Selector {
             prec_count: 0,
             children: Rc::clone(children),
         };
-        self.matches_part(last_index, &current, ancestors, preceding_siblings, interactive)
+        self.matches_part(
+            last_index,
+            &current,
+            ancestors,
+            preceding_siblings,
+            interactive,
+        )
     }
 
     fn matches_part(
@@ -5660,7 +5880,10 @@ impl Selector {
         current_preceding_siblings: &[ElementIdentity],
         interactive: &InteractiveState,
     ) -> bool {
-        if !self.parts[part_index].simple.matches_slot(current, interactive) {
+        if !self.parts[part_index]
+            .simple
+            .matches_slot(current, interactive)
+        {
             return false;
         }
 
@@ -5692,9 +5915,8 @@ impl Selector {
                     interactive,
                 )
             }),
-            Combinator::AdjacentSibling => current_preceding_siblings
-                .last()
-                .is_some_and(|sibling| {
+            Combinator::AdjacentSibling => {
+                current_preceding_siblings.last().is_some_and(|sibling| {
                     let sibling_index = current.sibling_index.saturating_sub(1);
                     let sibling_slot = AncestorSlot {
                         element: sibling.clone(),
@@ -5711,12 +5933,10 @@ impl Selector {
                         &current_preceding_siblings[..sibling_index],
                         interactive,
                     )
-                }),
-            Combinator::GeneralSibling => current_preceding_siblings
-                .iter()
-                .enumerate()
-                .rev()
-                .any(|(sibling_index, sibling)| {
+                })
+            }
+            Combinator::GeneralSibling => current_preceding_siblings.iter().enumerate().rev().any(
+                |(sibling_index, sibling)| {
                     let sibling_slot = AncestorSlot {
                         element: sibling.clone(),
                         sibling_index,
@@ -5732,7 +5952,8 @@ impl Selector {
                         &current_preceding_siblings[..sibling_index],
                         interactive,
                     )
-                }),
+                },
+            ),
         }
     }
 }
@@ -5756,8 +5977,7 @@ impl SimpleSelector {
                 }
             })
             .sum();
-        let class_score =
-            (self.classes.len() + non_not_pseudo_count + self.attributes.len()) * 10;
+        let class_score = (self.classes.len() + non_not_pseudo_count + self.attributes.len()) * 10;
         let tag_score = self.tag_name.is_some() as usize;
         id_score + class_score + not_score + tag_score
     }
@@ -5827,9 +6047,9 @@ impl SimpleSelector {
                         rem == 0 && (idx - b) / a >= 0
                     }
                 }
-                PseudoClass::Not(selectors) => {
-                    !selectors.iter().any(|selector| selector.matches_slot(slot, interactive))
-                }
+                PseudoClass::Not(selectors) => !selectors
+                    .iter()
+                    .any(|selector| selector.matches_slot(slot, interactive)),
                 PseudoClass::Has(selectors) => {
                     let count = slot.children.len();
                     (0..count).any(|index| {
@@ -5854,10 +6074,10 @@ impl SimpleSelector {
                     slot.element.node_id.is_some()
                         && slot.element.node_id == interactive.focused_node_id
                 }
-                PseudoClass::Active => {
-                    slot.element.node_id
-                        .is_some_and(|id| interactive.active_node_ids.contains(&id))
-                }
+                PseudoClass::Active => slot
+                    .element
+                    .node_id
+                    .is_some_and(|id| interactive.active_node_ids.contains(&id)),
                 PseudoClass::Checked => slot.element.attributes.contains_key("checked"),
                 PseudoClass::Disabled => slot.element.attributes.contains_key("disabled"),
                 PseudoClass::Enabled => !slot.element.attributes.contains_key("disabled"),
@@ -5900,7 +6120,6 @@ impl From<&Element> for ElementIdentity {
 // ─────────────────────────────────────────────────────────────────────────────
 // Property parsers
 // ─────────────────────────────────────────────────────────────────────────────
-
 
 /// The table part `display` names, if it names one.
 fn parse_table_role(input: &str) -> TableRole {
@@ -6028,11 +6247,7 @@ fn expand_grid_repeat(token: &str, parent_font_size: u32) -> Vec<GridTrackSize> 
     if track_sizes.is_empty() {
         return Vec::new();
     }
-    track_sizes
-        .into_iter()
-        .cycle()
-        .take(count)
-        .collect()
+    track_sizes.into_iter().cycle().take(count).collect()
 }
 
 fn parse_grid_track_size(token: &str, parent_font_size: u32) -> Option<GridTrackSize> {
@@ -6327,11 +6542,7 @@ fn apply_grid_line_pair(
 }
 
 /// Apply `grid-row` / `grid-column` to one axis.
-fn apply_grid_axis(
-    style: &mut ComputedStyle,
-    value: &str,
-    rows: bool,
-) {
+fn apply_grid_axis(style: &mut ComputedStyle, value: &str, rows: bool) {
     let parts: Vec<&str> = value.split('/').collect();
     let start = parse_grid_line_ref(parts.first().copied().unwrap_or(""));
     let end = parts.get(1).map(|part| parse_grid_line_ref(part));
@@ -6825,7 +7036,8 @@ fn parse_margin_shorthand(style: &mut ComputedStyle, input: &str, parent_font_si
 
     let tokens: Vec<&str> = input.split_whitespace().collect();
     // Parse each token as length or auto (None means auto)
-    let parsed: Vec<Option<i32>> = tokens.iter()
+    let parsed: Vec<Option<i32>> = tokens
+        .iter()
         .map(|t| {
             if t.to_ascii_lowercase() == "auto" {
                 None // auto
@@ -6872,8 +7084,12 @@ fn parse_margin_shorthand(style: &mut ComputedStyle, input: &str, parent_font_si
             style.margin.right = resolve(*right);
             style.margin.bottom = resolve(*bottom);
             style.margin.left = resolve(*left);
-            if left.is_none() { style.margin_left_auto = true; }
-            if right.is_none() { style.margin_right_auto = true; }
+            if left.is_none() {
+                style.margin_left_auto = true;
+            }
+            if right.is_none() {
+                style.margin_right_auto = true;
+            }
         }
         _ => {} // invalid, leave unchanged
     }
@@ -6943,6 +7159,12 @@ fn parse_legacy_font_size(input: &str, parent_font_size: u32) -> Option<u32> {
     }
 }
 
+/// `parse_font_family` for the font module's tests.
+#[cfg(test)]
+pub fn parse_font_family_for_test(input: &str) -> Option<FontFamilyKind> {
+    parse_font_family(input)
+}
+
 fn parse_font_family(input: &str) -> Option<FontFamilyKind> {
     // The list is read in order and the first name this machine has wins,
     // which is what a browser does. A generic keyword ends the search: nothing
@@ -7008,7 +7230,13 @@ fn parse_css_min_max(expr: &str, parent_font_size: u32, is_max: bool) -> Option<
         if let Some(v) = parse_length(arg.trim(), parent_font_size) {
             result = Some(match result {
                 None => v,
-                Some(r) => if is_max { r.max(v) } else { r.min(v) },
+                Some(r) => {
+                    if is_max {
+                        r.max(v)
+                    } else {
+                        r.min(v)
+                    }
+                }
             });
         }
     }
@@ -7051,7 +7279,10 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
         return parse_css_min_max(inner, parent_font_size, true);
     }
     // clamp()
-    if let Some(inner) = value.strip_prefix("clamp(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(inner) = value
+        .strip_prefix("clamp(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         return parse_css_clamp(inner, parent_font_size);
     }
 
@@ -7083,7 +7314,10 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
     // proportional faces pages actually use. Unsupported, they were dropped
     // entirely: firefox.com holds its front-page blurb to `max-inline-size: 48ch`
     // and without it the line ran the full width of the column.
-    if let Some(number) = value.strip_suffix("ch").or_else(|| value.strip_suffix("ex")) {
+    if let Some(number) = value
+        .strip_suffix("ch")
+        .or_else(|| value.strip_suffix("ex"))
+    {
         return parse_float(number).map(|p| (p * parent_font_size as f32 / 2.0).round() as u32);
     }
 
@@ -7431,7 +7665,9 @@ fn parse_offset(input: &str, parent_font_size: u32) -> Option<LengthValue> {
     if value == "auto" {
         return None;
     }
-    if let Some(inner) = value.strip_prefix("calc(").and_then(|s| s.strip_suffix(')'))
+    if let Some(inner) = value
+        .strip_prefix("calc(")
+        .and_then(|s| s.strip_suffix(')'))
         && let Some(length) = parse_calc_length_value(inner, parent_font_size)
     {
         return Some(length);
@@ -7449,7 +7685,10 @@ fn parse_offset(input: &str, parent_font_size: u32) -> Option<LengthValue> {
     } else {
         // `LengthValue::Pixels` cannot hold a negative length, and a negative
         // offset is ordinary here.
-        LengthValue::Calc { percent_hundredths: 0, px: pixels }
+        LengthValue::Calc {
+            percent_hundredths: 0,
+            px: pixels,
+        }
     })
 }
 
@@ -7465,7 +7704,9 @@ fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue>
         "auto" => return None,
         _ => {}
     }
-    if let Some(inner) = value.strip_prefix("calc(").and_then(|s| s.strip_suffix(')'))
+    if let Some(inner) = value
+        .strip_prefix("calc(")
+        .and_then(|s| s.strip_suffix(')'))
         && let Some(length) = parse_calc_length_value(inner, parent_font_size)
     {
         return Some(length);
@@ -7499,7 +7740,10 @@ fn parse_length_value(input: &str, parent_font_size: u32) -> Option<LengthValue>
             _ => None,
         };
     }
-    if let Some(inner) = value.strip_prefix("fit-content(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(inner) = value
+        .strip_prefix("fit-content(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         if let Some(px) = parse_length(inner, parent_font_size) {
             return Some(LengthValue::FitContent(px));
         }
@@ -7526,7 +7770,10 @@ fn linear_length_form(input: &str, parent_font_size: u32) -> Option<(i32, i32)> 
         return match length {
             LengthValue::Pixels(px) => Some((0, px.min(i32::MAX as u32) as i32)),
             LengthValue::Percent(percent) => Some((percent.min(i32::MAX as u32) as i32 * 100, 0)),
-            LengthValue::Calc { percent_hundredths, px } => Some((percent_hundredths, px)),
+            LengthValue::Calc {
+                percent_hundredths,
+                px,
+            } => Some((percent_hundredths, px)),
             _ => None,
         };
     }
@@ -7776,7 +8023,8 @@ mod background_shorthand_tests {
         // Hacker News writes its vote arrow as a picture with a transparent
         // gradient behind it; read as one value, the gradient stood in for the
         // picture and the arrows were nowhere.
-        let style = shorthand("url(triangle.svg), linear-gradient(transparent, transparent) no-repeat");
+        let style =
+            shorthand("url(triangle.svg), linear-gradient(transparent, transparent) no-repeat");
         assert_eq!(style.background_image_url.as_deref(), Some("triangle.svg"));
     }
 
@@ -7840,7 +8088,12 @@ fn parse_text_shadow(value: &str, parent_font_size: u32) -> Option<TextShadow> {
     }
 
     match lengths.as_slice() {
-        [ox, oy] => Some(TextShadow { offset_x: *ox, offset_y: *oy, blur: 0, color }),
+        [ox, oy] => Some(TextShadow {
+            offset_x: *ox,
+            offset_y: *oy,
+            blur: 0,
+            color,
+        }),
         [ox, oy, blur, ..] => Some(TextShadow {
             offset_x: *ox,
             offset_y: *oy,
@@ -7857,7 +8110,10 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
     let lower = value.to_ascii_lowercase();
     // `repeating-` forms are read as their plain counterparts: the first pass
     // through the stops is the part that shows over most of a box anyway.
-    let (start, radial, prefix) = match (lower.find("linear-gradient("), lower.find("radial-gradient(")) {
+    let (start, radial, prefix) = match (
+        lower.find("linear-gradient("),
+        lower.find("radial-gradient("),
+    ) {
         (Some(linear), Some(radial_at)) if radial_at < linear => {
             (radial_at, true, "radial-gradient(")
         }
@@ -7911,7 +8167,9 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
             "farthest-corner",
             " at ",
         ];
-        if SHAPE_WORDS.iter().any(|word| first_arg.contains(word.trim()))
+        if SHAPE_WORDS
+            .iter()
+            .any(|word| first_arg.contains(word.trim()))
             && parse_color(&first_arg).is_none()
         {
             arg_iter.next();
@@ -7935,7 +8193,12 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
         let deg: f64 = deg_str.trim().parse().unwrap_or(180.0);
         angle_deg_x1000 = (deg * 1000.0).round() as i32;
         arg_iter.next();
-    } else if first_arg.starts_with("to") || first_arg.ends_with("deg") || first_arg.ends_with("turn") || first_arg.ends_with("rad") || first_arg.ends_with("grad") {
+    } else if first_arg.starts_with("to")
+        || first_arg.ends_with("deg")
+        || first_arg.ends_with("turn")
+        || first_arg.ends_with("rad")
+        || first_arg.ends_with("grad")
+    {
         // Other angle formats — skip and use 180
         angle_deg_x1000 = 180_000;
         arg_iter.next();
@@ -7972,10 +8235,17 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
         // Try the whole joined string as color first, or look for position at end
         // Position is a numeric token ending with % or px
         let last = parts.last().unwrap();
-        let second_last = if parts.len() >= 2 { Some(&parts[parts.len() - 2]) } else { None };
+        let second_last = if parts.len() >= 2 {
+            Some(&parts[parts.len() - 2])
+        } else {
+            None
+        };
 
-        let last_is_position = last.ends_with('%') || (last.ends_with("px") && parse_length(last, 16).is_some());
-        let second_last_is_position = second_last.map(|s| s.ends_with('%') || s.ends_with("px")).unwrap_or(false);
+        let last_is_position =
+            last.ends_with('%') || (last.ends_with("px") && parse_length(last, 16).is_some());
+        let second_last_is_position = second_last
+            .map(|s| s.ends_with('%') || s.ends_with("px"))
+            .unwrap_or(false);
 
         if last_is_position && parts.len() >= 2 {
             pos_str = Some(last.clone());
@@ -7991,7 +8261,10 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
             let pos = pos_str.and_then(|p| {
                 let p = p.trim();
                 if p.ends_with('%') {
-                    p[..p.len()-1].parse::<f64>().ok().map(|v| (v * 10.0).round() as u32)
+                    p[..p.len() - 1]
+                        .parse::<f64>()
+                        .ok()
+                        .map(|v| (v * 10.0).round() as u32)
                 } else {
                     parse_length(p, 16).map(|v| (v as f64 / 10.0).round() as u32) // rough conversion
                 }
@@ -8006,18 +8279,26 @@ fn parse_linear_gradient(value: &str) -> Option<LinearGradient> {
 
     // Fill in missing positions by distributing evenly
     let count = raw_stops.len();
-    let stops: Vec<(u32, u32)> = raw_stops.into_iter().enumerate().map(|(i, (c, p))| {
-        let pos = p.unwrap_or_else(|| {
-            if count == 1 {
-                0
-            } else {
-                (1000 * i / (count - 1)) as u32
-            }
-        });
-        (c, pos)
-    }).collect();
+    let stops: Vec<(u32, u32)> = raw_stops
+        .into_iter()
+        .enumerate()
+        .map(|(i, (c, p))| {
+            let pos = p.unwrap_or_else(|| {
+                if count == 1 {
+                    0
+                } else {
+                    (1000 * i / (count - 1)) as u32
+                }
+            });
+            (c, pos)
+        })
+        .collect();
 
-    Some(LinearGradient { angle_deg_x1000, stops, radial })
+    Some(LinearGradient {
+        angle_deg_x1000,
+        stops,
+        radial,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -8031,10 +8312,9 @@ mod tests {
 
     use super::{
         AlignItems, Display, FlexDirection, FlexWrap, GridEdge, GridTrackSize, JustifyContent,
-        LengthValue,
-        Position, RuleIndex, StyledElement, StyledNode, TableRole, VerticalAlign, WhiteSpaceMode,
-        build_styled_tree, compute_style, parse_calc, parse_color, parse_inline_declarations,
-        parse_length, parse_stylesheet, split_at_top_level,
+        LengthValue, Position, RuleIndex, StyledElement, StyledNode, TableRole, VerticalAlign,
+        WhiteSpaceMode, build_styled_tree, compute_style, parse_calc, parse_color,
+        parse_inline_declarations, parse_length, parse_stylesheet, split_at_top_level,
     };
     use crate::html::{Element, Node, parse_document};
 
@@ -8115,14 +8395,21 @@ mod tests {
                 let all_sibling_ids: Rc<[super::ElementIdentity]> = element
                     .children
                     .iter()
-                    .filter_map(|c| if let Node::Element(e) = c { Some(super::ElementIdentity::from(e)) } else { None })
+                    .filter_map(|c| {
+                        if let Node::Element(e) = c {
+                            Some(super::ElementIdentity::from(e))
+                        } else {
+                            None
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .into();
                 let current_slot = super::AncestorSlot {
                     element: super::ElementIdentity::from(element),
                     sibling_index,
                     sibling_count,
-                    siblings: parent_all_sibling_ids.unwrap_or_else(|| Rc::from(preceding_siblings)),
+                    siblings: parent_all_sibling_ids
+                        .unwrap_or_else(|| Rc::from(preceding_siblings)),
                     prec_count: sibling_index,
                     children: super::empty_siblings_rc(),
                 };
@@ -8281,7 +8568,12 @@ mod tests {
             "p { color: blue; } .callout { color: red; } #hero { font-size: 24px; white-space: pre; }",
         );
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let paragraph = find_first_element(&styled, "p").expect("paragraph should exist");
 
         assert_eq!(paragraph.style.color, 0x00AA00);
@@ -8295,7 +8587,12 @@ mod tests {
         let document = parse_document("<div class=\"a\" id=\"x\">Hello</div>");
         let stylesheet = parse_stylesheet("#x { color: red; } .a { color: green !important; }");
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let div = find_first_element(&styled, "div").expect("div should exist");
 
         assert_eq!(div.style.color, 0x008000);
@@ -8306,12 +8603,16 @@ mod tests {
 
     #[test]
     fn inline_important_beats_author_important() {
-        let document = parse_document(
-            "<div id=\"x\" style=\"color: blue !important;\">Hello</div>",
-        );
+        let document =
+            parse_document("<div id=\"x\" style=\"color: blue !important;\">Hello</div>");
         let stylesheet = parse_stylesheet("#x { color: red !important; }");
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let div = find_first_element(&styled, "div").expect("div should exist");
 
         assert_eq!(div.style.color, 0x0000FF);
@@ -8327,7 +8628,12 @@ mod tests {
             ":root { --k: 180px; --v: 64px } div { padding-block: calc(var(--k) + var(--v) * 2) var(--v) }",
         );
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let div = find_first_element(&styled, "div").expect("div should exist");
 
         assert_eq!(div.style.padding.top, 308);
@@ -8344,7 +8650,12 @@ mod tests {
         let stylesheet =
             parse_stylesheet(".f a:link:not(.b) { color: #ffffff; text-decoration: none }");
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let link = find_first_element(&styled, "a").expect("a should exist");
 
         assert_eq!(link.style.color, 0xFFFFFF);
@@ -8356,10 +8667,18 @@ mod tests {
         let document = parse_document("<a href=\"/x\">go</a>");
         let stylesheet = parse_stylesheet("a:visited { color: #ff0000 }");
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let link = find_first_element(&styled, "a").expect("a should exist");
 
-        assert_ne!(link.style.color, 0xFF0000, "no history means nothing is visited");
+        assert_ne!(
+            link.style.color, 0xFF0000,
+            "no history means nothing is visited"
+        );
     }
 
     #[test]
@@ -8367,7 +8686,12 @@ mod tests {
         let document = parse_document("<div>x</div>");
         let stylesheet = parse_stylesheet("div { position: absolute; inset: 10px 20px 30px 40px }");
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let div = find_first_element(&styled, "div").expect("div should exist");
 
         assert_eq!(div.style.top, Some(LengthValue::Pixels(10)));
@@ -8381,7 +8705,12 @@ mod tests {
         let document = parse_document("<div>x</div>");
         let stylesheet = parse_stylesheet("div { position: absolute; inset: 5px 15px }");
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let div = find_first_element(&styled, "div").expect("div should exist");
 
         assert_eq!(div.style.top, Some(LengthValue::Pixels(5)));
@@ -8401,13 +8730,22 @@ mod tests {
             ".row { display: flex; color: #00ff00 }              .row::before { content: \"\"; background: linear-gradient(#ff0000, #ff0000) }",
         );
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let row = find_first_element(&styled, "div").expect("div should exist");
         let StyledNode::Element(pseudo) = &row.children[0] else {
             panic!("the ::before should have become a box");
         };
 
-        assert_ne!(pseudo.style.display, Display::Flex, "display must not be inherited");
+        assert_ne!(
+            pseudo.style.display,
+            Display::Flex,
+            "display must not be inherited"
+        );
         // Colour does inherit, and the pseudo's own rules still apply.
         assert_eq!(pseudo.style.color, 0x00FF00);
         assert!(pseudo.style.background_gradient.is_some());
@@ -8425,13 +8763,21 @@ mod tests {
             ":root { --flag: \"\"; --art: url(/art.svg) }              .a::before { content: var(--flag); background: var(--art) }",
         );
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let host = find_first_element(&styled, "div").expect("div should exist");
         let StyledNode::Element(pseudo) = &host.children[0] else {
             panic!("the ::before should have become a box");
         };
 
-        assert_eq!(pseudo.style.background_image_url.as_deref(), Some("/art.svg"));
+        assert_eq!(
+            pseudo.style.background_image_url.as_deref(),
+            Some("/art.svg")
+        );
     }
 
     #[test]
@@ -8445,13 +8791,21 @@ mod tests {
             ".hero { --kit-width: 940px }              .hero::before { content: \"\"; position: absolute;              inline-size: var(--kit-width, 580px);              background: url(/media/fox.svg) }",
         );
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let hero = find_first_element(&styled, "section").expect("section should exist");
         let StyledNode::Element(pseudo) = &hero.children[0] else {
             panic!("::before should be an element, not text");
         };
 
-        assert_eq!(pseudo.style.background_image_url.as_deref(), Some("/media/fox.svg"));
+        assert_eq!(
+            pseudo.style.background_image_url.as_deref(),
+            Some("/media/fox.svg")
+        );
         assert_eq!(pseudo.style.width, Some(LengthValue::Pixels(940)));
     }
 
@@ -8460,7 +8814,12 @@ mod tests {
         let document = parse_document("<p>x</p>");
         let stylesheet = parse_stylesheet("p::before { content: \"> \" }");
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let paragraph = find_first_element(&styled, "p").expect("p should exist");
 
         assert!(
@@ -8473,12 +8832,18 @@ mod tests {
     fn selector_list_is_scored_by_its_most_specific_match() {
         // Both halves match; only the second carries the `:first-child` that
         // outweighs the later rule. firefox.com's hero padding rides on this.
-        let document = parse_document("<section class=\"home\"><div class=\"intro\">x</div></section>");
+        let document =
+            parse_document("<section class=\"home\"><div class=\"intro\">x</div></section>");
         let stylesheet = parse_stylesheet(
             ".home .intro, .home .intro:first-child { color: green } .intro:first-child { color: red }",
         );
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let intro = find_first_element(&styled, "div").expect("intro should exist");
 
         assert_eq!(intro.style.color, 0x008000);
@@ -8486,13 +8851,19 @@ mod tests {
 
     #[test]
     fn where_contributes_nothing_to_specificity() {
-        let document = parse_document("<section class=\"home\"><div class=\"intro\">x</div></section>");
+        let document =
+            parse_document("<section class=\"home\"><div class=\"intro\">x</div></section>");
         // `:where(.home)` scores zero, leaving a bare `.intro` -- one class,
         // so it loses to the two-class rule written before it.
         let stylesheet =
             parse_stylesheet(".home .intro { color: green } :where(.home) .intro { color: red }");
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let intro = find_first_element(&styled, "div").expect("intro should exist");
 
         assert_eq!(intro.style.color, 0x008000);
@@ -8503,7 +8874,12 @@ mod tests {
         let document = parse_document("<div class=\"a\" id=\"x\">Hello</div>");
         let stylesheet = parse_stylesheet("#x { color: red; } .a { color: green; }");
 
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let div = find_first_element(&styled, "div").expect("div should exist");
 
         assert_eq!(div.style.color, 0xFF0000);
@@ -8547,7 +8923,12 @@ mod tests {
         );
         let stylesheet =
             parse_stylesheet(".outer > p { color: red; } .outer div p { display: none; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
 
         let Node::Element(root) = document else {
             panic!("document root should be an element");
@@ -8575,7 +8956,12 @@ mod tests {
             "<div><h1>Title</h1><p id=\"lead\">Lead</p><p id=\"body\">Body</p></div>",
         );
         let stylesheet = parse_stylesheet("h1 + p { color: #ff0000; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
 
         let lead = find_element_by_id(&styled, "lead").expect("lead paragraph should exist");
         let body = find_element_by_id(&styled, "body").expect("body paragraph should exist");
@@ -8590,7 +8976,12 @@ mod tests {
             "<div><h1 id=\"heading\">Title</h1><section id=\"content\"><p id=\"text\">Hello</p></section></div>",
         );
         let stylesheet = parse_stylesheet("h1 + section p { color: #00aa00; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
 
         let text = find_element_by_id(&styled, "text").expect("nested paragraph should exist");
         assert_eq!(text.style.color, 0x00AA00);
@@ -8604,7 +8995,12 @@ mod tests {
         let stylesheet = parse_stylesheet(
             "p + p + p { color: #ff0000; } p#a ~ p { background-color: #0000ff; }",
         );
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
 
         let a = find_element_by_id(&styled, "a").expect("first paragraph should exist");
         let b = find_element_by_id(&styled, "b").expect("second paragraph should exist");
@@ -8624,7 +9020,12 @@ mod tests {
             "<body><div></div><section><p id=\"target\"></p><div></div></section></body>",
         );
         let stylesheet = parse_stylesheet("div + section > p { color: #ff0000; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
 
         let target = find_element_by_id(&styled, "target").expect("target paragraph should exist");
         assert_eq!(target.style.color, 0xFF0000);
@@ -8632,11 +9033,15 @@ mod tests {
 
     #[test]
     fn supports_general_sibling_then_child_combinator() {
-        let document = parse_document(
-            "<body><h1></h1><p></p><div><span id=\"target\"></span></div></body>",
-        );
+        let document =
+            parse_document("<body><h1></h1><p></p><div><span id=\"target\"></span></div></body>");
         let stylesheet = parse_stylesheet("h1 ~ div > span { color: #00ff00; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
 
         let target = find_element_by_id(&styled, "target").expect("target span should exist");
         assert_eq!(target.style.color, 0x00FF00);
@@ -8647,7 +9052,12 @@ mod tests {
         let document = parse_document(
             "<body bgcolor=\"#f0f0ff\"><h1 align=\"center\">Title</h1><font color=\"#ff0000\">red</font></body>",
         );
-        let styled = build_styled_tree(&document, &super::Stylesheet::default(), 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &super::Stylesheet::default(),
+            1280,
+            &super::InteractiveState::default(),
+        );
 
         let body = find_first_element(&styled, "body").expect("body should exist");
         let heading = find_first_element(&styled, "h1").expect("heading should exist");
@@ -8663,7 +9073,12 @@ mod tests {
         let document = parse_document(
             "<table align=\"center\"><tr><td>text</td></tr></table><div align=\"center\">div</div><table><tr><td id=\"cell\" align=\"center\">cell</td></tr></table>",
         );
-        let styled = build_styled_tree(&document, &super::Stylesheet::default(), 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &super::Stylesheet::default(),
+            1280,
+            &super::InteractiveState::default(),
+        );
         let table = find_first_element(&styled, "table").expect("table should exist");
         let div = find_first_element(&styled, "div").expect("div should exist");
         let cell = find_element_by_id(&styled, "cell").expect("centered cell should exist");
@@ -8675,9 +9090,15 @@ mod tests {
 
     #[test]
     fn table_cells_default_to_middle_valign_but_attribute_can_override() {
-        let document =
-            parse_document("<table><tr><td>middle</td><th>head</th><td id=\"top\" valign=\"top\">top</td></tr></table>");
-        let styled = build_styled_tree(&document, &super::Stylesheet::default(), 1280, &super::InteractiveState::default());
+        let document = parse_document(
+            "<table><tr><td>middle</td><th>head</th><td id=\"top\" valign=\"top\">top</td></tr></table>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &super::Stylesheet::default(),
+            1280,
+            &super::InteractiveState::default(),
+        );
         let first_cell = find_first_element(&styled, "td").expect("td should exist");
         let header_cell = find_first_element(&styled, "th").expect("th should exist");
         let top_cell = find_element_by_id(&styled, "top").expect("top cell should exist");
@@ -8693,7 +9114,12 @@ mod tests {
             "<table><tr><td width=\"120\" height=\"40\" valign=\"bottom\" style=\"width: 60%;\">Hello</td></tr></table>",
         );
         let stylesheet = parse_stylesheet("td { vertical-align: middle; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let cell = find_first_element(&styled, "td").expect("cell should exist");
 
         assert_eq!(cell.style.width, Some(LengthValue::Percent(60)));
@@ -8744,7 +9170,12 @@ mod tests {
                 em { color: #0f0f0f; }
             "#,
         );
-        let optimized = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let optimized = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         compare_indexed_and_naive_styles(
             &document,
             &optimized,
@@ -8786,7 +9217,12 @@ mod tests {
     fn attribute_exists_selector_matches() {
         let document = parse_document("<div><a href=\"#\">link</a><span>plain</span></div>");
         let stylesheet = parse_stylesheet("[href] { color: #ff0000; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let a = find_first_element(&styled, "a").expect("a should exist");
         let span = find_first_element(&styled, "span").expect("span should exist");
         assert_eq!(a.style.color, 0xFF0000);
@@ -8797,7 +9233,12 @@ mod tests {
     fn attribute_equals_selector_matches() {
         let document = parse_document("<input type=\"text\"><input type=\"checkbox\">");
         let stylesheet = parse_stylesheet("[type=text] { color: #00ff00; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let inputs: Vec<_> = {
             fn collect_inputs<'a>(node: &'a StyledNode, out: &mut Vec<&'a StyledElement>) {
                 if let StyledNode::Element(el) = node {
@@ -8822,7 +9263,12 @@ mod tests {
         let document =
             parse_document("<a href=\"https://example.com\">A</a><a href=\"http://x.com\">B</a>");
         let stylesheet = parse_stylesheet("[href^=\"https\"] { color: #0000ff; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         fn nth_a(node: &StyledNode, n: usize) -> Option<&StyledElement> {
             let mut found = Vec::new();
             fn collect<'a>(node: &'a StyledNode, out: &mut Vec<&'a StyledElement>) {
@@ -8848,7 +9294,12 @@ mod tests {
     fn first_child_selector_matches() {
         let document = parse_document("<ul><li>first</li><li>second</li><li>third</li></ul>");
         let stylesheet = parse_stylesheet("li:first-child { color: #ff0000; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
             if let StyledNode::Element(el) = node {
                 if el.tag_name == "li" {
@@ -8869,7 +9320,12 @@ mod tests {
     fn last_child_selector_matches() {
         let document = parse_document("<ul><li>first</li><li>second</li><li>last</li></ul>");
         let stylesheet = parse_stylesheet("li:last-child { color: #0000ff; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
             if let StyledNode::Element(el) = node {
                 if el.tag_name == "li" {
@@ -8896,7 +9352,12 @@ mod tests {
         let stylesheet = parse_stylesheet(
             "li:nth-child(odd) { color: #ff0000; } li:nth-child(even) { color: #0000ff; }",
         );
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
             if let StyledNode::Element(el) = node {
                 if el.tag_name == "li" {
@@ -8919,7 +9380,12 @@ mod tests {
     fn not_selector_excludes_matching_elements() {
         let document = parse_document("<ul><li class=\"skip\">A</li><li>B</li><li>C</li></ul>");
         let stylesheet = parse_stylesheet("li:not(.skip) { color: #00ff00; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
             if let StyledNode::Element(el) = node {
                 if el.tag_name == "li" {
@@ -8941,7 +9407,12 @@ mod tests {
         let document =
             parse_document("<ul><li class=\"skip\">A</li><li class=\"omit\">B</li><li>C</li></ul>");
         let stylesheet = parse_stylesheet("li:not(.skip, .omit) { color: #00ff00; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         fn collect_li(node: &StyledNode, out: &mut Vec<u32>) {
             if let StyledNode::Element(el) = node {
                 if el.tag_name == "li" {
@@ -8954,9 +9425,18 @@ mod tests {
         }
         let mut colors = Vec::new();
         collect_li(&styled, &mut colors);
-        assert_ne!(colors[0], 0x00FF00, ".skip li should not match selector list in :not()");
-        assert_ne!(colors[1], 0x00FF00, ".omit li should not match selector list in :not()");
-        assert_eq!(colors[2], 0x00FF00, "plain li should match selector list in :not()");
+        assert_ne!(
+            colors[0], 0x00FF00,
+            ".skip li should not match selector list in :not()"
+        );
+        assert_ne!(
+            colors[1], 0x00FF00,
+            ".omit li should not match selector list in :not()"
+        );
+        assert_eq!(
+            colors[2], 0x00FF00,
+            "plain li should match selector list in :not()"
+        );
     }
 
     // ── @media tests ─────────────────────────────────────────────────────────
@@ -8970,7 +9450,12 @@ mod tests {
             "p { color: #0000ff; } @media (max-width: 600px) { p { color: #ff0000; } }",
         );
         // Viewport 1280 → max-width 600 rule should NOT apply, base rule wins
-        let styled_wide = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled_wide = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let p_wide = find_first_element(&styled_wide, "p").unwrap();
         assert_eq!(
             p_wide.style.color, 0x0000FF,
@@ -8978,7 +9463,12 @@ mod tests {
         );
 
         // Viewport 400 → max-width 600 rule SHOULD apply and wins (later in source)
-        let styled_narrow = build_styled_tree(&document, &stylesheet, 400, &super::InteractiveState::default());
+        let styled_narrow = build_styled_tree(
+            &document,
+            &stylesheet,
+            400,
+            &super::InteractiveState::default(),
+        );
         let p_narrow = find_first_element(&styled_narrow, "p").unwrap();
         assert_eq!(
             p_narrow.style.color, 0xFF0000,
@@ -8992,7 +9482,12 @@ mod tests {
         let document = parse_document("<p class=\"a\">A</p><p class=\"b\">B</p>");
         let stylesheet =
             parse_stylesheet("@media screen { .a { color: #ff0000; } .b { color: #0000ff; } }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let a = find_first_element(&styled, "p").unwrap();
         // Both rules inside @media screen should be parsed (screen always applies)
         assert_eq!(
@@ -9010,11 +9505,27 @@ mod tests {
             "p { color: #0000ff; } @media screen and (max-width: 768px) { p { color: #ff0000; } }",
         );
 
-        let styled_700 = build_styled_tree(&document, &stylesheet, 700, &super::InteractiveState::default());
-        assert_eq!(find_first_element(&styled_700, "p").unwrap().style.color, 0xFF0000);
+        let styled_700 = build_styled_tree(
+            &document,
+            &stylesheet,
+            700,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(
+            find_first_element(&styled_700, "p").unwrap().style.color,
+            0xFF0000
+        );
 
-        let styled_800 = build_styled_tree(&document, &stylesheet, 800, &super::InteractiveState::default());
-        assert_eq!(find_first_element(&styled_800, "p").unwrap().style.color, 0x0000FF);
+        let styled_800 = build_styled_tree(
+            &document,
+            &stylesheet,
+            800,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(
+            find_first_element(&styled_800, "p").unwrap().style.color,
+            0x0000FF
+        );
     }
 
     #[test]
@@ -9024,17 +9535,49 @@ mod tests {
             "@media (min-width: 768px) and (max-width: 1024px) { p { color: #ff0000; } }",
         );
 
-        let styled_768 = build_styled_tree(&document, &stylesheet, 768, &super::InteractiveState::default());
-        assert_eq!(find_first_element(&styled_768, "p").unwrap().style.color, 0xFF0000);
+        let styled_768 = build_styled_tree(
+            &document,
+            &stylesheet,
+            768,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(
+            find_first_element(&styled_768, "p").unwrap().style.color,
+            0xFF0000
+        );
 
-        let styled_900 = build_styled_tree(&document, &stylesheet, 900, &super::InteractiveState::default());
-        assert_eq!(find_first_element(&styled_900, "p").unwrap().style.color, 0xFF0000);
+        let styled_900 = build_styled_tree(
+            &document,
+            &stylesheet,
+            900,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(
+            find_first_element(&styled_900, "p").unwrap().style.color,
+            0xFF0000
+        );
 
-        let styled_700 = build_styled_tree(&document, &stylesheet, 700, &super::InteractiveState::default());
-        assert_ne!(find_first_element(&styled_700, "p").unwrap().style.color, 0xFF0000);
+        let styled_700 = build_styled_tree(
+            &document,
+            &stylesheet,
+            700,
+            &super::InteractiveState::default(),
+        );
+        assert_ne!(
+            find_first_element(&styled_700, "p").unwrap().style.color,
+            0xFF0000
+        );
 
-        let styled_1200 = build_styled_tree(&document, &stylesheet, 1200, &super::InteractiveState::default());
-        assert_ne!(find_first_element(&styled_1200, "p").unwrap().style.color, 0xFF0000);
+        let styled_1200 = build_styled_tree(
+            &document,
+            &stylesheet,
+            1200,
+            &super::InteractiveState::default(),
+        );
+        assert_ne!(
+            find_first_element(&styled_1200, "p").unwrap().style.color,
+            0xFF0000
+        );
     }
 
     #[test]
@@ -9044,28 +9587,67 @@ mod tests {
             "@media (max-width: 480px), (min-width: 1200px) { p { color: #ff0000; } }",
         );
 
-        let styled_400 = build_styled_tree(&document, &stylesheet, 400, &super::InteractiveState::default());
-        assert_eq!(find_first_element(&styled_400, "p").unwrap().style.color, 0xFF0000);
+        let styled_400 = build_styled_tree(
+            &document,
+            &stylesheet,
+            400,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(
+            find_first_element(&styled_400, "p").unwrap().style.color,
+            0xFF0000
+        );
 
-        let styled_800 = build_styled_tree(&document, &stylesheet, 800, &super::InteractiveState::default());
-        assert_ne!(find_first_element(&styled_800, "p").unwrap().style.color, 0xFF0000);
+        let styled_800 = build_styled_tree(
+            &document,
+            &stylesheet,
+            800,
+            &super::InteractiveState::default(),
+        );
+        assert_ne!(
+            find_first_element(&styled_800, "p").unwrap().style.color,
+            0xFF0000
+        );
 
-        let styled_1300 = build_styled_tree(&document, &stylesheet, 1300, &super::InteractiveState::default());
-        assert_eq!(find_first_element(&styled_1300, "p").unwrap().style.color, 0xFF0000);
+        let styled_1300 = build_styled_tree(
+            &document,
+            &stylesheet,
+            1300,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(
+            find_first_element(&styled_1300, "p").unwrap().style.color,
+            0xFF0000
+        );
     }
 
     #[test]
     fn media_supports_not_conditions() {
         let document = parse_document("<p>Hello</p>");
-        let stylesheet = parse_stylesheet(
-            "@media not (max-width: 600px) { p { color: #ff0000; } }",
+        let stylesheet =
+            parse_stylesheet("@media not (max-width: 600px) { p { color: #ff0000; } }");
+
+        let styled_700 = build_styled_tree(
+            &document,
+            &stylesheet,
+            700,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(
+            find_first_element(&styled_700, "p").unwrap().style.color,
+            0xFF0000
         );
 
-        let styled_700 = build_styled_tree(&document, &stylesheet, 700, &super::InteractiveState::default());
-        assert_eq!(find_first_element(&styled_700, "p").unwrap().style.color, 0xFF0000);
-
-        let styled_500 = build_styled_tree(&document, &stylesheet, 500, &super::InteractiveState::default());
-        assert_ne!(find_first_element(&styled_500, "p").unwrap().style.color, 0xFF0000);
+        let styled_500 = build_styled_tree(
+            &document,
+            &stylesheet,
+            500,
+            &super::InteractiveState::default(),
+        );
+        assert_ne!(
+            find_first_element(&styled_500, "p").unwrap().style.color,
+            0xFF0000
+        );
     }
 
     #[test]
@@ -9073,18 +9655,39 @@ mod tests {
         let document = parse_document("<p>Hello</p>");
         let stylesheet = parse_stylesheet("@media (max-width: 600px) { p { color: #ff0000; } }");
 
-        let styled_500 = build_styled_tree(&document, &stylesheet, 500, &super::InteractiveState::default());
-        assert_eq!(find_first_element(&styled_500, "p").unwrap().style.color, 0xFF0000);
+        let styled_500 = build_styled_tree(
+            &document,
+            &stylesheet,
+            500,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(
+            find_first_element(&styled_500, "p").unwrap().style.color,
+            0xFF0000
+        );
 
-        let styled_700 = build_styled_tree(&document, &stylesheet, 700, &super::InteractiveState::default());
-        assert_ne!(find_first_element(&styled_700, "p").unwrap().style.color, 0xFF0000);
+        let styled_700 = build_styled_tree(
+            &document,
+            &stylesheet,
+            700,
+            &super::InteractiveState::default(),
+        );
+        assert_ne!(
+            find_first_element(&styled_700, "p").unwrap().style.color,
+            0xFF0000
+        );
     }
 
     #[test]
     fn calc_addition_and_subtraction() {
         let document = parse_document("<p>text</p>");
         let stylesheet = parse_stylesheet("p { font-size: calc(10px + 6px); }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let p = find_first_element(&styled, "p").unwrap();
         assert_eq!(p.style.font_size_px, 16);
     }
@@ -9094,7 +9697,12 @@ mod tests {
         // calc(2px + 3 * 4px) should be 2 + 12 = 14, NOT (2+3)*4 = 20
         let document = parse_document("<p>text</p>");
         let stylesheet = parse_stylesheet("p { font-size: calc(2px + 3 * 4px); }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let p = find_first_element(&styled, "p").unwrap();
         assert_eq!(
             p.style.font_size_px, 14,
@@ -9107,7 +9715,12 @@ mod tests {
         // calc(1.5 * 1em) at 16px parent → 24px
         let document = parse_document("<p>text</p>");
         let stylesheet = parse_stylesheet("p { font-size: calc(1.5 * 1em); }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let p = find_first_element(&styled, "p").unwrap();
         assert_eq!(p.style.font_size_px, 24);
     }
@@ -9173,9 +9786,11 @@ mod tests {
     #[test]
     fn min_max_and_clamp_resolve_against_the_containing_block() {
         let bounded = |input: &str, container: u32| match super::parse_length_value(input, 16) {
-            Some(LengthValue::Bounded { lower, value, upper }) => {
-                super::resolve_bounded(lower, value, upper, container)
-            }
+            Some(LengthValue::Bounded {
+                lower,
+                value,
+                upper,
+            }) => super::resolve_bounded(lower, value, upper, container),
             other => panic!("{input} did not parse as a bounded length: {other:?}"),
         };
         assert_eq!(bounded("min(600px, 100%)", 1000), 600);
@@ -9222,7 +9837,10 @@ mod tests {
     fn rgba_half_transparent_encodes_alpha_in_high_byte() {
         let color = parse_color("rgba(0, 0, 0, 0.5)").expect("should return a color");
         let alpha = (color >> 24) & 0xFF;
-        assert!((alpha as i32 - 128).abs() <= 1, "alpha should be ~128, got {alpha}");
+        assert!(
+            (alpha as i32 - 128).abs() <= 1,
+            "alpha should be ~128, got {alpha}"
+        );
         assert_eq!(color & 0x00FF_FFFF, 0x0000_0000);
     }
 
@@ -9267,7 +9885,8 @@ mod tests {
 
     #[test]
     fn parse_stylesheet_ignores_opening_brace_inside_string() {
-        let stylesheet = parse_stylesheet(r#".b { content: "{"; color: #00ff00; } .c { color: #0000ff; }"#);
+        let stylesheet =
+            parse_stylesheet(r#".b { content: "{"; color: #00ff00; } .c { color: #0000ff; }"#);
         assert_eq!(stylesheet.rules.len(), 2);
         assert_eq!(
             stylesheet.rules[0]
@@ -9302,7 +9921,12 @@ mod tests {
     fn not_pseudo_class_selector_matches() {
         let document = parse_document("<p class=\"a\">A</p><p class=\"b\">B</p>");
         let stylesheet = parse_stylesheet("p:not(.a) { color: #ff0000; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let pa = find_first_element(&styled, "p").unwrap();
         // first p has class "a" so :not(.a) should NOT match it
         assert_ne!(pa.style.color, 0xFF0000, "p.a should not match :not(.a)");
@@ -9320,7 +9944,12 @@ mod tests {
         // require a LayerCommand for inline opacity runs (future work).
         let document = parse_document("<body><span><em>hi</em></span></body>");
         let stylesheet = parse_stylesheet("span { opacity: 0.5; } em { opacity: 0.5; }");
-        let styled = build_styled_tree(&document, &stylesheet, 1280, &super::InteractiveState::default());
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &super::InteractiveState::default(),
+        );
         let em = find_first_element(&styled, "em").expect("em element should exist");
         // em.effective_opacity == em.opacity (128) because span is a stacking context boundary.
         assert_eq!(
@@ -9346,7 +9975,10 @@ mod tests {
         }
 
         let p_el = find_p(&styled).expect("Should find <p> element");
-        assert_eq!(p_el.style.color, 0xff0000, "p color should be #ff0000 from :root var");
+        assert_eq!(
+            p_el.style.color, 0xff0000,
+            "p color should be #ff0000 from :root var"
+        );
     }
     #[test]
     fn test_before_pseudo_element_content_injection() {
@@ -9375,19 +10007,30 @@ mod tests {
         }
     }
 
-
     #[test]
     fn root_opacity_zero_is_clamped_but_others_honored() {
         fn opacity_of(tag: &str, css: &str) -> u8 {
             let ss = parse_stylesheet(css);
-            let el = Element { namespace: Default::default(),
+            let el = Element {
+                namespace: Default::default(),
                 tag_name: tag.into(),
                 attributes: Default::default(),
                 children: vec![],
             };
             let idx = RuleIndex::build(&ss.rules);
-            compute_style(&el, &ss, &idx, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default())
-                .opacity
+            compute_style(
+                &el,
+                &ss,
+                &idx,
+                None,
+                &[],
+                0,
+                1,
+                &[],
+                1280,
+                &super::InteractiveState::default(),
+            )
+            .opacity
         }
         // Anti-FOUC: a transparent root would blank the whole page, so clamp it.
         assert_eq!(opacity_of("body", "body { opacity: 0; }"), 255);
@@ -9402,9 +10045,25 @@ mod tests {
     #[test]
     fn test_position_relative_parsed() {
         let ss = parse_stylesheet("div { position: relative; top: 10px; left: 20px; }");
-        let el = Element { namespace: Default::default(), tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let el = Element {
+            namespace: Default::default(),
+            tag_name: "div".into(),
+            attributes: Default::default(),
+            children: vec![],
+        };
         let rule_index = RuleIndex::build(&ss.rules);
-        let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
+        let style = compute_style(
+            &el,
+            &ss,
+            &rule_index,
+            None,
+            &[],
+            0,
+            1,
+            &[],
+            1280,
+            &super::InteractiveState::default(),
+        );
         assert_eq!(style.position, Position::Relative);
         assert_eq!(style.top, Some(LengthValue::Pixels(10)));
         assert_eq!(style.left, Some(LengthValue::Pixels(20)));
@@ -9413,18 +10072,50 @@ mod tests {
     #[test]
     fn test_position_absolute_parsed() {
         let ss = parse_stylesheet("div { position: absolute; top: 0px; }");
-        let el = Element { namespace: Default::default(), tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let el = Element {
+            namespace: Default::default(),
+            tag_name: "div".into(),
+            attributes: Default::default(),
+            children: vec![],
+        };
         let rule_index = RuleIndex::build(&ss.rules);
-        let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
+        let style = compute_style(
+            &el,
+            &ss,
+            &rule_index,
+            None,
+            &[],
+            0,
+            1,
+            &[],
+            1280,
+            &super::InteractiveState::default(),
+        );
         assert_eq!(style.position, Position::Absolute);
     }
 
     #[test]
     fn test_flex_display_parsed() {
         let ss = parse_stylesheet("div { display: flex; flex-direction: column; gap: 8px; }");
-        let el = Element { namespace: Default::default(), tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let el = Element {
+            namespace: Default::default(),
+            tag_name: "div".into(),
+            attributes: Default::default(),
+            children: vec![],
+        };
         let rule_index = RuleIndex::build(&ss.rules);
-        let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
+        let style = compute_style(
+            &el,
+            &ss,
+            &rule_index,
+            None,
+            &[],
+            0,
+            1,
+            &[],
+            1280,
+            &super::InteractiveState::default(),
+        );
         assert_eq!(style.display, Display::Flex);
         assert_eq!(style.flex_direction, FlexDirection::Column);
         assert_eq!(style.gap, 8);
@@ -9432,10 +10123,28 @@ mod tests {
 
     #[test]
     fn test_justify_content_parsed() {
-        let ss = parse_stylesheet("div { display: flex; justify-content: space-between; align-items: center; }");
-        let el = Element { namespace: Default::default(), tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let ss = parse_stylesheet(
+            "div { display: flex; justify-content: space-between; align-items: center; }",
+        );
+        let el = Element {
+            namespace: Default::default(),
+            tag_name: "div".into(),
+            attributes: Default::default(),
+            children: vec![],
+        };
         let rule_index = RuleIndex::build(&ss.rules);
-        let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
+        let style = compute_style(
+            &el,
+            &ss,
+            &rule_index,
+            None,
+            &[],
+            0,
+            1,
+            &[],
+            1280,
+            &super::InteractiveState::default(),
+        );
         assert_eq!(style.justify_content, JustifyContent::SpaceBetween);
         assert_eq!(style.align_items, AlignItems::Center);
     }
@@ -9443,9 +10152,25 @@ mod tests {
     #[test]
     fn test_z_index_parsed() {
         let ss = parse_stylesheet("div { position: absolute; z-index: 10; }");
-        let el = Element { namespace: Default::default(), tag_name: "div".into(), attributes: Default::default(), children: vec![] };
+        let el = Element {
+            namespace: Default::default(),
+            tag_name: "div".into(),
+            attributes: Default::default(),
+            children: vec![],
+        };
         let rule_index = RuleIndex::build(&ss.rules);
-        let style = compute_style(&el, &ss, &rule_index, None, &[], 0, 1, &[], 1280, &super::InteractiveState::default());
+        let style = compute_style(
+            &el,
+            &ss,
+            &rule_index,
+            None,
+            &[],
+            0,
+            1,
+            &[],
+            1280,
+            &super::InteractiveState::default(),
+        );
         assert_eq!(style.z_index, Some(10));
     }
 
@@ -9489,9 +10214,13 @@ mod tests {
         let sheet = parse_stylesheet(css);
 
         // Without hover: link color should be the default link color (not red)
-        let styled_no_hover = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+        let styled_no_hover =
+            build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         let a_no_hover = find_first_element(&styled_no_hover, "a").expect("<a> should exist");
-        assert_ne!(a_no_hover.style.color, 0xFF0000, "color should not be red without hover");
+        assert_ne!(
+            a_no_hover.style.color, 0xFF0000,
+            "color should not be red without hover"
+        );
 
         // With hover on node 42: link color should become red
         let interactive = super::InteractiveState {
@@ -9500,7 +10229,10 @@ mod tests {
         };
         let styled_hovered = build_styled_tree(&doc, &sheet, 1280, &interactive);
         let a_hovered = find_first_element(&styled_hovered, "a").expect("<a> should exist");
-        assert_eq!(a_hovered.style.color, 0xFF0000, "color should be red when hovered");
+        assert_eq!(
+            a_hovered.style.color, 0xFF0000,
+            "color should be red when hovered"
+        );
     }
 
     #[test]
@@ -9527,7 +10259,7 @@ mod tests {
 
     #[test]
     fn grid_template_columns_parsed() {
-        use super::{GridTrackSize};
+        use super::GridTrackSize;
         let html = r#"<div style="display:grid;grid-template-columns:100px 1fr 200px;"></div>"#;
         let doc = parse_document(html);
         let sheet = parse_stylesheet("");
@@ -9535,9 +10267,15 @@ mod tests {
         let div = find_first_element(&styled, "div").unwrap();
         assert_eq!(div.style.display, Display::Grid);
         assert_eq!(div.style.grid_template_columns.len(), 3);
-        assert_eq!(div.style.grid_template_columns[0], GridTrackSize::Pixels(100));
+        assert_eq!(
+            div.style.grid_template_columns[0],
+            GridTrackSize::Pixels(100)
+        );
         assert_eq!(div.style.grid_template_columns[1], GridTrackSize::Fr(1000));
-        assert_eq!(div.style.grid_template_columns[2], GridTrackSize::Pixels(200));
+        assert_eq!(
+            div.style.grid_template_columns[2],
+            GridTrackSize::Pixels(200)
+        );
     }
 
     #[test]
@@ -9602,9 +10340,8 @@ mod tests {
     fn grid_template_areas_treats_a_period_run_as_one_null_cell() {
         let html = r#"<div></div>"#;
         let doc = parse_document(html);
-        let sheet = parse_stylesheet(
-            r#"div { display: grid; grid-template-areas: "a ..... b" "a . b"; }"#,
-        );
+        let sheet =
+            parse_stylesheet(r#"div { display: grid; grid-template-areas: "a ..... b" "a . b"; }"#);
         let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         let div = find_first_element(&styled, "div").unwrap();
         let areas = div.style.grid_template_areas.as_deref().expect("template");
@@ -9633,8 +10370,7 @@ mod tests {
     fn grid_template_areas_rejects_a_non_rectangular_area() {
         let html = r#"<div></div>"#;
         let doc = parse_document(html);
-        let sheet =
-            parse_stylesheet(r#"div { display: grid; grid-template-areas: "a a" "a b"; }"#);
+        let sheet = parse_stylesheet(r#"div { display: grid; grid-template-areas: "a a" "a b"; }"#);
         let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         let div = find_first_element(&styled, "div").unwrap();
         assert!(div.style.grid_template_areas.is_none());
@@ -9730,9 +10466,8 @@ mod tests {
     fn grid_template_shorthand_splits_rows_and_columns() {
         let html = r#"<div></div>"#;
         let doc = parse_document(html);
-        let sheet = parse_stylesheet(
-            r#"div { grid-template: min-content 1fr / 196px minmax(0,1fr); }"#,
-        );
+        let sheet =
+            parse_stylesheet(r#"div { grid-template: min-content 1fr / 196px minmax(0,1fr); }"#);
         let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         let div = find_first_element(&styled, "div").unwrap();
         assert_eq!(
@@ -9797,7 +10532,11 @@ mod tests {
         );
         let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
         assert_eq!(
-            find_first_element(&styled, "span").unwrap().style.padding.left,
+            find_first_element(&styled, "span")
+                .unwrap()
+                .style
+                .padding
+                .left,
             20,
             "the ancestor's value should beat :root"
         );
@@ -9851,7 +10590,10 @@ mod tests {
             1280,
             &super::InteractiveState::default(),
         );
-        assert_eq!(find_first_element(&wide, "p").unwrap().style.color, 0x0000FF);
+        assert_eq!(
+            find_first_element(&wide, "p").unwrap().style.color,
+            0x0000FF
+        );
 
         let narrow = build_styled_tree(
             &doc,
@@ -9859,26 +10601,62 @@ mod tests {
             400,
             &super::InteractiveState::default(),
         );
-        assert_eq!(find_first_element(&narrow, "p").unwrap().style.color, 0xFF0000);
+        assert_eq!(
+            find_first_element(&narrow, "p").unwrap().style.color,
+            0xFF0000
+        );
     }
 
     /// The value may be `calc()`, and the comparison may be written from either
     /// side. MDN uses `(width >= calc(1rem * 2 + 31rem))`.
     #[test]
     fn media_query_range_handles_calc_and_reversed_form() {
-        let sheet = "p { color: #0000ff } @media (width >= calc(30rem + 10rem)) { p { color: #00ff00 } }";
+        let sheet =
+            "p { color: #0000ff } @media (width >= calc(30rem + 10rem)) { p { color: #00ff00 } }";
         let doc = parse_document("<p>x</p>");
         // 40rem = 640px.
-        let wide = build_styled_tree(&doc, &parse_stylesheet(sheet), 700, &super::InteractiveState::default());
-        assert_eq!(find_first_element(&wide, "p").unwrap().style.color, 0x00FF00);
-        let narrow = build_styled_tree(&doc, &parse_stylesheet(sheet), 600, &super::InteractiveState::default());
-        assert_eq!(find_first_element(&narrow, "p").unwrap().style.color, 0x0000FF);
+        let wide = build_styled_tree(
+            &doc,
+            &parse_stylesheet(sheet),
+            700,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(
+            find_first_element(&wide, "p").unwrap().style.color,
+            0x00FF00
+        );
+        let narrow = build_styled_tree(
+            &doc,
+            &parse_stylesheet(sheet),
+            600,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(
+            find_first_element(&narrow, "p").unwrap().style.color,
+            0x0000FF
+        );
 
         let reversed = "p { color: #0000ff } @media (640px <= width) { p { color: #00ff00 } }";
-        let wide = build_styled_tree(&doc, &parse_stylesheet(reversed), 700, &super::InteractiveState::default());
-        assert_eq!(find_first_element(&wide, "p").unwrap().style.color, 0x00FF00);
-        let narrow = build_styled_tree(&doc, &parse_stylesheet(reversed), 600, &super::InteractiveState::default());
-        assert_eq!(find_first_element(&narrow, "p").unwrap().style.color, 0x0000FF);
+        let wide = build_styled_tree(
+            &doc,
+            &parse_stylesheet(reversed),
+            700,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(
+            find_first_element(&wide, "p").unwrap().style.color,
+            0x00FF00
+        );
+        let narrow = build_styled_tree(
+            &doc,
+            &parse_stylesheet(reversed),
+            600,
+            &super::InteractiveState::default(),
+        );
+        assert_eq!(
+            find_first_element(&narrow, "p").unwrap().style.color,
+            0x0000FF
+        );
     }
 
     /// `light-dark()` picks its first argument, because this engine renders in
@@ -9954,8 +10732,7 @@ mod tests {
         let style_of = |css: &str| {
             let doc = parse_document(r#"<div>x</div>"#);
             let sheet = parse_stylesheet(css);
-            let styled =
-                build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
+            let styled = build_styled_tree(&doc, &sheet, 1280, &super::InteractiveState::default());
             find_first_element(&styled, "div").unwrap().style.clone()
         };
 
@@ -9996,7 +10773,11 @@ mod tests {
 
         let sheet = "p { color: #0000ff } @media (--viewport-below-md) { p { color: #ff0000 } }";
         assert_eq!(colour_at(sheet, 1280), 0x0000FF);
-        assert_eq!(colour_at(sheet, 400), 0x0000FF, "and not at any other width");
+        assert_eq!(
+            colour_at(sheet, 400),
+            0x0000FF,
+            "and not at any other width"
+        );
 
         let nonsense = "p { color: #0000ff } @media (no-such-feature: 3) { p { color: #ff0000 } }";
         assert_eq!(colour_at(nonsense, 1280), 0x0000FF);
@@ -10018,17 +10799,30 @@ mod tests {
         };
 
         // A mouse is present.
-        assert_eq!(colour_at("p { color: #0000ff } @media (hover: hover) { p { color: #00ff00 } }"), 0x00FF00);
-        assert_eq!(colour_at("p { color: #0000ff } @media (hover: none) { p { color: #00ff00 } }"), 0x0000FF);
-        assert_eq!(colour_at("p { color: #0000ff } @media (pointer: fine) { p { color: #00ff00 } }"), 0x00FF00);
-
-        // No accessibility preference is set, so the "reduce" branch is skipped.
         assert_eq!(
-            colour_at("p { color: #0000ff } @media (prefers-reduced-motion: reduce) { p { color: #ff0000 } }"),
+            colour_at("p { color: #0000ff } @media (hover: hover) { p { color: #00ff00 } }"),
+            0x00FF00
+        );
+        assert_eq!(
+            colour_at("p { color: #0000ff } @media (hover: none) { p { color: #00ff00 } }"),
             0x0000FF
         );
         assert_eq!(
-            colour_at("p { color: #0000ff } @media (forced-colors: active) { p { color: #ff0000 } }"),
+            colour_at("p { color: #0000ff } @media (pointer: fine) { p { color: #00ff00 } }"),
+            0x00FF00
+        );
+
+        // No accessibility preference is set, so the "reduce" branch is skipped.
+        assert_eq!(
+            colour_at(
+                "p { color: #0000ff } @media (prefers-reduced-motion: reduce) { p { color: #ff0000 } }"
+            ),
+            0x0000FF
+        );
+        assert_eq!(
+            colour_at(
+                "p { color: #0000ff } @media (forced-colors: active) { p { color: #ff0000 } }"
+            ),
             0x0000FF
         );
     }
@@ -10151,7 +10945,9 @@ mod tests {
     #[test]
     fn a_negated_condition_drops_its_block() {
         assert_eq!(
-            color_of(".box{color:#00ff00}@supports not (all: revert-layer) { .box { color: #ff0000 } }"),
+            color_of(
+                ".box{color:#00ff00}@supports not (all: revert-layer) { .box { color: #ff0000 } }"
+            ),
             0x00ff00
         );
     }
@@ -10199,7 +10995,10 @@ mod tests {
     /// answered once at load.
     #[test]
     fn a_sheet_linked_for_a_width_follows_the_viewport() {
-        assert_eq!(color_with_linked_sheet("(max-width: 600px)", 1280), 0x00ff00);
+        assert_eq!(
+            color_with_linked_sheet("(max-width: 600px)", 1280),
+            0x00ff00
+        );
         assert_eq!(color_with_linked_sheet("(max-width: 600px)", 400), 0xff0000);
     }
 
@@ -10252,7 +11051,10 @@ mod tests {
             "three children do not match"
         );
         assert_eq!(
-            color_of_html(CSS, "<div class=\"g\"><i></i><i></i><i></i><i></i><i></i></div>"),
+            color_of_html(
+                CSS,
+                "<div class=\"g\"><i></i><i></i><i></i><i></i><i></i></div>"
+            ),
             0x0000ff,
             "five children do not match either"
         );
@@ -10291,7 +11093,9 @@ mod tests {
     #[test]
     fn a_later_layer_beats_an_earlier_one() {
         assert_eq!(
-            color_of("@layer base{.box{color:#ff0000}}@layer defaults{.box{color:#00ff00}}                      @layer base{.box{color:#ff0000}}"),
+            color_of(
+                "@layer base{.box{color:#ff0000}}@layer defaults{.box{color:#00ff00}}                      @layer base{.box{color:#ff0000}}"
+            ),
             0x00ff00,
             "base was declared first, so defaults wins even though a base block comes last"
         );
@@ -10303,7 +11107,9 @@ mod tests {
     #[test]
     fn a_layer_statement_sets_the_order() {
         assert_eq!(
-            color_of("@layer defaults, base;@layer base{.box{color:#00ff00}}                      @layer defaults{.box{color:#ff0000}}"),
+            color_of(
+                "@layer defaults, base;@layer base{.box{color:#00ff00}}                      @layer defaults{.box{color:#ff0000}}"
+            ),
             0x00ff00,
             "the statement puts base last, so it wins despite coming first"
         );
@@ -10313,7 +11119,9 @@ mod tests {
     #[test]
     fn important_reverses_the_layer_order() {
         assert_eq!(
-            color_of("@layer base{.box{color:#00ff00!important}}@layer defaults{.box{color:#ff0000!important}}"),
+            color_of(
+                "@layer base{.box{color:#00ff00!important}}@layer defaults{.box{color:#ff0000!important}}"
+            ),
             0x00ff00,
             "an important declaration in the earlier layer wins"
         );
@@ -10329,7 +11137,9 @@ mod tests {
     #[test]
     fn a_nested_layer_ranks_under_its_parent() {
         assert_eq!(
-            color_of("@layer base{@layer inner{.box{color:#ff0000}}}@layer defaults{.box{color:#00ff00}}"),
+            color_of(
+                "@layer base{@layer inner{.box{color:#ff0000}}}@layer defaults{.box{color:#00ff00}}"
+            ),
             0x00ff00
         );
     }
@@ -10348,7 +11158,9 @@ mod tests {
             0x00ff00
         );
         assert_eq!(
-            color_of("@supports (container-type: inline-size) or (display: grid) { .box { color: #00ff00 } }"),
+            color_of(
+                "@supports (container-type: inline-size) or (display: grid) { .box { color: #00ff00 } }"
+            ),
             0x00ff00
         );
     }
@@ -10384,7 +11196,11 @@ mod tests {
         // Should have one rule with Placeholder pseudo-element
         assert!(!sheet.rules.is_empty());
         let rule = &sheet.rules[0];
-        assert!(rule.selectors.iter().any(|s| s.pseudo_element == Some(super::PseudoElement::Placeholder)));
+        assert!(
+            rule.selectors
+                .iter()
+                .any(|s| s.pseudo_element == Some(super::PseudoElement::Placeholder))
+        );
     }
 
     #[test]
@@ -10441,8 +11257,14 @@ mod tests {
         let div = find_first_element(&styled, "div").unwrap();
         assert_eq!(div.style.margin.top, 80, "5em at 16px base = 80px");
         assert_eq!(div.style.margin.bottom, 80, "5em at 16px base = 80px");
-        assert_eq!(div.style.margin.left, 0, "auto resolves to 0 in parsed value");
-        assert_eq!(div.style.margin.right, 0, "auto resolves to 0 in parsed value");
+        assert_eq!(
+            div.style.margin.left, 0,
+            "auto resolves to 0 in parsed value"
+        );
+        assert_eq!(
+            div.style.margin.right, 0,
+            "auto resolves to 0 in parsed value"
+        );
         assert!(div.style.margin_left_auto, "margin-left should be auto");
         assert!(div.style.margin_right_auto, "margin-right should be auto");
     }
@@ -10502,7 +11324,10 @@ mod style_sharing {
         let mut uniq = HashSet::new();
         walk(&styled, &mut nodes, &mut uniq);
 
-        assert!(nodes >= 400, "expected the 200 <li> plus their text, got {nodes}");
+        assert!(
+            nodes >= 400,
+            "expected the 200 <li> plus their text, got {nodes}"
+        );
         assert!(
             nodes / uniq.len().max(1) >= 10,
             "200 identical rows should share styles heavily: {nodes} nodes but {} distinct styles",

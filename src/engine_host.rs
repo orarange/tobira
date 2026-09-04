@@ -16,19 +16,17 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use boa_ast::expression::ImportCall;
 use boa_ast::visitor::{VisitWith, Visitor};
+use tobira_engine::engine::compiler::ModuleContext;
 use tobira_engine::engine::{
     AdjacentPosition, Compiler, ConsoleMessage, DomEventInit, DomEventRequest, DomEventResult,
-    DomMutation, DomMutationResult, DomStructuralChange,
-    DomRead, DomReadResult, DomRect, FetchBody, FetchRequest, FetchResponse, FrameId, Heap, HistoryAction,
-    HistoryOutcome,
-    Host, HostData, HostError, HostEvent, HostResult, HostTimeSnapshot, LocationSnapshot,
-    NavigationAction,
-    NavigationOutcome, NetworkRequestId, NodeId, NodeKind, ObserverId, ObserverKind,
-    ObserverOptions, ObserverOp, ObserverRecord, ObserverResult, Parser, Program, SourceType,
-    ScrollMetrics, SiblingDirection, StatementNode, StorageAreaKind, StorageOp, StorageResult, TimerId, TimerRequest, Vm, WindowId,
-    WindowMetrics,
+    DomMutation, DomMutationResult, DomRead, DomReadResult, DomRect, DomStructuralChange,
+    FetchBody, FetchRequest, FetchResponse, FrameId, Heap, HistoryAction, HistoryOutcome, Host,
+    HostData, HostError, HostEvent, HostResult, HostTimeSnapshot, LocationSnapshot,
+    NavigationAction, NavigationOutcome, NetworkRequestId, NodeId, NodeKind, ObserverId,
+    ObserverKind, ObserverOp, ObserverOptions, ObserverRecord, ObserverResult, Parser, Program,
+    ScrollMetrics, SiblingDirection, SourceType, StatementNode, StorageAreaKind, StorageOp,
+    StorageResult, TimerId, TimerRequest, Vm, WindowId, WindowMetrics,
 };
-use tobira_engine::engine::compiler::ModuleContext;
 
 use crate::html::{Node, parse_document};
 use crate::url::Url;
@@ -178,7 +176,10 @@ enum DomNodeKind {
     Comment(String),
     Fragment,
     /// A shadow root attached to `host` (arena index). `open` is its mode.
-    ShadowRoot { host: usize, open: bool },
+    ShadowRoot {
+        host: usize,
+        open: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -243,8 +244,8 @@ impl DomNode {
 
 /// Void (self-closing) HTML elements that have no closing tag / children.
 const VOID_ELEMENTS: &[&str] = &[
-    "area", "base", "br", "col", "embed", "frame", "hr", "img", "input", "link", "meta",
-    "param", "source", "track", "wbr",
+    "area", "base", "br", "col", "embed", "frame", "hr", "img", "input", "link", "meta", "param",
+    "source", "track", "wbr",
 ];
 
 /// Raw-text elements whose text content must be serialized verbatim (HTML
@@ -468,16 +469,18 @@ impl BrowserHost {
     ) {
         let node_id = NodeId(target_idx as u32);
         if let Some(value) = self.nodes[target_idx].attrs.get(name).cloned() {
-            self.structural_changes.push(DomStructuralChange::SetAttribute {
-                node: node_id,
-                name: name.to_string(),
-                value,
-            });
+            self.structural_changes
+                .push(DomStructuralChange::SetAttribute {
+                    node: node_id,
+                    name: name.to_string(),
+                    value,
+                });
         } else {
-            self.structural_changes.push(DomStructuralChange::RemoveAttribute {
-                node: node_id,
-                name: name.to_string(),
-            });
+            self.structural_changes
+                .push(DomStructuralChange::RemoveAttribute {
+                    node: node_id,
+                    name: name.to_string(),
+                });
         }
         if self.observers.is_empty() {
             return;
@@ -507,7 +510,10 @@ impl BrowserHost {
         }
         for (oid, want_old) in hits {
             let payload = HostData::Object(vec![
-                ("type".to_string(), HostData::String("attributes".to_string())),
+                (
+                    "type".to_string(),
+                    HostData::String("attributes".to_string()),
+                ),
                 (
                     "attributeName".to_string(),
                     HostData::String(name.to_string()),
@@ -596,11 +602,12 @@ impl BrowserHost {
         if added.is_empty() && removed.is_empty() {
             return;
         }
-        self.structural_changes.push(DomStructuralChange::ChildList {
-            parent: NodeId(parent_idx as u32),
-            added: added.iter().map(|i| NodeId(*i as u32)).collect(),
-            removed: removed.iter().map(|i| NodeId(*i as u32)).collect(),
-        });
+        self.structural_changes
+            .push(DomStructuralChange::ChildList {
+                parent: NodeId(parent_idx as u32),
+                added: added.iter().map(|i| NodeId(*i as u32)).collect(),
+                removed: removed.iter().map(|i| NodeId(*i as u32)).collect(),
+            });
         if self.observers.is_empty() {
             return;
         }
@@ -632,7 +639,10 @@ impl BrowserHost {
             .collect();
         for oid in hits {
             let payload = HostData::Object(vec![
-                ("type".to_string(), HostData::String("childList".to_string())),
+                (
+                    "type".to_string(),
+                    HostData::String("childList".to_string()),
+                ),
                 (
                     "addedNodes".to_string(),
                     HostData::Array(added_nodes.clone()),
@@ -884,7 +894,10 @@ impl BrowserHost {
                 let bcr = viewport_rect(rect.x, rect.y - vp_top_v, rect.width, rect.height);
                 let root_bounds = viewport_rect(0.0, 0.0, vp_w, vp_h);
                 let payload = HostData::Object(vec![
-                    ("isIntersecting".to_string(), HostData::Bool(is_intersecting)),
+                    (
+                        "isIntersecting".to_string(),
+                        HostData::Bool(is_intersecting),
+                    ),
                     ("intersectionRatio".to_string(), HostData::Number(ratio)),
                     ("boundingClientRect".to_string(), bcr.clone()),
                     ("intersectionRect".to_string(), bcr),
@@ -966,12 +979,7 @@ impl BrowserHost {
         }
     }
 
-    fn find_by_tobira_id(
-        &self,
-        idx: usize,
-        target: usize,
-        counter: &mut usize,
-    ) -> Option<usize> {
+    fn find_by_tobira_id(&self, idx: usize, target: usize, counter: &mut usize) -> Option<usize> {
         if matches!(
             self.nodes[idx].kind,
             DomNodeKind::Document | DomNodeKind::Element(_)
@@ -1119,7 +1127,9 @@ impl BrowserHost {
     fn collect_inline_scripts(&self, root: usize, out: &mut Vec<String>) {
         for &child in &self.nodes[root].children {
             if self.nodes[child].tag_name() == Some("script") {
-                if !Self::is_executable_script_type(self.nodes[child].attrs.get("type").map(String::as_str)) {
+                if !Self::is_executable_script_type(
+                    self.nodes[child].attrs.get("type").map(String::as_str),
+                ) {
                     self.collect_inline_scripts(child, out);
                     continue;
                 }
@@ -1148,7 +1158,9 @@ impl BrowserHost {
     fn collect_ordered_scripts(&self, root: usize, out: &mut Vec<ScriptSource>) {
         for &child in &self.nodes[root].children {
             if self.nodes[child].tag_name() == Some("script") {
-                if !Self::is_executable_script_type(self.nodes[child].attrs.get("type").map(String::as_str)) {
+                if !Self::is_executable_script_type(
+                    self.nodes[child].attrs.get("type").map(String::as_str),
+                ) {
                     self.collect_ordered_scripts(child, out);
                     continue;
                 }
@@ -1494,7 +1506,12 @@ impl BrowserHost {
     }
 
     fn slot_assigned_nodes_flattened(&self, slot_idx: usize) -> Vec<usize> {
-        fn collect(host: &BrowserHost, slot_idx: usize, visited: &mut Vec<usize>, out: &mut Vec<usize>) {
+        fn collect(
+            host: &BrowserHost,
+            slot_idx: usize,
+            visited: &mut Vec<usize>,
+            out: &mut Vec<usize>,
+        ) {
             if visited.contains(&slot_idx) {
                 return;
             }
@@ -1538,14 +1555,16 @@ impl BrowserHost {
         let parent = self.nodes.get(idx).and_then(|n| n.parent)?;
         let shadow_idx = self.shadow_root_by_host.get(&parent).copied()?;
         let slot_name = self.attr_of(idx, "slot");
-        self.slot_nodes_in_shadow_root(shadow_idx).into_iter().find(|&slot| {
-            let name_on_slot = self.attr_of(slot, "name");
-            if name_on_slot.is_empty() {
-                slot_name.is_empty()
-            } else {
-                name_on_slot == slot_name
-            }
-        })
+        self.slot_nodes_in_shadow_root(shadow_idx)
+            .into_iter()
+            .find(|&slot| {
+                let name_on_slot = self.attr_of(slot, "name");
+                if name_on_slot.is_empty() {
+                    slot_name.is_empty()
+                } else {
+                    name_on_slot == slot_name
+                }
+            })
     }
 
     /// Event propagation path for `idx` in target → root order.
@@ -1609,7 +1628,6 @@ impl BrowserHost {
         // A fragment, not a document: `innerHTML = '<span>x</span>'` puts a
         // span inside the element, not a whole `<html><head></head><body>`.
         crate::html::parse_fragment(html)
-
             .iter()
             .filter_map(|child| self.build_from_node(child))
             .collect()
@@ -1640,7 +1658,9 @@ impl BrowserHost {
 }
 
 fn escape_text(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn escape_attr(value: &str) -> String {
@@ -1860,7 +1880,10 @@ impl Host for BrowserHost {
                     }
                 }
             }
-            DomRead::Contains { ancestor, descendant } => {
+            DomRead::Contains {
+                ancestor,
+                descendant,
+            } => {
                 let mut cur = descendant.0 as usize;
                 loop {
                     if cur == ancestor.0 as usize {
@@ -1881,7 +1904,10 @@ impl Host for BrowserHost {
                     None => DomReadResult::None,
                 })
             }
-            DomRead::Children { node, elements_only } => {
+            DomRead::Children {
+                node,
+                elements_only,
+            } => {
                 if !node_exists(node.0 as usize) {
                     return Err(HostError::InvalidHandle);
                 }
@@ -1999,10 +2025,12 @@ impl Host for BrowserHost {
                     self.nodes[node.0 as usize].attrs.keys().cloned().collect(),
                 ))
             }
-            DomRead::ShadowRoot { host } => Ok(match self.shadow_root_by_host.get(&(host.0 as usize)) {
-                Some(&idx) => DomReadResult::Node(NodeId(idx as u32)),
-                None => DomReadResult::None,
-            }),
+            DomRead::ShadowRoot { host } => {
+                Ok(match self.shadow_root_by_host.get(&(host.0 as usize)) {
+                    Some(&idx) => DomReadResult::Node(NodeId(idx as u32)),
+                    None => DomReadResult::None,
+                })
+            }
             DomRead::ShadowRootHost { node } => {
                 match self.nodes.get(node.0 as usize).map(|n| &n.kind) {
                     Some(DomNodeKind::ShadowRoot { host, .. }) => {
@@ -2025,12 +2053,10 @@ impl Host for BrowserHost {
                     None => Ok(DomReadResult::None),
                 }
             }
-            DomRead::AssignedSlot { node } => {
-                match self.assigned_slot_for_node(node.0 as usize) {
-                    Some(idx) => Ok(DomReadResult::Node(NodeId(idx as u32))),
-                    None => Ok(DomReadResult::None),
-                }
-            }
+            DomRead::AssignedSlot { node } => match self.assigned_slot_for_node(node.0 as usize) {
+                Some(idx) => Ok(DomReadResult::Node(NodeId(idx as u32))),
+                None => Ok(DomReadResult::None),
+            },
             DomRead::EventPath { node, composed } => {
                 let path = self.event_path(node.0 as usize, composed);
                 Ok(DomReadResult::Nodes(
@@ -2051,9 +2077,9 @@ impl Host for BrowserHost {
                     nodes.into_iter().map(|i| NodeId(i as u32)).collect(),
                 ))
             }
-            DomRead::BoundingClientRect { node } => {
-                Ok(DomReadResult::Rect(self.bounding_client_rect(node.0 as usize)))
-            }
+            DomRead::BoundingClientRect { node } => Ok(DomReadResult::Rect(
+                self.bounding_client_rect(node.0 as usize),
+            )),
             DomRead::ComputedStyle { node, property } => {
                 let found = self
                     .tobira_id_for_handle(node.0 as usize)
@@ -2220,7 +2246,11 @@ impl Host for BrowserHost {
                 self.record_childlist_mutation(parent, &added, &[idx]);
                 Ok(DomMutationResult::None)
             }
-            DomMutation::InsertAdjacentHtml { node, position, html } => {
+            DomMutation::InsertAdjacentHtml {
+                node,
+                position,
+                html,
+            } => {
                 let idx = node.0 as usize;
                 if !exists(&self.nodes, idx) {
                     return Err(HostError::InvalidHandle);
@@ -2248,7 +2278,9 @@ impl Host for BrowserHost {
                 };
                 for (offset, &child) in added.iter().enumerate() {
                     self.nodes[child].parent = Some(parent);
-                    self.nodes[parent].children.insert(insert_at + offset, child);
+                    self.nodes[parent]
+                        .children
+                        .insert(insert_at + offset, child);
                 }
                 self.record_childlist_mutation(parent, &added, &[]);
                 Ok(DomMutationResult::None)
@@ -2486,7 +2518,10 @@ impl Host for BrowserHost {
                     )));
                 }
                 let shadow_idx = self.push(DomNode {
-                    kind: DomNodeKind::ShadowRoot { host: host_idx, open },
+                    kind: DomNodeKind::ShadowRoot {
+                        host: host_idx,
+                        open,
+                    },
                     parent: None,
                     children: Vec::new(),
                     attrs: BTreeMap::new(),
@@ -2603,7 +2638,9 @@ impl Host for BrowserHost {
                     StorageResult::Value(site_state::storage_get_item(area(kind), &url, &key))
                 }
             }
-            StorageOp::Set { kind, key, value, .. } => {
+            StorageOp::Set {
+                kind, key, value, ..
+            } => {
                 if cookie_kind(kind) {
                     site_state::document_cookie_set(&url, &value);
                 } else {
@@ -2756,8 +2793,16 @@ pub struct EngineRunResult {
 /// external reference whose `src` must be resolved + fetched before execution.
 #[derive(Debug, Clone)]
 pub enum ScriptSource {
-    Inline { text: String, module: bool, node_id: Option<u32> },
-    External { src: String, module: bool, node_id: Option<u32> },
+    Inline {
+        text: String,
+        module: bool,
+        node_id: Option<u32>,
+    },
+    External {
+        src: String,
+        module: bool,
+        node_id: Option<u32>,
+    },
 }
 
 impl ScriptSource {
@@ -4479,7 +4524,9 @@ impl EngineSession {
                 let mut post_order = Vec::new();
                 let mut in_progress = std::collections::HashSet::new();
                 let base_url = current_script_src.as_deref().unwrap_or(&base_href);
-                let entry_url = current_script_src.clone().unwrap_or_else(|| base_href.clone());
+                let entry_url = current_script_src
+                    .clone()
+                    .unwrap_or_else(|| base_href.clone());
                 let module_src = source.clone();
                 if let Err(e) = Self::load_module_graph(
                     &entry_url,
@@ -4493,7 +4540,9 @@ impl EngineSession {
                     break 'scripts;
                 }
                 for url in post_order {
-                    let Some(record) = registry.get(&url) else { continue };
+                    let Some(record) = registry.get(&url) else {
+                        continue;
+                    };
                     let mut imports: HashMap<String, String> = HashMap::new();
                     for (specifier, dep_url) in &record.imports {
                         imports.insert(specifier.clone(), format!("\u{0}module:{dep_url}"));
@@ -4509,7 +4558,10 @@ impl EngineSession {
                         imports,
                         dynamic_imports,
                     };
-                    match Compiler::new(&record.program).with_module_context(module_ctx).compile() {
+                    match Compiler::new(&record.program)
+                        .with_module_context(module_ctx)
+                        .compile()
+                    {
                         Ok(chunk) => {
                             vm.set_current_script_src(Some(record.src_url.clone()));
                             vm.set_current_script_node(script_node_id);
@@ -4633,35 +4685,66 @@ impl EngineSession {
                     let dep_url = resolve_specifier(&spec, base_url)?;
                     imports.push((spec.clone(), dep_url.clone()));
                     if !registry.contains_key(&dep_url) {
-                        let dep_src = crate::http::fetch(&Url::parse(&dep_url).map_err(|e| format!("{e:?}"))?)
-                            .map_err(|e| format!("failed to fetch module {dep_url}: {e}"))?;
+                        let dep_src = crate::http::fetch(
+                            &Url::parse(&dep_url).map_err(|e| format!("{e:?}"))?,
+                        )
+                        .map_err(|e| format!("failed to fetch module {dep_url}: {e}"))?;
                         let dep_text = String::from_utf8_lossy(&dep_src.body).into_owned();
-                        Self::load_module_graph(&dep_url, &dep_text, &dep_url, registry, post_order, in_progress)?;
+                        Self::load_module_graph(
+                            &dep_url,
+                            &dep_text,
+                            &dep_url,
+                            registry,
+                            post_order,
+                            in_progress,
+                        )?;
                     }
                 }
                 StatementNode::ExportNamedDeclaration(export) => {
-                    if let boa_ast::declaration::ExportDeclaration::ReExport { specifier, .. } = &export.0 {
+                    if let boa_ast::declaration::ExportDeclaration::ReExport { specifier, .. } =
+                        &export.0
+                    {
                         let spec = program.resolve_sym(specifier.sym());
                         let dep_url = resolve_specifier(&spec, base_url)?;
                         imports.push((spec.clone(), dep_url.clone()));
                         if !registry.contains_key(&dep_url) {
-                            let dep_src = crate::http::fetch(&Url::parse(&dep_url).map_err(|e| format!("{e:?}"))?)
-                                .map_err(|e| format!("failed to fetch module {dep_url}: {e}"))?;
+                            let dep_src = crate::http::fetch(
+                                &Url::parse(&dep_url).map_err(|e| format!("{e:?}"))?,
+                            )
+                            .map_err(|e| format!("failed to fetch module {dep_url}: {e}"))?;
                             let dep_text = String::from_utf8_lossy(&dep_src.body).into_owned();
-                            Self::load_module_graph(&dep_url, &dep_text, &dep_url, registry, post_order, in_progress)?;
+                            Self::load_module_graph(
+                                &dep_url,
+                                &dep_text,
+                                &dep_url,
+                                registry,
+                                post_order,
+                                in_progress,
+                            )?;
                         }
                     }
                 }
                 StatementNode::ExportAllDeclaration(export) => {
-                    if let boa_ast::declaration::ExportDeclaration::ReExport { specifier, .. } = &export.0 {
+                    if let boa_ast::declaration::ExportDeclaration::ReExport { specifier, .. } =
+                        &export.0
+                    {
                         let spec = program.resolve_sym(specifier.sym());
                         let dep_url = resolve_specifier(&spec, base_url)?;
                         imports.push((spec.clone(), dep_url.clone()));
                         if !registry.contains_key(&dep_url) {
-                            let dep_src = crate::http::fetch(&Url::parse(&dep_url).map_err(|e| format!("{e:?}"))?)
-                                .map_err(|e| format!("failed to fetch module {dep_url}: {e}"))?;
+                            let dep_src = crate::http::fetch(
+                                &Url::parse(&dep_url).map_err(|e| format!("{e:?}"))?,
+                            )
+                            .map_err(|e| format!("failed to fetch module {dep_url}: {e}"))?;
                             let dep_text = String::from_utf8_lossy(&dep_src.body).into_owned();
-                            Self::load_module_graph(&dep_url, &dep_text, &dep_url, registry, post_order, in_progress)?;
+                            Self::load_module_graph(
+                                &dep_url,
+                                &dep_text,
+                                &dep_url,
+                                registry,
+                                post_order,
+                                in_progress,
+                            )?;
                         }
                     }
                 }
@@ -4682,7 +4765,9 @@ impl EngineSession {
             match resolve_specifier(&spec, base_url) {
                 Ok(dep_url) => {
                     if !registry.contains_key(&dep_url) {
-                        match crate::http::fetch(&Url::parse(&dep_url).map_err(|e| format!("{e:?}"))?) {
+                        match crate::http::fetch(
+                            &Url::parse(&dep_url).map_err(|e| format!("{e:?}"))?,
+                        ) {
                             Ok(dep_src) => {
                                 let dep_text = String::from_utf8_lossy(&dep_src.body).into_owned();
                                 if let Err(_e) = Self::load_module_graph(
@@ -4729,7 +4814,11 @@ impl EngineSession {
     /// node_order come back empty, and the browser treats an empty change log as
     /// a no-op. The initial load and event/explicit snapshots pass `force_full`
     /// true since they must hand the browser a complete document.
-    fn snapshot_with_options(&mut self, error: Option<String>, force_full: bool) -> EngineRunResult {
+    fn snapshot_with_options(
+        &mut self,
+        error: Option<String>,
+        force_full: bool,
+    ) -> EngineRunResult {
         let pending = self.vm.has_pending_event_loop_work();
         let host = self.host();
         let structural_changes = host.take_structural_changes();
@@ -4911,9 +5000,15 @@ mod tests {
     /// its own to stay independent of the other tests in this binary.
     #[test]
     fn storage_and_cookies_round_trip() {
-        let (mut session, initial) =
-            EngineSession::start("<html><body></body></html>", "http://storage-roundtrip.test/app/");
-        assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
+        let (mut session, initial) = EngineSession::start(
+            "<html><body></body></html>",
+            "http://storage-roundtrip.test/app/",
+        );
+        assert!(
+            initial.error.is_none(),
+            "initial error: {:?}",
+            initial.error
+        );
         let result = session.eval_for_test(
             r#"
             // localStorage and sessionStorage are separate areas on one origin.
@@ -4960,7 +5055,11 @@ mod tests {
             "<html><body><script id=\"s\"></script><img id=\"i\"><div id=\"d\"></div></body></html>",
             "http://interfaces.test/",
         );
-        assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
+        assert!(
+            initial.error.is_none(),
+            "initial error: {:?}",
+            initial.error
+        );
         let result = session.eval_for_test(
             r#"
             const s = document.getElementById('s');
@@ -5040,8 +5139,10 @@ mod tests {
     /// methods; scripts routinely do `String(location)` and `location.reload()`.
     #[test]
     fn location_stringifies_and_exposes_its_methods() {
-        let (mut session, initial) =
-            EngineSession::start("<html><body></body></html>", "https://host.test/page/?q=1#f");
+        let (mut session, initial) = EngineSession::start(
+            "<html><body></body></html>",
+            "https://host.test/page/?q=1#f",
+        );
         assert!(initial.error.is_none(), "initial: {:?}", initial.error);
         let result = session.eval_for_test(
             r#"
@@ -5106,7 +5207,11 @@ mod tests {
 
     fn run_structural_changes(html: &str, script: &str) -> Vec<DomStructuralChange> {
         let (mut session, initial) = EngineSession::start(html, "http://localhost/");
-        assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
+        assert!(
+            initial.error.is_none(),
+            "initial error: {:?}",
+            initial.error
+        );
         let result = session.eval_for_test(script);
         assert!(result.error.is_none(), "script error: {:?}", result.error);
         result.structural_changes
@@ -5120,42 +5225,62 @@ mod tests {
     #[test]
     fn dom_heavy_probe_report() {
         let probes: Vec<(&str, &str)> = vec![
-            ("createElement+append+textContent", r#"
+            (
+                "createElement+append+textContent",
+                r#"
                 const d = document.createElement('div'); d.textContent = 'hi';
                 document.body.appendChild(d);
                 assert(document.body.lastChild.textContent === 'hi');
-            "#),
-            ("setAttribute/getAttribute/has/remove", r#"
+            "#,
+            ),
+            (
+                "setAttribute/getAttribute/has/remove",
+                r#"
                 const e = document.createElement('a');
                 e.setAttribute('href', '/x'); assert(e.getAttribute('href') === '/x');
                 assert(e.hasAttribute('href')); e.removeAttribute('href');
                 assert(!e.hasAttribute('href'));
-            "#),
-            ("classList", r#"
+            "#,
+            ),
+            (
+                "classList",
+                r#"
                 const e = document.createElement('div');
                 e.classList.add('a'); e.classList.add('b');
                 assert(e.classList.contains('a') && e.classList.contains('b'));
                 e.classList.toggle('a'); assert(!e.classList.contains('a'));
                 e.classList.remove('b'); assert(e.className.trim() === '');
-            "#),
-            ("className/id properties", r#"
+            "#,
+            ),
+            (
+                "className/id properties",
+                r#"
                 const e = document.createElement('div');
                 e.className = 'x y'; e.id = 'foo';
                 assert(e.className === 'x y' && e.id === 'foo');
                 assert(e.getAttribute('class') === 'x y');
-            "#),
-            ("querySelector/All", r#"
+            "#,
+            ),
+            (
+                "querySelector/All",
+                r#"
                 document.body.innerHTML = '<ul><li class="a">1</li><li class="a">2</li></ul>';
                 assert(document.querySelector('li.a').textContent === '1');
                 assert(document.querySelectorAll('li.a').length === 2);
-            "#),
-            ("getElementById/ByClass/ByTag", r#"
+            "#,
+            ),
+            (
+                "getElementById/ByClass/ByTag",
+                r#"
                 document.body.innerHTML = '<div id="m" class="c">x</div><div class="c">y</div>';
                 assert(document.getElementById('m').textContent === 'x');
                 assert(document.getElementsByClassName('c').length === 2);
                 assert(document.getElementsByTagName('div').length === 2);
-            "#),
-            ("insertBefore/removeChild/replaceChild", r#"
+            "#,
+            ),
+            (
+                "insertBefore/removeChild/replaceChild",
+                r#"
                 const p = document.createElement('div');
                 const a = document.createElement('span'); a.textContent='a';
                 const b = document.createElement('span'); b.textContent='b';
@@ -5164,8 +5289,11 @@ mod tests {
                 const c = document.createElement('i'); c.textContent='c';
                 p.replaceChild(c, a); assert(p.lastChild.textContent === 'c');
                 p.removeChild(c); assert(p.childNodes.length === 1);
-            "#),
-            ("traversal: children/parent/sibling", r#"
+            "#,
+            ),
+            (
+                "traversal: children/parent/sibling",
+                r#"
                 const p = document.createElement('div');
                 const a = document.createElement('span'); const b = document.createElement('b');
                 p.appendChild(a); p.appendChild(b);
@@ -5173,96 +5301,147 @@ mod tests {
                 assert(a.parentNode === p && a.nextSibling === b);
                 assert(b.previousSibling === a);
                 assert(a.parentElement === p);
-            "#),
-            ("nodeType/tagName/nodeName", r#"
+            "#,
+            ),
+            (
+                "nodeType/tagName/nodeName",
+                r#"
                 const e = document.createElement('div');
                 assert(e.nodeType === 1);
                 assert(e.tagName === 'DIV' || e.tagName === 'div');
                 const t = document.createTextNode('x'); assert(t.nodeType === 3);
-            "#),
-            ("style get/set", r#"
+            "#,
+            ),
+            (
+                "style get/set",
+                r#"
                 const e = document.createElement('div');
                 e.style.color = 'red'; e.style.width = '10px';
                 assert(e.style.color === 'red');
                 assert(e.getAttribute('style').indexOf('color') >= 0);
-            "#),
-            ("cloneNode", r#"
+            "#,
+            ),
+            (
+                "cloneNode",
+                r#"
                 const e = document.createElement('div'); e.textContent = 'hi'; e.setAttribute('data-x','1');
                 const c = e.cloneNode(true);
                 assert(c.getAttribute('data-x') === '1');
-            "#),
-            ("dataset", r#"
+            "#,
+            ),
+            (
+                "dataset",
+                r#"
                 const e = document.createElement('div');
                 e.setAttribute('data-user-id', '42');
                 assert(e.dataset.userId === '42');
-            "#),
-            ("createTextNode/nodeValue", r#"
+            "#,
+            ),
+            (
+                "createTextNode/nodeValue",
+                r#"
                 const t = document.createTextNode('hello');
                 assert(t.nodeValue === 'hello' || t.textContent === 'hello');
-            "#),
-            ("matches/closest", r#"
+            "#,
+            ),
+            (
+                "matches/closest",
+                r#"
                 document.body.innerHTML = '<div class="outer"><p id="t">x</p></div>';
                 const t = document.getElementById('t');
                 assert(t.matches('p'));
                 assert(t.closest('.outer') !== null);
-            "#),
-            ("append/prepend multiple", r#"
+            "#,
+            ),
+            (
+                "append/prepend multiple",
+                r#"
                 const p = document.createElement('div');
                 const a = document.createElement('a'); const b = document.createElement('b');
                 p.append(a, b); assert(p.children.length === 2);
                 const c = document.createElement('i'); p.prepend(c);
                 assert(p.firstChild === c);
-            "#),
-            ("addEventListener+dispatchEvent", r#"
+            "#,
+            ),
+            (
+                "addEventListener+dispatchEvent",
+                r#"
                 const e = document.createElement('button');
                 let hits = 0; e.addEventListener('click', () => { hits++; });
                 e.dispatchEvent(new Event('click'));
                 assert(hits === 1);
-            "#),
-            ("innerHTML set+read", r#"
+            "#,
+            ),
+            (
+                "innerHTML set+read",
+                r#"
                 const e = document.createElement('div');
                 e.innerHTML = '<span>x</span>';
                 assert(e.children.length === 1 && e.firstChild.tagName.toLowerCase() === 'span');
-            "#),
-            ("remove()", r#"
+            "#,
+            ),
+            (
+                "remove()",
+                r#"
                 const p = document.createElement('div');
                 const c = document.createElement('span'); p.appendChild(c);
                 c.remove(); assert(p.childNodes.length === 0);
-            "#),
-            ("contains", r#"
+            "#,
+            ),
+            (
+                "contains",
+                r#"
                 const p = document.createElement('div');
                 const c = document.createElement('span'); p.appendChild(c);
                 assert(p.contains(c)); assert(!c.contains(p));
-            "#),
-            ("createElementNS (SVG)", r#"
+            "#,
+            ),
+            (
+                "createElementNS (SVG)",
+                r#"
                 const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
                 assert(svg !== null && svg !== undefined);
-            "#),
-            ("documentElement/head/body", r#"
+            "#,
+            ),
+            (
+                "documentElement/head/body",
+                r#"
                 assert(document.documentElement !== null);
                 assert(document.head !== null && document.body !== null);
-            "#),
-            ("input value property", r#"
+            "#,
+            ),
+            (
+                "input value property",
+                r#"
                 const i = document.createElement('input');
                 i.value = 'typed'; assert(i.value === 'typed');
-            "#),
-            ("hasChildNodes/firstElementChild", r#"
+            "#,
+            ),
+            (
+                "hasChildNodes/firstElementChild",
+                r#"
                 const p = document.createElement('div');
                 assert(!p.hasChildNodes());
                 p.appendChild(document.createTextNode(' '));
                 p.appendChild(document.createElement('b'));
                 assert(p.hasChildNodes());
                 assert(p.firstElementChild.tagName.toLowerCase() === 'b');
-            "#),
-            ("node expando property", r#"
+            "#,
+            ),
+            (
+                "node expando property",
+                r#"
                 const a = document.createElement('div');
                 a.__myKey = 42; a._data = { n: 1 };
                 document.body.appendChild(a);
                 assert(a.__myKey === 42);
                 assert(document.body.lastChild.__myKey === 42);
                 assert(document.body.lastChild._data.n === 1);
-            "#),
-            ("event bubbling + target", r#"
+            "#,
+            ),
+            (
+                "event bubbling + target",
+                r#"
                 document.body.innerHTML = '<div id="p"><button id="c">x</button></div>';
                 const p = document.getElementById('p');
                 const c = document.getElementById('c');
@@ -5271,16 +5450,22 @@ mod tests {
                 c.addEventListener('click', () => { log.push('c'); });
                 c.dispatchEvent(new Event('click', { bubbles: true }));
                 assert(log.join(',') === 'c,p:c:p', 'got ' + log.join(','));
-            "#),
-            ("event preventDefault", r#"
+            "#,
+            ),
+            (
+                "event preventDefault",
+                r#"
                 const b = document.createElement('button');
                 b.addEventListener('click', (e) => { e.preventDefault(); });
                 const ev = new Event('click', { cancelable: true });
                 const notCancelled = b.dispatchEvent(ev);
                 assert(ev.defaultPrevented === true);
                 assert(notCancelled === false);
-            "#),
-            ("removeEventListener", r#"
+            "#,
+            ),
+            (
+                "removeEventListener",
+                r#"
                 const b = document.createElement('button');
                 let n = 0; const handler = () => { n++; };
                 b.addEventListener('click', handler);
@@ -5288,16 +5473,22 @@ mod tests {
                 b.removeEventListener('click', handler);
                 b.dispatchEvent(new Event('click'));
                 assert(n === 1, 'n=' + n);
-            "#),
-            ("stopPropagation", r#"
+            "#,
+            ),
+            (
+                "stopPropagation",
+                r#"
                 document.body.innerHTML = '<div id="p2"><span id="c2">x</span></div>';
                 let hits = 0;
                 document.getElementById('p2').addEventListener('click', () => { hits++; });
                 document.getElementById('c2').addEventListener('click', (e) => { e.stopPropagation(); });
                 document.getElementById('c2').dispatchEvent(new Event('click', { bubbles: true }));
                 assert(hits === 0, 'hits=' + hits);
-            "#),
-            ("mini-react render to real DOM", r#"
+            "#,
+            ),
+            (
+                "mini-react render to real DOM",
+                r#"
                 function h(tag, props, ...kids){
                     const el = document.createElement(tag);
                     for (const k in props||{}) {
@@ -5315,7 +5506,8 @@ mod tests {
                 assert(root !== null);
                 assert(root.querySelector('h1').textContent === 'Title');
                 assert(root.querySelector('#c').textContent === 'count: 3');
-            "#),
+            "#,
+            ),
         ];
 
         let mut failures: Vec<(&str, String)> = Vec::new();
@@ -5359,7 +5551,11 @@ mod tests {
             "http://localhost/",
         );
 
-        assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
+        assert!(
+            initial.error.is_none(),
+            "initial error: {:?}",
+            initial.error
+        );
         assert!(!initial.html.contains("</frame>"), "html: {}", initial.html);
         assert_eq!(initial.html.matches("<frame ").count(), 2);
     }
@@ -5368,19 +5564,31 @@ mod tests {
     fn executable_script_type_detection_matches_spec() {
         assert!(BrowserHost::is_executable_script_type(None));
         assert!(BrowserHost::is_executable_script_type(Some("")));
-        assert!(BrowserHost::is_executable_script_type(Some("text/javascript")));
+        assert!(BrowserHost::is_executable_script_type(Some(
+            "text/javascript"
+        )));
         assert!(BrowserHost::is_executable_script_type(Some(
             "  text/javascript ; charset=utf-8 "
         )));
-        assert!(BrowserHost::is_executable_script_type(Some("application/javascript")));
+        assert!(BrowserHost::is_executable_script_type(Some(
+            "application/javascript"
+        )));
         assert!(BrowserHost::is_executable_script_type(Some("MODULE")));
         assert!(BrowserHost::is_executable_script_type(Some("module")));
 
-        assert!(!BrowserHost::is_executable_script_type(Some("application/json")));
-        assert!(!BrowserHost::is_executable_script_type(Some("application/ld+json")));
+        assert!(!BrowserHost::is_executable_script_type(Some(
+            "application/json"
+        )));
+        assert!(!BrowserHost::is_executable_script_type(Some(
+            "application/ld+json"
+        )));
         assert!(!BrowserHost::is_executable_script_type(Some("importmap")));
-        assert!(!BrowserHost::is_executable_script_type(Some("speculationrules")));
-        assert!(!BrowserHost::is_executable_script_type(Some("text/template")));
+        assert!(!BrowserHost::is_executable_script_type(Some(
+            "speculationrules"
+        )));
+        assert!(!BrowserHost::is_executable_script_type(Some(
+            "text/template"
+        )));
         assert!(!BrowserHost::is_executable_script_type(Some("text/plain")));
     }
 
@@ -6646,12 +6854,7 @@ mod tests {
         let expected_len = host
             .nodes
             .iter()
-            .filter(|node| {
-                matches!(
-                    node.kind,
-                    DomNodeKind::Document | DomNodeKind::Element(_)
-                )
-            })
+            .filter(|node| matches!(node.kind, DomNodeKind::Document | DomNodeKind::Element(_)))
             .count();
         assert_eq!(node_order.len(), expected_len);
 
@@ -6810,7 +7013,9 @@ mod tests {
             snapshot.html
         );
         assert!(
-            snapshot.html.contains("data-current-script-has-parent=\"true\""),
+            snapshot
+                .html
+                .contains("data-current-script-has-parent=\"true\""),
             "currentScript should have a parentElement: {:?}",
             snapshot.html
         );
@@ -6818,7 +7023,7 @@ mod tests {
 
     #[test]
     fn global_image_constructor_reuses_img_element() {
-        use crate::html::{parse_document, Node};
+        use crate::html::{Node, parse_document};
 
         let html = r#"
             <html><body>
@@ -6836,7 +7041,11 @@ mod tests {
         let (mut session, initial) = EngineSession::start(html, "http://localhost/");
         assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
         let snapshot = session.snapshot();
-        assert!(snapshot.error.is_none(), "snapshot error: {:?}", snapshot.error);
+        assert!(
+            snapshot.error.is_none(),
+            "snapshot error: {:?}",
+            snapshot.error
+        );
         let tree = parse_document(&snapshot.html);
         fn find_body<'a>(node: &'a Node) -> Option<&'a crate::html::Element> {
             match node {
@@ -6855,16 +7064,31 @@ mod tests {
             }
         }
         let body = find_body(&tree).expect("body element present");
-        assert_eq!(body.attributes.get("data-typeof-image").map(String::as_str), Some("function"));
-        assert_eq!(body.attributes.get("data-tag-name").map(String::as_str), Some("IMG"));
-        assert_eq!(body.attributes.get("data-node-name").map(String::as_str), Some("IMG"));
-        assert_eq!(body.attributes.get("data-width").map(String::as_str), Some("40"));
-        assert_eq!(body.attributes.get("data-height").map(String::as_str), Some("20"));
+        assert_eq!(
+            body.attributes.get("data-typeof-image").map(String::as_str),
+            Some("function")
+        );
+        assert_eq!(
+            body.attributes.get("data-tag-name").map(String::as_str),
+            Some("IMG")
+        );
+        assert_eq!(
+            body.attributes.get("data-node-name").map(String::as_str),
+            Some("IMG")
+        );
+        assert_eq!(
+            body.attributes.get("data-width").map(String::as_str),
+            Some("40")
+        );
+        assert_eq!(
+            body.attributes.get("data-height").map(String::as_str),
+            Some("20")
+        );
     }
 
     #[test]
     fn top_level_this_is_global_object() {
-        use crate::html::{parse_document, Node};
+        use crate::html::{Node, parse_document};
 
         let html = r#"
             <html><body><div id="out"></div><script>
@@ -6883,7 +7107,11 @@ mod tests {
         let (mut session, initial) = EngineSession::start(html, "http://localhost/");
         assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
         let snapshot = session.snapshot();
-        assert!(snapshot.error.is_none(), "snapshot error: {:?}", snapshot.error);
+        assert!(
+            snapshot.error.is_none(),
+            "snapshot error: {:?}",
+            snapshot.error
+        );
         let tree = parse_document(&snapshot.html);
         fn find_data_result(node: &Node) -> Option<String> {
             match node {
@@ -6911,7 +7139,7 @@ mod tests {
 
     #[test]
     fn document_expando_properties_survive_and_title_still_works() {
-        use crate::html::{parse_document, Node};
+        use crate::html::{Node, parse_document};
 
         let html = r#"
             <html><body>
@@ -6929,7 +7157,11 @@ mod tests {
         let (mut session, initial) = EngineSession::start(html, "http://localhost/");
         assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
         let snapshot = session.snapshot();
-        assert!(snapshot.error.is_none(), "snapshot error: {:?}", snapshot.error);
+        assert!(
+            snapshot.error.is_none(),
+            "snapshot error: {:?}",
+            snapshot.error
+        );
         let tree = parse_document(&snapshot.html);
         fn find_body<'a>(node: &'a Node) -> Option<&'a crate::html::Element> {
             match node {
@@ -6948,10 +7180,24 @@ mod tests {
             }
         }
         let body = find_body(&tree).expect("body element present");
-        assert_eq!(body.attributes.get("data-expando-present").map(String::as_str), Some("true"));
-        assert_eq!(body.attributes.get("data-expando-r").map(String::as_str), Some("1"));
-        assert_eq!(body.attributes.get("data-expando-tag").map(String::as_str), Some("ok"));
-        assert_eq!(body.attributes.get("data-title").map(String::as_str), Some("Hi"));
+        assert_eq!(
+            body.attributes
+                .get("data-expando-present")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            body.attributes.get("data-expando-r").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            body.attributes.get("data-expando-tag").map(String::as_str),
+            Some("ok")
+        );
+        assert_eq!(
+            body.attributes.get("data-title").map(String::as_str),
+            Some("Hi")
+        );
     }
 
     #[test]
@@ -6968,7 +7214,10 @@ mod tests {
         // No mutation since the initial load: a lazy snapshot skips the full
         // serialize and the node-order walk entirely.
         let noop = session.snapshot_lazy();
-        assert!(noop.html.is_empty(), "no-op lazy snapshot must skip serialize");
+        assert!(
+            noop.html.is_empty(),
+            "no-op lazy snapshot must skip serialize"
+        );
         assert!(noop.structural_changes.is_empty());
         assert!(noop.node_order.is_empty());
 
@@ -6982,7 +7231,10 @@ mod tests {
         let t_id = find_node_id_by_attr(&doc, "id", "t").expect("t id");
         session.set_attribute(t_id, "data-x", "1");
         let mutated = session.snapshot_lazy();
-        assert!(!mutated.html.is_empty(), "lazy snapshot must serialize after a mutation");
+        assert!(
+            !mutated.html.is_empty(),
+            "lazy snapshot must serialize after a mutation"
+        );
         assert!(!mutated.structural_changes.is_empty());
         assert!(mutated.html.contains("data-x"));
     }
@@ -7086,17 +7338,17 @@ mod tests {
 
         let stylesheet = parse_stylesheet(stylesheet);
         let (mut session, initial) = EngineSession::start(initial_html, "http://localhost/");
-        assert!(initial.error.is_none(), "initial error: {:?}", initial.error);
+        assert!(
+            initial.error.is_none(),
+            "initial error: {:?}",
+            initial.error
+        );
 
         let mut old_doc = parse_document(&initial.html);
         annotate_node_ids(&mut old_doc);
         let go_id = find_node_id_by_attr(&old_doc, "id", "go").expect("go node id");
-        let old_styled = build_styled_tree(
-            &old_doc,
-            &stylesheet,
-            1280,
-            &InteractiveState::default(),
-        );
+        let old_styled =
+            build_styled_tree(&old_doc, &stylesheet, 1280, &InteractiveState::default());
         let old_node_order: Vec<u32> = initial.node_order.iter().map(|id| id.0 as u32).collect();
 
         let result = trigger(&mut session, go_id);
@@ -7105,8 +7357,9 @@ mod tests {
         let mut new_doc = parse_document(&result.html);
         annotate_node_ids(&mut new_doc);
         let new_node_order: Vec<u32> = result.node_order.iter().map(|id| id.0 as u32).collect();
-        let dirty_roots = compute_dirty_roots(&result.structural_changes, &new_doc, &new_node_order)
-            .expect("dirty roots");
+        let dirty_roots =
+            compute_dirty_roots(&result.structural_changes, &new_doc, &new_node_order)
+                .expect("dirty roots");
         let incremental = build_styled_tree_incremental(
             &new_doc,
             &stylesheet,
@@ -7118,12 +7371,7 @@ mod tests {
             &dirty_roots,
         )
         .expect("incremental style");
-        let full = build_styled_tree(
-            &new_doc,
-            &stylesheet,
-            1280,
-            &InteractiveState::default(),
-        );
+        let full = build_styled_tree(&new_doc, &stylesheet, 1280, &InteractiveState::default());
         assert_eq!(incremental, full);
     }
 
@@ -7347,7 +7595,12 @@ mod tests {
         let (mut session, initial) = EngineSession::start(html, "http://localhost/");
         let mut old_doc = parse_document(&initial.html);
         annotate_node_ids(&mut old_doc);
-        let _old_styled = build_styled_tree(&old_doc, &crate::css::parse_stylesheet("p { color: rgb(1, 2, 3); }"), 1280, &InteractiveState::default());
+        let _old_styled = build_styled_tree(
+            &old_doc,
+            &crate::css::parse_stylesheet("p { color: rgb(1, 2, 3); }"),
+            1280,
+            &InteractiveState::default(),
+        );
         let mut tree = parse_document(&initial.html);
         annotate_node_ids(&mut tree);
         let go_id = find_node_id_by_attr(&tree, "id", "go").expect("go node id");
@@ -7355,15 +7608,17 @@ mod tests {
         let mut new_doc = parse_document(&result.html);
         annotate_node_ids(&mut new_doc);
         let new_node_order: Vec<u32> = result.node_order.iter().map(|id| id.0 as u32).collect();
-        assert!(compute_dirty_roots(
-            &[DomStructuralChange::SetText {
-                node: NodeId(1),
-                value: "b".to_string(),
-            }],
-            &new_doc,
-            &new_node_order,
-        )
-        .is_none());
+        assert!(
+            compute_dirty_roots(
+                &[DomStructuralChange::SetText {
+                    node: NodeId(1),
+                    value: "b".to_string(),
+                }],
+                &new_doc,
+                &new_node_order,
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -7875,13 +8130,41 @@ mod tests {
     #[test]
     fn supports_for_await_of_over_sync_iterables() {
         let cases: &[(&str, &str, &str)] = &[
-            ("promises", "async function f(){let s=0; for await (const x of [Promise.resolve(1),Promise.resolve(2)]) s+=x; return s}", "3"),
-            ("plain", "async function f(){let o=''; for await (const x of [1,2,3]) o+=x; return o}", "123"),
-            ("empty", "async function f(){let n=0; for await (const x of []) n++; return n}", "0"),
-            ("break", "async function f(){let s=0; for await (const x of [1,2,3,4]){ if(x===3) break; s+=x; } return s}", "3"),
-            ("continue", "async function f(){let s=0; for await (const x of [1,2,3,4]){ if(x%2===0) continue; s+=x; } return s}", "4"),
-            ("await-in-body", "async function f(){let s=0; for await (const x of [10,20]){ const y=await Promise.resolve(x); s+=y; } return s}", "30"),
-            ("reject", "async function f(){try{ for await (const x of [Promise.reject('boom')]) {} }catch(e){return 'caught:'+e} return 'no'}", "caught:boom"),
+            (
+                "promises",
+                "async function f(){let s=0; for await (const x of [Promise.resolve(1),Promise.resolve(2)]) s+=x; return s}",
+                "3",
+            ),
+            (
+                "plain",
+                "async function f(){let o=''; for await (const x of [1,2,3]) o+=x; return o}",
+                "123",
+            ),
+            (
+                "empty",
+                "async function f(){let n=0; for await (const x of []) n++; return n}",
+                "0",
+            ),
+            (
+                "break",
+                "async function f(){let s=0; for await (const x of [1,2,3,4]){ if(x===3) break; s+=x; } return s}",
+                "3",
+            ),
+            (
+                "continue",
+                "async function f(){let s=0; for await (const x of [1,2,3,4]){ if(x%2===0) continue; s+=x; } return s}",
+                "4",
+            ),
+            (
+                "await-in-body",
+                "async function f(){let s=0; for await (const x of [10,20]){ const y=await Promise.resolve(x); s+=y; } return s}",
+                "30",
+            ),
+            (
+                "reject",
+                "async function f(){try{ for await (const x of [Promise.reject('boom')]) {} }catch(e){return 'caught:'+e} return 'no'}",
+                "caught:boom",
+            ),
         ];
         for (name, body, expected) in cases {
             let html = format!(
@@ -7990,7 +8273,10 @@ mod tests {
             "http://localhost/",
         );
         assert!(result.error.is_none(), "error: {:?}", result.error);
-        assert_eq!(result.console_logs, vec!["2".to_string(), "true".to_string()]);
+        assert_eq!(
+            result.console_logs,
+            vec!["2".to_string(), "true".to_string()]
+        );
     }
 
     #[test]
@@ -8039,9 +8325,8 @@ mod tests {
     fn react_umd_usestate_onclick_rerenders() {
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");
-        let react_dom =
-            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
-                .expect("react-dom fixture present");
+        let react_dom = std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+            .expect("react-dom fixture present");
 
         let html = format!(
             "<html><body><div id=\"root\"></div>\
@@ -8102,9 +8387,8 @@ mod tests {
     fn react_umd_effects_lists_conditional() {
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");
-        let react_dom =
-            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
-                .expect("react-dom fixture present");
+        let react_dom = std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+            .expect("react-dom fixture present");
         let app = r#"
             var e = React.createElement;
             var useState = React.useState, useEffect = React.useEffect;
@@ -8128,7 +8412,13 @@ mod tests {
         assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
         let pump = |s: &mut EngineSession| {
             let mut now = 0u64;
-            for _ in 0..200 { if !s.has_pending_work() { break; } now += 16; s.pump(now); }
+            for _ in 0..200 {
+                if !s.has_pending_work() {
+                    break;
+                }
+                now += 16;
+                s.pump(now);
+            }
         };
         pump(&mut session);
         let mount = session.snapshot();
@@ -8173,9 +8463,8 @@ mod tests {
     fn react_umd_controlled_input_mounts() {
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");
-        let react_dom =
-            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
-                .expect("react-dom fixture present");
+        let react_dom = std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+            .expect("react-dom fixture present");
         let app = r#"
             var e = React.createElement;
             function Form() {
@@ -8193,7 +8482,13 @@ mod tests {
         let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
         assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
         let mut now = 0u64;
-        for _ in 0..200 { if !session.has_pending_work() { break; } now += 16; session.pump(now); }
+        for _ in 0..200 {
+            if !session.has_pending_work() {
+                break;
+            }
+            now += 16;
+            session.pump(now);
+        }
         let snap = session.snapshot();
         assert!(
             snap.html.contains("id=\"in\""),
@@ -8215,9 +8510,8 @@ mod tests {
     fn react_umd_controlled_input_onchange() {
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");
-        let react_dom =
-            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
-                .expect("react-dom fixture present");
+        let react_dom = std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+            .expect("react-dom fixture present");
         let app = r#"
             var e = React.createElement;
             function Form() {
@@ -8235,9 +8529,21 @@ mod tests {
         );
         let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
         assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
-        let pump = |s: &mut EngineSession| { let mut now=0u64; for _ in 0..200 { if !s.has_pending_work(){break;} now+=16; s.pump(now); } };
+        let pump = |s: &mut EngineSession| {
+            let mut now = 0u64;
+            for _ in 0..200 {
+                if !s.has_pending_work() {
+                    break;
+                }
+                now += 16;
+                s.pump(now);
+            }
+        };
         pump(&mut session);
-        assert!(session.snapshot().html.contains("echo:"), "form did not mount");
+        assert!(
+            session.snapshot().html.contains("echo:"),
+            "form did not mount"
+        );
 
         // Type into the input: set value + fire a bubbling 'input' event, the way a
         // real keystroke does. React's onChange should update the bound state.
@@ -8259,9 +8565,8 @@ mod tests {
     fn react_umd_form_diag() {
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");
-        let react_dom =
-            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
-                .expect("react-dom fixture present");
+        let react_dom = std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+            .expect("react-dom fixture present");
         let app = r#"
             var e = React.createElement;
             var useState = React.useState;
@@ -8283,17 +8588,35 @@ mod tests {
         );
         let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
         println!("INIT_ERR: {:?}", initial.error);
-        let pump = |s: &mut EngineSession| { let mut now=0u64; for _ in 0..200 { if !s.has_pending_work(){break;} now+=16; s.pump(now); } };
+        let pump = |s: &mut EngineSession| {
+            let mut now = 0u64;
+            for _ in 0..200 {
+                if !s.has_pending_work() {
+                    break;
+                }
+                now += 16;
+                s.pump(now);
+            }
+        };
         pump(&mut session);
         let show = |s: &mut EngineSession, label: &str| {
             let snap = s.snapshot();
-            if let Some(i) = snap.html.find("id=\"echo\"") { let end=(i+60).min(snap.html.len()); println!("{label} ECHO: {}", &snap.html[i..end]); }
-            if let Some(i) = snap.html.find("id=\"in\"") { let end=(i+80).min(snap.html.len()); println!("{label} INPUT: {}", &snap.html[i..end]); }
+            if let Some(i) = snap.html.find("id=\"echo\"") {
+                let end = (i + 60).min(snap.html.len());
+                println!("{label} ECHO: {}", &snap.html[i..end]);
+            }
+            if let Some(i) = snap.html.find("id=\"in\"") {
+                let end = (i + 80).min(snap.html.len());
+                println!("{label} INPUT: {}", &snap.html[i..end]);
+            }
         };
         {
             let snap = session.snapshot();
             println!("INIT_LOGS: {:?}", initial.console_logs);
-            if let Some(i) = snap.html.find("id=\"root\"") { let end=(i+200).min(snap.html.len()); println!("ROOT: {}", &snap.html[i..end]); }
+            if let Some(i) = snap.html.find("id=\"root\"") {
+                let end = (i + 200).min(snap.html.len());
+                println!("ROOT: {}", &snap.html[i..end]);
+            }
         }
         show(&mut session, "MOUNT");
         // Simulate typing: set value + dispatch a bubbling input event (React maps
@@ -8320,9 +8643,8 @@ mod tests {
     fn react_umd_complex_diag() {
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");
-        let react_dom =
-            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
-                .expect("react-dom fixture present");
+        let react_dom = std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+            .expect("react-dom fixture present");
         // Exercise useEffect, list rendering with keys, conditional rendering, and
         // a multi-item state update driven by a click.
         let app = r#"
@@ -8348,11 +8670,19 @@ mod tests {
         let (mut session, initial) = EngineSession::start(&html, "http://localhost/");
         println!("INIT_ERR: {:?}", initial.error);
         println!("INIT_LOGS: {:?}", initial.console_logs);
-        let mc = session.eval_for_test("console.log('MC=' + typeof MessageChannel + ' perf=' + typeof performance);");
+        let mc = session.eval_for_test(
+            "console.log('MC=' + typeof MessageChannel + ' perf=' + typeof performance);",
+        );
         println!("MC_LOGS: {:?}", mc.console_logs);
         let pump = |s: &mut EngineSession| {
             let mut now = 0u64;
-            for _ in 0..200 { if !s.has_pending_work() { break; } now += 16; s.pump(now); }
+            for _ in 0..200 {
+                if !s.has_pending_work() {
+                    break;
+                }
+                now += 16;
+                s.pump(now);
+            }
         };
         pump(&mut session);
         let m = session.snapshot();
@@ -8384,9 +8714,8 @@ mod tests {
     fn react_umd_click_diag() {
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");
-        let react_dom =
-            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
-                .expect("react-dom fixture present");
+        let react_dom = std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+            .expect("react-dom fixture present");
         let html = format!(
             "<html><body><div id=\"root\"></div>\
              <script>{react}</script>\
@@ -8406,7 +8735,13 @@ mod tests {
         println!("INIT_ERR: {:?}", initial.error);
         println!("INIT_LOGS: {:?}", initial.console_logs);
         let mut now = 0u64;
-        for _ in 0..50 { if !session.has_pending_work() { break; } now += 16; session.pump(now); }
+        for _ in 0..50 {
+            if !session.has_pending_work() {
+                break;
+            }
+            now += 16;
+            session.pump(now);
+        }
         // manual listener probe + click
         let r1 = session.eval_for_test(
             "var b=document.getElementById('btn'); \
@@ -8418,7 +8753,13 @@ mod tests {
         println!("CLICK_LOGS: {:?}", r1.console_logs);
         println!("PENDING_AFTER_CLICK: {}", session.has_pending_work());
         let mut now = 0u64;
-        for _ in 0..50 { if !session.has_pending_work() { break; } now += 16; session.pump(now); }
+        for _ in 0..50 {
+            if !session.has_pending_work() {
+                break;
+            }
+            now += 16;
+            session.pump(now);
+        }
         let snap = session.snapshot();
         println!("AFTER_LOGS: {:?}", snap.console_logs);
         if let Some(i) = snap.html.find("id=\"root\"") {
@@ -8432,9 +8773,8 @@ mod tests {
     fn react_umd_mount_diag() {
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");
-        let react_dom =
-            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
-                .expect("react-dom fixture present");
+        let react_dom = std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+            .expect("react-dom fixture present");
         // Try BOTH APIs to isolate concurrent-scheduler issues from DOM mount issues:
         // legacy ReactDOM.render (synchronous) vs createRoot().render (concurrent).
         let html = format!(
@@ -8469,8 +8809,14 @@ mod tests {
         let snap = session.snapshot();
         println!("FINAL_ERROR: {:?}", snap.error);
         println!("FINAL_LOGS: {:?}", snap.console_logs);
-        println!("LEGACY_MOUNTED: {}", snap.html.contains("id=\"L\"") || snap.html.contains("Legacy</h1>"));
-        println!("CONCURRENT_MOUNTED: {}", snap.html.contains("id=\"C\"") || snap.html.contains("Concurrent</h1>"));
+        println!(
+            "LEGACY_MOUNTED: {}",
+            snap.html.contains("id=\"L\"") || snap.html.contains("Legacy</h1>")
+        );
+        println!(
+            "CONCURRENT_MOUNTED: {}",
+            snap.html.contains("id=\"C\"") || snap.html.contains("Concurrent</h1>")
+        );
         // Dump the two containers' regions.
         for marker in ["id=\"legacy\"", "id=\"concurrent\""] {
             if let Some(i) = snap.html.find(marker) {
@@ -8565,9 +8911,8 @@ mod tests {
     fn react_umd_renders_into_dom() {
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");
-        let react_dom =
-            std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
-                .expect("react-dom fixture present");
+        let react_dom = std::fs::read_to_string("tests/fixtures/react/react-dom.production.min.js")
+            .expect("react-dom fixture present");
 
         let html = format!(
             "<html><body><div id=\"root\"></div>\
@@ -8601,7 +8946,11 @@ mod tests {
             session.pump(now);
         }
         let snap = session.snapshot();
-        assert!(snap.error.is_none(), "engine error after pump: {:?}", snap.error);
+        assert!(
+            snap.error.is_none(),
+            "engine error after pump: {:?}",
+            snap.error
+        );
         // The rendered <h1> (with React-applied id/class) must be inside #root.
         assert!(
             snap.html.contains("id=\"title\"") && snap.html.contains("Hello, Tobira"),
@@ -8625,36 +8974,74 @@ mod tests {
 
         // location.href = full navigation (reload), resolved against the doc URL.
         let r = run("location.href = '/next?from=test';");
-        assert_eq!(r.navigation_target.as_deref(), Some("https://example.com/next?from=test"), "err={:?}", r.error);
+        assert_eq!(
+            r.navigation_target.as_deref(),
+            Some("https://example.com/next?from=test"),
+            "err={:?}",
+            r.error
+        );
 
         // location.hash = soft navigation + hashchange.
-        let r = run("window.addEventListener('hashchange', function(){ document.title = location.href + '|' + location.hash; }); location.hash = '#frag';");
-        assert_eq!(r.soft_navigation_target.as_deref(), Some("https://example.com/start#frag"));
-        assert!(r.navigation_target.is_none(), "hash change must not full-navigate");
-        assert_eq!(r.title.as_deref(), Some("https://example.com/start#frag|#frag"));
+        let r = run(
+            "window.addEventListener('hashchange', function(){ document.title = location.href + '|' + location.hash; }); location.hash = '#frag';",
+        );
+        assert_eq!(
+            r.soft_navigation_target.as_deref(),
+            Some("https://example.com/start#frag")
+        );
+        assert!(
+            r.navigation_target.is_none(),
+            "hash change must not full-navigate"
+        );
+        assert_eq!(
+            r.title.as_deref(),
+            Some("https://example.com/start#frag|#frag")
+        );
 
         // history.pushState: soft nav, location updates, no reload.
-        let r = run("history.pushState({ page: 1 }, '', '/next?from=test#frag'); document.title = location.href + '|' + location.hash;");
-        assert_eq!(r.soft_navigation_target.as_deref(), Some("https://example.com/next?from=test#frag"));
+        let r = run(
+            "history.pushState({ page: 1 }, '', '/next?from=test#frag'); document.title = location.href + '|' + location.hash;",
+        );
+        assert_eq!(
+            r.soft_navigation_target.as_deref(),
+            Some("https://example.com/next?from=test#frag")
+        );
         assert!(r.navigation_target.is_none());
-        assert_eq!(r.title.as_deref(), Some("https://example.com/next?from=test#frag|#frag"));
+        assert_eq!(
+            r.title.as_deref(),
+            Some("https://example.com/next?from=test#frag|#frag")
+        );
 
         // pushState x2 + back: popstate fires, history.state restored.
-        let r = run("window.addEventListener('popstate', function(){ document.title = location.href + '|' + String(history.state.page); }); history.pushState({page:1},'','/one'); history.pushState({page:2},'','/two'); history.back();");
-        assert_eq!(r.soft_navigation_target.as_deref(), Some("https://example.com/one"));
+        let r = run(
+            "window.addEventListener('popstate', function(){ document.title = location.href + '|' + String(history.state.page); }); history.pushState({page:1},'','/one'); history.pushState({page:2},'','/two'); history.back();",
+        );
+        assert_eq!(
+            r.soft_navigation_target.as_deref(),
+            Some("https://example.com/one")
+        );
         assert_eq!(r.title.as_deref(), Some("https://example.com/one|1"));
 
         // back then forward: lands on /two, history.length == 3.
-        let r = run("history.pushState({},'','/one'); history.pushState({},'','/two'); history.back(); history.forward(); document.title = location.href + '|' + location.hash + '|' + String(history.length);");
-        assert_eq!(r.soft_navigation_target.as_deref(), Some("https://example.com/two"));
+        let r = run(
+            "history.pushState({},'','/one'); history.pushState({},'','/two'); history.back(); history.forward(); document.title = location.href + '|' + location.hash + '|' + String(history.length);",
+        );
+        assert_eq!(
+            r.soft_navigation_target.as_deref(),
+            Some("https://example.com/two")
+        );
         assert!(r.navigation_target.is_none());
         assert_eq!(r.title.as_deref(), Some("https://example.com/two||3"));
 
         // scroll restore across back/forward.
-        let r = run("window.scrollTo(0,120); history.pushState({},'','/one'); window.scrollTo(0,240); history.pushState({},'','/two'); history.back(); var a = location.href + '|' + String(window.scrollY); history.back(); var b = location.href + '|' + String(window.scrollY); history.forward(); var c = location.href + '|' + String(window.scrollY); document.title = a + '||' + b + '||' + c;");
+        let r = run(
+            "window.scrollTo(0,120); history.pushState({},'','/one'); window.scrollTo(0,240); history.pushState({},'','/two'); history.back(); var a = location.href + '|' + String(window.scrollY); history.back(); var b = location.href + '|' + String(window.scrollY); history.forward(); var c = location.href + '|' + String(window.scrollY); document.title = a + '||' + b + '||' + c;",
+        );
         assert_eq!(
             r.title.as_deref(),
-            Some("https://example.com/one|240||https://example.com/start|120||https://example.com/one|240")
+            Some(
+                "https://example.com/one|240||https://example.com/start|120||https://example.com/one|240"
+            )
         );
     }
 
@@ -8680,7 +9067,11 @@ mod tests {
             html.replace(&tag, &format!("<script>{bundle}</script>"))
         };
         let html = inline(raw, "./react.production.min.js", "react.production.min.js");
-        let html = inline(html, "./react-dom.production.min.js", "react-dom.production.min.js");
+        let html = inline(
+            html,
+            "./react-dom.production.min.js",
+            "react-dom.production.min.js",
+        );
 
         let (mut session, initial) = EngineSession::start(&html, "http://localhost:8000/");
         assert!(initial.error.is_none(), "engine error: {:?}", initial.error);
@@ -8698,9 +9089,20 @@ mod tests {
 
         // ① Mount: all three sections present, counter at 0, both seed todos shown.
         let mount = session.snapshot();
-        assert!(mount.error.is_none(), "error after mount: {:?}", mount.error);
-        println!("=== MOUNTED DOM (excerpt) ===\n{}", excerpt_root(&mount.html));
-        assert!(mount.html.contains("カウンター"), "counter section missing: {}", mount.html);
+        assert!(
+            mount.error.is_none(),
+            "error after mount: {:?}",
+            mount.error
+        );
+        println!(
+            "=== MOUNTED DOM (excerpt) ===\n{}",
+            excerpt_root(&mount.html)
+        );
+        assert!(
+            mount.html.contains("カウンター"),
+            "counter section missing: {}",
+            mount.html
+        );
         assert!(mount.html.contains("エンジンを書く"), "seed todo 1 missing");
         assert!(mount.html.contains("React を動かす"), "seed todo 2 missing");
 
@@ -8770,7 +9172,10 @@ mod tests {
             "first todo was not removed; root={del_root}"
         );
         println!("todo delete: OK (エンジンを書く removed)");
-        println!("=== FINAL DOM (excerpt) ===\n{}", excerpt_root(&after_del.html));
+        println!(
+            "=== FINAL DOM (excerpt) ===\n{}",
+            excerpt_root(&after_del.html)
+        );
     }
 
     /// Verifies the REAL external-`<script src>` load path end-to-end: fetches the
@@ -8782,8 +9187,8 @@ mod tests {
     #[test]
     #[ignore]
     fn react_demo_external_src_over_http() {
-        let url = crate::url::Url::parse("http://localhost:8000/react-demo.html")
-            .expect("valid url");
+        let url =
+            crate::url::Url::parse("http://localhost:8000/react-demo.html").expect("valid url");
         let page = crate::http::fetch(&url).expect("demo server running on :8000");
         let html = String::from_utf8_lossy(&page.body).into_owned();
         // The page must reference the bundles externally — no inlining here.
@@ -8825,7 +9230,7 @@ mod tests {
     #[test]
     fn react_gui_click_path_increments_counter() {
         use crate::browser::annotate_node_ids;
-        use crate::html::{parse_document, Node};
+        use crate::html::{Node, parse_document};
 
         let react = std::fs::read_to_string("tests/fixtures/react/react.production.min.js")
             .expect("react fixture present");
@@ -8856,7 +9261,11 @@ mod tests {
         };
         pump(&mut session);
         let mount = session.snapshot();
-        assert!(mount.html.contains("count: 0"), "mount: {}", excerpt_root(&mount.html));
+        assert!(
+            mount.html.contains("count: 0"),
+            "mount: {}",
+            excerpt_root(&mount.html)
+        );
 
         // Replicate the browser: parse the snapshot + annotate node ids, then find
         // the button's id by its rendered text — exactly what hit-test would carry.

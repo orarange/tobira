@@ -142,7 +142,10 @@ impl JavaScriptSession {
         let (response_tx, response_rx) = mpsc::channel();
         if self
             .command_tx
-            .send(JavaScriptSessionCommand::Tick { now_ms, response_tx })
+            .send(JavaScriptSessionCommand::Tick {
+                now_ms,
+                response_tx,
+            })
             .is_err()
         {
             return None;
@@ -226,7 +229,9 @@ fn engine_result_to_processed(result: crate::engine_host::EngineRunResult) -> Pr
     let mut console_logs = result.console_logs;
     if std::env::var_os("TOBIRA_DEBUG_JS_RUN").is_some() {
         let head = &result.html[..result.html.len().min(400)];
-        let open = head.find("<html").map(|i| &head[i..(i + 120).min(head.len())]);
+        let open = head
+            .find("<html")
+            .map(|i| &head[i..(i + 120).min(head.len())]);
         eprintln!(
             "[js] err={:?} has_client_js={} open={:?}",
             result.error.as_deref().map(|e| &e[..e.len().min(80)]),
@@ -343,7 +348,10 @@ fn start_engine_script_session(
                     JavaScriptSessionCommand::Snapshot { response_tx } => {
                         let _ = response_tx.send(engine_result_to_processed(session.snapshot()));
                     }
-                    JavaScriptSessionCommand::Tick { now_ms, response_tx } => {
+                    JavaScriptSessionCommand::Tick {
+                        now_ms,
+                        response_tx,
+                    } => {
                         // Only serialize a snapshot when the frame did work; a
                         // page with a pending interval but nothing due this frame
                         // shouldn't pay a full DOM serialize every ~16ms. And even
@@ -353,8 +361,8 @@ fn start_engine_script_session(
                         // change log and treats it as a no-op.
                         let did_work = session.pump(now_ms);
                         let has_more = session.has_pending_work();
-                        let snapshot = did_work
-                            .then(|| engine_result_to_processed(session.snapshot_lazy()));
+                        let snapshot =
+                            did_work.then(|| engine_result_to_processed(session.snapshot_lazy()));
                         let _ = response_tx.send((snapshot, has_more));
                     }
                     JavaScriptSessionCommand::SetScrollPosition { y } => {
@@ -417,9 +425,8 @@ fn process_document_scripts_error(html: String, message: String) -> ProcessedScr
 mod tests {
 
     use super::{
-        DomEventRequest, process_document_scripts,
-        process_document_scripts_with_engine, start_document_script_session,
-        start_engine_script_session,
+        DomEventRequest, process_document_scripts, process_document_scripts_with_engine,
+        start_document_script_session, start_engine_script_session,
     };
     use crate::url::Url;
 
@@ -517,8 +524,11 @@ mod tests {
                 });
             </script>
         </body></html>"#;
-        let (initial, session) =
-            start_engine_script_session(html, &Url::parse("http://localhost/").unwrap(), String::new());
+        let (initial, session) = start_engine_script_session(
+            html,
+            &Url::parse("http://localhost/").unwrap(),
+            String::new(),
+        );
         let session = session.expect("engine session present");
         assert!(initial.html.contains(">idle</div>"));
 
@@ -575,8 +585,11 @@ mod tests {
                 });
             </script>
         </body></html>"#;
-        let (initial, session) =
-            start_engine_script_session(html, &Url::parse("http://localhost/").unwrap(), String::new());
+        let (initial, session) = start_engine_script_session(
+            html,
+            &Url::parse("http://localhost/").unwrap(),
+            String::new(),
+        );
         let session = session.expect("engine session present");
 
         // Use and drop a clone, exactly like set_dom_attribute does.

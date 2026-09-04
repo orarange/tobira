@@ -8,7 +8,9 @@ use tobira_engine::engine::{Compiler, Heap, Parser, Vm};
 
 fn run(src: &str) {
     let program = Parser::new(src).parse().expect("script should parse");
-    let chunk = Compiler::new(&program).compile().expect("script should compile");
+    let chunk = Compiler::new(&program)
+        .compile()
+        .expect("script should compile");
     let mut vm = Vm::new(Heap::new());
     vm.execute(&chunk).expect("script should execute");
 }

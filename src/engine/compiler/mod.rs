@@ -12,17 +12,19 @@ use super::ast::{
     FunctionBodyNode, FunctionDeclaration, IterableLoopInitializerNode, LiteralKindNode,
     LogicalOpNode, MethodDefinitionKindNode, ObjectMethodDefinitionNode, ObjectPatternElementNode,
     ObjectPropertyDefinition, OptionalOperationKindNode, Program, PropertyAccessFieldNode,
-    PropertyNameNode, RelationalOpNode, StatementNode, SuperCallExpression,
+    PropertyNameNode, RelationalOpNode, SourceType, StatementNode, SuperCallExpression,
     SuperPropertyAccessNode, TemplateElementNode, UnaryOpNode, UpdateOpNode, UpdateTargetNode,
-    VariableDeclaration, SourceType, statement_list_item_to_node,
+    VariableDeclaration, statement_list_item_to_node,
 };
-use super::chunk::{CallSitePosition, Chunk, Constant, ExceptionHandler, FunctionProto, Opcode, UpvalueDescriptor};
+use super::chunk::{
+    CallSitePosition, Chunk, Constant, ExceptionHandler, FunctionProto, Opcode, UpvalueDescriptor,
+};
 use super::verifier::verify_stack_balance;
-mod scope;
 mod classes;
-mod patterns;
 mod expressions;
 mod modules;
+mod patterns;
+mod scope;
 mod statements;
 use patterns::PendingPatternInit;
 use scope::{ImportBinding, OuterBindings, ResolvedBinding, ScopeFrame, UpvalueState};
@@ -147,7 +149,10 @@ impl<'a> Compiler<'a> {
         );
         function.install_this_binding()?;
         let has_eval_completion_value = preserve_eval_completion
-            && matches!(self.program.body().last(), Some(StatementNode::ExpressionStatement(_)));
+            && matches!(
+                self.program.body().last(),
+                Some(StatementNode::ExpressionStatement(_))
+            );
         if has_eval_completion_value {
             function.compile_statements_preserving_final_expression(self.program.body())?;
             function.emit(Opcode::Return);
@@ -283,7 +288,11 @@ impl<'a> FunctionCompiler<'a> {
 
     fn record_call_position(&mut self, code_index: usize, line: u32, column: u32) {
         if let Ok(code_index) = u32::try_from(code_index) {
-            self.call_positions.push(CallSitePosition { code_index, line, column });
+            self.call_positions.push(CallSitePosition {
+                code_index,
+                line,
+                column,
+            });
         }
     }
 
@@ -441,6 +450,4 @@ impl<'a> FunctionCompiler<'a> {
         u16::try_from(index)
             .map_err(|_| CompileError::message("nested function count exceeded u16"))
     }
-
 }
-
