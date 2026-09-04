@@ -20,11 +20,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## いまの状態（2026-09-04）
 
-- ブランチ `master`。`origin/master` と同期済み。この文書を書いた時点の HEAD は
-  `c55a5b5`（`tools/geom/` の移設とこの文書のコミットが直後に乗る）。
+- ブランチ `master`。この文書を書いた時点の HEAD は `8c081ee`
+  （この文書のコミットが直後に乗る）。
 - `cargo build --release` 通る。警告は dead_code のみ。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1126 通過 / 0 落ち**。
+- `cargo test --release` → **1129 通過 / 0 落ち**。
   数え方: `cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result" | awk '{p+=$4; f+=$6} END {print p, f}'`
   （`tr -d '\000'` は必須。出力に NUL が混ざって grep が binary 扱いする）
 - html5lib 木構築適合 **1192/1229 (97.0%)**。
@@ -57,6 +57,20 @@ Edge は 2026-08-27 の更新以降 `--dump-dom` が無出力になったので�
 **数値だけ見るな。** 表が指定幅を無視する件も `<center>` が表を中央寄せせん件も、
 `--screenshot` を足して目で見るまで一つも見つからんかった。修正のたびに一枚撮ること。
 
+**JS の穴を「素の Vm」で判定するな。** `Vm::new(Heap::new())` で走らせると
+`Intl`・`Object.groupBy`・`Array.fromAsync`・`Promise.withResolvers`・
+`Segmenter`・`DOMParser`・`Blob`・`FileReader` あたりが軒並み「無い」と出るが、
+これらは `engine_host.rs:2845 RUNTIME_PRELUDE`（約1,500行の JS）が
+host 側で入れとるだけで、エンジン本体には無い。素の Vm はプレリュードを積まん。
+本当に穴かどうかは `EngineSession` 経由か、実頁を `TOBIRA_DEBUG_CONSOLE=1` で
+見て判断すること。逆に、コンパイラで落ちるもの（bigint・`with`・`#x in o`・
+`o?.#x`・オブジェクトリテラルのメソッド内 `super`）はプレリュードでは救えん。
+
+**エンジンの速さを測るなら受け手の幅を変えて測る。** 呼び出し 20,000 回を
+receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理が
+紛れ込んどるかどうかが一発で出る。平らなら正常。2026-09-04 の
+`describe_receiver` はこれで見つけた（幅400で 21 倍）。
+
 ## 設計判断とその理由
 
 - **スクリプトを走らせる前にレイアウトを済ませる**（`engine_host.rs:4465 start_with_styles`）
@@ -82,6 +96,17 @@ Edge は 2026-08-27 の更新以降 `--dump-dom` が無出力になったので�
 - **インライン箱の矩形は「run 番号 + バイト位置」で印を打つ**
   （`layout.rs:1099 push_marker` → `layout.rs:6474 apply_inline_marks`）
   理由は下の「試してダメやった方法」参照。
+- **ループ予算（fuel）はターンごと**（`vm.rs` の `TURN_FUEL`、`refill_turn_fuel`）
+  後退ジャンプ 1,000,000 回で `VmError::InfiniteLoop`。これを積み直すのは
+  スクリプト実行・task callback・rAF の一周・`fire_dom_event` のそれぞれの頭。
+  以前は `execute_with_this` でしか積まんかったので、最後の `<script>` の
+  残りを頁の生涯の callback 全部で分け合っとった。一こま200回のアニメでも
+  60fps で二分で尽きる。**頁の生涯の割り当てに戻したらあかん。**
+- **event loop から逃げた例外は握り潰さん**（`vm.rs` の `report_job_error`）
+  timer / rAF / microtask には返す先の呼び手がおらん。頁の console に Error として
+  流し（snapshot に乗る）、`TOBIRA_DEBUG_CONSOLE` なら backtrace 付きで stderr にも出す。
+  `take_job_errors` で host が引き取る。`run_due_jobs` が返すのは
+  **走った**仕事の数で、投げた callback は数えん。
 - **`<isindex>` は追わん**と決めた。html5lib の残りに数件あるが、現実の頁に無い。
 - **省リソースは第二目標**。2026-08-23 に「まず実用ブラウザ」へ方針変更済み。
   メモリのために正しさを落とす判断はもうしとらん。
@@ -135,6 +160,20 @@ Edge は 2026-08-27 の更新以降 `--dump-dom` が無出力になったので�
 - **表のセル背景を二度塗っとる**。半透明を重ねると濃くなる。
 - **差分 restyle** は既定 ON（`TOBIRA_INCREMENTAL_RESTYLE`）。
   `docs/JS_ROADMAP.md` の Phase5 に「blocker」と書いてあるのは古い記述。
+- **JS の GC は一度も走らん**。`heap.rs` に `GcColor`・`RootSet`・`free_for_gc` は
+  書いてあるが**呼び出し元が無い**。頁を捨てるまでヒープは単調増加。
+  `tests/gc_heap_growth.rs` がその現状を仕様として書き留めとる。
+- **文字列は作った端から永久に intern される**（`vm.rs` の `make_string_value`）。
+  動的に作った文字列も `string_cache` に入り、key として String をもう一部持つ。
+  `s += 'x'` を n 回まわすと途中経過が全部残って O(n²)（n=2000 で 2MB、cache 側で更に同量）。
+  合わせて `string_text` が**毎回全長を clone** する。`if (s)` の真偽判定でもコピーが走る。
+  `s.length` は `chars().count()`、`s[i]` は `chars().nth(i)` で両方 O(n)。
+- **`Map` / `Set` は `Vec` の線形走査**（`value.rs` の `ObjectKind::Map`）。
+  n=500 で 28ms、1000 で 104ms、2000 で 427ms ときれいに O(n²)。
+- **inline cache も hidden class も無い**。`PropertyKey::String(String)` なので
+  `a.b` のたびに String を確保する。ディスパッチループは `Opcode` を二度 clone
+  しとる（`Opcode` の中身は全部スカラーなので `Copy` を derive できるはず）。
+  素の速度は約 15M opcode/秒。
 
 ## 次の一手（優先順）
 
@@ -168,8 +207,21 @@ Edge は 2026-08-27 の更新以降 `--dump-dom` が無出力になったので�
    おるかどうかから切り分ける。命令が無いならレイアウト、あるなら描画。
 6. **CSS transition / animation** — 一番でかい未実装。`@keyframes` のパース、
    時間軸、再描画の駆動が要る。着手するなら独立した回を丸ごと使うこと。
-7. **html5lib 残り 37 件** — 大半は adoption agency の深いところ。
-   `TOBIRA_H5_FILE=adoption01.dat` から。費用対効果は 1〜6 より低い。
+   **fuel をターンごとにする修正（2026-09-04）を入れる前にこれを作っとったら、
+   完成した瞬間に「二分で止まる」を踏んどった。** 今は踏まん。
+7. **文字列の intern をやめる** — `vm.rs` の `make_string_value`。
+   リテラルだけ intern して、実行時に作った文字列は素通しにする。
+   `string_text` が全長 clone を返しとるのも合わせて（`&str` を返すか、
+   長さだけ要る場面は長さだけ引く）。頁を開きっぱなしで膨らむ問題の主犯。
+8. **`Map` / `Set` を索引化** — `Vec` の線形走査をやめる。
+   キーが `Value` なので単純に `HashMap` にはできん（NaN と -0、
+   オブジェクトの同一性）。挿入順は保つこと。
+9. **JS の GC** — `heap.rs` に道具は揃っとるが繋がっとらん。
+   ルートは VM のスタック・フレーム・globals・`node_wrappers`・
+   `event_listeners`・各種 prototype・observer の登録簿と広い。
+   独立した回が要る。7 と 8 を先にやるほうが安い。
+10. **html5lib 残り 37 件** — 大半は adoption agency の深いところ。
+   `TOBIRA_H5_FILE=adoption01.dat` から。費用対効果は他より低い。
 
 ## 主なモジュール
 
@@ -182,7 +234,7 @@ Edge は 2026-08-27 の更新以降 `--dump-dom` が無出力になったので�
 | `src/font.rs` | face の読み込みとグリフ。名前付き family、字ごとの fallback |
 | `src/gui.rs` | 窓、アドレス欄、当たり判定、`paint_layout` |
 | `src/main.rs` | CLI。`--cli` / `--dump-styled` / `--screenshot` |
-| `src/engine/` | 自作 JS エンジン（コンパイラ + VM + GC）。boa は parser front-end のみ |
+| `src/engine/` | 自作 JS エンジン（コンパイラ + VM + ヒープ）。boa は parser front-end のみ。手書きの字句解析器は無い（`lexer.rs` は死んどったので 2026-09-04 に削除） |
 | `src/engine_host.rs` | DOM ↔ JS の橋。`RUNTIME_PRELUDE`、`start_with_styles` |
 | `src/js.rs` | スクリプト実行の入り口とポリシー |
 | `tools/geom/` | Chrome 突き合わせ用の合成頁と `cmp.py` |
@@ -215,6 +267,29 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-09-04 - Claude (JS エンジンの棚卸し: 64b87f7..8c081ee)
+
+ユーザーの「JSエンジンどうなってるか突き詰めて」から。コードを読むだけでなく
+使い捨ての test を書いて実測した（測ったら消した）。出てきたものは上の
+「設計判断」「未確定・仮実装」「次の一手」に散らしてある。ここには経緯だけ。
+
+- 構成は boa_parser → boa_ast → 自作コンパイラ（4,994行）→ 自作 VM（21,060行、
+  builtin 499個）。`heap.rs` は arena まで作ってあるが収集器は繋がっとらん。
+- **一番でかいのは fuel がターンを跨いで漏れる件やった**。measurement で
+  「前段で 950,000 回まわしてから setTimeout を張ると callback が完走せん、
+  しかも try/catch にも掛からず戻り値は健康そのもの」を再現できたのが決め手。
+  直したうえで `tests/event_loop_fuel.rs` を置いた。補充を外すと 5 本中 3 本落ちる
+  ことを確認済み（回帰テストが本当に回帰を捕まえるかは必ず確かめること）。
+- 二番目は `describe_receiver`。例外用の文字列を正常系で毎回作っとった。
+  **受け手の幅を変えて測る**と一発で出た（幅400で 21 倍）。この測り方は
+  「測り方・見方」に書いた。
+- ユーザーの指摘で修正の形が変わったのが一箇所。fuel は「補充」だけ入れれば
+  ええと思うとったが、握り潰しを直さんと次に本物の無限ループを踏んだとき
+  同じ無言停止になり「fuel 直したはずやのに」で捜査が倍こじれる、と。
+  そのとおりなので同じコミットに入れた。
+- 素の `Vm` でエンジンの穴を判定して一度間違えた。プレリュードは host 側にある。
+  同じ罠を踏まんように「測り方・見方」に書いた。
 
 ### 2026-09-04 - Claude (Chrome parity campaign: 2d2dfbc..c55a5b5, 34 commits)
 
