@@ -20,11 +20,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## いまの状態（2026-09-04）
 
-- ブランチ `master`。この文書を書いた時点の HEAD は `4448441`
+- ブランチ `master`。この文書を書いた時点の HEAD は `18b94c4`
   （この文書のコミットが直後に乗る）。
 - `cargo build --release` 通る。警告は dead_code のみ。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1145 通過 / 0 落ち**。
+- `cargo test --release` → **1148 通過 / 0 落ち**。
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
   数え方: `cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result" | awk '{p+=$4; f+=$6} END {print p, f}'`
   （`tr -d '\000'` は必須。出力に NUL が混ざって grep が binary 扱いする）
@@ -84,6 +84,17 @@ host 側で入れとるだけで、エンジン本体には無い。素の Vm �
 持つ入れ物を足したときは必ずこれを回すこと。** 全テストと実頁 5 枚で報告 0 が
 今の状態。
 
+**期待値は先に Chrome で確定させる。** 2026-09-05 に `background-repeat` を
+追うたとき、合成頁 7 行のうち 1 行は**空白が正解**やった（10x10 の箱に 32x32 を
+原寸で敷けば左上は空白）。Chrome を撮らんまま「全部出たら勝ち」で進んどったら、
+正しい挙動を追いかけて壊しとった。`tools/geom/cmp.py` と同じ要領で
+`chrome.exe --headless --screenshot` を先に一枚撮ること。
+
+**検体は「区別がつく」ものを選ぶ。** 同じ 2026-09-05 の件で、8x8 の単色 PNG は
+敷き詰めが壊れとっても箱が埋まって見えたので「塗れとる」と誤読しかけた。
+中身に構造のある画像（実物の SVG）を並べて初めて、断片が隅に出て分かった。
+**単色の検体は敷き詰めの検証に使えん。**
+
 **エンジンの速さを測るなら受け手の幅を変えて測る。** 呼び出し 20,000 回を
 receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理が
 紛れ込んどるかどうかが一発で出る。平らなら正常。2026-09-04 の
@@ -125,6 +136,14 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
   流し（snapshot に乗る）、`TOBIRA_DEBUG_CONSOLE` なら backtrace 付きで stderr にも出す。
   `take_job_errors` で host が引き取る。`run_due_jobs` が返すのは
   **走った**仕事の数で、投げた callback は数えん。
+- **背景画像は命令をタイルごとに増やさん**（`gui.rs` の `draw_tiled_image`）
+  命令が持つのは画像と `repeat_x` / `repeat_y` と一枚のタイルの寸法だけで、
+  塗るときに箱を画素単位で走査して元画像から拾う。1px の画像を 1920x1080 に
+  敷いても命令は 1 個。タイルごとに命令を吐く作りにすると 200 万命令になって
+  描画も `--dump-styled` での診断も詰む。**そこへ戻したらあかん。**
+- **繰り返しの両軸は一箇所から出す**（`css.rs` の `BackgroundRepeat::axes()`）
+  `no-repeat` は「両軸とも回数 1」、`repeat-x` は「縦が 1」として同じ経路を
+  通る。片軸だけ別実装にすると必ず片方がズレる。
 - **周回ごとの束縛は「宣言された枠 ∩ 捕獲された枠」だけ**
   （`compiler/statements.rs` の `begin_loop_body` / `end_loop_body`）
   ループ変数は元から `FreshenLocal` をもらっとったが、本体で宣言した
@@ -203,6 +222,12 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
 - **`checkVisibility`** は prelude 版と native 版（`DomNodeCheckVisibility`）が両方ある。
   native が勝つ。prelude 側は消し忘れ。
 - **CSS の遷移とアニメーション**は丸ごと無い。最終状態が即座に出る。
+- **`background-size` の百分率**（`background-size: 50%`）は未対応で `auto`
+  に落ちる。箱に対する割合なので解くのはレイアウト時になる。長さと
+  `cover` / `contain` は効く。
+- **背景の層は 1 枚目しか塗らん**（`css.rs` の `apply_background_shorthand`）。
+  `background: url(a), url(b)` は a だけ。CSS では 1 枚目が手前なので、
+  だいたいの頁では見た目が合う。
 - **表のセル背景を二度塗っとる**。半透明を重ねると濃くなる。
 - **差分 restyle** は既定 ON（`TOBIRA_INCREMENTAL_RESTYLE`）。
   `docs/JS_ROADMAP.md` の Phase5 に「blocker」と書いてあるのは古い記述。
@@ -251,30 +276,18 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    大きさは出しとるので、同じ値を `record_container_box`（`layout.rs:9005`）に
    渡して hitbox にも反映させる。scale と translate の適用段を揃えるのは
    その後（設計判断が要る。translate も描画時に寄せるほうが筋がええ）。
-5. **`background-repeat: repeat` が敷き詰めをせん** — 2026-09-04 に
-   「HN の投票矢印」を追って行き着いた真因。矢印はこれの一例でしかない。
-   塗り側が repeat 系を `ObjectFit::None` に落としとるので
-   （`layout.rs:2409`、`3609`、`4158`、`4289`）、原寸の一枚を切り抜いて
-   置くだけになり、`background-size` もその経路では捨てられる。
-   単色の画像やと区別がつかんが、箱より大きい画像やと切り抜かれた隅しか出ん。
-   HN は 10x10 の箱に 32x32 の SVG なので隅が空白で、丸ごと消えて見えとった。
-   **`repeat` は CSS の初期値**なので、背景画像を置いて `no-repeat` と
-   書かん頁は全部これを踏む。
-   直し方: 敷き詰めを実装し、そのうえで `background-size` を効かせる。
-   最小再現は `tools/geom/arrow*.html`（README 参照）。
-   なお、closure バグ（2026-09-04 に修正）が原因やろかと疑うたが無関係やった。
-6. **CSS transition / animation** — 一番でかい未実装。`@keyframes` のパース、
+5. **CSS transition / animation** — 一番でかい未実装。`@keyframes` のパース、
    時間軸、再描画の駆動が要る。着手するなら独立した回を丸ごと使うこと。
    **fuel をターンごとにする修正（2026-09-04）を入れる前にこれを作っとったら、
    完成した瞬間に「二分で止まる」を踏んどった。** 今は踏まん。
-7. **`Map` / `Set` を索引化** — `Vec` の線形走査をやめる。
+6. **`Map` / `Set` を索引化** — `Vec` の線形走査をやめる。
    キーが `Value` なので単純に `HashMap` にはできん（NaN と -0、
    オブジェクトの同一性）。挿入順は保つこと。
-8. **文字列の表現** — `string_text` の全長 clone、`s.length` の
+7. **文字列の表現** — `string_text` の全長 clone、`s.length` の
    `chars().count()`、`s[i]` の `chars().nth(i)`。`Value::String` の
    表現に手が入るので独立した回が要る。GC が入った今、これは漏れやのうて
    速さの話。
-9. **html5lib 残り 37 件** — 大半は adoption agency の深いところ。
+8. **html5lib 残り 37 件** — 大半は adoption agency の深いところ。
    `TOBIRA_H5_FILE=adoption01.dat` から。費用対効果は他より低い。
 
 ## 主なモジュール
@@ -323,6 +336,27 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-09-05 - Claude (background-size に長さを持たせる: 18b94c4)
+
+前回「`background-repeat: repeat` が敷き詰めをせん」と書いたが、**それも
+まだ半分やった**。敷き詰めは動いとって、原寸で敷くのが問題。真因は
+`background-size` の長さ指定が丸ごと落ちとったこと。詳しくはコミット。
+
+- 一日で同じ件について**二回、原因を言い直した**。「箱が無い」→「敷き詰めが
+  未実装」→「`background-size` の長さが落ちとる」。毎回、次の検体を作るまでは
+  もっともらしかった。**症状の説明がついた時点で止めると間違う。**
+- 二回目から抜けられたのは、SVG と PNG を並べたから。単色やと壊れとっても
+  埋まって見える。三回目に着地できたのは、`arrow3.html` で
+  `background-repeat` だけを動かしたら「repeat 系が全滅、no-repeat だけ通る」
+  と出て、そこから「no-repeat の経路は何をしとるんや」と逆から見たから。
+- **Chrome を先に撮ったのが効いた。** 7 行のうち 1 行（r4）は空白が正解で、
+  それを知らんまま「全部出たら勝ち」で進んどったら、正しい挙動を追いかけて
+  壊しとった。期待値は再現頁の中に書き込んである。
+- ついでに `background-position` の初期値が 50 やった（CSS は 0% 0%）。
+  `object-position` から写した間違いで、背景が常に引き伸ばされとったから
+  今まで見えんかった。`object_position_x/y` は別の欄なので触っとらん。
+- 退化の確認は Chrome との幾何照合（g1..g6 が README と全部同じ）と実頁 4 枚。
 
 ### 2026-09-04 - Claude (HN の矢印 → background-repeat: 4448441)
 
