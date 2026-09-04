@@ -1,3 +1,15 @@
+//! The parser front end: a thin adapter over `boa_parser`.
+//!
+//! There is no hand-written lexer or parser here. Source text goes to
+//! `boa_parser`, and this module reshapes the resulting `boa_ast` into the
+//! `Program` the compiler in `super::compiler` walks. `boa_ast`,
+//! `boa_parser` and `boa_interner` are the only parts of boa still used --
+//! the boa runtime went when the self-built VM became the sole JS backend.
+//!
+//! (A hand-written `lexer.rs` did once live beside this file. It was dead
+//! from the day boa took over and was deleted on 2026-09-04; look in the
+//! history if you ever want it back.)
+
 use std::{fs, path::Path};
 
 use boa_ast::{

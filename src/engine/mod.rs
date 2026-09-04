@@ -14,7 +14,6 @@ pub mod event_loop;
 pub mod heap;
 pub mod host;
 pub mod js_regex;
-pub mod lexer;
 pub mod parser;
 pub mod value;
 pub mod verifier;
@@ -45,7 +44,6 @@ pub use host::{
     StorageResult, TimerId, TimerKind, TimerRequest, WindowId, WindowMetrics,
 };
 pub use js_regex::{JsCaptures, JsMatch, JsRegex};
-pub use lexer::{LexError, LexGoal, Lexer, SourceLocation, Token, TokenKind};
 pub use parser::{ParseError, Parser, ParserOptions};
 pub use value::{
     AsyncContext, HostDispatch, HostObjectClass, HostObjectSlot, JsObject, JsPropertyDescriptor,
