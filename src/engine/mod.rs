@@ -15,6 +15,7 @@ pub mod heap;
 pub mod host;
 pub mod js_regex;
 pub mod parser;
+pub mod trace;
 pub mod value;
 pub mod verifier;
 pub mod vm;
@@ -45,6 +46,7 @@ pub use host::{
 };
 pub use js_regex::{JsCaptures, JsMatch, JsRegex};
 pub use parser::{ParseError, Parser, ParserOptions};
+pub use trace::{Trace, Tracer};
 pub use value::{
     AsyncContext, HostDispatch, HostObjectClass, HostObjectSlot, JsObject, JsPropertyDescriptor,
     JsString, ObjectKind, PromiseReaction, PromiseState, PropertyKey, SymbolId, Value,

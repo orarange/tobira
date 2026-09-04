@@ -13,10 +13,22 @@ pub enum HeapArena {
 
 pub trait ArenaItem {
     const ARENA: HeapArena;
+
+    /// Bytes this item owns outside its own slot. Counting slots alone is not
+    /// enough to decide when to collect: two thousand strings of a thousand
+    /// characters are two megabytes but only two thousand slots, so a
+    /// count-based trigger sails straight past them.
+    fn footprint(&self) -> usize {
+        0
+    }
 }
 
 impl ArenaItem for JsString {
     const ARENA: HeapArena = HeapArena::String;
+
+    fn footprint(&self) -> usize {
+        self.text.len()
+    }
 }
 
 impl ArenaItem for JsObject {
@@ -112,11 +124,17 @@ pub enum GcColor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HeapHeader {
     mark_color: GcColor,
+    /// Set instead of freeing when `TOBIRA_GC_VERIFY` is on: the collector
+    /// decided this cell was unreachable, but left it in place. Any later read
+    /// of it is a root the collector failed to see, and `Arena::get` says so
+    /// out loud. See `Heap::verify_mode`.
+    condemned: bool,
 }
 
 impl Default for HeapHeader {
     fn default() -> Self {
         Self {
+            condemned: false,
             mark_color: GcColor::White,
         }
     }
@@ -129,6 +147,10 @@ impl HeapHeader {
 
     pub fn set_mark_color(&mut self, mark_color: GcColor) {
         self.mark_color = mark_color;
+    }
+
+    pub fn is_condemned(&self) -> bool {
+        self.condemned
     }
 }
 
@@ -207,6 +229,33 @@ impl<T: ArenaItem> ArenaPage<T> {
         self.slots.iter().filter_map(|slot| slot.cell.as_ref())
     }
 
+    /// Every live cell with the `GcRef` that addresses it. The sweep needs the
+    /// ref, not just the value, to ask whether the mark phase reached it.
+    fn iter_refs(&self) -> impl Iterator<Item = (GcRef<T>, &HeapCell<T>)> {
+        let page_index = self.index;
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(move |(slot_index, slot)| {
+                let cell = slot.cell.as_ref()?;
+                Some((
+                    GcRef::new(page_index, slot_index as u32, slot.generation),
+                    cell,
+                ))
+            })
+    }
+
+    /// Mark a cell as garbage without reclaiming it (verify mode).
+    fn condemn(&mut self, slot_index: u32) {
+        if let Some(cell) = self
+            .slots
+            .get_mut(slot_index as usize)
+            .and_then(|slot| slot.cell.as_mut())
+        {
+            cell.header.condemned = true;
+        }
+    }
+
     fn get_cell(&self, gc_ref: GcRef<T>) -> Option<&HeapCell<T>> {
         if gc_ref.arena() != T::ARENA {
             return None;
@@ -229,6 +278,17 @@ impl<T: ArenaItem> ArenaPage<T> {
             return None;
         }
         slot.cell.as_mut()
+    }
+
+    /// Take a specific free slot, for the arena's cross-page free list.
+    fn allocate_in_slot(&mut self, slot_index: u32, value: T) -> Option<GcRef<T>> {
+        let slot = self.slots.get_mut(slot_index as usize)?;
+        if slot.cell.is_some() {
+            return None;
+        }
+        slot.cell = Some(HeapCell::new(value));
+        self.free_list.retain(|index| *index != slot_index);
+        Some(GcRef::new(self.index, slot_index, slot.generation))
     }
 
     fn allocate(&mut self, value: T) -> GcRef<T> {
@@ -263,7 +323,9 @@ impl<T: ArenaItem> ArenaPage<T> {
         }
 
         slot.generation = slot.generation.wrapping_add(1);
-        self.free_list.push(gc_ref.slot_index());
+        // Deliberately NOT pushed onto `self.free_list`: swept slots are owned
+        // by `Arena::free_slots`, which spans pages. Two lists would eventually
+        // hand the same slot out twice.
         true
     }
 }
@@ -273,6 +335,12 @@ pub struct Arena<T: ArenaItem> {
     page_capacity: usize,
     pages: Vec<ArenaPage<T>>,
     len: usize,
+    /// Running total of `ArenaItem::footprint` over the live cells.
+    bytes: usize,
+    /// Slots freed by a sweep, across every page. Without this the arena only
+    /// ever reused free slots in its LAST page, so collecting a long-lived page
+    /// bought nothing: the next allocation still grew the arena.
+    free_slots: Vec<(u32, u32)>,
 }
 
 impl<T: ArenaItem> Default for Arena<T> {
@@ -287,11 +355,18 @@ impl<T: ArenaItem> Arena<T> {
             page_capacity: page_capacity.max(1),
             pages: Vec::new(),
             len: 0,
+            bytes: 0,
+            free_slots: Vec::new(),
         }
     }
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Bytes owned by the live cells, over and above their slots.
+    pub fn bytes(&self) -> usize {
+        self.bytes
     }
 
     pub fn is_empty(&self) -> bool {
@@ -311,8 +386,23 @@ impl<T: ArenaItem> Arena<T> {
     }
 
     pub fn allocate(&mut self, value: T) -> GcRef<T> {
-        // Phase 7: freed slots in earlier pages are never reused here; mark-sweep
-        // will need a cross-page free scan or a separate global free list.
+        self.bytes += value.footprint();
+        // Reuse whatever the last sweep reclaimed, wherever it lives.
+        while let Some((page_index, slot_index)) = self.free_slots.pop() {
+            let usable = self
+                .pages
+                .get(page_index as usize)
+                .and_then(|page| page.slots.get(slot_index as usize))
+                .is_some_and(|slot| slot.cell.is_none());
+            if !usable {
+                continue;
+            }
+            let gc_ref = self.pages[page_index as usize]
+                .allocate_in_slot(slot_index, value)
+                .expect("slot was just checked to be free");
+            self.len += 1;
+            return gc_ref;
+        }
         if self.pages.last().is_none_or(ArenaPage::is_full) {
             let next_index = self.pages.len() as u32;
             self.pages
@@ -326,11 +416,46 @@ impl<T: ArenaItem> Arena<T> {
     }
 
     pub fn get(&self, gc_ref: GcRef<T>) -> Option<&T> {
-        self.get_cell(gc_ref).map(HeapCell::value)
+        let cell = self.get_cell(gc_ref)?;
+        if cell.header.condemned {
+            report_condemned_access(gc_ref.raw());
+        }
+        Some(cell.value())
     }
 
     pub fn get_mut(&mut self, gc_ref: GcRef<T>) -> Option<&mut T> {
-        self.get_cell_mut(gc_ref).map(HeapCell::value_mut)
+        let cell = self.get_cell_mut(gc_ref)?;
+        if cell.header.condemned {
+            report_condemned_access(gc_ref.raw());
+        }
+        Some(cell.value_mut())
+    }
+
+    /// Free every live cell the mark phase did not reach. Returns how many went.
+    ///
+    /// With `condemn_only`, nothing is actually reclaimed — the cells are
+    /// flagged instead, so that a later read of one reports a missed root at
+    /// the point of use rather than misbehaving somewhere far away.
+    pub fn sweep(&mut self, is_live: &dyn Fn(GcRef<T>) -> bool, condemn_only: bool) -> usize {
+        let mut doomed: Vec<GcRef<T>> = Vec::new();
+        for page in &self.pages {
+            for (gc_ref, cell) in page.iter_refs() {
+                if !cell.header.condemned && !is_live(gc_ref) {
+                    doomed.push(gc_ref);
+                }
+            }
+        }
+        for gc_ref in &doomed {
+            if condemn_only {
+                if let Some(page) = self.pages.get_mut(gc_ref.page_index() as usize) {
+                    page.condemn(gc_ref.slot_index());
+                }
+            } else if self.free_for_gc(*gc_ref) {
+                self.free_slots
+                    .push((gc_ref.page_index(), gc_ref.slot_index()));
+            }
+        }
+        doomed.len()
     }
 
     pub fn get_cell(&self, gc_ref: GcRef<T>) -> Option<&HeapCell<T>> {
@@ -357,12 +482,36 @@ impl<T: ArenaItem> Arena<T> {
         let Some(page) = self.pages.get_mut(gc_ref.page_index() as usize) else {
             return false;
         };
+        let footprint = page.get_cell(gc_ref).map_or(0, |cell| cell.value().footprint());
         let freed = page.free_for_gc(gc_ref);
         if freed {
             self.len = self.len.saturating_sub(1);
+            self.bytes = self.bytes.saturating_sub(footprint);
         }
         freed
     }
+}
+
+/// A cell the collector condemned is being read: the collector believed nothing
+/// could reach it, and something just did. That means a root was not traced.
+/// Reported once per cell so a hot path does not drown the output.
+#[cold]
+fn report_condemned_access(raw: RawGcRef) {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<RawGcRef>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    if let Ok(mut seen) = seen.lock() {
+        if !seen.insert(raw) {
+            return;
+        }
+    }
+    eprintln!(
+        "[gc-verify] a root holding this reference was not traced: {:?} page={} slot={} gen={}",
+        raw.arena(),
+        raw.page_index(),
+        raw.slot_index(),
+        raw.generation()
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -27,6 +27,7 @@ use super::value::{
     HostObjectSlot, JsObject, JsPropertyDescriptor, JsString, ObjectKind, PromiseReaction,
     PromiseState, PropertyKey, SymbolId, TypedArrayKind, Value,
 };
+use super::trace::{Trace, Tracer};
 use super::verifier::compute_stack_depths;
 
 type ValueCell = Rc<RefCell<Value>>;
@@ -1581,6 +1582,31 @@ pub struct Vm {
     /// How many jobs have failed, uncapped. Separate from `job_errors` because
     /// that list is bounded, and a bounded list cannot be used to count.
     job_error_count: u64,
+    /// `TOBIRA_GC_VERIFY`: collect, but flag garbage instead of reclaiming it,
+    /// so that reading a cell the collector gave up on reports a missed root at
+    /// the point of use. See `super::trace`.
+    gc_verify: bool,
+    /// How many native frames are part-way through their work. Nonzero means
+    /// Rust locals may be holding values the tracer cannot see, so no
+    /// collection may happen. See `maybe_collect_garbage`.
+    reentry_depth: usize,
+    /// Heap size (objects + strings) at which the next collection is due.
+    next_gc_at: usize,
+    /// The same, in string bytes. Either one being reached is enough.
+    next_gc_bytes: usize,
+    /// Interpreter iterations left before the next size check. Checking the
+    /// heap on every single opcode is measurable; every few thousand is not.
+    gc_countdown: u32,
+    gc_collections: u64,
+    gc_objects_freed: u64,
+    gc_strings_freed: u64,
+}
+
+/// Rebuild a typed object reference from a raw one. Safe because the arena is
+/// part of the type: a raw ref that came from a `GcRef<JsObject>` can only name
+/// an object slot, and a mismatched generation reads back as `None` anyway.
+fn object_ref_from_raw(raw: RawGcRef) -> GcRef<JsObject> {
+    GcRef::new(raw.page_index(), raw.slot_index(), raw.generation())
 }
 
 /// A `customElements.define`d class: the constructor value plus its
@@ -1988,6 +2014,18 @@ const TURN_FUEL: u32 = 1_000_000;
 /// How many escaped job errors are kept for the host to collect.
 const MAX_RECORDED_JOB_ERRORS: usize = 8;
 
+/// Heap size (objects + strings together) below which collecting is not worth
+/// the walk. A fresh VM already holds ~730 objects of built-in surface.
+const GC_MIN_HEAP: usize = 4096;
+
+/// The same threshold measured in string bytes, so that a few large strings
+/// trigger a collection even though they are few slots. A `s += ...` loop
+/// builds a megabyte out of a couple of thousand cells.
+const GC_MIN_BYTES: usize = 1 << 20;
+
+/// Interpreter iterations between heap-size checks.
+const GC_CHECK_INTERVAL: u32 = 4096;
+
 impl Vm {
     /// Create a VM with a no-op host (for tests and scripts that don't need DOM/console).
     pub fn new(heap: Heap) -> Self {
@@ -2062,6 +2100,14 @@ impl Vm {
             connected_custom_elements: std::collections::HashSet::new(),
             job_errors: Vec::new(),
             job_error_count: 0,
+            gc_verify: env::var_os("TOBIRA_GC_VERIFY").is_some(),
+            reentry_depth: 0,
+            next_gc_at: GC_MIN_HEAP,
+            next_gc_bytes: GC_MIN_BYTES,
+            gc_countdown: GC_CHECK_INTERVAL,
+            gc_collections: 0,
+            gc_objects_freed: 0,
+            gc_strings_freed: 0,
         };
         vm.install_globals();
         vm
@@ -2604,6 +2650,283 @@ impl Vm {
         }
     }
 
+    /// Every reference the VM itself holds. The mark phase starts here.
+    ///
+    /// `Vm` is destructured with no `..`, so adding a field to it will not
+    /// compile until someone has decided whether it holds heap references. A
+    /// root that is not listed here gets its object freed while still in use,
+    /// and because a stale `GcRef` reads back as `None` rather than faulting,
+    /// the damage shows up somewhere else entirely. That is the whole reason
+    /// this function looks the way it does.
+    fn trace_roots(&self, tracer: &mut Tracer) {
+        let Self {
+            // --- live execution state ---
+            stack,
+            frames,
+            pending_call_receiver,
+            generator_outcome,
+            // --- global environment ---
+            globals,
+            import_meta,
+            builtin_method_cache,
+            window_singletons,
+            custom_elements,
+            // --- intrinsics ---
+            object_prototype,
+            function_prototype,
+            array_prototype,
+            string_prototype,
+            number_prototype,
+            boolean_prototype,
+            regexp_prototype,
+            date_prototype,
+            iterator_prototype,
+            generator_prototype,
+            async_generator_prototype,
+            url_search_params_prototype,
+            headers_prototype,
+            form_data_prototype,
+            weak_ref_prototype,
+            text_encoder_prototype,
+            text_decoder_prototype,
+            url_prototype,
+            error_prototype,
+            promise_prototype,
+            map_prototype,
+            set_prototype,
+            array_buffer_prototype,
+            typed_array_prototype,
+            // --- pending work ---
+            event_loop,
+            // --- things the DOM keeps alive ---
+            //
+            // These are strong on purpose. A listener is reachable from the
+            // node it is attached to, and a node wrapper has to survive as long
+            // as the node does or the expando properties a page put on it would
+            // vanish between two reads of the same element. The DOM side owns
+            // their lifetime, not JS reachability.
+            event_listeners,
+            mutation_observers,
+            resize_observers,
+            node_wrappers,
+            dom_interface_ctors,
+
+            // --- weak: traced elsewhere, not roots ---
+            //
+            // `callables` is keyed by the function object, so its contents are
+            // traced in the mark loop only once that object is known live, and
+            // `string_cache` is pruned after the sweep. Rooting either would
+            // make every function and every interned string immortal, which is
+            // most of what there is to collect.
+            callables: _,
+            string_cache: _,
+
+            // --- no heap references ---
+            heap: _,
+            // The host is the DOM side; it holds node ids and strings, never a
+            // GcRef. (Checked: no `GcRef` or `Value` appears in host.rs or
+            // engine_host.rs.)
+            host: _,
+            stack_depth_cache: _,
+            trace_stack_enabled: _,
+            last_backtrace: _,
+            pending_call_name: _,
+            current_script_src: _,
+            current_script_node: _,
+            fuel: _,
+            random_state: _,
+            delivering_mutations: _,
+            delivering_slotchange: _,
+            next_symbol_id: _,
+            symbol_descriptions: _,
+            symbol_registry: _,
+            template_contents: _,
+            constructed_custom_elements: _,
+            connected_custom_elements: _,
+            job_errors: _,
+            job_error_count: _,
+            gc_verify: _,
+            reentry_depth: _,
+            next_gc_at: _,
+            next_gc_bytes: _,
+            gc_countdown: _,
+            gc_collections: _,
+            gc_objects_freed: _,
+            gc_strings_freed: _,
+        } = self;
+
+        stack.trace(tracer);
+        frames.trace(tracer);
+        pending_call_receiver.trace(tracer);
+        generator_outcome.trace(tracer);
+
+        globals.trace(tracer);
+        import_meta.trace(tracer);
+        builtin_method_cache.trace(tracer);
+        window_singletons.trace(tracer);
+        custom_elements.trace(tracer);
+
+        object_prototype.trace(tracer);
+        function_prototype.trace(tracer);
+        array_prototype.trace(tracer);
+        string_prototype.trace(tracer);
+        number_prototype.trace(tracer);
+        boolean_prototype.trace(tracer);
+        regexp_prototype.trace(tracer);
+        date_prototype.trace(tracer);
+        iterator_prototype.trace(tracer);
+        generator_prototype.trace(tracer);
+        async_generator_prototype.trace(tracer);
+        url_search_params_prototype.trace(tracer);
+        headers_prototype.trace(tracer);
+        form_data_prototype.trace(tracer);
+        weak_ref_prototype.trace(tracer);
+        text_encoder_prototype.trace(tracer);
+        text_decoder_prototype.trace(tracer);
+        url_prototype.trace(tracer);
+        error_prototype.trace(tracer);
+        promise_prototype.trace(tracer);
+        map_prototype.trace(tracer);
+        set_prototype.trace(tracer);
+        array_buffer_prototype.trace(tracer);
+        typed_array_prototype.trace(tracer);
+
+        event_loop.trace(tracer);
+
+        event_listeners.trace(tracer);
+        mutation_observers.trace(tracer);
+        resize_observers.trace(tracer);
+        node_wrappers.trace(tracer);
+        for raw in dom_interface_ctors.keys() {
+            tracer.mark_object(object_ref_from_raw(*raw));
+        }
+    }
+
+    /// Mark from the roots, then free everything unreached.
+    ///
+    /// Only called from a safe point (see `maybe_collect_garbage`), because
+    /// tracing sees only what the VM's own fields reach — a `Value` sitting in
+    /// a Rust local inside a half-finished builtin is invisible to it.
+    fn collect_garbage(&mut self) {
+        let mut tracer = Tracer::new();
+        self.trace_roots(&mut tracer);
+        while let Some(object) = tracer.next_to_scan() {
+            if let Some(data) = self.heap.objects().get(object) {
+                data.trace(&mut tracer);
+            }
+            // Weak by key: a closure's captured variables, a bound function's
+            // target, a promise reaction's plumbing — all reachable only while
+            // the function object they hang off is.
+            if let Some(callable) = self.callables.get(&object.raw()) {
+                callable.trace(&mut tracer);
+            }
+        }
+
+        if let Some(reason) = tracer.aborted() {
+            // The live set is incomplete. Freeing from it would take reachable
+            // objects with it, so this collection does nothing at all.
+            if self.gc_verify {
+                eprintln!("[gc] collection abandoned: {reason}");
+            }
+            return;
+        }
+
+        let condemn_only = self.gc_verify;
+        let objects_freed = self
+            .heap
+            .objects_mut()
+            .sweep(&|object| tracer.object_is_live(object), condemn_only);
+        let strings_freed = self
+            .heap
+            .strings_mut()
+            .sweep(&|string| tracer.string_is_live(string), condemn_only);
+
+        // Weak tables: drop the entries whose key just went away. Without this
+        // they are the leak the collector was supposed to fix.
+        //
+        // Done in verify mode too, even though nothing is being reclaimed
+        // there. Skipping it made the string cache hand back a condemned cell
+        // on the next lookup of the same text, and reading that reported a
+        // missed root that did not exist -- verify mode inventing its own false
+        // positives is worse than not having it. Pruning here keeps the two
+        // modes behaving identically; only reclamation differs.
+        self.callables
+            .retain(|raw, _| tracer.object_is_live(object_ref_from_raw(*raw)));
+        self.string_cache
+            .retain(|_, string| tracer.string_is_live(*string));
+
+        self.gc_collections += 1;
+        self.gc_objects_freed += objects_freed as u64;
+        self.gc_strings_freed += strings_freed as u64;
+        if self.gc_verify {
+            eprintln!(
+                "[gc] #{} live={}obj/{}str {} {}obj/{}str",
+                self.gc_collections,
+                tracer.live_object_count(),
+                tracer.live_string_count(),
+                if condemn_only { "condemned" } else { "freed" },
+                objects_freed,
+                strings_freed
+            );
+        }
+    }
+
+    /// Collect if the heap has grown enough since the last time, and only from
+    /// a safe point.
+    ///
+    /// `reentry_depth` is what makes it safe. A Rust builtin part-way through
+    /// its work — `Array.prototype.map` with its results in a local `Vec`, a
+    /// sort holding the array it is ordering — can call back into JS, and those
+    /// values are reachable from nothing the tracer can see. So collection is
+    /// only allowed when no native frame is in the middle of anything.
+    fn maybe_collect_garbage(&mut self) {
+        if self.reentry_depth > 0 {
+            return;
+        }
+        if !self.gc_is_due() {
+            return;
+        }
+        self.collect_garbage();
+        self.rearm_gc_threshold();
+    }
+
+    fn gc_is_due(&self) -> bool {
+        let slots = self.heap.objects().len() + self.heap.strings().len();
+        slots >= self.next_gc_at || self.heap.strings().bytes() >= self.next_gc_bytes
+    }
+
+    /// Aim the next collection at twice what survived, so a page with a
+    /// genuinely large live set does not collect on every allocation.
+    fn rearm_gc_threshold(&mut self) {
+        let slots = self.heap.objects().len() + self.heap.strings().len();
+        self.next_gc_at = slots.saturating_mul(2).max(GC_MIN_HEAP);
+        self.next_gc_bytes = self
+            .heap
+            .strings()
+            .bytes()
+            .saturating_mul(2)
+            .max(GC_MIN_BYTES);
+    }
+
+    /// Heap statistics: (collections, objects freed, strings freed).
+    #[must_use]
+    pub fn gc_stats(&self) -> (u64, u64, u64) {
+        (
+            self.gc_collections,
+            self.gc_objects_freed,
+            self.gc_strings_freed,
+        )
+    }
+
+    /// Run a collection now, whatever the heap size. For tests, and for a host
+    /// that knows it has just dropped a lot.
+    pub fn collect_garbage_now(&mut self) {
+        if self.reentry_depth == 0 {
+            self.collect_garbage();
+            self.rearm_gc_threshold();
+        }
+    }
+
     /// Give the next turn a full backward-jump budget. See `TURN_FUEL`.
     fn refill_turn_fuel(&mut self) {
         self.fuel = TURN_FUEL;
@@ -2646,6 +2969,10 @@ impl Vm {
 
     pub fn event_loop_tick(&mut self, now_ms: u64, has_render_opportunity: bool) -> TickResult {
         self.event_loop.current_time_ms = now_ms;
+        // The other safe point: between turns nothing native is part-way
+        // through anything, and a page that spends its life in short callbacks
+        // would otherwise rarely reach the interpreter-loop check.
+        self.maybe_collect_garbage();
         self.enqueue_due_timers(now_ms);
 
         let mut did_work = false;
@@ -2787,6 +3114,15 @@ impl Vm {
 
     fn run_until_frame_depth(&mut self, target_depth: usize) -> Result<(), VmError> {
         while self.frames.len() > target_depth {
+            // A safe point. Between two opcodes every value the program can
+            // still reach is on the operand stack or in a frame, both of which
+            // are roots. Inside an opcode it is not, which is why this is here
+            // and not in the allocator.
+            self.gc_countdown = self.gc_countdown.saturating_sub(1);
+            if self.gc_countdown == 0 {
+                self.gc_countdown = GC_CHECK_INTERVAL;
+                self.maybe_collect_garbage();
+            }
             let (ip, opcode) = {
                 let frame = self
                     .frames
@@ -7195,6 +7531,20 @@ impl Vm {
     }
 
     fn call_value_sync(
+        &mut self,
+        callee: Value,
+        this_value: Value,
+        args: Vec<Value>,
+    ) -> Result<Value, VmError> {
+        // Callers of this reach it from Rust, often holding values in locals
+        // that no root can see. Nothing may be collected until they are done.
+        self.reentry_depth += 1;
+        let result = self.call_value_sync_inner(callee, this_value, args);
+        self.reentry_depth -= 1;
+        result
+    }
+
+    fn call_value_sync_inner(
         &mut self,
         callee: Value,
         this_value: Value,
@@ -20060,6 +20410,159 @@ impl Vm {
                     _ => Value::Null,
                 })
             }
+        }
+    }
+}
+
+// ---- reachability -------------------------------------------------------
+//
+// See `super::trace` for the rule these follow: enums matched exhaustively,
+// structs destructured completely, so that adding a variant or a field that
+// holds a heap reference breaks the build instead of leaking a dangling ref.
+
+impl Trace for RuntimeClosure {
+    fn trace(&self, tracer: &mut Tracer) {
+        let Self { proto: _, upvalues } = self;
+        upvalues.trace(tracer);
+    }
+}
+
+impl Trace for BoundFunction {
+    fn trace(&self, tracer: &mut Tracer) {
+        let Self {
+            target,
+            bound_this,
+            bound_args,
+        } = self;
+        target.trace(tracer);
+        bound_this.trace(tracer);
+        bound_args.trace(tracer);
+    }
+}
+
+impl Trace for PromiseAllState {
+    fn trace(&self, tracer: &mut Tracer) {
+        let Self {
+            result_promise,
+            values,
+            remaining: _,
+        } = self;
+        result_promise.trace(tracer);
+        values.trace(tracer);
+    }
+}
+
+impl Trace for PromiseAllResolveElement {
+    fn trace(&self, tracer: &mut Tracer) {
+        let Self { state, index: _ } = self;
+        state.trace(tracer);
+    }
+}
+
+impl Trace for PromiseAllSettledElement {
+    fn trace(&self, tracer: &mut Tracer) {
+        let Self {
+            state,
+            index: _,
+            is_reject: _,
+        } = self;
+        state.trace(tracer);
+    }
+}
+
+impl Trace for PromiseAnyRejectElement {
+    fn trace(&self, tracer: &mut Tracer) {
+        let Self {
+            result_promise,
+            errors,
+            remaining: _,
+            index: _,
+        } = self;
+        result_promise.trace(tracer);
+        errors.trace(tracer);
+    }
+}
+
+impl Trace for Callable {
+    fn trace(&self, tracer: &mut Tracer) {
+        match self {
+            Self::Builtin(_) => {}
+            Self::Closure(closure) => closure.trace(tracer),
+            Self::Bound(bound) => bound.trace(tracer),
+            Self::PromiseCapability { promise, mode: _ } => promise.trace(tracer),
+            Self::PromiseFinally { callback, mode: _ } => callback.trace(tracer),
+            Self::PromiseAllResolveElement(element) => element.trace(tracer),
+            Self::PromiseAllReject { result_promise }
+            | Self::PromiseRaceResolve { result_promise }
+            | Self::PromiseRaceReject { result_promise }
+            | Self::PromiseAnyResolve { result_promise } => result_promise.trace(tracer),
+            Self::PromiseAllSettledElement(element) => element.trace(tracer),
+            Self::PromiseAnyRejectElement(element) => element.trace(tracer),
+        }
+    }
+}
+
+impl Trace for CallFrame {
+    fn trace(&self, tracer: &mut Tracer) {
+        let Self {
+            proto: _,
+            ip: _,
+            stack_base: _,
+            stack_divergence_reported: _,
+            locals,
+            upvalues,
+            this_value,
+            construct_fallback,
+            pending_exception,
+            async_outer_promise,
+            async_gen_request,
+            generator,
+            arguments,
+            new_target,
+        } = self;
+        locals.trace(tracer);
+        upvalues.trace(tracer);
+        this_value.trace(tracer);
+        construct_fallback.trace(tracer);
+        pending_exception.trace(tracer);
+        async_outer_promise.trace(tracer);
+        async_gen_request.trace(tracer);
+        generator.trace(tracer);
+        arguments.trace(tracer);
+        new_target.trace(tracer);
+    }
+}
+
+impl Trace for MutationObserverReg {
+    fn trace(&self, tracer: &mut Tracer) {
+        let Self { callback, instance } = self;
+        callback.trace(tracer);
+        instance.trace(tracer);
+    }
+}
+
+impl Trace for ResizeObserverReg {
+    fn trace(&self, tracer: &mut Tracer) {
+        let Self { callback, instance } = self;
+        callback.trace(tracer);
+        instance.trace(tracer);
+    }
+}
+
+impl Trace for CustomElementDef {
+    fn trace(&self, tracer: &mut Tracer) {
+        let Self {
+            class_value,
+            observed: _,
+        } = self;
+        class_value.trace(tracer);
+    }
+}
+
+impl Trace for GeneratorOutcome {
+    fn trace(&self, tracer: &mut Tracer) {
+        match self {
+            Self::Yielded(value) | Self::Returned(value) => value.trace(tracer),
         }
     }
 }
