@@ -197,6 +197,15 @@ struct FunctionCompiler<'a> {
     is_generator: bool,
     outer: Option<OuterBindings>,
     control_stack: Vec<ControlContext>,
+    /// Slots of the block-scoped bindings each enclosing loop BODY declares,
+    /// innermost last. A `let`/`const` in a loop body is a fresh binding every
+    /// iteration, so a closure made in one iteration has to keep the value it
+    /// saw; these are the slots that need a fresh cell per turn.
+    ///
+    /// Only `declare_block_scoped` records here. `var` is function-scoped and
+    /// must keep ONE binding for the whole function, so freshening it would
+    /// break code that is currently correct.
+    loop_body_bindings: Vec<Vec<u16>>,
     active_finally_blocks: Vec<super::ast::BlockStatement>,
     /// Label attached to the next loop to be compiled (from a labeled statement).
     pending_label: Option<String>,
@@ -241,6 +250,7 @@ impl<'a> FunctionCompiler<'a> {
             is_generator: false,
             outer,
             control_stack: Vec::new(),
+            loop_body_bindings: Vec::new(),
             active_finally_blocks: Vec::new(),
             pending_label: None,
             is_arrow: false,

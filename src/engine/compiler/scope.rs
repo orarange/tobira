@@ -155,6 +155,15 @@ impl<'a> FunctionCompiler<'a> {
         self.current_scope_mut()
             .bindings
             .insert(name.to_string(), LocalBinding { slot });
+        // Every enclosing loop body wants to know about this: the innermost one
+        // is the one that must give it a fresh cell each iteration, and an outer
+        // one freshening it too is redundant but harmless. Note this is
+        // `declare_block_scoped` only -- `declare_function_scoped` (`var`)
+        // deliberately does not record, because one binding per function is the
+        // correct semantics for it.
+        for enclosing_loop in &mut self.loop_body_bindings {
+            enclosing_loop.push(slot);
+        }
         Ok(slot)
     }
 

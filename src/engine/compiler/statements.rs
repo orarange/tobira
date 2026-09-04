@@ -482,8 +482,10 @@ impl<'a> super::FunctionCompiler<'a> {
         self.compile_iterable_initializer_store(statement.initializer(), value_slot)?;
         let loop_slots = self.per_iteration_loop_slots(statement.initializer());
         self.push_control_context(true);
+        let body_mark = self.begin_loop_body();
         let body = statement_to_node(statement.body().clone());
         self.compile_statement(&body)?;
+        let body_slots = self.end_loop_body(body_mark);
         let increment_start = self.code.len();
         let context = self
             .control_stack
@@ -494,8 +496,13 @@ impl<'a> super::FunctionCompiler<'a> {
         }
         // Per-iteration binding, as in the classic `for (let …)` loop: give the
         // loop variable a fresh cell so a closure made in the body keeps the key
-        // it actually saw instead of the last one.
+        // it actually saw instead of the last one. The same goes for anything
+        // the body itself declared -- `continue` lands on `increment_start`,
+        // just above here, so it gets the fresh cells too.
         for &slot in &loop_slots {
+            self.emit(Opcode::FreshenLocal(slot));
+        }
+        for &slot in &body_slots {
             self.emit(Opcode::FreshenLocal(slot));
         }
         let one = self.add_number_constant(1.0)?;
@@ -557,8 +564,10 @@ impl<'a> super::FunctionCompiler<'a> {
             self.compile_iterable_initializer_store(statement.initializer(), value_slot)?;
             let loop_slots = self.per_iteration_loop_slots(statement.initializer());
             self.push_control_context(true);
+            let body_mark = self.begin_loop_body();
             let body = statement_to_node(statement.body().clone());
             self.compile_statement(&body)?;
+            let body_slots = self.end_loop_body(body_mark);
             let increment_start = self.code.len();
             let context = self
                 .control_stack
@@ -568,6 +577,9 @@ impl<'a> super::FunctionCompiler<'a> {
                 self.patch_jump(jump, increment_start)?;
             }
             for &slot in &loop_slots {
+                self.emit(Opcode::FreshenLocal(slot));
+            }
+            for &slot in &body_slots {
                 self.emit(Opcode::FreshenLocal(slot));
             }
             self.emit_back_jump(loop_start)?;
@@ -588,8 +600,10 @@ impl<'a> super::FunctionCompiler<'a> {
             self.compile_iterable_initializer_store(statement.initializer(), value_slot)?;
             let loop_slots = self.per_iteration_loop_slots(statement.initializer());
             self.push_control_context(true);
+            let body_mark = self.begin_loop_body();
             let body = statement_to_node(statement.body().clone());
             self.compile_statement(&body)?;
+            let body_slots = self.end_loop_body(body_mark);
             let increment_start = self.code.len();
             let context = self
                 .control_stack
@@ -598,8 +612,12 @@ impl<'a> super::FunctionCompiler<'a> {
             for jump in context.continue_jumps {
                 self.patch_jump(jump, increment_start)?;
             }
-            // Per-iteration binding, matching the classic `for (let …)` loop.
+            // Per-iteration binding, matching the classic `for (let …)` loop,
+            // for the loop variable and for anything the body declared.
             for &slot in &loop_slots {
+                self.emit(Opcode::FreshenLocal(slot));
+            }
+            for &slot in &body_slots {
                 self.emit(Opcode::FreshenLocal(slot));
             }
             self.emit_back_jump(loop_start)?;
@@ -617,6 +635,50 @@ impl<'a> super::FunctionCompiler<'a> {
     ///
     /// `var` and plain assignment targets share one binding across the whole
     /// loop by design, so they get an empty list and no freshening.
+    /// Begin collecting the block-scoped bindings a loop body declares.
+    /// Returns a mark to hand back to `end_loop_body`.
+    fn begin_loop_body(&mut self) -> usize {
+        self.loop_body_bindings.push(Vec::new());
+        self.nested_functions.len()
+    }
+
+    /// Finish the collection and return the slots that actually need a fresh
+    /// cell each iteration: declared in this body AND captured by a closure
+    /// created in it.
+    ///
+    /// The second half is what keeps this cheap. Freshening every body binding
+    /// unconditionally would put an allocation in every iteration of every loop,
+    /// and almost no loop creates a closure. A nested function that captures one
+    /// of THIS function's locals records an upvalue descriptor with
+    /// `is_local: true` naming the slot, so the functions compiled while the
+    /// body was being compiled say exactly which slots matter. Transitive
+    /// captures (`() => () => n`) are covered too: the intermediate function
+    /// gets the `is_local` descriptor, and it is one of these direct children.
+    fn end_loop_body(&mut self, nested_before: usize) -> Vec<u16> {
+        let declared = self.loop_body_bindings.pop().unwrap_or_default();
+        if declared.is_empty() {
+            return Vec::new();
+        }
+        let mut captured: std::collections::HashSet<u16> = std::collections::HashSet::new();
+        for proto in &self.nested_functions[nested_before..] {
+            for descriptor in &proto.upvalue_descriptors {
+                if descriptor.is_local {
+                    captured.insert(descriptor.index);
+                }
+            }
+        }
+        if captured.is_empty() {
+            return Vec::new();
+        }
+        let mut slots: Vec<u16> = declared
+            .into_iter()
+            .filter(|slot| captured.contains(slot))
+            .collect();
+        slots.sort_unstable();
+        slots.dedup();
+        slots
+    }
+
     fn per_iteration_loop_slots(&self, initializer: &IterableLoopInitializerNode) -> Vec<u16> {
         if !matches!(
             initializer,
@@ -1569,11 +1631,26 @@ impl<'a> super::FunctionCompiler<'a> {
         self.compile_expression(statement.condition())?;
         let exit_jump = self.emit_jump(Opcode::JumpIfFalsePop(0));
         self.push_control_context(true);
+        let body_mark = self.begin_loop_body();
         let body = statement_to_node(statement.body().clone());
         self.compile_statement(&body)?;
+        let body_slots = self.end_loop_body(body_mark);
         let loop_context = self.control_stack.pop().expect("loop context should exist");
+        // `continue` normally jumps straight back to the condition. When the
+        // body declared captured bindings it has to pass through their
+        // freshening first, or a closure made before the `continue` would be
+        // overwritten by the next iteration.
+        let freshen_start = self.code.len();
+        for &slot in &body_slots {
+            self.emit(Opcode::FreshenLocal(slot));
+        }
+        let continue_target = if body_slots.is_empty() {
+            loop_start
+        } else {
+            freshen_start
+        };
         for jump in loop_context.continue_jumps {
-            self.patch_jump(jump, loop_start)?;
+            self.patch_jump(jump, continue_target)?;
         }
         self.emit_back_jump(loop_start)?;
         let loop_end = self.code.len();
@@ -1590,12 +1667,24 @@ impl<'a> super::FunctionCompiler<'a> {
     ) -> Result<(), CompileError> {
         let loop_start = self.code.len();
         self.push_control_context(true);
+        let body_mark = self.begin_loop_body();
         let body = statement_to_node(statement.body().clone());
         self.compile_statement(&body)?;
+        let body_slots = self.end_loop_body(body_mark);
+        // As in `while`: `continue` has to run the freshening before the test.
+        let freshen_start = self.code.len();
+        for &slot in &body_slots {
+            self.emit(Opcode::FreshenLocal(slot));
+        }
         let condition_start = self.code.len();
         let loop_context = self.control_stack.pop().expect("loop context should exist");
+        let continue_target = if body_slots.is_empty() {
+            condition_start
+        } else {
+            freshen_start
+        };
         for jump in loop_context.continue_jumps {
-            self.patch_jump(jump, condition_start)?;
+            self.patch_jump(jump, continue_target)?;
         }
         self.compile_expression(statement.cond())?;
         let back_jump = self.emit_jump(Opcode::JumpIfTruePop(0));
@@ -1670,8 +1759,10 @@ impl<'a> super::FunctionCompiler<'a> {
         };
 
         self.push_control_context(true);
+        let body_mark = self.begin_loop_body();
         let body = statement_to_node(statement.body().clone());
         self.compile_statement(&body)?;
+        let body_slots = self.end_loop_body(body_mark);
 
         let increment_start = self.code.len();
         let loop_context = self.control_stack.pop().expect("loop context should exist");
@@ -1681,8 +1772,13 @@ impl<'a> super::FunctionCompiler<'a> {
 
         // Per-iteration binding: copy each loop variable into a fresh cell before
         // running the increment, so closures captured in the just-finished body
-        // keep the value they saw.
+        // keep the value they saw. Bindings the body itself declared get the
+        // same treatment -- `continue` lands on `increment_start`, just above,
+        // so it passes through both.
         for &slot in &loop_slots {
+            self.emit(Opcode::FreshenLocal(slot));
+        }
+        for &slot in &body_slots {
             self.emit(Opcode::FreshenLocal(slot));
         }
 
