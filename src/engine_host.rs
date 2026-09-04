@@ -4820,6 +4820,10 @@ impl EngineSession {
         force_full: bool,
     ) -> EngineRunResult {
         let pending = self.vm.has_pending_event_loop_work();
+        // An error that escaped a timer / animation frame / microtask has no
+        // caller to return it to, so it surfaces here instead of vanishing.
+        // A script error passed in by the caller stays the headline.
+        let error = error.or_else(|| self.vm.take_job_errors().into_iter().next());
         let host = self.host();
         let structural_changes = host.take_structural_changes();
         let navigation_target = host.navigation_target();

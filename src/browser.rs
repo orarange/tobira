@@ -61,6 +61,11 @@ impl BrowserPage {
     }
 
     pub fn apply_script_snapshot(&mut self, snapshot: ProcessedScriptHtml) {
+        // Snapshots from timers / animation frames / events carry console
+        // output too, including errors that escaped an event-loop job. Only
+        // the initial load used to be dumped, so anything a page reported
+        // after it had finished loading went nowhere.
+        dump_console(&snapshot.console_logs);
         // Fast path: the scripts didn't change the DOM (e.g. a scroll/resize or
         // a requestAnimationFrame frame whose listeners — if any — mutated
         // nothing). An empty structural-change log means the DOM is unchanged
@@ -350,17 +355,29 @@ pub fn style_viewport_width() -> u32 {
     STYLE_VIEWPORT_WIDTH.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether `TOBIRA_DEBUG_CONSOLE` asked for the page's console on stderr.
+/// Cached: this is checked once per snapshot, and snapshots arrive per frame.
+fn debug_console_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("TOBIRA_DEBUG_CONSOLE").is_some())
+}
+
+fn dump_console(lines: &[String]) {
+    if !debug_console_enabled() {
+        return;
+    }
+    for line in lines {
+        eprintln!("[console] {line}");
+    }
+}
+
 pub fn load_page_for_cli(url: &Url) -> Result<BrowserPage> {
     load_page_with_options(url, true)
 }
 
 fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<BrowserPage> {
     let source = load_document_source(url, 0)?;
-    if std::env::var("TOBIRA_DEBUG_CONSOLE").is_ok() {
-        for line in &source.processed_html.console_logs {
-            eprintln!("[console] {line}");
-        }
-    }
+    dump_console(&source.processed_html.console_logs);
     let mut page = rebuild_page_from_document(
         &source.final_url,
         source.status_code,

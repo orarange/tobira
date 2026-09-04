@@ -1571,6 +1571,12 @@ pub struct Vm {
     constructed_custom_elements: std::collections::HashSet<NodeId>,
     /// Custom elements that have already had `connectedCallback` called.
     connected_custom_elements: std::collections::HashSet<NodeId>,
+    /// Errors that escaped an event-loop job and had no caller to propagate to.
+    /// Drained by `take_job_errors`. Capped — see `MAX_RECORDED_JOB_ERRORS`.
+    job_errors: Vec<String>,
+    /// How many jobs have failed, uncapped. Separate from `job_errors` because
+    /// that list is bounded, and a bounded list cannot be used to count.
+    job_error_count: u64,
 }
 
 /// A `customElements.define`d class: the constructor value plus its
@@ -1961,6 +1967,23 @@ const FIRST_USER_SYMBOL: u32 = 16;
 /// legitimately deep framework call chains (e.g. Vite's bundle).
 const MAX_CALL_FRAMES: usize = 10_000;
 
+/// Backward-jump budget for one turn: a script execution, a timer/task
+/// callback, one `requestAnimationFrame` pass, or one dispatched DOM event.
+/// Exhausting it raises `VmError::InfiniteLoop`.
+///
+/// It is per TURN, not per page. It used to be set only by `execute_with_this`,
+/// so every timer, animation frame and event handler for the rest of the page's
+/// life drew down whatever the last `<script>` had left. An animation loop
+/// spending even a hundred backward jumps a frame ran the budget out in a
+/// couple of minutes at 60fps, after which every callback died — silently,
+/// because `InfiniteLoop` is not catchable from JS and the event loop dropped
+/// the error. Refilling per turn keeps the guard (one runaway loop still can't
+/// wedge the browser) without making it a lifetime quota.
+const TURN_FUEL: u32 = 1_000_000;
+
+/// How many escaped job errors are kept for the host to collect.
+const MAX_RECORDED_JOB_ERRORS: usize = 8;
+
 impl Vm {
     /// Create a VM with a no-op host (for tests and scripts that don't need DOM/console).
     pub fn new(heap: Heap) -> Self {
@@ -1987,7 +2010,7 @@ impl Vm {
             globals: HashMap::new(),
             callables: HashMap::new(),
             string_cache: HashMap::new(),
-            fuel: 1_000_000,
+            fuel: TURN_FUEL,
             object_prototype: None,
             import_meta: HashMap::new(),
             function_prototype: None,
@@ -2033,6 +2056,8 @@ impl Vm {
             template_contents: HashMap::new(),
             constructed_custom_elements: std::collections::HashSet::new(),
             connected_custom_elements: std::collections::HashSet::new(),
+            job_errors: Vec::new(),
+            job_error_count: 0,
         };
         vm.install_globals();
         vm
@@ -2120,6 +2145,8 @@ impl Vm {
         event_type: &str,
         init: &DomEventInit,
     ) -> Result<bool, VmError> {
+        // A dispatched user event is its own turn, like a timer callback.
+        self.refill_turn_fuel();
         let target = self.make_dom_node_value(NodeId(node_handle));
         let event_obj = self.build_host_event(event_type, &target, init);
         let event_val = Value::Object(event_obj);
@@ -2490,7 +2517,7 @@ impl Vm {
     fn execute_with_this(&mut self, chunk: &Chunk, this_value: Value) -> Result<Value, VmError> {
         self.stack.clear();
         self.frames.clear();
-        self.fuel = 1_000_000;
+        self.refill_turn_fuel();
 
         let closure = RuntimeClosure {
             proto: Rc::new(chunk.top_level.clone()),
@@ -2573,6 +2600,46 @@ impl Vm {
         }
     }
 
+    /// Give the next turn a full backward-jump budget. See `TURN_FUEL`.
+    fn refill_turn_fuel(&mut self) {
+        self.fuel = TURN_FUEL;
+    }
+
+    /// Record an error that escaped an event-loop job (a timer callback, an
+    /// animation frame, a microtask). These have no caller to propagate to, so
+    /// they used to be dropped with `let _ = …` and the page just stopped doing
+    /// whatever it was doing, with nothing printed anywhere. Now the message
+    /// rides the page's console — so it lands in the snapshot the browser
+    /// already collects — and goes to stderr under `TOBIRA_DEBUG_CONSOLE`,
+    /// alongside the backtrace when one was captured.
+    fn report_job_error(&mut self, context: &str, error: &VmError) {
+        let message = format!("uncaught in {context}: {error}");
+        if env::var_os("TOBIRA_DEBUG_CONSOLE").is_some() {
+            eprintln!("[engine] {message}");
+            if let Some(backtrace) = &self.last_backtrace {
+                eprintln!("{backtrace}");
+            }
+        }
+        // Bounded: a page that throws every animation frame would otherwise
+        // grow this without limit. The first few say what broke; the rest are
+        // the same error again.
+        self.job_error_count = self.job_error_count.saturating_add(1);
+        if self.job_errors.len() < MAX_RECORDED_JOB_ERRORS {
+            self.job_errors.push(message.clone());
+        }
+        let _ = self.host.console(ConsoleMessage {
+            level: ConsoleLevel::Error,
+            parts: vec![message],
+        });
+    }
+
+    /// Drain the errors that escaped event-loop jobs since the last call, so a
+    /// host can surface them (the browser puts the first into the snapshot's
+    /// `error` field).
+    pub fn take_job_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.job_errors)
+    }
+
     pub fn event_loop_tick(&mut self, now_ms: u64, has_render_opportunity: bool) -> TickResult {
         self.event_loop.current_time_ms = now_ms;
         self.enqueue_due_timers(now_ms);
@@ -2580,7 +2647,10 @@ impl Vm {
         let mut did_work = false;
         if let Some(task) = self.event_loop.macrotask_queue.pop_front() {
             did_work = true;
-            let _ = self.run_task(task);
+            self.refill_turn_fuel();
+            if let Err(error) = self.run_task(task) {
+                self.report_job_error("task callback", &error);
+            }
             self.drain_microtasks();
         }
 
@@ -2594,12 +2664,15 @@ impl Vm {
                 .drain(..)
                 .map(|(_, entry)| entry)
                 .collect::<Vec<_>>();
+            self.refill_turn_fuel();
             for entry in callbacks {
-                let _ = self.call_value_sync(
+                if let Err(error) = self.call_value_sync(
                     Value::Object(entry.callback),
                     Value::Undefined,
                     vec![Value::Number(now_ms as f64)],
-                );
+                ) {
+                    self.report_job_error("requestAnimationFrame callback", &error);
+                }
                 self.drain_microtasks();
             }
         }
@@ -2633,14 +2706,21 @@ impl Vm {
     pub fn run_due_jobs_at(&mut self, now_ms: u64, max_steps: usize) -> usize {
         self.drain_microtasks();
         let now = self.event_loop.current_time_ms.max(now_ms);
-        let mut steps = 0;
-        while steps < max_steps {
+        let errors_before = self.job_error_count;
+        let mut ticks = 0;
+        while ticks < max_steps {
             if matches!(self.event_loop_tick(now, false), TickResult::Idle) {
                 break;
             }
-            steps += 1;
+            ticks += 1;
         }
-        steps
+        // Report jobs that RAN, not jobs that were dispatched. A callback that
+        // threw did no work the caller can act on, and counting it made a page
+        // whose timers were all failing look busy and healthy — which is how a
+        // silently dying event loop stayed invisible. Errors themselves come
+        // back through `take_job_errors`.
+        let failed = usize::try_from(self.job_error_count - errors_before).unwrap_or(usize::MAX);
+        ticks.saturating_sub(failed)
     }
 
     /// Whether the event loop has outstanding work (pending timers, RAF
@@ -6371,7 +6451,9 @@ impl Vm {
 
     fn drain_microtasks(&mut self) {
         while let Some(job) = self.event_loop.microtask_queue.pop_front() {
-            let _ = self.run_microtask_job(job);
+            if let Err(error) = self.run_microtask_job(job) {
+                self.report_job_error("microtask", &error);
+            }
         }
         // End of a microtask checkpoint: notify mutation observers (guarded so
         // the drains it performs don't recurse back here).
