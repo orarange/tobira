@@ -32,9 +32,13 @@ python tools/geom/cmp.py g4.html
 | `overflow.html` | overflow in a narrow parent | 10/17 |
 | `overflow2.html` | `overflow-x` / `-y` set apart | 6/12 |
 | `fsize.html` | text width at fractional type sizes | 3/12 |
+| `lineheight2.html` | line height at fractional type sizes | 7/14 |
 | `sup.html` | superscripts and `vertical-align` | 2/10 |
+| `details.html` | a closed `<details>` folds its contents away | 3/6 |
+| `hidden.html` | the `hidden` attribute | 7/7 |
+| `carousel.html` | a horizontally scrolling strip of cards | 9/13 |
 
-Scores are from 2026-09-10 at 1280px. They are not asserted anywhere — this is
+Scores are from 2026-09-10 (late) at 1280px. They are not asserted anywhere — this is
 a hand-run tool, not a test.
 
 **Read which axis is wrong before deciding what a page is telling you.** Three
