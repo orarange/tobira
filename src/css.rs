@@ -1599,6 +1599,13 @@ pub struct ComputedStyle {
     /// which scrollbars are there, and so how much room is left inside.
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
+    /// Set on a `<details>` that is not open. Everything inside it except the
+    /// `<summary>` is hidden, which is the whole point of the element: it is
+    /// a fold, and what is folded away is not on the page.
+    ///
+    /// Kept on the parent's style rather than looked up from the child,
+    /// because a child only ever sees its parent's style, not its markup.
+    pub folds_children: bool,
     pub list_style_type: ListStyleType,
     pub cursor_pointer: bool,
     pub cursor_kind: CursorKind,
@@ -1747,7 +1754,16 @@ impl ComputedStyle {
             // Custom properties inherit; the ancestors' map is shared, not copied.
             border_color_transparent: false,
             custom_properties: parent.and_then(|s| s.custom_properties.clone()),
-            display: default_display(tag_name),
+            // Inside a `<details>` that is not open, only the `<summary>`
+            // shows. Laid out anyway, every folded panel on a page is drawn on
+            // top of whatever else is there: lobste.rs hangs a "caches" fold
+            // off each of its twenty-five stories, and all twenty-five stacked
+            // in the same spot over the first headline.
+            display: if parent.is_some_and(|p| p.folds_children) && tag_name != "summary" {
+                Display::None
+            } else {
+                default_display(tag_name)
+            },
             table_role: TableRole::None,
             flow_root: false,
             color: parent.map(|s| s.color).unwrap_or(DEFAULT_TEXT_COLOR),
@@ -1818,6 +1834,7 @@ impl ComputedStyle {
             overflow: Overflow::Visible,
             overflow_x: Overflow::Visible,
             overflow_y: Overflow::Visible,
+            folds_children: false,
             list_style_type: default_list_style_type(tag_name, parent),
             cursor_pointer: false,
             cursor_kind: CursorKind::Auto,
@@ -6135,6 +6152,12 @@ fn default_margin(tag_name: &str) -> SignedEdgeSizes {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_font_size: u32) {
+    // `open` is what unfolds a `<details>`; its value does not matter, only
+    // whether it is written at all.
+    if element.tag_name == "details" && element.attribute("open").is_none() {
+        style.folds_children = true;
+    }
+
     if element.tag_name == "table" {
         style.table_cellpadding = element
             .attribute("cellpadding")
@@ -9882,6 +9905,43 @@ mod tests {
         assert_eq!(down.style.font_size_px, 16);
         // `baseline` is the initial value, so it has to undo the tag's lift.
         assert_eq!(by_id("flat").style.baseline_shift, 0);
+    }
+
+    /// A closed `<details>` is a fold, and what is folded away is not on the
+    /// page: it takes no room and paints nothing. Laid out anyway, every
+    /// folded panel is drawn over whatever is beside it -- lobste.rs hangs a
+    /// "caches" fold off each of its twenty-five stories, and all of them
+    /// stacked in the same spot over the first headline. The overlap report on
+    /// that page went from 1250 collisions to 300.
+    #[test]
+    fn a_closed_details_hides_everything_but_its_summary() {
+        let styled_display = |html: &str, tag: &str| {
+            let document = crate::html::parse_document(html);
+            let styled = build_styled_tree(
+                &document,
+                &parse_stylesheet(""),
+                1280,
+                &super::InteractiveState::default(),
+            );
+            find_first_element(&styled, tag)
+                .unwrap_or_else(|| panic!("no <{tag}> in the tree"))
+                .style
+                .display
+        };
+
+        let closed = "<details><summary>s</summary><p>body</p></details>";
+        assert_eq!(styled_display(closed, "summary"), Display::Block);
+        assert_eq!(styled_display(closed, "p"), Display::None, "the fold");
+
+        // `open` unfolds it. The value is not read -- only whether it is there.
+        let open = "<details open><summary>s</summary><p>body</p></details>";
+        assert_eq!(styled_display(open, "p"), Display::Block);
+        let open_false = "<details open=\"false\"><summary>s</summary><p>body</p></details>";
+        assert_eq!(styled_display(open_false, "p"), Display::Block);
+
+        // Only the direct children fold; the summary keeps its own contents.
+        let nested = "<details><summary><b>s</b></summary><p><i>body</i></p></details>";
+        assert_eq!(styled_display(nested, "b"), Display::Inline);
     }
 
     #[test]

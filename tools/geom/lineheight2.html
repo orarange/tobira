@@ -1,0 +1,32 @@
+<html><head><style>body{margin:0;font-family:Arial}
+div{background:#eee}</style></head><body>
+<!-- The same question as lineheight.html, but at sizes that do not land on a
+     whole pixel. tobira rounds the size before it asks the face anything, so
+     these say how much that rounding actually costs in the vertical rhythm --
+     which is the part that accumulates down a page.
+
+     Each pair is a fractional size and the whole number tobira turns it into,
+     so the two rows of a pair should differ by exactly what the rounding
+     costs. -->
+<div id="a1" style="font-size:13.333px">x</div>
+<div id="a2" style="font-size:13px">x</div>
+<div id="b1" style="font-size:14.667px">x</div>
+<div id="b2" style="font-size:15px">x</div>
+<div id="c1" style="font-size:12.8px">x</div>
+<div id="c2" style="font-size:13px">x</div>
+<div id="d1" style="font-size:17.6px">x</div>
+<div id="d2" style="font-size:18px">x</div>
+<div id="e1" style="font-size:16.8px">x</div>
+<div id="e2" style="font-size:17px">x</div>
+<div id="f1" style="font-size:10.667px">x</div>
+<div id="f2" style="font-size:11px">x</div>
+<div id="g1" style="font-size:22.4px">x</div>
+<div id="g2" style="font-size:22px">x</div>
+<pre id="out"></pre>
+<script>
+var ids=('a1 a2 b1 b2 c1 c2 d1 d2 e1 e2 f1 f2 g1 g2').split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var e=document.getElementById(id), r=e.getBoundingClientRect();
+  return id+' size='+getComputedStyle(e).fontSize+' h='+Math.round(r.height);
+}).join('\n');
+</script></body></html>

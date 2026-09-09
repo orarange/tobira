@@ -1,0 +1,25 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+div{background:#eee;margin-bottom:6px}
+</style></head><body>
+<!-- `<details>` is a fold. What is folded away is not on the page at all, so
+     it takes no room and paints nothing; only the `<summary>` shows. Laid out
+     anyway, every folded panel is drawn over whatever is beside it --
+     lobste.rs hangs one off each of its stories and all of them stacked in
+     the same spot. -->
+<div id="d1"><details><summary>closed</summary><p>hidden body</p></details></div>
+<div id="d2"><details open><summary>open</summary><p>shown body</p></details></div>
+<div id="d3"><details><summary>closed</summary><ul><li>a</li><li>b</li><li>c</li></ul></details></div>
+<!-- No summary at all: the browser supplies one, and the rest still folds. -->
+<div id="d4"><details><p>no summary here</p></details></div>
+<!-- The value of `open` does not matter, only that it is written. -->
+<div id="d5"><details open="false"><summary>s</summary><p>still shown</p></details></div>
+<div id="d6">after</div>
+<pre id="out"></pre>
+<script>
+var ids='d1 d2 d3 d4 d5 d6'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>
