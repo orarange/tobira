@@ -1,0 +1,54 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:900px}
+.box{height:20px;background:#4a4;margin:6px;width:100px}
+/* Same trick as anim2.html: a negative delay starts the animation part-way in
+   and `paused` holds it there, so both browsers can be asked about a moment
+   without either of them running.
+
+   This page is about the CURVE. Every row travels the same 0 -> 400px, so the
+   width read back IS the curve's value at that moment, in pixels.
+
+   CSS starts from `ease`, not from a constant rate -- c0 and c1 are the same
+   animation with and without the word `linear`, and they must NOT agree. */
+@keyframes wide { from { width: 0px } to { width: 400px } }
+
+#c0 { animation: wide 1s -500ms linear paused both }
+#c1 { animation: wide 1s -500ms paused both }
+#c2 { animation: wide 1s -500ms ease paused both }
+#c3 { animation: wide 1s -250ms ease paused both }
+#c4 { animation: wide 1s -750ms ease paused both }
+#c5 { animation: wide 1s -500ms ease-in paused both }
+#c6 { animation: wide 1s -500ms ease-out paused both }
+#c7 { animation: wide 1s -500ms ease-in-out paused both }
+#c8 { animation: wide 1s -500ms cubic-bezier(0.68, -0.55, 0.27, 1.55) paused both }
+#c9 { animation: wide 1s -300ms steps(4) paused both }
+#ca { animation: wide 1s -300ms steps(4, start) paused both }
+#cb { animation: wide 1s -500ms step-start paused both }
+#cc { animation: wide 1s -500ms step-end paused both }
+/* The curve is spent between EACH pair of stops, not over the whole run.
+   At 750ms this is 50% of the way from the 50% stop to the 100% one, eased. */
+#cd { animation: half 1s -750ms ease paused both }
+@keyframes half { 0% { width: 0px } 50% { width: 100px } 100% { width: 400px } }
+</style></head><body>
+<div class="box" id="c0">c0</div>
+<div class="box" id="c1">c1</div>
+<div class="box" id="c2">c2</div>
+<div class="box" id="c3">c3</div>
+<div class="box" id="c4">c4</div>
+<div class="box" id="c5">c5</div>
+<div class="box" id="c6">c6</div>
+<div class="box" id="c7">c7</div>
+<div class="box" id="c8">c8</div>
+<div class="box" id="c9">c9</div>
+<div class="box" id="ca">ca</div>
+<div class="box" id="cb">cb</div>
+<div class="box" id="cc">cc</div>
+<div class="box" id="cd">cd</div>
+<pre id="out"></pre>
+<script>
+var ids='c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 ca cb cc cd'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var e=document.getElementById(id), r=e.getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>

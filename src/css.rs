@@ -423,6 +423,32 @@ pub struct InteractiveState {
 /// rest to the others. It is kept beside `display` rather than inside it so
 /// that every box that is block-level on the outside still reads as
 /// `Display::Block` and no existing match has to grow a case.
+/// How the time between two keyframes is spent.
+///
+/// The control points are kept in thousandths rather than as floats because
+/// `ComputedStyle` is compared and hashed, and floats are neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimingFunction {
+    /// `cubic-bezier(x1, y1, x2, y2)`, with the ends pinned at (0,0) and (1,1).
+    /// Every one of the named curves is one of these.
+    CubicBezier { x1: i32, y1: i32, x2: i32, y2: i32 },
+    /// `steps(n, start|end)`: the value jumps rather than slides.
+    Steps { count: u32, at_start: bool },
+}
+
+impl Default for TimingFunction {
+    /// `ease`, which is what CSS starts from -- not `linear`. A page that says
+    /// nothing about timing still does not move at a constant rate.
+    fn default() -> Self {
+        TimingFunction::CubicBezier {
+            x1: 250,
+            y1: 100,
+            x2: 250,
+            y2: 1000,
+        }
+    }
+}
+
 /// Which way round a pass through the keyframes runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AnimationDirection {
@@ -1491,6 +1517,7 @@ pub struct ComputedStyle {
     pub animation_iterations: Option<u32>,
     pub animation_direction: AnimationDirection,
     pub animation_fill: AnimationFill,
+    pub animation_timing: TimingFunction,
     /// How long before the animation starts. While it is waiting, the element
     /// keeps its ordinary style unless `animation-fill-mode` says otherwise.
     pub animation_delay_ms: i32,
@@ -1654,6 +1681,7 @@ impl ComputedStyle {
             animation_iterations: Some(1),
             animation_direction: AnimationDirection::Normal,
             animation_fill: AnimationFill::None,
+            animation_timing: TimingFunction::default(),
             animation_delay_ms: 0,
             transform_origin_x: 500, // 50% center
             transform_origin_y: 500,
@@ -2346,6 +2374,7 @@ pub fn animation_is_running(style: &ComputedStyle, now_ms: u32) -> bool {
 fn keyframe_declarations_at(
     stops: &[(u32, Vec<Declaration>)],
     progress: f32,
+    timing: TimingFunction,
 ) -> Vec<Declaration> {
     let permille = (progress.clamp(0.0, 1.0) * 1000.0).round() as i64;
     // Property order is the order the stops were written in, so a later
@@ -2392,8 +2421,11 @@ fn keyframe_declarations_at(
                     upper = (at, declaration);
                 }
             }
+            // The curve is spent between each pair of keyframes, not spread
+            // over the whole animation, so it is the local fraction that is
+            // eased.
             let span = (upper.0 - lower.0).max(1) as f32;
-            let local = (permille - lower.0) as f32 / span;
+            let local = ease((permille - lower.0) as f32 / span, timing);
             interpolate_css_value(&lower.1.value, &upper.1.value, local)
         };
         out.push(Declaration {
@@ -4136,7 +4168,7 @@ fn compute_style_with_rules(
         && let Some(stops) = stylesheet.keyframes.get(name.as_ref())
         && let Some(progress) = animation_progress(&style, interactive.animation_time_ms)
     {
-        for declaration in keyframe_declarations_at(stops, progress) {
+        for declaration in keyframe_declarations_at(stops, progress, style.animation_timing) {
             let em_basis = if matches!(declaration.property.as_str(), "font-size" | "font") {
                 parent_font_size
             } else {
@@ -5681,17 +5713,26 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 style.animation_fill = fill;
             }
         }
+        "animation-timing-function" => {
+            if let Some(timing) = parse_timing_function(value) {
+                style.animation_timing = timing;
+            }
+        }
         "animation" | "-webkit-animation" => {
             // The shorthand in any order. The first time is the duration and
             // the second the delay; the rest of the parts are told apart by
             // which set of keywords they belong to. `normal` and `none` belong
             // to two sets each, so the first reading of them wins -- which is
             // the order the shorthand is written in.
+            // `cubic-bezier(0.1, 0.2, 0.3, 0.4)` has spaces inside it, so the
+            // shorthand cannot simply be split on whitespace.
+            let value = &join_function_arguments(value);
             let mut times: Vec<i32> = Vec::new();
             let mut name: Option<Arc<str>> = None;
             let mut direction = None;
             let mut fill = None;
             let mut iterations = None;
+            let mut timing = None;
             for token in value.split_whitespace() {
                 let lowered = token.to_ascii_lowercase();
                 if let Some(ms) = parse_css_time_ms(&lowered) {
@@ -5716,19 +5757,13 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                         continue;
                     }
                 }
-                if matches!(
-                    lowered.as_str(),
-                    "none"
-                        | "running"
-                        | "paused"
-                        | "linear"
-                        | "ease"
-                        | "ease-in"
-                        | "ease-out"
-                        | "ease-in-out"
-                ) || lowered.starts_with("cubic-bezier(")
-                    || lowered.starts_with("steps(")
-                {
+                if let Some(parsed) = parse_timing_function(&lowered) {
+                    if timing.is_none() {
+                        timing = Some(parsed);
+                        continue;
+                    }
+                }
+                if matches!(lowered.as_str(), "none" | "running" | "paused") {
                     continue;
                 }
                 if name.is_none() {
@@ -5741,6 +5776,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.animation_iterations = iterations.unwrap_or(Some(1));
             style.animation_direction = direction.unwrap_or(AnimationDirection::Normal);
             style.animation_fill = fill.unwrap_or(AnimationFill::None);
+            style.animation_timing = timing.unwrap_or_default();
         }
         "object-position" => {
             let parse_pct = |s: &str| -> u32 {
@@ -7359,6 +7395,160 @@ fn parse_animation_iterations(input: &str) -> Option<Option<u32>> {
         return None;
     }
     Some(Some(count.ceil() as u32))
+}
+
+/// Close up the spaces inside `f(a, b)` so a whitespace split does not tear a
+/// function into pieces.
+fn join_function_arguments(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut depth = 0usize;
+    for c in value.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                out.push(c);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                out.push(c);
+            }
+            c if c.is_whitespace() && depth > 0 => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn parse_timing_function(input: &str) -> Option<TimingFunction> {
+    let value = join_function_arguments(input.trim()).to_ascii_lowercase();
+    let bezier = |x1: i32, y1: i32, x2: i32, y2: i32| {
+        Some(TimingFunction::CubicBezier { x1, y1, x2, y2 })
+    };
+    match value.as_str() {
+        "linear" => return bezier(0, 0, 1000, 1000),
+        "ease" => return bezier(250, 100, 250, 1000),
+        "ease-in" => return bezier(420, 0, 1000, 1000),
+        "ease-out" => return bezier(0, 0, 580, 1000),
+        "ease-in-out" => return bezier(420, 0, 580, 1000),
+        "step-start" => {
+            return Some(TimingFunction::Steps {
+                count: 1,
+                at_start: true,
+            });
+        }
+        "step-end" => {
+            return Some(TimingFunction::Steps {
+                count: 1,
+                at_start: false,
+            });
+        }
+        _ => {}
+    }
+    if let Some(args) = value
+        .strip_prefix("cubic-bezier(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let numbers: Vec<f32> = args.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+        if numbers.len() == 4 {
+            let thousandth = |v: f32| (v * 1000.0).round() as i32;
+            return bezier(
+                thousandth(numbers[0]),
+                thousandth(numbers[1]),
+                thousandth(numbers[2]),
+                thousandth(numbers[3]),
+            );
+        }
+        return None;
+    }
+    if let Some(args) = value
+        .strip_prefix("steps(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let mut parts = args.split(',');
+        let count: u32 = parts.next()?.trim().parse().ok()?;
+        // `jump-start` and `start` land on the far value straight away;
+        // everything else waits until the end of the step.
+        let at_start = matches!(
+            parts.next().map(str::trim),
+            Some("start") | Some("jump-start") | Some("jump-both")
+        );
+        return Some(TimingFunction::Steps {
+            count: count.max(1),
+            at_start,
+        });
+    }
+    None
+}
+
+/// Where the value stands when the clock is `t` of the way between two
+/// keyframes.
+///
+/// The curve is `x` against time and `y` against value, so the time has to be
+/// turned back into the curve's own parameter before the value can be read
+/// off. Newton converges in a handful of steps for the shapes CSS allows;
+/// bisection stands behind it for the ones where the slope goes flat.
+fn ease(t: f32, timing: TimingFunction) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    match timing {
+        TimingFunction::Steps { count, at_start } => {
+            let steps = count as f32;
+            let stepped = if at_start {
+                (t * steps).ceil()
+            } else {
+                (t * steps).floor()
+            };
+            (stepped / steps).clamp(0.0, 1.0)
+        }
+        TimingFunction::CubicBezier { x1, y1, x2, y2 } => {
+            let (x1, y1, x2, y2) = (
+                x1 as f32 / 1000.0,
+                y1 as f32 / 1000.0,
+                x2 as f32 / 1000.0,
+                y2 as f32 / 1000.0,
+            );
+            // A straight line needs no solving, and `linear` is common enough
+            // to be worth the check.
+            if (x1 - y1).abs() < 1e-6 && (x2 - y2).abs() < 1e-6 {
+                return t;
+            }
+            let curve = |a: f32, b: f32, u: f32| {
+                let inv = 1.0 - u;
+                3.0 * inv * inv * u * a + 3.0 * inv * u * u * b + u * u * u
+            };
+            let slope = |a: f32, b: f32, u: f32| {
+                let inv = 1.0 - u;
+                3.0 * inv * inv * a + 6.0 * inv * u * (b - a) + 3.0 * u * u * (1.0 - b)
+            };
+            let mut u = t;
+            for _ in 0..8 {
+                let x = curve(x1, x2, u) - t;
+                if x.abs() < 1e-6 {
+                    return curve(y1, y2, u);
+                }
+                let d = slope(x1, x2, u);
+                if d.abs() < 1e-6 {
+                    break;
+                }
+                u -= x / d;
+            }
+            // Newton wandered off; fall back on halving the interval.
+            let (mut low, mut high) = (0.0f32, 1.0f32);
+            let mut u = t.clamp(0.0, 1.0);
+            for _ in 0..24 {
+                let x = curve(x1, x2, u);
+                if (x - t).abs() < 1e-6 {
+                    break;
+                }
+                if x < t {
+                    low = u;
+                } else {
+                    high = u;
+                }
+                u = (low + high) / 2.0;
+            }
+            curve(y1, y2, u)
+        }
+    }
 }
 
 fn parse_animation_direction(input: &str) -> Option<AnimationDirection> {
@@ -10389,7 +10579,7 @@ mod tests {
     }
 
     const GROW: &str = "@keyframes grow { from { width: 50px } to { width: 200px } } \
-                        div { width: 10px; animation: grow 1s }";
+                        div { width: 10px; animation: grow 1s linear }";
 
     /// The clock decides which moment of the keyframes is showing. Before it
     /// was wired up every animation was frozen at its first stop.
@@ -10408,18 +10598,18 @@ mod tests {
     #[test]
     fn fill_forwards_holds_the_last_stop_and_backwards_the_first() {
         let forwards = "@keyframes grow { from { width: 50px } to { width: 200px } } \
-                        div { width: 10px; animation: grow 1s forwards }";
+                        div { width: 10px; animation: grow 1s linear forwards }";
         assert_eq!(animated_width(forwards, 9000), Some(LengthValue::Pixels(200)));
 
         // With a delay and `backwards`, the first stop shows while waiting.
         let backwards = "@keyframes grow { from { width: 50px } to { width: 200px } } \
-                         div { width: 10px; animation: grow 1s 2s backwards }";
+                         div { width: 10px; animation: grow 1s 2s linear backwards }";
         assert_eq!(animated_width(backwards, 0), Some(LengthValue::Pixels(50)));
         assert_eq!(animated_width(backwards, 2500), Some(LengthValue::Pixels(125)));
 
         // Without it, the element keeps its own style until the delay is out.
         let plain = "@keyframes grow { from { width: 50px } to { width: 200px } } \
-                     div { width: 10px; animation: grow 1s 2s }";
+                     div { width: 10px; animation: grow 1s 2s linear }";
         assert_eq!(animated_width(plain, 0), Some(LengthValue::Pixels(10)));
         assert_eq!(animated_width(plain, 2500), Some(LengthValue::Pixels(125)));
     }
@@ -10427,14 +10617,14 @@ mod tests {
     #[test]
     fn alternate_runs_every_other_pass_backwards() {
         let css = "@keyframes grow { from { width: 50px } to { width: 200px } } \
-                   div { width: 10px; animation: grow 1s infinite alternate }";
+                   div { width: 10px; animation: grow 1s linear infinite alternate }";
         // First pass forwards, second one back the other way.
         assert_eq!(animated_width(css, 250), Some(LengthValue::Pixels(88)));
         assert_eq!(animated_width(css, 1250), Some(LengthValue::Pixels(163)));
         assert_eq!(animated_width(css, 2250), Some(LengthValue::Pixels(88)));
 
         let reverse = "@keyframes grow { from { width: 50px } to { width: 200px } } \
-                       div { width: 10px; animation: grow 1s infinite reverse }";
+                       div { width: 10px; animation: grow 1s linear infinite reverse }";
         assert_eq!(animated_width(reverse, 250), Some(LengthValue::Pixels(163)));
     }
 
@@ -10443,7 +10633,7 @@ mod tests {
     #[test]
     fn a_property_is_bracketed_by_the_stops_that_mention_it() {
         let css = "@keyframes mixed { 0% { width: 0px } 50% { color: red } 100% { width: 100px } } \
-                   div { animation: mixed 1s }";
+                   div { animation: mixed 1s linear }";
         assert_eq!(animated_width(css, 500), Some(LengthValue::Pixels(50)));
     }
 
@@ -10493,6 +10683,64 @@ mod tests {
 
         // No animation at all.
         assert!(!running(&declared_here("width", "10px"), 0));
+    }
+
+    /// The curve is spent between one keyframe and the next, and CSS starts
+    /// from `ease`, not from a constant rate. Reading an animation at a
+    /// constant rate put every value in the wrong place for the whole middle
+    /// of every animation on every page that says nothing about timing.
+    #[test]
+    fn the_curve_decides_where_the_value_stands() {
+        use super::{TimingFunction, ease};
+        let linear = super::parse_timing_function("linear").expect("linear");
+        let default_ease = TimingFunction::default();
+
+        // The ends are the ends whatever the curve.
+        for timing in [linear, default_ease] {
+            assert!((ease(0.0, timing) - 0.0).abs() < 1e-3, "{timing:?}");
+            assert!((ease(1.0, timing) - 1.0).abs() < 1e-3, "{timing:?}");
+        }
+        assert!((ease(0.5, linear) - 0.5).abs() < 1e-4);
+        // `ease` is past halfway at the halfway mark: Chrome puts it at 0.8025.
+        let midway = ease(0.5, default_ease);
+        assert!(
+            (midway - 0.8025).abs() < 0.002,
+            "ease at the midpoint should be about 0.8025, got {midway}"
+        );
+        // `ease-in` is the other way about.
+        let ease_in = super::parse_timing_function("ease-in").expect("ease-in");
+        assert!(ease(0.5, ease_in) < 0.35, "{}", ease(0.5, ease_in));
+
+        // Steps jump rather than slide.
+        let four = super::parse_timing_function("steps(4)").expect("steps");
+        assert!((ease(0.30, four) - 0.25).abs() < 1e-4);
+        assert!((ease(0.49, four) - 0.25).abs() < 1e-4);
+        assert!((ease(0.51, four) - 0.50).abs() < 1e-4);
+        let four_start = super::parse_timing_function("steps(4, start)").expect("steps");
+        assert!((ease(0.01, four_start) - 0.25).abs() < 1e-4);
+
+        // The shorthand carries a curve whose arguments have spaces in them.
+        let style = declared_here("animation", "grow 1s cubic-bezier(0.1, 0.2, 0.3, 0.4)");
+        assert_eq!(style.animation_name.as_deref(), Some("grow"));
+        assert_eq!(
+            style.animation_timing,
+            TimingFunction::CubicBezier {
+                x1: 100,
+                y1: 200,
+                x2: 300,
+                y2: 400
+            }
+        );
+        // ...and is not mistaken for the animation's name.
+        let style = declared_here("animation", "1s steps(4, end) spin");
+        assert_eq!(style.animation_name.as_deref(), Some("spin"));
+        assert_eq!(
+            style.animation_timing,
+            TimingFunction::Steps {
+                count: 4,
+                at_start: false
+            }
+        );
     }
 
     // ── @media tests ─────────────────────────────────────────────────────────
