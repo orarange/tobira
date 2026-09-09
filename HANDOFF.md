@@ -194,6 +194,11 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
   置くと、絶対 URL の `https://…` がスラッシュ持ちなので位置と誤読される。
   インライン `<style>`（相対パス）だけ動いて linked stylesheet が動かん、という
   紛らわしい症状になる。今は `apply_background_shorthand`（`css.rs:7876`）で層ごとに分解。
+- **`src/html.rs` を python で書き戻すとき `newline=""` を付けん** — このファイルは
+  NUL 入りの文字列リテラルを持つので **git に binary 扱いされる**。`core.autocrlf` の
+  正規化が効かんため、書き込みで改行が LF から CRLF に変わると **全 4600 行が差分**に
+  なる。20 行の変更が「4631 挿入 4608 削除」になった（2026-09-10、amend で直した）。
+  binary 扱いかどうかは `grep` が "Binary file ... matches" と言うので分かる。
 - **ヒアドキュメント（`python - <<'PYEOF'`）でパッチ script を流す** — バックスラッシュが
   一段食われて `\n` や `\u{...}` が壊れる。**必ず Write でファイルに書いてから実行する。**
   また、`sub()` 失敗で `sys.exit` すると最後の `write` に到達せず、それまでの成功分が
