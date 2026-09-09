@@ -37,7 +37,7 @@ python tools/geom/cmp.py g4.html
 | `details.html` | a closed `<details>` folds its contents away | 3/6 |
 | `hidden.html` | the `hidden` attribute | 7/7 |
 | `carousel.html` | a horizontally scrolling strip of cards | 11/13 |
-| `flexgap.html` | `gap` on a flex row, and the row's own box | 8/9 |
+| `flexgap.html` | `gap` on a flex row, and the row's own box | 9/9 |
 | `visuallyhidden.html` | screen-reader-only text, and where it sits | 4/7 |
 
 Scores are from 2026-09-10 (late) at 1280px. They are not asserted anywhere — this is

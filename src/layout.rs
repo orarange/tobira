@@ -9394,9 +9394,26 @@ fn record_container_box(
     // reported is the box that was drawn.
     let available =
         outer_width_with_margins(width, element.style.margin.left, element.style.margin.right);
+    // A stated width is the CONTENT box unless the page says otherwise, so the
+    // padding and border go on top of it -- the box that is reported is the
+    // border box. Left off, a flex container with `width: 120px` and a 1px
+    // border reported 120 where Chrome reports 122.
+    let surround = if matches!(element.style.box_sizing, BoxSizing::BorderBox) {
+        0
+    } else {
+        element.style.padding.left
+            + element.style.padding.right
+            + if element.style.border_style_none {
+                0
+            } else {
+                element.style.border.left + element.style.border.right
+            }
+    };
     let outer_width = match element.style.width {
-        Some(LengthValue::Pixels(px)) => px,
-        Some(LengthValue::Percent(percent)) => (available as u64 * percent as u64 / 100) as u32,
+        Some(LengthValue::Pixels(px)) => px.saturating_add(surround),
+        Some(LengthValue::Percent(percent)) => {
+            ((available as u64 * percent as u64 / 100) as u32).saturating_add(surround)
+        }
         _ => available,
     };
     context.element_hitboxes.push(ElementHitbox {
