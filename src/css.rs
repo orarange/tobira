@@ -400,6 +400,15 @@ pub struct InteractiveState {
     pub hovered_node_id: Option<usize>,
     pub focused_node_id: Option<usize>,
     pub active_node_ids: std::collections::HashSet<usize>,
+    /// How long the document has been showing, in milliseconds -- the clock
+    /// every `@keyframes` animation is read against.
+    ///
+    /// It lives here rather than in a parameter of its own because this struct
+    /// is already threaded through every caller that builds a styled tree, and
+    /// its `Default` is zero: a caller that does not care about time gets the
+    /// first frame of every animation, which is where a page is the moment it
+    /// loads and what this code did before the clock existed.
+    pub animation_time_ms: u32,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -414,6 +423,30 @@ pub struct InteractiveState {
 /// rest to the others. It is kept beside `display` rather than inside it so
 /// that every box that is block-level on the outside still reads as
 /// `Display::Block` and no existing match has to grow a case.
+/// Which way round a pass through the keyframes runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AnimationDirection {
+    #[default]
+    Normal,
+    Reverse,
+    /// Odd-numbered passes run backwards.
+    Alternate,
+    /// Even-numbered passes run backwards.
+    AlternateReverse,
+}
+
+/// Whether the keyframes reach outside the time the animation is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AnimationFill {
+    #[default]
+    None,
+    /// Hold the last stop after the animation has finished.
+    Forwards,
+    /// Show the first stop during the delay, before it starts.
+    Backwards,
+    Both,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TableRole {
     #[default]
@@ -1450,6 +1483,14 @@ pub struct ComputedStyle {
     pub transform_rotate_millideg: i32,
     /// The `@keyframes` block driving this element, if any.
     pub animation_name: Option<Arc<str>>,
+    /// How long one pass through the keyframes takes. Zero means the page did
+    /// not say, and the animation is then shown at its first stop and left
+    /// there -- there is no span of time to place a moment inside.
+    pub animation_duration_ms: u32,
+    /// How many passes. `None` is `infinite`.
+    pub animation_iterations: Option<u32>,
+    pub animation_direction: AnimationDirection,
+    pub animation_fill: AnimationFill,
     /// How long before the animation starts. While it is waiting, the element
     /// keeps its ordinary style unless `animation-fill-mode` says otherwise.
     pub animation_delay_ms: i32,
@@ -1609,6 +1650,10 @@ impl ComputedStyle {
             transform_scale_y: 0,
             transform_rotate_millideg: 0,
             animation_name: None,
+            animation_duration_ms: 0,
+            animation_iterations: Some(1),
+            animation_direction: AnimationDirection::Normal,
+            animation_fill: AnimationFill::None,
             animation_delay_ms: 0,
             transform_origin_x: 500, // 50% center
             transform_origin_y: 500,
@@ -2210,6 +2255,279 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         layer_order,
         keyframes: Rc::new(keyframes),
     }
+}
+
+/// Where inside one pass of the keyframes this element stands at `now_ms`, as
+/// a fraction from 0 to 1 -- or `None` when the animation is not painting the
+/// element at all, which is what `animation-fill-mode: none` asks for outside
+/// the animation's own span of time.
+///
+/// A page that names an animation without saying how long it takes gets its
+/// first stop and stays there. There is no span to place a moment inside, and
+/// the first stop is where a page is the instant it loads: `animation: grow`
+/// from 50px shows 50px, not the element's own width.
+fn animation_progress(style: &ComputedStyle, now_ms: u32) -> Option<f32> {
+    if style.animation_duration_ms == 0 {
+        return Some(0.0);
+    }
+    let duration = style.animation_duration_ms as i64;
+    let elapsed = now_ms as i64 - style.animation_delay_ms as i64;
+
+    // Which pass we are in, and how far through it -- before the answer is
+    // turned round for `reverse` / `alternate`.
+    let (pass, fraction) = if elapsed < 0 {
+        // Still waiting for the delay to run out.
+        if !matches!(
+            style.animation_fill,
+            AnimationFill::Backwards | AnimationFill::Both
+        ) {
+            return None;
+        }
+        (0i64, 0.0f32)
+    } else if let Some(total_passes) = style.animation_iterations {
+        let finished_at = duration * total_passes as i64;
+        if total_passes == 0 {
+            return None;
+        }
+        if elapsed >= finished_at {
+            // Over. `forwards` holds the end of the last pass; without it the
+            // element goes back to its ordinary style.
+            if !matches!(
+                style.animation_fill,
+                AnimationFill::Forwards | AnimationFill::Both
+            ) {
+                return None;
+            }
+            (total_passes as i64 - 1, 1.0)
+        } else {
+            (elapsed / duration, (elapsed % duration) as f32 / duration as f32)
+        }
+    } else {
+        (elapsed / duration, (elapsed % duration) as f32 / duration as f32)
+    };
+
+    let backwards = match style.animation_direction {
+        AnimationDirection::Normal => false,
+        AnimationDirection::Reverse => true,
+        AnimationDirection::Alternate => pass % 2 == 1,
+        AnimationDirection::AlternateReverse => pass % 2 == 0,
+    };
+    Some(if backwards { 1.0 - fraction } else { fraction })
+}
+
+/// The declarations an animation is showing at `progress`, each property
+/// interpolated between the two stops that name it.
+///
+/// The bracket is found per property, not per stop: `0%{opacity:1}
+/// 50%{width:5px} 100%{opacity:0}` has to read opacity across the whole run
+/// even though a stop in the middle says nothing about it.
+fn keyframe_declarations_at(
+    stops: &[(u32, Vec<Declaration>)],
+    progress: f32,
+) -> Vec<Declaration> {
+    let permille = (progress.clamp(0.0, 1.0) * 1000.0).round() as i64;
+    // Property order is the order the stops were written in, so a later
+    // declaration of the same property still wins when it is applied.
+    let mut order: Vec<&str> = Vec::new();
+    for (_, declarations) in stops {
+        for declaration in declarations {
+            if !order.contains(&declaration.property.as_str()) {
+                order.push(&declaration.property);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for property in order {
+        // Every stop that says something about this property, in order.
+        let mut points: Vec<(i64, &Declaration)> = Vec::new();
+        for (stop_permille, declarations) in stops {
+            for declaration in declarations {
+                if declaration.property == property {
+                    points.push((*stop_permille as i64, declaration));
+                }
+            }
+        }
+        let Some(&(first_at, first)) = points.first() else {
+            continue;
+        };
+        let &(last_at, last) = points.last().expect("points is not empty");
+        let value = if permille <= first_at {
+            first.value.clone()
+        } else if permille >= last_at {
+            last.value.clone()
+        } else {
+            // The pair this moment falls between.
+            let mut lower = (first_at, first);
+            let mut upper = (last_at, last);
+            for &(at, declaration) in &points {
+                if at <= permille && at >= lower.0 {
+                    lower = (at, declaration);
+                }
+            }
+            for &(at, declaration) in points.iter().rev() {
+                if at > permille && at <= upper.0 {
+                    upper = (at, declaration);
+                }
+            }
+            let span = (upper.0 - lower.0).max(1) as f32;
+            let local = (permille - lower.0) as f32 / span;
+            interpolate_css_value(&lower.1.value, &upper.1.value, local)
+        };
+        out.push(Declaration {
+            property: property.to_string(),
+            value,
+            // A keyframe's `!important` is ignored by the standard, and these
+            // are applied last anyway.
+            important: false,
+        });
+    }
+    out
+}
+
+/// A value part-way between two others.
+///
+/// Two shapes are understood, and they cover what pages actually animate.
+/// A colour written as hex is mixed channel by channel. Anything else is read
+/// as text with numbers in it: if the text around the numbers is the same on
+/// both sides, the numbers are moved and the text kept. That one rule covers
+/// `50px` -> `200px`, `0.2` -> `1`, `translateX(0px) rotate(0deg)` ->
+/// `translateX(40px) rotate(90deg)` and `rgb(255,0,0)` -> `rgb(0,0,255)`
+/// without knowing what any of those properties mean.
+///
+/// When the two sides are not the same shape there is nothing sensible to move
+/// between, so the nearer end is used -- which is what a browser does for a
+/// property it cannot interpolate.
+fn interpolate_css_value(from: &str, to: &str, t: f32) -> String {
+    if t <= 0.0 {
+        return from.to_string();
+    }
+    if t >= 1.0 {
+        return to.to_string();
+    }
+    if let (Some(a), Some(b)) = (parse_hex_rgb(from), parse_hex_rgb(to)) {
+        let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
+        return format!("#{:02x}{:02x}{:02x}", mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2));
+    }
+    if let Some(mixed) = interpolate_numbers_in_text(from, to, t) {
+        return mixed;
+    }
+    if t < 0.5 { from.to_string() } else { to.to_string() }
+}
+
+/// `#rgb` and `#rrggbb`. Longer forms carry an alpha this cannot express, so
+/// they fall through to the text rule instead.
+fn parse_hex_rgb(value: &str) -> Option<(u8, u8, u8)> {
+    let digits = value.trim().strip_prefix('#')?;
+    let pair = |s: &str| u8::from_str_radix(s, 16).ok();
+    match digits.len() {
+        3 => {
+            let mut bytes = digits.chars();
+            let mut next = || {
+                let c = bytes.next()?;
+                u8::from_str_radix(&format!("{c}{c}"), 16).ok()
+            };
+            Some((next()?, next()?, next()?))
+        }
+        6 => Some((pair(&digits[0..2])?, pair(&digits[2..4])?, pair(&digits[4..6])?)),
+        _ => None,
+    }
+}
+
+/// Split a value into the text between its numbers and the numbers themselves.
+fn split_numbers(value: &str) -> (Vec<String>, Vec<f32>) {
+    let bytes = value.as_bytes();
+    let mut literals = Vec::new();
+    let mut numbers = Vec::new();
+    let mut literal = String::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        // A sign only starts a number when it is not being used as an
+        // operator: `calc(10px + 2px)` has a space after the `+`.
+        let starts_number = c.is_ascii_digit()
+            || (c == '.' && i + 1 < bytes.len() && (bytes[i + 1] as char).is_ascii_digit())
+            || ((c == '-' || c == '+')
+                && i + 1 < bytes.len()
+                && ((bytes[i + 1] as char).is_ascii_digit() || bytes[i + 1] as char == '.'));
+        if !starts_number {
+            literal.push(c);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        if c == '-' || c == '+' {
+            i += 1;
+        }
+        while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] as char == '.' {
+            i += 1;
+            while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
+                i += 1;
+            }
+        }
+        let Ok(number) = value[start..i].parse::<f32>() else {
+            literal.push_str(&value[start..i]);
+            continue;
+        };
+        literals.push(std::mem::take(&mut literal));
+        numbers.push(number);
+    }
+    literals.push(literal);
+    (literals, numbers)
+}
+
+fn interpolate_numbers_in_text(from: &str, to: &str, t: f32) -> Option<String> {
+    let (from_text, from_numbers) = split_numbers(from);
+    let (to_text, to_numbers) = split_numbers(to);
+    if from_numbers.is_empty() || from_numbers.len() != to_numbers.len() {
+        return None;
+    }
+    // The text has to line up, or the two values are different shapes:
+    // `10px` and `red` have nothing to move between.
+    if from_text.len() != to_text.len() {
+        return None;
+    }
+    for (a, b) in from_text.iter().zip(&to_text) {
+        if a.trim() != b.trim() {
+            return None;
+        }
+    }
+    // The three channels of a colour function are whole numbers -- the parser
+    // reads them as `u8` -- so a moved value has to land on one. Everything
+    // else keeps its fraction: rounding `opacity` would turn a fade into a
+    // blink.
+    let lowered = from.trim_start().to_ascii_lowercase();
+    let channels_are_whole = lowered.starts_with("rgb(")
+        || lowered.starts_with("rgba(")
+        || lowered.starts_with("hsl(")
+        || lowered.starts_with("hsla(");
+
+    let mut out = String::new();
+    for (index, literal) in from_text.iter().enumerate() {
+        out.push_str(literal);
+        if let (Some(a), Some(b)) = (from_numbers.get(index), to_numbers.get(index)) {
+            let moved = a + (b - a) * t;
+            let moved = if channels_are_whole && index < 3 {
+                moved.round()
+            } else {
+                moved
+            };
+            out.push_str(&format_css_number(moved));
+        }
+    }
+    Some(out)
+}
+
+/// A number the CSS parsers can read back: no exponent, no trailing zeros.
+fn format_css_number(value: f32) -> String {
+    if (value - value.round()).abs() < 0.0005 {
+        return format!("{}", value.round() as i64);
+    }
+    let text = format!("{value:.3}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// The stops of one `@keyframes` block: `from`, `to` and percentages, each
@@ -3791,26 +4109,18 @@ fn compute_style_with_rules(
     }
 
     // An animation that is running takes over the properties its keyframes
-    // name. Only the first stop is applied: the clock is not wired up yet, so
-    // every animation is shown at its beginning, which is where a page is when
-    // it has just loaded. Chrome agrees at that moment -- `animation: grow`
-    // from 50px shows 50px, not the element's own width -- and ignoring the
-    // animation entirely showed the element's own width instead.
-    //
-    // While the delay is still running the element keeps its ordinary style,
-    // which is what `animation-fill-mode: none` (the initial value) asks for.
+    // name, at whatever moment the document's clock is showing.
     if let Some(name) = style.animation_name.clone()
-        && style.animation_delay_ms <= 0
         && let Some(stops) = stylesheet.keyframes.get(name.as_ref())
-        && let Some((_, declarations)) = stops.first()
+        && let Some(progress) = animation_progress(&style, interactive.animation_time_ms)
     {
-        for declaration in declarations {
+        for declaration in keyframe_declarations_at(stops, progress) {
             let em_basis = if matches!(declaration.property.as_str(), "font-size" | "font") {
                 parent_font_size
             } else {
                 style.font_size_px
             };
-            apply_declaration(&mut style, declaration, em_basis);
+            apply_declaration(&mut style, &declaration, em_basis);
         }
     }
 
@@ -5331,31 +5641,64 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         "animation-delay" => {
             style.animation_delay_ms = parse_css_time_ms(value).unwrap_or(0);
         }
+        "animation-duration" => {
+            style.animation_duration_ms = parse_css_time_ms(value).unwrap_or(0).max(0) as u32;
+        }
+        "animation-iteration-count" => {
+            if let Some(count) = parse_animation_iterations(value) {
+                style.animation_iterations = count;
+            }
+        }
+        "animation-direction" => {
+            if let Some(direction) = parse_animation_direction(value) {
+                style.animation_direction = direction;
+            }
+        }
+        "animation-fill-mode" => {
+            if let Some(fill) = parse_animation_fill(value) {
+                style.animation_fill = fill;
+            }
+        }
         "animation" | "-webkit-animation" => {
-            // The shorthand in any order. Only the parts that decide what an
-            // element looks like at a given moment are read: the name, and the
-            // delay (the second time, when there are two).
+            // The shorthand in any order. The first time is the duration and
+            // the second the delay; the rest of the parts are told apart by
+            // which set of keywords they belong to. `normal` and `none` belong
+            // to two sets each, so the first reading of them wins -- which is
+            // the order the shorthand is written in.
             let mut times: Vec<i32> = Vec::new();
             let mut name: Option<Arc<str>> = None;
+            let mut direction = None;
+            let mut fill = None;
+            let mut iterations = None;
             for token in value.split_whitespace() {
                 let lowered = token.to_ascii_lowercase();
                 if let Some(ms) = parse_css_time_ms(&lowered) {
                     times.push(ms);
                     continue;
                 }
+                if let Some(count) = parse_animation_iterations(&lowered) {
+                    if iterations.is_none() {
+                        iterations = Some(count);
+                        continue;
+                    }
+                }
+                if let Some(parsed) = parse_animation_direction(&lowered) {
+                    if direction.is_none() {
+                        direction = Some(parsed);
+                        continue;
+                    }
+                }
+                if let Some(parsed) = parse_animation_fill(&lowered) {
+                    if fill.is_none() {
+                        fill = Some(parsed);
+                        continue;
+                    }
+                }
                 if matches!(
                     lowered.as_str(),
-                    "normal"
-                        | "reverse"
-                        | "alternate"
-                        | "alternate-reverse"
-                        | "none"
-                        | "forwards"
-                        | "backwards"
-                        | "both"
+                    "none"
                         | "running"
                         | "paused"
-                        | "infinite"
                         | "linear"
                         | "ease"
                         | "ease-in"
@@ -5363,7 +5706,6 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                         | "ease-in-out"
                 ) || lowered.starts_with("cubic-bezier(")
                     || lowered.starts_with("steps(")
-                    || lowered.parse::<f32>().is_ok()
                 {
                     continue;
                 }
@@ -5372,7 +5714,11 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
                 }
             }
             style.animation_name = name;
+            style.animation_duration_ms = times.first().copied().unwrap_or(0).max(0) as u32;
             style.animation_delay_ms = times.get(1).copied().unwrap_or(0);
+            style.animation_iterations = iterations.unwrap_or(Some(1));
+            style.animation_direction = direction.unwrap_or(AnimationDirection::Normal);
+            style.animation_fill = fill.unwrap_or(AnimationFill::None);
         }
         "object-position" => {
             let parse_pct = |s: &str| -> u32 {
@@ -6973,6 +7319,42 @@ fn parse_vertical_align(input: &str) -> Option<VerticalAlign> {
         "top" | "text-top" => Some(VerticalAlign::Top),
         "middle" | "center" => Some(VerticalAlign::Middle),
         "bottom" | "text-bottom" => Some(VerticalAlign::Bottom),
+        _ => None,
+    }
+}
+
+/// `infinite`, or a whole number of passes. `Some(None)` is infinite;
+/// `None` means the value was not an iteration count at all.
+fn parse_animation_iterations(input: &str) -> Option<Option<u32>> {
+    let value = input.trim().to_ascii_lowercase();
+    if value == "infinite" {
+        return Some(None);
+    }
+    // A fraction of a pass is legal but vanishingly rare; rounding up keeps a
+    // `0.5` from reading as "no passes at all", which would hide the element.
+    let count: f32 = value.parse().ok()?;
+    if count < 0.0 {
+        return None;
+    }
+    Some(Some(count.ceil() as u32))
+}
+
+fn parse_animation_direction(input: &str) -> Option<AnimationDirection> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some(AnimationDirection::Normal),
+        "reverse" => Some(AnimationDirection::Reverse),
+        "alternate" => Some(AnimationDirection::Alternate),
+        "alternate-reverse" => Some(AnimationDirection::AlternateReverse),
+        _ => None,
+    }
+}
+
+fn parse_animation_fill(input: &str) -> Option<AnimationFill> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "none" => Some(AnimationFill::None),
+        "forwards" => Some(AnimationFill::Forwards),
+        "backwards" => Some(AnimationFill::Backwards),
+        "both" => Some(AnimationFill::Both),
         _ => None,
     }
 }
@@ -9963,6 +10345,107 @@ mod tests {
         // A timing keyword must not be mistaken for the name.
         let style = declared_here("animation", "ease-in-out 1s slide");
         assert_eq!(style.animation_name.as_deref(), Some("slide"));
+    }
+
+    /// The width of the one `<div>` on the page at a given moment, so a test
+    /// can read an animation off the clock.
+    fn animated_width(css: &str, now_ms: u32) -> Option<LengthValue> {
+        let document = parse_document("<div id=\"box\">x</div>");
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(css),
+            1280,
+            &super::InteractiveState {
+                animation_time_ms: now_ms,
+                ..Default::default()
+            },
+        );
+        find_first_element(&styled, "div")
+            .expect("the div should exist")
+            .style
+            .width
+    }
+
+    const GROW: &str = "@keyframes grow { from { width: 50px } to { width: 200px } } \
+                        div { width: 10px; animation: grow 1s }";
+
+    /// The clock decides which moment of the keyframes is showing. Before it
+    /// was wired up every animation was frozen at its first stop.
+    #[test]
+    fn an_animation_is_read_off_the_clock() {
+        assert_eq!(animated_width(GROW, 0), Some(LengthValue::Pixels(50)));
+        assert_eq!(animated_width(GROW, 250), Some(LengthValue::Pixels(88)));
+        assert_eq!(animated_width(GROW, 500), Some(LengthValue::Pixels(125)));
+        assert_eq!(animated_width(GROW, 750), Some(LengthValue::Pixels(163)));
+        // One pass, and `animation-fill-mode` is `none`: when it is over the
+        // element goes back to the width it declares for itself.
+        assert_eq!(animated_width(GROW, 1000), Some(LengthValue::Pixels(10)));
+        assert_eq!(animated_width(GROW, 5000), Some(LengthValue::Pixels(10)));
+    }
+
+    #[test]
+    fn fill_forwards_holds_the_last_stop_and_backwards_the_first() {
+        let forwards = "@keyframes grow { from { width: 50px } to { width: 200px } } \
+                        div { width: 10px; animation: grow 1s forwards }";
+        assert_eq!(animated_width(forwards, 9000), Some(LengthValue::Pixels(200)));
+
+        // With a delay and `backwards`, the first stop shows while waiting.
+        let backwards = "@keyframes grow { from { width: 50px } to { width: 200px } } \
+                         div { width: 10px; animation: grow 1s 2s backwards }";
+        assert_eq!(animated_width(backwards, 0), Some(LengthValue::Pixels(50)));
+        assert_eq!(animated_width(backwards, 2500), Some(LengthValue::Pixels(125)));
+
+        // Without it, the element keeps its own style until the delay is out.
+        let plain = "@keyframes grow { from { width: 50px } to { width: 200px } } \
+                     div { width: 10px; animation: grow 1s 2s }";
+        assert_eq!(animated_width(plain, 0), Some(LengthValue::Pixels(10)));
+        assert_eq!(animated_width(plain, 2500), Some(LengthValue::Pixels(125)));
+    }
+
+    #[test]
+    fn alternate_runs_every_other_pass_backwards() {
+        let css = "@keyframes grow { from { width: 50px } to { width: 200px } } \
+                   div { width: 10px; animation: grow 1s infinite alternate }";
+        // First pass forwards, second one back the other way.
+        assert_eq!(animated_width(css, 250), Some(LengthValue::Pixels(88)));
+        assert_eq!(animated_width(css, 1250), Some(LengthValue::Pixels(163)));
+        assert_eq!(animated_width(css, 2250), Some(LengthValue::Pixels(88)));
+
+        let reverse = "@keyframes grow { from { width: 50px } to { width: 200px } } \
+                       div { width: 10px; animation: grow 1s infinite reverse }";
+        assert_eq!(animated_width(reverse, 250), Some(LengthValue::Pixels(163)));
+    }
+
+    /// A property is read across the two stops that name it, which are not
+    /// necessarily next to each other.
+    #[test]
+    fn a_property_is_bracketed_by_the_stops_that_mention_it() {
+        let css = "@keyframes mixed { 0% { width: 0px } 50% { color: red } 100% { width: 100px } } \
+                   div { animation: mixed 1s }";
+        assert_eq!(animated_width(css, 500), Some(LengthValue::Pixels(50)));
+    }
+
+    #[test]
+    fn a_value_is_moved_between_two_others_by_its_numbers() {
+        use super::interpolate_css_value as mix;
+        assert_eq!(mix("50px", "200px", 0.5), "125px");
+        assert_eq!(mix("0.2", "1", 0.5), "0.6");
+        assert_eq!(
+            mix("translateX(0px) rotate(0deg)", "translateX(40px) rotate(90deg)", 0.5),
+            "translateX(20px) rotate(45deg)"
+        );
+        assert_eq!(mix("rgb(255, 0, 0)", "rgb(0, 0, 255)", 0.5), "rgb(128, 0, 128)");
+        // Hex is mixed channel by channel rather than as text.
+        assert_eq!(mix("#000000", "#ffffff", 0.5), "#808080");
+        assert_eq!(mix("#000", "#fff", 0.5), "#808080");
+        // Different shapes have nothing to move between, so the nearer end
+        // stands -- which is what a browser does with a property it cannot
+        // interpolate.
+        assert_eq!(mix("10px", "red", 0.25), "10px");
+        assert_eq!(mix("10px", "red", 0.75), "red");
+        // The ends are exact, never a rounded version of themselves.
+        assert_eq!(mix("50px", "200px", 0.0), "50px");
+        assert_eq!(mix("50px", "200px", 1.0), "200px");
     }
 
     // ── @media tests ─────────────────────────────────────────────────────────
