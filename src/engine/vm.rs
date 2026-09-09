@@ -8115,6 +8115,22 @@ impl Vm {
         Value::String(gc_ref)
     }
 
+    /// The string's characters, borrowed from the heap.
+    ///
+    /// `string_text` hands back an owned `String`, which means a full copy of
+    /// the text every time anyone looks at it. That is fine when the caller
+    /// needs to own the result and ruinous when it does not: `a === b` copied
+    /// BOTH strings before comparing them, and `if (s)` copied one to ask
+    /// whether it was empty. A `Map` lookup does one such comparison per entry,
+    /// so a map of n string keys allocated 2n strings per `get`.
+    fn string_text_ref(&self, gc_ref: GcRef<JsString>) -> &str {
+        self.heap
+            .strings()
+            .get(gc_ref)
+            .map(|string| string.text.as_str())
+            .unwrap_or("")
+    }
+
     fn string_text(&self, gc_ref: GcRef<JsString>) -> String {
         self.heap
             .strings()
@@ -8135,7 +8151,7 @@ impl Vm {
             Value::Undefined | Value::Null => false,
             Value::Bool(boolean) => *boolean,
             Value::Number(number) => *number != 0.0 && !number.is_nan(),
-            Value::String(string) => !self.string_text(*string).is_empty(),
+            Value::String(string) => !self.string_text_ref(*string).is_empty(),
             Value::Object(_) | Value::Symbol(_) => true,
         }
     }
@@ -8395,7 +8411,9 @@ impl Vm {
                 !left.is_nan() && !right.is_nan() && left == right
             }
             (Value::String(left), Value::String(right)) => {
-                self.string_text(*left) == self.string_text(*right)
+                // Interning is not relied on: two refs may hold equal text.
+                // Compared in place, without copying either side.
+                left.raw() == right.raw() || self.string_text_ref(*left) == self.string_text_ref(*right)
             }
             (Value::Object(left), Value::Object(right)) => left.raw() == right.raw(),
             (Value::Symbol(left), Value::Symbol(right)) => left == right,
@@ -8535,7 +8553,7 @@ impl Vm {
 
     fn to_property_key(&self, value: &Value) -> Result<PropertyKey, VmError> {
         Ok(match value {
-            Value::String(string) => Self::property_key_from_text(&self.string_text(*string)),
+            Value::String(string) => Self::property_key_from_text(self.string_text_ref(*string)),
             Value::Number(number)
                 if number.is_finite() && *number >= 0.0 && number.fract() == 0.0 =>
             {
@@ -8848,19 +8866,21 @@ impl Vm {
         receiver: &Value,
         key: &PropertyKey,
     ) -> Result<Value, VmError> {
-        let text = self.string_text(string);
         match key {
             PropertyKey::Index(index) => {
-                let value = text
+                // The borrow ends before `make_string_value` needs `&mut self`.
+                let character = self
+                    .string_text_ref(string)
                     .chars()
-                    .nth(*index as usize)
+                    .nth(*index as usize);
+                let value = character
                     .map(|character| self.make_string_value(&character.to_string()))
                     .unwrap_or(Value::Undefined);
                 Ok(value)
             }
-            PropertyKey::String(name) if name == "length" => {
-                Ok(Value::Number(text.chars().count() as f64))
-            }
+            PropertyKey::String(name) if name == "length" => Ok(Value::Number(
+                self.string_text_ref(string).chars().count() as f64,
+            )),
             _ => self.get_property_from_chain(self.string_prototype_ref(), receiver, key),
         }
     }
