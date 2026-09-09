@@ -1032,7 +1032,9 @@ fn ensure_table_ancestry(builder: &mut Builder, new_tag: &str) {
         while builder.open.len() > 1
             && !matches!(
                 builder.tag_of(builder.current()),
-                "table" | "tbody" | "thead" | "tfoot" | "tr" | "caption" | "colgroup"
+                // A table part closes an open caption: `<table><caption>
+                // <select><tr>` puts the row in the table, not in the caption.
+                "table" | "tbody" | "thead" | "tfoot" | "tr" | "colgroup"
             )
         {
             builder.open.pop();
@@ -2821,6 +2823,10 @@ fn tokenize(input: &str) -> Vec<Token> {
         };
         let mut attributes = BTreeMap::new();
         let mut self_closing = is_void_element(&name);
+        // Whether the tag was actually finished. A tag that runs off the end of
+        // the file is not a tag: the standard drops it, along with everything
+        // that was swallowed looking for the `>`.
+        let mut closed = false;
 
         loop {
             skip_whitespace(input, &mut index);
@@ -2832,6 +2838,7 @@ fn tokenize(input: &str) -> Vec<Token> {
             match bytes[index] {
                 b'>' => {
                     index += 1;
+                    closed = true;
                     break;
                 }
                 b'/' => {
@@ -2865,6 +2872,15 @@ fn tokenize(input: &str) -> Vec<Token> {
                     }
                 }
             }
+        }
+
+        // An unclosed quote swallows the rest of the document into an
+        // attribute value: `<img alt="><div>A</div></body></html>` reaches the
+        // end of the file still inside the value. A browser drops the whole
+        // tag, so the page ends up empty rather than holding an image whose
+        // `alt` is the rest of the markup.
+        if !closed {
+            break;
         }
 
         if name == "plaintext" {

@@ -1,0 +1,43 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+.lbl{font-size:12px;color:#666;margin-top:8px}
+.p{width:120px;height:40px;border:1px solid #c00}
+.wide{width:300px;height:20px;background:#cde}
+.tall{width:60px;height:120px;background:#dfd}
+</style></head><body>
+<!-- `overflow-x` and `overflow-y` are two properties, and a page routinely
+     sets only one of them: `overflow-x: hidden` on a wrapper to stop the page
+     sliding sideways, `overflow-y: auto` on a panel that scrolls down only.
+     Reading them as a single value -- taking whichever is more restrictive --
+     clips the axis the page left alone.
+
+     Each box below is 120x40 with a child that overflows on ONE axis. The
+     child's own rect says whether it survived; whether it is clipped is read
+     from where the box thinks its content ends. -->
+<div class="lbl">1 overflow-x:hidden, child overflows DOWN</div>
+<div class="p" id="a1" style="overflow-x:hidden"><div class="tall" id="c1"></div></div>
+
+<div class="lbl">2 overflow-y:hidden, child overflows RIGHT</div>
+<div class="p" id="a2" style="overflow-y:hidden"><div class="wide" id="c2"></div></div>
+
+<div class="lbl">3 overflow-x:auto, child overflows DOWN</div>
+<div class="p" id="a3" style="overflow-x:auto"><div class="tall" id="c3"></div></div>
+
+<div class="lbl">4 overflow-y:auto, child overflows RIGHT</div>
+<div class="p" id="a4" style="overflow-y:auto"><div class="wide" id="c4"></div></div>
+
+<div class="lbl">5 both stated apart</div>
+<div class="p" id="a5" style="overflow-x:hidden;overflow-y:auto"><div class="tall" id="c5"></div></div>
+
+<div class="lbl">6 the plain shorthand, for comparison</div>
+<div class="p" id="a6" style="overflow:hidden"><div class="tall" id="c6"></div></div>
+<pre id="out"></pre>
+<script>
+var ids='a1 c1 a2 c2 a3 c3 a4 c4 a5 c5 a6 c6'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var e=document.getElementById(id), r=e.getBoundingClientRect();
+  var line=id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+  if (id.charAt(0)==='a') line += ' sw='+e.scrollWidth+' sh='+e.scrollHeight;
+  return line;
+}).join('\n');
+</script></body></html>
