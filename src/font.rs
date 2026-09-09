@@ -521,10 +521,26 @@ impl FontContext {
                     .map(|line| CachedLineMetrics {
                         ascent_px: line.ascent.ceil() as i32,
                         descent_px: (-line.descent).ceil().max(0.0) as u32,
-                        normal_line_px: line.new_line_size.round().max(1.0) as u32,
                         // Rounded apart and then added, which is what Chrome
-                        // does: Arial at 16px is ascent 14.484 and descent
-                        // 3.391, so 14 + 3 = 17. Rounding the sum would give 18.
+                        // does -- for the line advance as well as the content
+                        // area. Rounding the sum instead lands on a different
+                        // whole number wherever the three parts happen to
+                        // carry: Arial at 11px is ascent 9.958, descent 2.331
+                        // and line gap 0.360, so Chrome makes the line
+                        // 10 + 2 + 0 = 12 where rounding 12.649 gives 13. At
+                        // 22px it goes the other way (20 + 5 + 1 = 26 against
+                        // 25), and at 40px back again.
+                        //
+                        // One pixel here is one pixel on every line, and it
+                        // adds up down the page: `tools/geom/tablew.html` had
+                        // every table in the right place relative to the one
+                        // above it and every one of them further down the page
+                        // than Chrome put it, by exactly the number of small
+                        // labels above it.
+                        normal_line_px: (line.ascent.round()
+                            + (-line.descent).round().max(0.0)
+                            + line.line_gap.round())
+                        .max(1.0) as u32,
                         content_px: (line.ascent.round() + (-line.descent).round().max(0.0)).max(1.0)
                             as u32,
                     })
@@ -1122,6 +1138,61 @@ mod tests {
     /// 2.2px at 10px type. A line of small print then came out several percent
     /// too wide -- six pixels over twenty-six characters at 10px, and nothing
     /// at all at 16px, which is why the drift read as a rounding problem.
+    /// The line advance is the three parts of the face's own recommendation --
+    /// ascent, descent, line gap -- each rounded and then added, which is what
+    /// Chrome does. Adding first and rounding once lands on a different whole
+    /// number wherever the parts happen to carry, and one pixel a line adds up
+    /// down a page. `tools/geom/lineheight.html` pins the numbers against
+    /// Chrome; this pins the shape, so it cannot drift back on a machine with
+    /// other faces.
+    #[test]
+    fn a_line_advance_is_its_parts_rounded_apart() {
+        let mut fonts = FontContext::load();
+        for family in [
+            FontFamilyKind::Sans,
+            FontFamilyKind::Serif,
+            FontFamilyKind::Monospace,
+        ] {
+            fonts.ensure_family_loaded(family, false);
+            for size in [8u32, 11, 12, 16, 22, 28, 40] {
+                let Some(line) = fonts
+                    .fonts_for(family, false)
+                    .iter()
+                    .find_map(|font| font.horizontal_line_metrics(size as f32))
+                else {
+                    continue;
+                };
+                let expected = (line.ascent.round()
+                    + (-line.descent).round().max(0.0)
+                    + line.line_gap.round())
+                .max(1.0) as u32;
+                assert_eq!(
+                    fonts.line_height_px(size, family),
+                    expected,
+                    "{family:?} at {size}px: ascent {}, descent {}, gap {}",
+                    line.ascent,
+                    line.descent,
+                    line.line_gap
+                );
+            }
+        }
+    }
+
+    /// Bigger type never sits on a shorter line.
+    #[test]
+    fn a_line_advance_grows_with_the_type() {
+        let mut fonts = FontContext::load();
+        let mut previous = 0;
+        for size in 6u32..=48 {
+            let advance = fonts.line_height_px(size, FontFamilyKind::Sans);
+            assert!(
+                advance >= previous,
+                "{size}px advances {advance}, less than the size below it ({previous})"
+            );
+            previous = advance;
+        }
+    }
+
     #[test]
     fn a_narrow_letter_is_narrower_than_a_wide_one_at_small_sizes() {
         let mut fonts = FontContext::load();

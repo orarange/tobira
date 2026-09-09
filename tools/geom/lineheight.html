@@ -1,0 +1,37 @@
+<html><head><style>body{margin:0;font-family:Arial}
+div{background:#eee}</style></head><body>
+<!-- How tall one line is at every ordinary type size. `line-height: normal`
+     is the face's own recommendation, and it is the vertical rhythm of every
+     page: an error of one pixel here is an error of one pixel per line, and it
+     accumulates down the document. -->
+<div id="s8" style="font-size:8px">x</div>
+<div id="s9" style="font-size:9px">x</div>
+<div id="s10" style="font-size:10px">x</div>
+<div id="s11" style="font-size:11px">x</div>
+<div id="s12" style="font-size:12px">x</div>
+<div id="s13" style="font-size:13px">x</div>
+<div id="s14" style="font-size:14px">x</div>
+<div id="s15" style="font-size:15px">x</div>
+<div id="s16" style="font-size:16px">x</div>
+<div id="s17" style="font-size:17px">x</div>
+<div id="s18" style="font-size:18px">x</div>
+<div id="s19" style="font-size:19px">x</div>
+<div id="s20" style="font-size:20px">x</div>
+<div id="s22" style="font-size:22px">x</div>
+<div id="s24" style="font-size:24px">x</div>
+<div id="s28" style="font-size:28px">x</div>
+<div id="s32" style="font-size:32px">x</div>
+<div id="s40" style="font-size:40px">x</div>
+<div id="m12" style="font-size:12px;font-family:'Times New Roman'">x</div>
+<div id="m16" style="font-size:16px;font-family:'Times New Roman'">x</div>
+<div id="c12" style="font-size:12px;font-family:Consolas">x</div>
+<div id="c16" style="font-size:16px;font-family:Consolas">x</div>
+<pre id="out"></pre>
+<script>
+var ids=('s8 s9 s10 s11 s12 s13 s14 s15 s16 s17 s18 s19 s20 s22 s24 s28 s32 s40 '
+        +'m12 m16 c12 c16').split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' h='+Math.round(r.height);
+}).join('\n');
+</script></body></html>
