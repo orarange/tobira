@@ -9106,6 +9106,20 @@ fn flex_item_content_width(
     let mut dummy_y = 0u32;
     let mut ctx = LayoutContext {
         background_color: bg,
+        // The measured box's own main size, already decided: `intrinsic` is the
+        // width it is about to be laid out at.
+        //
+        // Without this the measurement recursed forever. `layout_block_element`
+        // shrink-wraps an `inline-flex` / `inline-grid` box by asking this
+        // function how wide its contents are -- but only while no main size has
+        // been settled for the box. Answering here by laying the *same element*
+        // out again in a fresh context re-entered that very branch, which asked
+        // again, and so on: the recursion is unbounded, not merely deep, so a
+        // bigger stack does not help. A real flex container avoids it by
+        // pinning each item's main size before laying the item out (the two
+        // `context.flex_item_main_size = Some(..)` sites below); the
+        // measurement pass has to do the same.
+        flex_item_main_size: Some(intrinsic),
         ..LayoutContext::default()
     };
     layout_block_element(
@@ -10598,6 +10612,37 @@ mod percentage_sizing_tests {
             "and sits near the middle of 600px: {}",
             centred[0].x
         );
+    }
+
+    /// An `inline-flex` box written inside an inline one is placed on the line
+    /// as an atomic inline, and laying it out shrink-wraps it: the box asks how
+    /// wide its own contents are, and that measurement used to answer by laying
+    /// the same box out again -- straight back into the shrink-wrap branch,
+    /// which asked again. The recursion had no bottom.
+    ///
+    /// github.com's masthead is exactly this shape: an `inline-flex` locale
+    /// switcher inside an `<a>`. The page could not be opened at all. The only
+    /// sign of it was `thread 'tobira-engine-js' has overflowed its stack`
+    /// before a single script had run, which reads like a JavaScript fault and
+    /// is not one -- the layout that the engine thread does up front is what
+    /// died. Half a gigabyte of stack made no difference.
+    #[test]
+    fn measuring_an_atomic_inline_flex_box_terminates() {
+        let runs = text_runs(
+            ".t { display: inline-flex } .k { display: block }",
+            "<div style=\"width:600px\"><a href=\"#\">\
+             <span class=\"t\"><span class=\"k\">A</span><span class=\"k\">B</span></span>\
+             </a></div>",
+        );
+        assert_eq!(runs.len(), 2, "{runs:?}");
+
+        let grid = text_runs(
+            ".t { display: inline-grid } .k { display: block }",
+            "<div style=\"width:600px\"><a href=\"#\">\
+             <span class=\"t\"><span class=\"k\">A</span><span class=\"k\">B</span></span>\
+             </a></div>",
+        );
+        assert_eq!(grid.len(), 2, "{grid:?}");
     }
 
     /// A percentage width on a flex item resolves against the flex container,
