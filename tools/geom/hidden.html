@@ -1,0 +1,25 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+div{background:#eee;margin-bottom:4px}
+.shown[hidden]{display:block}
+</style></head><body>
+<!-- The `hidden` attribute is how a page hides something without writing any
+     CSS for it. It is the UA stylesheet's `[hidden] { display: none }`, which
+     means page CSS can override it -- the last row here does exactly that,
+     and is why this cannot simply be a hard skip in layout. -->
+<div id="a">before</div>
+<div id="b" hidden>hidden by attribute</div>
+<div id="c" hidden="">empty value still hides</div>
+<div id="d" hidden="false">the value is not read</div>
+<span id="e" hidden>an inline one hides too</span>
+<div id="f" class="shown" hidden>page CSS wins over the attribute</div>
+<div id="g">after</div>
+<pre id="out"></pre>
+<script>
+var ids='a b c d e f g'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var e=document.getElementById(id), r=e.getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height)
+       +' disp='+getComputedStyle(e).display;
+}).join('\n');
+</script></body></html>

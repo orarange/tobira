@@ -6158,6 +6158,20 @@ fn apply_legacy_attributes(style: &mut ComputedStyle, element: &Element, parent_
         style.folds_children = true;
     }
 
+    // `hidden` is how a page hides something without writing any CSS for it.
+    // It was not read at all, so everything written that way was drawn: on a
+    // page that keeps a menu, a dialogue and a set of tab panels in the markup
+    // and hides all but one, every one of them came out on top of the others.
+    //
+    // The value is not read -- `hidden="false"` still hides. This is the UA
+    // stylesheet's `[hidden] { display: none }`, and it is applied here,
+    // before the page's own rules, so a page that writes `[hidden] { display:
+    // block }` still wins. That is the standard's own arrangement, and pages
+    // do use it.
+    if element.attribute("hidden").is_some() {
+        style.display = Display::None;
+    }
+
     if element.tag_name == "table" {
         style.table_cellpadding = element
             .attribute("cellpadding")
@@ -9905,6 +9919,44 @@ mod tests {
         assert_eq!(down.style.font_size_px, 16);
         // `baseline` is the initial value, so it has to undo the tag's lift.
         assert_eq!(by_id("flat").style.baseline_shift, 0);
+    }
+
+    /// `hidden` is how a page hides something without writing any CSS for it,
+    /// and it was not read at all. A page that keeps a menu, a dialogue and a
+    /// set of tab panels in the markup and hides all but one drew every one of
+    /// them on top of the others.
+    #[test]
+    fn the_hidden_attribute_hides() {
+        let display_of = |html: &str, id: &str| {
+            let document = crate::html::parse_document(html);
+            let styled = build_styled_tree(
+                &document,
+                &parse_stylesheet(".shown[hidden] { display: block }"),
+                1280,
+                &super::InteractiveState::default(),
+            );
+            fn walk(node: &StyledNode, id: &str) -> Option<Display> {
+                match node {
+                    StyledNode::Element(element) => {
+                        if element.attributes.get("id").map(String::as_str) == Some(id) {
+                            return Some(element.style.display);
+                        }
+                        element.children.iter().find_map(|child| walk(child, id))
+                    }
+                    StyledNode::Text(_) => None,
+                }
+            }
+            walk(&styled, id).expect("the element should be in the tree")
+        };
+
+        let html = "<div id=\"a\">x</div>                    <div id=\"b\" hidden>x</div>                    <div id=\"c\" hidden=\"false\">x</div>                    <span id=\"d\" hidden>x</span>                    <div id=\"e\" class=\"shown\" hidden>x</div>";
+        assert_eq!(display_of(html, "a"), Display::Block);
+        assert_eq!(display_of(html, "b"), Display::None);
+        // The value is not read: anything written there still hides.
+        assert_eq!(display_of(html, "c"), Display::None);
+        assert_eq!(display_of(html, "d"), Display::None, "an inline one too");
+        // It is the UA stylesheet, so the page's own rule beats it.
+        assert_eq!(display_of(html, "e"), Display::Block);
     }
 
     /// A closed `<details>` is a fold, and what is folded away is not on the
