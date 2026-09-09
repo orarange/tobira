@@ -1,0 +1,39 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+.strip{display:flex;overflow-x:auto;gap:8px;border:1px solid #c00;margin-bottom:8px}
+.strip>li{list-style:none;background:#cde;padding:4px}
+/* A carousel names a width for each card and lets the row overflow. */
+.sized>li{width:200px;flex:0 0 auto}
+/* Without a stated width the cards shrink to fit, which is the shape that
+   goes wrong: every card ends up as narrow as one word and they pile up. */
+.unsized>li{flex:0 0 auto}
+ul{margin:0;padding:0}
+</style></head><body>
+<!-- A horizontally scrolling strip of cards: a flex row inside a box that
+     scrolls sideways. theguardian.com builds its front page out of these
+     (`<gu-island name="ScrollableFeature">`), and tobira drew 37,875
+     overlapping text runs on that page -- the cards stacked in a narrow
+     column at the top left instead of running across. -->
+<ul class="strip sized" id="s1">
+  <li id="c1">First card headline here</li>
+  <li id="c2">Second card headline here</li>
+  <li id="c3">Third card headline here</li>
+  <li id="c4">Fourth card headline here</li>
+  <li id="c5">Fifth card headline here</li>
+</ul>
+<ul class="strip unsized" id="s2">
+  <li id="d1">First card headline here</li>
+  <li id="d2">Second card headline here</li>
+  <li id="d3">Third card headline here</li>
+  <li id="d4">Fourth card headline here</li>
+  <li id="d5">Fifth card headline here</li>
+</ul>
+<div id="after">after</div>
+<pre id="out"></pre>
+<script>
+var ids='s1 c1 c2 c3 c4 c5 s2 d1 d2 d3 d4 d5 after'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>

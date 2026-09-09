@@ -9723,10 +9723,27 @@ fn layout_flex_container_inner(
                     // explicit `width` is not a margin box and needs them added.
                     let margins = child.style.margin.left.max(0) as u32
                         + child.style.margin.right.max(0) as u32;
+                    // A stated width is the CONTENT box unless the child says
+                    // otherwise, so its padding and border go on top -- the slot
+                    // the row hands out is a border box. Left off, a card that
+                    // asks for 200px with 4px of padding got a 200px slot and
+                    // came out eight pixels narrow, and a row of them drifted
+                    // further left with every card.
+                    let surround = if matches!(child.style.box_sizing, BoxSizing::BorderBox) {
+                        0
+                    } else {
+                        child.style.padding.left
+                            + child.style.padding.right
+                            + if child.style.border_style_none {
+                                0
+                            } else {
+                                child.style.border.left + child.style.border.right
+                            }
+                    };
                     let base = if let Some(w) = child.style.width.as_ref() {
-                        resolve(w)
+                        resolve(w).saturating_add(surround)
                     } else if let Some(b) = child.style.flex_basis.as_ref() {
-                        resolve(b)
+                        resolve(b).saturating_add(surround)
                     } else {
                         flex_item_content_width(
                             child,
@@ -10153,6 +10170,15 @@ fn layout_flex_container_inner(
         // 60px bar with a one-pixel rule under it 61px tall, and everything
         // below the bar moved down with it.
         *cursor_y = background_top.saturating_add(stated);
+    }
+
+    // A flex row that runs off the side gets the same scrollbar along its
+    // bottom edge a block one does. Only the block paths reserved the room, so
+    // a horizontally scrolling strip of cards -- which is how a front page is
+    // built these days -- came out fifteen pixels short and everything below
+    // it rode up.
+    if reserve_horizontal_scrollbar(element, context, clip_start_idx, content_x, content_width) {
+        *cursor_y = cursor_y.saturating_add(SCROLLBAR_PX);
     }
 
     // Update background rect height
