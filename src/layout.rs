@@ -208,6 +208,18 @@ pub struct ElementHitbox {
     pub width: u32,
     pub height: u32,
     pub cursor_kind: CursorKind,
+    /// How far the contents reach inside this box, measured from its own top
+    /// left. This is what `scrollWidth` / `scrollHeight` answer, and the only
+    /// way the DOM can learn it: everything else it is told about a box is the
+    /// box itself, so a page asking "is this text longer than the space I gave
+    /// it?" -- which is how a "read more" link decides whether to appear --
+    /// got the space back and never the text.
+    ///
+    /// Zero where nothing was measured, and the reader takes the box's own
+    /// size instead, which is what the standard asks for anyway: the answer is
+    /// never smaller than the box.
+    pub scroll_width: u32,
+    pub scroll_height: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -661,6 +673,8 @@ pub fn layout_styled_document(
             width: right.saturating_sub(left),
             height: bottom.saturating_sub(top).max(1),
             cursor_kind,
+            scroll_width: 0,
+            scroll_height: 0,
         });
     }
 
@@ -2514,6 +2528,9 @@ fn layout_block_element(
     // Capture clip start BEFORE children are laid out, so overflow:hidden can correctly
     // filter commands added by children (even when there is no background rect).
     let clip_start_idx = context.commands.len();
+    // The same mark in the box list, so how far the contents reach can be read
+    // off the descendants' own boxes as well as off what they painted.
+    let hitboxes_start_idx = context.element_hitboxes.len();
 
     // A border takes up room. The box is its content plus the padding plus the
     // border, so a box with `border: 5px` is ten pixels taller than the same
@@ -2713,6 +2730,13 @@ fn layout_block_element(
         // tall. Nothing can be hovered at zero area anyway, so recording the
         // true size costs the hit test nothing.
         if !element.style.pointer_events_none {
+            let (scroll_width, scroll_height) = scroll_extent(
+                context,
+                clip_start_idx,
+                hitboxes_start_idx,
+                outer_x,
+                background_top,
+            );
             context.element_hitboxes.push(ElementHitbox {
                 node_id,
                 x: outer_x,
@@ -2720,6 +2744,8 @@ fn layout_block_element(
                 width: outer_width,
                 height: background_height,
                 cursor_kind: element.style.cursor_kind,
+                scroll_width,
+                scroll_height,
             });
         }
     }
@@ -3960,6 +3986,8 @@ fn layout_block_element_as_layer(
             width: hit_width,
             height: hit_height,
             cursor_kind: element.style.cursor_kind,
+            scroll_width: 0,
+            scroll_height: 0,
         });
     }
 
@@ -4452,6 +4480,8 @@ fn layout_table_element(
                         width: h.width,
                         height: h.height,
                         cursor_kind: h.cursor_kind,
+                        scroll_width: 0,
+                        scroll_height: 0,
                     }
                 }));
         } else {
@@ -4514,6 +4544,8 @@ fn layout_table_element(
                 width: cell_width.max(1),
                 height: cell_height.max(1),
                 cursor_kind: placement.cell.style.cursor_kind,
+                scroll_width: 0,
+                scroll_height: 0,
             });
         }
     }
@@ -4531,6 +4563,8 @@ fn layout_table_element(
             width: table_width.max(1),
             height: table_height.max(1),
             cursor_kind: element.style.cursor_kind,
+            scroll_width: 0,
+            scroll_height: 0,
         });
     }
     context.next_control_id = next_control_id;
@@ -4975,6 +5009,8 @@ fn merge_fragment(
             width: h.width,
             height: h.height,
             cursor_kind: h.cursor_kind,
+            scroll_width: 0,
+            scroll_height: 0,
         }));
 }
 
@@ -8968,6 +9004,47 @@ fn reserve_horizontal_scrollbar(
     }
 }
 
+/// How far down a painted thing reaches.
+fn command_bottom_edge(command: &DrawCommand) -> u32 {
+    match command {
+        DrawCommand::Rect(rect) => rect.y.saturating_add(rect.height),
+        DrawCommand::Text(text) => text.y.saturating_add(text.font_size_px),
+        DrawCommand::Image(image) => image.y.saturating_add(image.height),
+        DrawCommand::Gradient(gradient) => gradient.y.saturating_add(gradient.height),
+        DrawCommand::Layer(layer) => layer.y.saturating_add(layer.height),
+        DrawCommand::Sticky(sticky) => sticky.layer.y.saturating_add(sticky.layer.height),
+    }
+}
+
+/// How far the contents laid down since `commands_from` / `hitboxes_from`
+/// reach past the top left of this box -- which is what `scrollWidth` /
+/// `scrollHeight` report.
+///
+/// Both lists are read, because neither is enough on its own. Paint misses a
+/// box with no background: `<div style="width:300px">` with nothing in it
+/// draws nothing at all, and a page that lays its carousel out that way would
+/// look as though nothing overflowed. Boxes miss the paint that is not a box:
+/// a long line of text overflows as text, not as an element.
+fn scroll_extent(
+    context: &LayoutContext,
+    commands_from: usize,
+    hitboxes_from: usize,
+    origin_x: u32,
+    origin_y: u32,
+) -> (u32, u32) {
+    let mut right = origin_x;
+    let mut bottom = origin_y;
+    for command in &context.commands[commands_from..] {
+        right = right.max(command_right_edge(command));
+        bottom = bottom.max(command_bottom_edge(command));
+    }
+    for hitbox in &context.element_hitboxes[hitboxes_from..] {
+        right = right.max(hitbox.x.saturating_add(hitbox.width));
+        bottom = bottom.max(hitbox.y.saturating_add(hitbox.height));
+    }
+    (right.saturating_sub(origin_x), bottom.saturating_sub(origin_y))
+}
+
 /// How far right a painted thing reaches. Used to tell whether anything
 /// inside a box has overflowed it.
 fn command_right_edge(command: &DrawCommand) -> u32 {
@@ -9314,6 +9391,8 @@ fn record_container_box(
         width: outer_width.max(1),
         height: bottom.saturating_sub(top).max(1),
         cursor_kind: element.style.cursor_kind,
+        scroll_width: 0,
+        scroll_height: 0,
     });
 }
 

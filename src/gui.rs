@@ -2501,7 +2501,7 @@ impl DocumentView {
     fn feed_geometry(&self, layout: &LayoutDocument) {
         if let DocumentContent::Loaded(page) = &self.content {
             if page.javascript_session.is_some() {
-                let rects: Vec<(usize, f32, f32, f32, f32)> = layout
+                let rects: Vec<(usize, f32, f32, f32, f32, f32, f32)> = layout
                     .element_hitboxes
                     .iter()
                     .map(|h| {
@@ -2511,6 +2511,8 @@ impl DocumentView {
                             h.y as f32,
                             h.width as f32,
                             h.height as f32,
+                            h.scroll_width as f32,
+                            h.scroll_height as f32,
                         )
                     })
                     .collect();

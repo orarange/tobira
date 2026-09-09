@@ -19619,19 +19619,40 @@ impl Vm {
                     let raw = vm.computed_style_value(node_id, edge);
                     raw.trim_end_matches("px").trim().parse::<f64>().unwrap_or(0.0)
                 };
+                // `scrollWidth` / `scrollHeight` are how far the CONTENTS
+                // reach, not how big the box is. They were the border box, so
+                // a box always looked exactly as big as its contents and the
+                // question pages ask -- "is this longer than the room I gave
+                // it?", which is how a "read more" link decides whether to
+                // appear -- always answered no. Layout measures the reach and
+                // sends it along with the rest of the geometry.
+                let scroll = || match self.host.read_dom(DomRead::ScrollMetrics { node: node_id }) {
+                    Ok(DomReadResult::ScrollMetrics(metrics)) => Some(metrics),
+                    _ => None,
+                };
                 let value = match name.as_str() {
-                    "offsetWidth" | "scrollWidth" => w,
-                    "offsetHeight" | "scrollHeight" => h,
-                    "clientWidth" => {
-                        let edges = border("border-left-width", self)
-                            + border("border-right-width", self);
-                        (w - edges).max(0.0)
-                    }
-                    "clientHeight" => {
-                        let edges =
-                            border("border-top-width", self) + border("border-bottom-width", self);
-                        (h - edges).max(0.0)
-                    }
+                    "offsetWidth" => w,
+                    "offsetHeight" => h,
+                    "scrollWidth" => scroll().map(|m| m.scroll_width).unwrap_or(w),
+                    "scrollHeight" => scroll().map(|m| m.scroll_height).unwrap_or(h),
+                    // The padding box, less whatever a scrollbar has taken:
+                    // a box that scrolls has fifteen fewer pixels of room on
+                    // the side the bar is on. The same reckoning answers
+                    // `scrollWidth`, so both come from one place.
+                    "clientWidth" => scroll()
+                        .map(|m| m.client_width)
+                        .unwrap_or_else(|| {
+                            let edges = border("border-left-width", self)
+                                + border("border-right-width", self);
+                            (w - edges).max(0.0)
+                        }),
+                    "clientHeight" => scroll()
+                        .map(|m| m.client_height)
+                        .unwrap_or_else(|| {
+                            let edges = border("border-top-width", self)
+                                + border("border-bottom-width", self);
+                            (h - edges).max(0.0)
+                        }),
                     // bounding rect is viewport-relative; add scroll back for the
                     // document-relative offsetLeft/offsetTop approximation.
                     "offsetLeft" => x + scroll_x,

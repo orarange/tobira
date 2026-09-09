@@ -313,6 +313,10 @@ pub struct BrowserHost {
     /// viewport coordinates. Stale after a DOM mutation until the next layout
     /// feed (same as a real browser between reflows).
     geometry: HashMap<usize, DomRect>,
+    /// How far the contents reach inside each box, by node id. Kept apart from
+    /// `geometry` because it answers a different question: that one is where
+    /// the box is, this one is how much is inside it.
+    scroll_extents: HashMap<usize, (f64, f64)>,
     /// What the cascade worked out for each element, keyed the same way as
     /// `geometry`. `getComputedStyle` used to be answered from the `style`
     /// attribute and a table of per-tag defaults, so a rule in the page's
@@ -350,6 +354,7 @@ impl BrowserHost {
             slot_snapshots: HashMap::new(),
             observers: Vec::new(),
             geometry: HashMap::new(),
+            scroll_extents: HashMap::new(),
             computed_styles: HashMap::new(),
             root_custom_properties: std::collections::BTreeMap::new(),
             structural_changes: Vec::new(),
@@ -818,10 +823,14 @@ impl BrowserHost {
     }
 
     /// Feed element geometry from the browser's most recent layout. `rects` is
-    /// `(data-tobira-node-id, x, y, width, height)` in document coordinates.
-    pub fn set_geometry(&mut self, rects: &[(usize, f32, f32, f32, f32)]) {
+    /// `(data-tobira-node-id, x, y, width, height, scroll width, scroll height)`
+    /// in document coordinates. The last two are how far the contents reach
+    /// inside the box, which is the only thing here the box's own rectangle
+    /// cannot say.
+    pub fn set_geometry(&mut self, rects: &[(usize, f32, f32, f32, f32, f32, f32)]) {
         self.geometry.clear();
-        for &(id, x, y, w, h) in rects {
+        self.scroll_extents.clear();
+        for &(id, x, y, w, h, scroll_w, scroll_h) in rects {
             self.geometry.insert(
                 id,
                 DomRect {
@@ -831,6 +840,8 @@ impl BrowserHost {
                     height: h as f64,
                 },
             );
+            self.scroll_extents
+                .insert(id, (scroll_w as f64, scroll_h as f64));
         }
         self.compute_intersections();
     }
@@ -960,6 +971,72 @@ impl BrowserHost {
     /// `getBoundingClientRect` for an arena node: document-coordinate geometry
     /// from the last layout, shifted into viewport coordinates by the current
     /// scroll offset. Returns a zero rect when geometry is unknown.
+    /// What a box says about its own inside: how much room there is, and how
+    /// far the contents reach.
+    ///
+    /// The room is the padding box -- the border is outside it. The reach is
+    /// what layout measured, and is never reported as less than the room: a
+    /// box whose contents fit answers its own size, which is what the standard
+    /// asks for and what a page comparing `scrollHeight` with `clientHeight`
+    /// to decide whether to show a "read more" link depends on.
+    fn scroll_metrics(&self, arena_idx: usize) -> ScrollMetrics {
+        let rect = self.bounding_client_rect(arena_idx);
+        let border = |edge: &str| -> f64 {
+            self.tobira_id_for_handle(arena_idx)
+                .and_then(|id| self.computed_styles.get(&id))
+                .and_then(|style| {
+                    crate::css::computed_property_string(style, edge, &self.root_custom_properties)
+                })
+                .and_then(|value| value.trim_end_matches("px").trim().parse::<f64>().ok())
+                .unwrap_or(0.0)
+        };
+        let border_left = border("border-left-width");
+        let border_top = border("border-top-width");
+        let padding_width = (rect.width - border_left - border("border-right-width")).max(0.0);
+        let padding_height = (rect.height - border_top - border("border-bottom-width")).max(0.0);
+        // The extent layout measured runs from the border box; the standard
+        // measures from the padding box, so the near borders come off.
+        let (reach_x, reach_y) = self
+            .tobira_id_for_handle(arena_idx)
+            .and_then(|id| self.scroll_extents.get(&id).copied())
+            .unwrap_or((0.0, 0.0));
+        let reach_width = (reach_x - border_left).max(0.0);
+        let reach_height = (reach_y - border_top).max(0.0);
+
+        // A scrollbar eats into the room inside the box, and which ones are
+        // there follows from `overflow`: `scroll` puts both up whether they
+        // are needed or not, `auto` only the ones that are. Everything else
+        // has none -- there is nowhere to scroll to.
+        let overflow = self
+            .tobira_id_for_handle(arena_idx)
+            .and_then(|id| self.computed_styles.get(&id))
+            .and_then(|style| {
+                crate::css::computed_property_string(style, "overflow", &self.root_custom_properties)
+            })
+            .unwrap_or_default();
+        const SCROLLBAR: f64 = 15.0;
+        let (vertical_bar, horizontal_bar) = match overflow.as_str() {
+            "scroll" => (SCROLLBAR, SCROLLBAR),
+            "auto" => (
+                if reach_height > padding_height { SCROLLBAR } else { 0.0 },
+                if reach_width > padding_width { SCROLLBAR } else { 0.0 },
+            ),
+            _ => (0.0, 0.0),
+        };
+        let client_width = (padding_width - vertical_bar).max(0.0);
+        let client_height = (padding_height - horizontal_bar).max(0.0);
+
+        ScrollMetrics {
+            // Neither is tracked per element yet; only the page scrolls.
+            scroll_left: 0.0,
+            scroll_top: 0.0,
+            scroll_width: client_width.max(reach_width),
+            scroll_height: client_height.max(reach_height),
+            client_width,
+            client_height,
+        }
+    }
+
     fn bounding_client_rect(&self, arena_idx: usize) -> DomRect {
         if let Some(id) = self.tobira_id_for_handle(arena_idx) {
             if let Some(rect) = self.geometry.get(&id) {
@@ -2143,14 +2220,9 @@ impl Host for BrowserHost {
                     hits.into_iter().map(|(_, _, node)| node).collect(),
                 ))
             }
-            DomRead::ScrollMetrics { .. } => Ok(DomReadResult::ScrollMetrics(ScrollMetrics {
-                scroll_left: 0.0,
-                scroll_top: 0.0,
-                scroll_width: 0.0,
-                scroll_height: 0.0,
-                client_width: 0.0,
-                client_height: 0.0,
-            })),
+            DomRead::ScrollMetrics { node } => {
+                Ok(DomReadResult::ScrollMetrics(self.scroll_metrics(node.0 as usize)))
+            }
         }
     }
 
@@ -4407,7 +4479,7 @@ impl EngineSession {
         html: &str,
         stylesheet_text: &str,
     ) -> (
-        Vec<(usize, f32, f32, f32, f32)>,
+        Vec<(usize, f32, f32, f32, f32, f32, f32)>,
         Vec<(usize, std::sync::Arc<crate::css::ComputedStyle>)>,
         std::collections::BTreeMap<String, String>,
     ) {
@@ -4438,6 +4510,8 @@ impl EngineSession {
                     box_.y as f32,
                     box_.width as f32,
                     box_.height as f32,
+                    box_.scroll_width as f32,
+                    box_.scroll_height as f32,
                 )
             })
             .collect();
@@ -4889,7 +4963,7 @@ impl EngineSession {
     /// `getBoundingClientRect` / `offsetWidth` etc. return real values.
     /// `rects` is `(data-tobira-node-id, x, y, width, height)` in document coords.
     /// Also recomputes IntersectionObserver / ResizeObserver state and delivers any changes.
-    pub fn set_geometry(&mut self, rects: &[(usize, f32, f32, f32, f32)]) {
+    pub fn set_geometry(&mut self, rects: &[(usize, f32, f32, f32, f32, f32, f32)]) {
         self.host().set_geometry(rects);
         // IntersectionObserver records queued by the geometry update are flushed
         // to their callbacks here (the host can't call JS itself).
@@ -7625,6 +7699,57 @@ mod tests {
         );
     }
 
+    /// A box says how far its contents reach, not how big it is.
+    ///
+    /// `scrollWidth` and `scrollHeight` were the border box, so a box always
+    /// looked exactly as big as what was in it and the comparison pages
+    /// actually make -- `scrollHeight > clientHeight`, which is how a "read
+    /// more" link decides whether to appear -- could never come out true.
+    /// The numbers themselves are pinned against Chrome in
+    /// `tools/geom/scrollbar.html`; this holds the plumbing that carries them
+    /// from layout to the DOM.
+    #[test]
+    fn a_box_reports_how_far_its_contents_reach() {
+        // Written inline: a `<style>` element is collected by the browser and
+        // handed in from outside, and this session is started without one.
+        let html = r#"<html><body>
+            <div id="probe" style="width:120px;height:40px;border:1px solid #c00;overflow:auto">
+              <div style="width:300px;height:20px"></div></div>
+            <script>
+              var e = document.getElementById('probe');
+              document.title = e.scrollWidth + '/' + e.scrollHeight
+                             + '/' + e.clientWidth + '/' + e.clientHeight;
+            </script>
+        </body></html>"#;
+        let (_, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "error: {:?}", initial.error);
+        // The child reaches 300 across; down it needs only its own 20, so no
+        // horizontal room is lost and the box keeps its full 120 of width.
+        // A horizontal scrollbar does appear, and takes 15 off the height.
+        assert_eq!(
+            initial.title.as_deref(), Some("300/25/120/25"),
+            "scrollWidth/scrollHeight/clientWidth/clientHeight"
+        );
+    }
+
+    /// A box whose contents fit reports its own size, which is what the
+    /// standard asks for: the answer is never smaller than the box.
+    #[test]
+    fn a_box_whose_contents_fit_reports_its_own_size() {
+        let html = r#"<html><body>
+            <div id="probe" style="width:120px;height:40px;border:1px solid #c00;overflow:auto">
+              <div style="width:50px;height:20px"></div></div>
+            <script>
+              var e = document.getElementById('probe');
+              document.title = e.scrollWidth + '/' + e.scrollHeight
+                             + '/' + e.clientWidth + '/' + e.clientHeight;
+            </script>
+        </body></html>"#;
+        let (_, initial) = EngineSession::start(html, "http://localhost/");
+        assert!(initial.error.is_none(), "error: {:?}", initial.error);
+        assert_eq!(initial.title.as_deref(), Some("120/40/120/40"));
+    }
+
     #[test]
     fn intersection_observer_fires_on_scroll_into_view() {
         use crate::browser::annotate_node_ids;
@@ -7651,7 +7776,7 @@ mod tests {
         let target_id = find_node_id_by_attr(&tree, "id", "target").expect("target id");
 
         // Target far below the 720px viewport → first feed reports "out".
-        session.set_geometry(&[(target_id, 0.0, 2000.0, 100.0, 50.0)]);
+        session.set_geometry(&[(target_id, 0.0, 2000.0, 100.0, 50.0, 100.0, 50.0)]);
         let snap = session.snapshot();
         assert!(
             snap.html.contains(">out</div>"),
@@ -7661,7 +7786,7 @@ mod tests {
 
         // Scroll so the target enters the viewport → reports "in".
         session.set_scroll_position(1900);
-        session.set_geometry(&[(target_id, 0.0, 2000.0, 100.0, 50.0)]);
+        session.set_geometry(&[(target_id, 0.0, 2000.0, 100.0, 50.0, 100.0, 50.0)]);
         let snap = session.snapshot();
         assert!(
             snap.html.contains(">out,in</div>"),
@@ -7671,7 +7796,7 @@ mod tests {
 
         // Scrolling back out reports "out" again (state-change only).
         session.set_scroll_position(0);
-        session.set_geometry(&[(target_id, 0.0, 2000.0, 100.0, 50.0)]);
+        session.set_geometry(&[(target_id, 0.0, 2000.0, 100.0, 50.0, 100.0, 50.0)]);
         let snap = session.snapshot();
         assert!(
             snap.html.contains(">out,in,out</div>"),
@@ -7705,7 +7830,7 @@ mod tests {
         annotate_node_ids(&mut tree);
         let target_id = find_node_id_by_attr(&tree, "id", "target").expect("target id");
 
-        session.set_geometry(&[(target_id, 0.0, 0.0, 120.0, 40.0)]);
+        session.set_geometry(&[(target_id, 0.0, 0.0, 120.0, 40.0, 120.0, 40.0)]);
         let snap = session.snapshot();
         assert!(
             snap.html.contains(">function,120</div>"),
@@ -7737,7 +7862,7 @@ mod tests {
         let btn_id = find_node_id_by_attr(&tree, "id", "btn").expect("button id");
 
         // Feed geometry the browser would compute from layout (document coords).
-        session.set_geometry(&[(btn_id, 10.0, 20.0, 100.0, 40.0)]);
+        session.set_geometry(&[(btn_id, 10.0, 20.0, 100.0, 40.0, 100.0, 40.0)]);
 
         let result = session.dispatch_event(btn_id, "click", &DomEventInit::default());
         assert!(
@@ -7767,7 +7892,7 @@ mod tests {
         annotate_node_ids(&mut tree);
         let btn_id = find_node_id_by_attr(&tree, "id", "btn").expect("button id");
 
-        session.set_geometry(&[(btn_id, 0.0, 500.0, 100.0, 40.0)]);
+        session.set_geometry(&[(btn_id, 0.0, 500.0, 100.0, 40.0, 100.0, 40.0)]);
         session.set_scroll_position(300); // viewport y = 500 - 300 = 200
         let result = session.dispatch_event(btn_id, "click", &DomEventInit::default());
         assert!(

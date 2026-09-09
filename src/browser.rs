@@ -272,7 +272,7 @@ impl BrowserPage {
     /// Feed element geometry from the latest layout into the JS session so
     /// `getBoundingClientRect` / `offsetWidth` etc. return real values.
     /// `rects` is `(data-tobira-node-id, x, y, width, height)` (document coords).
-    pub fn set_geometry(&self, rects: Vec<(usize, f32, f32, f32, f32)>) -> bool {
+    pub fn set_geometry(&self, rects: Vec<(usize, f32, f32, f32, f32, f32, f32)>) -> bool {
         if let Some(session) = &self.javascript_session {
             return session.set_geometry(rects);
         }

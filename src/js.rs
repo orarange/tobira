@@ -80,7 +80,7 @@ enum JavaScriptSessionCommand {
     /// Feed element geometry from the browser's latest layout so
     /// `getBoundingClientRect`/`offsetWidth` return real values (engine path).
     SetGeometry {
-        rects: Vec<(usize, f32, f32, f32, f32)>,
+        rects: Vec<(usize, f32, f32, f32, f32, f32, f32)>,
     },
     SetAttribute {
         node_id: usize,
@@ -170,7 +170,7 @@ impl JavaScriptSession {
             .is_ok()
     }
 
-    pub(crate) fn set_geometry(&self, rects: Vec<(usize, f32, f32, f32, f32)>) -> bool {
+    pub(crate) fn set_geometry(&self, rects: Vec<(usize, f32, f32, f32, f32, f32, f32)>) -> bool {
         self.command_tx
             .send(JavaScriptSessionCommand::SetGeometry { rects })
             .is_ok()
