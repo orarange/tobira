@@ -44,10 +44,21 @@ pub struct Stylesheet {
     /// an unlayered rule beats them all, so this order is what the cascade
     /// sorts on -- not the order the rules happen to appear in.
     layer_order: Vec<Arc<str>>,
+    /// `@keyframes` by name: each entry is the stops of one animation, sorted,
+    /// as (position in per-mille, the declarations at that stop). Shared via
+    /// `Rc` because every element's style computation reads it.
+    pub keyframes: Rc<HashMap<String, Vec<(u32, Vec<Declaration>)>>>,
 }
 
 impl Stylesheet {
     pub fn extend(&mut self, other: Stylesheet) {
+        if !other.keyframes.is_empty() {
+            let mut merged = (*self.keyframes).clone();
+            // A later sheet's `@keyframes` of the same name replaces an
+            // earlier one, as the cascade says.
+            merged.extend((*other.keyframes).clone());
+            self.keyframes = Rc::new(merged);
+        }
         self.rules.extend(other.rules);
         // Merge unconditional root_vars: make a mutable copy, extend it, then wrap back in Rc
         let mut merged = (*self.root_vars).clone();
@@ -1437,6 +1448,11 @@ pub struct ComputedStyle {
     pub transform_scale_y: u32,
     /// rotation in millidegrees clockwise (0 = no rotation)
     pub transform_rotate_millideg: i32,
+    /// The `@keyframes` block driving this element, if any.
+    pub animation_name: Option<Arc<str>>,
+    /// How long before the animation starts. While it is waiting, the element
+    /// keeps its ordinary style unless `animation-fill-mode` says otherwise.
+    pub animation_delay_ms: i32,
     /// transform-origin X in permille of element width (500 = 50% = center)
     pub transform_origin_x: u32,
     /// transform-origin Y in permille of element height (500 = 50% = center)
@@ -1592,6 +1608,8 @@ impl ComputedStyle {
             transform_scale_x: 0, // 0 = "not set" → treated as 1000 at render time
             transform_scale_y: 0,
             transform_rotate_millideg: 0,
+            animation_name: None,
+            animation_delay_ms: 0,
             transform_origin_x: 500, // 50% center
             transform_origin_y: 500,
         };
@@ -1977,6 +1995,7 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
     let mut root_vars = BTreeMap::new();
     let mut media_root_vars: Vec<(MediaCondition, BTreeMap<String, String>)> = Vec::new();
     let mut layer_order: Vec<Arc<str>> = Vec::new();
+    let mut keyframes: HashMap<String, Vec<(u32, Vec<Declaration>)>> = HashMap::new();
     let source = strip_comments(input);
     let mut cursor = 0;
 
@@ -2045,6 +2064,21 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
                 for mut rule in inner_stylesheet.rules {
                     rule.media = Some(media_cond.clone());
                     rules.push(rule);
+                }
+            } else if at_lower.starts_with("@keyframes")
+                || at_lower.starts_with("@-webkit-keyframes")
+            {
+                let name = selector_text
+                    .split_once(|c: char| c.is_whitespace())
+                    .map(|(_, rest)| rest.trim())
+                    .unwrap_or_default()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_string();
+                if !name.is_empty() {
+                    let stops = parse_keyframe_stops(block_text);
+                    if !stops.is_empty() {
+                        keyframes.insert(name, stops);
+                    }
                 }
             } else if at_lower.starts_with("@supports") || at_lower.starts_with("@layer") {
                 // @layer: ignore layer name, parse rules as regular rules (no cascade layering)
@@ -2174,7 +2208,53 @@ pub fn parse_stylesheet(input: &str) -> Stylesheet {
         media_root_vars,
         rule_index,
         layer_order,
+        keyframes: Rc::new(keyframes),
     }
+}
+
+/// The stops of one `@keyframes` block: `from`, `to` and percentages, each
+/// carrying the declarations written at that point. A stop may name several
+/// positions at once (`0%, 100% { … }`), so one block can contribute the same
+/// declarations more than once.
+fn parse_keyframe_stops(block: &str) -> Vec<(u32, Vec<Declaration>)> {
+    let mut stops: Vec<(u32, Vec<Declaration>)> = Vec::new();
+    let bytes = block.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let Some(open) = block[cursor..].find('{') else {
+            break;
+        };
+        let selector = block[cursor..cursor + open].trim().to_string();
+        let body_start = cursor + open + 1;
+        let Some(close) = block[body_start..].find('}') else {
+            break;
+        };
+        let body = &block[body_start..body_start + close];
+        cursor = body_start + close + 1;
+        if selector.is_empty() {
+            continue;
+        }
+        let declarations = parse_inline_declarations(body);
+        if declarations.is_empty() {
+            continue;
+        }
+        for position in selector.split(',') {
+            let position = position.trim().to_ascii_lowercase();
+            let permille = match position.as_str() {
+                "from" => Some(0),
+                "to" => Some(1000),
+                other => other
+                    .strip_suffix('%')
+                    .and_then(|number| number.trim().parse::<f32>().ok())
+                    .map(|percent| (percent.clamp(0.0, 100.0) * 10.0).round() as u32),
+            };
+            if let Some(permille) = permille {
+                stops.push((permille, declarations.clone()));
+            }
+        }
+    }
+    stops.sort_by_key(|(permille, _)| *permille);
+    stops
 }
 
 /// Records the layers named by `@layer a, b, c;` statements in a prelude.
@@ -3710,6 +3790,30 @@ fn compute_style_with_rules(
         apply_declaration(&mut style, &declaration, em_basis);
     }
 
+    // An animation that is running takes over the properties its keyframes
+    // name. Only the first stop is applied: the clock is not wired up yet, so
+    // every animation is shown at its beginning, which is where a page is when
+    // it has just loaded. Chrome agrees at that moment -- `animation: grow`
+    // from 50px shows 50px, not the element's own width -- and ignoring the
+    // animation entirely showed the element's own width instead.
+    //
+    // While the delay is still running the element keeps its ordinary style,
+    // which is what `animation-fill-mode: none` (the initial value) asks for.
+    if let Some(name) = style.animation_name.clone()
+        && style.animation_delay_ms <= 0
+        && let Some(stops) = stylesheet.keyframes.get(name.as_ref())
+        && let Some((_, declarations)) = stops.first()
+    {
+        for declaration in declarations {
+            let em_basis = if matches!(declaration.property.as_str(), "font-size" | "font") {
+                parent_font_size
+            } else {
+                style.font_size_px
+            };
+            apply_declaration(&mut style, declaration, em_basis);
+        }
+    }
+
     style.effective_opacity = parent_style
         .map(|parent| {
             // CSS opacity < 1 creates a stacking context for ALL element types, including
@@ -4301,6 +4405,26 @@ fn split_value_components(value: &str) -> Vec<String> {
         out.push(current);
     }
     out
+}
+
+/// `0.05s`, `250ms`, `0`. Returns `None` for anything that is not a time, so
+/// the shorthand can use it to tell a duration from a name.
+fn parse_css_time_ms(token: &str) -> Option<i32> {
+    let token = token.trim();
+    if token == "0" {
+        return Some(0);
+    }
+    if let Some(number) = token.strip_suffix("ms") {
+        return number.trim().parse::<f32>().ok().map(|ms| ms.round() as i32);
+    }
+    if let Some(number) = token.strip_suffix('s') {
+        return number
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|seconds| (seconds * 1000.0).round() as i32);
+    }
+    None
 }
 
 fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, parent_font_size: u32) {
@@ -5155,6 +5279,60 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         | "contain"
         | "content-visibility" => {
             // Parsed and ignored — no implementation yet
+        }
+        "animation-name" => {
+            let name = value.trim().trim_matches('"').trim_matches('\'');
+            style.animation_name = if name.is_empty() || name.eq_ignore_ascii_case("none") {
+                None
+            } else {
+                Some(Arc::from(name))
+            };
+        }
+        "animation-delay" => {
+            style.animation_delay_ms = parse_css_time_ms(value).unwrap_or(0);
+        }
+        "animation" | "-webkit-animation" => {
+            // The shorthand in any order. Only the parts that decide what an
+            // element looks like at a given moment are read: the name, and the
+            // delay (the second time, when there are two).
+            let mut times: Vec<i32> = Vec::new();
+            let mut name: Option<Arc<str>> = None;
+            for token in value.split_whitespace() {
+                let lowered = token.to_ascii_lowercase();
+                if let Some(ms) = parse_css_time_ms(&lowered) {
+                    times.push(ms);
+                    continue;
+                }
+                if matches!(
+                    lowered.as_str(),
+                    "normal"
+                        | "reverse"
+                        | "alternate"
+                        | "alternate-reverse"
+                        | "none"
+                        | "forwards"
+                        | "backwards"
+                        | "both"
+                        | "running"
+                        | "paused"
+                        | "infinite"
+                        | "linear"
+                        | "ease"
+                        | "ease-in"
+                        | "ease-out"
+                        | "ease-in-out"
+                ) || lowered.starts_with("cubic-bezier(")
+                    || lowered.starts_with("steps(")
+                    || lowered.parse::<f32>().is_ok()
+                {
+                    continue;
+                }
+                if name.is_none() {
+                    name = Some(Arc::from(token.trim_matches('"').trim_matches('\'')));
+                }
+            }
+            style.animation_name = name;
+            style.animation_delay_ms = times.get(1).copied().unwrap_or(0);
         }
         "object-position" => {
             let parse_pct = |s: &str| -> u32 {
@@ -9618,6 +9796,66 @@ mod tests {
             colors[2], 0x00FF00,
             "plain li should match selector list in :not()"
         );
+    }
+
+    // ── @keyframes ───────────────────────────────────────────────────────────
+
+    fn declared_here(name: &str, value: &str) -> super::ComputedStyle {
+        use super::{ComputedStyle, Declaration, apply_declaration};
+        let mut style = ComputedStyle::for_element("div", None);
+        let declaration = Declaration {
+            property: name.to_string(),
+            value: value.to_string(),
+            important: false,
+        };
+        apply_declaration(&mut style, &declaration, 16);
+        style
+    }
+
+
+    #[test]
+    fn keyframes_are_collected_by_name() {
+        let sheet = parse_stylesheet(
+            "@keyframes grow { from { width: 50px } to { width: 200px } }
+             @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0 } }",
+        );
+        let grow = sheet.keyframes.get("grow").expect("grow should be there");
+        assert_eq!(grow.len(), 2);
+        assert_eq!(grow[0].0, 0);
+        assert_eq!(grow[1].0, 1000);
+
+        // One stop may name several positions at once.
+        let pulse = sheet.keyframes.get("pulse").expect("pulse should be there");
+        assert_eq!(
+            pulse.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+            vec![0, 500, 1000]
+        );
+    }
+
+    #[test]
+    fn the_animation_shorthand_finds_the_name_and_the_delay() {
+        // The parts may come in any order, and only one of the two times is
+        // the delay.
+        for value in [
+            "grow 0.05s forwards",
+            "0.05s grow forwards",
+            "forwards 50ms grow",
+        ] {
+            let style = declared_here("animation", value);
+            assert_eq!(
+                style.animation_name.as_deref(),
+                Some("grow"),
+                "{value}: name"
+            );
+            assert_eq!(style.animation_delay_ms, 0, "{value}: no delay given");
+        }
+        // Two times: the second is the delay.
+        let style = declared_here("animation", "grow 1s 2s linear infinite");
+        assert_eq!(style.animation_name.as_deref(), Some("grow"));
+        assert_eq!(style.animation_delay_ms, 2000);
+        // A timing keyword must not be mistaken for the name.
+        let style = declared_here("animation", "ease-in-out 1s slide");
+        assert_eq!(style.animation_name.as_deref(), Some("slide"));
     }
 
     // ── @media tests ─────────────────────────────────────────────────────────

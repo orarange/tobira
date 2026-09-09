@@ -1,0 +1,29 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+.box{width:100px;height:40px;background:#4a4;margin:10px}
+/* Short enough that it is over before anything screenshots the page. */
+@keyframes fadein { from { opacity: 0 } to { opacity: 1 } }
+@keyframes grow   { from { width: 50px } to { width: 200px } }
+@keyframes slide  { 0% { transform: translateX(0) } 100% { transform: translateX(60px) } }
+#a1 { opacity: 0; animation: fadein 0.05s forwards }
+#a2 { animation: grow 0.05s forwards }
+#a3 { animation: slide 0.05s forwards }
+/* Never finishes: shows what a running animation looks like at t=0. */
+#a4 { animation: grow 1000s linear }
+/* No fill-mode: falls back to the base style when it ends. */
+#a5 { width: 70px; animation: grow 0.05s }
+</style></head><body>
+<div class="box" id="a1">fade</div>
+<div class="box" id="a2">grow</div>
+<div class="box" id="a3">slide</div>
+<div class="box" id="a4">running</div>
+<div class="box" id="a5">nofill</div>
+<pre id="out"></pre>
+<script>
+var ids='a1 a2 a3 a4 a5'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var e=document.getElementById(id), r=e.getBoundingClientRect();
+  var cs=getComputedStyle(e);
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height)+' op='+cs.opacity;
+}).join('\n');
+</script></body></html>
