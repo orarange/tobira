@@ -20,15 +20,15 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## いまの状態（2026-09-04）
 
-- ブランチ `master`。この文書を書いた時点の HEAD は `18b94c4`
+- ブランチ `master`。この文書を書いた時点の HEAD は `32e7f58`
   （この文書のコミットが直後に乗る）。
 - `cargo build --release` 通る。警告は dead_code のみ。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1148 通過 / 0 落ち**。
+- `cargo test --release` → **1154 通過 / 0 落ち**。
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
   数え方: `cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result" | awk '{p+=$4; f+=$6} END {print p, f}'`
   （`tr -d '\000'` は必須。出力に NUL が混ざって grep が binary 扱いする）
-- html5lib 木構築適合 **1192/1229 (97.0%)**。
+- html5lib 木構築適合 **1196/1229 (97.3%)**。
   `cargo test --release --bin tobira -- tree_construction_conformance --nocapture`
   が `.dat` ごとの内訳を出す。合計は自分で足す。`TOBIRA_H5_FILE=<名前>` で一本に絞れる。
 - 動作確認できとる範囲（`--screenshot` で目視、JS エラーは `TOBIRA_DEBUG_CONSOLE=1`）:
@@ -66,6 +66,16 @@ Edge は 2026-08-27 の更新以降 `--dump-dom` が無出力になったので�
 
 **数値だけ見るな。** 表が指定幅を無視する件も `<center>` が表を中央寄せせん件も、
 `--screenshot` を足して目で見るまで一つも見つからんかった。修正のたびに一枚撮ること。
+
+**「黙って既定に落ちる」CSS は集計で釣る。**
+`TOBIRA_DEBUG_CSS=1 ./target/release/tobira --dump-styled <url>` が、
+`apply_declaration` を素通りした宣言を頻度順で出す。実頁を三枚ほど回して
+上から見るのが一番効率がええ。2026-09-10 の `pt` の件も `border-radius` の
+複数値もこれで出た。**症状から探すより、落ちとる宣言から探すほうが速い。**
+
+**単位は網羅した検体で試す。** `12pt` と `1pc` はちょうど 16px なので、
+単位が丸ごと未対応でも「既定の 16px」と一致してしまう。この二つで確認しとったら
+`pt` 未対応に気づかんかった。`tools/geom/units.html` に一通り並べてある。
 
 **JS の穴を「素の Vm」で判定するな。** `Vm::new(Heap::new())` で走らせると
 `Intl`・`Object.groupBy`・`Array.fromAsync`・`Promise.withResolvers`・
@@ -257,43 +267,52 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
 
 ## 次の一手（優先順）
 
-1. **`overflow` があふれるようにする** — `src/layout.rs`。
-   `Overflow::Auto` / `Scroll` が今 `Hidden` と同じ道を通っとる（`layout.rs:2700`、
-   `layout.rs:3703` の `element.style.overflow == Overflow::Hidden` の判定周り）。
-   まず「子の幅を親に丸めるのをやめる」だけで MDN の崩れは改善するはず。
-   巻物 UI まではいらん。クリップだけ正しくして、はみ出しを許す。
-2. **インライン箱の高さが 1px 高い** — ここが一番割に合う。
-   `cmp.py g4.html` の落ち 9 件のうち **7 件は高さが `x17` であるべきところ
-   `x18` になっとるだけ**（`s1` `s2` `w1` `w2` `long` `e1`、それと空 div の
-   `800x0` が `800x1`）。原因は行の芯の丸め — `font.rs:474 line_height_px` が
-   face の `new_line_size` をそのまま切り上げとる。Chrome は ascent + descent を
-   別々に丸めて足す。ここを合わせるだけで g4 は 5/14 → 11〜12/14 になるはず。
-   `layout.rs:6946 below_baseline` と対で見ること。
-3. **インライン箱の矩形の残り（g2 / g4）** — 1px を直した後に残るのはこれ。
-   `layout.rs:6474 apply_inline_marks` が `inline_rects` を作り、
-   `layout_styled_document`（`layout.rs:564`）の末尾で親へ union しながら
-   `ElementHitbox` に流す。残るのは
-   (a) 空白だけの div の中の空 `<span>` が y=0 に落ちる（`e2`: Chrome は `0,18`）
-   (b) 行をまたぐ `<span>`（Chrome は複数矩形、こっちは union 一個）
-   (c) `<a>` の x が 3px ずれる（`lnk`: chrome `63,36` / tobira `60,36`）——
-   直前の `<i>` の後の空白の幅。
-4. **`transform` の hitbox** — `layout.rs:3328 transformed_layer_bounds` が層の
-   大きさは出しとるので、同じ値を `record_container_box`（`layout.rs:9005`）に
-   渡して hitbox にも反映させる。scale と translate の適用段を揃えるのは
-   その後（設計判断が要る。translate も描画時に寄せるほうが筋がええ）。
-5. **CSS transition / animation** — 一番でかい未実装。`@keyframes` のパース、
-   時間軸、再描画の駆動が要る。着手するなら独立した回を丸ごと使うこと。
-   **fuel をターンごとにする修正（2026-09-04）を入れる前にこれを作っとったら、
-   完成した瞬間に「二分で止まる」を踏んどった。** 今は踏まん。
-6. **`Map` / `Set` を索引化** — `Vec` の線形走査をやめる。
-   キーが `Value` なので単純に `HashMap` にはできん（NaN と -0、
-   オブジェクトの同一性）。挿入順は保つこと。
-7. **文字列の表現** — `string_text` の全長 clone、`s.length` の
-   `chars().count()`、`s[i]` の `chars().nth(i)`。`Value::String` の
-   表現に手が入るので独立した回が要る。GC が入った今、これは漏れやのうて
-   速さの話。
-8. **html5lib 残り 37 件** — 大半は adoption agency の深いところ。
-   `TOBIRA_H5_FILE=adoption01.dat` から。費用対効果は他より低い。
+2026-09-10 の夜に 1・2・4・6・7・8 は片付いた（下の Session Log 参照）。
+残っとるのと、その晩に新しく見つかったものを混ぜて並べ直してある。
+
+1. **インライン矩形の残り（g2 / g4）** — `cmp.py g4.html` が 10/14、`g2` が 14/22。
+   残るのは (a) 空白だけの div の中の空 `<span>`、(b) 行をまたぐ `<span>`、
+   (c) `<a>` の x が 3px ずれる、(d) 空 div の高さが 800x1（Chrome は 800x0）。
+   **2026-09-10 に三度直そうとして三度悪化させた**（10/14 → 6〜8/14）。
+   原因は `emit_line_impl` で閉じ印が自分の run より先に処理される構造で、
+   その順序に他の計算がぶら下がっとる。**部分的に触ると壊れる。走査順を
+   設計からやり直すこと。** 詳しくは `tools/geom/README.md` の sup.html の節。
+2. **`vertical-align: super` / `sub` が効いとらん** — タグの `<sup>`/`<sub>` は
+   効くが `vertical-align` の値としては無視されとる。`<sup>`/`<sub>` の字が
+   小さうならんのも同じ節に記録した（`tools/geom/sup.html`）。
+3. **CSS animation の時間駆動** — `@keyframes` の収集と `animation` 短縮形の
+   解析は入った（`6b9a759`）。今はどのアニメも**先頭のこまで固まる**。
+   読み込み直後は Chrome もそこにおるので静止画は合う。残りは補間と、
+   こまごとの再スタイルの駆動。ここが「独立した回を丸ごと使う」部分。
+4. **巻物の幅（版面 16px と箱の 15px）** — 2026-09-10 に Chrome を実測した。
+   `overflow:auto` は中身がはみ出したときだけ 15px 確保、`scroll` は常に縦横、
+   高さ指定があると箱やのうて内側が縮む。版面のほうは `vw` と
+   `position: fixed` が 16px ずれる原因（`g1` の `vw`、`g5` の `fixed`）。
+   **未着手。**「はみ出すときだけ」を出すには二段レイアウトが要るのと、
+   描画側の巻物幅（今 10px）を 16px に寄せるかという意匠の判断が要る。
+   `tools/geom/scrollbar.html` に Chrome の数字が入っとる。
+5. **角ごとの `border-radius`** — 半径を箱に一つしか持っとらん。
+   `border-top-left-radius` などの長形式は無視されるまま。四隅に広げるには
+   `ComputedStyle`・`RectCommand`・塗りの三箇所（`border_radius` に触るのは
+   41 箇所）。短縮形の複数値は `32e7f58` で読めるようになっとる。
+6. **`Map` / `Set` の索引化** — 走査は今も線形。ただし 2026-09-10 に一歩ごとの
+   値段が 12 倍下がった（n=2000 で 456ms → 36ms）ので、**索引が要るかどうかは
+   この数字を見てから決めればええ**。`ObjectKind` の形を変える話で 43 箇所。
+7. **文字列の表現** — 写さずに読めるようにはなった（`855f9b8`）が、
+   `s.length` が `chars().count()` で O(n) なのは残っとる。`Value::String` に
+   長さか ASCII 判定を持たせる話。
+8. **html5lib 残り 33 件** — **9 件は `<isindex>`** で、これは追わんと決めた
+   ぶん。実質 24 件。塊は `<font>` の入れ子（tests23 の 3 件、adoption agency の
+   深いところ）と `<col>`/`<colgroup>` の表構造（3 件）。あとは一件ずつバラバラ。
+   **`adoption01.dat` は 13/13 で全通過しとる**ので、「大半が adoption agency」
+   というかつての記述は当たらん。`<col>` は表の自動閉じに触る領域で、
+   過去に 1184 → 1115 の退化を出しとるので慎重に。
+9. **font-size が整数** — `10pt` は 13.333px やが `LengthValue` が u32 なので
+   13px になる。Chrome との 1〜3px の字幅差はだいたいこれ。
+10. **総称 font family が locale を見とらん** — Chrome はこの機械で
+   `sans-serif` / `monospace` / `serif` に日本語既定（MS ゴシック等）を当てる。
+   tobira は英語既定（Arial / Consolas）に固定。`g6` の 3 件の落ちのうち
+   2 件はこれで、バグやのうて locale の話。残る 1 件は Tahoma の 1px 丸め差。
 
 ## 主なモジュール
 
@@ -341,6 +360,45 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-09-10 - Claude (自走ループ一晩: d1bd3cd..32e7f58)
+
+「HANDOFF の次の一手を上から順に、09:00 まで自分で回せ」で走った回。
+一件ずつ Chrome と突き合わせ → テスト → 実頁 screenshot → コミット、を繰り返した。
+細かい経緯は各コミットに書いた。ここには**やり方の話だけ**残す。
+
+**効いたやり方**
+
+- **着手前に Chrome を撮る。** 今夜これで三回救われた。`background-repeat` の
+  合成頁は 7 行のうち 1 行が「空白が正解」やったし、表の幅も 6 形のうち 4 形は
+  元から合っとった。撮らずに「全部直す」で入っとったら正しい挙動を壊しとった。
+- **落ちとる宣言から探す。** `TOBIRA_DEBUG_CSS=1 --dump-styled` の集計を実頁
+  三枚で回して上から潰す。`pt` 未対応も `border-radius` の複数値もこれで出た。
+  症状から探すより速い。
+- **網羅した検体を作る。** ループ本体の束縛は 22 形、単位は 9 形並べた。
+  22 形のほうは `var` が 222 で**正しい**ことに気づけて、素朴な修正が今
+  正しいものを壊すのを止められた。単位のほうは `12pt` と `1pc` がちょうど
+  16px で「未対応やのに一致する」罠を可視化した。
+- **一歩ごとに全部回す。** テスト・html5lib・幾何照合 g1..g6・実頁 3〜5 枚。
+  表を触った回はこれで安心して入れられた（あの領域は過去に 1184 → 1115 を
+  出しとる）。
+
+**しくじったやり方**
+
+- **インライン矩形に三度突っ込んで三度悪化させた**（g4 10/14 → 6〜8/14）。
+  部分的に触れる場所やないと分かるまでに一時間近く溶かした。
+  三度目で止めて記録に回したのは正しかったが、**二度目で止めるべきやった。**
+- **自分で書いた註釈を踏んだ。** 「ヒアドキュメントでパッチを流すな、必ず
+  Write でファイルに書け」と HANDOFF に書いてあるのに流して壊した。
+- **`html.rs` を python で書き戻して 4600 行の差分を作った。** binary 扱いで
+  `core.autocrlf` が効かん。amend で直した。両方「試してダメやった方法」に足した。
+
+**判断して**やらなかった**こと**
+
+- 巻物の 16px 確保。二段レイアウトと、描画側の巻物幅を変えるかという意匠の
+  判断が要る。Chrome の実測だけ `tools/geom/scrollbar.html` に残した。
+- 総称 font family の locale 対応。`g6` の落ちはバグやのうてこれ、と特定だけした。
+- `<col>` の表構造（html5lib 3 件）。過去の大退化と同じ領域で、割に合わん。
 
 ### 2026-09-05 - Claude (background-size に長さを持たせる: 18b94c4)
 
