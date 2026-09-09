@@ -630,13 +630,23 @@ impl FontContext {
                 }
 
                 let (metrics, bitmap) = font.rasterize(character, font_size_px as f32);
+                // No floor on the real advance. Four pixels was a floor for
+                // every glyph at every size, and a narrow letter is narrower
+                // than that whenever the type is small: Arial's `i` is 2.2px
+                // at 10px type, and `t`, `f` and the space are 2.8. Widened to
+                // four apiece they made a line of small print several percent
+                // too wide -- six pixels over twenty-six characters at 10px,
+                // three at 12px, one at 14px, and nothing at 16px, which is
+                // why the drift looked like a rounding problem rather than a
+                // floor. A face that reports no advance at all still falls
+                // back to the estimate above.
                 let advance = if metrics.advance_width > 0.0 {
                     metrics.advance_width
                 } else {
                     fallback_advance as f32
-                }
-                .max(MIN_ADVANCE_PX as f32);
-                let advance_px = (advance.round() as u32).max(MIN_ADVANCE_PX);
+                };
+                // The stepping used to place a caret still has to move.
+                let advance_px = (advance.round() as u32).max(1);
                 if metrics.width == 0 || metrics.height == 0 {
                     return CachedGlyph {
                         advance,
@@ -1104,6 +1114,40 @@ mod tests {
             );
             assert!(content > 0, "size {size}: content area should be positive");
         }
+    }
+
+    /// A narrow letter is narrow. Every glyph advance used to be floored at
+    /// four pixels whatever the type size, which only shows up when the type
+    /// is small enough for a letter to be narrower than that: Arial's `i` is
+    /// 2.2px at 10px type. A line of small print then came out several percent
+    /// too wide -- six pixels over twenty-six characters at 10px, and nothing
+    /// at all at 16px, which is why the drift read as a rounding problem.
+    #[test]
+    fn a_narrow_letter_is_narrower_than_a_wide_one_at_small_sizes() {
+        let mut fonts = FontContext::load();
+        for size in [8u32, 10, 12] {
+            let narrow = fonts.text_width_px("iiiiiiiiii", size, FontFamilyKind::Sans);
+            let wide = fonts.text_width_px("mmmmmmmmmm", size, FontFamilyKind::Sans);
+            assert!(
+                narrow * 2 <= wide,
+                "at {size}px ten i's ({narrow}) should be well under ten m's ({wide})"
+            );
+        }
+    }
+
+    /// The width of a run grows with the type, in step. A floor on the advance
+    /// flattens the small end of that curve.
+    #[test]
+    fn a_run_grows_in_proportion_with_its_type() {
+        let mut fonts = FontContext::load();
+        let text = "Hamburgefonstiv";
+        let at_10 = fonts.text_width_px(text, 10, FontFamilyKind::Sans) as f32;
+        let at_20 = fonts.text_width_px(text, 20, FontFamilyKind::Sans) as f32;
+        let ratio = at_20 / at_10;
+        assert!(
+            (ratio - 2.0).abs() < 0.15,
+            "twice the type should be about twice as wide: {at_10} -> {at_20} ({ratio})"
+        );
     }
 
     #[test]
