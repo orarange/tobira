@@ -1,5 +1,5 @@
 use crate::css::{
-    AlignItems, AlignSelf, BackgroundRepeat, BackgroundSize, BoxSizing, ClearSide, Color,
+    AlignItems, AlignSelf, BackgroundSize, BoxSizing, ClearSide, Color,
     ComputedStyle, Corners, CursorKind, DEFAULT_BACKGROUND_COLOR, Display, FlexDirection, FlexWrap,
     FloatSide, FontFamilyKind, GridEdge, GridTrackSize, JustifyContent, LengthValue, ListStyleType,
     ObjectFit, Overflow, Position, StyledElement, StyledNode, TableRole, TextAlign, TextTransform,

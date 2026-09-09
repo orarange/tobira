@@ -20,7 +20,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## いまの状態（2026-09-10）
 
-- ブランチ `master`。この文書を書いた時点の HEAD は `e88da22`
+- ブランチ `master`。この文書を書いた時点の HEAD は `c16844e`
   （この文書のコミットが直後に乗る）。
 - `cargo build --release` 通る。警告は dead_code のみ。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
@@ -325,14 +325,27 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
 
 1. **theguardian.com の 37,871 組の重なり** — **未解明。今いちばん大きい
    実害。** 左上に細い柱ができて見出しが積み上がる（screenshot で見える）。
-   潰した筋:
+   潰した筋（全部この夜に確かめて外した）:
    - **JSON の漏れやない。** `<gu-island props="{…}">` の属性値は健全で、
      生の `>` も `<` も無い。積まれとる文字は頁の本文として正しい
    - `hidden` でも `<details>` でもない（両方この夜に直したが数字は動かん）
    - 横に流れる帯そのものでもない（`tools/geom/carousel.html` が示した）
-   次に見るなら、柱の幅が一語ぶんしか無いこと — つまり**どこかの容器の
-   内容幅がほぼ 0 になっとる**ところから。`--dump-styled` は浅いので、
-   容器を特定するには計器を入れるほうが早い。
+   - **読み上げ専用の文字でもない。** `position:absolute; width:1px;
+     overflow:hidden; clip:…` は tobira もちゃんと clip しとる。
+     span を入れた頁と入れん頁で描かれる run 数が同じ
+     （`tools/geom/visuallyhidden.html`）
+
+   計器で分かっとること:
+   - 内容幅が 1 になっとる要素は**深さ 8** から始まる。それより浅い親は正常。
+     つまり深さ 7 あたりの親が 0 を配っとる
+   - 数が多いのは `dcr-1shbixy`（読み上げ専用、これは正しく 1px）が 3312、
+     `<h3 class="card-headline">` が 2760。**後者が本命**
+   - `dcr-t197d6` は `display:none` と `display:block` の**両方**が頁の
+     CSS に出てくる。どちらが勝つかは未確認
+
+   計器の入れ方: `layout_block_element` の終わりで `content_width` が
+   小さい要素を tag/class/深さ付きで出す。`--dump-styled` は浅いので
+   これが一番速い。
 
 2. **`font-size` の端数** — `LengthValue` が u32 なので `10pt`（13.333px）が
    13px になる。**縦への影響はほぼ無いと測って分かった**
@@ -356,8 +369,13 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    **部分的に触ると壊れる。走査順を設計からやり直すこと。**
    詳しくは `tools/geom/README.md` の sup.html の節。
 
-4. **flex の行の高さが 8px 高い** — `tools/geom/carousel.html` の残り 4 件。
-   単一行やのに `gap` が下にも足されとる疑い。**未確認**、一番安い。
+4. **絶対配置されたインラインの静的位置** — 流れの中の位置やのうて親の
+   内容の左端になる。Chrome は「その前の語の後ろ」に置く
+   （`tools/geom/visuallyhidden.html` で 151 に対して 8）。
+   1x1 の読み上げ専用なら実害は無いが、位置決めした吹き出しや badge では
+   効く。**直すなら行の組み立て段階**で、`layout.rs:5536` が今
+   `static_x` に 0 を渡しとる。断片を集める時点では x が決まっとらんので、
+   3 番と同じ「走査順の設計」の話になる。
 
 5. **縦の巻物の場所** — 横は入った（`1fa56de` と `e88da22`）。縦は
    `overflow: scroll` なら無条件なので**子を配置する前に幅から引ける**が、
@@ -447,11 +465,11 @@ python tools/geom/cmp.py g4.html
 
 ## Session Log
 
-### 2026-09-10 - Claude (自走ループ二晩目: 8535535..e88da22, 20 コミット)
+### 2026-09-10 - Claude (自走ループ二晩目: 8535535..c16844e, 23 コミット)
 
 一晩目と同じ「次の一手を上から順に、09:00 まで自分で回せ」。一覧を
 一巡し、そのあと実頁を掃いた。数字は 1154 → **1176 通過**、
-html5lib 97.3% → **98.5%**、照合頁は 6 枚 → 22 枚。
+html5lib 97.3% → **98.5%**、照合頁は 6 枚 → 26 枚。
 何をどう直したかは各コミットに書いた。ここには**やり方の話だけ**残す。
 
 **前半（一覧を一巡）と後半（実頁を掃く）で、出てくる穴の種類が違うた。**
