@@ -1650,6 +1650,88 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     builder.frameset_document = true;
                 }
 
+                // `<isindex>` is not an element and never becomes one. It is
+                // shorthand from the first years of the web for a whole search
+                // form, and the standard says exactly which elements stand in
+                // its place: a form, a rule, a labelled input, another rule.
+                // Left as an unknown element it stayed in the tree as itself.
+                //
+                // No page written this century uses it, and that is why it sat
+                // untouched for so long. It is worth doing anyway: it is the
+                // largest single group left in the conformance suite -- nine
+                // cases across three files -- and it is the safest, because
+                // everything here hangs off one tag name that nothing else can
+                // reach.
+                if namespace == Namespace::Html && name == "isindex" {
+                    // Only one form at a time, and this builds one. Inside a
+                    // form already open, the token is dropped whole.
+                    if builder.form_open {
+                        continue;
+                    }
+                    builder.frameset_ok = false;
+
+                    // The form takes the `action`, and nothing else.
+                    let mut form_attributes = BTreeMap::new();
+                    if let Some(action) = attributes.get("action") {
+                        form_attributes.insert("action".to_string(), action.clone());
+                    }
+                    let form = builder.insert(BuildKind::Element {
+                        tag_name: "form".to_string(),
+                        attributes: form_attributes,
+                        namespace: Namespace::Html,
+                    });
+                    builder.open.push(form);
+                    builder.form_open = true;
+
+                    let rule = |builder: &mut Builder| {
+                        builder.insert(BuildKind::Element {
+                            tag_name: "hr".to_string(),
+                            attributes: BTreeMap::new(),
+                            namespace: Namespace::Html,
+                        });
+                    };
+                    rule(&mut builder);
+                    builder.reconstruct_formatting();
+
+                    let label = builder.insert(BuildKind::Element {
+                        tag_name: "label".to_string(),
+                        attributes: BTreeMap::new(),
+                        namespace: Namespace::Html,
+                    });
+                    builder.open.push(label);
+
+                    // The words beside the box: the page's own `prompt`, or
+                    // the wording the standard spells out.
+                    builder.insert(BuildKind::Text(
+                        attributes.get("prompt").cloned().unwrap_or_else(|| {
+                            "This is a searchable index. Enter search keywords: ".to_string()
+                        }),
+                    ));
+
+                    // The input takes everything the token carried except the
+                    // three that were spoken for, and is always named
+                    // `isindex` whatever the token said.
+                    let mut input_attributes: BTreeMap<String, String> = attributes
+                        .iter()
+                        .filter(|(key, _)| {
+                            !matches!(key.as_str(), "name" | "action" | "prompt")
+                        })
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect();
+                    input_attributes.insert("name".to_string(), "isindex".to_string());
+                    builder.insert(BuildKind::Element {
+                        tag_name: "input".to_string(),
+                        attributes: input_attributes,
+                        namespace: Namespace::Html,
+                    });
+
+                    builder.open.pop();
+                    rule(&mut builder);
+                    builder.open.pop();
+                    builder.form_open = false;
+                    continue;
+                }
+
                 // A slash before `>` closes the tag only where it means
                 // something: a void element (where it is redundant) or one in
                 // SVG or MathML (where it is XML). On an ordinary HTML element
