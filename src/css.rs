@@ -4657,8 +4657,32 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             }
         }
         "vertical-align" => {
-            if let Some(va) = parse_vertical_align(value) {
-                style.vertical_align = va;
+            // `super` and `sub` are not a box alignment at all -- they shift the
+            // box off the line's baseline, which is what `baseline_shift`
+            // already does for the `<sup>` and `<sub>` tags. Only the four
+            // alignment keywords were understood, so `vertical-align: super`
+            // was dropped and the box sat flat on the baseline: on
+            // `tools/geom/sup.html` the line came out 18px tall where Chrome
+            // makes it 24. Unlike the tags, the keywords do not change the
+            // type size -- only where the box hangs.
+            //
+            // `baseline` is the initial value and has to undo a shift, so
+            // `sup { vertical-align: baseline }` puts a footnote marker back on
+            // the line the way a page that writes it expects.
+            let keyword = value.trim().to_ascii_lowercase();
+            let em_third = (parent_font_size * 33 / 100) as i32;
+            match keyword.as_str() {
+                "super" => style.baseline_shift = -em_third,
+                "sub" => style.baseline_shift = em_third / 2,
+                "baseline" => {
+                    style.baseline_shift = 0;
+                    style.vertical_align = VerticalAlign::Baseline;
+                }
+                _ => {
+                    if let Some(va) = parse_vertical_align(value) {
+                        style.vertical_align = va;
+                    }
+                }
             }
         }
         "text-decoration" => {
@@ -8892,6 +8916,48 @@ mod tests {
         assert_eq!(sup.style.font_size_px, 13);
         assert!(sup.style.baseline_shift < 0, "a superscript is lifted");
         assert!(sub.style.baseline_shift > 0, "a subscript is dropped");
+    }
+
+    /// `vertical-align: super` and `sub` shift a box off the baseline; they are
+    /// not one of the four box alignments and were dropped on the floor, so a
+    /// page that lifts a footnote marker with CSS instead of `<sup>` got no
+    /// lift at all. Unlike the tags, they leave the type size alone.
+    #[test]
+    fn vertical_align_super_and_sub_shift_the_baseline() {
+        let document = crate::html::parse_document(
+            "<p>x<span id=\"up\">1</span><span id=\"down\">2</span><sup id=\"flat\">3</sup></p>",
+        );
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(
+                "body{font-size:16px} #up{vertical-align:super} \
+                 #down{vertical-align:sub} #flat{vertical-align:baseline}",
+            ),
+            1280,
+            &super::InteractiveState::default(),
+        );
+        let by_id = |id: &str| {
+            fn walk(node: &StyledNode, id: &str) -> Option<StyledElement> {
+                match node {
+                    StyledNode::Element(element) => {
+                        if element.attributes.get("id").map(String::as_str) == Some(id) {
+                            return Some(element.clone());
+                        }
+                        element.children.iter().find_map(|child| walk(child, id))
+                    }
+                    StyledNode::Text(_) => None,
+                }
+            }
+            walk(&styled, id).expect("the span should exist")
+        };
+        let up = by_id("up");
+        let down = by_id("down");
+        assert!(up.style.baseline_shift < 0, "super lifts: {up:?}");
+        assert!(down.style.baseline_shift > 0, "sub drops: {down:?}");
+        assert_eq!(up.style.font_size_px, 16, "the keyword leaves the size alone");
+        assert_eq!(down.style.font_size_px, 16);
+        // `baseline` is the initial value, so it has to undo the tag's lift.
+        assert_eq!(by_id("flat").style.baseline_shift, 0);
     }
 
     #[test]
