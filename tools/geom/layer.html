@@ -1,0 +1,17 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+.b{width:100px;height:40px;background:#cde;margin:10px}
+</style></head><body>
+<div class="b" id="p0">plain</div>
+<div class="b" id="p1" style="opacity:0.5">op</div>
+<div class="b" id="p2">plain2</div>
+<div class="b" id="p3" style="filter:blur(2px)">blur</div>
+<div class="b" id="p4">plain3</div>
+<pre id="out"></pre>
+<script>
+var ids='p0 p1 p2 p3 p4'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>

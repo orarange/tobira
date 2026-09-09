@@ -2371,6 +2371,13 @@ fn layout_block_element(
             current_form,
         );
         *cursor_y = advance_by_margin(*cursor_y, element.style.margin.bottom);
+        // The next sibling collapses its top margin against this one, and it
+        // can only do that if the gap is recorded. Every other path that
+        // finishes a block does this; the layer path did not, so the sibling
+        // after anything with `opacity`, a filter or a transform added its top
+        // margin on top of this bottom margin instead of into it -- a 10px
+        // step per layered box, accumulating down the page.
+        context.last_bottom_margin = element.style.margin.bottom;
         return;
     }
 
