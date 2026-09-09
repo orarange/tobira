@@ -1,0 +1,33 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+/* The visually-hidden idiom: text that screen readers read and eyes never
+   see. It is on nearly every page built this decade -- theguardian.com has
+   over three thousand of them on its front page alone. The box really is 1x1;
+   what keeps the words out of sight is that the box clips.
+
+   tobira DOES clip it: a page with one of these spans paints exactly the same
+   text runs as the same page without it. That was checked, because it looked
+   like the cause of theguardian.com's 37,796 overlapping runs and is not.
+
+   What this page does catch is where the box sits. An absolutely positioned
+   inline takes its static position from where it would have been in the flow
+   -- after the words before it -- and tobira puts it at the block's content
+   origin instead. Every such span in a container therefore stacks at the same
+   x. Harmless at 1x1; not harmless for a positioned tooltip or badge. */
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;
+    clip:rect(1px,1px,1px,1px);clip-path:inset(50%);
+    white-space:nowrap;margin:-1px;padding:0;border:0}
+.card{position:relative;border:1px solid #c00;padding:8px;margin-bottom:6px}
+</style></head><body>
+<div class="card" id="k1">Visible headline one<span class="vh" id="v1">hidden helper text for readers one</span></div>
+<div class="card" id="k2">Visible headline two<span class="vh" id="v2">hidden helper text for readers two</span></div>
+<div class="card" id="k3">Visible headline three<span class="vh" id="v3">hidden helper text for readers three</span></div>
+<div id="after">after</div>
+<pre id="out"></pre>
+<script>
+var ids='k1 v1 k2 v2 k3 v3 after'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>
