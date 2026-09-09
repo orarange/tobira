@@ -2127,6 +2127,29 @@ fn ensure_document_structure(root: &mut Element, extras: ParseExtras) {
                 before_head.push(node)
             }
             Node::Comment(_) if !seen_body_content => head.children.push(node),
+            // The first run of text that is not all whitespace is where the
+            // body starts -- but any whitespace at the FRONT of it was still
+            // written while the parser was in the head, and belongs there.
+            // `<style> <!-- </style> --> x` puts the space after `</style>`
+            // in the head and starts the body at `-->`, which is what the
+            // spec's "in head" mode does with a whitespace character.
+            //
+            // Only when the head has something in it already: before that the
+            // parser is in "before head", where whitespace really is dropped.
+            Node::Text(text)
+                if !seen_body_content
+                    && !head.children.is_empty()
+                    && text.starts_with(|c: char| c.is_ascii_whitespace()) =>
+            {
+                let split = text
+                    .find(|c: char| !c.is_ascii_whitespace())
+                    .unwrap_or(text.len());
+                head.children.push(Node::Text(text[..split].to_string()));
+                seen_body_content = true;
+                if split < text.len() {
+                    body.children.push(Node::Text(text[split..].to_string()));
+                }
+            }
             _ => {
                 seen_body_content = true;
                 body.children.push(node);
