@@ -1650,6 +1650,18 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     builder.frameset_document = true;
                 }
 
+                // A column belongs to a table. Written anywhere else it is
+                // dropped, not drawn: `<body><col>A` is a body holding the
+                // letter A and nothing else. Kept, it became an empty box in
+                // the middle of the page that took the text after it inside.
+                if namespace == Namespace::Html
+                    && name == "col"
+                    && !builder.is_open("table")
+                    && !builder.is_open("colgroup")
+                {
+                    continue;
+                }
+
                 // `<isindex>` is not an element and never becomes one. It is
                 // shorthand from the first years of the web for a whole search
                 // form, and the standard says exactly which elements stand in
@@ -2918,6 +2930,46 @@ fn tokenize(input: &str) -> Vec<Token> {
     tokens
 }
 
+/// Where a tag ends, counting a `>` written inside a quoted attribute value
+/// as part of the value rather than as the end of the tag.
+///
+/// `</script foo=">" dd>` ends at the last `>`, not the one inside the quotes.
+/// Stopping at the first one left `" dd>` behind as script text and put it on
+/// the page. The quote only opens a value when it comes straight after `=`; a
+/// bare `"` anywhere else in a tag is an ordinary character.
+///
+/// A doctype is not read this way -- there a `>` ends the declaration wherever
+/// it stands, quotes included -- so it keeps the plain scan below.
+fn consume_until_tag_end_with_quotes(input: &str, index: &mut usize) {
+    let bytes = input.as_bytes();
+    while *index < bytes.len() {
+        match bytes[*index] {
+            b'>' => {
+                *index += 1;
+                return;
+            }
+            b'=' => {
+                *index += 1;
+                while *index < bytes.len() && bytes[*index].is_ascii_whitespace() {
+                    *index += 1;
+                }
+                if *index < bytes.len() && matches!(bytes[*index], b'"' | b'\'') {
+                    let quote = bytes[*index];
+                    *index += 1;
+                    while *index < bytes.len() && bytes[*index] != quote {
+                        *index += 1;
+                    }
+                    // Step over the closing quote, if the file has one.
+                    if *index < bytes.len() {
+                        *index += 1;
+                    }
+                }
+            }
+            _ => *index += 1,
+        }
+    }
+}
+
 fn consume_until_tag_end(input: &str, index: &mut usize) {
     if let Some(offset) = input[*index..].find('>') {
         *index += offset + 1;
@@ -3019,6 +3071,7 @@ fn is_void_element(name: &str) -> bool {
             // era that used them are still on the web.
             | "basefont"
             | "bgsound"
+            | "command"
             | "keygen"
             | "frame"
             | "br"
@@ -3176,7 +3229,7 @@ fn starts_with_case_insensitive(haystack: &str, needle: &str) -> bool {
 
 fn consume_raw_text_close(input: &str, close_start: usize, tag_name: &str) -> usize {
     let mut index = close_start + 2 + tag_name.len();
-    consume_until_tag_end(input, &mut index);
+    consume_until_tag_end_with_quotes(input, &mut index);
     index
 }
 
