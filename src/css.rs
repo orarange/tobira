@@ -8283,7 +8283,33 @@ fn parse_font_family(input: &str) -> Option<FontFamilyKind> {
             | "blinkmacsystemfont" | "inherit" | "initial" => {
                 return Some(FontFamilyKind::Sans);
             }
-            "cursive" | "fantasy" | "ui-serif" => return Some(FontFamilyKind::Serif),
+            "ui-serif" => return Some(FontFamilyKind::Serif),
+            // The two decorative generics are named faces on this platform,
+            // not a shape to guess at: Windows answers `cursive` with Comic
+            // Sans MS and `fantasy` with Impact, and so does Chrome. Both were
+            // being read as `serif`, so a page asking for either got Georgia
+            // -- the wrong letters and the wrong width. Measured against
+            // Chrome on `tools/geom/g6b.html`: cursive 128, fantasy 113,
+            // and tobira answered 124 for both.
+            //
+            // If the machine has no such face the old reading stands, which is
+            // the only sensible thing left.
+            "cursive" => {
+                if crate::font::family_is_installed("comic sans ms")
+                    && let Some(named) = intern_family_name("comic sans ms")
+                {
+                    return Some(named);
+                }
+                return Some(FontFamilyKind::Serif);
+            }
+            "fantasy" => {
+                if crate::font::family_is_installed("impact")
+                    && let Some(named) = intern_family_name("impact")
+                {
+                    return Some(named);
+                }
+                return Some(FontFamilyKind::Serif);
+            }
             _ => {}
         }
         if crate::font::family_is_installed(&lowered) {

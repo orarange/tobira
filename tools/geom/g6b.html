@@ -1,0 +1,53 @@
+<html><head><style>body{margin:0}
+span{display:inline-block;font-size:16px}
+</style></head><body>
+<!-- Which installed face is Chrome actually choosing for the two generic
+     families on this machine? `g6.html` says sans-serif is 129 wide and
+     monospace 120 for this word at 16px, and neither matches what tobira
+     picks (Arial 121, Consolas 132). Naming the candidates outright and
+     measuring each one says which face those numbers belong to.
+
+     Every named face in g6.html already agrees between the two browsers, so
+     a width measured here identifies the face. -->
+<div><span id="c00" style="font-family:'Yu Gothic UI'">Hamburgefonstiv</span></div>
+<div><span id="c01" style="font-family:'Yu Gothic'">Hamburgefonstiv</span></div>
+<div><span id="c02" style="font-family:'Meiryo'">Hamburgefonstiv</span></div>
+<div><span id="c03" style="font-family:'Meiryo UI'">Hamburgefonstiv</span></div>
+<div><span id="c04" style="font-family:'MS PGothic'">Hamburgefonstiv</span></div>
+<div><span id="c05" style="font-family:'MS UI Gothic'">Hamburgefonstiv</span></div>
+<div><span id="c06" style="font-family:'MS Gothic'">Hamburgefonstiv</span></div>
+<div><span id="c07" style="font-family:'Segoe UI'">Hamburgefonstiv</span></div>
+<div><span id="c08" style="font-family:'MS Mincho'">Hamburgefonstiv</span></div>
+<div><span id="c09" style="font-family:'MS PMincho'">Hamburgefonstiv</span></div>
+<div><span id="c10" style="font-family:'BIZ UDPGothic'">Hamburgefonstiv</span></div>
+<div><span id="c11" style="font-family:'BIZ UDGothic'">Hamburgefonstiv</span></div>
+<div><span id="c12" style="font-family:'Consolas'">Hamburgefonstiv</span></div>
+<div><span id="c13" style="font-family:'Courier New'">Hamburgefonstiv</span></div>
+<div><span id="c14" style="font-family:'Arial'">Hamburgefonstiv</span></div>
+<div><span id="c15" style="font-family:'Tahoma'">Hamburgefonstiv</span></div>
+<div><span id="c16" style="font-family:sans-serif">Hamburgefonstiv</span></div>
+<div><span id="c17" style="font-family:monospace">Hamburgefonstiv</span></div>
+<div><span id="c18" style="font-family:serif">Hamburgefonstiv</span></div>
+<div><span id="c19" style="font-family:cursive">Hamburgefonstiv</span></div>
+<div><span id="c20" style="font-family:fantasy">Hamburgefonstiv</span></div>
+<div><span id="c21" style="font-family:system-ui">Hamburgefonstiv</span></div>
+<div><span id="c22" style="font-family:'Microsoft Sans Serif'">Hamburgefonstiv</span></div>
+<div><span id="c23" style="font-family:'Yu Mincho'">Hamburgefonstiv</span></div>
+<div><span id="c24" style="font-family:'Calibri'">Hamburgefonstiv</span></div>
+<div><span id="c25" style="font-family:'Noto Sans'">Hamburgefonstiv</span></div>
+<div><span id="c26" style="font-family:'Times New Roman'">Hamburgefonstiv</span></div>
+<div><span id="c27" style="font-family:'Georgia'">Hamburgefonstiv</span></div>
+<div><span id="c28" style="font-family:'Comic Sans MS'">Hamburgefonstiv</span></div>
+<div><span id="c29" style="font-family:'Impact'">Hamburgefonstiv</span></div>
+<div><span id="c30" style="font-family:'Segoe UI Emoji'">Hamburgefonstiv</span></div>
+<div><span id="c31" style="font-family:'Verdana'">Hamburgefonstiv</span></div>
+<pre id="out"></pre>
+<script>
+var out=[];
+for (var i=0;i<=31;i++){
+  var id='c'+(i<10?'0'+i:i);
+  var e=document.getElementById(id);
+  out.push(id+' '+e.getAttribute('style').replace('font-family:','')+' w='+Math.round(e.getBoundingClientRect().width));
+}
+document.getElementById('out').textContent = out.join('\n');
+</script></body></html>
