@@ -1,0 +1,18 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+.b{width:100px;height:40px;background:#cde;margin:10px}
+</style></head><body>
+<div class="b" id="t0">none</div>
+<div class="b" id="t1" style="transform:scale(2)">scale2</div>
+<div class="b" id="t2" style="transform:translate(30px,10px)">tr</div>
+<div class="b" id="t3" style="transform:scale(2) translate(20px,0)">s+t</div>
+<div class="b" id="t4" style="transform:rotate(45deg)">rot45</div>
+<div class="b" id="t5" style="transform:scale(0.5)">half</div>
+<pre id="out"></pre>
+<script>
+var ids='t0 t1 t2 t3 t4 t5'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>

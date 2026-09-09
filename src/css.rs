@@ -1466,7 +1466,7 @@ pub struct ComputedStyle {
 }
 
 impl ComputedStyle {
-    fn for_element(tag_name: &str, parent: Option<&Self>) -> Self {
+    pub(crate) fn for_element(tag_name: &str, parent: Option<&Self>) -> Self {
         let parent_font_size = parent.map(|s| s.font_size_px).unwrap_or(16);
         let mut style = Self {
             // Custom properties inherit; the ancestors' map is shared, not copied.

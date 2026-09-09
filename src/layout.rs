@@ -3350,6 +3350,59 @@ fn rebase_commands(commands: &mut Vec<DrawCommand>, origin_x: u32, origin_y: u32
 ///
 /// Returns `(shift_x, shift_y, width, height)`: how far the contents move
 /// inside the enlarged layer, and how big that layer has to be.
+/// Where a transformed box actually lands, as `(left, top, width, height)`
+/// relative to the box's untransformed top-left. `left` and `top` are signed:
+/// a box scaled up about its centre starts to the left of where the flow put
+/// it.
+///
+/// Not the same as `transformed_layer_bounds`, which only ever grows because
+/// it is sizing a buffer to paint into. Hit testing needs the real rectangle:
+/// `transform: scale(0.5)` covers a quarter of the area, and saying otherwise
+/// would let a click land on a box that is not under the pointer.
+fn transformed_hit_bounds(style: &ComputedStyle, width: u32, height: u32) -> (i64, i64, u32, u32) {
+    let scale_x = if style.transform_scale_x == 0 {
+        1.0
+    } else {
+        style.transform_scale_x as f32 / 1000.0
+    };
+    let scale_y = if style.transform_scale_y == 0 {
+        1.0
+    } else {
+        style.transform_scale_y as f32 / 1000.0
+    };
+    let angle = (style.transform_rotate_millideg as f32 / 1000.0).to_radians();
+    let (sin, cos) = angle.sin_cos();
+    let origin_x = style.transform_origin_x as f32 / 1000.0 * width as f32;
+    let origin_y = style.transform_origin_y as f32 / 1000.0 * height as f32;
+
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for (x, y) in [
+        (0.0, 0.0),
+        (width as f32, 0.0),
+        (0.0, height as f32),
+        (width as f32, height as f32),
+    ] {
+        let (dx, dy) = (x - origin_x, y - origin_y);
+        let (sx, sy) = (dx * scale_x, dy * scale_y);
+        let moved_x = origin_x + sx * cos - sy * sin;
+        let moved_y = origin_y + sx * sin + sy * cos;
+        min_x = min_x.min(moved_x);
+        min_y = min_y.min(moved_y);
+        max_x = max_x.max(moved_x);
+        max_y = max_y.max(moved_y);
+    }
+
+    (
+        min_x.round() as i64,
+        min_y.round() as i64,
+        (max_x - min_x).round().max(1.0) as u32,
+        (max_y - min_y).round().max(1.0) as u32,
+    )
+}
+
 fn transformed_layer_bounds(
     style: &ComputedStyle,
     width: u32,
@@ -3806,6 +3859,32 @@ fn layout_block_element_as_layer(
         origin_y,
         commands: sub_context.commands,
     }));
+
+    // The box's own hitbox. This path returns before `record_container_box` is
+    // ever reached, so a scaled or rotated element had NO hitbox at all --
+    // `getBoundingClientRect` answered 0,0 0x0 for every one of them, and
+    // nothing could be clicked. The children's boxes came through below; only
+    // the transformed box itself was missing.
+    //
+    // Measured against the transform, not against the flow: a box at
+    // `scale(0.5)` covers a quarter of the area it was given.
+    if !element.style.pointer_events_none
+        && let Some(node_id) = element_node_id(element)
+    {
+        let (hit_left, hit_top, hit_width, hit_height) =
+            transformed_hit_bounds(&element.style, box_width, final_height);
+        context.element_hitboxes.push(ElementHitbox {
+            node_id,
+            // A box scaled up about its centre reaches left of the page. The
+            // hitbox is unsigned, so that part is simply not addressable and
+            // the box starts at the edge.
+            x: (outer_x as i64 + hit_left).max(0) as u32,
+            y: (background_top as i64 + hit_top).max(0) as u32,
+            width: hit_width,
+            height: hit_height,
+            cursor_kind: element.style.cursor_kind,
+        });
+    }
 
     // Propagate links, controls, and element hitboxes from sub_context to parent
     context.links.extend(sub_context.links);
@@ -14933,6 +15012,44 @@ mod tests {
             "a cell must not exceed its table's width, got {}",
             cell.width
         );
+    }
+
+    /// A scaled or rotated box is painted into a layer of its own, and that
+    /// path used to return before any hitbox was recorded -- so every
+    /// transformed element reported 0,0 0x0 and nothing on it could be
+    /// clicked. `transformed_hit_bounds` is what the hitbox is measured with:
+    /// unlike the layer's own bounds it may SHRINK, because `scale(0.5)`
+    /// really does cover a quarter of the area and a click outside that
+    /// quarter is not on the box.
+    #[test]
+    fn transformed_hit_bounds_follow_the_transform() {
+        use super::transformed_hit_bounds;
+        use crate::css::ComputedStyle;
+        let mut style = ComputedStyle::for_element("div", None);
+        // `transform-origin: 50% 50%` is the initial value.
+        style.transform_origin_x = 500;
+        style.transform_origin_y = 500;
+
+        // No transform: the box is where the flow put it.
+        assert_eq!(transformed_hit_bounds(&style, 100, 40), (0, 0, 100, 40));
+
+        // Twice the size about the centre: it reaches half its width to the
+        // left and half its height above.
+        style.transform_scale_x = 2000;
+        style.transform_scale_y = 2000;
+        assert_eq!(transformed_hit_bounds(&style, 100, 40), (-50, -20, 200, 80));
+
+        // Half the size: a quarter of the area, inset by a quarter.
+        style.transform_scale_x = 500;
+        style.transform_scale_y = 500;
+        assert_eq!(transformed_hit_bounds(&style, 100, 40), (25, 10, 50, 20));
+
+        // A quarter turn of a 100x40 box is a 40x100 one.
+        style.transform_scale_x = 0;
+        style.transform_scale_y = 0;
+        style.transform_rotate_millideg = 90_000;
+        let (_, _, width, height) = transformed_hit_bounds(&style, 100, 40);
+        assert_eq!((width, height), (40, 100));
     }
 
     #[test]
