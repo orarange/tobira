@@ -6655,7 +6655,13 @@ fn emit_line_impl(
         .max(line.line_height.min(above + below).max(1))
         .max(min_line_height);
     let baseline = above;
-    let strut_content = text_line_height(container_style, fonts);
+    // The height an inline element falls back to when its runs have not been
+    // walked yet, or when it wrote nothing at all: its CONTENT area, not the
+    // line's advance. Two spans on one line disagreed because of this -- the
+    // one whose closing mark shares a span index with its opening one is
+    // closed before its run is measured, so it took this fallback while its
+    // neighbour took the measured height.
+    let strut_content = text_content_height(container_style, fonts);
     // The inline elements whose runs are being walked right now.
     let mut open_inlines: Vec<u32> = Vec::new();
 
@@ -6677,15 +6683,23 @@ fn emit_line_impl(
         );
         // Every run inside an open element pushes its box out to hold it.
         if !open_inlines.is_empty() {
+            // An inline element's own box is its CONTENT area -- ascent plus
+            // descent -- not the line's advance. The two differ by the face's
+            // line gap, which is leading and sits outside the box: Arial at
+            // 16px advances 18 and has a 17px content area, and reporting 18
+            // made every inline box in the geometry probes a pixel too tall.
+            // The top is still measured from the line's own baseline, so only
+            // the bottom edge moves.
             let run_height = if span.atomic.is_some() || span.image.is_some() {
                 span.height
             } else {
-                text_line_height(&span.style, fonts)
+                text_content_height(&span.style, fonts)
             };
             let run_above = if span.atomic.is_some() || span.image.is_some() {
                 span.height
             } else {
-                run_height.saturating_sub(below_baseline(&span.style, fonts))
+                text_line_height(&span.style, fonts)
+                    .saturating_sub(below_baseline(&span.style, fonts))
             };
             let top = cursor_y
                 .saturating_add(baseline)
@@ -7020,6 +7034,15 @@ fn atomic_span_baseline(
     } else {
         height
     }
+}
+
+/// The height of an inline box's own content area.
+///
+/// `line-height` sets how far apart the lines sit; it does not stretch or
+/// shrink the box around the letters. So this is always the face's ascent plus
+/// descent, whatever the line spacing is.
+fn text_content_height(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {
+    fonts.content_height_px(style.font_size_px, style.font_family)
 }
 
 fn text_line_height(style: &ComputedStyle, fonts: &mut FontContext) -> u32 {

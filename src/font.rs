@@ -261,8 +261,15 @@ struct CachedLineMetrics {
     /// How far the face reaches below the baseline, as a positive number.
     descent_px: u32,
     /// What `line-height: normal` comes to for this face and size: the font's
-    /// own ascent, descent and line gap added together.
+    /// own ascent, descent and line gap added together. This is the line's
+    /// ADVANCE -- how far the next line starts below this one.
     normal_line_px: u32,
+    /// The content area of an inline box: ascent plus descent, each rounded on
+    /// its own, with no line gap. This is what an inline element reports as its
+    /// height, and it is not the same number as the line advance -- Arial at
+    /// 16px advances 18 and has a 17px content area. Taking the advance for
+    /// both made every inline box in the geometry probes a pixel too tall.
+    content_px: u32,
 }
 
 impl FontContext {
@@ -477,6 +484,13 @@ impl FontContext {
             .max(1)
     }
 
+    /// The height of an inline box's content area: ascent plus descent, each
+    /// rounded on its own. Distinct from `line_height_px`, which is how far
+    /// apart two lines sit -- that one includes the face's line gap.
+    pub fn content_height_px(&mut self, font_size_px: u32, font_family: FontFamilyKind) -> u32 {
+        self.line_metrics(font_size_px, font_family).content_px.max(1)
+    }
+
     /// How far below the baseline the face reaches, at this size.
     ///
     /// Half the leading is added on top of it when a line is taller than the
@@ -508,6 +522,11 @@ impl FontContext {
                         ascent_px: line.ascent.ceil() as i32,
                         descent_px: (-line.descent).ceil().max(0.0) as u32,
                         normal_line_px: line.new_line_size.round().max(1.0) as u32,
+                        // Rounded apart and then added, which is what Chrome
+                        // does: Arial at 16px is ascent 14.484 and descent
+                        // 3.391, so 14 + 3 = 17. Rounding the sum would give 18.
+                        content_px: (line.ascent.round() + (-line.descent).round().max(0.0)).max(1.0)
+                            as u32,
                     })
             })
             .unwrap_or(CachedLineMetrics {
@@ -516,6 +535,7 @@ impl FontContext {
                 // No face to ask: the ratio a browser lands on for the common
                 // text faces.
                 normal_line_px: (font_size_px as f32 * 1.15).round().max(1.0) as u32,
+                content_px: (font_size_px as f32 * 1.15).round().max(1.0) as u32,
             });
 
         self.line_metrics_cache.insert(key, metrics);
@@ -1066,6 +1086,25 @@ mod tests {
 
     use super::{FontContext, estimated_glyph_advance_px, estimated_text_width_px};
     use crate::css::FontFamilyKind;
+
+    /// The line's advance and an inline box's content area are two different
+    /// numbers. The advance carries the face's line gap; the content area does
+    /// not. Arial at 16px advances 18 and has a 17px content area, and taking
+    /// the advance for both made every inline box a pixel too tall against
+    /// Chrome (`tools/geom/g4.html`).
+    #[test]
+    fn a_line_advances_further_than_its_content_area() {
+        let mut fonts = FontContext::load();
+        for size in [12u32, 16, 20, 32] {
+            let advance = fonts.line_height_px(size, FontFamilyKind::Sans);
+            let content = fonts.content_height_px(size, FontFamilyKind::Sans);
+            assert!(
+                content <= advance,
+                "size {size}: content area {content} should not exceed the advance {advance}"
+            );
+            assert!(content > 0, "size {size}: content area should be positive");
+        }
+    }
 
     #[test]
     fn wide_characters_take_more_space() {
