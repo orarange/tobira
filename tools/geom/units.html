@@ -1,0 +1,22 @@
+<html><head><style>body{margin:0;font-family:Verdana}span{display:inline-block}
+#pt10{font-size:10pt} #px13{font-size:13.333px} #px16{font-size:16px}
+#pt12{font-size:12pt} #em{font-size:1em} #pc{font-size:1pc} #inch{font-size:0.2in}
+#mm{font-size:5mm} #cm{font-size:0.5cm}
+</style></head><body>
+<div><span id="pt10">Hamburgefonstiv</span></div>
+<div><span id="px13">Hamburgefonstiv</span></div>
+<div><span id="px16">Hamburgefonstiv</span></div>
+<div><span id="pt12">Hamburgefonstiv</span></div>
+<div><span id="em">Hamburgefonstiv</span></div>
+<div><span id="pc">Hamburgefonstiv</span></div>
+<div><span id="inch">Hamburgefonstiv</span></div>
+<div><span id="mm">Hamburgefonstiv</span></div>
+<div><span id="cm">Hamburgefonstiv</span></div>
+<pre id="out"></pre>
+<script>
+var ids='pt10 px13 px16 pt12 em pc inch mm cm'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var e=document.getElementById(id);
+  return id+' '+Math.round(e.getBoundingClientRect().width)+' fs='+getComputedStyle(e).fontSize;
+}).join('\n');
+</script></body></html>

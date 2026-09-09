@@ -1,0 +1,16 @@
+<html><head><style>body{margin:0}span{display:inline-block}</style></head><body>
+<div><span id="segoe" style="font:16px 'Segoe UI'">Hamburgefonstiv</span></div>
+<div><span id="consolas" style="font:16px Consolas">Hamburgefonstiv</span></div>
+<div><span id="tahoma" style="font:16px Tahoma">Hamburgefonstiv</span></div>
+<div><span id="lucida" style="font:16px 'Lucida Console'">Hamburgefonstiv</span></div>
+<div><span id="calibri" style="font:16px Calibri">Hamburgefonstiv</span></div>
+<div><span id="sans" style="font:16px sans-serif">Hamburgefonstiv</span></div>
+<div><span id="mono" style="font:16px monospace">Hamburgefonstiv</span></div>
+<div><span id="serif" style="font:16px serif">Hamburgefonstiv</span></div>
+<pre id="out"></pre>
+<script>
+var ids='segoe consolas tahoma lucida calibri sans mono serif'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  return id+' '+Math.round(document.getElementById(id).getBoundingClientRect().width);
+}).join('\n');
+</script></body></html>

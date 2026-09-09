@@ -7511,6 +7511,31 @@ pub fn parse_length(input: &str, parent_font_size: u32) -> Option<u32> {
         return parse_float(number).map(|p| p.round().max(0.0) as u32);
     }
 
+    // The absolute units. Every one of them is a fixed multiple of the pixel:
+    // CSS defines 1in as exactly 96px and the rest follow from that.
+    //
+    // None of them were understood, so `parse_length` answered `None` and the
+    // caller fell back to its default -- `font-size: 10pt` came out 16px
+    // instead of 13.3px. Hacker News sets its whole page in points
+    // (`body{font-size:10pt}`, `.subtext{font-size:9pt}`), so every word on it
+    // was a fifth too large. `12pt` and `1pc` happen to be exactly 16px, which
+    // is why spot checks with those two looked right.
+    for (suffix, per_unit) in [
+        ("pt", 96.0 / 72.0),
+        ("pc", 16.0),
+        ("in", 96.0),
+        ("cm", 96.0 / 2.54),
+        ("mm", 96.0 / 25.4),
+        ("q", 96.0 / 101.6),
+    ] {
+        if let Some(number) = value.strip_suffix(suffix) {
+            // Only if what is left really is a number: `thin` ends in `in`.
+            if let Some(parsed) = parse_float(number) {
+                return Some((parsed * per_unit).round().max(0.0) as u32);
+            }
+        }
+    }
+
     if let Some(number) = value.strip_suffix("vw") {
         return parse_float(number).map(|p| (p * 1280.0 / 100.0).round() as u32);
     }
