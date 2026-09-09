@@ -392,8 +392,12 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    `auto` は「縦にはみ出すか」を先に知らなあかんので二段レイアウトが要る。
 
 7. **clip がまだ軸ごとやない** — `overflow_x` / `overflow_y` は入った
-   （`a056c38`）が、clip の判定は潰した一つの値で見とる。実害は測っとらん
-   （箱の寸法は Chrome と一致）。判定は 8 箇所。
+   （`a056c38`）が、clip の判定は潰した一つの値で見とる。
+   **実害を測った。無い。** `tools/geom/clipaxis.html` が 8/9 で、
+   間違うて clip した行も、clip せんかった行も出とらん。
+   唯一の差は「`overflow-x:hidden` の箱の子が Chrome では 105 幅」で、
+   これは縦巻物が幅を食うぶん — 6 番の二段レイアウトの話であって
+   軸ごとの clip の話やない。**急がんでええ、と測って言える。**
 
 8. **`<summary>` の無い `<details>`** — ブラウザは既定の見出しを出す。
    `tools/geom/details.html` の d4 がこれで、Chrome 24px に対して 0。

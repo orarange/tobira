@@ -1,0 +1,44 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+.p{width:120px;height:40px;border:1px solid #c00;margin-bottom:8px}
+.tall{background:#dfd}
+.wide{width:300px;background:#cde}
+</style></head><body>
+<!-- Clipping is per axis. `overflow-x: hidden` clips sideways and leaves the
+     other axis scrollable, so what runs off the BOTTOM is still reachable and
+     is not painted away; `overflow-y: hidden` is the mirror of that.
+     tobira keeps one `overflow` value for both axes -- the stricter of the two
+     -- so it may clip an axis the page left alone. This page says whether that
+     costs anything visible.
+
+     The text is what tells: a run that survives is painted, a clipped one is
+     not. The boxes themselves are the same size either way.
+
+     Measured 2026-09-10: it costs nothing visible. Eight of the nine rows
+     agree with Chrome, and the one that does not is not about clipping -- the
+     child of the `overflow-x: hidden` box is 105 wide in Chrome and 120 here,
+     because CSS turns the other axis into `auto`, the content runs off the
+     bottom, and the vertical scrollbar that appears takes fifteen pixels out
+     of the width the child is offered. That is the two-pass problem, not the
+     axis one. -->
+<div class="p" style="overflow-x:hidden" id="a">
+  <div class="tall" id="a1">one two three four five six seven eight nine ten</div>
+</div>
+<div class="p" style="overflow-y:hidden" id="b">
+  <div class="wide" id="b1">one two three four five</div>
+</div>
+<div class="p" style="overflow:hidden" id="c">
+  <div class="tall" id="c1">one two three four five six seven eight nine ten</div>
+</div>
+<div class="p" style="overflow:visible" id="d">
+  <div class="tall" id="d1">one two three four five six seven eight nine ten</div>
+</div>
+<div id="after">after</div>
+<pre id="out"></pre>
+<script>
+var ids='a a1 b b1 c c1 d d1 after'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>

@@ -31,6 +31,7 @@ python tools/geom/cmp.py g4.html
 | `scrollbar.html` | when a scrollbar takes room | 7/7 |
 | `overflow.html` | overflow in a narrow parent | 10/17 |
 | `overflow2.html` | `overflow-x` / `-y` set apart | 12/12 |
+| `clipaxis.html` | whether one-axis clipping costs anything | 8/9 |
 | `fsize.html` | text width at fractional type sizes | 3/12 |
 | `lineheight2.html` | line height at fractional type sizes | 7/14 |
 | `sup.html` | superscripts and `vertical-align` | 2/10 |
