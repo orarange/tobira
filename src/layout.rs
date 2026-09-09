@@ -1,6 +1,6 @@
 use crate::css::{
     AlignItems, AlignSelf, BackgroundRepeat, BackgroundSize, BoxSizing, ClearSide, Color,
-    ComputedStyle, CursorKind, DEFAULT_BACKGROUND_COLOR, Display, FlexDirection, FlexWrap,
+    ComputedStyle, Corners, CursorKind, DEFAULT_BACKGROUND_COLOR, Display, FlexDirection, FlexWrap,
     FloatSide, FontFamilyKind, GridEdge, GridTrackSize, JustifyContent, LengthValue, ListStyleType,
     ObjectFit, Overflow, Position, StyledElement, StyledNode, TableRole, TextAlign, TextTransform,
     VerticalAlign, WhiteSpaceMode, apply_text_transform,
@@ -141,7 +141,7 @@ pub struct GradientCommand {
     pub y: u32,
     pub width: u32,
     pub height: u32,
-    pub border_radius: u32,
+    pub border_radius: Corners,
     pub angle_deg_x1000: i32,
     /// Stops run out from the centre rather than along the angle.
     pub radial: bool,
@@ -428,7 +428,7 @@ pub struct RectCommand {
     pub width: u32,
     pub height: u32,
     pub color: Color,
-    pub border_radius: u32,
+    pub border_radius: Corners,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2412,7 +2412,7 @@ fn layout_block_element(
             width: sw,
             height: 1,
             color: shadow.color.unwrap_or(element.style.color),
-            border_radius: element.style.border_radius.saturating_add(blur),
+            border_radius: element.style.border_radius.expanded(blur),
         }));
         Some(context.commands.len() - 1)
     } else {
@@ -2585,7 +2585,7 @@ fn layout_block_element(
             width: content_width,
             height: 2,
             color: element.style.color,
-            border_radius: 0,
+            border_radius: Corners::ZERO,
         }));
         *cursor_y = cursor_y.saturating_add(10);
     } else {
@@ -2819,8 +2819,16 @@ fn layout_block_element(
         // starts curving. Run edge to edge, the bar cuts across the rounded
         // corner and the page shows through between the two: firefox.com's
         // front-page cards had a dark notch bitten out of each bottom corner.
+        // The largest corner, so a bar stops short of every curve on its
+        // side. Insetting each bar by its own two corners would be exact;
+        // taking the largest only makes a bar shorter than it needs to be,
+        // which shows as a slightly wider gap and never as a notch.
         let corner = corner_inset(
-            element.style.border_radius,
+            element
+                .style
+                .border_radius
+                .fitted(outer_width.max(1), background_height)
+                .largest(),
             outer_width.max(1),
             background_height,
         );
@@ -2833,7 +2841,7 @@ fn layout_block_element(
                 width: bar_width,
                 height: border_top_h,
                 color: bc,
-                border_radius: 0,
+                border_radius: Corners::ZERO,
             }));
         }
         if border_bottom_h > 0 && bar_width > 0 {
@@ -2843,7 +2851,7 @@ fn layout_block_element(
                 width: bar_width,
                 height: border_bottom_h,
                 color: bc,
-                border_radius: 0,
+                border_radius: Corners::ZERO,
             }));
         }
         if border_left_w > 0 && bar_height > 0 {
@@ -2853,7 +2861,7 @@ fn layout_block_element(
                 width: border_left_w,
                 height: bar_height,
                 color: bc,
-                border_radius: 0,
+                border_radius: Corners::ZERO,
             }));
         }
         if border_right_w > 0 && bar_height > 0 {
@@ -2865,7 +2873,7 @@ fn layout_block_element(
                 width: border_right_w,
                 height: bar_height,
                 color: bc,
-                border_radius: 0,
+                border_radius: Corners::ZERO,
             }));
         }
     }
@@ -3524,7 +3532,7 @@ fn layout_block_element_as_layer(
             width: sw,
             height: 1,
             color: shadow.color.unwrap_or(element.style.color),
-            border_radius: element.style.border_radius.saturating_add(blur),
+            border_radius: element.style.border_radius.expanded(blur),
         }));
         Some(sub_context.commands.len() - 1)
     } else {
@@ -3641,7 +3649,7 @@ fn layout_block_element_as_layer(
             width: content_width,
             height: 2,
             color: element.style.color,
-            border_radius: 0,
+            border_radius: Corners::ZERO,
         }));
         *cursor_y = cursor_y.saturating_add(10);
     } else {
@@ -3803,7 +3811,7 @@ fn layout_block_element_as_layer(
                 width: border_left_w,
                 height: final_height,
                 color: bc,
-                border_radius: 0,
+                border_radius: Corners::ZERO,
             }));
         }
         if border_right_w > 0 {
@@ -3815,7 +3823,7 @@ fn layout_block_element_as_layer(
                 width: border_right_w,
                 height: final_height,
                 color: bc,
-                border_radius: 0,
+                border_radius: Corners::ZERO,
             }));
         }
     }
@@ -4303,7 +4311,7 @@ fn layout_table_element(
                     width: layer_w,
                     height: layer_h,
                     color: background_color,
-                    border_radius: 0,
+                    border_radius: Corners::ZERO,
                 }));
             }
             if let Some(ref url) = placement.cell.style.background_image_url {
@@ -4432,7 +4440,7 @@ fn layout_table_element(
                     width: cell_width.max(1),
                     height: cell_height.max(1),
                     color: blended,
-                    border_radius: 0,
+                    border_radius: Corners::ZERO,
                 }));
             }
             if let Some(ref url) = placement.cell.style.background_image_url {
@@ -6999,7 +7007,7 @@ fn emit_line_impl(
                 width: span.width,
                 height: line_height,
                 color: blended_bg,
-                border_radius: 0,
+                border_radius: Corners::ZERO,
             }));
         }
 
@@ -8749,7 +8757,7 @@ fn layout_grid_container_inner(
                 width: border_left_w,
                 height: background_height,
                 color: bc,
-                border_radius: 0,
+                border_radius: Corners::ZERO,
             }));
         }
         if border_right_w > 0 {
@@ -8761,7 +8769,7 @@ fn layout_grid_container_inner(
                 width: border_right_w,
                 height: background_height,
                 color: bc,
-                border_radius: 0,
+                border_radius: Corners::ZERO,
             }));
         }
     }
@@ -9352,7 +9360,7 @@ fn layout_flex_container_inner(
                 style.padding = crate::css::EdgeSizes::default();
                 style.margin = crate::css::SignedEdgeSizes::default();
                 style.border = crate::css::EdgeSizes::default();
-                style.border_radius = 0;
+                style.border_radius = Corners::ZERO;
                 style.background_color = None;
                 style.background_gradient = None;
                 style.background_image_url = None;
@@ -10089,7 +10097,7 @@ fn layout_flex_container_inner(
                 width: border_left,
                 height: background_height,
                 color: bc,
-                border_radius: 0,
+                border_radius: Corners::ZERO,
             }));
         }
         if border_right > 0 {
@@ -10101,7 +10109,7 @@ fn layout_flex_container_inner(
                 width: border_right,
                 height: background_height,
                 color: bc,
-                border_radius: 0,
+                border_radius: Corners::ZERO,
             }));
         }
     }
@@ -14602,12 +14610,12 @@ mod tests {
         let layout = layout_styled_document(&styled, &images, 800, &mut fonts);
 
         let rects = layout.rects();
-        let bg_rect = rects.iter().find(|r| r.border_radius == 10);
+        let bg_rect = rects.iter().find(|r| r.border_radius == crate::css::Corners::uniform(10));
         assert!(
             bg_rect.is_some(),
             "Should have a rect with border_radius=10"
         );
-        assert_eq!(bg_rect.unwrap().border_radius, 10);
+        assert_eq!(bg_rect.unwrap().border_radius, crate::css::Corners::uniform(10));
     }
     #[test]
     fn test_box_shadow_generates_shadow_rect() {

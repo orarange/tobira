@@ -4537,7 +4537,7 @@ fn render_commands(
                 if rect_bottom < scroll_y || rect.y > viewport_bottom {
                     continue;
                 }
-                if rect.border_radius > 0 {
+                if !rect.border_radius.is_zero() {
                     if rect.y < scroll_y {
                         // Partially above viewport: fall back to draw_rect to avoid rendering
                         // top rounded corners at the viewport edge (wrong position). The
@@ -4760,7 +4760,15 @@ fn render_commands(
                 let radius = ((gw / 2.0).hypot(gh / 2.0)).max(0.001);
 
                 // border_radius corner check setup
-                let r = g.border_radius.min(g.width / 2).min(g.height / 2) as i64;
+                // A gradient is still rounded by one radius: the largest,
+                // so no corner is left square. Per-corner gradients would need
+                // this loop to know which corner each pixel is nearest.
+                let r = g
+                    .border_radius
+                    .fitted(g.width, g.height)
+                    .largest()
+                    .min(g.width / 2)
+                    .min(g.height / 2) as i64;
                 let r_sq = r * r;
                 let cx_left = g.x as i64 + r;
                 let cx_right = (g.x + g.width) as i64 - r;
@@ -5560,6 +5568,13 @@ fn blend_pixel(dst: u32, src: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
+/// A rectangle with a radius of its own on each corner.
+///
+/// Written as four quarter-discs and the three bands between them, so a corner
+/// that is square costs nothing and no pixel is painted twice. One radius for
+/// the whole box could not draw a card rounded on top and square where it
+/// meets what is below -- which is how tabs, cards and stacked panels are
+/// written.
 fn draw_rounded_rect(
     buffer: &mut [u32],
     buf_w: u32,
@@ -5568,126 +5583,87 @@ fn draw_rounded_rect(
     y: u32,
     w: u32,
     h: u32,
-    radius: u32,
+    radius: crate::css::Corners,
     color: u32,
 ) {
-    if radius == 0 || w == 0 || h == 0 {
-        draw_rect(buffer, buf_w, buf_h, x, y, w, h, color);
+    if w == 0 || h == 0 {
         return;
     }
-    let r = radius.min(w / 2).min(h / 2);
-    if r == 0 {
+    // No corner may reach past the middle of an edge, and two on the same edge
+    // may not overlap.
+    let radius = radius.fitted(w, h);
+    if radius.is_zero() {
         draw_rect(buffer, buf_w, buf_h, x, y, w, h, color);
         return;
     }
 
     let x2 = x.saturating_add(w);
     let y2 = y.saturating_add(h);
-    let cx_left = x.saturating_add(r);
-    let cx_right = x2.saturating_sub(r);
-    let cy_top = y.saturating_add(r);
-    let cy_bottom = y2.saturating_sub(r);
-    let r_sq = (r as i64) * (r as i64);
+    // The band at the top is as tall as the taller of the two corners above it,
+    // and likewise at the bottom. Everything between them is a plain rectangle.
+    let top_band = radius.top_left.max(radius.top_right);
+    let bottom_band = radius.bottom_left.max(radius.bottom_right);
+    let middle_top = y.saturating_add(top_band);
+    let middle_bottom = y2.saturating_sub(bottom_band);
 
-    // Middle strip: full-width rows — no corner checks needed
-    if cy_top < cy_bottom {
+    if middle_top < middle_bottom {
         draw_rect(
             buffer,
             buf_w,
             buf_h,
             x,
-            cy_top,
+            middle_top,
             w,
-            cy_bottom - cy_top,
+            middle_bottom - middle_top,
             color,
         );
     }
 
-    // Top corner strip: rows y..cy_top
-    let py_end_top = cy_top.min(buf_h) as usize;
-    for py in (y.min(buf_h) as usize)..py_end_top {
-        let pv32 = py as u32;
-        // Left corner: x..cx_left
-        for px in (x.min(buf_w) as usize)..(cx_left.min(buf_w) as usize) {
-            let pu32 = px as u32;
-            let dx = cx_left.saturating_sub(pu32) as i64;
-            let dy = cy_top.saturating_sub(pv32) as i64;
-            if dx * dx + dy * dy <= r_sq {
-                let idx = py * buf_w as usize + px;
-                if idx < buffer.len() {
-                    buffer[idx] = blend_pixel(buffer[idx], color);
-                }
+    // One row of a band: solid except where a corner's disc has not reached.
+    let mut row = |py: u32, left_radius: u32, right_radius: u32, from_top: bool| {
+        if py >= buf_h {
+            return;
+        }
+        // How far in from each side this row is still cut away.
+        let inset = |r: u32| -> u32 {
+            if r == 0 {
+                return 0;
             }
-        }
-        // Middle of row: cx_left..cx_right (always inside)
-        if cx_left < cx_right {
-            draw_rect(
-                buffer,
-                buf_w,
-                buf_h,
-                cx_left,
-                pv32,
-                cx_right - cx_left,
-                1,
-                color,
-            );
-        }
-        // Right corner: cx_right..x2
-        for px in (cx_right.min(buf_w) as usize)..(x2.min(buf_w) as usize) {
-            let pu32 = px as u32;
-            let dx = pu32.saturating_sub(cx_right) as i64;
-            let dy = cy_top.saturating_sub(pv32) as i64;
-            if dx * dx + dy * dy <= r_sq {
-                let idx = py * buf_w as usize + px;
-                if idx < buffer.len() {
-                    buffer[idx] = blend_pixel(buffer[idx], color);
-                }
+            // The centre of the corner's disc, measured along the edge.
+            let centre = if from_top {
+                y.saturating_add(r)
+            } else {
+                y2.saturating_sub(r)
+            };
+            let dy = if from_top {
+                centre.saturating_sub(py) as i64
+            } else {
+                (py + 1).saturating_sub(centre) as i64
+            };
+            if dy <= 0 {
+                return 0;
             }
+            let r64 = r as i64;
+            let inside = r64 * r64 - dy * dy;
+            if inside <= 0 {
+                return r;
+            }
+            // The disc reaches this far along the row; everything nearer the
+            // corner than that is outside the shape.
+            r.saturating_sub((inside as f64).sqrt().floor() as u32)
+        };
+        let left = x.saturating_add(inset(left_radius));
+        let right = x2.saturating_sub(inset(right_radius));
+        if left < right {
+            draw_rect(buffer, buf_w, buf_h, left, py, right - left, 1, color);
         }
-    }
+    };
 
-    // Bottom corner strip: rows cy_bottom..y2
-    let py_start_bot = cy_bottom.min(buf_h) as usize;
-    let py_end_bot = y2.min(buf_h) as usize;
-    for py in py_start_bot..py_end_bot {
-        let pv32 = py as u32;
-        // Left corner
-        for px in (x.min(buf_w) as usize)..(cx_left.min(buf_w) as usize) {
-            let pu32 = px as u32;
-            let dx = cx_left.saturating_sub(pu32) as i64;
-            let dy = pv32.saturating_sub(cy_bottom) as i64;
-            if dx * dx + dy * dy <= r_sq {
-                let idx = py * buf_w as usize + px;
-                if idx < buffer.len() {
-                    buffer[idx] = blend_pixel(buffer[idx], color);
-                }
-            }
-        }
-        // Middle of row
-        if cx_left < cx_right {
-            draw_rect(
-                buffer,
-                buf_w,
-                buf_h,
-                cx_left,
-                pv32,
-                cx_right - cx_left,
-                1,
-                color,
-            );
-        }
-        // Right corner
-        for px in (cx_right.min(buf_w) as usize)..(x2.min(buf_w) as usize) {
-            let pu32 = px as u32;
-            let dx = pu32.saturating_sub(cx_right) as i64;
-            let dy = pv32.saturating_sub(cy_bottom) as i64;
-            if dx * dx + dy * dy <= r_sq {
-                let idx = py * buf_w as usize + px;
-                if idx < buffer.len() {
-                    buffer[idx] = blend_pixel(buffer[idx], color);
-                }
-            }
-        }
+    for py in y..middle_top.min(y2) {
+        row(py, radius.top_left, radius.top_right, true);
+    }
+    for py in middle_bottom.max(middle_top)..y2 {
+        row(py, radius.bottom_left, radius.bottom_right, false);
     }
 }
 

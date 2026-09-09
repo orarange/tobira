@@ -1,0 +1,35 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:900px}
+.b{width:120px;height:60px;background:#4a4;margin:8px}
+/* `getComputedStyle` is what this page reads: the geometry of a rounded box is
+   the same as a square one, so the corners have to be asked about directly.
+   Each row is one way of writing the shorthand. */
+#r0 { border-radius: 10px }
+#r1 { border-radius: 10px 20px }
+#r2 { border-radius: 10px 20px 30px }
+#r3 { border-radius: 10px 20px 30px 40px }
+/* The two-axis form: horizontal radii, then vertical ones. */
+#r4 { border-radius: 10px 20px / 30px 40px }
+#r5 { border-top-left-radius: 12px; border-bottom-right-radius: 24px }
+/* Percentages resolve against the box: 50% of 120x60. */
+#r6 { border-radius: 50% }
+/* Over-large radii are scaled down together so they cannot overlap. */
+#r7 { border-radius: 200px }
+</style></head><body>
+<div class="b" id="r0">r0</div>
+<div class="b" id="r1">r1</div>
+<div class="b" id="r2">r2</div>
+<div class="b" id="r3">r3</div>
+<div class="b" id="r4">r4</div>
+<div class="b" id="r5">r5</div>
+<div class="b" id="r6">r6</div>
+<div class="b" id="r7">r7</div>
+<pre id="out"></pre>
+<script>
+var ids='r0 r1 r2 r3 r4 r5 r6 r7'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var cs=getComputedStyle(document.getElementById(id));
+  return id+' tl='+cs.borderTopLeftRadius+' tr='+cs.borderTopRightRadius
+          +' br='+cs.borderBottomRightRadius+' bl='+cs.borderBottomLeftRadius;
+}).join('\n');
+</script></body></html>

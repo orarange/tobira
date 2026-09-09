@@ -449,6 +449,161 @@ impl Default for TimingFunction {
     }
 }
 
+/// The four corner radii of a box, in that order round the box: top-left,
+/// top-right, bottom-right, bottom-left. Which is the order CSS writes them in.
+///
+/// Only one radius per corner is kept, so an elliptical corner
+/// (`border-radius: 10px / 30px`) is drawn round. The horizontal radius is the
+/// one taken -- it is the one that decides how far the curve reaches along the
+/// edge a reader's eye follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Corners {
+    pub top_left: CornerRadius,
+    pub top_right: CornerRadius,
+    pub bottom_right: CornerRadius,
+    pub bottom_left: CornerRadius,
+}
+
+/// One corner's radius, before the box it belongs to is known.
+///
+/// A percentage has to survive until then: `border-radius: 50%` is how every
+/// round avatar on the web is written, and resolving the percentage early --
+/// against the font size, which is what the general length parser does with a
+/// bare `50%` -- turned it into 8px and left the picture very nearly square.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CornerRadius {
+    #[default]
+    Zero,
+    Pixels(u32),
+    /// A share of the box. CSS measures the horizontal radius against the
+    /// width and the vertical one against the height; only one radius per
+    /// corner is kept here, so the shorter side is used and a percentage on an
+    /// oblong box comes out round rather than elliptical.
+    Percent(u32),
+}
+
+impl CornerRadius {
+    pub fn resolve(self, width: u32, height: u32) -> u32 {
+        match self {
+            CornerRadius::Zero => 0,
+            CornerRadius::Pixels(px) => px,
+            CornerRadius::Percent(percent) => {
+                width.min(height).saturating_mul(percent) / 100
+            }
+        }
+    }
+
+    pub fn is_zero(self) -> bool {
+        matches!(self, CornerRadius::Zero) || matches!(self, CornerRadius::Pixels(0))
+    }
+
+    /// How this reads back through `getComputedStyle`, which keeps a
+    /// percentage a percentage the way Chrome does.
+    pub fn to_css(self) -> String {
+        match self {
+            CornerRadius::Zero => "0px".to_string(),
+            CornerRadius::Pixels(px) => format!("{px}px"),
+            CornerRadius::Percent(percent) => format!("{percent}%"),
+        }
+    }
+}
+
+impl Corners {
+    pub const ZERO: Corners = Corners {
+        top_left: CornerRadius::Zero,
+        top_right: CornerRadius::Zero,
+        bottom_right: CornerRadius::Zero,
+        bottom_left: CornerRadius::Zero,
+    };
+
+    pub const fn uniform(radius: u32) -> Corners {
+        let r = CornerRadius::Pixels(radius);
+        Corners {
+            top_left: r,
+            top_right: r,
+            bottom_right: r,
+            bottom_left: r,
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.top_left.is_zero()
+            && self.top_right.is_zero()
+            && self.bottom_right.is_zero()
+            && self.bottom_left.is_zero()
+    }
+
+    /// Every corner pushed out by the same amount, which is what a shadow
+    /// spreading beyond its box needs. A percentage is left alone: it already
+    /// grows with the box.
+    pub fn expanded(&self, by: u32) -> Corners {
+        let grow = |corner: CornerRadius| match corner {
+            CornerRadius::Zero => CornerRadius::Pixels(by),
+            CornerRadius::Pixels(px) => CornerRadius::Pixels(px.saturating_add(by)),
+            percent => percent,
+        };
+        Corners {
+            top_left: grow(self.top_left),
+            top_right: grow(self.top_right),
+            bottom_right: grow(self.bottom_right),
+            bottom_left: grow(self.bottom_left),
+        }
+    }
+
+    /// The four radii in pixels for a box of this size, with no corner
+    /// reaching more than half way along an edge and no two on the same edge
+    /// overlapping -- when they would, all four are scaled down together, so
+    /// the shape stays the one the page asked for, only smaller. That is what
+    /// CSS calls the overlapping-curves rule.
+    pub fn fitted(&self, width: u32, height: u32) -> FittedCorners {
+        let tl = self.top_left.resolve(width, height);
+        let tr = self.top_right.resolve(width, height);
+        let br = self.bottom_right.resolve(width, height);
+        let bl = self.bottom_left.resolve(width, height);
+        let mut scale = 1.0f32;
+        let limit = |sum: u32, extent: u32| {
+            if sum > extent && sum > 0 {
+                extent as f32 / sum as f32
+            } else {
+                1.0
+            }
+        };
+        scale = scale.min(limit(tl.saturating_add(tr), width));
+        scale = scale.min(limit(bl.saturating_add(br), width));
+        scale = scale.min(limit(tl.saturating_add(bl), height));
+        scale = scale.min(limit(tr.saturating_add(br), height));
+        let apply = |r: u32| (r as f32 * scale).floor() as u32;
+        FittedCorners {
+            top_left: apply(tl),
+            top_right: apply(tr),
+            bottom_right: apply(br),
+            bottom_left: apply(bl),
+        }
+    }
+}
+
+/// The four radii of a box whose size is known, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct FittedCorners {
+    pub top_left: u32,
+    pub top_right: u32,
+    pub bottom_right: u32,
+    pub bottom_left: u32,
+}
+
+impl FittedCorners {
+    pub fn is_zero(&self) -> bool {
+        self.top_left == 0 && self.top_right == 0 && self.bottom_right == 0 && self.bottom_left == 0
+    }
+
+    pub fn largest(&self) -> u32 {
+        self.top_left
+            .max(self.top_right)
+            .max(self.bottom_right)
+            .max(self.bottom_left)
+    }
+}
+
 /// Which way round a pass through the keyframes runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AnimationDirection {
@@ -1288,7 +1443,29 @@ pub fn computed_property_string(
         } else {
             style.border.left
         }),
-        "border-radius" => px(style.border_radius),
+        "border-top-left-radius" => style.border_radius.top_left.to_css(),
+        "border-top-right-radius" => style.border_radius.top_right.to_css(),
+        "border-bottom-right-radius" => style.border_radius.bottom_right.to_css(),
+        "border-bottom-left-radius" => style.border_radius.bottom_left.to_css(),
+        // The shorthand reads back as the four corners, the way Chrome writes
+        // it -- a single number only when all four agree.
+        "border-radius" => {
+            let r = style.border_radius;
+            if r.top_left == r.top_right
+                && r.top_right == r.bottom_right
+                && r.bottom_right == r.bottom_left
+            {
+                r.top_left.to_css()
+            } else {
+                format!(
+                    "{} {} {} {}",
+                    r.top_left.to_css(),
+                    r.top_right.to_css(),
+                    r.bottom_right.to_css(),
+                    r.bottom_left.to_css()
+                )
+            }
+        }
         "text-transform" => match style.text_transform {
             TextTransform::None => "none",
             TextTransform::Uppercase => "uppercase",
@@ -1386,7 +1563,7 @@ pub struct ComputedStyle {
     pub border: EdgeSizes,
     pub border_color: Color,
     pub border_style_none: bool,
-    pub border_radius: u32,
+    pub border_radius: Corners,
     pub outline_width: u32,
     pub outline_color: Option<Color>,
     /// line-height in thousandths of em; 0 = "normal"
@@ -1607,7 +1784,7 @@ impl ComputedStyle {
             border: EdgeSizes::default(),
             border_color: parent.map(|s| s.color).unwrap_or(DEFAULT_TEXT_COLOR),
             border_style_none: false,
-            border_radius: 0,
+            border_radius: Corners::ZERO,
             outline_width: 0,
             outline_color: None,
             line_height: parent.map(|s| s.line_height).unwrap_or(0),
@@ -5212,21 +5389,37 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         "border-radius" => {
             // The shorthand may name up to four corners, and an `/` may follow
             // with the vertical radii. Only one radius is modelled, so the
-            // first horizontal value stands for all four.
+            // one to four lengths, going round the box from the top-left,
+            // with the missing ones taken from the corner opposite. An
+            // optional `/` introduces the vertical radii, which are not kept:
+            // a corner here is round, not elliptical.
             //
-            // The whole string used to go to `parse_length`, which cannot read
-            // `10px 10px 0 0` and answered `None` -- so every box written that
-            // way came out square. Taking the first value cannot make any of
-            // them worse: a box that asked for four equal corners now gets
-            // them, and one that asked for two keeps the two it already had
-            // right. Corners that differ still need a radius per corner; see
-            // the note in HANDOFF.
-            let horizontal = value.split('/').next().unwrap_or(value).trim();
-            style.border_radius = horizontal
-                .split_whitespace()
-                .next()
-                .and_then(|first| parse_length(first, parent_font_size))
-                .unwrap_or(0);
+            // Only the first value used to be read, so `10px 10px 0 0` -- a
+            // card or a tab, rounded on top and square where it meets what is
+            // below -- came out rounded on all four.
+            if let Some(corners) = parse_corner_radii(value, parent_font_size) {
+                style.border_radius = corners;
+            }
+        }
+        "border-top-left-radius" => {
+            if let Some(radius) = parse_corner_radius(value, parent_font_size) {
+                style.border_radius.top_left = radius;
+            }
+        }
+        "border-top-right-radius" => {
+            if let Some(radius) = parse_corner_radius(value, parent_font_size) {
+                style.border_radius.top_right = radius;
+            }
+        }
+        "border-bottom-right-radius" => {
+            if let Some(radius) = parse_corner_radius(value, parent_font_size) {
+                style.border_radius.bottom_right = radius;
+            }
+        }
+        "border-bottom-left-radius" => {
+            if let Some(radius) = parse_corner_radius(value, parent_font_size) {
+                style.border_radius.bottom_left = radius;
+            }
         }
         "outline" => {
             parse_outline_shorthand(style, value, parent_font_size);
@@ -7548,6 +7741,59 @@ fn ease(t: f32, timing: TimingFunction) -> f32 {
             }
             curve(y1, y2, u)
         }
+    }
+}
+
+/// One corner's radius. A corner may be written as two lengths -- the
+/// horizontal one and the vertical one -- and only the horizontal is kept.
+fn parse_corner_radius(value: &str, parent_font_size: u32) -> Option<CornerRadius> {
+    let first = value.split_whitespace().next()?;
+    if let Some(percent) = first.strip_suffix('%') {
+        // Checked before the general length parser, which reads a bare `50%`
+        // against the font size and answers 8px.
+        return percent.trim().parse::<f32>().ok().map(|p| {
+            CornerRadius::Percent(p.max(0.0).round() as u32)
+        });
+    }
+    parse_length(first, parent_font_size).map(CornerRadius::Pixels)
+}
+
+/// `border-radius`, in any of the shapes CSS allows: one to four lengths going
+/// round from the top-left, each missing one taken from the corner opposite.
+fn parse_corner_radii(value: &str, parent_font_size: u32) -> Option<Corners> {
+    // Anything after `/` is the vertical radii, which are not modelled.
+    let horizontal = value.split('/').next().unwrap_or(value).trim();
+    let lengths: Vec<CornerRadius> = horizontal
+        .split_whitespace()
+        .map(|part| parse_corner_radius(part, parent_font_size).unwrap_or(CornerRadius::Zero))
+        .collect();
+    match lengths.len() {
+        1 => Some(Corners {
+            top_left: lengths[0],
+            top_right: lengths[0],
+            bottom_right: lengths[0],
+            bottom_left: lengths[0],
+        }),
+        // top-left/bottom-right, then top-right/bottom-left.
+        2 => Some(Corners {
+            top_left: lengths[0],
+            top_right: lengths[1],
+            bottom_right: lengths[0],
+            bottom_left: lengths[1],
+        }),
+        3 => Some(Corners {
+            top_left: lengths[0],
+            top_right: lengths[1],
+            bottom_right: lengths[2],
+            bottom_left: lengths[1],
+        }),
+        4 => Some(Corners {
+            top_left: lengths[0],
+            top_right: lengths[1],
+            bottom_right: lengths[2],
+            bottom_left: lengths[3],
+        }),
+        _ => None,
     }
 }
 
@@ -10740,6 +10986,112 @@ mod tests {
                 count: 4,
                 at_start: false
             }
+        );
+    }
+
+    /// `border-radius` names one to four corners, going round from the
+    /// top-left and taking each missing one from the corner opposite. Only the
+    /// first value used to be read, so a card rounded on top and square where
+    /// it meets what is below came out rounded on all four.
+    #[test]
+    fn border_radius_names_each_corner() {
+        use super::{CornerRadius, Corners};
+        let radii = |value: &str| declared_here("border-radius", value).border_radius;
+
+        assert_eq!(radii("10px"), Corners::uniform(10));
+        assert_eq!(
+            radii("10px 20px"),
+            Corners {
+                top_left: CornerRadius::Pixels(10),
+                top_right: CornerRadius::Pixels(20),
+                bottom_right: CornerRadius::Pixels(10),
+                bottom_left: CornerRadius::Pixels(20),
+            }
+        );
+        assert_eq!(
+            radii("10px 20px 30px"),
+            Corners {
+                top_left: CornerRadius::Pixels(10),
+                top_right: CornerRadius::Pixels(20),
+                bottom_right: CornerRadius::Pixels(30),
+                bottom_left: CornerRadius::Pixels(20),
+            }
+        );
+        assert_eq!(
+            radii("10px 20px 30px 40px"),
+            Corners {
+                top_left: CornerRadius::Pixels(10),
+                top_right: CornerRadius::Pixels(20),
+                bottom_right: CornerRadius::Pixels(30),
+                bottom_left: CornerRadius::Pixels(40),
+            }
+        );
+        // The vertical radii after `/` are not modelled; the horizontal ones
+        // still have to be read.
+        assert_eq!(
+            radii("10px 20px / 30px 40px"),
+            Corners {
+                top_left: CornerRadius::Pixels(10),
+                top_right: CornerRadius::Pixels(20),
+                bottom_right: CornerRadius::Pixels(10),
+                bottom_left: CornerRadius::Pixels(20),
+            }
+        );
+
+        // A percentage stays a percentage. Sent to the general length parser it
+        // reads against the font size, and a round avatar came out 8px.
+        assert_eq!(radii("50%").top_left, CornerRadius::Percent(50));
+        assert_eq!(CornerRadius::Percent(50).resolve(40, 40), 20);
+        assert_eq!(CornerRadius::Pixels(7).resolve(40, 40), 7);
+
+        // Corners that would overlap are scaled down together, so the shape
+        // keeps its proportions.
+        let square = Corners::uniform(200).fitted(120, 60);
+        assert_eq!(square.top_left, 30, "half the shorter side: {square:?}");
+        let lopsided = Corners {
+            top_left: CornerRadius::Pixels(80),
+            top_right: CornerRadius::Pixels(40),
+            bottom_right: CornerRadius::Zero,
+            bottom_left: CornerRadius::Zero,
+        }
+        .fitted(120, 200);
+        assert_eq!(
+            (lopsided.top_left, lopsided.top_right),
+            (80, 40),
+            "80 + 40 is exactly the width, so nothing is scaled: {lopsided:?}"
+        );
+    }
+
+    /// The four long-hand corners, and what they read back as.
+    #[test]
+    fn a_single_corner_can_be_set_and_read_back() {
+        let document = parse_document("<div id=\"b\">x</div>");
+        let styled = build_styled_tree(
+            &document,
+            &parse_stylesheet(
+                "div { border-top-left-radius: 12px; border-bottom-right-radius: 24px }",
+            ),
+            1280,
+            &super::InteractiveState::default(),
+        );
+        let element = find_first_element(&styled, "div").expect("the div");
+        let style = &element.style;
+        let no_vars = std::collections::BTreeMap::new();
+        let read = |name: &str| super::computed_property_string(style, name, &no_vars);
+        assert_eq!(read("border-top-left-radius"), Some("12px".to_string()));
+        assert_eq!(read("border-top-right-radius"), Some("0px".to_string()));
+        assert_eq!(
+            read("border-bottom-right-radius"),
+            Some("24px".to_string())
+        );
+        assert_eq!(
+            read("border-bottom-left-radius"),
+            Some("0px".to_string())
+        );
+        // The shorthand reads back as all four when they differ.
+        assert_eq!(
+            read("border-radius"),
+            Some("12px 0px 24px 0px".to_string())
         );
     }
 
