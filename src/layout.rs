@@ -2617,7 +2617,11 @@ fn layout_block_element(
     *cursor_y = advance_by_margin(*cursor_y, -trailing_child_margin);
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
     *cursor_y = cursor_y.saturating_add(border_bottom);
-    let content_height = cursor_y.saturating_sub(background_top).max(1);
+    // A box with nothing in it is zero tall, not one pixel tall. The floor of
+    // one was invisible on its own but it accumulated: a column of empty
+    // wrappers pushed everything below it down a pixel each, which is where a
+    // good part of the standing 1px drift against Chrome came from.
+    let content_height = cursor_y.saturating_sub(background_top);
     // Honor an explicit CSS `height` (px or percent); expands a short box.
     let background_height = explicit_box_height(
         &element.style,
@@ -2681,12 +2685,16 @@ fn layout_block_element(
 
     // Emit element hitbox for interactive state (hover/focus) detection
     if let Some(node_id) = element_node_id(element) {
-        if background_height > 0 && !element.style.pointer_events_none {
+        // A flat or hairline box is still a box: `getBoundingClientRect` on a
+        // `width: 0` element answers 0, not 1, and an empty wrapper answers 0
+        // tall. Nothing can be hovered at zero area anyway, so recording the
+        // true size costs the hit test nothing.
+        if !element.style.pointer_events_none {
             context.element_hitboxes.push(ElementHitbox {
                 node_id,
                 x: outer_x,
                 y: background_top,
-                width: outer_width.max(1),
+                width: outer_width,
                 height: background_height,
                 cursor_kind: element.style.cursor_kind,
             });
@@ -3653,7 +3661,11 @@ fn layout_block_element_as_layer(
     context.containing_block_size = saved_cb_size;
 
     *cursor_y = cursor_y.saturating_add(element.style.padding.bottom);
-    let content_height = cursor_y.saturating_sub(background_top).max(1);
+    // A box with nothing in it is zero tall, not one pixel tall. The floor of
+    // one was invisible on its own but it accumulated: a column of empty
+    // wrappers pushed everything below it down by a pixel each, which is where
+    // a good part of the standing 1px drift against Chrome came from.
+    let content_height = cursor_y.saturating_sub(background_top);
     // Honor an explicit CSS `height` (px or percent); expands a short box.
     let final_height = explicit_box_height(
         &element.style,
@@ -11024,6 +11036,55 @@ mod percentage_sizing_tests {
             "a 200px band in 600px starts at 200px, got x={}",
             band.x
         );
+    }
+
+    /// Every element's box, in the order they are laid out.
+    fn element_boxes(css: &str, html: &str) -> Vec<(u32, u32)> {
+        let mut doc = parse_document(html);
+        crate::browser::annotate_node_ids(&mut doc);
+        let sheet = parse_stylesheet(&format!("body {{ margin: 0 }} {css}"));
+        let styled = build_styled_tree(&doc, &sheet, 1280, &InteractiveState::default());
+        let mut fonts = FontContext::load();
+        let images = ImageStore::default();
+        layout_styled_document(&styled, &images, 1280, &mut fonts)
+            .element_hitboxes
+            .iter()
+            .map(|hitbox| (hitbox.width, hitbox.height))
+            .collect()
+    }
+
+    /// A flat box is flat. `width: 0` used to be reported as one pixel wide and
+    /// a box with nothing in it as one pixel tall, because both were floored at
+    /// one on the way out.
+    ///
+    /// On its own that is invisible. It accumulated: a column of empty wrappers
+    /// -- which is how most pages are built -- pushed everything below it down
+    /// a pixel each, and that is a good part of the standing 1px drift against
+    /// Chrome. Nothing can be hovered at zero area, so recording the true size
+    /// costs the hit test nothing.
+    #[test]
+    fn a_flat_box_is_reported_flat() {
+        let flat = element_boxes(
+            ".z { width: 0; height: 20px; background: #4a4 }",
+            "<div class=\"z\"></div>",
+        );
+        assert!(
+            flat.contains(&(0, 20)),
+            "a zero-width box is 0 wide, not 1: {flat:?}"
+        );
+
+        let empty = element_boxes("", "<div></div>");
+        assert!(
+            empty.contains(&(1280, 0)),
+            "a box with nothing in it is 0 tall: {empty:?}"
+        );
+
+        // And an ordinary box is untouched.
+        let solid = element_boxes(
+            ".b { width: 30px; height: 20px }",
+            "<div class=\"b\">x</div>",
+        );
+        assert!(solid.contains(&(30, 20)), "{solid:?}");
     }
 
     /// A box that states its own width is that wide whatever is inside it --
