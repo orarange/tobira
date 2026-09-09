@@ -1879,6 +1879,22 @@ fn explicit_box_height(
 }
 
 /// The height `height` alone asks for, before `max-height` gets a say.
+/// The box a mask is fitted into.
+///
+/// Its height is not known where the mask is emitted -- that comes from the
+/// children, which have not been laid out yet -- and `outer_width` used to
+/// stand in for it. A 200x20 bar therefore had its mask drawn 200px tall and
+/// swallowed whatever sat under it. A masked box almost always states its own
+/// size (`width:20px;height:20px;mask-image:…` is the icon idiom), so the
+/// stated height is used whenever there is one; without it the old guess
+/// stands, which is no worse than before.
+fn mask_box_height(style: &ComputedStyle, fallback: u32) -> u32 {
+    match style.height {
+        Some(LengthValue::Pixels(px)) => px.max(1),
+        _ => fallback.max(1),
+    }
+}
+
 fn specified_box_height(
     style: &ComputedStyle,
     background_top: u32,
@@ -2451,11 +2467,14 @@ fn layout_block_element(
             x: outer_x as i32,
             y: background_top,
             width: outer_width.max(1),
-            height: outer_width.max(1),
+            height: mask_box_height(&element.style, outer_width),
             src: mask.clone(),
             object_fit: ObjectFit::Contain,
-            object_position_x: 50,
-            object_position_y: 50,
+            // `mask-position` starts at `0% 0%`, the same as
+            // `background-position`. Centred was a guess, and it put an icon in
+            // the middle of a box that Chrome draws it at the corner of.
+            object_position_x: 0,
+            object_position_y: 0,
             repeat_x: false,
             repeat_y: false,
             background_size: None,
@@ -3515,11 +3534,14 @@ fn layout_block_element_as_layer(
             x: outer_x as i32,
             y: background_top,
             width: outer_width.max(1),
-            height: outer_width.max(1),
+            height: mask_box_height(&element.style, outer_width),
             src: mask.clone(),
             object_fit: ObjectFit::Contain,
-            object_position_x: 50,
-            object_position_y: 50,
+            // `mask-position` starts at `0% 0%`, the same as
+            // `background-position`. Centred was a guess, and it put an icon in
+            // the middle of a box that Chrome draws it at the corner of.
+            object_position_x: 0,
+            object_position_y: 0,
             repeat_x: false,
             repeat_y: false,
             background_size: None,
@@ -8458,11 +8480,14 @@ fn layout_grid_container_inner(
             x: outer_x as i32,
             y: background_top,
             width: outer_width.max(1),
-            height: outer_width.max(1),
+            height: mask_box_height(&element.style, outer_width),
             src: mask.clone(),
             object_fit: ObjectFit::Contain,
-            object_position_x: 50,
-            object_position_y: 50,
+            // `mask-position` starts at `0% 0%`, the same as
+            // `background-position`. Centred was a guess, and it put an icon in
+            // the middle of a box that Chrome draws it at the corner of.
+            object_position_x: 0,
+            object_position_y: 0,
             repeat_x: false,
             repeat_y: false,
             background_size: None,
@@ -9413,11 +9438,14 @@ fn layout_flex_container_inner(
             x: outer_x as i32,
             y: background_top,
             width: outer_width.max(1),
-            height: outer_width.max(1),
+            height: mask_box_height(&element.style, outer_width),
             src: mask.clone(),
             object_fit: ObjectFit::Contain,
-            object_position_x: 50,
-            object_position_y: 50,
+            // `mask-position` starts at `0% 0%`, the same as
+            // `background-position`. Centred was a guess, and it put an icon in
+            // the middle of a box that Chrome draws it at the corner of.
+            object_position_x: 0,
+            object_position_y: 0,
             repeat_x: false,
             repeat_y: false,
             background_size: None,

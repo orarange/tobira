@@ -1,0 +1,17 @@
+<html><head><style>
+body{margin:0;font:16px Arial;background:#fff}
+.m{background:#c00;
+   -webkit-mask-image:url("triangle.svg"); mask-image:url("triangle.svg");
+   -webkit-mask-repeat:no-repeat; mask-repeat:no-repeat;
+   -webkit-mask-size:contain; mask-size:contain;
+   margin:6px}
+#sq{width:40px;height:40px}
+#wide{width:200px;height:20px}
+#tall{width:20px;height:80px}
+.lbl{font-size:8pt;color:#666}
+</style></head><body>
+<div class="lbl">square 40x40</div><div class="m" id="sq"></div>
+<div class="lbl">wide 200x20</div><div class="m" id="wide"></div>
+<div class="lbl">tall 20x80</div><div class="m" id="tall"></div>
+<div class="lbl">plain box for reference</div><div style="width:200px;height:20px;background:#08c;margin:6px"></div>
+</body></html>
