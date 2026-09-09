@@ -12,6 +12,13 @@ use std::sync::Arc;
 /// Width reserved to the left of a list item's content for its marker.
 const MARKER_INDENT: u32 = 16;
 
+/// How much room a scrollbar takes out of the box it belongs to.
+///
+/// Measured against Chrome on this platform (`tools/geom/scrollbar.html`): a
+/// 120x20 box with `overflow: auto` and a wider child comes out 37 tall --
+/// twenty of content, fifteen of scrollbar, two of border.
+const SCROLLBAR_PX: u32 = 15;
+
 /// The marker string for a list item, or `None` when it renders without one.
 ///
 /// `list-style-type` was parsed into the computed style but never read back
@@ -2621,6 +2628,22 @@ fn layout_block_element(
     // one was invisible on its own but it accumulated: a column of empty
     // wrappers pushed everything below it down a pixel each, which is where a
     // good part of the standing 1px drift against Chrome came from.
+    // A scrollbar along the bottom is part of the box. `overflow: scroll` puts
+    // one there whether or not it is needed; `auto` only when something
+    // actually reaches past the right edge. Either way the box grows by its
+    // height -- unless the page stated a height, in which case the box stays
+    // as written and the room comes out of the inside, which
+    // `explicit_box_height` settles a few lines down.
+    //
+    // The cursor moves, not just the height: a box's height is read off the
+    // cursor, and so is the position of whatever comes after it. Growing only
+    // the height made the box taller on paper while everything below it -- and
+    // the parent measuring it -- carried on from where the content ended, so a
+    // scrolling strip inside another one came out fifteen pixels short and the
+    // rest of the page rode up.
+    if reserve_horizontal_scrollbar(element, context, clip_start_idx, content_x, content_width) {
+        *cursor_y = cursor_y.saturating_add(SCROLLBAR_PX);
+    }
     let content_height = cursor_y.saturating_sub(background_top);
     // Honor an explicit CSS `height` (px or percent); expands a short box.
     let background_height = explicit_box_height(
@@ -3673,6 +3696,11 @@ fn layout_block_element_as_layer(
     // one was invisible on its own but it accumulated: a column of empty
     // wrappers pushed everything below it down by a pixel each, which is where
     // a good part of the standing 1px drift against Chrome came from.
+    // The same scrollbar the plain block path reserves, for a box that also
+    // needs a layer of its own.
+    if reserve_horizontal_scrollbar(element, &sub_context, 0, content_x, content_width) {
+        *cursor_y = cursor_y.saturating_add(SCROLLBAR_PX);
+    }
     let content_height = cursor_y.saturating_sub(background_top);
     // Honor an explicit CSS `height` (px or percent); expands a short box.
     let final_height = explicit_box_height(
@@ -8913,6 +8941,46 @@ fn resolve_grid_tracks_with_intrinsic(
 ///
 /// A radius never exceeds half the box, the same clamp the painter applies, so
 /// opposite corners cannot eat into one another.
+/// Whether this box has to leave room along its bottom edge for a horizontal
+/// scrollbar.
+///
+/// `scroll` always does. `auto` does only when something inside actually
+/// reaches past the right edge, which is why the commands laid down since
+/// `commands_from` are looked at rather than the declared widths: a child may
+/// overflow through a long word or a wide table as easily as through a stated
+/// width.
+fn reserve_horizontal_scrollbar(
+    element: &StyledElement,
+    context: &LayoutContext,
+    commands_from: usize,
+    content_x: u32,
+    content_width: u32,
+) -> bool {
+    match element.style.overflow {
+        Overflow::Scroll => true,
+        Overflow::Auto => {
+            let content_right = content_x.saturating_add(content_width);
+            context.commands[commands_from..]
+                .iter()
+                .any(|command| command_right_edge(command) > content_right)
+        }
+        Overflow::Visible | Overflow::Hidden => false,
+    }
+}
+
+/// How far right a painted thing reaches. Used to tell whether anything
+/// inside a box has overflowed it.
+fn command_right_edge(command: &DrawCommand) -> u32 {
+    match command {
+        DrawCommand::Rect(rect) => rect.x.saturating_add(rect.width),
+        DrawCommand::Text(text) => text.x.saturating_add(text.width),
+        DrawCommand::Image(image) => image.x.saturating_add(image.width as i32).max(0) as u32,
+        DrawCommand::Gradient(gradient) => gradient.x.saturating_add(gradient.width),
+        DrawCommand::Layer(layer) => layer.x.saturating_add(layer.width),
+        DrawCommand::Sticky(sticky) => sticky.layer.x.saturating_add(sticky.layer.width),
+    }
+}
+
 fn corner_inset(radius: u32, width: u32, height: u32) -> u32 {
     radius.min(width / 2).min(height / 2)
 }
