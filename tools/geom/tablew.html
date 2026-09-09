@@ -1,0 +1,33 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+.par{width:120px;border:1px solid #c00;margin-bottom:6px}
+table{border-collapse:collapse}
+td{border:1px solid #08c;padding:1px}
+.lbl{font-size:8pt;color:#666}
+</style></head><body>
+<div class="lbl">1 table width:300 in a 120px parent</div>
+<div class="par"><table id="t1" style="width:300px"><tr><td>a</td><td>b</td></tr></table></div>
+
+<div class="lbl">2 table width="300" attribute</div>
+<div class="par"><table id="t2" width="300"><tr><td>a</td><td>b</td></tr></table></div>
+
+<div class="lbl">3 table with no width, wide content</div>
+<div class="par"><table id="t3"><tr><td>aaaaaaaaaaaaaaaa</td><td>bbbbbbbbbbbbbbbb</td></tr></table></div>
+
+<div class="lbl">4 table width:300 at top level (800px body)</div>
+<table id="t4" style="width:300px"><tr><td>a</td><td>b</td></tr></table>
+
+<div class="lbl">5 table width:100% in a 120px parent</div>
+<div class="par"><table id="t5" style="width:100%"><tr><td>a</td><td>b</td></tr></table></div>
+
+<div class="lbl">6 table width:600 with narrow content, top level</div>
+<table id="t6" style="width:600px"><tr><td>x</td></tr></table>
+
+<pre id="out"></pre>
+<script>
+var ids='t1 t2 t3 t4 t5 t6'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>

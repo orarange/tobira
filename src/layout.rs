@@ -7170,11 +7170,18 @@ fn resolve_table_width(element: &StyledElement, available_width: u32, preferred_
     // `<table width="85%">` span the whole page whenever its text was wide
     // enough, which is every page laid out the old way: Hacker News came out
     // edge to edge instead of the centred column it is.
-    specified_length(element, element.style.width, "width")
-        .map(|length| resolve_length_value(length, available_width))
-        .unwrap_or(preferred_width)
-        .min(available_width.max(1))
-        .max(1)
+    match specified_length(element, element.style.width, "width") {
+        // A stated width stands even when it is wider than the room on offer.
+        // A table is a block box in that respect: `<table width="300">` inside
+        // a 120px box is 300 wide in Chrome and overflows, and clamping it to
+        // the container squeezed the columns into a table the page never asked
+        // for. A percentage resolves against the container and so cannot
+        // exceed it anyway.
+        Some(length) => resolve_length_value(length, available_width).max(1),
+        // With no width of its own the table is as wide as its columns need,
+        // but no wider than the room it was given.
+        None => preferred_width.min(available_width.max(1)).max(1),
+    }
 }
 
 fn measure_cell_preferred_width(
