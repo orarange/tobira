@@ -2299,8 +2299,18 @@ fn layout_block_element(
         outer_width_with_margins(width, ml, mr).min(max).max(min)
     };
 
-    // Compute outer_width: only use explicit width when it actually constrains (is narrower).
-    // This prevents HTML width="" attributes from incorrectly shrinking table-allocated cells.
+    // A width the box was handed rather than chose. A table cell's width comes
+    // from the column algorithm and a flex item's from its line; both already
+    // accounted for the box's own `width`, and letting the declaration widen it
+    // past the allocation would tear the row it belongs to. For those, an
+    // explicit width may only narrow.
+    //
+    // For every other block box the declaration wins outright, even when it is
+    // wider than the space on offer -- that is what `overflow` is for. Clamping
+    // it to the container was why a 300px child of a 120px parent came out
+    // 120px wide in tobira and 300px in Chrome, on all four `overflow` values.
+    let width_was_allocated = settled_main_size.is_some()
+        || matches!(element.tag_name.as_str(), "td" | "th");
     let (outer_width, width_is_constrained) = if let Some(ew) = explicit_width {
         let max = element
             .style
@@ -2313,7 +2323,7 @@ fn layout_block_element(
             .map(|length| resolve_length_value(length, width))
             .unwrap_or(0);
         let clamped = ew.min(max).max(min);
-        if clamped < container_derived_width {
+        if clamped < container_derived_width || !width_was_allocated {
             (clamped, true)
         } else {
             (container_derived_width, false)
@@ -2709,7 +2719,10 @@ fn layout_block_element(
     // overflow: hidden — clip commands that fall outside the element box
     // Use clip_start_idx (captured before children were laid out) so that child
     // commands are correctly filtered even when there is no background rect.
-    if element.style.overflow == Overflow::Hidden {
+    // `auto` and `scroll` clip their box just as `hidden` does; what they add
+    // is a way for the user to reach what was clipped, which is a scrollbar
+    // and not a layout question. Only `visible` lets paint escape the box.
+    if !matches!(element.style.overflow, Overflow::Visible) {
         let clip_height = element
             .style
             .height
@@ -3714,7 +3727,10 @@ fn layout_block_element_as_layer(
     }
 
     // overflow: hidden — clip child commands within the element box
-    if element.style.overflow == Overflow::Hidden {
+    // `auto` and `scroll` clip their box just as `hidden` does; what they add
+    // is a way for the user to reach what was clipped, which is a scrollbar
+    // and not a layout question. Only `visible` lets paint escape the box.
+    if !matches!(element.style.overflow, Overflow::Visible) {
         let clip_height = element
             .style
             .height
@@ -9834,7 +9850,10 @@ fn layout_flex_container_inner(
     // overflow:hidden`) is on almost every page, and several of Yahoo! JAPAN's
     // screen-reader headings are flex containers -- unclipped they printed down
     // the left edge, one character to a line.
-    if element.style.overflow == Overflow::Hidden {
+    // `auto` and `scroll` clip their box just as `hidden` does; what they add
+    // is a way for the user to reach what was clipped, which is a scrollbar
+    // and not a layout question. Only `visible` lets paint escape the box.
+    if !matches!(element.style.overflow, Overflow::Visible) {
         let clip_height = element
             .style
             .height
@@ -14824,6 +14843,73 @@ mod tests {
             .find(|r| r.color == 0xFF0000)
             .expect("red background rect should exist");
         assert_eq!(bg.width, 200, "div should be 200px wide, got {}", bg.width);
+    }
+
+    /// A block box keeps the width it was given even when that is wider than
+    /// the room on offer -- overflowing is what `overflow` is there to describe.
+    /// Clamping it to the container made a 300px child of a 120px parent come
+    /// out 120px, on every `overflow` value, where Chrome gives 300px.
+    #[test]
+    fn an_explicit_width_wider_than_the_parent_overflows() {
+        for overflow in ["visible", "hidden", "auto", "scroll"] {
+            let html = format!(
+                r#"<div style="width:120px;overflow:{overflow}"><div style="width:300px;height:20px;background:red"></div></div>"#
+            );
+            let document = parse_document(&html);
+            let stylesheet = parse_stylesheet("");
+            let styled = build_styled_tree(
+                &document,
+                &stylesheet,
+                1280,
+                &crate::css::InteractiveState::default(),
+            );
+            let mut fonts = FontContext::load();
+            let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
+            let rects = layout.rects();
+            let child = rects
+                .iter()
+                .find(|r| r.color == 0xFF0000)
+                .unwrap_or_else(|| panic!("overflow:{overflow}: child rect should exist"));
+            // `visible` lets the paint escape; the other three clip it to the
+            // box. Either way the BOX is 300 wide -- what differs is how much
+            // of it reaches the screen.
+            let expected = if overflow == "visible" { 300 } else { 120 };
+            assert_eq!(
+                child.width, expected,
+                "overflow:{overflow}: painted width should be {expected}, got {}",
+                child.width
+            );
+        }
+    }
+
+    /// The other half of the same rule: a width a box was HANDED is not a width
+    /// it chose. A table cell's comes from the column algorithm, so a `width`
+    /// attribute on it may narrow the cell but must not widen it past its
+    /// column -- that would tear the row apart.
+    #[test]
+    fn a_table_cell_does_not_widen_past_its_column() {
+        let html = r#"<table style="width:200px"><tr>
+            <td width="500" style="background:red">a</td><td>b</td></tr></table>"#;
+        let document = parse_document(html);
+        let stylesheet = parse_stylesheet("");
+        let styled = build_styled_tree(
+            &document,
+            &stylesheet,
+            1280,
+            &crate::css::InteractiveState::default(),
+        );
+        let mut fonts = FontContext::load();
+        let layout = layout_styled_document(&styled, &ImageStore::default(), 800, &mut fonts);
+        let rects = layout.rects();
+        let cell = rects
+            .iter()
+            .find(|r| r.color == 0xFF0000)
+            .expect("cell rect should exist");
+        assert!(
+            cell.width <= 200,
+            "a cell must not exceed its table's width, got {}",
+            cell.width
+        );
     }
 
     #[test]
