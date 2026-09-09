@@ -1,0 +1,30 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+.p{width:120px;border:1px solid #c00;margin-bottom:6px}
+.kid{width:300px;height:20px;background:#cde}
+.fit{width:50px;height:20px;background:#dfd}
+.lbl{font-size:8pt;color:#666}
+</style></head><body>
+<div class="lbl">1 visible, wide child</div>
+<div class="p" id="a1" style="overflow:visible"><div class="kid" id="k1"></div></div>
+<div class="lbl">2 hidden, wide child</div>
+<div class="p" id="a2" style="overflow:hidden"><div class="kid" id="k2"></div></div>
+<div class="lbl">3 auto, wide child (scrollbar appears)</div>
+<div class="p" id="a3" style="overflow:auto"><div class="kid" id="k3"></div></div>
+<div class="lbl">4 auto, child fits (no scrollbar)</div>
+<div class="p" id="a4" style="overflow:auto"><div class="fit" id="k4"></div></div>
+<div class="lbl">5 scroll, child fits (scrollbar reserved anyway)</div>
+<div class="p" id="a5" style="overflow:scroll"><div class="fit" id="k5"></div></div>
+<div class="lbl">6 overflow-x:auto only</div>
+<div class="p" id="a6" style="overflow-x:auto"><div class="kid" id="k6"></div></div>
+<div class="lbl">7 auto with a stated height</div>
+<div class="p" id="a7" style="overflow:auto;height:40px"><div class="kid" id="k7"></div></div>
+<pre id="out"></pre>
+<script>
+var ids='a1 a2 a3 a4 a5 a6 a7'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var e=document.getElementById(id), r=e.getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height)
+       +' cw='+e.clientWidth+' ch='+e.clientHeight;
+}).join('\n');
+</script></body></html>

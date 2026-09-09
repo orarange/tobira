@@ -19599,9 +19599,30 @@ impl Vm {
                     .window_metrics(WindowId(0))
                     .map(|m| m.scroll_x)
                     .unwrap_or(0.0);
+                // `clientWidth` / `clientHeight` are the PADDING box: the
+                // border is outside them. They were aliased to the border box,
+                // so every element reported its borders as part of its inside
+                // -- a 120px box with a 1px border answered 122 where Chrome
+                // answers 120. Pages measure with these constantly, and being
+                // two pixels wide on every read is the kind of error that
+                // shows up as a layout that never quite settles.
+                let border = |edge: &str, vm: &mut Self| -> f64 {
+                    let raw = vm.computed_style_value(node_id, edge);
+                    raw.trim_end_matches("px").trim().parse::<f64>().unwrap_or(0.0)
+                };
                 let value = match name.as_str() {
-                    "offsetWidth" | "clientWidth" | "scrollWidth" => w,
-                    "offsetHeight" | "clientHeight" | "scrollHeight" => h,
+                    "offsetWidth" | "scrollWidth" => w,
+                    "offsetHeight" | "scrollHeight" => h,
+                    "clientWidth" => {
+                        let edges = border("border-left-width", self)
+                            + border("border-right-width", self);
+                        (w - edges).max(0.0)
+                    }
+                    "clientHeight" => {
+                        let edges =
+                            border("border-top-width", self) + border("border-bottom-width", self);
+                        (h - edges).max(0.0)
+                    }
                     // bounding rect is viewport-relative; add scroll back for the
                     // document-relative offsetLeft/offsetTop approximation.
                     "offsetLeft" => x + scroll_x,
@@ -19610,7 +19631,18 @@ impl Vm {
                 };
                 Ok(Value::Number(value))
             }
-            "clientLeft" | "clientTop" => Ok(Value::Number(0.0)),
+            // The width of the border on that side, which is exactly the gap
+            // between the border box and the padding box.
+            "clientLeft" => {
+                let raw = self.computed_style_value(node_id, "border-left-width");
+                let px = raw.trim_end_matches("px").trim().parse::<f64>().unwrap_or(0.0);
+                Ok(Value::Number(px))
+            }
+            "clientTop" => {
+                let raw = self.computed_style_value(node_id, "border-top-width");
+                let px = raw.trim_end_matches("px").trim().parse::<f64>().unwrap_or(0.0);
+                Ok(Value::Number(px))
+            }
             "scrollLeft" | "scrollTop" => {
                 // The root element's scrollLeft/scrollTop mirror the window
                 // scroll; other elements don't track their own overflow yet.
