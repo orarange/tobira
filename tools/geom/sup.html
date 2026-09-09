@@ -1,0 +1,15 @@
+<html><head><style>body{margin:0;font:16px Arial;width:800px}div{background:#eee}</style></head><body>
+<div id="d0">plain</div>
+<div id="d1">x<sup id="s1">2</sup>y</div>
+<div id="d2">x<sub id="s2">2</sub>y</div>
+<div id="d3">x<span id="s3" style="vertical-align:super">2</span>y</div>
+<div id="d4">x<span id="s4" style="font-size:10px">2</span>y</div>
+<div id="d5">after</div>
+<pre id="out"></pre>
+<script>
+var ids='d0 d1 d2 d3 d4 d5 s1 s2 s3 s4'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>
