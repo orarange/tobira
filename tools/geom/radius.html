@@ -1,0 +1,19 @@
+<html><head><style>body{margin:0;font:16px Arial}
+div{width:80px;height:30px;background:#4a8;margin:4px}
+#r1{border-radius:10px}
+#r2{border-radius:10px 10px 0 0}
+#r3{border-radius:50%}
+#r4{border-top-left-radius:12px}
+#r5{border-radius:10px/20px}
+#r6{border-radius:1em}
+</style></head><body>
+<div id="r1"></div><div id="r2"></div><div id="r3"></div>
+<div id="r4"></div><div id="r5"></div><div id="r6"></div>
+<pre id="out"></pre>
+<script>
+var ids='r1 r2 r3 r4 r5 r6'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var cs=getComputedStyle(document.getElementById(id));
+  return id+' tl='+cs.borderTopLeftRadius+' tr='+cs.borderTopRightRadius;
+}).join('\n');
+</script></body></html>

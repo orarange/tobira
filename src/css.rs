@@ -4822,7 +4822,23 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             style.border_style_none = v == "none";
         }
         "border-radius" => {
-            style.border_radius = parse_length(value, parent_font_size).unwrap_or(0);
+            // The shorthand may name up to four corners, and an `/` may follow
+            // with the vertical radii. Only one radius is modelled, so the
+            // first horizontal value stands for all four.
+            //
+            // The whole string used to go to `parse_length`, which cannot read
+            // `10px 10px 0 0` and answered `None` -- so every box written that
+            // way came out square. Taking the first value cannot make any of
+            // them worse: a box that asked for four equal corners now gets
+            // them, and one that asked for two keeps the two it already had
+            // right. Corners that differ still need a radius per corner; see
+            // the note in HANDOFF.
+            let horizontal = value.split('/').next().unwrap_or(value).trim();
+            style.border_radius = horizontal
+                .split_whitespace()
+                .next()
+                .and_then(|first| parse_length(first, parent_font_size))
+                .unwrap_or(0);
         }
         "outline" => {
             parse_outline_shorthand(style, value, parent_font_size);
