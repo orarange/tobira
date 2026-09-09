@@ -8123,6 +8123,16 @@ impl Vm {
     /// BOTH strings before comparing them, and `if (s)` copied one to ask
     /// whether it was empty. A `Map` lookup does one such comparison per entry,
     /// so a map of n string keys allocated 2n strings per `get`.
+    /// How many characters a string holds, taken from the count kept beside
+    /// it rather than walked. This is what `.length` answers.
+    fn string_char_len(&self, gc_ref: GcRef<JsString>) -> usize {
+        self.heap
+            .strings()
+            .get(gc_ref)
+            .map(|string| string.char_len())
+            .unwrap_or(0)
+    }
+
     fn string_text_ref(&self, gc_ref: GcRef<JsString>) -> &str {
         self.heap
             .strings()
@@ -8878,9 +8888,9 @@ impl Vm {
                     .unwrap_or(Value::Undefined);
                 Ok(value)
             }
-            PropertyKey::String(name) if name == "length" => Ok(Value::Number(
-                self.string_text_ref(string).chars().count() as f64,
-            )),
+            PropertyKey::String(name) if name == "length" => {
+                Ok(Value::Number(self.string_char_len(string) as f64))
+            }
             _ => self.get_property_from_chain(self.string_prototype_ref(), receiver, key),
         }
     }
@@ -9053,9 +9063,8 @@ impl Vm {
                     }
                 }
                 (Value::String(string), PropertyKey::String(name)) if name == "length" => {
-                    let text = self.string_text(*string);
                     self.property_descriptor_to_value(JsPropertyDescriptor::Data {
-                        value: Value::Number(text.chars().count() as f64),
+                        value: Value::Number(self.string_char_len(*string) as f64),
                         writable: false,
                         enumerable: false,
                         configurable: false,
@@ -9466,7 +9475,7 @@ impl Vm {
                 }
                 Ok(self.array_length(*object))
             }
-            Value::String(string) => Ok(self.string_text(*string).chars().count() as u32),
+            Value::String(string) => Ok(self.string_char_len(*string) as u32),
             _ => Err(VmError::TypeError("value is not array-like".to_string())),
         }
     }

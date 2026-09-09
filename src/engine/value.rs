@@ -68,17 +68,47 @@ impl Value {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JsString {
     pub text: String,
+    /// How many characters `text` holds, counted once when the string is made.
+    ///
+    /// `.length` was `chars().count()` every time it was read, which walks the
+    /// whole string: on a 100,000 character string a single read cost about
+    /// five microseconds, and a loop that reads it every pass -- which is how
+    /// a loop over a string is written -- paid that on every pass. A JS string
+    /// never changes after it is made, so the count can be taken once.
+    ///
+    /// This is why `text` must not be written to in place. Nothing does; the
+    /// only ways to make a `JsString` are the two conversions below, and both
+    /// count as they build.
+    char_len: usize,
+}
+
+impl JsString {
+    pub fn char_len(&self) -> usize {
+        self.char_len
+    }
+}
+
+fn count_chars(text: &str) -> usize {
+    // A byte is a character when there are no multi-byte ones, and most
+    // strings a page makes are ASCII.
+    if text.is_ascii() {
+        text.len()
+    } else {
+        text.chars().count()
+    }
 }
 
 impl From<String> for JsString {
     fn from(text: String) -> Self {
-        Self { text }
+        let char_len = count_chars(&text);
+        Self { text, char_len }
     }
 }
 
 impl From<&str> for JsString {
     fn from(text: &str) -> Self {
         Self {
+            char_len: count_chars(text),
             text: text.to_string(),
         }
     }
