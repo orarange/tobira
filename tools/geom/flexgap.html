@@ -1,0 +1,33 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+.r{display:flex;border:1px solid #c00;margin-bottom:6px}
+.r>div{background:#cde}
+.gap8{gap:8px}
+.nogap{gap:0}
+.colgap{column-gap:8px}
+.rowgap{row-gap:8px}
+.wrap{flex-wrap:wrap;width:120px}
+</style></head><body>
+<!-- `gap` on a single-line flex row is spacing BETWEEN the items, so it adds
+     to the row's width and nothing to its height. `row-gap` only does
+     anything once the row wraps onto a second line.
+
+     `tools/geom/carousel.html` came out eight pixels tall per strip, which is
+     exactly one `gap`, so this splits the shorthand from its two halves to
+     say which one is being charged to the height. -->
+<div class="r nogap" id="a"><div id="a1">one</div><div id="a2">two</div></div>
+<div class="r gap8" id="b"><div>one</div><div>two</div></div>
+<div class="r colgap" id="c"><div>one</div><div>two</div></div>
+<div class="r rowgap" id="d"><div>one</div><div>two</div></div>
+<!-- Wrapped onto two lines, where the row gap really does count. -->
+<div class="r gap8 wrap" id="e"><div>oneoneone</div><div>twotwotwo</div></div>
+<div id="g">plain block</div>
+<div id="f">after</div>
+<pre id="out"></pre>
+<script>
+var ids='a a1 a2 b c d e g f'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var r=document.getElementById(id).getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>

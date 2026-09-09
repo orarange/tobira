@@ -9371,6 +9371,18 @@ fn record_container_box(
     bottom: u32,
     context: &mut LayoutContext,
 ) {
+    // The box that is reported is the BORDER box, the same as everywhere else.
+    // `top` is where the cursor stood before the container's own top margin
+    // was spent and `bottom` after its bottom one, so both margins are inside
+    // the pair and have to come off -- the horizontal pair already does this a
+    // few lines down. Left in, a flex row with `margin-bottom: 8px` reported
+    // itself eight pixels taller than it is, and every page whose structure is
+    // flex rows -- which is most of them -- answered every
+    // `getBoundingClientRect` with a box that overlapped the next one.
+    let top = top.saturating_add(element.style.margin.top.max(0) as u32);
+    let bottom = bottom
+        .saturating_sub(element.style.margin.bottom.max(0) as u32)
+        .max(top);
     if element.style.pointer_events_none {
         return;
     }
