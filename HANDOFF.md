@@ -377,42 +377,52 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
    `static_x` に 0 を渡しとる。断片を集める時点では x が決まっとらんので、
    3 番と同じ「走査順の設計」の話になる。
 
-5. **縦の巻物の場所** — 横は入った（`1fa56de` と `e88da22`）。縦は
+5. **版面の幅から頁の巻物を引く** — Chrome は窓 1280 に対して
+   **1264** を版面に使う（16px ぶん）。2026-09-10 に実測した:
+   `#fixed{position:fixed;right:5px;width:20px}` が Chrome で x=1239、
+   tobira で 1255。1239+20+5 = 1264。`g1` の `vw` の外れも同じ 16px。
+
+   **頁全体の幅が動く話なので、照合頁 26 枚の基準が全部変わる。**
+   一手でやって全部測り直すこと。`position:fixed` だけ先に直すのは
+   筋が悪い（頁の中身は 1280 のまま巻物の下に潜る）。
+   描画側の巻物幅が今 10px なのを 16px に寄せるかという意匠の判断も要る。
+
+6. **縦の巻物の場所** — 横は入った（`1fa56de` と `e88da22`）。縦は
    `overflow: scroll` なら無条件なので**子を配置する前に幅から引ける**が、
    `auto` は「縦にはみ出すか」を先に知らなあかんので二段レイアウトが要る。
 
-6. **clip がまだ軸ごとやない** — `overflow_x` / `overflow_y` は入った
+7. **clip がまだ軸ごとやない** — `overflow_x` / `overflow_y` は入った
    （`a056c38`）が、clip の判定は潰した一つの値で見とる。実害は測っとらん
    （箱の寸法は Chrome と一致）。判定は 8 箇所。
 
-7. **`<summary>` の無い `<details>`** — ブラウザは既定の見出しを出す。
+8. **`<summary>` の無い `<details>`** — ブラウザは既定の見出しを出す。
    `tools/geom/details.html` の d4 がこれで、Chrome 24px に対して 0。
 
-8. **html5lib 残り 19 件** — 98.5%。塊は `<font>` の入れ子（tests23 に 3）と
+9. **html5lib 残り 19 件** — 98.5%。塊は `<font>` の入れ子（tests23 に 3）と
    `<col>`/`<colgroup>` の表構造（tests1 に 2）。後者は過去に
    1184 → 1115 の退化を出した領域と地続き。残りは文書の頭の空白
    （doctype01・tests15・tests19）と、表の中のフォームの里親付け。
    **頭の空白は一度試して増減ゼロやった**ので、あの二例がどの状態で
    文字を受け取っとるかを先に測ること。
 
-9. **`Map` / `Set` の索引化** — 二乗であることは測った（n を倍にすると
+10. **`Map` / `Set` の索引化** — 二乗であることは測った（n を倍にすると
    時間が約 3.7 倍、素のオブジェクトはきっちり 2 倍。n=4000 で
    Map 67ms 対オブジェクト 8ms）。**やらんと決めた。** `ObjectKind` の形を
    変える 43 箇所の話で、GC のときと同じ「登録漏れに気づける仕掛け」が
    要る領域。独立した回でやること。
 
-10. **`Range.getBoundingClientRect` が無い** — `fsize.html` を最初その形で
+11. **`Range.getBoundingClientRect` が無い** — `fsize.html` を最初その形で
    書いて全行 0 が返った。文字の run の幾何を Range に繋ぐ話。
 
-11. **文字列が符号点で数えられとる** — `'😀'.length` が 1（JS は 2）、
+12. **文字列が符号点で数えられとる** — `'😀'.length` が 1（JS は 2）、
    `charCodeAt(0)` が 128512（JS は 55357）。一貫はしとるので `s[i]` の
    往復は壊れとらんが、surrogate を触る polyfill が合わん。
    **直すなら添字も全部まとめて。**
 
-12. **楕円の角** — `border-radius: 10px / 30px`。角は真円一つしか
+13. **楕円の角** — `border-radius: 10px / 30px`。角は真円一つしか
    持っとらん。`radius2.html` の r4 と `radius.html` の r5。
 
-13. **総称 `monospace` / `serif` の当て先** — Chrome headless は
+14. **総称 `monospace` / `serif` の当て先** — Chrome headless は
    monospace 120 / serif 137、tobira は Consolas 132 / Georgia 124。
    **当てれば数字は上がるが、やらんかった。** Consolas のほうが code の
    見た目として明らかにええ。
