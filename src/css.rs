@@ -2315,6 +2315,28 @@ fn animation_progress(style: &ComputedStyle, now_ms: u32) -> Option<f32> {
     Some(if backwards { 1.0 - fraction } else { fraction })
 }
 
+/// Whether this element will look different a frame from now because an
+/// animation is still moving it.
+///
+/// The GUI asks before it starts pumping frames: a page with nothing moving
+/// must stay asleep rather than restyling sixty times a second for nothing.
+/// An animation with no duration never changes -- it is pinned to its first
+/// stop -- so it does not count as running.
+pub fn animation_is_running(style: &ComputedStyle, now_ms: u32) -> bool {
+    if style.animation_name.is_none() || style.animation_duration_ms == 0 {
+        return false;
+    }
+    match style.animation_iterations {
+        // `infinite` never stops.
+        None => true,
+        Some(passes) => {
+            let ends_at = style.animation_delay_ms as i64
+                + style.animation_duration_ms as i64 * passes as i64;
+            (now_ms as i64) < ends_at
+        }
+    }
+}
+
 /// The declarations an animation is showing at `progress`, each property
 /// interpolated between the two stops that name it.
 ///
@@ -10446,6 +10468,31 @@ mod tests {
         // The ends are exact, never a rounded version of themselves.
         assert_eq!(mix("50px", "200px", 0.0), "50px");
         assert_eq!(mix("50px", "200px", 1.0), "200px");
+    }
+
+    #[test]
+    fn only_a_moving_animation_keeps_the_page_awake() {
+        use super::animation_is_running as running;
+        let style = declared_here("animation", "grow 1s");
+        assert!(running(&style, 0));
+        assert!(running(&style, 999));
+        // Its one pass is over; nothing will change again.
+        assert!(!running(&style, 1000));
+
+        let delayed = declared_here("animation", "grow 1s 2s");
+        assert!(running(&delayed, 0), "still waiting to start, but it will");
+        assert!(running(&delayed, 2999));
+        assert!(!running(&delayed, 3000));
+
+        let forever = declared_here("animation", "grow 1s infinite");
+        assert!(running(&forever, 10_000_000));
+
+        // No duration: pinned to the first stop, so there is nothing to pump.
+        let pinned = declared_here("animation-name", "grow");
+        assert!(!running(&pinned, 0));
+
+        // No animation at all.
+        assert!(!running(&declared_here("width", "10px"), 0));
     }
 
     // ── @media tests ─────────────────────────────────────────────────────────

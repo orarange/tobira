@@ -219,6 +219,26 @@ impl BrowserPage {
         result
     }
 
+    /// Whether any element on the page is part-way through an animation at
+    /// `now_ms`, and so will look different a frame from now.
+    ///
+    /// The GUI asks before it starts pumping frames: a page with no animation
+    /// must stay on `ControlFlow::Wait` rather than restyling sixty times a
+    /// second for nothing. An animation with no duration never changes either
+    /// -- it is pinned to its first stop -- so it does not count.
+    pub(crate) fn animations_running(&self, now_ms: u32) -> bool {
+        fn walk(node: &StyledNode, now_ms: u32) -> bool {
+            match node {
+                StyledNode::Text(_) => false,
+                StyledNode::Element(element) => {
+                    crate::css::animation_is_running(&element.style, now_ms)
+                        || element.children.iter().any(|child| walk(child, now_ms))
+                }
+            }
+        }
+        walk(&self.styled_document, now_ms)
+    }
+
     pub fn relayout(&mut self, viewport_width: u32, interactive: &InteractiveState) {
         self.styled_document = build_styled_tree(
             &self.raw_document,

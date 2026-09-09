@@ -141,6 +141,16 @@ struct BrowserApp {
     /// per-frame delta added to `engine_clock_ms`. `None` when not currently
     /// animating (so the next tick starts a fresh delta of 0).
     last_tick_instant: Option<Instant>,
+    /// When the last CSS-animation restyle ran, and how long it took.
+    ///
+    /// A running animation means rebuilding the styled tree every frame, and
+    /// on a heavy page that is not free -- github.com carries 34,000 rules. A
+    /// page with an endless spinner in a corner would then hold the frame loop
+    /// for as long as the restyle takes and the window would stop answering.
+    /// Pacing the next restyle by how long the last one took gives such a page
+    /// a slower animation instead of an unusable browser.
+    last_anim_instant: Option<Instant>,
+    last_anim_cost: Duration,
     /// Set when an animation tick changed the page but a render was already in
     /// flight, so the request was coalesced. `finish_render` re-requests once the
     /// in-flight render lands, ensuring the final animation frame is painted.
@@ -272,6 +282,8 @@ impl BrowserApp {
             ime_composing: false,
             engine_clock_ms: 0,
             last_tick_instant: None,
+            last_anim_instant: None,
+            last_anim_cost: Duration::ZERO,
             content_dirty: false,
             has_rendered_once: false,
             scratch: Vec::new(), // depth-indexed pool; grows lazily on first paint
@@ -2109,7 +2121,14 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
         // Drive the active page's JS event loop (setInterval / setTimeout(fn,
         // delay) / requestAnimationFrame) while it has pending work. Idle pages
         // stay on ControlFlow::Wait so there is no busy-loop.
-        if !self.document.engine_pending() {
+        // A CSS animation is a second reason to keep pumping: it has to be
+        // restyled every frame even when no script is waiting to run. Asked at
+        // the clock we are about to leave behind, so the frame that ends an
+        // animation is still drawn.
+        let animating = self
+            .document
+            .animations_running(self.engine_clock_ms.min(u32::MAX as u64) as u32);
+        if !self.document.engine_pending() && !animating {
             self.last_tick_instant = None;
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
@@ -2139,7 +2158,34 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
         self.engine_clock_ms = self.engine_clock_ms.saturating_add(delta_ms);
         self.last_tick_instant = Some(now);
 
-        if self.document.tick(self.engine_clock_ms) {
+        let mut changed = self.document.tick(self.engine_clock_ms);
+        // How often the animation may be restyled: sixty times a second, or as
+        // often as the last restyle allows, whichever is slower.
+        let anim_interval = FRAME_INTERVAL.max(self.last_anim_cost);
+        let anim_due = self
+            .last_anim_instant
+            .is_none_or(|prev| now.saturating_duration_since(prev) >= anim_interval);
+        if animating && anim_due {
+            let started = Instant::now();
+            let content_width = self
+                .window
+                .as_ref()
+                .map(|window| window.inner_size().width)
+                .unwrap_or(0)
+                .saturating_sub(FRAME_PADDING)
+                .max(1);
+            crate::browser::set_style_viewport_width(content_width);
+            let hovered = self.hovered_element_node_id;
+            self.document.advance_animations(
+                content_width,
+                hovered,
+                self.engine_clock_ms.min(u32::MAX as u64) as u32,
+            );
+            self.last_anim_cost = Instant::now().saturating_duration_since(started);
+            self.last_anim_instant = Some(now);
+            changed = true;
+        }
+        if changed {
             // Coalesce: at most one render in flight. If one is already pending,
             // mark dirty so `finish_render` paints the final frame.
             if self.pending_render_id.is_none() {
@@ -2149,10 +2195,20 @@ impl ApplicationHandler<BrowserUserEvent> for BrowserApp {
             }
         }
 
-        if self.document.engine_pending() {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(now + FRAME_INTERVAL));
+        let still_animating = self
+            .document
+            .animations_running(self.engine_clock_ms.min(u32::MAX as u64) as u32);
+        if self.document.engine_pending() || still_animating {
+            let next = if still_animating {
+                FRAME_INTERVAL.min(anim_interval)
+            } else {
+                FRAME_INTERVAL
+            };
+            event_loop.set_control_flow(ControlFlow::WaitUntil(now + next));
         } else {
             self.last_tick_instant = None;
+            self.last_anim_instant = None;
+            self.last_anim_cost = Duration::ZERO;
             event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
@@ -2470,6 +2526,31 @@ impl DocumentView {
             DocumentContent::Loaded(page) => page.engine_pending(),
             _ => false,
         }
+    }
+
+    /// Whether a CSS animation is still moving, and so the page has to be
+    /// restyled on the next frame even if no script is waiting to run.
+    fn animations_running(&self, now_ms: u32) -> bool {
+        match &self.content {
+            DocumentContent::Loaded(page) => page.animations_running(now_ms),
+            _ => false,
+        }
+    }
+
+    /// Rebuild the styled tree at `now_ms` so every `@keyframes` animation
+    /// moves on to the moment the clock is showing.
+    fn advance_animations(&mut self, viewport_width: u32, hovered: Option<usize>, now_ms: u32) {
+        if let DocumentContent::Loaded(page) = &mut self.content {
+            page.relayout(
+                viewport_width,
+                &InteractiveState {
+                    hovered_node_id: hovered,
+                    animation_time_ms: now_ms,
+                    ..Default::default()
+                },
+            );
+        }
+        self.layout_cache = None;
     }
 
     /// Advance the active page's JS clock to `now_ms`, run due timers / one rAF

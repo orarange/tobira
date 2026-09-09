@@ -1,0 +1,45 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+.box{height:40px;background:#4a4;margin:10px;width:100px}
+/* Every animation here is `paused` with a NEGATIVE delay, which is how a
+   moment part-way through one is made to hold still. A negative delay starts
+   the animation that far in, and `paused` stops the clock there -- so Chrome
+   and tobira are asked about exactly the same instant without either of them
+   having to be running.
+
+   `linear` throughout: tobira has no easing curves yet, so anything else
+   would be comparing two different questions. */
+@keyframes grow  { from { width: 50px } to { width: 200px } }
+@keyframes fade  { from { opacity: 0 } to { opacity: 1 } }
+@keyframes slide { from { margin-left: 0px } to { margin-left: 80px } }
+@keyframes tint  { from { background: #000000 } to { background: #ffffff } }
+
+#b0 { animation: grow 1s -0ms   linear paused both }
+#b1 { animation: grow 1s -250ms linear paused both }
+#b2 { animation: grow 1s -500ms linear paused both }
+#b3 { animation: grow 1s -750ms linear paused both }
+/* Past the end, held by `forwards`. */
+#b4 { animation: grow 1s -3s    linear paused forwards }
+/* Every other pass runs backwards, so -1250ms is 250ms into the second one. */
+#b5 { animation: grow 1s -1250ms linear paused both infinite alternate }
+#b6 { animation: fade 1s -250ms linear paused both }
+#b7 { animation: slide 1s -500ms linear paused both }
+#b8 { animation: tint 1s -500ms linear paused both }
+</style></head><body>
+<div class="box" id="b0">b0</div>
+<div class="box" id="b1">b1</div>
+<div class="box" id="b2">b2</div>
+<div class="box" id="b3">b3</div>
+<div class="box" id="b4">b4</div>
+<div class="box" id="b5">b5</div>
+<div class="box" id="b6">b6</div>
+<div class="box" id="b7">b7</div>
+<div class="box" id="b8">b8</div>
+<pre id="out"></pre>
+<script>
+var ids='b0 b1 b2 b3 b4 b5 b6 b7 b8'.split(' ');
+document.getElementById('out').textContent = ids.map(function(id){
+  var e=document.getElementById(id), r=e.getBoundingClientRect();
+  return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>
