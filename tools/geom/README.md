@@ -13,15 +13,44 @@ python tools/geom/cmp.py g4.html
 | page | what it probes | last score |
 |------|----------------|-----------:|
 | `g1.html` | box model, flex, grid, position | 28/29 |
-| `g2.html` | inline formatting, line breaking | 13/22 |
+| `g2.html` | inline formatting, line breaking | 14/22 |
 | `g3.html` | inline-block baselines | 6/7 |
-| `g4.html` | inline element hitboxes | 5/14 |
-| `g5.html` | modern CSS (custom properties, logical props, clamp) | 22/26 |
-| `g6.html` | font-family name resolution | 9/12 |
+| `g4.html` | inline element hitboxes | 11/14 |
+| `g5.html` | modern CSS (custom properties, logical props, clamp) | 23/26 |
+| `g6.html` | font-family name resolution | 10/12 |
+| `g6b.html` | which face each generic family resolves to | 17/32 |
+| `lineheight.html` | `line-height: normal` at every size | 22/22 |
+| `tablew.html` | table widths in a narrow parent | 6/6 |
+| `anim.html` | `@keyframes` at load | 5/5 |
+| `anim2.html` | animation held at a chosen moment | 9/9 |
+| `anim3.html` | the easing curves | 14/14 |
+| `layer.html` | opacity / transform layers | 5/5 |
+| `radius.html` | `border-radius` shorthand forms | 5/6 |
+| `radius2.html` | each corner read back separately | 7/8 |
+| `mask.html` | `mask-image` | Chrome writes nothing — probe is broken |
+| `scrollbar.html` | when a scrollbar takes room | 3/7 |
+| `overflow.html` | overflow in a narrow parent | 10/17 |
+| `overflow2.html` | `overflow-x` / `-y` set apart | 6/12 |
+| `fsize.html` | text width at fractional type sizes | 3/12 |
+| `sup.html` | superscripts and `vertical-align` | 2/10 |
 
-Scores are from 2026-09-04 at 1280px. They are not asserted anywhere — this is
-a hand-run tool, not a test. `g2` and `g4` are the weak pair and both are about
-the same thing: how many rectangles an inline box owns and where they split.
+Scores are from 2026-09-10 at 1280px. They are not asserted anywhere — this is
+a hand-run tool, not a test.
+
+**Read which axis is wrong before deciding what a page is telling you.** Three
+of these were misread that way. `tablew` sat at 0/6 and looked like a table
+problem; every width and height in it was already right and only `y` was
+wrong, by one more pixel per row — it was the line height. `fsize` looked like
+a rounding problem; the whole-number sizes were wrong too, which made it a
+floor instead. `overflow` mixed two unrelated causes in one score.
+
+`g2` and `g4` are the weak pair and both are about the same thing: how many
+rectangles an inline box owns and where they split. `sup` is the same root.
+
+Two of these pages exist to identify something rather than to score:
+`g6b.html` names candidate faces so the width says which face a generic family
+resolved to, and `anim2`/`anim3` hold an animation still (a negative delay plus
+`paused`) so a moment part-way through one can be compared at all.
 
 ## arrow*.html — HN の投票矢印がなぜ出んかったか（2026-09-04）
 
