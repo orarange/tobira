@@ -1007,22 +1007,29 @@ impl BrowserHost {
         // there follows from `overflow`: `scroll` puts both up whether they
         // are needed or not, `auto` only the ones that are. Everything else
         // has none -- there is nowhere to scroll to.
-        let overflow = self
-            .tobira_id_for_handle(arena_idx)
-            .and_then(|id| self.computed_styles.get(&id))
-            .and_then(|style| {
-                crate::css::computed_property_string(style, "overflow", &self.root_custom_properties)
-            })
-            .unwrap_or_default();
-        const SCROLLBAR: f64 = 15.0;
-        let (vertical_bar, horizontal_bar) = match overflow.as_str() {
-            "scroll" => (SCROLLBAR, SCROLLBAR),
-            "auto" => (
-                if reach_height > padding_height { SCROLLBAR } else { 0.0 },
-                if reach_width > padding_width { SCROLLBAR } else { 0.0 },
-            ),
-            _ => (0.0, 0.0),
+        let axis = |property: &str| -> String {
+            self.tobira_id_for_handle(arena_idx)
+                .and_then(|id| self.computed_styles.get(&id))
+                .and_then(|style| {
+                    crate::css::computed_property_string(
+                        style,
+                        property,
+                        &self.root_custom_properties,
+                    )
+                })
+                .unwrap_or_default()
         };
+        const SCROLLBAR: f64 = 15.0;
+        // Each bar belongs to one axis. `overflow-x: hidden` on its own leaves
+        // the box scrollable downwards -- CSS turns the other axis into `auto`
+        // -- so it grows a bar down the side and loses fifteen pixels of width.
+        let bar = |property: &str, overflows: bool| match axis(property).as_str() {
+            "scroll" => SCROLLBAR,
+            "auto" if overflows => SCROLLBAR,
+            _ => 0.0,
+        };
+        let vertical_bar = bar("overflow-y", reach_height > padding_height);
+        let horizontal_bar = bar("overflow-x", reach_width > padding_width);
         let client_width = (padding_width - vertical_bar).max(0.0);
         let client_height = (padding_height - horizontal_bar).max(0.0);
 

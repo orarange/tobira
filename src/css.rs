@@ -1390,7 +1390,11 @@ pub fn computed_property_string(
             Position::Sticky => "sticky",
         }
         .to_string(),
-        "overflow" | "overflow-x" | "overflow-y" => match style.overflow {
+        "overflow" | "overflow-x" | "overflow-y" => match match property {
+            "overflow-x" => style.overflow_x,
+            "overflow-y" => style.overflow_y,
+            _ => style.overflow,
+        } {
             Overflow::Visible => "visible",
             Overflow::Hidden => "hidden",
             Overflow::Scroll => "scroll",
@@ -1584,7 +1588,17 @@ pub struct ComputedStyle {
     pub max_height: Option<u32>,
     pub min_height: u32,
     pub box_sizing: BoxSizing,
+    /// The stricter of the two axes, which is what clipping asks about: a box
+    /// that clips on either axis is drawn clipped. Every existing reader wants
+    /// this one.
     pub overflow: Overflow,
+    /// The two axes as the page wrote them, after the rule that makes a
+    /// `visible` axis into `auto` when the other one is not visible -- which is
+    /// why `overflow-x: hidden` on its own still leaves a box scrollable
+    /// downwards, and is the whole reason these are kept apart. They decide
+    /// which scrollbars are there, and so how much room is left inside.
+    pub overflow_x: Overflow,
+    pub overflow_y: Overflow,
     pub list_style_type: ListStyleType,
     pub cursor_pointer: bool,
     pub cursor_kind: CursorKind,
@@ -1802,6 +1816,8 @@ impl ComputedStyle {
             min_height: 0,
             box_sizing: BoxSizing::ContentBox,
             overflow: Overflow::Visible,
+            overflow_x: Overflow::Visible,
+            overflow_y: Overflow::Visible,
             list_style_type: default_list_style_type(tag_name, parent),
             cursor_pointer: false,
             cursor_kind: CursorKind::Auto,
@@ -5452,14 +5468,18 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
             };
         }
         "overflow" => {
-            style.overflow = parse_overflow(value);
+            let parsed = parse_overflow(value);
+            style.overflow_x = parsed;
+            style.overflow_y = parsed;
+            settle_overflow_axes(style);
         }
-        "overflow-x" | "overflow-y" => {
-            // Use the more restrictive one
-            let ov = parse_overflow(value);
-            if ov != Overflow::Visible {
-                style.overflow = ov;
-            }
+        "overflow-x" => {
+            style.overflow_x = parse_overflow(value);
+            settle_overflow_axes(style);
+        }
+        "overflow-y" => {
+            style.overflow_y = parse_overflow(value);
+            settle_overflow_axes(style);
         }
         "list-style-type" => {
             style.list_style_type = parse_list_style_type(value);
@@ -7833,6 +7853,44 @@ fn parse_text_transform(input: &str) -> TextTransform {
         "capitalize" => TextTransform::Capitalize,
         _ => TextTransform::None,
     }
+}
+
+/// Settle the two axes against each other, and work out the one value the
+/// clipping code reads.
+///
+/// CSS will not let a box clip on one axis and spill on the other: an axis
+/// written `visible` beside an axis that is not becomes `auto`. That is why
+/// `overflow-x: hidden` -- which is how a page stops itself sliding sideways
+/// -- leaves the box still able to scroll downwards, and it is what decides
+/// whether a scrollbar is there to take room out of the box.
+fn settle_overflow_axes(style: &mut ComputedStyle) {
+    let x = style.overflow_x;
+    let y = style.overflow_y;
+    if x != Overflow::Visible && y == Overflow::Visible {
+        style.overflow_y = Overflow::Auto;
+    } else if y != Overflow::Visible && x == Overflow::Visible {
+        style.overflow_x = Overflow::Auto;
+    }
+    // What clipping asks about: a box that clips on either axis is drawn
+    // clipped, and `visible` only survives when both axes are visible.
+    style.overflow = if style.overflow_x == Overflow::Visible
+        && style.overflow_y == Overflow::Visible
+    {
+        Overflow::Visible
+    } else {
+        // The stricter of the two, in the order they restrict.
+        let rank = |o: Overflow| match o {
+            Overflow::Visible => 0,
+            Overflow::Auto => 1,
+            Overflow::Scroll => 2,
+            Overflow::Hidden => 3,
+        };
+        if rank(style.overflow_x) >= rank(style.overflow_y) {
+            style.overflow_x
+        } else {
+            style.overflow_y
+        }
+    };
 }
 
 fn parse_overflow(input: &str) -> Overflow {

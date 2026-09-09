@@ -8992,7 +8992,10 @@ fn reserve_horizontal_scrollbar(
     content_x: u32,
     content_width: u32,
 ) -> bool {
-    match element.style.overflow {
+    // The bar along the bottom is the horizontal axis's, so it is
+    // `overflow-x` that decides -- a box that only clips sideways has no bar
+    // there, however it scrolls downwards.
+    match element.style.overflow_x {
         Overflow::Scroll => true,
         Overflow::Auto => {
             let content_right = content_x.saturating_add(content_width);
