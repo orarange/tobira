@@ -3196,6 +3196,7 @@ pub fn run_document_scripts_with_styles(
 /// what backs the engine path's interactive `JavaScriptSession`.
 pub struct EngineSession {
     vm: Vm,
+    missing_reported_total: u32,
 }
 
 /// JS polyfills injected before page scripts. See `EngineSession::start`.
@@ -4943,7 +4944,7 @@ impl EngineSession {
             }
         };
 
-        let mut session = Self { vm };
+        let mut session = Self { vm, missing_reported_total: 0 };
         let snapshot = session.snapshot_with_error(error);
         (session, snapshot)
     }
@@ -5384,6 +5385,20 @@ impl EngineSession {
         // caller to return it to, so it surfaces here instead of vanishing.
         // A script error passed in by the caller stays the headline.
         let error = error.or_else(|| self.vm.take_job_errors().into_iter().next());
+        // The members the page read and did not get, most read first: what
+        // to build next, by what pages actually touch. Printed whenever the
+        // list grew.
+        if std::env::var_os("TOBIRA_DEBUG_MISSING").is_some() {
+            let rows = self.vm.missing_report();
+            let total: u32 = rows.iter().map(|(_, n)| n).sum();
+            if !rows.is_empty() && total != self.missing_reported_total {
+                self.missing_reported_total = total;
+                eprintln!("[missing] {} distinct members read and absent, {total} reads:", rows.len());
+                for (name, count) in rows.iter().take(60) {
+                    eprintln!("[missing] {count:6}  {name}");
+                }
+            }
+        }
         let host = self.host();
         let structural_changes = host.take_structural_changes();
         let navigation_target = host.navigation_target();

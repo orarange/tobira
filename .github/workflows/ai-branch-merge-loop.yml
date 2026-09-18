@@ -3,14 +3,16 @@ name: AI Branch Auto-Merge
 # Trigger: when a push lands on codex/* or claude/* branches,
 # or on a schedule every 10 minutes to catch branches that were
 # already there when this workflow was first added.
+# The ten-minute schedule is gone (2026-09-18): the codex/* and claude/*
+# branches it was for stopped in June, and every scheduled run since had
+# failed before making a job -- 29 red runs in a row, which buried the
+# `test` workflow's real verdict. It still runs on a push to those
+# branches and by hand.
 on:
   push:
     branches:
       - "codex/**"
       - "claude/**"
-  schedule:
-    # every 10 minutes – GitHub's minimum is 5 min but 10 is safer for quotas
-    - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:

@@ -1526,6 +1526,12 @@ pub struct Vm {
     array_buffer_prototype: Option<GcRef<JsObject>>,
     typed_array_prototype: Option<GcRef<JsObject>>,
     event_loop: EventLoop,
+    /// TOBIRA_DEBUG_MISSING: host members a page read that answered
+    /// undefined, by `Interface.name`, with how often. A feature test
+    /// (`typeof obj.x`, `"x" in obj`) is not a read and is not counted.
+    debug_missing: bool,
+    probe_read: bool,
+    missing_reads: HashMap<String, u32>,
     /// `document.readyState`: "loading" while the parser's scripts run,
     /// "interactive" once they have, "complete" after `load`.
     document_ready_state: &'static str,
@@ -2096,6 +2102,9 @@ impl Vm {
             array_buffer_prototype: None,
             typed_array_prototype: None,
             event_loop: EventLoop::new(),
+            debug_missing: env::var_os("TOBIRA_DEBUG_MISSING").is_some(),
+            probe_read: false,
+            missing_reads: HashMap::new(),
             document_ready_state: "loading",
             random_state,
             host,
@@ -2910,6 +2919,9 @@ impl Vm {
             gc_objects_freed: _,
             gc_strings_freed: _,
             document_ready_state: _,
+            debug_missing: _,
+            probe_read: _,
+            missing_reads: _,
         } = self;
 
         stack.trace(tracer);
@@ -3224,6 +3236,18 @@ impl Vm {
     /// What is keeping the event loop busy, in a line: how many timers (and
     /// how many of them repeat), animation frames and tasks are queued, and
     /// the callbacks' names. For a page that never settles.
+    /// The missing-member counts so far, most read first. Empty unless
+    /// TOBIRA_DEBUG_MISSING is set.
+    pub fn missing_report(&self) -> Vec<(String, u32)> {
+        let mut rows: Vec<(String, u32)> = self
+            .missing_reads
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        rows
+    }
+
     pub fn set_document_ready_state(&mut self, state: &'static str) {
         self.document_ready_state = state;
     }
@@ -4052,8 +4076,18 @@ impl Vm {
             Opcode::GetProp => {
                 let key = self.pop_value()?;
                 let object = self.pop_value()?;
-                let value = self.get_property_value(&object, &self.to_property_key(&key)?)?;
-                self.stack.push(value);
+                // `typeof obj.x` is a page asking, not using; the read that
+                // follows is not a missing member.
+                if self.debug_missing {
+                    self.probe_read = self
+                        .frames
+                        .last()
+                        .and_then(|frame| frame.proto.code.get(frame.ip))
+                        .is_some_and(|next| matches!(next, Opcode::Typeof));
+                }
+                let value = self.get_property_value(&object, &self.to_property_key(&key)?);
+                self.probe_read = false;
+                self.stack.push(value?);
             }
             Opcode::SetProp => {
                 let value = self.pop_value()?;
@@ -9075,6 +9109,17 @@ impl Vm {
         });
         if let Some(slot) = host_slot {
             let value = self.get_host_property(slot, key)?;
+            if self.debug_missing
+                && !self.probe_read
+                && matches!(value, Value::Undefined)
+                && let PropertyKey::String(name) = key
+                && self.get_own_property_descriptor(object, key).is_none()
+            {
+                *self
+                    .missing_reads
+                    .entry(format!("{}.{}", slot.interface_name, name))
+                    .or_insert(0) += 1;
+            }
             // Fall back to an own expando property for Node names the DOM doesn't
             // expose (mirrors the set path above).
             if matches!(value, Value::Undefined)
