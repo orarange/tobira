@@ -111,8 +111,12 @@ impl<'a> super::FunctionCompiler<'a> {
             )?
         };
 
+        // The closure goes into its slot and comes back out at the end, once.
+        // A `Dup` here left a second copy on the operand stack under every
+        // class expression: `f(class {})` then called `undefined`, because
+        // the callee was one slot deeper than `Call` looked, and a class
+        // declaration leaked one value per statement.
         self.emit(Opcode::MakeClosure(constructor_index));
-        self.emit(Opcode::Dup);
         self.emit(Opcode::SetLocal(class_slot));
 
         if let (Some(super_ctor_slot), Some(super_proto_slot)) = (super_ctor_slot, super_proto_slot)

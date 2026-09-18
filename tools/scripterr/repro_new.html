@@ -1,0 +1,29 @@
+<html><body><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(label, fn){ try { log(label+'='+fn()); } catch(e){ log(label+'=ERR:'+e.message); } }
+// 1. the shape from CodeMirror: static method, let-destructuring, n++ as arg, arrow as 4th arg
+let tA=0;
+class A{constructor(t,e,i,s){this.id=t;this.s=s;this.ext=s(this)} static define(t,e){let{eventHandlers:i,provide:s,decorations:o}=e||{};return new A(tA++,t,i,t=>{let e=[t.id];return o&&e.push(o),s&&e.push(s(t)),e})} static fromClass(t,e){return A.define(e=>new t(e),e)}}
+t('1-fromClass', ()=>A.fromClass(class{constructor(t){}}).ext.length);
+t('1b-define', ()=>A.define(function(){}, {provide: x=>7}).ext.join(','));
+// 2. no postfix increment
+class B{constructor(t,e,i,s){this.ext=s(this)} static define(t,e){let{provide:s,decorations:o}=e||{};return new B(0,t,undefined,t=>[o,s])}}
+t('2-no-postfix', ()=>B.define(1,{}).ext.length);
+// 3. no destructuring
+class C{constructor(t,e,i,s){this.ext=s(this)} static define(t,e){return new C(tA++,t,undefined,t=>[t])}}
+t('3-no-destructure', ()=>C.define(1,{}).ext.length);
+// 4. plain function instead of class
+function D(t,e,i,s){this.ext=s(this)} function dd(t,e){let{provide:s}=e||{};return new D(tA++,t,undefined,t=>[s])}
+t('4-function', ()=>dd(1,{}).ext.length);
+// 5. postfix increment on a let at module top-level, as a call arg (not new)
+function f5(a,b,c,d){return typeof d} 
+t('5-call-postfix', ()=>f5(tA++,1,2,()=>1));
+// 6. new with postfix, no arrow
+function E(a,b,c,d){this.d=d} 
+t('6-new-postfix-plain', ()=>typeof new E(tA++,1,2,function(){}).d);
+t('6b-new-postfix-arrow', ()=>typeof new E(tA++,1,2,()=>1).d);
+t('6c-new-arrow-only', ()=>typeof new E(0,1,2,()=>1).d);
+// 7. e||{} destructure with missing keys
+t('7-destructure-missing', ()=>{ let {a:s,b:o}=undefined||{}; return typeof s+','+typeof o; });
+</script></body></html>

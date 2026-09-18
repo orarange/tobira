@@ -1,0 +1,19 @@
+<html><body><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(label, fn){ try { log(label+'='+fn()); } catch(e){ log(label+'=ERR:'+e.message); } }
+function f(x,y){ return 'f:'+typeof x+','+typeof y; }
+var o={ m(x,y){ return 'm:'+typeof x+','+typeof y; } };
+class A{ constructor(){ log('CTOR-A-CALLED'); } static s(x,y){ return 's:'+typeof x+','+typeof y; } }
+t('c1-f(class)', ()=>f(class{}));
+t('c2-o.m(class)', ()=>o.m(class{}));
+t('c3-A.s(class)', ()=>A.s(class{}));
+t('c4-f(1,class)', ()=>f(1,class{}));
+t('c5-o.m(1,class)', ()=>o.m(1,class{}));
+t('c6-o.m(class,1)', ()=>o.m(class{},1));
+t('c7-o.m(k)', ()=>{ var k=class{}; return o.m(k); });
+t('c8-o.m(class X)', ()=>o.m(class X{}));
+t('c9-o.m(class extends)', ()=>o.m(class extends Object{}));
+t('c10-o["m"](class)', ()=>o["m"](class{}));
+t('c11-new f2(class)', ()=>{ function F2(x){ this.x=typeof x } return typeof new F2(class{}).x; });
+</script></body></html>

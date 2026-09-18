@@ -1,0 +1,20 @@
+<html><body><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(label, fn){ try { log(label+'='+fn()); } catch(e){ log(label+'=ERR:'+e.message); } }
+function f(x,y){ return 'f:'+typeof x+','+typeof y; }
+t('d1-array', ()=>[class{}].length+':'+typeof [class{}][0]);
+t('d2-comma', ()=>typeof (0, class{}));
+t('d3-paren-arg', ()=>f((class{})));
+t('d4-spread-arg', ()=>f(...[class{}]));
+t('d5-fn-arg', ()=>f(function(){}));
+t('d6-obj-literal', ()=>typeof ({k:class{}}).k);
+t('d7-ternary', ()=>typeof (true?class{}:1));
+t('d8-return', ()=>{ function g(){ return class{} } return typeof g(); });
+t('d9-arg-after-1', ()=>f(1, (class{})));
+t('d10-arrow-arg', ()=>f(()=>class{}));
+t('d11-call-in-class-field', ()=>f(class{ static x=1 }));
+t('d12-template', ()=>`${typeof class{}}`);
+t('d13-binary', ()=>typeof (class{}) + '');
+t('d14-nested-call', ()=>f(f(class{})));
+</script></body></html>

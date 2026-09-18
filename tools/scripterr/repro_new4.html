@@ -1,0 +1,28 @@
+<html><body><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(label, fn){ try { log(label+'='+fn()); } catch(e){ log(label+'=ERR:'+e.message); } }
+let tA=0;
+class A{constructor(t,e,i,s){this.s=s;this.ext=s(this)} static define(t,e){let{eventHandlers:i,provide:s,decorations:o}=e||{};return new A(tA++,t,i,t=>{let e=[1];return o&&e.push(o),s&&e.push(s(t)),e})} static fromClass(t,e){return A.define(e=>new t(e),e)}}
+class Z{constructor(t){}}
+t('x1-fromClass(Z)', ()=>A.fromClass(Z).ext.length);
+t('x2-fromClass(inline-class-ctor)', ()=>A.fromClass(class{constructor(t){}}).ext.length);
+t('x3-fromClass(inline-class-empty)', ()=>A.fromClass(class{}).ext.length);
+t('x4-fromClass(function)', ()=>A.fromClass(function(t){}).ext.length);
+t('x5-define(arrow-new-inline)', ()=>A.define(e=>new (class{constructor(t){}})(e)).ext.length);
+// B: same as A but 4th arrow is trivial
+class B{constructor(t,e,i,s){this.s=s;this.ext=s(this)} static define(t,e){let{eventHandlers:i,provide:s,decorations:o}=e||{};return new B(tA++,t,i,t=>[1])} static fromClass(t,e){return B.define(e=>new t(e),e)}}
+t('y1-B.fromClass(Z)', ()=>B.fromClass(Z).ext.length);
+// C: 4th arrow uses s and o but no shadowing e
+class C{constructor(t,e,i,s){this.s=s;this.ext=s(this)} static define(t,e){let{eventHandlers:i,provide:s,decorations:o}=e||{};return new C(tA++,t,i,t=>{let q=[1];return o&&q.push(o),s&&q.push(s(t)),q})} static fromClass(t,e){return C.define(e=>new t(e),e)}}
+t('z1-C.fromClass(Z)', ()=>C.fromClass(Z).ext.length);
+// D: shadowing e but no s/o use
+class D{constructor(t,e,i,s){this.s=s;this.ext=s(this)} static define(t,e){let{eventHandlers:i,provide:s,decorations:o}=e||{};return new D(tA++,t,i,t=>{let e=[1];return e})} static fromClass(t,e){return D.define(e=>new t(e),e)}}
+t('w1-D.fromClass(Z)', ()=>D.fromClass(Z).ext.length);
+// E: uses s only
+class E{constructor(t,e,i,s){this.s=s;this.ext=s(this)} static define(t,e){let{eventHandlers:i,provide:s,decorations:o}=e||{};return new E(tA++,t,i,t=>{let q=[1];return s&&q.push(s(t)),q})} static fromClass(t,e){return E.define(e=>new t(e),e)}}
+t('v1-E.fromClass(Z)', ()=>E.fromClass(Z).ext.length);
+// F: uses o only
+class F{constructor(t,e,i,s){this.s=s;this.ext=s(this)} static define(t,e){let{eventHandlers:i,provide:s,decorations:o}=e||{};return new F(tA++,t,i,t=>{let q=[1];return o&&q.push(o),q})} static fromClass(t,e){return F.define(e=>new t(e),e)}}
+t('u1-F.fromClass(Z)', ()=>F.fromClass(Z).ext.length);
+</script></body></html>

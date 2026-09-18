@@ -34,7 +34,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   先の本物の腕に食われとる stub）、deprecated `boa_ast` `ImportCall::argument` 4、
   unused mut 2、残りは dead_code 系。数が増えたら中身を見ること。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1180 通過 / 0 落ち**（2026-09-18）。
+- `cargo test --release` → **1181 通過 / 0 落ち**（2026-09-18）。
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
   数え方: `cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result" | awk '{p+=$4; f+=$6} END {print p, f}'`
   （`tr -d '\000'` は必須。出力に NUL が混ざって grep が binary 扱いする）
@@ -68,6 +68,9 @@ width/height）、`mask=`。`bg=none bgimg=<url>` なら「規則は当たっと
 
 主な環境変数: `TOBIRA_DEBUG_CONSOLE`（console と未捕捉エラー）、
 `TOBIRA_DEBUG_SCRIPTS`（script 一本ごとに ok / 失敗を一行。何本走ったかはこれで数える）、
+`TOBIRA_DYNAMIC_SCRIPTS=0`（script が足した script を走らせん。切り分け用）、
+`TOBIRA_DUMP_DOM=<path>`（script 実行後の文書を書き出す。Chrome の `--dump-dom` と
+`tools/scripterr/domstat.py` で突き合わせる）、
 `TOBIRA_TRACE_STACK`、
 `TOBIRA_DUMP_BOXES` / `TOBIRA_DUMP_DEPTH` / `TOBIRA_DUMP_WIDTH`、`TOBIRA_SHOT_HEIGHT`、
 `TOBIRA_DEBUG_IMAGES` / `_ATOMIC` / `_FLEX` / `_PAINT` / `_TABLE` / `_CSS`、
@@ -608,6 +611,47 @@ append、inline の動的、append してから src、404、timer から、scrip
 - 見立てが一つ当たって一つ外れた: Mac 側の「Wikipedia の JS は丸ごと
   ここに乗っとる」は当たり（5 本走った）。こちらが前に書いた「onclick=
   属性は実頁で多い」は参照九枚では 0 個で外れ。
+
+**続き: 「動くようにした、効果は不明」を閉じる。静止画やのうて DOM で測った。**
+Mac 側が「Noah's Ark と同じ形に片足を突っ込んどる」と言うたので、
+`TOBIRA_DYNAMIC_SCRIPTS=0`（動的 script を切る）と `TOBIRA_DUMP_DOM=<path>`
+（script 実行後の文書を書き出す）を足して、Chrome の `--dump-dom` と
+三つ並べた（`tools/scripterr/domstat.py`）。
+
+| 頁 | Chrome | tobira 動的 off | tobira 動的 on |
+|---|---|---|---|
+| ja.wikipedia (ブラウザ) | 810 要素 | 733 | 730（差は script 要素の数だけ） |
+| react.dev | 1846 要素 / 7525 字 | 995 / 6651 | **62 / 0 字**（最初） → 1362 / 6503（修正後） |
+
+- Wikipedia は on / off で**文字一つ動かず**。`centralNotice` の枠は Chrome に
+  あって tobira に無い（バナーの中身は別 fetch で、そこは追うとらん）。
+- **react.dev は動的 chunk を走らせたら真っ白になっとった**（高さ 0、Next.js の
+  "client-side exception"、React が木を丸ごと外す）。**14bb6df の時点で
+  参照頁が一枚退化しとった**ことになる。`--cli` の uncaught error 0 では
+  見えん（error boundary が拾うので）。静止画を撮らんかったのも悪い。
+- 追い方: console が `[object Object]` しか出さんかったので、Error は
+  "Name: message" と stack を出すようにした（vm.rs の console）。それでも
+  backtrace が無い（page の catch が拾うと消える）ので、`TOBIRA_TRACE_STACK=1`
+  のとき **throw の瞬間に** backtrace を eprintln するようにした。それで
+  `4ad82c5e` chunk の CodeMirror `ViewPlugin.fromClass(class{...})` →
+  `define` → ctor の `s(this)` が undefined、と辿れた。
+- 最小再現を六段階で絞った（`tools/scripterr/repro_new*.html`、
+  `repro_classarg*.html`）。**class 式を呼び出しの引数に置くと、どの形でも
+  引数が一つずれる**（`f(class{})` は callee が undefined になる）。
+  真因は `compiler/classes.rs` の `compile_class_value` が `MakeClosure` の後に
+  `Dup` → `SetLocal` → 最後に `GetLocal` で、**式一つに値が二つ**残っとった
+  （宣言文でも一つ漏れとった）。`Dup` を外した。一行の修正。
+- 修正後の react.dev: DOM 995 → 1362 要素（Chrome 1846）、span 12 → 277、
+  br 3 → 51。**見た目も変わった**: 「Video.js」「VideoList.js」のコード欄が
+  素の等幅から CodeMirror の色付きエディタになった（`react_on2.png`）。
+  **動的 script が実頁の見た目を変えた最初の例。** React error #418
+  （hydration の文字不一致）は console に残るが致命やない。
+- テスト 1180 → **1181 / 0**（class 式の回帰テスト）、GC verify 同数。
+
+**教訓**: ①「機構は動いた」の後に必ず「実頁で何が変わったか」を DOM で測る。
+静止画は「押せる」を測れんし、error boundary の中の死は uncaught error に
+出ん。②参照頁を触る変更の後は、参照頁を**全部**一枚ずつ撮る。今回は
+react.dev だけ撮らんかった一枚が退化しとった。
 
 ### 2026-09-10 - Claude (自走ループ二晩目: 8535535..c16844e, 23 コミット)
 

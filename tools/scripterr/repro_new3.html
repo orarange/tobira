@@ -1,0 +1,29 @@
+<html><body><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(label, fn){ try { log(label+'='+fn()); } catch(e){ log(label+'=ERR:'+e.message); } }
+class A{constructor(t,e,i,s){this.s=s;this.ext=s(this)} static define(t,e){let{provide:s}=e||{};return new A(0,t,undefined,t=>[1])}
+  static m(t,e){return A.define(function(e){return new t(e)},e)}
+  static n(t,e){return A.define(e=>t,e)}
+  static o(t,e){return A.define(e=>new t(e),e)}
+  static p(t,e){return A.define(e=>new t(),e)}
+  static q(t,e){return A.define(e=>{new t(e)},e)}
+  static r(t,e){var f=e=>new t(e);return A.define(f,e)}
+}
+function fc(t,e){return A.define(e=>new t(e),e)}
+class Z{constructor(x){}}
+t('m-function-new', ()=>A.m(Z).ext.length);
+t('n-arrow-no-new', ()=>A.n(Z).ext.length);
+t('o-arrow-new-t(e)', ()=>A.o(Z).ext.length);
+t('p-arrow-new-t()', ()=>A.p(Z).ext.length);
+t('q-arrow-block-new', ()=>A.q(Z).ext.length);
+t('r-arrow-in-var', ()=>A.r(Z).ext.length);
+t('s-plain-fn-wrapper', ()=>fc(Z).ext.length);
+// direct: pass arrow with new-of-upvalue as arg to a normal function that then does new
+function W(a,b,c,d){this.d=d} function w(t){return new W(0,t,undefined,x=>1)}
+function wc(t){return w(e=>new t(e))}
+t('t-fn-fn', ()=>typeof wc(Z).d);
+function w2(t){return new W(0,t,undefined,x=>1)}
+t('u-arrow-new-direct', ()=>typeof w2(e=>new Z(e)).d);
+t('v-arrow-new-direct2', ()=>{ const g=e=>new Z(e); return typeof w2(g).d; });
+</script></body></html>

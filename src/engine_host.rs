@@ -1354,8 +1354,12 @@ impl BrowserHost {
     }
 
     /// The scripts waiting to run, in arrival order, each handed out once.
+    /// `TOBIRA_DYNAMIC_SCRIPTS=0` hands out none, to see a page without them.
     pub fn take_pending_scripts(&mut self) -> Vec<ScriptSource> {
         let pending = std::mem::take(&mut self.pending_scripts);
+        if std::env::var_os("TOBIRA_DYNAMIC_SCRIPTS").is_some_and(|v| v == "0") {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for idx in pending {
             if !self.started_scripts.insert(idx) {
@@ -7461,6 +7465,37 @@ mod tests {
             result.html
         );
         assert!(!result.html.contains("BAD"), "{}", result.html);
+    }
+
+    /// A class expression is one value. It used to leave two on the operand
+    /// stack, so `f(class {})` called something one slot too deep: react.dev's
+    /// CodeMirror bundle went `ViewPlugin.fromClass(class { ... })` and the
+    /// whole page unmounted with "attempted to call a non-function value".
+    #[test]
+    fn class_expression_as_call_argument_is_one_value() {
+        let result = run_document_scripts(
+            r#"
+            <p id="out"></p>
+            <script>
+            function f(x, y) { return typeof x + "," + typeof y; }
+            var o = { m(x, y) { return typeof x + "," + typeof y; } };
+            class A { static s(x, y) { return typeof x + "," + typeof y; } }
+            document.getElementById("out").textContent = [
+              f(class {}), o.m(class {}), A.s(class {}), f(1, class {}),
+              [class {}].length, f(f(class {})), f(class X extends Object {}),
+            ].join(" ");
+            </script>
+            "#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains(
+                "function,undefined function,undefined function,undefined number,function 1 string,undefined function,undefined"
+            ),
+            "{}",
+            result.html
+        );
     }
 
     #[test]

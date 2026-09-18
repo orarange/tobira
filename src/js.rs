@@ -242,6 +242,13 @@ fn engine_result_to_processed(result: crate::engine_host::EngineRunResult) -> Pr
     if let Some(error) = result.error {
         console_logs.push(format!("[tobira-engine] uncaught error: {error}"));
     }
+    // The document as the scripts left it, to put next to Chrome's
+    // `--dump-dom` or next to itself with a switch flipped.
+    if let Some(path) = std::env::var_os("TOBIRA_DUMP_DOM") {
+        if let Err(e) = std::fs::write(&path, &result.html) {
+            eprintln!("[js] TOBIRA_DUMP_DOM: could not write {}: {e}", path.to_string_lossy());
+        }
+    }
     ProcessedScriptHtml {
         html: result.html,
         title_override: result.title,

@@ -7920,6 +7920,12 @@ impl Vm {
                     (Some(name), None) => format!("{name} is not a function ({described})"),
                     (None, _) => format!("attempted to call a non-function value ({described})"),
                 };
+                // A page's own `catch` usually swallows this, and the
+                // backtrace with it. With TOBIRA_TRACE_STACK it is printed
+                // at the throw, where the frames still exist.
+                if self.trace_stack_enabled {
+                    eprintln!("[trace] TypeError: {message}\n{}", self.capture_backtrace());
+                }
                 return Err(VmError::TypeError(message));
             }
         };
@@ -14280,7 +14286,26 @@ impl Vm {
                     BuiltinId::ConsoleError => ConsoleLevel::Error,
                     _ => ConsoleLevel::Log,
                 };
-                let parts: Vec<String> = args.iter().map(|v| self.to_string(v)).collect();
+                // An Error handed to the console reads as "Name: message"
+                // and its stack, as it does in a browser; "[object Object]"
+                // told nobody why a page went blank.
+                let parts: Vec<String> = args
+                    .iter()
+                    .map(|v| {
+                        let text = self.describe_thrown_value(v);
+                        let stack = match v {
+                            Value::Object(object) if text != "[object Object]" => self
+                                .read_data_property_chain(*object, &PropertyKey::from("stack"))
+                                .map(|s| self.to_string(&s))
+                                .filter(|s| !s.is_empty() && s != &text),
+                            _ => None,
+                        };
+                        match stack {
+                            Some(stack) => format!("{text}\n{stack}"),
+                            None => text,
+                        }
+                    })
+                    .collect();
                 let _ = self.host.console(ConsoleMessage { level, parts });
                 Ok(Value::Undefined)
             }

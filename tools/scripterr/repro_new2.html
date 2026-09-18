@@ -1,0 +1,27 @@
+<html><body><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(label, fn){ try { log(label+'='+fn()); } catch(e){ log(label+'=ERR:'+e.message); } }
+let tA=0;
+class A{constructor(t,e,i,s){this.s=s;this.ext=s(this)} static define(t,e){let{eventHandlers:i,provide:s,decorations:o}=e||{};return new A(tA++,t,i,t=>{let e=[1];return o&&e.push(o),s&&e.push(s(t)),e})} static fromClass(t,e){return A.define(e=>new t(e),e)}}
+t('a-define(fn,undefined)', ()=>A.define(function(){}, undefined).ext.length);
+t('b-define(arrow,{})', ()=>A.define(e=>1, {}).ext.length);
+t('c-define(arrow,undefined)', ()=>A.define(e=>1, undefined).ext.length);
+t('d-fromClass(cls,{})', ()=>A.fromClass(class{constructor(t){}}, {}).ext.length);
+t('e-fromClass(cls)', ()=>A.fromClass(class{constructor(t){}}).ext.length);
+t('f-define(fn)', ()=>A.define(function(){}).ext.length);
+// simpler: does `new X(a, b, c, arrow)` lose the arrow when called from a function whose 2nd param is undefined?
+class G{constructor(t,e,i,s){this.s=s} static define(t,e){let{p:s}=e||{};return new G(0,t,undefined,t=>1)}}
+t('g-G.define(1)', ()=>typeof G.define(1).s);
+t('g2-G.define(1,{})', ()=>typeof G.define(1,{}).s);
+class H{constructor(t,e,i,s){this.s=s} static define(t,e){let{p:s}=e||{};return new H(0,t,s,t=>1)}}
+t('h-H.define(1)', ()=>typeof H.define(1).s);
+class I{constructor(t,e,i,s){this.s=s} static define(t,e){let{p:s}=e||{};return new I(0,t,undefined,function(){})}}
+t('i-I.define(1)', ()=>typeof I.define(1).s);
+class J{constructor(t,e,i,s){this.s=s} static define(t,e){let{p:s}=e||{};let f=t=>1;return new J(0,t,undefined,f)}}
+t('j-J.define(1)', ()=>typeof J.define(1).s);
+class K{constructor(t,e,i,s){this.s=s} static define(t,e){let s=(e||{}).p;return new K(0,t,undefined,t=>1)}}
+t('k-K.define(1)', ()=>typeof K.define(1).s);
+class L{constructor(t,e,i,s){this.s=s} static define(t,e){let{p:s}=e||{};return new L(0,t,undefined,t=>s)}}
+t('l-L.define(1)', ()=>typeof L.define(1).s);
+</script></body></html>

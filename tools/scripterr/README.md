@@ -23,6 +23,23 @@ TOBIRA_DEBUG_CONSOLE=1 TOBIRA_DEBUG_SCRIPTS=1 ./target/release/tobira --cli http
 | `onprop.html` | `el.onclick = fn` next to `addEventListener` | `start onclick-prop click-listener onclick-prop click-listener` |
 | `style3.html` | `<style>` right after `</p>` with `<font>` still active | `style-parent body child #text ...` |
 | `dyn.html` | scripts that script adds: seven ways | see below |
+| `repro_classarg.html`, `repro_classarg2.html` | a class expression as a call argument, in every call shape | every line names the right types |
+| `repro_new.html` .. `repro_new4.html` | the bisection that led there, from CodeMirror's `ViewPlugin.fromClass` | kept as the record |
+
+`domstat.py` counts elements, text and tags in a serialized DOM and diffs two
+of them. With `TOBIRA_DUMP_DOM=<path>` (the document as the scripts left it)
+and `TOBIRA_DYNAMIC_SCRIPTS=0` (no scripts that script added), a page can be
+read three ways -- Chrome, tobira without, tobira with -- and compared:
+
+```
+"chrome.exe" --headless --dump-dom URL > chrome.html
+TOBIRA_DYNAMIC_SCRIPTS=0 TOBIRA_DUMP_DOM=off.html tobira --cli URL
+TOBIRA_DUMP_DOM=on.html tobira --cli URL
+python tools/scripterr/domstat.py off.html on.html chrome.html
+```
+
+That is how react.dev's blank page was found: `on` had 62 elements against
+`off`'s 995, and Chrome's 1846.
 
 `dyn.html`: Chrome prints `start inline-dyn sync-end next-parser-script
 err-missing3 ran-d3 ran-d2 ran-d1 load-d1 ran-d4 ran-d5-chained`; tobira
