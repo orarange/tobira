@@ -2995,6 +2995,12 @@ impl Vm {
         std::mem::take(&mut self.job_errors)
     }
 
+    /// A failure from outside the event loop that has no caller to return
+    /// to either, such as a script that script added after load.
+    pub fn push_job_error(&mut self, message: String) {
+        self.job_errors.push(message);
+    }
+
     pub fn event_loop_tick(&mut self, now_ms: u64, has_render_opportunity: bool) -> TickResult {
         self.event_loop.current_time_ms = now_ms;
         // The other safe point: between turns nothing native is part-way
@@ -6839,7 +6845,7 @@ impl Vm {
         Ok(promise)
     }
 
-    fn drain_microtasks(&mut self) {
+    pub fn drain_microtasks(&mut self) {
         while let Some(job) = self.event_loop.microtask_queue.pop_front() {
             if let Err(error) = self.run_microtask_job(job) {
                 self.report_job_error("microtask", &error);

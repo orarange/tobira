@@ -283,6 +283,12 @@ pub struct BrowserHost {
     /// The focused node (`document.activeElement`), set by focus/blur events.
     active_element: Option<usize>,
     console: Vec<String>,
+    /// `<script>` elements that script put into the document (or gave a
+    /// `src`) and that have not run yet, in the order they arrived.
+    pending_scripts: Vec<usize>,
+    /// Script elements that have run, or been handed out to run. A script
+    /// element runs once, however often it is moved.
+    started_scripts: HashSet<usize>,
     location: LocationSnapshot,
     /// A full (cross-document) navigation requested this turn — the browser
     /// reloads. Set by `location.href`/`assign`/`reload` and `Navigate`.
@@ -337,6 +343,8 @@ impl BrowserHost {
             document: 0,
             active_element: None,
             console: Vec::new(),
+            pending_scripts: Vec::new(),
+            started_scripts: HashSet::new(),
             location: location_from_url(url),
             navigation: None,
             soft_navigation: None,
@@ -606,6 +614,11 @@ impl BrowserHost {
     fn record_childlist_mutation(&mut self, parent_idx: usize, added: &[usize], removed: &[usize]) {
         if added.is_empty() && removed.is_empty() {
             return;
+        }
+        // Every way script puts nodes into the document comes through
+        // here, so this is where a `<script>` it added waits its turn.
+        for &idx in added {
+            self.queue_scripts_under(idx);
         }
         self.structural_changes
             .push(DomStructuralChange::ChildList {
@@ -1238,60 +1251,121 @@ impl BrowserHost {
     /// attribute, to be resolved against the document URL and fetched by the
     /// caller. Preserves source order so dependencies (e.g. React before the app)
     /// execute correctly.
-    pub fn ordered_scripts(&self) -> Vec<ScriptSource> {
+    pub fn ordered_scripts(&mut self) -> Vec<ScriptSource> {
         let mut scripts = Vec::new();
         self.collect_ordered_scripts(self.document, &mut scripts);
         scripts
     }
 
-    fn collect_ordered_scripts(&self, root: usize, out: &mut Vec<ScriptSource>) {
-        for &child in &self.nodes[root].children {
+    fn collect_ordered_scripts(&mut self, root: usize, out: &mut Vec<ScriptSource>) {
+        let children = self.nodes[root].children.clone();
+        for child in children {
             if self.nodes[child].tag_name() == Some("script") {
-                if !Self::is_executable_script_type(
-                    self.nodes[child].attrs.get("type").map(String::as_str),
-                ) {
-                    self.collect_ordered_scripts(child, out);
-                    continue;
-                }
-                // This host's `NodeId` IS the arena node index (see
-                // `collect_node_order` / `make_dom_node_value`), not the browser's
-                // `data-tobira-node-id` pre-order number — use the index directly.
-                let node_id = Some(child as u32);
-                let module = self.nodes[child]
-                    .attrs
-                    .get("type")
-                    .map(|type_attr| {
-                        type_attr
-                            .trim()
-                            .split(';')
-                            .next()
-                            .unwrap_or("")
-                            .trim()
-                            .eq_ignore_ascii_case("module")
-                    })
-                    .unwrap_or(false);
-                match self.nodes[child].attrs.get("src") {
-                    Some(src) if !src.trim().is_empty() => {
-                        out.push(ScriptSource::External {
-                            src: src.trim().to_string(),
-                            module,
-                            node_id,
-                        });
-                    }
-                    _ => {
-                        let text = self.collect_text(child);
-                        if !text.trim().is_empty() {
-                            out.push(ScriptSource::Inline {
-                                text,
-                                module,
-                                node_id,
-                            });
-                        }
-                    }
+                if let Some(script) = self.script_source_for(child) {
+                    self.started_scripts.insert(child);
+                    out.push(script);
                 }
             }
             self.collect_ordered_scripts(child, out);
         }
+    }
+
+    /// What a `<script>` element would run: its `src`, or its text. None
+    /// when its `type` is not JavaScript, or it has neither.
+    ///
+    /// This host's `NodeId` IS the arena node index (see `collect_node_order`
+    /// / `make_dom_node_value`), not the browser's `data-tobira-node-id`
+    /// pre-order number, so the index is the handle.
+    fn script_source_for(&self, idx: usize) -> Option<ScriptSource> {
+        if self.nodes[idx].tag_name() != Some("script") {
+            return None;
+        }
+        if !Self::is_executable_script_type(self.nodes[idx].attrs.get("type").map(String::as_str)) {
+            return None;
+        }
+        let node_id = Some(idx as u32);
+        let module = self.nodes[idx]
+            .attrs
+            .get("type")
+            .map(|type_attr| {
+                type_attr
+                    .trim()
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .eq_ignore_ascii_case("module")
+            })
+            .unwrap_or(false);
+        match self.nodes[idx].attrs.get("src") {
+            Some(src) if !src.trim().is_empty() => Some(ScriptSource::External {
+                src: src.trim().to_string(),
+                module,
+                node_id,
+            }),
+            _ => {
+                let text = self.collect_text(idx);
+                if text.trim().is_empty() {
+                    None
+                } else {
+                    Some(ScriptSource::Inline {
+                        text,
+                        module,
+                        node_id,
+                    })
+                }
+            }
+        }
+    }
+
+    fn is_connected(&self, mut idx: usize) -> bool {
+        loop {
+            if idx == self.document {
+                return true;
+            }
+            match self.nodes[idx].parent {
+                Some(parent) => idx = parent,
+                None => return false,
+            }
+        }
+    }
+
+    /// A `<script>` that has just become part of the document, or just got
+    /// its `src` while in it, waits its turn. One that has run, is not in the
+    /// document, or has nothing to run, does not.
+    fn queue_script(&mut self, idx: usize) {
+        if self.nodes[idx].tag_name() != Some("script")
+            || self.started_scripts.contains(&idx)
+            || self.pending_scripts.contains(&idx)
+            || !self.is_connected(idx)
+            || self.script_source_for(idx).is_none()
+        {
+            return;
+        }
+        self.pending_scripts.push(idx);
+    }
+
+    fn queue_scripts_under(&mut self, idx: usize) {
+        self.queue_script(idx);
+        let children = self.nodes[idx].children.clone();
+        for child in children {
+            self.queue_scripts_under(child);
+        }
+    }
+
+    /// The scripts waiting to run, in arrival order, each handed out once.
+    pub fn take_pending_scripts(&mut self) -> Vec<ScriptSource> {
+        let pending = std::mem::take(&mut self.pending_scripts);
+        let mut out = Vec::new();
+        for idx in pending {
+            if !self.started_scripts.insert(idx) {
+                continue;
+            }
+            if let Some(script) = self.script_source_for(idx) {
+                out.push(script);
+            }
+        }
+        out
     }
 
     /// The document's base URL (used to resolve relative `src`/`href`).
@@ -2382,8 +2456,11 @@ impl Host for BrowserHost {
                         .iter()
                         .filter_map(|child| self.build_from_node(child))
                         .collect();
-                    for child in child_indices {
+                    for &child in &child_indices {
                         self.attach(body, child);
+                    }
+                    for child in child_indices {
+                        self.queue_scripts_under(child);
                     }
                 }
                 Ok(DomMutationResult::None)
@@ -2396,6 +2473,11 @@ impl Host for BrowserHost {
                 let old = self.nodes[idx].attrs.get(&name).cloned();
                 self.nodes[idx].attrs.insert(name.clone(), value);
                 self.record_attribute_mutation(idx, &name, old);
+                // `document.body.appendChild(s); s.src = url` -- the src
+                // arriving on a script already in the document starts it.
+                if name == "src" {
+                    self.queue_script(idx);
+                }
                 Ok(DomMutationResult::None)
             }
             DomMutation::RemoveAttribute { node, name } => {
@@ -2851,6 +2933,11 @@ impl BrowserHost {
 }
 
 /// Result of running a document's inline scripts on the self-built engine.
+/// How many scripts added by script run in one go before the rest are
+/// left. A page whose scripts add scripts without end would otherwise
+/// never finish.
+const DYNAMIC_SCRIPT_BUDGET: usize = 256;
+
 #[derive(Debug, Clone, Default)]
 pub struct EngineRunResult {
     pub html: String,
@@ -4584,111 +4671,62 @@ impl EngineSession {
                 let _ = vm.execute(&chunk);
             }
         }
+        // Scripts that scripts put into the document run between the ones
+        // the parser found, as soon as the one that added them is done.
+        // A browser fetches them off the main thread and runs each when it
+        // arrives, so the order among them is whatever the network made
+        // it; here it is arrival order, which is one of the orders a
+        // browser can produce. The budget is for pages whose scripts add
+        // scripts without end.
+        let mut dynamic_budget = DYNAMIC_SCRIPT_BUDGET;
         for (script_index, script) in scripts.iter().enumerate() {
-            let script_node_id = script.node_id().map(NodeId);
-            let script_label = match script {
-                ScriptSource::External { src, .. } => format!("external script {src}"),
-                ScriptSource::Inline { .. } => format!("inline script #{script_index}"),
-            };
-            // Resolve the source: inline text is used directly; an external `src`
-            // is resolved against the document URL and fetched over HTTP, like a
-            // real browser loading `<script src>`. A fetch that fails, or that
-            // answers with anything but 2xx, runs nothing: a 404 page is HTML,
-            // not the script, and a browser fires `error` on the element
-            // instead of executing the body. It is noted on the console and
-            // the next script goes ahead.
-            let (source, current_script_src) = match script {
-                ScriptSource::Inline { text, .. } => (text.clone(), None),
-                ScriptSource::External { src, .. } => {
-                    let resolved = Url::parse(&base_href)
-                        .and_then(|base| base.resolve(src))
-                        .or_else(|_| Url::parse(src));
-                    let fetched = match resolved {
-                        Ok(url) => match crate::http::fetch(&url) {
-                            Ok(response) if (200..300).contains(&response.status_code) => Ok((
-                                String::from_utf8_lossy(&response.body).into_owned(),
-                                Some(url.to_string()),
-                            )),
-                            Ok(response) => Err(format!(
-                                "script {src} not run: HTTP {} {}",
-                                response.status_code, response.reason_phrase
-                            )),
-                            Err(e) => Err(format!("script {src} not run: fetch failed: {e}")),
-                        },
-                        Err(e) => Err(format!("script {src} not run: invalid url: {e:?}")),
-                    };
-                    match fetched {
-                        Ok(pair) => pair,
-                        Err(note) => {
-                            if debug_scripts {
-                                eprintln!(
-                                    "[scripts] {}/{script_count} {script_label}: {note}",
-                                    script_index + 1
-                                );
-                            }
-                            Self::host_of(&mut vm).note(format!("[tobira-engine] {note}"));
-                            // The element hears about it: `onerror` is how a
-                            // page falls back to another CDN.
-                            Self::fire_on_script(&mut vm, script_node_id, "error");
-                            continue;
-                        }
-                    }
-                }
-            };
-            let outcome: Result<(), String> = if script.is_module() {
-                Self::run_module_script(
-                    &mut vm,
-                    &source,
-                    current_script_src.as_deref(),
-                    &base_href,
-                    script_node_id,
-                )
-            } else {
-                match Parser::new(&source).parse() {
-                    Ok(program) => match Compiler::new(&program).compile() {
-                        Ok(chunk) => {
-                            vm.set_current_script_src(current_script_src.clone());
-                            vm.set_current_script_node(script_node_id);
-                            match vm.execute(&chunk) {
-                                Ok(_) => Ok(()),
-                                Err(e) => {
-                                    let backtrace = vm.take_last_backtrace();
-                                    Err(match backtrace {
-                                        Some(backtrace) if !backtrace.is_empty() => {
-                                            format!("{e} (in {script_label})\n{backtrace}")
-                                        }
-                                        _ => format!("{e} (in {script_label})"),
-                                    })
-                                }
-                            }
-                        }
-                        Err(e) => Err(format!("compile: {e:?} (in {script_label})")),
-                    },
-                    Err(e) => Err(format!("parse: {e:?} (in {script_label})")),
-                }
-            };
-            if debug_scripts {
-                match &outcome {
-                    Ok(()) => eprintln!(
-                        "[scripts] {}/{script_count} {script_label}: ok",
-                        script_index + 1
-                    ),
-                    Err(e) => eprintln!(
-                        "[scripts] {}/{script_count} {script_label}: {}",
-                        script_index + 1,
-                        e.lines().next().unwrap_or("")
-                    ),
-                }
-            }
-            if let Err(e) = outcome {
+            let label = Self::script_label(script, script_index);
+            if let Err(e) = Self::run_one_script(
+                &mut vm,
+                script,
+                &label,
+                &base_href,
+                debug_scripts,
+                Some((script_index + 1, script_count)),
+            ) {
                 errors.push(e);
             }
-            // An external script fires `load` once it has run, whether or not
-            // it threw. An inline one never does.
-            if matches!(script, ScriptSource::External { .. }) {
-                Self::fire_on_script(&mut vm, script_node_id, "load");
-            }
+            Self::drain_pending_scripts(
+                &mut vm,
+                &base_href,
+                debug_scripts,
+                &mut dynamic_budget,
+                &mut errors,
+            );
         }
+
+        // The document is parsed and its scripts ran: fire the initial load
+        // events on the document/window (handle 0), like boa's
+        // dispatch_initial_load_events.
+        for event_type in ["readystatechange", "DOMContentLoaded", "load"] {
+            let _ = vm.fire_dom_event(0, event_type);
+            Self::drain_pending_scripts(
+                &mut vm,
+                &base_href,
+                debug_scripts,
+                &mut dynamic_budget,
+                &mut errors,
+            );
+        }
+
+        // Settle deferred work (Promise microtasks + a 1ms timer window) so
+        // async initial rendering reflects in the snapshot. The 1ms window
+        // runs `setTimeout(fn, 1)` "next turn" callbacks like boa does, while
+        // timers those callbacks schedule (and longer delays) stay pending.
+        vm.run_due_jobs_at(1, 10_000);
+        Self::drain_pending_scripts(
+            &mut vm,
+            &base_href,
+            debug_scripts,
+            &mut dynamic_budget,
+            &mut errors,
+        );
+
         let error = match errors.len() {
             0 => None,
             1 => errors.pop(),
@@ -4706,19 +4744,6 @@ impl EngineSession {
             }
         };
 
-        // The document is parsed and its scripts ran: fire the initial load
-        // events on the document/window (handle 0), like boa's
-        // dispatch_initial_load_events.
-        for event_type in ["readystatechange", "DOMContentLoaded", "load"] {
-            let _ = vm.fire_dom_event(0, event_type);
-        }
-
-        // Settle deferred work (Promise microtasks + a 1ms timer window) so
-        // async initial rendering reflects in the snapshot. The 1ms window
-        // runs `setTimeout(fn, 1)` "next turn" callbacks like boa does, while
-        // timers those callbacks schedule (and longer delays) stay pending.
-        vm.run_due_jobs_at(1, 10_000);
-
         let mut session = Self { vm };
         let snapshot = session.snapshot_with_error(error);
         (session, snapshot)
@@ -4730,6 +4755,183 @@ impl EngineSession {
             .as_any_mut()
             .downcast_mut::<BrowserHost>()
             .expect("host is a BrowserHost")
+    }
+
+    fn script_label(script: &ScriptSource, script_index: usize) -> String {
+        match script {
+            ScriptSource::External { src, .. } => format!("external script {src}"),
+            ScriptSource::Inline { .. } => format!("inline script #{script_index}"),
+        }
+    }
+
+    /// Run one script element to completion: fetch it if it is external
+    /// (nothing runs on a failed fetch, and the element hears `error`), then
+    /// parse, compile and execute it, then `load` on an external one. The
+    /// `Err` is the script's own failure, for the caller to keep.
+    fn run_one_script(
+        vm: &mut Vm,
+        script: &ScriptSource,
+        script_label: &str,
+        base_href: &str,
+        debug_scripts: bool,
+        position: Option<(usize, usize)>,
+    ) -> Result<(), String> {
+        let script_node_id = script.node_id().map(NodeId);
+        let where_ = match position {
+            Some((n, total)) => format!("{n}/{total} "),
+            None => String::new(),
+        };
+        // Resolve the source: inline text is used directly; an external `src`
+        // is resolved against the document URL and fetched over HTTP, like a
+        // real browser loading `<script src>`. A fetch that fails, or that
+        // answers with anything but 2xx, runs nothing: a 404 page is HTML,
+        // not the script, and a browser fires `error` on the element
+        // instead of executing the body. It is noted on the console and
+        // the next script goes ahead.
+        let (source, current_script_src) = match script {
+            ScriptSource::Inline { text, .. } => (text.clone(), None),
+            ScriptSource::External { src, .. } => {
+                let resolved = Url::parse(base_href)
+                    .and_then(|base| base.resolve(src))
+                    .or_else(|_| Url::parse(src));
+                let fetched = match resolved {
+                    Ok(url) => match crate::http::fetch(&url) {
+                        Ok(response) if (200..300).contains(&response.status_code) => Ok((
+                            String::from_utf8_lossy(&response.body).into_owned(),
+                            Some(url.to_string()),
+                        )),
+                        Ok(response) => Err(format!(
+                            "script {src} not run: HTTP {} {}",
+                            response.status_code, response.reason_phrase
+                        )),
+                        Err(e) => Err(format!("script {src} not run: fetch failed: {e}")),
+                    },
+                    Err(e) => Err(format!("script {src} not run: invalid url: {e:?}")),
+                };
+                match fetched {
+                    Ok(pair) => pair,
+                    Err(note) => {
+                        if debug_scripts {
+                            eprintln!("[scripts] {where_}{script_label}: {note}");
+                        }
+                        Self::host_of(vm).note(format!("[tobira-engine] {note}"));
+                        // The element hears about it: `onerror` is how a
+                        // page falls back to another CDN.
+                        Self::fire_on_script(vm, script_node_id, "error");
+                        return Ok(());
+                    }
+                }
+            }
+        };
+        let outcome: Result<(), String> = if script.is_module() {
+            Self::run_module_script(
+                vm,
+                &source,
+                current_script_src.as_deref(),
+                base_href,
+                script_node_id,
+            )
+        } else {
+            match Parser::new(&source).parse() {
+                Ok(program) => match Compiler::new(&program).compile() {
+                    Ok(chunk) => {
+                        vm.set_current_script_src(current_script_src.clone());
+                        vm.set_current_script_node(script_node_id);
+                        match vm.execute(&chunk) {
+                            Ok(_) => Ok(()),
+                            Err(e) => {
+                                let backtrace = vm.take_last_backtrace();
+                                Err(match backtrace {
+                                    Some(backtrace) if !backtrace.is_empty() => {
+                                        format!("{e} (in {script_label})\n{backtrace}")
+                                    }
+                                    _ => format!("{e} (in {script_label})"),
+                                })
+                            }
+                        }
+                    }
+                    Err(e) => Err(format!("compile: {e:?} (in {script_label})")),
+                },
+                Err(e) => Err(format!("parse: {e:?} (in {script_label})")),
+            }
+        };
+        if debug_scripts {
+            match &outcome {
+                Ok(()) => eprintln!("[scripts] {where_}{script_label}: ok"),
+                Err(e) => eprintln!(
+                    "[scripts] {where_}{script_label}: {}",
+                    e.lines().next().unwrap_or("")
+                ),
+            }
+        }
+        // An external script fires `load` once it has run, whether or not
+        // it threw. An inline one never does.
+        if matches!(script, ScriptSource::External { .. }) {
+            Self::fire_on_script(vm, script_node_id, "load");
+        }
+        outcome
+    }
+
+    /// Run the scripts that script has put into the document, and the ones
+    /// those put in, until none are waiting or the budget is spent. Returns
+    /// whether anything ran.
+    fn drain_pending_scripts(
+        vm: &mut Vm,
+        base_href: &str,
+        debug_scripts: bool,
+        budget: &mut usize,
+        errors: &mut Vec<String>,
+    ) -> bool {
+        let mut ran_any = false;
+        loop {
+            let pending = Self::host_of(vm).take_pending_scripts();
+            if pending.is_empty() {
+                return ran_any;
+            }
+            for script in pending {
+                if *budget == 0 {
+                    Self::host_of(vm).note(format!(
+                        "[tobira-engine] dynamic script budget of {DYNAMIC_SCRIPT_BUDGET} spent; \
+                         later ones do not run"
+                    ));
+                    return ran_any;
+                }
+                *budget -= 1;
+                ran_any = true;
+                let label = match &script {
+                    ScriptSource::External { src, .. } => format!("dynamic script {src}"),
+                    ScriptSource::Inline { node_id, .. } => {
+                        format!("dynamic inline script (node {})", node_id.unwrap_or(0))
+                    }
+                };
+                if let Err(e) =
+                    Self::run_one_script(vm, &script, &label, base_href, debug_scripts, None)
+                {
+                    errors.push(e);
+                }
+            }
+        }
+    }
+
+    /// After anything that ran script -- a timer, an event, a call from the
+    /// browser -- run the scripts it added. Their failures go where a
+    /// timer's would.
+    fn settle_dynamic_scripts(&mut self) -> bool {
+        let base_href = self.host().base_href();
+        let debug_scripts = std::env::var_os("TOBIRA_DEBUG_SCRIPTS").is_some();
+        let mut budget = DYNAMIC_SCRIPT_BUDGET;
+        let mut errors = Vec::new();
+        let ran = Self::drain_pending_scripts(
+            &mut self.vm,
+            &base_href,
+            debug_scripts,
+            &mut budget,
+            &mut errors,
+        );
+        for e in errors {
+            self.vm.push_job_error(e);
+        }
+        ran
     }
 
     /// Fire `load` or `error` on a `<script>` element the parser put there.
@@ -4744,7 +4946,10 @@ impl EngineSession {
             eprintln!("[scripts] fire {event_type} on node {}", node.0);
         }
         let _ = vm.fire_dom_event(node.0, event_type);
-        vm.run_due_jobs(10_000);
+        // The listeners' promises settle now; timers wait for the event
+        // loop, as they do in a browser, so a `setTimeout(fn, 0)` does not
+        // run between two of the parser's scripts.
+        vm.drain_microtasks();
     }
 
     fn host_of(vm: &mut Vm) -> &mut BrowserHost {
@@ -5014,7 +5219,9 @@ impl EngineSession {
     /// no-op (a page with a pending interval but nothing due this frame). Drives
     /// `setInterval`, `setTimeout(fn, delay)`, and animation loops over time.
     pub fn pump(&mut self, now_ms: u64) -> bool {
-        self.vm.pump_event_loop(now_ms, 10_000)
+        let ran = self.vm.pump_event_loop(now_ms, 10_000);
+        let added = self.settle_dynamic_scripts();
+        ran || added
     }
 
     /// Whether the engine still has pending event-loop work (timers / RAF /
@@ -5083,6 +5290,7 @@ impl EngineSession {
                 .fire_dom_event_with(handle, event_type, init)
                 .unwrap_or(false);
             self.vm.run_due_jobs(10_000);
+            self.settle_dynamic_scripts();
         }
         let mut snapshot = self.snapshot();
         snapshot.default_prevented = default_prevented;
@@ -5099,6 +5307,7 @@ impl EngineSession {
         }
         let _ = self.vm.fire_dom_event(0, event_type);
         self.vm.run_due_jobs(10_000);
+        self.settle_dynamic_scripts();
         Some(self.snapshot())
     }
 
@@ -7205,6 +7414,53 @@ mod tests {
             "{:?}",
             result.console_logs
         );
+    }
+
+    /// A `<script>` that script puts into the document runs: inline text,
+    /// `src` set before or after it is appended, one added by a timer, and
+    /// one added by a script that was itself added. One that is never put in
+    /// the document does not. A failed fetch fires `error` and runs nothing.
+    #[test]
+    fn scripts_added_by_script_run() {
+        let result = run_document_scripts(
+            r#"
+            <p id="out">start</p>
+            <script>
+            var out = document.getElementById("out");
+            function log(s) { out.textContent += " " + s; }
+            var a = document.createElement("script");
+            a.textContent = "log('inline'); var b = document.createElement('script'); b.textContent = \"log('chained')\"; document.body.appendChild(b);";
+            document.body.appendChild(a);
+            var c = document.createElement("script");
+            document.head.appendChild(c);
+            c.textContent = "log('BAD-text-after-append')";
+            var d = document.createElement("script");
+            d.src = "http://127.0.0.1:1/unreachable.js";
+            d.onerror = function () { log("error"); };
+            d.onload = function () { log("BAD-load"); };
+            document.body.appendChild(d);
+            var e = document.createElement("script");
+            e.textContent = "log('BAD-never-inserted')";
+            setTimeout(function () {
+              var f = document.createElement("script");
+              f.textContent = "log('timer')";
+              document.body.appendChild(f);
+            }, 0);
+            log("sync-end");
+            </script>
+            <script>log("second");</script>
+            "#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result
+                .html
+                .contains("start sync-end inline error chained second timer"),
+            "{}",
+            result.html
+        );
+        assert!(!result.html.contains("BAD"), "{}", result.html);
     }
 
     #[test]

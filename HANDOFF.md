@@ -20,17 +20,21 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## いまの状態（2026-09-18）
 
-- ブランチ `master`。この文書を書いた時点の HEAD は `64deda1`
+- ブランチ `master`。この文書を書いた時点の HEAD は `845f104`
   （この文書のコミットが直後に乗る）。origin/master と同期しとる。
 - script は一本ずつ独立（2026-09-18）。一本の失敗で以降が止まる、
   404 の本体を実行する、の二つを直した。`tools/scripterr/` が検体。
+- **script が足した `<script>` が走る**（2026-09-18）。挿入・`src` 付与で
+  待ち行列に積み、足した script が終わった直後・load の後・pump の後・
+  イベント配送の後に捌く。予算 256 本。`el.onclick = fn` も効く。
+  ja.wikipedia の `mw.loader` が 5 本、react.dev が 3 本、ここで走る。
 - `cargo build --release` 通る。警告は 35 件（2026-09-18 実測）で、全部無害:
   unreachable pattern 10（`html.rs` の `is_block_like` の重複リテラル 8、
   `compiler/expressions.rs` の網羅済み match の `_`、`vm.rs` の `createComment` が
   先の本物の腕に食われとる stub）、deprecated `boa_ast` `ImportCall::argument` 4、
   unused mut 2、残りは dead_code 系。数が増えたら中身を見ること。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1179 通過 / 0 落ち**（2026-09-18）。
+- `cargo test --release` → **1180 通過 / 0 落ち**（2026-09-18）。
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
   数え方: `cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result" | awk '{p+=$4; f+=$6} END {print p, f}'`
   （`tr -d '\000'` は必須。出力に NUL が混ざって grep が binary 扱いする）
@@ -563,15 +567,47 @@ tests23（2/5）を Mac 側が Noah's Ark 条項の未実装と読み、こち�
   - `onerror="..."` の **HTML 属性**はハンドラとして読んどらん（属性を
     関数にコンパイルする経路が無い）。`<body onload>` や `<img onerror>` も
     同じはず。
-  - **script が `appendChild` した `<script src>` は走らん。** 動的に
-    足した script を拾って実行する経路が無い。ローダーの類（CDN の
-    フォールバック、遅延読み込み）はここに乗るので、大きい。
+  - ~~script が `appendChild` した `<script src>` は走らん~~ → 同じ日に直した（下記）。
   - bubble せんイベントは capture 段を通らん（`propagate_event` は
     `bubbles` のときだけ祖先を辿る）。document の capture listener が
     script の `error` を見れん。
   - tobira は文書を全部 parse してから script を走らせる。Chrome は
     parse しながら走らせるので、先の inline script が後の要素を見れる
     のは tobira だけ。events.html の `el-*` 行の差はこれで、バグやない。
+
+**続き: script が足した script を走らせる。** Mac 側が実頁を数えて、
+`on*` 属性は参照九枚で 0 個、動的 script 生成は react.dev の bundle に 6、
+ja.wikipedia の startup module に 2、と出したので、こっちを先に。
+`tools/scripterr/dyn.html` に七つの形（src を付けてから append、head へ
+append、inline の動的、append してから src、404、timer から、script が
+足した script）を並べて Chrome を先に撮った。tobira は七つとも走っとらんかった。
+
+- **仕組み:** `BrowserHost` に `pending_scripts`（待ち行列）と
+  `started_scripts`（走った要素。一つの要素は一度だけ）。挿入の全経路が
+  通る `record_childlist_mutation` と、`SetAttribute` の `src`、
+  `document.write` の attach で、**文書に繋がっとる** script 要素を積む。
+  捌くのは `EngineSession::drain_pending_scripts`: 足した script が
+  終わった直後、load 系イベントの後、初期 `run_due_jobs_at` の後、
+  `pump` の後、イベント配送の後（`settle_dynamic_scripts`）。
+  script ループ本体は `run_one_script` に切り出した（parser の script も
+  動的の script も同じ道）。予算 `DYNAMIC_SCRIPT_BUDGET = 256` を使い切ったら
+  console に一行残して残りは捨てる。
+- **順序は近似:** Chrome は inline の動的 script を挿入の瞬間に同期実行し、
+  外部は別スレッドで取って届いた順に、parser の script が全部終わってから
+  走らせる。tobira は「足した script が終わったら、届いた順に全部」。
+  同じ集合、違う順。dyn.html の README に両方の出力を貼ってある。
+  inline を挿入時に同期で走らせる（Vm の再入）は今回やっとらん。
+- `fire_on_script` が `run_due_jobs` を呼んどったのを `drain_microtasks`
+  に変えた。0ms の timer が parser の二本目より先に走っとった。
+- 数字: テスト 1179 → **1180 / 0**、`TOBIRA_GC_VERIFY=1` でも同数。html5lib
+  変わらず。実頁: ja.wikipedia で動的 5 本（`load.php?modules=ext.centralNotice…`、
+  `ext.gadget…`、`ext.visualEditor…`、`mw.config…`、meta の Wikiminiatlas.js）が
+  全部 ok、react.dev で `_next/static/chunks` 3 本 ok、他四枚は 0 本。
+  uncaught error 六枚とも 0、予算切れ無し。Wikipedia と HN の一枚は見た目
+  変わらず（JS が走っても静止画には出ん種類のもの）。
+- 見立てが一つ当たって一つ外れた: Mac 側の「Wikipedia の JS は丸ごと
+  ここに乗っとる」は当たり（5 本走った）。こちらが前に書いた「onclick=
+  属性は実頁で多い」は参照九枚では 0 個で外れ。
 
 ### 2026-09-10 - Claude (自走ループ二晩目: 8535535..c16844e, 23 コミット)
 
