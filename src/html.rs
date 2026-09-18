@@ -1477,8 +1477,21 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                     }
                     // Text belongs inside whatever formatting is still in
                     // force, so any that has fallen off the stack is re-opened
-                    // around it first.
-                    builder.reconstruct_formatting();
+                    // around it first. Not inside a raw text element: the
+                    // spec's "text" insertion mode has no such step, and a
+                    // `<font>` re-opened inside a `<script>` or `<style>` put
+                    // the code, or the stylesheet, one element down from
+                    // where anything reading `firstChild` looks for it.
+                    let in_raw_text = builder
+                        .open
+                        .last()
+                        .is_some_and(|&current| {
+                            let tag = builder.tag_of(current);
+                            is_raw_text_element(tag) || is_escapable_text_element(tag)
+                        });
+                    if !in_raw_text {
+                        builder.reconstruct_formatting();
+                    }
                     builder.insert(BuildKind::Text(text));
                 }
             }
