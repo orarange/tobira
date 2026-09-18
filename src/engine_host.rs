@@ -7934,8 +7934,15 @@ mod tests {
             "{}",
             result.html
         );
-        // The light tree shows no shadow content and no template.
-        assert!(!result.html.contains("shadowrootmode") && !result.html.contains(r#"id="inner""#), "{}", result.html);
+        // `result.html` is the rendered tree: the template is gone, the host
+        // carries its shadow-host mark and the shadow content its scope.
+        assert!(
+            !result.html.contains("shadowrootmode")
+                && result.html.contains("data-tobira-shadow-host=")
+                && result.html.contains(r##"id="inner" data-tobira-shadow="##),
+            "{}",
+            result.html
+        );
     }
 
     #[test]
