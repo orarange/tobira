@@ -8627,7 +8627,7 @@ impl Vm {
     /// Describe an uncaught thrown value for diagnostics. For Error-like
     /// objects this yields "Name: message" (matching `Error.prototype.toString`)
     /// instead of the generic "[object Object]" that `to_string` would produce.
-    fn describe_thrown_value(&self, value: &Value) -> String {
+    pub(crate) fn describe_thrown_value(&self, value: &Value) -> String {
         if let Value::Object(object) = value
             && !self.callables.contains_key(&object.raw())
         {
@@ -9739,9 +9739,12 @@ impl Vm {
 
         match key {
             PropertyKey::Index(index) => {
+                // 2^32 - 1 is a property name, not an array index: `length`
+                // stays. It used to become 2^32 - 1, and the next builtin to
+                // walk the array asked for 206 GB.
                 let length = self.array_length(object);
-                if *index >= length {
-                    self.set_array_length(object, index.saturating_add(1));
+                if *index >= length && *index != u32::MAX {
+                    self.set_array_length(object, index + 1);
                 }
             }
             PropertyKey::String(name) if name == "length" => {
@@ -9952,6 +9955,13 @@ impl Vm {
 
     fn array_like_to_vec(&mut self, value: &Value) -> Result<Vec<Value>, VmError> {
         let length = self.array_like_length(value)?;
+        // Arrays are sparse here and this makes them dense. `a[4e9] = 1;
+        // a.join()` is slow in a browser and fatal here (the allocation
+        // aborts the process), so past 2^26 elements it is a RangeError a
+        // page can catch.
+        if length > 1 << 26 {
+            return Err(VmError::RangeError("Invalid array length".to_string()));
+        }
         let mut values = Vec::with_capacity(length as usize);
         for index in 0..length {
             values.push(self.get_property_value(value, &PropertyKey::Index(index))?);
@@ -21558,6 +21568,28 @@ mod tests {
         let mut vm = Vm::new(Heap::new());
         let result = vm.execute(&chunk).map(|_| ());
         (vm, result)
+    }
+
+    /// test262's first find: 2^32 - 1 is not an array index. `length` became
+    /// 2^32 - 1 and the next walk of the array aborted the process asking for
+    /// 206 GB. A length that really is huge is a RangeError instead.
+    #[test]
+    fn the_largest_u32_is_not_an_array_index() {
+        run_script(
+            r#"
+            var a = [1, 2];
+            a["4294967295"] = 7;
+            assert(a.length === 2);
+            assert(a["4294967295"] === 7);
+            assert(a.join() === "1,2");
+            var b = [];
+            b[4294967294] = 1;
+            assert(b.length === 4294967295);
+            var name = "none";
+            try { b.join(); } catch (e) { name = e.name; }
+            assert(name === "RangeError");
+            "#,
+        );
     }
 
     #[test]

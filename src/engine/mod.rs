@@ -20,6 +20,9 @@ pub mod value;
 pub mod verifier;
 pub mod vm;
 
+#[cfg(test)]
+mod test262;
+
 pub use ast::{
     ArrowFunctionExpression, ExportAllDeclaration, ExportDefaultDeclaration,
     ExportNamedDeclaration, FunctionDeclaration, FunctionExpression, MetaProperty, Program,

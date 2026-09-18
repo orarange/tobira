@@ -1092,6 +1092,41 @@ react.dev だけ撮らんかった一枚が退化しとった。
     clear、`Array.from` / `of`、`Reflect.apply` / `construct` / `set`、
     `JSON.stringify`、`Object.assign`（getter 順）、`String.fromCodePoint`、
     `Symbol.prototype.constructor`。
+- **test262 の部分集合を入れた**（2026-09-19）。html5lib-tests の JS 版。
+  `tests/fixtures/test262/`（harness 全部 + built-ins の Math / Number /
+  Symbol / Array/prototype/join / String/prototype/startsWith / Object/assign /
+  Promise/all、1220 本、4 MB、取り込んだ commit は README）。runner は
+  `src/engine/test262.rs`（**lib crate 側**: `cargo test --release --lib
+  test262_subset -- --nocapture`。`--bin tobira` では 0 本になる）。
+  - **結果は三つに分ける: pass / fail / absent**（Mac の提案）。fail は
+    「有るのに答えが違う」= バグ。absent は runner の `ABSENT` 表に**理由付きで
+    載っとる feature** を要る試験の失敗 = 判断済みの不在
+    （`Symbol.species` / `replace` / `split` / `search` / `matchAll` /
+    `isConcatSpreadable` / `unscopables` / `cross-realm`）。混ぜると、半端に
+    足さんという正しい判断のぶんだけ率が下がって、計器が設計判断と逆向きに
+    引っ張る。表に無い feature の不在は fail。
+  - **門は率やのうて集合**: `baseline.txt` が通る試験の一覧で、そこから一本でも
+    落ちたら失敗。五本直して五本壊しても率は動かんから。新しく通ったものは
+    表示されるので `TOBIRA_T262_BLESS=1` で取り込み、**baseline.txt の diff を
+    読む**。
+  - 最初の値: **pass 614 / fail 489（55.7%）、absent 34、skip 83**
+    （module / async は数えるだけ）。
+  - **入れた瞬間に一個出た**: `a["4294967295"] = x` で `length` が 2^32-1 に
+    なり、次に配列を舐めた builtin が **206 GB を要求してプロセスごと abort**
+    （catch_unwind では拾えん）。2^32-1 は配列の index やない。直した。
+    本当に巨大な length（2^26 超）を密な Vec にする所は RangeError にした
+    （Chrome は遅いだけで落ちんので近似。配列が property map で、builtin が
+    密に展開する構造のせい）。
+  - 失敗理由の上位三つで 186 本:
+    `Expected a TypeError but got a Error` 73 本（**VM が出す TypeError が
+    素の Error として見える**。constructor / prototype が違う）、
+    `length should be an own property` 58 本と `name should be an own
+    property` 55 本（**builtin 関数に own の `length` / `name` が無い**）。
+    次に `Object.getOwnPropertyDescriptor requires an object` /
+    `hasOwnProperty requires an object`（primitive を ToObject せん）、
+    bigint literal、`Math.sumPrecise`。
+  - `new Number(3)` が primitive を返す件は、`built-ins/Number` に正解が
+    入ったので、ここを見ながら直す。
 - **`ai-branch-merge-loop.yml` は作られた日から YAML が壊れとった**
   （2026-09-19 に判明）。merge の step の複数行コミットメッセージが `run: |` の
   字下げから出とって、ファイルごと無効。一度も job を作れたことが無く、GitHub は
