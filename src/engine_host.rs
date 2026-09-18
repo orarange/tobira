@@ -8095,6 +8095,42 @@ mod tests {
         );
     }
 
+    /// core-js's test that Symbol is native: `Object(sym) instanceof Symbol`.
+    /// `Object(primitive)` answered an empty `{}`, the test failed, and the
+    /// Symbol polyfill took a dozen built-ins with it (`Object.create`,
+    /// `defineProperty`, `getOwnPropertyNames`, `Symbol.for`, ...), in tobira
+    /// only. A symbol also names itself: `String(Symbol("x"))` was "Symbol()".
+    #[test]
+    fn object_of_primitive_is_a_wrapper_and_symbols_describe_themselves() {
+        let result = run_document_scripts(
+            r##"<p id="out"></p><script>
+            var s = Symbol("x"), o = Object(s);
+            document.getElementById("out").textContent = [
+              o instanceof Symbol, typeof o, String(s), s.toString(), o.toString(),
+              String(Symbol.match), Symbol.iterator.description, String(Symbol()),
+              Object("ab").length === undefined ? "nolen" : "len", Object("ab").toUpperCase(),
+              Object(3) + 1, Object(3).toFixed(1), typeof Object(true), Object(false).valueOf(),
+              Object("ab") instanceof String, Object(1) instanceof Number,
+              Object(o) === o, Object.keys(Object(null)).length,
+            ].join(" ");
+            </script>"##,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains(
+                "true object Symbol(x) Symbol(x) Symbol(x) Symbol(Symbol.match) Symbol.iterator Symbol() "
+            ),
+            "{}",
+            result.html
+        );
+        assert!(
+            result.html.contains(" AB 4 3.0 object false true true true 0<"),
+            "{}",
+            result.html
+        );
+    }
+
     /// Where Rust's numbers and JavaScript's differ, JavaScript's answer.
     /// `as i32` from a float saturates where ToInt32 wraps (a string hash
     /// collapsed to 2147483647), `f64::round` sends halves away from zero,

@@ -1056,6 +1056,42 @@ react.dev だけ撮らんかった一枚が退化しとった。
     依存しとった（`[null, true].join(" ")` は " true"）。
   - 残り: `new Date(8.64e15 + 1)` は NaN（範囲外）、`2020-02-30` の繰り上げ。
   - 六枚は DOM も console も動かず。テスト 1193 → 1194。
+- **polyfill が tobira でだけ差し替える built-in を数える計器**
+  （2026-09-19、`tools/polyfill/replaced.html`）。polyfill を読む前に 27 個の
+  root（Object / Array / String / … / globalThis の関数）の built-in を全部
+  覚えて、読んだ後に `!==` になったものを JSON で `<pre id="out">` に出す。
+  `POLYFILL` を検体の script の URL に書き換えて使う。**Chrome でも同じ頁を
+  走らせて差を取る**のが肝: Chrome でも差し替わるもの（提案段階の API、
+  URL 系）は tobira の落ち度やない。見るのは **tobira-only** の集合。
+  - 最初の値: react.dev の polyfills chunk で tobira-only **45**、
+    core-js-bundle 3.38.1 で **79**。`Math.min` の件（react.dev -484 要素）は
+    この 45 個のうちの一個が踏んだ結果やった。
+  - 一発目の原因: core-js の `NATIVE_SYMBOL` 判定
+    `Object(sym) instanceof Symbol` が false。**`Object(primitive)` が空の
+    `{}` を返しとった**（boxing が無かった）。Symbol polyfill が入ると
+    `Object.create` / `defineProperty` / `defineProperties` /
+    `getOwnPropertyDescriptor` / `getOwnPropertyNames` /
+    `getOwnPropertySymbols` / `propertyIsEnumerable` / `Object.prototype
+    .toString` / `Symbol.for` / `keyFor` を道連れにする。
+  - 直した: `ObjectKind::Primitive(Value)` を足して `Object(primitive)` が
+    その型の prototype を持つ wrapper を返す。`StringProto*` / `NumberProto*`
+    / `BooleanProto*` / `SymbolProto*` の builtin は入口で `this` の wrapper を
+    剥がす。`String(Symbol("x"))` は "Symbol(x)"（"Symbol()" やった）、
+    well-known symbol は "Symbol.iterator" 等の description を持つ。symbol の
+    未知の member は `Symbol.prototype` の鎖を引く。
+  - 結果: tobira-only **45 → 32**、core-js 全部入りで **79 → 66**。増えた
+    ものは無し。六枚は DOM 動かず。
+  - **`new Number(3)` / `new String("a")` / `new Boolean(x)` はまだ primitive
+    を返す**（`typeof new Number(3)` が "number"）。wrapper の仕組みは今回
+    できたので、`new` のときだけ `ObjectKind::Primitive` を返せば済むが、
+    `new String(x)` に頼っとる既存の経路を見てからにする。
+  - 残り 32 の塊（次に見る順）: RegExp.prototype 6 個 +
+    String.prototype.match / replace / search / split（`Symbol.replace` 等を
+    わざと足してへん件 — 設計判断の節を見よ）、Promise 5 個（`Symbol.species`
+    か subclassing の判定）、Map / Set / WeakMap / WeakSet の constructor +
+    clear、`Array.from` / `of`、`Reflect.apply` / `construct` / `set`、
+    `JSON.stringify`、`Object.assign`（getter 順）、`String.fromCodePoint`、
+    `Symbol.prototype.constructor`。
 - **`ai-branch-merge-loop.yml` は作られた日から YAML が壊れとった**
   （2026-09-19 に判明）。merge の step の複数行コミットメッセージが `run: |` の
   字下げから出とって、ファイルごと無効。一度も job を作れたことが無く、GitHub は

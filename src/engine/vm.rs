@@ -1529,6 +1529,7 @@ pub struct Vm {
     string_prototype: Option<GcRef<JsObject>>,
     number_prototype: Option<GcRef<JsObject>>,
     boolean_prototype: Option<GcRef<JsObject>>,
+    symbol_prototype: Option<GcRef<JsObject>>,
     regexp_prototype: Option<GcRef<JsObject>>,
     date_prototype: Option<GcRef<JsObject>>,
     iterator_prototype: Option<GcRef<JsObject>>,
@@ -2111,6 +2112,7 @@ impl Vm {
             string_prototype: None,
             number_prototype: None,
             boolean_prototype: None,
+            symbol_prototype: None,
             regexp_prototype: None,
             date_prototype: None,
             iterator_prototype: None,
@@ -2877,6 +2879,7 @@ impl Vm {
             string_prototype,
             number_prototype,
             boolean_prototype,
+            symbol_prototype,
             regexp_prototype,
             date_prototype,
             iterator_prototype,
@@ -2977,6 +2980,7 @@ impl Vm {
         string_prototype.trace(tracer);
         number_prototype.trace(tracer);
         boolean_prototype.trace(tracer);
+        symbol_prototype.trace(tracer);
         regexp_prototype.trace(tracer);
         date_prototype.trace(tracer);
         iterator_prototype.trace(tracer);
@@ -4438,6 +4442,7 @@ impl Vm {
         // bundle ran that check.
         let symbol_prototype = self.allocate_ordinary_object(Some(object_prototype));
         self.define_builtin_method(symbol_prototype, "toString", BuiltinId::SymbolProtoToString);
+        self.symbol_prototype = Some(symbol_prototype);
         let symbol_ctor = self.allocate_builtin_value(
             BuiltinId::SymbolConstructor,
             false,
@@ -5449,6 +5454,8 @@ impl Vm {
                 ("toStringTag", 5),
                 ("match", SYMBOL_MATCH_ID),
             ] {
+                self.symbol_descriptions
+                    .insert(id, format!("Symbol.{name}"));
                 self.define_data_property(
                     symbol_ref,
                     PropertyKey::from(name),
@@ -8381,6 +8388,7 @@ impl Vm {
             ObjectKind::RegExp { .. } => "RegExp",
             ObjectKind::Map(_) => "Map",
             ObjectKind::Set(_) => "Set",
+            ObjectKind::Primitive(_) => "Primitive",
             ObjectKind::UrlSearchParams(_) => "UrlSearchParams",
             ObjectKind::Headers(_) => "Headers",
             ObjectKind::FormData(_) => "FormData",
@@ -8664,7 +8672,10 @@ impl Vm {
                     "[object Object]".to_string()
                 }
             }
-            Value::Symbol(_) => "Symbol()".to_string(),
+            Value::Symbol(SymbolId(id)) => format!(
+                "Symbol({})",
+                self.symbol_descriptions.get(id).map(String::as_str).unwrap_or("")
+            ),
         }
     }
 
@@ -9107,11 +9118,23 @@ impl Vm {
         }
     }
 
+    /// The primitive inside a wrapper made by `Object(primitive)`.
+    fn wrapped_primitive(&self, value: &Value) -> Option<Value> {
+        let Value::Object(object) = value else {
+            return None;
+        };
+        match &self.heap.objects().get(*object)?.kind {
+            ObjectKind::Primitive(primitive) => Some(primitive.clone()),
+            _ => None,
+        }
+    }
+
     fn object_introspection_primitive_prototype_ref(&self, value: &Value) -> GcRef<JsObject> {
         match value {
             Value::String(_) => self.string_prototype_ref(),
             Value::Number(_) => self.number_prototype_ref(),
             Value::Bool(_) => self.boolean_prototype_ref(),
+            Value::Symbol(_) => self.symbol_prototype.unwrap_or(self.object_prototype_ref()),
             _ => self.object_prototype_ref(),
         }
     }
@@ -9171,7 +9194,10 @@ impl Vm {
                         return Ok(self.allocate_builtin_method(BuiltinId::SymbolProtoToString));
                     }
                 }
-                Ok(Value::Undefined)
+                match self.symbol_prototype {
+                    Some(proto) => self.get_property_from_chain(proto, receiver, key),
+                    None => Ok(Value::Undefined),
+                }
             }
             Value::Null | Value::Undefined => {
                 let what = if matches!(receiver, Value::Null) {
@@ -11576,6 +11602,16 @@ impl Vm {
         // `isNaN([])` see the primitive. `to_number` alone answers NaN for
         // every object, because it cannot call `valueOf`.
         let mut args = args;
+        let this_value = match self.wrapped_primitive(&this_value) {
+            Some(primitive)
+                if ["StringProto", "NumberProto", "BooleanProto", "SymbolProto"]
+                    .iter()
+                    .any(|prefix| format!("{builtin:?}").starts_with(prefix)) =>
+            {
+                primitive
+            }
+            _ => this_value,
+        };
         if args.iter().any(|arg| matches!(arg, Value::Object(_)))
             && (matches!(
                 builtin,
@@ -11788,6 +11824,23 @@ impl Vm {
             }
             BuiltinId::ObjectConstructor => Ok(match args.first() {
                 Some(Value::Object(_)) => args[0].clone(),
+                // ToObject: a wrapper with the type's prototype, so that
+                // `Object(sym) instanceof Symbol` and `Object("ab").length`
+                // hold. core-js takes the first as its test that Symbol is
+                // native, and replaces some forty built-ins when it fails.
+                Some(
+                    primitive @ (Value::String(_)
+                    | Value::Number(_)
+                    | Value::Bool(_)
+                    | Value::Symbol(_)),
+                ) => {
+                    let prototype = self.object_introspection_primitive_prototype_ref(primitive);
+                    Value::Object(self.heap.allocate_object(JsObject {
+                        kind: ObjectKind::Primitive(primitive.clone()),
+                        prototype: Some(prototype),
+                        ..JsObject::default()
+                    }))
+                }
                 _ => {
                     Value::Object(self.allocate_ordinary_object(Some(self.object_prototype_ref())))
                 }

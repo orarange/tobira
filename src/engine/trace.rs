@@ -326,6 +326,7 @@ impl Trace for ObjectKind {
             }
             Self::Map(entries) | Self::WeakMap(entries) => entries.trace(tracer),
             Self::Set(values) | Self::WeakSet(values) => values.trace(tracer),
+            Self::Primitive(value) => value.trace(tracer),
             Self::TypedArray {
                 buffer,
                 kind,

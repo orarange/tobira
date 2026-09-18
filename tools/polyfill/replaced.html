@@ -1,0 +1,27 @@
+<html><body><pre id="out"></pre>
+<script>
+// Every built-in function there is, remembered before the polyfill loads.
+var __roots = ['Object','Function','Array','String','Number','Boolean','Symbol','Math','JSON','Reflect','Promise','Map','Set','WeakMap','WeakSet','RegExp','Date','Error','ArrayBuffer','DataView','Uint8Array','Int32Array','Float64Array','URL','URLSearchParams','Iterator','globalThis'];
+var __before = {};
+(function(){
+  function note(path, holder){ var names; try { names = Object.getOwnPropertyNames(holder); } catch(e){ return; }
+    for (var i=0;i<names.length;i++){ var n=names[i], v; if (n==='caller'||n==='callee'||n==='arguments') continue;
+      try { v = Object.getOwnPropertyDescriptor(holder, n); v = v && ('value' in v ? v.value : v.get); } catch(e){ continue; }
+      if (typeof v === 'function') __before[path+'.'+n] = v; } }
+  for (var r=0;r<__roots.length;r++){ var name=__roots[r], obj = name==='globalThis' ? window : window[name]; if (!obj) { __before[name]='ABSENT'; continue; }
+    if (name!=='globalThis') __before[name] = obj;
+    if (name==='globalThis') { var g=['parseInt','parseFloat','isNaN','isFinite','structuredClone','queueMicrotask','setTimeout','atob','btoa','encodeURIComponent','decodeURIComponent','escape','unescape']; for (var k=0;k<g.length;k++) if (typeof window[g[k]]==='function') __before['global.'+g[k]] = window[g[k]]; continue; }
+    note(name, obj); if (obj.prototype) note(name+'.prototype', obj.prototype); }
+})();
+</script>
+<script src="POLYFILL"></script>
+<script>
+(function(){
+  var replaced=[], added=[], names=Object.keys(__before);
+  for (var i=0;i<names.length;i++){ var p=names[i], parts=p.split('.'), cur=window, ok=true;
+    if (__before[p]==='ABSENT') { if (window[p]) added.push(p); continue; }
+    if (parts[0]==='global') { cur = window[parts[1]]; } else { for (var j=0;j<parts.length;j++){ if (cur==null){ ok=false; break; } var d; try { d=Object.getOwnPropertyDescriptor(cur, parts[j]); } catch(e){ d=null; } if (j===parts.length-1 && d && !('value' in d)) { cur = d.get; } else { cur = cur[parts[j]]; } } }
+    if (ok && cur !== __before[p]) replaced.push(p); }
+  document.getElementById('out').textContent = JSON.stringify({replaced: replaced.sort(), added: added.sort()});
+})();
+</script></body></html>

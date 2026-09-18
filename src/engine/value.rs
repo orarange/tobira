@@ -354,6 +354,9 @@ pub enum ObjectKind {
     },
     Map(Vec<(Value, Value)>),
     Set(Vec<Value>),
+    /// What `Object(primitive)` makes: a wrapper holding the string, number,
+    /// boolean or symbol, whose prototype is that type's.
+    Primitive(Value),
     /// Ordered (name, value) pairs backing a `URLSearchParams`.
     UrlSearchParams(Vec<(String, String)>),
     /// Ordered (name, value) pairs backing a `Headers`.
@@ -420,6 +423,7 @@ impl std::fmt::Debug for ObjectKind {
                 .finish(),
             Self::Map(entries) => f.debug_tuple("Map").field(entries).finish(),
             Self::Set(values) => f.debug_tuple("Set").field(values).finish(),
+            Self::Primitive(value) => f.debug_tuple("Primitive").field(value).finish(),
             Self::UrlSearchParams(pairs) => f.debug_tuple("UrlSearchParams").field(pairs).finish(),
             Self::Headers(pairs) => f.debug_tuple("Headers").field(pairs).finish(),
             Self::FormData(pairs) => f.debug_tuple("FormData").field(pairs).finish(),
