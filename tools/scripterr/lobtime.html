@@ -1,0 +1,12 @@
+<html><body><time data-at-unix="1789658724">2026-09-17 10:25:24</time><span id="s">x</span><pre id="out">start</pre>
+<script type="module">
+export const qSA = (...args) => args.length === 1 ? document.querySelectorAll(args[0]) : args[0].querySelectorAll(args[1]);
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+log('module-ran');
+document.addEventListener("DOMContentLoaded", () => {
+  log('dcl');
+  for (const t of qSA('time[data-at-unix]')) { const secs = Math.floor(Date.now()/1000) - parseInt(t.dataset.atUnix); t.innerText = secs + " ago"; log('set:'+t.textContent); }
+});
+const s=document.getElementById('s'); s.innerText='y'; log('innerText-set:'+s.textContent+'/'+s.innerText);
+log('readyState:'+document.readyState);
+</script></body></html>

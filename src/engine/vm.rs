@@ -1526,6 +1526,9 @@ pub struct Vm {
     array_buffer_prototype: Option<GcRef<JsObject>>,
     typed_array_prototype: Option<GcRef<JsObject>>,
     event_loop: EventLoop,
+    /// `document.readyState`: "loading" while the parser's scripts run,
+    /// "interactive" once they have, "complete" after `load`.
+    document_ready_state: &'static str,
     random_state: u64,
     host: Box<dyn Host>,
     /// Event listeners stored by (node_handle, event_type) → list of JS function GcRefs.
@@ -2093,6 +2096,7 @@ impl Vm {
             array_buffer_prototype: None,
             typed_array_prototype: None,
             event_loop: EventLoop::new(),
+            document_ready_state: "loading",
             random_state,
             host,
             event_listeners: HashMap::new(),
@@ -2905,6 +2909,7 @@ impl Vm {
             gc_collections: _,
             gc_objects_freed: _,
             gc_strings_freed: _,
+            document_ready_state: _,
         } = self;
 
         stack.trace(tracer);
@@ -3219,6 +3224,10 @@ impl Vm {
     /// What is keeping the event loop busy, in a line: how many timers (and
     /// how many of them repeat), animation frames and tasks are queued, and
     /// the callbacks' names. For a page that never settles.
+    pub fn set_document_ready_state(&mut self, state: &'static str) {
+        self.document_ready_state = state;
+    }
+
     pub fn describe_pending_work(&self) -> String {
         let timers = self.event_loop.timer_heap.len();
         let intervals = self
@@ -16086,8 +16095,19 @@ impl Vm {
             BuiltinId::CssSupports => {
                 // The same answer `@supports` gives here: yes, unless the
                 // renderer knows it cannot do the thing. Saying no would send
-                // pages down fallback paths they no longer maintain.
-                Ok(Value::Bool(true))
+                // pages down fallback paths they no longer maintain. Until
+                // 2026-09-18 this said yes to everything while `@supports`
+                // said no to eight properties, so a page took the modern
+                // path and the rules for it were dropped.
+                let first = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let condition = match args.get(1) {
+                    Some(value) if !matches!(value, Value::Undefined) => {
+                        let value = self.to_string(value);
+                        format!("({}: {})", first.trim(), value.trim())
+                    }
+                    _ => first,
+                };
+                Ok(Value::Bool(self.host.supports_css(&condition)))
             }
             BuiltinId::CssEscape => {
                 let input = args.first().map(|v| self.to_string(v)).unwrap_or_default();
@@ -19393,7 +19413,7 @@ impl Vm {
             }
             "nodeType" => Ok(Value::Number(9.0)),
             "nodeName" => Ok(self.make_string_value("#document")),
-            "readyState" => Ok(self.make_string_value("complete")),
+            "readyState" => Ok(self.make_string_value(self.document_ready_state)),
             "compatMode" => Ok(self.make_string_value("CSS1Compat")),
             "charset" | "characterSet" => Ok(self.make_string_value("UTF-8")),
             "location" => self.make_location_object(),
@@ -19650,7 +19670,11 @@ impl Vm {
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Null })
             }
             "splitText" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeSplitText)),
-            "textContent" => {
+            "textContent" | "innerText" => {
+                // `innerText` is the rendered text in a browser; here it is
+                // the text content. It used to be an expando, so writing it
+                // changed nothing on the page (lobste.rs rewrites its
+                // `<time>` elements this way).
                 let res = self.host.read_dom(DomRead::TextContent { node: node_id });
                 Ok(match res { Ok(DomReadResult::String(s)) => self.make_string_value(&s), _ => Value::Null })
             }
@@ -20522,7 +20546,7 @@ impl Vm {
                             html,
                         });
                     }
-                    "textContent" | "nodeValue" | "data" => {
+                    "textContent" | "innerText" | "nodeValue" | "data" => {
                         let text = self.to_string(&value);
                         let _ = self.host.mutate_dom(DomMutation::SetTextContent {
                             node: node_id,
@@ -21991,6 +22015,7 @@ fn is_dom_managed_node_property(name: &str) -> bool {
         "innerHTML"
             | "outerHTML"
             | "textContent"
+            | "innerText"
             | "nodeValue"
             | "data"
             | "id"

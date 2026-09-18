@@ -2799,6 +2799,10 @@ impl Host for BrowserHost {
         })
     }
 
+    fn supports_css(&self, condition: &str) -> bool {
+        crate::css::supports_condition(condition)
+    }
+
     fn console(&mut self, message: ConsoleMessage) -> HostResult<()> {
         self.console.push(message.parts.join(" "));
         Ok(())
@@ -4785,6 +4789,8 @@ impl EngineSession {
         // events on the document/window (handle 0), like boa's
         // dispatch_initial_load_events.
         for event_type in ["readystatechange", "DOMContentLoaded", "load"] {
+            // "interactive" as the parser finishes, "complete" as `load` fires.
+            vm.set_document_ready_state(if event_type == "load" { "complete" } else { "interactive" });
             let _ = vm.fire_dom_event(0, event_type);
             Self::drain_pending_scripts(
                 &mut vm,
@@ -7717,6 +7723,57 @@ mod tests {
             result.html.contains(
                 "2 color margin-top function null important 5px true true 7px true true true true false height: 40px; color: blue; 40px 1 3 true false abcDef,fooBar false"
             ),
+            "{}",
+            result.html
+        );
+    }
+
+    /// `innerText` writes to the page like `textContent` (it was an expando,
+    /// and lobste.rs's "9 hours ago" never appeared), and `document.readyState`
+    /// is "loading" while the parser's scripts run and "complete" after load.
+    #[test]
+    fn inner_text_writes_through_and_ready_state_moves() {
+        let result = run_document_scripts(
+            r#"<time id="t">2026-09-17</time><p id="out"></p>
+            <script>
+            var t = document.getElementById("t"), r = [document.readyState];
+            t.innerText = "9 hours ago"; r.push(t.textContent, t.innerText);
+            document.addEventListener("DOMContentLoaded", function () { r.push("dcl:" + document.readyState); });
+            window.addEventListener("load", function () { r.push("load:" + document.readyState); document.getElementById("out").textContent = r.join(" "); });
+            </script>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains("loading 9 hours ago 9 hours ago dcl:interactive load:complete"),
+            "{}",
+            result.html
+        );
+        assert!(result.html.contains(">9 hours ago</time>"), "{}", result.html);
+    }
+
+    /// `CSS.supports` answers what `@supports` answers: no for the properties
+    /// the renderer says it cannot do, yes otherwise, in both call forms and
+    /// through `not` / `and` / `or`. It said yes to everything until
+    /// 2026-09-18, so a page took the modern path and the rules for it were
+    /// dropped.
+    #[test]
+    fn css_supports_agrees_with_supports_rule() {
+        let result = run_document_scripts(
+            r#"<p id="out"></p><script>
+            document.getElementById("out").textContent = [
+              CSS.supports("container-type", "inline-size"), CSS.supports("(container-type: inline-size)"),
+              CSS.supports("backdrop-filter", "blur(1px)"), CSS.supports("display", "grid"),
+              CSS.supports("(display: grid) and (container-type: inline-size)"),
+              CSS.supports("(container-type: inline-size) or (display: grid)"),
+              CSS.supports("not (container-type: inline-size)"),
+            ].join(" ");
+            </script>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains("false false false true false true true"),
             "{}",
             result.html
         );

@@ -729,6 +729,12 @@ pub trait Host: Any {
     fn matches_media(&self, _query: &str) -> HostResult<bool> {
         Ok(false)
     }
+    /// Whether `CSS.supports(condition)` holds: the same answer the
+    /// embedder's `@supports` gives, so a page's feature detection and the
+    /// rules it then relies on agree. The engine alone says yes.
+    fn supports_css(&self, _condition: &str) -> bool {
+        true
+    }
     fn location(&self, window: WindowId) -> HostResult<LocationSnapshot>;
     fn navigate(&mut self, action: NavigationAction) -> HostResult<NavigationOutcome>;
     fn history(&mut self, action: HistoryAction) -> HostResult<HistoryOutcome>;

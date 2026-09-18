@@ -1,0 +1,23 @@
+<html><head><style>
+#a,#b,#c,#d,#e,#f,#g,#h,#i,#j{width:10px;height:10px}
+@supports (container-type: inline-size) { #a { width: 50px } }
+@supports (container-name: x) { #b { width: 50px } }
+@supports (container: x / inline-size) { #c { width: 50px } }
+@supports (anchor-name: --x) { #d { width: 50px } }
+@supports (position-anchor: --x) { #e { width: 50px } }
+@supports (position-area: top) { #f { width: 50px } }
+@supports (backdrop-filter: blur(1px)) { #g { width: 50px } }
+@supports (-webkit-backdrop-filter: blur(1px)) { #h { width: 50px } }
+@supports (display: grid) { #i { width: 50px } }
+@supports (display: grid) and (container-type: inline-size) { #j { width: 50px } }
+</style></head><body>
+<div id="a"></div><div id="b"></div><div id="c"></div><div id="d"></div><div id="e"></div><div id="f"></div><div id="g"></div><div id="h"></div><div id="i"></div><div id="j"></div>
+<pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+var cases=[['a','container-type','inline-size'],['b','container-name','x'],['c','container','x / inline-size'],['d','anchor-name','--x'],['e','position-anchor','--x'],['f','position-area','top'],['g','backdrop-filter','blur(1px)'],['h','-webkit-backdrop-filter','blur(1px)'],['i','display','grid']];
+for (var k of cases){ var js=CSS.supports(k[1],k[2]); var js2=CSS.supports('('+k[1]+': '+k[2]+')'); var css=document.getElementById(k[0]).getBoundingClientRect().width===50; log(k[0]+':js='+js+'/'+js2+'/css='+css+(js===css&&js2===css?'':'/MISMATCH')); }
+var jj=CSS.supports('(display: grid) and (container-type: inline-size)'); var cj=document.getElementById('j').getBoundingClientRect().width===50; log('j:js='+jj+'/css='+cj+(jj===cj?'':'/MISMATCH'));
+log('not:'+CSS.supports('not (display: grid)')); log('or:'+CSS.supports('(container-type: inline-size) or (display: grid)')); log('bogus:'+CSS.supports('bogus-prop','x')+'/'+CSS.supports('(bogus-prop: x)'));
+log('typeof:'+typeof CSS.supports+'/'+typeof CSS.escape);
+</script></body></html>

@@ -34,7 +34,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   先の本物の腕に食われとる stub）、deprecated `boa_ast` `ImportCall::argument` 4、
   unused mut 2、残りは dead_code 系。数が増えたら中身を見ること。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1184 通過 / 0 落ち**（2026-09-18）。
+- `cargo test --release` → **1188 通過 / 0 落ち**（2026-09-18）。
   JS のコンパイラを触ったら `TOBIRA_VERIFY_BYTECODE=1` で実頁を一枚読んで
   `[verify] ok` の行と `verification failed` の行を数えること。
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
@@ -813,6 +813,23 @@ react.dev だけ撮らんかった一枚が退化しとった。
   残る差は `background` 短縮形の展開（`style.background="red"` で
   `backgroundColor` が空）、`webkitTransform` の `transform` への別名、
   dataset のキー順（属性が BTreeMap なので辞書順）。
+- **`CSS.supports` が無条件に true**、`@supports` は八つの property
+  （container-* 三つ、anchor 三つ、backdrop-filter 二つ）に no。Mac 側が
+  css.rs と vm.rs を読んで見つけた。JS は「対応しとる」と信じて近代的な経路に
+  入るのに、それを実装する `@supports` ブロックは CSS 側で捨てられとる、
+  という「中身は出るが意匠が甘い」の作り方。`tools/scripterr/supportsprobe.html`
+  で九つとも MISMATCH やった。`CSS.supports` を css.rs の `supports_declaration` /
+  `supports_condition` に繋いだ（二引数形と条件形の両方）。Chrome は八つのうち
+  七つに yes と言うので Chrome とは違うが、tobira の中では一貫する。
+  「知らんものには yes」の方針はそのまま（`bogus-prop` は Chrome false / tobira true）。
+- **lobste.rs の相対時刻**: `application.js` は module で、`DOMContentLoaded` で
+  `time[data-at-unix]` を `t.innerText = "9 hours ago"` に書き換える。
+  **`innerText` の代入が expando に化けて DOM に届いとらんかった。**
+  textContent と同じ扱いに（読みも）。ついでに `document.readyState` が
+  script 実行中も "complete" やった → "loading" → DOMContentLoaded の前で
+  "interactive" → load で "complete"。（Chrome は module script の中では
+  "interactive"。tobira は module も parser の script と同じ位置で走らせるので
+  "loading"。差として記録。）lobste.rs の文字差が相対時刻ぶんは消えた。
 - react.dev の pending の中身: **頁自身の `setInterval` 60ms が 5 本**
   （例のプレビューの時計）と 20 秒・29 秒の timer。tobira 側の収束の問題やない。
   `TOBIRA_DEBUG_SCRIPTS=1` で pump が 1 秒ごとに `[pump] N timers (M repeating),

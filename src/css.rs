@@ -2932,7 +2932,7 @@ fn to_physical_property(property: String) -> String {
 /// unwrapped here and left in source order rather than ordered by declaration.
 /// That is an approximation, but a much closer one than a second copy of the
 /// base sheet winning over everything built on top of it.
-fn supports_condition(condition: &str) -> bool {
+pub(crate) fn supports_condition(condition: &str) -> bool {
     let condition = condition.trim();
     if condition.is_empty() {
         return true;
@@ -2976,7 +2976,7 @@ fn supports_condition(condition: &str) -> bool {
 ///
 /// Everything not listed answers yes, so this only ever removes a block that
 /// would have been applied before.
-fn supports_declaration(property: &str, _value: &str) -> bool {
+pub(crate) fn supports_declaration(property: &str, _value: &str) -> bool {
     !matches!(
         property,
         // Container queries: a block gated on these lays the page out against a
