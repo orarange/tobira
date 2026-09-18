@@ -1,0 +1,6 @@
+<html><body><pre id="out"></pre><script>
+var ifaces={EventTarget:EventTarget,Node:Node,Element:Element,HTMLElement:HTMLElement,Document:Document,HTMLInputElement:HTMLInputElement,HTMLAnchorElement:HTMLAnchorElement,CharacterData:CharacterData,Text:Text,HTMLImageElement:HTMLImageElement,HTMLFormElement:HTMLFormElement,HTMLSelectElement:HTMLSelectElement,HTMLButtonElement:HTMLButtonElement,Window:Window};
+var o={}; for (var k in ifaces){ o[k]=Object.getOwnPropertyNames(ifaces[k].prototype).filter(function(n){return n!=='constructor'}).sort(); }
+o.window=Object.getOwnPropertyNames(window).filter(function(n){return /^[a-zA-Z]/.test(n)}).sort();
+document.getElementById('out').textContent=JSON.stringify(o);
+</script></body></html>

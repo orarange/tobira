@@ -1,0 +1,34 @@
+name: test
+
+# Every push to master and every pull request runs the whole suite. Twice on
+# 2026-09-18 a commit with a failing test reached master because the chain
+# of shell commands that was meant to stop on a red test did not; this is
+# the check that does not depend on how a command line was joined.
+#
+# Windows, because `font.rs` reads the Windows font files
+# (`WINDOWS_FAMILY_FILES`), and a debug build, because it is a gate and not a
+# measurement.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        shell: bash
+        run: |
+          cargo test 2>&1 | tr -d '\000' | tee test.log | grep -aE "^test result|FAILED|panicked" \
+            | awk '/^test result/{p+=$4; f+=$6; next} {print} END {print "passed=" p, "failed=" f; exit (f > 0)}'
+      - name: html5lib tree construction
+        shell: bash
+        run: |
+          cargo test --bin tobira -- tree_construction_conformance --nocapture 2>&1 | tr -d '\000' \
+            | grep -a "html5lib tree construction"

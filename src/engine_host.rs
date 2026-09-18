@@ -7945,6 +7945,33 @@ mod tests {
         );
     }
 
+    /// `in` on a host object asks the host's dispatch, so a member a page
+    /// can use answers true before it is touched -- which is how a page
+    /// tests for features. Only a short list answered until 2026-09-18.
+    #[test]
+    fn in_operator_sees_host_members_before_they_are_touched() {
+        let result = run_document_scripts(
+            r#"<p id="out"></p><script>
+            var el = document.createElement("div"), t = document.createTextNode("x");
+            document.getElementById("out").textContent = [
+              "appendChild" in el, "addEventListener" in el, "nodeType" in t, "textContent" in el,
+              "Array" in window, "IntersectionObserver" in window, "fetch" in window,
+              "getElementById" in document, "nope" in el, "nope" in window,
+              el.ELEMENT_NODE, t.TEXT_NODE, el.DOCUMENT_POSITION_FOLLOWING,
+            ].join(" ");
+            </script>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        // (`Node.TEXT_NODE` on the constructor and `document.DOCUMENT_NODE`
+        // are still missing; noted in HANDOFF.md.)
+        assert!(
+            result.html.contains("true true true true true true true true false false 1 3 4"),
+            "{}",
+            result.html
+        );
+    }
+
     #[test]
     fn run_document_scripts_includes_js_backtrace() {
         let result = run_document_scripts(

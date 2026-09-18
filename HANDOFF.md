@@ -325,6 +325,16 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
 
 ## 未確定・仮実装
 
+- **shadow DOM の境界は片側だけ**（2026-09-18）。shadow の `<style>` は属性
+  セレクタで自分の木にしか効かんようにしたが、**文書側の規則は shadow の中に
+  全部入る**（Chrome は継承分だけ）。MDN では見た目に出とらん。**噛むときの
+  症状: 「shadow の中だけ潰れとる」。** 文書に `div { margin: 0 }`、
+  `button { all: unset }`、`* { margin:0; padding:0 }` の類（Tailwind の
+  preflight など）があると、custom element の部品の間隔が潰れる・ボタンが
+  丸裸になる。直すなら描画用の直列化で shadow の要素に
+  `data-tobira-shadow` が付いとるのを使って、文書側の規則の適用先から
+  除く（継承プロパティは通す）。`TOBIRA_DUMP_RENDER` で描画用の木が見える。
+
 - **属性の名前空間**は実体として持っとらん。`xlink:href` などは正規化した名前で
   照合しとるだけ。大抵の頁は通るが、`getAttributeNS` の厳密な挙動とは違う。
 - **`transform`** は translate をレイアウト時、scale/rotate を描画時に効かせとる。
@@ -853,6 +863,48 @@ react.dev だけ撮らんかった一枚が退化しとった。
   - 検体 `tools/scripterr/dsd.html` が 13 項目 Chrome と一致。MDN: light DOM は
     724 のまま Chrome と一致、ヘッダに "Theme" / "English (US)" / 検索欄が出た。
     本文は動かず。六枚の light DOM も動かず。
+  - 反省の二度目: 28f9271 もテストが一本落ちたまま push した。`&&` で繋いどった
+    つもりが、途中の `pid=…; [ -n "$pid" ] && …;` の `;` で鎖が切れとった。
+    **サーバ停止みたいな副作用は鎖の前に別コマンドで済ませる。鎖の中は
+    `&&` だけ。** b4dc22f で直しとる。
+- **DOM の面の総当たり**（`tools/scripterr/domsurface_names.html` で Chrome から
+  14 インターフェースの own property 名を機械的に取り、`domsurface.html` で
+  まっさらな要素に**触る前に** `name in obj`、次に `typeof obj[name]` を聞く）。
+  **一番大きいのは `in` そのもの**: host object への `in` は短い白名簿しか
+  見とらんかったので、`"appendChild" in el` も `"Array" in window` も
+  `"IntersectionObserver" in window` も false やった（Element で 152 中 138 が
+  false、実際に無いのは 89）。`In` opcode に「host の dispatch が Undefined 以外を
+  返せば in」の fallback を足した（style と dataset は精密な答えが別にある
+  ので除く）。Node の定数（`ELEMENT_NODE` など 15 個）も足した。
+  **本当に無いもの**（typeof undefined、2026-09-18）:
+  - 実頁で効く見込みが高い: Document の `children` / `firstElementChild` /
+    `lastElementChild` / `childElementCount` / `doctype` / `defaultView` /
+    `forms` / `images` / `links` / `scripts` / `styleSheets` / `getElementsByName` /
+    `getSelection` / `append` / `prepend` / `replaceChildren`、
+    HTMLInputElement の `checked` / `required` / `readOnly` / `multiple` /
+    `defaultValue` / `max` / `min` / `step` / `maxLength` / `files` / `form` /
+    `select` / `selectionStart` / `checkValidity`、HTMLFormElement の
+    `elements` / `submit` / `reset` / `requestSubmit`、HTMLAnchorElement の
+    URL 分解（`hash` / `host` / `pathname` / `search` / `protocol` / `origin`）、
+    HTMLImageElement の `complete` / `naturalWidth` / `naturalHeight` /
+    `currentSrc` / `loading` / `decode`、Element の `namespaceURI` / `role` /
+    `slot` / `part`、window の `alert` / `confirm` / `prompt` / `postMessage` /
+    `frames` / `name` / `outerWidth` / `screenX`、**未設定の `on*` が null
+    やのうて undefined**（Element / Document / window とも）。
+  - 型はあるが実装が要らん新しめのもの: `aria*`（50 個）、popover 系、
+    `attachInternals`、`startViewTransition`、`moveBefore`、`getHTML` / `setHTML`。
+  - 射程外: fullscreen / pointer lock / picture-in-picture / `execCommand` /
+    `queryCommand*` / storage access / `browsingTopics` / speech / `WebAssembly` /
+    `Worker` / `WebSocket` / `Notification` / streams。
+  - 有るもの（無いと思うとったが有った）: `closest` / `matches` /
+    `insertAdjacentHTML` / `scrollIntoView` / `getBoundingClientRect` /
+    `URL` / `URLSearchParams` / `fetch` / `AbortController` / `IntersectionObserver` /
+    `ResizeObserver` / `MutationObserver` / `TextEncoder` / `FormData` / `Blob` /
+    `DOMParser` / `structuredClone` / `matchMedia` / `customElements`。
+  - 無い constructor で効きそうなもの: `Request` / `Response`（`fetch` は
+    有るのに）、`Option` / `Audio`、`CustomElementRegistry`、`BigInt`、
+    `Atomics` / `BigInt64Array`、canvas 系（`CanvasRenderingContext2D` /
+    `ImageData` / `Path2D`）。
 - react.dev の pending の中身: **頁自身の `setInterval` 60ms が 5 本**
   （例のプレビューの時計）と 20 秒・29 秒の timer。tobira 側の収束の問題やない。
   `TOBIRA_DEBUG_SCRIPTS=1` で pump が 1 秒ごとに `[pump] N timers (M repeating),

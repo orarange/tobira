@@ -3668,7 +3668,7 @@ impl Vm {
                     ObjectKind::Proxy { target, handler } => Some((*target, *handler)),
                     _ => None,
                 });
-                let present = match proxy {
+                let mut present = match proxy {
                     Some((target, handler)) => self.proxy_has(target, handler, &key)?,
                     None => {
                         self.lookup_property_descriptor(object, &key).is_some()
@@ -3676,6 +3676,32 @@ impl Vm {
                             || self.host_manages_property(object, &key)
                     }
                 };
+                // A host object answers most names through its dispatch, not
+                // through own properties, so `in` asks the dispatch: a name
+                // it answers is in. Until 2026-09-18 only a short list was,
+                // and `"appendChild" in el`, `"Array" in window` and every
+                // `"IntersectionObserver" in window` feature test said false.
+                if !present && proxy.is_none() {
+                    let host_slot = self.heap.objects().get(object).and_then(|o| match o.kind {
+                        ObjectKind::Host(slot) => Some(slot),
+                        _ => None,
+                    });
+                    // The style declaration and the dataset answer every
+                    // name with a string, so `host_manages_property` above
+                    // is the precise answer for those two.
+                    if let Some(slot) = host_slot
+                        && !matches!(
+                            slot.class,
+                            HostObjectClass::Other("CSSStyleDeclaration")
+                                | HostObjectClass::Other("Dataset")
+                        )
+                    {
+                        present = !matches!(
+                            self.get_host_property(slot, &key)?,
+                            Value::Undefined
+                        );
+                    }
+                }
                 self.stack.push(Value::Bool(present));
             }
             Opcode::Instanceof => {
@@ -20167,6 +20193,22 @@ impl Vm {
             "isPrototypeOf" => Ok(self.allocate_builtin_method(BuiltinId::ObjectProtoIsPrototypeOf)),
             "valueOf" => Ok(self.allocate_builtin_method(BuiltinId::ObjectProtoValueOf)),
             "toString" => Ok(self.allocate_builtin_method(BuiltinId::ObjectProtoToString)),
+            // The node type constants live on every node as well as on `Node`.
+            "ELEMENT_NODE" => Ok(Value::Number(1.0)),
+            "ATTRIBUTE_NODE" => Ok(Value::Number(2.0)),
+            "TEXT_NODE" => Ok(Value::Number(3.0)),
+            "CDATA_SECTION_NODE" => Ok(Value::Number(4.0)),
+            "PROCESSING_INSTRUCTION_NODE" => Ok(Value::Number(7.0)),
+            "COMMENT_NODE" => Ok(Value::Number(8.0)),
+            "DOCUMENT_NODE" => Ok(Value::Number(9.0)),
+            "DOCUMENT_TYPE_NODE" => Ok(Value::Number(10.0)),
+            "DOCUMENT_FRAGMENT_NODE" => Ok(Value::Number(11.0)),
+            "DOCUMENT_POSITION_DISCONNECTED" => Ok(Value::Number(1.0)),
+            "DOCUMENT_POSITION_PRECEDING" => Ok(Value::Number(2.0)),
+            "DOCUMENT_POSITION_FOLLOWING" => Ok(Value::Number(4.0)),
+            "DOCUMENT_POSITION_CONTAINS" => Ok(Value::Number(8.0)),
+            "DOCUMENT_POSITION_CONTAINED_BY" => Ok(Value::Number(16.0)),
+            "DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC" => Ok(Value::Number(32.0)),
             _ => Ok(Value::Undefined),
         }
     }

@@ -29,6 +29,8 @@ TOBIRA_DEBUG_CONSOLE=1 TOBIRA_DEBUG_SCRIPTS=1 ./target/release/tobira --cli http
 | `capture.html` | the three phases of propagation, a non-bubbling `error`, `stopPropagation` in capture, an `<img>` failure reaching `window` | see below |
 | `fetchprobe.html`, `fetchfail.html` | `fetch()` same-origin / cross-origin / refused / unknown host / 404 / 500, `Promise.all` with a failure, XHR, an `<img>` that fails | every line matches Chrome except `img-onerror` |
 | `geomprobe.html` | `offsetHeight` / `getBoundingClientRect` of elements a script just made, before any frame | `fixed 72 / plain 18 (Chrome 24: line height) / inline-fixed 50`, was all 0 |
+| `domsurface_names.html` | run in Chrome: prints `Object.getOwnPropertyNames` of 14 interfaces' prototypes (and `window`) as JSON | the reference list, saved as `domsurface_names.json` |
+| `domsurface.html` | generated from that list: for every name, on a fresh object and before touching it, `name in obj`, then `typeof obj[name]` | two lists per interface: what `in` denies, what is really absent |
 | `dsd.html` | a declarative shadow root: folding, `<slot>` assignment and fallback, `:host` / `::slotted()` / a class the document also uses, `document` not seeing in, `shadowRoot.getElementById` | every line matches Chrome |
 | `attrsel.html`, `attrsel2.html`, `attrsel3.html` | the selectors the shadow rewrite produces, in a plain document | all applied; kept from the hunt for why `:host` did not reach (the geometry runs had not read the shadow `<style>`) |
 | `supportsprobe.html` | `CSS.supports` (both forms, `not` / `and` / `or`) against `@supports` for the eight properties the renderer says no to | no line says `MISMATCH`; Chrome says yes to seven of the eight, which is a real difference and not a bug |
