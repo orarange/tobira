@@ -660,6 +660,58 @@ impl Builder {
         }
     }
 
+    /// Put a formatting element on the active list.
+    ///
+    /// The Noah's Ark clause: the list holds at most three of a kind -- same
+    /// name, namespace and attributes -- after the last marker. A fourth
+    /// pushes the earliest of them off. Only the list is capped; the open
+    /// element stack still holds every one of them, which is what makes
+    /// `<font size=4>` written fifty times over without closing it reopen as
+    /// three in the next paragraph rather than fifty.
+    ///
+    /// The reconstruction in `reconstruct_formatting` replaces entries in
+    /// place and never comes through here, so it cannot count its own clones.
+    fn push_formatting(&mut self, index: usize) {
+        let mut same = Vec::new();
+        for (position, entry) in self.formatting.iter().enumerate().rev() {
+            match entry {
+                Formatting::Marker => break,
+                Formatting::Element(other) if self.same_formatting(*other, index) => {
+                    same.push(position);
+                }
+                Formatting::Element(_) => {}
+            }
+        }
+        if same.len() >= 3 {
+            // `same` was gathered walking backwards, so its last entry is the
+            // earliest on the list.
+            let earliest = same[same.len() - 1];
+            self.formatting.remove(earliest);
+        }
+        self.formatting.push(Formatting::Element(index));
+    }
+
+    /// Whether two elements are of a kind for the Noah's Ark clause: same
+    /// name, namespace and attributes. Attributes live in a `BTreeMap`, so
+    /// comparing the maps ignores the order they were written in.
+    fn same_formatting(&self, a: usize, b: usize) -> bool {
+        match (&self.nodes[a].kind, &self.nodes[b].kind) {
+            (
+                BuildKind::Element {
+                    tag_name: tag_a,
+                    attributes: attributes_a,
+                    namespace: namespace_a,
+                },
+                BuildKind::Element {
+                    tag_name: tag_b,
+                    attributes: attributes_b,
+                    namespace: namespace_b,
+                },
+            ) => tag_a == tag_b && namespace_a == namespace_b && attributes_a == attributes_b,
+            _ => false,
+        }
+    }
+
     /// A fresh element with the same name and attributes, and no children.
     fn clone_element(&mut self, source: usize) -> usize {
         let kind = match &self.nodes[source].kind {
@@ -1767,7 +1819,7 @@ fn parse_document_body(input: &str) -> (Node, ParseExtras) {
                 if starts_scope {
                     builder.formatting.push(Formatting::Marker);
                 } else if formatting && !self_closing {
-                    builder.formatting.push(Formatting::Element(index));
+                    builder.push_formatting(index);
                 }
             }
             Token::EndTag(name) => {

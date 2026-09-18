@@ -40,6 +40,7 @@ python tools/geom/cmp.py g4.html
 | `carousel.html` | a horizontally scrolling strip of cards | 11/13 |
 | `flexgap.html` | `gap` on a flex row, and the row's own box | 9/9 |
 | `visuallyhidden.html` | screen-reader-only text, and where it sits | 4/7 |
+| `noah.html` | fifty unclosed `<font>`: the Noah's Ark clause caps them at three per paragraph | counts, not geometry — 99 vs Chrome 96 |
 
 Scores are from 2026-09-10 (late) at 1280px. They are not asserted anywhere — this is
 a hand-run tool, not a test.

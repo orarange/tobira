@@ -1,0 +1,38 @@
+<html><head><style>
+body{margin:0;font:16px Arial;width:800px}
+</style></head><body>
+<!-- Noah's Ark clause. Fifty <font size=4> that never close, with a <p>
+     every ten. Each <p> closes the one before it, and re-opening the next
+     paragraph reconstructs every formatting element that is still active.
+     Without the clause every one of the fifty is reconstructed into every
+     paragraph; with it, the list holds three of a kind and the rest are
+     dropped as they arrive. Chrome is the reference. -->
+<p>a0
+<font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4>
+<p>a1
+<font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4>
+<p>a2
+<font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4>
+<p>a3
+<font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4>
+<p>a4
+<font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4><font size=4>
+<p>a5
+<p>a6
+<p>a7
+<p>a8
+<p>a9
+<pre id="out"></pre>
+<script>
+function depth(e){var d=0;while(e){d++;e=e.parentElement;}return d;}
+var all=document.querySelectorAll('*'), fonts=document.querySelectorAll('font');
+var maxd=0; for(var i=0;i<all.length;i++){maxd=Math.max(maxd,depth(all[i]));}
+var ps=document.querySelectorAll('p'), perp=[];
+for(var j=0;j<ps.length;j++){perp.push(ps[j].querySelectorAll('font').length);}
+document.getElementById('out').textContent =
+  'elements '+all.length+'\n'+
+  'fonts '+fonts.length+'\n'+
+  'maxdepth '+maxd+'\n'+
+  'fonts-per-p '+perp.join(',')+'\n'+
+  'stray '+Array.prototype.filter.call(fonts,function(f){return !f.closest('p');}).map(function(f){return f.parentNode.nodeName.toLowerCase()+'>'+(f.firstChild?f.firstChild.nodeName.toLowerCase():'-');}).join(' ');
+</script></body></html>

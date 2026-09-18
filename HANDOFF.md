@@ -18,10 +18,10 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - **PR title** — When opening a pull request, always include the agent's name in the title.
   Example: `[Claude] fix CSS calc() precedence` / `[Codex] add image lazy-loading`
 
-## いまの状態（2026-09-10）
+## いまの状態（2026-09-18）
 
-- ブランチ `master`。この文書を書いた時点の HEAD は `c16844e`
-  （この文書のコミットが直後に乗る）。
+- ブランチ `master`。この文書を書いた時点の HEAD は `3b09958`
+  （この文書のコミットが直後に乗る）。origin/master と同期しとる。
 - `cargo build --release` 通る。警告は 35 件（2026-09-18 実測）で、全部無害:
   unreachable pattern 10（`html.rs` の `is_block_like` の重複リテラル 8、
   `compiler/expressions.rs` の網羅済み match の `_`、`vm.rs` の `createComment` が
@@ -32,7 +32,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
   数え方: `cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result" | awk '{p+=$4; f+=$6} END {print p, f}'`
   （`tr -d '\000'` は必須。出力に NUL が混ざって grep が binary 扱いする）
-- html5lib 木構築適合 **1210/1229 (98.5%)**。
+- html5lib 木構築適合 **1213/1229 (98.7%)**（2026-09-18、Noah's Ark 条項で tests23 が 5/5）。
   `cargo test --release --bin tobira -- tree_construction_conformance --nocapture`
   が `.dat` ごとの内訳を出す。合計は自分で足す。`TOBIRA_H5_FILE=<名前>` で一本に絞れる。
 - 動作確認できとる範囲（`--screenshot` で目視、JS エラーは `TOBIRA_DEBUG_CONSOLE=1`）:
@@ -121,6 +121,19 @@ host 側で入れとるだけで、エンジン本体には無い。素の Vm �
 - 「`tablew.html` が 0/6」→ **表の話やなかった**。幅も高さも六形とも
   合うとって、外れは y だけ、しかも 1 行ごとに +1 ずつ積もる形。
   真因は行の高さの丸め方（下記）。
+
+2026-09-18 にもう一つ外れた（Mac 側の Claude の見立て、Windows 側で測った）:
+
+- 「Noah's Ark 条項が無いと実頁で要素が爆発しとるはず。適合率より
+  そっちが本命」→ **測った範囲では実害は無かった**。合成頁
+  （`tools/geom/noah.html`、`<font size=4>` を閉じずに 50 個）では
+  516 → 99 要素、`<p>` ごとの font が 50 → 3 で Chrome（96）と段落内は
+  一致した。理論は正しい。けど実頁は abehiroshi top/menu・HN・lobste.rs
+  の四枚とも**修正前から Chrome と同数**（161 / 103 / 810 / 827）で、
+  修正後も一つも動かんかった。abehiroshi の `<font>` は全部閉じてある。
+  「古い手書き HTML は閉じん」は、この四枚に関しては当たらんかった。
+  この修正の実の取り分は html5lib +3 件と仕様準拠で、要素爆発の抑制は
+  **検体でしか見えとらん**。
 
 **外れとる数字を見たら、その頁が何を測っとるかを疑う前に、
 どの軸が外れとるかを見ること。** 三つとも「合っとる軸」と「外れとる軸」を
@@ -406,7 +419,9 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
 8. **`<summary>` の無い `<details>`** — ブラウザは既定の見出しを出す。
    `tools/geom/details.html` の d4 がこれで、Chrome 24px に対して 0。
 
-9. **html5lib 残り 19 件** — 98.5%。塊は `<font>` の入れ子（tests23 に 3）と
+9. **html5lib 残り 16 件** — 98.7%。tests23 の `<font>` の入れ子 3 件は
+   2026-09-18 に Noah's Ark 条項（同型の活性整形要素は marker 以後 3 つまで、
+   `html.rs` の `push_formatting`）で片付いた。残りの塊は
    `<col>`/`<colgroup>` の表構造（tests1 に 2）。後者は過去に
    1184 → 1115 の退化を出した領域と地続き。残りは文書の頭の空白
    （doctype01・tests15・tests19）と、表の中のフォームの里親付け。
@@ -482,6 +497,27 @@ python tools/geom/cmp.py g4.html
 ```
 
 ## Session Log
+
+### 2026-09-18 - Claude (Windows、Mac 側の Claude と往復しながら)
+
+Mac 側が GitHub と比べて「55 コミット未 push」を見つけたところから。
+push して、入口の `CLAUDE.md` を足して、html5lib の残りで一番固まっとった
+tests23（2/5）を Mac 側が Noah's Ark 条項の未実装と読み、こちらで確かめて直した。
+
+- 落ちとる 3 件が「減る側」、通っとる 2 件が「残す側」（属性違い・marker 越し）で
+  見立てどおり。積む場所は `html.rs` の一箇所だけ、属性は `BTreeMap` なので
+  順序非依存の比較が `==` で済んだ。再構築（`reconstruct_formatting`）は
+  その場で置き換える経路で push を通らんことも確認した。
+- 数字: テスト 1176 / 0（動かず）、html5lib 1210 → **1213/1229 (98.7%)**。
+  adoption01/02・tricky01 は動かず。HN と Wikipedia を一枚ずつ撮って崩れなし。
+- **要素爆発の実測**は上の「見立ても疑え」の節。検体では 516 → 99、実頁四枚では
+  差ゼロ。測る前に「本命」と言うとった見立ては外れ。
+- 途中で見つけた別の穴（未修正）: `<script>` の中身に活性整形要素が
+  再構築されて巻き付く。`noah.html` の stray 行で `script>font` と出る。
+  Chrome は出さん。raw text の挿入で `reconstruct_formatting` を呼んどる筋。
+- `--cli` で外部 `<script src>` が 404（HTML が返る）やと parse error になり、
+  **それ以降の inline script が走らん**ように見えた（HN の保存頁で再現）。
+  Chrome は外部の失敗を無視して次へ進む。要確認。
 
 ### 2026-09-10 - Claude (自走ループ二晩目: 8535535..c16844e, 23 コミット)
 
