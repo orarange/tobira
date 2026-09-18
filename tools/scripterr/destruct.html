@@ -1,0 +1,15 @@
+<html><body><pre id="out">start</pre><script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(l,f){ try{ log(l+'='+f()); }catch(x){ log(l+'=ERR:'+x.name+':'+x.message.slice(0,30)); } }
+var V={video:{image:"/img/a.webp",url:"http://u/"}};
+function eX(e){let t,r,s,n;let i=[1,2],{video:o}=e,{image:d}=o,m=o.url,h="blue"===d&&"x",u="object"==typeof d&&"y",g=o.url&&"z";return [typeof d, d, m, String(h), String(u), g].join('|');}
+t('chain', ()=>eX(V));
+function eY(e){let {video:o}=e,{image:d}=o;return d;}
+t('two', ()=>eY(V));
+function eZ(e){let i=[1],{video:o}=e,{image:d}=o;return d;}
+t('after-array', ()=>eZ(V));
+function eW(e){let t,r;let i=(0,Array)(3),{video:o}=e,{image:d}=o,m=o.url;return d+'|'+m;}
+t('after-call', ()=>eW(V));
+function eQ(e){let t,r,s,n;let i=[1],{video:o}=e,{image:d}=o,m=o.url;let b="string"==typeof d&&d.startsWith("/")?"url("+d+")":null;return b+'|'+("string"!=typeof d?'A':d.startsWith("/")?null:'B');}
+t('full-shape', ()=>eQ(V));
+</script></body></html>

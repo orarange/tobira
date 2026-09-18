@@ -1,0 +1,12 @@
+<html><body><pre id="out">start</pre><script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(l,f){ try{ log(l+'='+f()); }catch(x){ log(l+'=ERR:'+x.name); } }
+var d="/images/home/videos/documentary.webp", A='A', B='B';
+t('startsWith', ()=>d.startsWith("/"));
+t('nested', ()=>{ var s; s="string"!=typeof d?A:d.startsWith("/")?null:B; return String(s); });
+t('nested-assign-in-cond', ()=>{ var i=[1], s, r; return String(i[0]!==d?(s="string"!=typeof d?A:d.startsWith("/")?null:B,i[0]=d,i[1]=s):s=i[1], s); });
+t('comma-in-ternary', ()=>{ var i=[], s; i[9]!==d?(s=d.startsWith("/")?null:B,i[9]=d,i[10]=s):s=i[10]; return String(s); });
+t('full', ()=>{ var i=[], s, n; i[9]!==d?(s="string"!=typeof d?(A+A):d.startsWith("/")?null:(0,f1)(B,{}),i[9]=d,i[10]=s):s=i[10]; return String(s); function f1(x){return x} });
+t('null-in-ternary-obj', ()=>{ var o={children: d.startsWith("/")?null:B}; return String(o.children); });
+t('typeof-neq', ()=>("string"!=typeof d));
+</script></body></html>

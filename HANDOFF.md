@@ -47,12 +47,13 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   DOM は `TOBIRA_DUMP_DOM` + `tools/scripterr/domstat.py` で Chrome と突き合わせ。
   **2026-09-18 に settle 込み（仮想 8 秒）で全部撮り直した。それまでの判定は
   load 直後 1ms の絵で下されとった**）:
-  - **一致に近い**: news.ycombinator.com（DOM 完全一致、投票矢印を除く）、
+  - **一致に近い**: **react.dev（2026-09-19 から DOM が 1846/1846 で完全一致。
+    コード欄は CodeMirror で色付き、四つの例のプレビューも全部出る。
+    意匠はまだ甘い）**、news.ycombinator.com（DOM 完全一致、投票矢印を除く）、
     lobste.rs（要素は完全一致、`<time>` の相対時刻の書き換えだけ効いとらん）、
     ja.wikipedia.org（settle 込みで 807/809 要素。外観パネルも出るが右端に
     細く崩れる）、abehiroshi.la.coocan.jp
-  - **中身は出るが意匠が甘い**: react.dev（1362/1846。コード欄は CodeMirror で
-    色付き、四つ目の例のプレビューだけ空の枠）、vuejs.org（599/657。スポンサー欄が
+  - **中身は出るが意匠が甘い**: vuejs.org（599/657。スポンサー欄が
     空。settle で一度真っ白になったのは geometry の問題で、直した）、
     developer.mozilla.org（light DOM は完全一致。declarative shadow DOM 17 個を
     畳んどらんのでヘッダの部品が無い）
@@ -947,6 +948,55 @@ react.dev だけ撮らんかった一枚が退化しとった。
     17 個の shadow root 全部に `<style>` がある（SSR が入れとる）。Lit の判定
     `"adoptedStyleSheets" in Document.prototype` は tobira で false なので、
     Lit は `<style>` 要素に落ちる。それで正しい。
+- **react.dev の -484 要素は `Math.min(undefined, 3)` が 3 やったせい**
+  （2026-09-19）。1362 → **1846、Chrome と完全一致**、React #418 も消えた。
+  辿り方をそのまま残す。次に「JS が走ったら減る」を見たらこの順で:
+  1. **向きを決める。** `TOBIRA_DUMP_DOM_PARSED=<path>`（script の前の文書）を
+     足して前後を並べた。配信 HTML 66 ellipse / parse 後 66 / script 後 9 /
+     Chrome 66。**作れんのやのうて、あったものを失くしとる。** id が
+     `:R1sq8q6:` から `:r0:` に変わっとって、React が hydration を諦めて root を
+     クライアント描画し直したと分かる。（Mac 側が配信 HTML を数えて向きを示した）
+  2. **parse 後の DOM を Chrome と一ノードずつ比べる。** script を抜いた配信
+     HTML に walker（depth / nodeType / nodeName / nodeValue の長さ）を足して
+     両方で走らせる。2483 ノード、差は **SVG 要素の名前の大文字小文字だけ**
+     （599 個。`SVG` / `LINEARGRADIENT`、Chrome は `svg` / `linearGradient`）。
+     正しい修正やが（下）、**これが原因やなかった**。直しても 1362 のまま。
+  3. **どの検査で落ちたかを React に言わせる。** `TOBIRA_TRACE_THROW=<text>`:
+     投げられた値の説明に text を含むとき、その瞬間の backtrace と、
+     **投げた関数の第一引数の `type` / props / `return` の連なり**を出す。
+     React は #418 を投げず（console に渡すだけ）、`rv(fiber)` で #519 を投げる
+     ので `TOBIRA_TRACE_THROW=519`。→ `svg className="drop-shadow-xl"` ←
+     `<e1>` ← `a href="youtube…8pDqJVdNa44"` ← `<eX>`。
+  4. **その component の分岐を chunk で読む。** `d.startsWith("/") ? null :
+     <svg/>`。配信 HTML ではこの `<a>` は空（画像がある）。tobira 上では svg 側。
+     式そのもの・連続した分割代入は検体で Chrome と一致（`ternary.html`、
+     `destruct.html`）。**言語は正しい。**
+  5. **頁が最初に読む polyfills chunk を疑う。** core-js を読ませた後で同じ式を
+     試すと `"abc".startsWith("ab")` が **false**、`("b", 1)` は true。core-js は
+     tobira でだけ `startsWith` を差し替えとった（Chrome ではせん）。差し替え後は
+     `toLength(Math.min(position, length))` で開始位置を決める。
+     `Math.min(undefined, 3)` が NaN やのうて 3 → 末尾から探す → 常に false。
+  - **直したもの**: `Math.min` / `max` は NaN が一つでもあれば NaN、-0 < +0
+    （Rust の `f64::min` は NaN を飛ばす。そのまま使うとった）。
+    `startsWith` / `endsWith` / `includes` は RegExp を渡されたら TypeError
+    （`re[Symbol.match] = false` なら通す）— core-js が差し替える引き金。
+    同じ三つが**第二引数の位置を無視しとった**のも直した。`Symbol.match` を
+    well-known symbol に足した（id 6）。`String(/a/g)` は `"/a/g"`
+    （`[object Object]` やった）。SVG / MathML 要素の `nodeName` / `tagName` /
+    `localName` は書かれたとおりの大文字小文字（`foreignObject` の下は HTML）。
+  - **まだ core-js は `startsWith` と `Object.assign` を差し替えとる**
+    （`tools/scripterr/nativesymbol.html`）。core-js の `NATIVE_SYMBOL` 判定が
+    落ちるので `Symbol.match` を信用せん: `Object(Symbol()) instanceof Symbol` が
+    false、`String(Symbol("x"))` が `"Symbol()"`（説明を落とす、`.description` も
+    undefined）。`Object.assign` は getter が途中で enumerable を変える形で
+    順序が違う（Chrome 1、tobira 3）。**polyfill が native を置き換えるたびに、
+    頁は tobira が試したことのないコードを走る**ので、次の候補。
+    `species` / `replace` / `split` などの well-known symbol は**わざと足しとらん**
+    （足すと core-js が配列メソッドの species 対応を検査して、通らんので
+    `map` / `filter` / `slice` まで差し替え始める）。
+  - **教訓**: 「頁の JS が読んで壊れる」の前に、**頁が最初に入れる polyfill が
+    native を差し替えとらんか**を見る。`poly.html` の形（差し替え前の関数を
+    先に控えて、polyfill の後で `!==` を見る）で一発。
 - **`ai-branch-merge-loop.yml` は作られた日から YAML が壊れとった**
   （2026-09-19 に判明）。merge の step の複数行コミットメッセージが `run: |` の
   字下げから出とって、ファイルごと無効。一度も job を作れたことが無く、GitHub は

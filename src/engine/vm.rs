@@ -2013,6 +2013,9 @@ const SYMBOL_TO_PRIMITIVE_ID: u32 = 4;
 /// Well-known symbol id for `Symbol.hasInstance` (custom `instanceof`).
 const SYMBOL_HAS_INSTANCE_ID: u32 = 3;
 const SYMBOL_TO_STRING_TAG_ID: u32 = 5;
+/// `Symbol.match`: what `String.prototype.startsWith` and friends read to
+/// decide whether their argument counts as a regular expression.
+const SYMBOL_MATCH_ID: u32 = 6;
 /// First id available to user-created `Symbol(...)` values.
 const FIRST_USER_SYMBOL: u32 = 16;
 
@@ -3250,6 +3253,59 @@ impl Vm {
     /// the callbacks' names. For a page that never settles.
     /// The missing-member counts so far, most read first. Empty unless
     /// TOBIRA_DEBUG_MISSING is set.
+    /// For TOBIRA_TRACE_THROW: the thrower's first argument, described. A
+    /// library that throws from a helper (`rv(fiber)` in React) was handed the
+    /// thing it gave up on; this prints its `type`, a few props, and the same
+    /// for each object up its `return` chain, when it has them.
+    fn describe_throwers_first_argument(&mut self) {
+        let first = self
+            .frames
+            .last()
+            .and_then(|frame| frame.locals.first())
+            .map(|cell| cell.borrow().clone());
+        let Some(mut node @ Value::Object(_)) = first else {
+            return;
+        };
+        eprintln!("[throw] first argument, then its `return` chain:");
+        for _ in 0..14 {
+            let ty = self
+                .get_property_value(&node, &PropertyKey::from("type"))
+                .unwrap_or(Value::Undefined);
+            let name = match &ty {
+                Value::String(_) => self.to_string(&ty),
+                Value::Object(_) => {
+                    let n = self
+                        .get_property_value(&ty, &PropertyKey::from("name"))
+                        .unwrap_or(Value::Undefined);
+                    format!("<{}>", self.to_string(&n))
+                }
+                _ => "-".to_string(),
+            };
+            let props = self
+                .get_property_value(&node, &PropertyKey::from("pendingProps"))
+                .unwrap_or(Value::Undefined);
+            let mut detail = String::new();
+            if matches!(props, Value::Object(_)) {
+                for key in ["className", "id", "href", "aria-label"] {
+                    let v = self
+                        .get_property_value(&props, &PropertyKey::from(key))
+                        .unwrap_or(Value::Undefined);
+                    if !matches!(v, Value::Undefined | Value::Null) {
+                        let text: String = self.to_string(&v).chars().take(48).collect();
+                        detail.push_str(&format!(" {key}={text:?}"));
+                    }
+                }
+            }
+            eprintln!("[throw]   {name}{detail}");
+            node = self
+                .get_property_value(&node, &PropertyKey::from("return"))
+                .unwrap_or(Value::Undefined);
+            if !matches!(node, Value::Object(_)) {
+                break;
+            }
+        }
+    }
+
     pub fn set_missing_phase(&mut self, phase: &'static str) {
         self.missing_phase = phase;
     }
@@ -4159,6 +4215,17 @@ impl Vm {
             }
             Opcode::Throw => {
                 let thrown = self.pop_value()?;
+                // TOBIRA_TRACE_THROW=<text>: print where a thrown value whose
+                // description contains <text> was thrown from. A page's own
+                // `catch` swallows it a moment later, and a minified library
+                // says only "error #418".
+                if let Some(needle) = env::var_os("TOBIRA_TRACE_THROW") {
+                    let text = self.describe_thrown_value(&thrown);
+                    if text.contains(needle.to_string_lossy().as_ref()) {
+                        eprintln!("[throw] {text}\n{}", self.capture_backtrace());
+                        self.describe_throwers_first_argument();
+                    }
+                }
                 return Err(VmError::Thrown(thrown));
             }
             Opcode::DynamicImport => {
@@ -5359,6 +5426,7 @@ impl Vm {
                 ("hasInstance", 3),
                 ("toPrimitive", 4),
                 ("toStringTag", 5),
+                ("match", SYMBOL_MATCH_ID),
             ] {
                 self.define_data_property(
                     symbol_ref,
@@ -8563,6 +8631,11 @@ impl Vm {
             Value::Object(object) => {
                 if self.callables.contains_key(&object.raw()) {
                     "function() { [native code] }".to_string()
+                } else if let Some(ObjectKind::RegExp { source, flags, .. }) =
+                    self.heap.objects().get(*object).map(|o| &o.kind)
+                {
+                    // `String(/a/g)` is "/a/g", not "[object Object]".
+                    format!("/{source}/{flags}")
                 } else if let Some(href) = self.location_href_for_stringify(*object) {
                     // `String(location)` / ``${location}`` / `new URL(".", location)`
                     // must yield the href, not the generic "[object Object]".
@@ -14228,10 +14301,54 @@ impl Vm {
             | BuiltinId::StringProtoStartsWith
             | BuiltinId::StringProtoEndsWith => {
                 let text = self.builtin_string_this(&this_value)?;
+                // `includes`, `startsWith` and `endsWith` refuse a regular
+                // expression: an object whose `Symbol.match` is truthy, or a
+                // RegExp that has not set it. core-js tests for exactly this
+                // and replaces the method when it does not throw.
+                if matches!(
+                    builtin,
+                    BuiltinId::StringProtoIncludes
+                        | BuiltinId::StringProtoStartsWith
+                        | BuiltinId::StringProtoEndsWith
+                ) && let Some(first @ Value::Object(object)) = args.first()
+                {
+                    let matcher = self
+                        .get_property_value(first, &PropertyKey::Symbol(SymbolId(SYMBOL_MATCH_ID)))
+                        .unwrap_or(Value::Undefined);
+                    let is_regexp = if matches!(matcher, Value::Undefined) {
+                        self.heap
+                            .objects()
+                            .get(*object)
+                            .is_some_and(|o| matches!(o.kind, ObjectKind::RegExp { .. }))
+                    } else {
+                        self.is_truthy(&matcher)
+                    };
+                    if is_regexp {
+                        return Err(VmError::TypeError(
+                            "First argument must not be a regular expression".to_string(),
+                        ));
+                    }
+                }
                 let needle = args
                     .first()
                     .map(|value| self.to_string(value))
                     .unwrap_or_default();
+                // The second argument: where to start (or, for `endsWith`,
+                // where the string is taken to end), clamped to the string.
+                let chars: Vec<char> = text.chars().collect();
+                let position = |vm: &Self, default: usize| -> usize {
+                    match args.get(1) {
+                        None | Some(Value::Undefined) => default,
+                        Some(value) => {
+                            let n = vm.to_number(value);
+                            if n.is_nan() || n <= 0.0 {
+                                0
+                            } else {
+                                (n as usize).min(chars.len())
+                            }
+                        }
+                    }
+                };
                 Ok(match builtin {
                     BuiltinId::StringProtoIndexOf => {
                         let from = args
@@ -14252,9 +14369,21 @@ impl Vm {
                             .unwrap_or(-1.0);
                         Value::Number(index)
                     }
-                    BuiltinId::StringProtoIncludes => Value::Bool(text.contains(&needle)),
-                    BuiltinId::StringProtoStartsWith => Value::Bool(text.starts_with(&needle)),
-                    BuiltinId::StringProtoEndsWith => Value::Bool(text.ends_with(&needle)),
+                    BuiltinId::StringProtoIncludes => {
+                        let from = position(self, 0);
+                        let rest: String = chars[from..].iter().collect();
+                        Value::Bool(rest.contains(&needle))
+                    }
+                    BuiltinId::StringProtoStartsWith => {
+                        let from = position(self, 0);
+                        let rest: String = chars[from..].iter().collect();
+                        Value::Bool(rest.starts_with(&needle))
+                    }
+                    BuiltinId::StringProtoEndsWith => {
+                        let end = position(self, chars.len());
+                        let head: String = chars[..end].iter().collect();
+                        Value::Bool(head.ends_with(&needle))
+                    }
                     _ => unreachable!(),
                 })
             }
@@ -14503,16 +14632,28 @@ impl Vm {
             BuiltinId::MathRound => Ok(Value::Number(self.number_arg(&args, 0).round())),
             BuiltinId::MathTrunc => Ok(Value::Number(self.number_arg(&args, 0).trunc())),
             BuiltinId::MathAbs => Ok(Value::Number(self.number_arg(&args, 0).abs())),
-            BuiltinId::MathMin => Ok(Value::Number(
-                args.iter()
-                    .map(|value| self.to_number(value))
-                    .fold(f64::INFINITY, f64::min),
-            )),
-            BuiltinId::MathMax => Ok(Value::Number(
-                args.iter()
-                    .map(|value| self.to_number(value))
-                    .fold(f64::NEG_INFINITY, f64::max),
-            )),
+            // One NaN makes the answer NaN, and -0 is below +0. Rust's
+            // `f64::min` / `max` skip a NaN instead, so `Math.min(undefined, 3)`
+            // was 3 -- and core-js's `startsWith` (`toLength(min(position,
+            // length))`) started its search at the end of the string.
+            BuiltinId::MathMin | BuiltinId::MathMax => {
+                let want_min = matches!(builtin, BuiltinId::MathMin);
+                let mut best = if want_min { f64::INFINITY } else { f64::NEG_INFINITY };
+                let mut saw_nan = false;
+                for value in args.iter() {
+                    let n = self.to_number(value);
+                    if n.is_nan() {
+                        saw_nan = true;
+                    } else if want_min {
+                        if n < best || (n == 0.0 && best == 0.0 && n.is_sign_negative()) {
+                            best = n;
+                        }
+                    } else if n > best || (n == 0.0 && best == 0.0 && n.is_sign_positive()) {
+                        best = n;
+                    }
+                }
+                Ok(Value::Number(if saw_nan { f64::NAN } else { best }))
+            }
             BuiltinId::MathPow => Ok(Value::Number(
                 self.number_arg(&args, 0).powf(self.number_arg(&args, 1)),
             )),
@@ -19868,8 +20009,15 @@ impl Vm {
                 Ok(self.make_string_value(&value))
             }
             "localName" => {
-                let tag = self.get_node_name(node_id).to_ascii_lowercase();
-                Ok(self.make_string_value(&tag))
+                // Lower case for an HTML element; an SVG element's name is
+                // already in its own case (`linearGradient`) and stays so.
+                let name = self.get_node_name(node_id);
+                let local = if name.chars().any(|c| c.is_ascii_lowercase()) {
+                    name
+                } else {
+                    name.to_ascii_lowercase()
+                };
+                Ok(self.make_string_value(&local))
             }
             "type" => {
                 // `input.type` reflects the attribute but DEFAULTS to "text" when
@@ -20193,11 +20341,17 @@ impl Vm {
             "isConnected" => Ok(Value::Bool(true)),
             // The namespace is not kept on the node; the tag says which it is.
             "namespaceURI" => {
-                let tag = self.get_node_name(node_id).to_ascii_lowercase();
-                let ns = if is_svg_tag(&tag) {
-                    "http://www.w3.org/2000/svg"
-                } else if tag == "math" {
+                // The host answers a foreign element's name in its own case
+                // and an HTML element's in upper case, which tells them apart
+                // for an element in a parsed tree; a created one falls back
+                // on the tag.
+                let name = self.get_node_name(node_id);
+                let tag = name.to_ascii_lowercase();
+                let foreign = name.chars().any(|c| c.is_ascii_lowercase());
+                let ns = if tag == "math" {
                     "http://www.w3.org/1998/Math/MathML"
+                } else if foreign || is_svg_tag(&tag) {
+                    "http://www.w3.org/2000/svg"
                 } else {
                     "http://www.w3.org/1999/xhtml"
                 };

@@ -1,0 +1,10 @@
+<html><body><pre id="out">start</pre><script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(l,f){ try{ log(l+'='+f()); }catch(x){ log(l+'=ERR:'+x.name); } }
+t('min-undef', ()=>Math.min(undefined,3)); t('max-undef', ()=>Math.max(undefined,3)); t('min-nan', ()=>Math.min(NaN,3)); t('max-nan', ()=>Math.max(3,NaN));
+t('min-empty', ()=>Math.min()); t('max-empty', ()=>Math.max()); t('min-str', ()=>Math.min("2",3)); t('min-null', ()=>Math.min(null,3)); t('min-obj', ()=>Math.min({},3));
+t('min-negzero', ()=>1/Math.min(0,-0)); t('max-negzero', ()=>1/Math.max(-0,0));
+t('sw-regexp', ()=>"/./".startsWith(/./)); t('ew-regexp', ()=>"/./".endsWith(/./)); t('inc-regexp', ()=>"/./".includes(/./));
+t('sw-regexp-match-false', ()=>{ var r=/./; r[Symbol.match]=false; return "/./".startsWith(r); });
+t('sw-writable', ()=>Object.getOwnPropertyDescriptor(String.prototype,'startsWith').writable);
+</script></body></html>

@@ -1493,6 +1493,34 @@ impl BrowserHost {
         }
     }
 
+    /// The name of an element in the SVG or MathML namespace, in the case
+    /// the HTML parser gives it, or None for an HTML element. The namespace
+    /// is not kept on the node, so it is read from where the element sits:
+    /// `svg` / `math` itself or under one, and not under a `foreignObject`
+    /// (or a MathML text integration point), which is HTML again.
+    fn foreign_element_name(&self, idx: usize) -> Option<String> {
+        let tag = self.nodes[idx].tag_name()?.to_ascii_lowercase();
+        let mut cur = Some(idx);
+        let mut first = true;
+        while let Some(i) = cur {
+            if let Some(name) = self.nodes[i].tag_name() {
+                let name = name.to_ascii_lowercase();
+                if !first && matches!(name.as_str(), "foreignobject" | "desc" | "title" | "annotation-xml") {
+                    return None;
+                }
+                if name == "svg" {
+                    return Some(svg_adjusted_tag_name(&tag));
+                }
+                if name == "math" {
+                    return Some(tag);
+                }
+            }
+            first = false;
+            cur = self.nodes[i].parent;
+        }
+        None
+    }
+
     fn is_connected(&self, mut idx: usize) -> bool {
         loop {
             if idx == self.document {
@@ -2309,7 +2337,15 @@ impl Host for BrowserHost {
                 }
                 let name = match &self.nodes[node.0 as usize].kind {
                     DomNodeKind::Document => "#document".to_string(),
-                    DomNodeKind::Element(tag) => tag.to_uppercase(),
+                    // An HTML element's name is upper case; an SVG or MathML
+                    // element's is as written (`svg`, `linearGradient`). All
+                    // 599 SVG nodes of react.dev answered `SVG`, `ELLIPSE`,
+                    // and it was the only difference from Chrome in the whole
+                    // parsed document.
+                    DomNodeKind::Element(tag) => match self.foreign_element_name(node.0 as usize) {
+                        Some(name) => name,
+                        None => tag.to_uppercase(),
+                    },
                     DomNodeKind::Text(_) => "#text".to_string(),
                     DomNodeKind::Comment(_) => "#comment".to_string(),
                     DomNodeKind::Fragment => "#document-fragment".to_string(),
@@ -4835,6 +4871,12 @@ impl EngineSession {
     ) -> (Self, EngineRunResult) {
         let mut host = BrowserHost::from_html(html, url);
         host.set_stylesheet_text(stylesheet_text);
+        // The document as parsed, before any script has run: next to
+        // TOBIRA_DUMP_DOM it says whether the scripts added what is missing
+        // or took away what was there.
+        if let Some(path) = std::env::var_os("TOBIRA_DUMP_DOM_PARSED") {
+            let _ = std::fs::write(&path, host.serialize_document_light());
+        }
         // Laid out from the host's rendered tree, not the source: a
         // declarative shadow root has been folded by now, and its `<style>`
         // rewritten to reach only its own tree.
@@ -8019,6 +8061,64 @@ mod tests {
         );
     }
 
+    /// What took react.dev from 1362 elements back to Chrome's 1846.
+    /// `Math.min(undefined, n)` is NaN (it was n, because Rust's `f64::min`
+    /// skips a NaN), and core-js's `startsWith` -- installed because the
+    /// native one did not refuse a RegExp -- computes its start position as
+    /// `toLength(min(position, length))`: every `"/x".startsWith("/")` said
+    /// false, a thumbnail took its no-image branch, hydration failed, and
+    /// React threw the server's markup away.
+    #[test]
+    fn math_min_nan_and_string_search_methods() {
+        let result = run_document_scripts(
+            r##"<p id="out"></p><script>
+            function thrown(f) { try { f(); return "no"; } catch (e) { return e.name; } }
+            var re = /./; re[Symbol.match] = false;
+            document.getElementById("out").textContent = [
+              Math.min(undefined, 3), Math.max(3, NaN), Math.min({}, 3), Math.min(), Math.max(), Math.min("2", 3),
+              1 / Math.min(0, -0), 1 / Math.max(-0, 0),
+              "/img/a".startsWith("/"), "abc".startsWith("b", 1), "abc".startsWith("a", 1),
+              "abc".endsWith("b", 2), "abc".includes("a", 1),
+              thrown(function () { "/./".startsWith(/./); }), thrown(function () { "/./".endsWith(/./); }),
+              thrown(function () { "/./".includes(/./); }), "/./".startsWith(re), String(/a+/gi), typeof Symbol.match,
+            ].join(" ");
+            </script>"##,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains(
+                "NaN NaN NaN Infinity -Infinity 2 -Infinity Infinity true true false true false TypeError TypeError TypeError true /a+/gi symbol"
+            ),
+            "{}",
+            result.html
+        );
+    }
+
+    /// An SVG element answers its name as written (`svg`, `linearGradient`),
+    /// an HTML one in upper case, and what sits under `foreignObject` is HTML
+    /// again. It was the only difference between react.dev's parsed document
+    /// here and in Chrome, over 2483 nodes.
+    #[test]
+    fn svg_element_names_keep_their_case() {
+        let result = run_document_scripts(
+            r##"<div id="d"><svg id="s"><linearGradient id="g"></linearGradient><foreignObject id="f"><p id="p">x</p></foreignObject></svg></div><p id="out"></p>
+            <script>
+            function n(id) { var e = document.getElementById(id); return e.nodeName + ":" + e.tagName + ":" + e.localName; }
+            document.getElementById("out").textContent = [n("d"), n("s"), n("g"), n("f"), n("p"), document.getElementById("g").namespaceURI.slice(-3), document.getElementById("p").namespaceURI.slice(-5)].join(" ");
+            </script>"##,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains(
+                "DIV:DIV:div svg:svg:svg linearGradient:linearGradient:linearGradient foreignObject:foreignObject:foreignObject P:P:p svg xhtml"
+            ),
+            "{}",
+            result.html
+        );
+    }
+
     #[test]
     fn run_document_scripts_includes_js_backtrace() {
         let result = run_document_scripts(
@@ -10641,4 +10741,50 @@ fn collect_shadow_styles(node: &Node, out: &mut String) {
             collect_shadow_styles(child, out);
         }
     }
+}
+
+/// The HTML parser's "adjust SVG tag names" table: the mixed-case SVG
+/// element names, keyed by the lower case the tokenizer produces.
+fn svg_adjusted_tag_name(lower: &str) -> String {
+    match lower {
+        "altglyph" => "altGlyph",
+        "altglyphdef" => "altGlyphDef",
+        "altglyphitem" => "altGlyphItem",
+        "animatecolor" => "animateColor",
+        "animatemotion" => "animateMotion",
+        "animatetransform" => "animateTransform",
+        "clippath" => "clipPath",
+        "feblend" => "feBlend",
+        "fecolormatrix" => "feColorMatrix",
+        "fecomponenttransfer" => "feComponentTransfer",
+        "fecomposite" => "feComposite",
+        "feconvolvematrix" => "feConvolveMatrix",
+        "fediffuselighting" => "feDiffuseLighting",
+        "fedisplacementmap" => "feDisplacementMap",
+        "fedistantlight" => "feDistantLight",
+        "fedropshadow" => "feDropShadow",
+        "feflood" => "feFlood",
+        "fefunca" => "feFuncA",
+        "fefuncb" => "feFuncB",
+        "fefuncg" => "feFuncG",
+        "fefuncr" => "feFuncR",
+        "fegaussianblur" => "feGaussianBlur",
+        "feimage" => "feImage",
+        "femerge" => "feMerge",
+        "femergenode" => "feMergeNode",
+        "femorphology" => "feMorphology",
+        "feoffset" => "feOffset",
+        "fepointlight" => "fePointLight",
+        "fespecularlighting" => "feSpecularLighting",
+        "fespotlight" => "feSpotLight",
+        "fetile" => "feTile",
+        "feturbulence" => "feTurbulence",
+        "foreignobject" => "foreignObject",
+        "glyphref" => "glyphRef",
+        "lineargradient" => "linearGradient",
+        "radialgradient" => "radialGradient",
+        "textpath" => "textPath",
+        other => other,
+    }
+    .to_string()
 }

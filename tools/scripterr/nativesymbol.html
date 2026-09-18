@@ -1,0 +1,13 @@
+<html><body><pre id="out">start</pre><script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(l,f){ try{ log(l+'='+f()); }catch(x){ log(l+'=ERR:'+x.name); } }
+t('gOPS', ()=>typeof Object.getOwnPropertySymbols);
+t('String(sym)', ()=>String(Symbol('symbol detection')));
+t('Object(sym)-instanceof', ()=>Object(Symbol()) instanceof Symbol);
+t('sym-sham', ()=>typeof Symbol.sham);
+t('typeof-iterator', ()=>typeof Symbol.iterator);
+t('hasOwn-match', ()=>Object.prototype.hasOwnProperty.call(Symbol,'match'));
+t('sym-desc', ()=>Symbol.match.toString()+'/'+Symbol.match.description);
+t('assign-order', ()=>{ var A={},B={},s=Symbol('a'),al='abcdefghijklmnopqrst'; A[s]=7; al.split('').forEach(function(c){B[c]=c}); return Object.assign({},A)[s]+'/'+(Object.keys(Object.assign({},B)).join('')===al); });
+t('assign-getter', ()=>{ var r=Object.assign({b:1},Object.assign(Object.defineProperty({},'a',{enumerable:true,get:function(){Object.defineProperty(this,'b',{value:3,enumerable:false})}}),{b:2})); return r.b; });
+</script></body></html>
