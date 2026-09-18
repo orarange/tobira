@@ -20449,6 +20449,19 @@ impl Vm {
             }
             HostObjectClass::Other("CSSStyleDeclaration") => {
                 let node_id = NodeId(slot.handle as u32);
+                // `el.style.cssText = "..."` replaces the whole declaration.
+                // It was treated as a property named `css-text`, so the
+                // attribute read `style="css-text: height:40px"` and none of
+                // it applied; vuejs.org's ad banner set its size this way.
+                if name == "cssText" {
+                    let text = self.to_string(&value);
+                    let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                        node: node_id,
+                        name: "style".to_string(),
+                        value: text,
+                    });
+                    return Ok(());
+                }
                 let css_prop = camel_to_css_prop(&name);
                 let new_val = self.to_string(&value);
                 let existing = match self.host.read_dom(DomRead::Attribute {
