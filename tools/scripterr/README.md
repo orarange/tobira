@@ -27,6 +27,8 @@ TOBIRA_DEBUG_CONSOLE=1 TOBIRA_DEBUG_SCRIPTS=1 ./target/release/tobira --cli http
 | `repro_new.html` .. `repro_new4.html` | the bisection that led there, from CodeMirror's `ViewPlugin.fromClass` | kept as the record |
 | `repro_logical.html` | `a ||= v`, `a &&= v`, `a ??= v`, `import()`, `a++` as call arguments | every line names the right types (`??=` used to lose the callee) |
 | `capture.html` | the three phases of propagation, a non-bubbling `error`, `stopPropagation` in capture, an `<img>` failure reaching `window` | see below |
+| `fetchprobe.html`, `fetchfail.html` | `fetch()` same-origin / cross-origin / refused / unknown host / 404 / 500, `Promise.all` with a failure, XHR, an `<img>` that fails | every line matches Chrome except `img-onerror` |
+| `geomprobe.html` | `offsetHeight` / `getBoundingClientRect` of elements a script just made, before any frame | `fixed 72 / plain 18 (Chrome 24: line height) / inline-fixed 50`, was all 0 |
 
 `capture.html`, Chrome: `start win-cap:1:w doc-cap:1:#document a-cap:1:a
 b-cap:1:b c-cap:2:c c-bub:2:c b-bub:3:b b-onprop:3 a-bub:3:a doc-bub:3:#document

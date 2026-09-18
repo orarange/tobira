@@ -1,0 +1,14 @@
+<html><head><style>body{margin:0} #tall{height:3000px} #fixed{position:fixed;top:0;left:0;width:100%;height:72px;background:#0f0}</style></head><body>
+<div id="tall">tall</div><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+var t=document.getElementById('tall');
+log('tall.offsetHeight='+t.offsetHeight); log('tall.rect.h='+Math.round(t.getBoundingClientRect().height));
+var d=document.createElement('div'); d.id='fixed'; d.textContent='banner'; document.body.appendChild(d);
+log('fixed.offsetHeight='+d.offsetHeight); log('fixed.rect.h='+Math.round(d.getBoundingClientRect().height)); log('fixed.clientHeight='+d.clientHeight);
+var e=document.createElement('div'); e.textContent='plain'; document.body.appendChild(e);
+log('plain.offsetHeight='+e.offsetHeight); log('plain.rect.h='+Math.round(e.getBoundingClientRect().height));
+var f=document.createElement('div'); f.style.cssText='position:fixed;top:0;height:50px;width:100%'; document.body.appendChild(f);
+log('inline-fixed.offsetHeight='+f.offsetHeight);
+setTimeout(function(){ log('t0:fixed.offsetHeight='+d.offsetHeight+' plain='+e.offsetHeight+' inline-fixed='+f.offsetHeight); },0);
+</script></body></html>

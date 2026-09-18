@@ -1,0 +1,14 @@
+<html><body><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+fetch('http://127.0.0.1:9/refused.json').then(r=>log('refused-RESOLVED:'+r.status)).catch(e=>log('refused-rejected:'+e.name));
+fetch('http://no-such-host.invalid/x.json').then(r=>log('dns-RESOLVED:'+r.status)).catch(e=>log('dns-rejected:'+e.name));
+fetch('/missing.js').then(r=>log('404-resolved:'+r.status+':ok='+r.ok)).catch(e=>log('404-REJECTED:'+e.name));
+fetch('/err500.js').then(r=>log('500-resolved:'+r.status+':ok='+r.ok)).catch(e=>log('500-REJECTED:'+e.name));
+Promise.all([fetch('/ok.js'), fetch('http://127.0.0.1:9/refused.json')]).then(()=>log('all-RESOLVED')).catch(e=>log('all-rejected:'+e.name));
+Promise.allSettled([fetch('/ok.js'), fetch('http://127.0.0.1:9/refused.json')]).then(r=>log('allSettled:'+r.map(x=>x.status).join(',')));
+fetch('/ok.js', {mode:'no-cors'}).then(r=>log('nocors:'+r.status)).catch(e=>log('nocors-rejected'));
+var x=new XMLHttpRequest(); x.onload=function(){log('xhr-refused-ONLOAD')}; x.onerror=function(){log('xhr-refused-onerror')}; x.open('GET','http://127.0.0.1:9/r.json'); x.send();
+var img=new Image(); img.onerror=function(){log('img-onerror')}; img.onload=function(){log('img-ONLOAD')}; img.src='/missing.png';
+setTimeout(()=>log('t500'),500);
+</script></body></html>

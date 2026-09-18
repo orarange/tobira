@@ -391,6 +391,9 @@ fn dump_console(lines: &[String]) {
     }
 }
 
+/// How far the engine's clock runs after load outside the GUI.
+const DEFAULT_SETTLE_MS: u64 = 2000;
+
 pub fn load_page_for_cli(url: &Url) -> Result<BrowserPage> {
     load_page_with_options(url, true)
 }
@@ -418,18 +421,58 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
     // `--screenshot`, `--dump-styled`, the DOM dump -- used to stop at the
     // 1ms window after load, so a section a page draws from a timer, an
     // idle callback or a fetch's promise was never there, while the Chrome
-    // it was compared with had run its virtual time out. TOBIRA_SETTLE_MS
-    // advances a virtual clock in frames until nothing is pending or the
-    // budget is spent, like Chrome's --virtual-time-budget.
-    if let Some(budget_ms) = std::env::var_os("TOBIRA_SETTLE_MS")
+    // it was compared with had run its virtual time out. The virtual clock
+    // now advances in frames until nothing is pending or the budget is
+    // spent, like Chrome's --virtual-time-budget: two seconds unless
+    // TOBIRA_SETTLE_MS says otherwise, and 0 for the picture at 1ms.
+    let budget_ms = std::env::var_os("TOBIRA_SETTLE_MS")
         .and_then(|v| v.to_str().and_then(|s| s.parse::<u64>().ok()))
-        .filter(|&ms| ms > 0)
-    {
+        .unwrap_or(DEFAULT_SETTLE_MS);
+    if budget_ms > 0 {
+        // A timer that measures the page needs the page measured: the GUI
+        // lays out and feeds `getBoundingClientRect` after every frame that
+        // changed something, and so does this. Without it vuejs.org read
+        // its banner as the height of the whole document and pushed
+        // everything below the fold.
+        let width = style_viewport_width();
+        let mut fonts = crate::font::FontContext::load();
+        let feed_geometry = |page: &BrowserPage, fonts: &mut crate::font::FontContext| {
+            let layout = crate::layout::layout_styled_document(
+                &page.styled_document,
+                &page.images,
+                width,
+                fonts,
+            );
+            let rects: Vec<(usize, f32, f32, f32, f32, f32, f32)> = layout
+                .element_hitboxes
+                .iter()
+                .map(|h| {
+                    (
+                        h.node_id,
+                        h.x as f32,
+                        h.y as f32,
+                        h.width as f32,
+                        h.height as f32,
+                        h.scroll_width as f32,
+                        h.scroll_height as f32,
+                    )
+                })
+                .collect();
+            let count = rects.len();
+            let accepted = page.set_geometry(rects);
+            if std::env::var_os("TOBIRA_DEBUG_SCRIPTS").is_some() {
+                eprintln!("[settle] fed {count} rects (accepted: {accepted})");
+            }
+        };
+        page.set_viewport_size(width, 900);
+        feed_geometry(&page, &mut fonts);
         let mut now_ms = 0u64;
         let mut frames = 0u32;
         while page.engine_pending() && now_ms < budget_ms {
             now_ms += 16;
-            page.tick(now_ms);
+            if page.tick(now_ms) {
+                feed_geometry(&page, &mut fonts);
+            }
             frames += 1;
         }
         if std::env::var_os("TOBIRA_DEBUG_SCRIPTS").is_some() {

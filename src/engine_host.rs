@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 use std::any::Any;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use boa_ast::expression::ImportCall;
@@ -318,11 +319,25 @@ pub struct BrowserHost {
     /// coordinates; `getBoundingClientRect` subtracts the scroll offset to get
     /// viewport coordinates. Stale after a DOM mutation until the next layout
     /// feed (same as a real browser between reflows).
-    geometry: HashMap<usize, DomRect>,
+    /// Behind a RefCell because a read can fill it: a script that makes
+    /// an element and asks its size straight away is answered from a
+    /// layout run on the spot, as a browser does, rather than with 0.
+    geometry: RefCell<HashMap<usize, DomRect>>,
     /// How far the contents reach inside each box, by node id. Kept apart from
     /// `geometry` because it answers a different question: that one is where
     /// the box is, this one is how much is inside it.
-    scroll_extents: HashMap<usize, (f64, f64)>,
+    scroll_extents: RefCell<HashMap<usize, (f64, f64)>>,
+    /// The page's stylesheet text, for laying out on demand, and whether
+    /// laying out on demand is on at all (it is once a page has started).
+    stylesheet_text: String,
+    layout_on_demand: bool,
+    /// Whether the document changed since the geometry was last fed or
+    /// computed. Set by every mutation that can move a box.
+    layout_dirty: Cell<bool>,
+    /// On-demand layouts since the browser last fed geometry. A page that
+    /// measures after every one of a thousand mutations would otherwise
+    /// lay out a thousand times; past the budget the answer goes stale.
+    forced_layouts: Cell<u32>,
     /// What the cascade worked out for each element, keyed the same way as
     /// `geometry`. `getComputedStyle` used to be answered from the `style`
     /// attribute and a table of per-tag defaults, so a rule in the page's
@@ -361,8 +376,12 @@ impl BrowserHost {
             shadow_root_by_host: HashMap::new(),
             slot_snapshots: HashMap::new(),
             observers: Vec::new(),
-            geometry: HashMap::new(),
-            scroll_extents: HashMap::new(),
+            geometry: RefCell::new(HashMap::new()),
+            scroll_extents: RefCell::new(HashMap::new()),
+            stylesheet_text: String::new(),
+            layout_on_demand: false,
+            layout_dirty: Cell::new(false),
+            forced_layouts: Cell::new(0),
             computed_styles: HashMap::new(),
             root_custom_properties: std::collections::BTreeMap::new(),
             structural_changes: Vec::new(),
@@ -480,6 +499,7 @@ impl BrowserHost {
         name: &str,
         old_value: Option<String>,
     ) {
+        self.layout_dirty.set(true);
         let node_id = NodeId(target_idx as u32);
         if let Some(value) = self.nodes[target_idx].attrs.get(name).cloned() {
             self.structural_changes
@@ -552,6 +572,7 @@ impl BrowserHost {
     /// Record a characterData mutation against every observer watching
     /// `target_idx` (directly or, with `subtree`, as an ancestor).
     fn record_characterdata_mutation(&mut self, target_idx: usize, old_value: &str) {
+        self.layout_dirty.set(true);
         if let DomNodeKind::Text(text) = &self.nodes[target_idx].kind {
             self.structural_changes.push(DomStructuralChange::SetText {
                 node: NodeId(target_idx as u32),
@@ -612,6 +633,7 @@ impl BrowserHost {
     /// Record a childList mutation (added/removed nodes) against every observer
     /// watching `parent_idx` (directly or, with `subtree`, as an ancestor).
     fn record_childlist_mutation(&mut self, parent_idx: usize, added: &[usize], removed: &[usize]) {
+        self.layout_dirty.set(true);
         if added.is_empty() && removed.is_empty() {
             return;
         }
@@ -841,10 +863,23 @@ impl BrowserHost {
     /// inside the box, which is the only thing here the box's own rectangle
     /// cannot say.
     pub fn set_geometry(&mut self, rects: &[(usize, f32, f32, f32, f32, f32, f32)]) {
-        self.geometry.clear();
-        self.scroll_extents.clear();
+        Self::fill_geometry(&self.geometry, &self.scroll_extents, rects);
+        self.layout_dirty.set(false);
+        self.forced_layouts.set(0);
+        self.compute_intersections();
+    }
+
+    fn fill_geometry(
+        geometry: &RefCell<HashMap<usize, DomRect>>,
+        scroll_extents: &RefCell<HashMap<usize, (f64, f64)>>,
+        rects: &[(usize, f32, f32, f32, f32, f32, f32)],
+    ) {
+        let mut geometry = geometry.borrow_mut();
+        let mut scroll_extents = scroll_extents.borrow_mut();
+        geometry.clear();
+        scroll_extents.clear();
         for &(id, x, y, w, h, scroll_w, scroll_h) in rects {
-            self.geometry.insert(
+            geometry.insert(
                 id,
                 DomRect {
                     x: x as f64,
@@ -853,10 +888,48 @@ impl BrowserHost {
                     height: h as f64,
                 },
             );
-            self.scroll_extents
-                .insert(id, (scroll_w as f64, scroll_h as f64));
+            scroll_extents.insert(id, (scroll_w as f64, scroll_h as f64));
         }
-        self.compute_intersections();
+    }
+
+    pub fn set_stylesheet_text(&mut self, stylesheet_text: &str) {
+        self.stylesheet_text = stylesheet_text.to_string();
+        self.layout_on_demand = true;
+    }
+
+    /// Lay the document out now if it changed since the last layout, so a
+    /// measurement made right after a mutation sees the mutation. A browser
+    /// does exactly this on every read; the budget keeps a page that
+    /// measures in a loop from doing it a thousand times.
+    fn ensure_layout(&self) {
+        if !self.layout_dirty.get() || !self.layout_on_demand {
+            return;
+        }
+        if self.forced_layouts.get() >= FORCED_LAYOUT_BUDGET {
+            return;
+        }
+        self.forced_layouts.set(self.forced_layouts.get() + 1);
+        self.layout_dirty.set(false);
+        let html = self.serialize_document();
+        let (rects, _, _) = EngineSession::layout_geometry(&html, &self.stylesheet_text);
+        if std::env::var_os("TOBIRA_DEBUG_SCRIPTS").is_some() {
+            eprintln!(
+                "[layout] on demand #{}: {} boxes",
+                self.forced_layouts.get(),
+                rects.len()
+            );
+        }
+        Self::fill_geometry(&self.geometry, &self.scroll_extents, &rects);
+    }
+
+    fn rect_for(&self, tobira_id: usize) -> Option<DomRect> {
+        self.ensure_layout();
+        self.geometry.borrow().get(&tobira_id).cloned()
+    }
+
+    fn scroll_extent_for(&self, tobira_id: usize) -> Option<(f64, f64)> {
+        self.ensure_layout();
+        self.scroll_extents.borrow().get(&tobira_id).copied()
     }
 
     /// Recompute IntersectionObserver state against the current viewport and
@@ -880,7 +953,7 @@ impl BrowserHost {
                 let Some(tid) = self.tobira_id_for_handle(*target_idx) else {
                     continue;
                 };
-                let Some(rect) = self.geometry.get(&tid) else {
+                let Some(rect) = self.rect_for(tid) else {
                     continue;
                 };
                 let top = rect.y;
@@ -949,7 +1022,7 @@ impl BrowserHost {
                 let Some(tid) = self.tobira_id_for_handle(*target_idx) else {
                     continue;
                 };
-                let Some(rect) = self.geometry.get(&tid) else {
+                let Some(rect) = self.rect_for(tid) else {
                     continue;
                 };
                 let inline_size = rect.width.max(0.0);
@@ -1011,7 +1084,7 @@ impl BrowserHost {
         // measures from the padding box, so the near borders come off.
         let (reach_x, reach_y) = self
             .tobira_id_for_handle(arena_idx)
-            .and_then(|id| self.scroll_extents.get(&id).copied())
+            .and_then(|id| self.scroll_extent_for(id))
             .unwrap_or((0.0, 0.0));
         let reach_width = (reach_x - border_left).max(0.0);
         let reach_height = (reach_y - border_top).max(0.0);
@@ -1059,7 +1132,7 @@ impl BrowserHost {
 
     fn bounding_client_rect(&self, arena_idx: usize) -> DomRect {
         if let Some(id) = self.tobira_id_for_handle(arena_idx) {
-            if let Some(rect) = self.geometry.get(&id) {
+            if let Some(rect) = self.rect_for(id) {
                 return DomRect {
                     x: rect.x - self.scroll_x,
                     y: rect.y - self.scroll_y,
@@ -2283,7 +2356,7 @@ impl Host for BrowserHost {
                     let Some(id) = self.tobira_id_for_handle(node.0 as usize) else {
                         continue;
                     };
-                    let Some(rect) = self.geometry.get(&id) else {
+                    let Some(rect) = self.rect_for(id) else {
                         continue;
                     };
                     if point_x >= rect.x
@@ -2941,6 +3014,9 @@ impl BrowserHost {
 /// left. A page whose scripts add scripts without end would otherwise
 /// never finish.
 const DYNAMIC_SCRIPT_BUDGET: usize = 256;
+
+/// On-demand layouts between two geometry feeds from the browser.
+const FORCED_LAYOUT_BUDGET: u32 = 64;
 
 #[derive(Debug, Clone, Default)]
 pub struct EngineRunResult {
@@ -4645,6 +4721,7 @@ impl EngineSession {
         stylesheet_text: &str,
     ) -> (Self, EngineRunResult) {
         let mut host = BrowserHost::from_html(html, url);
+        host.set_stylesheet_text(stylesheet_text);
         let (rects, styles, root_vars) = Self::layout_geometry(html, stylesheet_text);
         host.set_geometry(&rects);
         host.set_computed_styles(styles, root_vars);
@@ -7581,6 +7658,28 @@ mod tests {
         // handed back by a parent walk is not the `document` global's. A
         // separate gap, noted in HANDOFF.md.)
         assert!(result.html.contains("null true true"), "{}", result.html);
+    }
+
+    /// An element a script just made has a size when the script asks,
+    /// because the host lays the document out on demand when it changed
+    /// since the last layout. It answered 0 until 2026-09-18, and vuejs.org
+    /// took a banner's height for 2956px from the wrong answer.
+    #[test]
+    fn a_new_element_has_geometry_when_measured() {
+        let result = run_document_scripts_with_styles(
+            r#"<div id="a" style="height:30px"></div><p id="out"></p>
+            <script>
+            var d = document.createElement("div"); d.style.cssText = "height:40px"; document.body.appendChild(d);
+            var f = document.createElement("div"); f.style.cssText = "position:fixed;top:0;left:0;width:100%;height:72px"; document.body.appendChild(f);
+            document.getElementById("out").textContent = [
+              document.getElementById("a").offsetHeight, d.offsetHeight, Math.round(d.getBoundingClientRect().height), f.offsetHeight,
+            ].join(" ");
+            </script>"#,
+            "http://localhost/",
+            "",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(result.html.contains("30 40 40 72"), "{}", result.html);
     }
 
     #[test]

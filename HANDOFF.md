@@ -43,9 +43,19 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - html5lib 木構築適合 **1213/1229 (98.7%)**（2026-09-18、Noah's Ark 条項で tests23 が 5/5）。
   `cargo test --release --bin tobira -- tree_construction_conformance --nocapture`
   が `.dat` ごとの内訳を出す。合計は自分で足す。`TOBIRA_H5_FILE=<名前>` で一本に絞れる。
-- 動作確認できとる範囲（`--screenshot` で目視、JS エラーは `TOBIRA_DEBUG_CONSOLE=1`）:
-  - **一致に近い**: ja.wikipedia.org、abehiroshi.la.coocan.jp、news.ycombinator.com（投票矢印を除く）
-  - **中身は出るが意匠が甘い**: react.dev、vuejs.org、developer.mozilla.org
+- 動作確認できとる範囲（`--screenshot` で目視、JS エラーは `TOBIRA_DEBUG_CONSOLE=1`、
+  DOM は `TOBIRA_DUMP_DOM` + `tools/scripterr/domstat.py` で Chrome と突き合わせ。
+  **2026-09-18 に settle 込み（仮想 8 秒）で全部撮り直した。それまでの判定は
+  load 直後 1ms の絵で下されとった**）:
+  - **一致に近い**: news.ycombinator.com（DOM 完全一致、投票矢印を除く）、
+    lobste.rs（要素は完全一致、`<time>` の相対時刻の書き換えだけ効いとらん）、
+    ja.wikipedia.org（settle 込みで 807/809 要素。外観パネルも出るが右端に
+    細く崩れる）、abehiroshi.la.coocan.jp
+  - **中身は出るが意匠が甘い**: react.dev（1362/1846。コード欄は CodeMirror で
+    色付き、四つ目の例のプレビューだけ空の枠）、vuejs.org（599/657。スポンサー欄が
+    空。settle で一度真っ白になったのは geometry の問題で、直した）、
+    developer.mozilla.org（light DOM は完全一致。declarative shadow DOM 17 個を
+    畳んどらんのでヘッダの部品が無い）
   - 上記いずれも未捕捉 JS エラー 0。**ただし「未捕捉 0」は React の頁では
     何も保証せん**（2026-09-18 に二度外れた）。error boundary が拾うと
     console.error にしか出ん（react.dev が真っ白でも uncaught 0 やった）。
@@ -84,9 +94,9 @@ width/height）、`mask=`。`bg=none bgimg=<url>` なら「規則は当たっと
 `TOBIRA_DUMP_DOM=<path>`（script 実行後の文書を書き出す。Chrome の `--dump-dom` と
 `tools/scripterr/domstat.py` で突き合わせる）、
 `TOBIRA_SETTLE_MS=<n>`（load 後に仮想時計を 16ms 刻みで進めて timer / rAF を
-回し切る。**GUI 以外は tick を一度も回さんので、これ無しの `--cli` / `--screenshot` /
-`--dump-styled` は load 直後 1ms の姿**。Chrome の `--virtual-time-budget` に
-揃えるならこれを付ける）、
+回し切る。**既定 2000**。`=0` で load 直後 1ms の姿。2026-09-18 までは GUI 以外
+tick を一度も回しとらんかった。frame ごとに relayout して geometry を engine に
+戻す。Chrome の `--virtual-time-budget` に揃えるなら同じ数にする）、
 `TOBIRA_TRACE_STACK`、
 `TOBIRA_DUMP_BOXES` / `TOBIRA_DUMP_DEPTH` / `TOBIRA_DUMP_WIDTH`、`TOBIRA_SHOT_HEIGHT`、
 `TOBIRA_DEBUG_IMAGES` / `_ATOMIC` / `_FLEX` / `_PAINT` / `_TABLE` / `_CSS`、
@@ -748,6 +758,34 @@ react.dev だけ撮らんかった一枚が退化しとった。
 
 `tools/scripterr/domstat.py` の使い方は README。Chrome 側は
 `--virtual-time-budget=8000`、tobira 側は `TOBIRA_SETTLE_MS=8000` で揃える。
+
+**続き: settle は geometry 無しやと壊す。読まれたときに relayout する。**
+
+- Mac 側の「fetch の失敗が永久 pending やないか」は検体で**外れ**
+  （`fetchfail.html`: 接続拒否・DNS は reject、404/500 は resolve、
+  `Promise.all` / `allSettled` / XHR 全部 Chrome と同じ。欠けは `<img>` の
+  `error` だけ）。react.dev の「8000ms 回しても pending」は別物。
+- settle 込みで六枚撮り直したら **vuejs.org が真っ白**になった（1ms の絵は
+  無事）。広告 script が自分で作った `position:fixed` の banner の高さを測って
+  `--vp-layout-top-height: 2956px`（文書の高さ）を書いて、全部を下に押しとった。
+  Chrome は 72px。原因は二段: (1) settle の tick が geometry を戻しとらんかった
+  → GUI と同じく frame ごとに relayout して `set_geometry`。(2) それでも直らん:
+  **script が作った要素は次に browser がレイアウトするまで geometry が無い**
+  （`geomprobe.html`: `fixed.offsetHeight=0`、Chrome は 72）。Chrome は読んだ
+  瞬間に同期でレイアウトする。
+- 直し: `BrowserHost` に `layout_dirty`（mutation で立つ）と `ensure_layout`
+  （geometry の読み口 `rect_for` / `scroll_extent_for` で、dirty なら
+  `serialize_document` → `EngineSession::layout_geometry` → 埋め直す）。
+  browser が geometry を feed したら dirty が下りる。予算
+  `FORCED_LAYOUT_BUDGET = 64`（feed ごとに戻る）。`geometry` は `RefCell` に
+  なった（読み口が `&self` なので）。vue の変数が 72px になって絵が戻った。
+  実頁六枚で on-demand layout が走ったのは vue の 1 回だけ。
+- `domstat.py`: `<template>` の中身を数から外して本数だけ報告（MDN が
+  838 → 724 で Chrome と**完全一致**、差は shadow root 17 個そのもの）、
+  文字の差（片側にしか無い text run）を出す（lobste.rs の相対時刻がこれで表に出る）。
+- `--cli` / `--screenshot` / `--dump-styled` の**既定を settle 2000ms に**した。
+  1ms の絵は人が見る絵やない。`TOBIRA_SETTLE_MS=0` で旧挙動。
+- 「動作確認できとる範囲」を settle 込みで書き直した（上）。
 
 ### 2026-09-10 - Claude (自走ループ二晩目: 8535535..c16844e, 23 コミット)
 

@@ -15,15 +15,32 @@ from html.parser import HTMLParser
 
 
 class Stat(HTMLParser):
+    # <template> content is inert in a browser, and a declarative shadow
+    # root (`<template shadowrootmode>`) is folded into a shadow tree that
+    # Chrome's --dump-dom does not print. Counting it would make a page look
+    # bigger for holding what the other side rendered elsewhere, so it is
+    # left out of the counts and reported on its own line.
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.tags = Counter()
         self.text = 0
         self.skip = 0
+        self.in_template = 0
+        self.templates = 0
+        self.shadow_roots = 0
         self.ids = set()
         self.classes = Counter()
+        self.words = Counter()
 
     def handle_starttag(self, tag, attrs):
+        if tag == "template":
+            self.templates += 1
+            if any(k == "shadowrootmode" for k, _ in attrs):
+                self.shadow_roots += 1
+            self.in_template += 1
+            return
+        if self.in_template:
+            return
         self.tags[tag] += 1
         if tag in ("script", "style"):
             self.skip += 1
@@ -35,12 +52,21 @@ class Stat(HTMLParser):
                     self.classes[c] += 1
 
     def handle_endtag(self, tag):
+        if tag == "template" and self.in_template:
+            self.in_template -= 1
+            return
+        if self.in_template:
+            return
         if tag in ("script", "style") and self.skip:
             self.skip -= 1
 
     def handle_data(self, data):
-        if not self.skip:
-            self.text += len(re.sub(r"\s+", " ", data).strip())
+        if self.skip or self.in_template:
+            return
+        squeezed = re.sub(r"\s+", " ", data).strip()
+        self.text += len(squeezed)
+        if squeezed:
+            self.words[squeezed] += 1
 
 
 def stat(path):
@@ -53,7 +79,10 @@ def main():
     files = sys.argv[1:]
     stats = [(f, stat(f)) for f in files]
     for f, s in stats:
-        print("%-24s elements %6d  text %7d  ids %5d" % (f, sum(s.tags.values()), s.text, len(s.ids)))
+        print(
+            "%-24s elements %6d  text %7d  ids %5d  templates %3d (shadow roots %3d)"
+            % (f, sum(s.tags.values()), s.text, len(s.ids), s.templates, s.shadow_roots)
+        )
     if len(stats) < 2:
         return
     base_name, base = stats[0]
@@ -69,6 +98,14 @@ def main():
             print("  ids only in %s: %s" % (f, " ".join(only_here[:30])))
         if only_base:
             print("  ids only in %s: %s" % (base_name, " ".join(only_base[:30])))
+        # Text runs on one side only. Same element count with different
+        # words is a JS that did or did not rewrite something (lobste.rs
+        # showed "9 hours ago" against "2026-09-17 11:44:39"), and the
+        # element counts alone never show it.
+        text_here = [w for w in s.words if w not in base.words]
+        text_base = [w for w in base.words if w not in s.words]
+        print("  text runs only in %s: %d%s" % (f, len(text_here), "  e.g. " + " | ".join(w[:40] for w in text_here[:5]) if text_here else ""))
+        print("  text runs only in %s: %d%s" % (base_name, len(text_base), "  e.g. " + " | ".join(w[:40] for w in text_base[:5]) if text_base else ""))
 
 
 if __name__ == "__main__":
