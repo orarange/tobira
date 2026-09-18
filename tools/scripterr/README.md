@@ -26,6 +26,18 @@ TOBIRA_DEBUG_CONSOLE=1 TOBIRA_DEBUG_SCRIPTS=1 ./target/release/tobira --cli http
 | `repro_classarg.html`, `repro_classarg2.html` | a class expression as a call argument, in every call shape | every line names the right types |
 | `repro_new.html` .. `repro_new4.html` | the bisection that led there, from CodeMirror's `ViewPlugin.fromClass` | kept as the record |
 | `repro_logical.html` | `a ||= v`, `a &&= v`, `a ??= v`, `import()`, `a++` as call arguments | every line names the right types (`??=` used to lose the callee) |
+| `capture.html` | the three phases of propagation, a non-bubbling `error`, `stopPropagation` in capture, an `<img>` failure reaching `window` | see below |
+
+`capture.html`, Chrome: `start win-cap:1:w doc-cap:1:#document a-cap:1:a
+b-cap:1:b c-cap:2:c c-bub:2:c b-bub:3:b b-onprop:3 a-bub:3:a doc-bub:3:#document
+win-bub:3:w | ew-cap:1 ed-cap:1 eb-cap:1 ec-cap:2 ec-bub:2 | kd-a-cap |
+ew-cap:1 img-err-at-window:1 ed-cap:1 img-onerror`. tobira matches the
+phases, the order and the non-bubbling `error`, with three known differences:
+`window` and `document` are one handle (0), so both print `#document` and
+their listeners come out in one registration order; the `on<type>` property
+runs before that node's listeners rather than at the position it was first
+set; and an `<img>` that fails to load fires no `error` at all yet (the last
+four entries are missing).
 
 `domstat.py` counts elements, text and tags in a serialized DOM and diffs two
 of them. With `TOBIRA_DUMP_DOM=<path>` (the document as the scripts left it)

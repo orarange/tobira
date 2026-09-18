@@ -1462,6 +1462,14 @@ enum ObjectIntrospectionKind {
     Entries,
 }
 
+/// Which listeners a node hears with: the ones added with `capture`, or
+/// the rest (and the `on<type>` property).
+#[derive(Clone, Copy)]
+enum ListenerSet {
+    Capture,
+    Bubble,
+}
+
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
@@ -1521,6 +1529,10 @@ pub struct Vm {
     /// Event listeners stored by (node_handle, event_type) → list of JS function GcRefs.
     /// Lives in the VM (not the Host) so GcRefs remain valid.
     event_listeners: HashMap<u32, HashMap<String, Vec<GcRef<JsObject>>>>,
+    /// Listeners added with `capture: true`. They hear the event on the
+    /// way down (and at the target, first); the ones above hear it at the
+    /// target and on the way up. Same key shape as `event_listeners`.
+    capture_listeners: HashMap<u32, HashMap<String, Vec<GcRef<JsObject>>>>,
     /// Live `MutationObserver` instances keyed by `ObserverId.0`: the JS callback
     /// and the observer object itself (passed back to the callback as `this` and
     /// its 2nd argument). Lives in the VM so the callback/instance survive.
@@ -2082,6 +2094,7 @@ impl Vm {
             random_state,
             host,
             event_listeners: HashMap::new(),
+            capture_listeners: HashMap::new(),
             mutation_observers: HashMap::new(),
             resize_observers: HashMap::new(),
             delivering_mutations: false,
@@ -2173,10 +2186,27 @@ impl Vm {
     /// given handle (handle 0 = window/document). Lets callers skip dispatching
     /// no-op events (e.g. `scroll` when nothing listens for it).
     pub fn has_event_listener(&self, node_handle: u32, event_type: &str) -> bool {
-        self.event_listeners
-            .get(&node_handle)
-            .map(|by_type| by_type.contains_key(event_type))
-            .unwrap_or(false)
+        [&self.event_listeners, &self.capture_listeners]
+            .iter()
+            .any(|table| {
+                table
+                    .get(&node_handle)
+                    .map(|by_type| by_type.contains_key(event_type))
+                    .unwrap_or(false)
+            })
+    }
+
+    /// The third argument of add/removeEventListener: `true`, or
+    /// `{ capture: true }`.
+    fn listener_options_capture(&mut self, options: Option<&Value>) -> bool {
+        match options {
+            Some(Value::Bool(b)) => *b,
+            Some(value @ Value::Object(_)) => self
+                .get_property_value(value, &PropertyKey::from("capture"))
+                .map(|v| self.is_truthy(&v))
+                .unwrap_or(false),
+            _ => false,
+        }
     }
 
     pub fn fire_dom_event(&mut self, node_handle: u32, event_type: &str) -> Result<(), VmError> {
@@ -2261,39 +2291,130 @@ impl Vm {
             false,
             true,
         );
-        let path: Vec<u32> = if bubbles {
-            full_path
-        } else {
-            vec![target_handle]
+        // Three phases, as in a browser. The path is always walked down
+        // (capture) and the target always hears; `bubbles` decides only
+        // whether the way back up is walked. Until 2026-09-18 there was one
+        // pass, upward, and only when the event bubbled -- so a
+        // `window.addEventListener("error", fn, true)` never saw a script's
+        // or an image's `error`, which is the one standard way to see them.
+        let ancestors: Vec<u32> = full_path
+            .iter()
+            .copied()
+            .filter(|&h| h != target_handle)
+            .collect();
+        let mut stopped = false;
+        // Capture: root first, capture listeners only.
+        for &node_handle in ancestors.iter().rev() {
+            if self.deliver_event(
+                node_handle,
+                target_handle,
+                event_ref,
+                event_val,
+                event_type,
+                1.0,
+                ListenerSet::Capture,
+            )? {
+                stopped = true;
+                break;
+            }
+        }
+        // At the target: capture listeners, then the rest and the `on<type>`
+        // property, all with eventPhase 2.
+        if !stopped {
+            stopped = self.deliver_event(
+                target_handle,
+                target_handle,
+                event_ref,
+                event_val,
+                event_type,
+                2.0,
+                ListenerSet::Capture,
+            )? || self.deliver_event(
+                target_handle,
+                target_handle,
+                event_ref,
+                event_val,
+                event_type,
+                2.0,
+                ListenerSet::Bubble,
+            )?;
+        }
+        // Bubble: target's parent up to the root, when the event bubbles.
+        if !stopped && bubbles {
+            for &node_handle in &ancestors {
+                if self.deliver_event(
+                    node_handle,
+                    target_handle,
+                    event_ref,
+                    event_val,
+                    event_type,
+                    3.0,
+                    ListenerSet::Bubble,
+                )? {
+                    break;
+                }
+            }
+        }
+        self.define_data_property(
+            event_ref,
+            PropertyKey::from("eventPhase"),
+            Value::Number(0.0),
+            true,
+            true,
+            true,
+        );
+        Ok(())
+    }
+
+    /// Run one node's listeners of one kind for an event, with `currentTarget`,
+    /// the retargeted `target` and `eventPhase` set for them. Returns whether
+    /// propagation is to stop after this node.
+    fn deliver_event(
+        &mut self,
+        node_handle: u32,
+        target_handle: u32,
+        event_ref: GcRef<JsObject>,
+        event_val: &Value,
+        event_type: &str,
+        phase: f64,
+        set: ListenerSet,
+    ) -> Result<bool, VmError> {
+        let current_target = self.make_dom_node_value(NodeId(node_handle));
+        self.define_data_property(
+            event_ref,
+            PropertyKey::from("currentTarget"),
+            current_target.clone(),
+            true,
+            true,
+            true,
+        );
+        self.define_data_property(
+            event_ref,
+            PropertyKey::from("eventPhase"),
+            Value::Number(phase),
+            true,
+            true,
+            true,
+        );
+        // Shadow retargeting: the event's `target` is rewritten relative to
+        // the current node's tree root as it crosses shadow boundaries.
+        let retargeted = match self.host.read_dom(DomRead::RetargetTarget {
+            target: NodeId(target_handle),
+            current: NodeId(node_handle),
+        }) {
+            Ok(DomReadResult::Node(id)) => id,
+            _ => NodeId(target_handle),
         };
-        'propagate: for node_handle in path {
-            let current_target = self.make_dom_node_value(NodeId(node_handle));
-            self.define_data_property(
-                event_ref,
-                PropertyKey::from("currentTarget"),
-                current_target.clone(),
-                true,
-                true,
-                true,
-            );
-            // Shadow retargeting: the event's `target` is rewritten relative to
-            // the current node's tree root as it crosses shadow boundaries.
-            let retargeted = match self.host.read_dom(DomRead::RetargetTarget {
-                target: NodeId(target_handle),
-                current: NodeId(node_handle),
-            }) {
-                Ok(DomReadResult::Node(id)) => id,
-                _ => NodeId(target_handle),
-            };
-            let retargeted_value = self.make_dom_node_value(retargeted);
-            self.define_data_property(
-                event_ref,
-                PropertyKey::from("target"),
-                retargeted_value,
-                true,
-                true,
-                true,
-            );
+        let retargeted_value = self.make_dom_node_value(retargeted);
+        self.define_data_property(
+            event_ref,
+            PropertyKey::from("target"),
+            retargeted_value,
+            true,
+            true,
+            true,
+        );
+        if matches!(set, ListenerSet::Bubble) {
             // The `on<type>` property handler, `el.onclick = fn`. Until
             // 2026-09-18 only `addEventListener` was heard: the property was
             // stored on the wrapper like any other and never read back, so
@@ -2322,35 +2443,35 @@ impl Vm {
                     );
                 }
             }
-            let listeners: Vec<GcRef<JsObject>> = self
-                .event_listeners
-                .get(&node_handle)
-                .and_then(|m| m.get(event_type))
-                .cloned()
-                .unwrap_or_default();
-            for listener in listeners {
-                // A listener's `this` is the node it is attached to (currentTarget).
-                self.call_value_sync(
-                    Value::Object(listener),
-                    current_target.clone(),
-                    vec![event_val.clone()],
-                )?;
-                self.drain_microtasks();
-                let stop_immediate = self
-                    .get_property_value(event_val, &PropertyKey::from("__stopImmediate"))
-                    .unwrap_or(Value::Undefined);
-                if self.is_truthy(&stop_immediate) {
-                    break 'propagate;
-                }
-            }
-            let cancel = self
-                .get_property_value(event_val, &PropertyKey::from("cancelBubble"))
+        }
+        let table = match set {
+            ListenerSet::Capture => &self.capture_listeners,
+            ListenerSet::Bubble => &self.event_listeners,
+        };
+        let listeners: Vec<GcRef<JsObject>> = table
+            .get(&node_handle)
+            .and_then(|m| m.get(event_type))
+            .cloned()
+            .unwrap_or_default();
+        for listener in listeners {
+            // A listener's `this` is the node it is attached to (currentTarget).
+            self.call_value_sync(
+                Value::Object(listener),
+                current_target.clone(),
+                vec![event_val.clone()],
+            )?;
+            self.drain_microtasks();
+            let stop_immediate = self
+                .get_property_value(event_val, &PropertyKey::from("__stopImmediate"))
                 .unwrap_or(Value::Undefined);
-            if self.is_truthy(&cancel) {
-                break;
+            if self.is_truthy(&stop_immediate) {
+                return Ok(true);
             }
         }
-        Ok(())
+        let cancel = self
+            .get_property_value(event_val, &PropertyKey::from("cancelBubble"))
+            .unwrap_or(Value::Undefined);
+        Ok(self.is_truthy(&cancel))
     }
 
     /// Build the Event object delivered to host-event listeners.
@@ -2734,6 +2855,7 @@ impl Vm {
             // vanish between two reads of the same element. The DOM side owns
             // their lifetime, not JS reachability.
             event_listeners,
+            capture_listeners,
             mutation_observers,
             resize_observers,
             node_wrappers,
@@ -2822,6 +2944,7 @@ impl Vm {
         event_loop.trace(tracer);
 
         event_listeners.trace(tracer);
+        capture_listeners.trace(tracer);
         mutation_observers.trace(tracer);
         resize_observers.trace(tracer);
         node_wrappers.trace(tracer);
@@ -15308,13 +15431,23 @@ impl Vm {
                     .unwrap_or(0); // 0 = document/window
                 let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let listener = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let capture = self.listener_options_capture(args.get(2));
                 if let Value::Object(fn_ref) = listener {
-                    self.event_listeners
+                    let table = if capture {
+                        &mut self.capture_listeners
+                    } else {
+                        &mut self.event_listeners
+                    };
+                    let list = table
                         .entry(node_handle)
                         .or_default()
                         .entry(event_type)
-                        .or_default()
-                        .push(fn_ref);
+                        .or_default();
+                    // The same listener with the same capture flag is added
+                    // once, as the spec says.
+                    if !list.iter().any(|f| f.raw() == fn_ref.raw()) {
+                        list.push(fn_ref);
+                    }
                 }
                 Ok(Value::Undefined)
             }
@@ -15325,8 +15458,14 @@ impl Vm {
                     .unwrap_or(0);
                 let event_type = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let listener = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let capture = self.listener_options_capture(args.get(2));
                 if let Value::Object(fn_ref) = listener {
-                    if let Some(types) = self.event_listeners.get_mut(&node_handle) {
+                    let table = if capture {
+                        &mut self.capture_listeners
+                    } else {
+                        &mut self.event_listeners
+                    };
+                    if let Some(types) = table.get_mut(&node_handle) {
                         if let Some(list) = types.get_mut(&event_type) {
                             list.retain(|f| f.raw() != fn_ref.raw());
                         }
@@ -19495,7 +19634,19 @@ impl Vm {
             })),
             "parentNode" | "parentElement" => {
                 let res = self.host.read_dom(DomRead::Parent { node: node_id });
-                Ok(match res { Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id), _ => Value::Null })
+                Ok(match res {
+                    // `parentElement` is null when the parent is not an
+                    // element: the document, for `<html>`. It answered the
+                    // document, and every `parentElement` walk came out one
+                    // deeper than Chrome's.
+                    Ok(DomReadResult::Node(id))
+                        if name == "parentElement" && self.get_node_name(id).starts_with('#') =>
+                    {
+                        Value::Null
+                    }
+                    Ok(DomReadResult::Node(id)) => self.make_dom_node_value(id),
+                    _ => Value::Null,
+                })
             }
             "children" => {
                 let res = self.host.read_dom(DomRead::Children { node: node_id, elements_only: true });

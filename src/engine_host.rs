@@ -7527,6 +7527,62 @@ mod tests {
         );
     }
 
+    /// Three phases: capture listeners hear the event on the way down with
+    /// eventPhase 1, the target hears its capture listeners then the rest
+    /// with 2, and the way up (3) is walked only when the event bubbles. A
+    /// non-bubbling `error` still reaches a capture listener on the
+    /// document, which is how a page sees a script's or image's failure.
+    /// `stopPropagation` in capture stops the target from hearing at all.
+    #[test]
+    fn events_propagate_in_three_phases() {
+        let result = run_document_scripts(
+            r#"
+            <div id="a"><button id="c">c</button></div><p id="out"></p>
+            <script>
+            var out = document.getElementById("out"), a = document.getElementById("a"), c = document.getElementById("c");
+            function L(el, name, type, cap) { el.addEventListener(type, function (e) { out.textContent += " " + name + ":" + e.eventPhase; }, cap); }
+            L(c, "c-bub", "click", false); L(c, "c-cap", "click", true);
+            L(a, "a-bub", "click", false); L(a, "a-cap", "click", true);
+            L(document, "d-cap", "click", { capture: true }); L(document, "d-bub", "click", false);
+            c.click();
+            out.textContent += " |";
+            L(document, "ed-cap", "error", true); L(document, "ed-bub", "error", false);
+            L(c, "ec-bub", "error", false);
+            c.dispatchEvent(new Event("error"));
+            out.textContent += " |";
+            a.addEventListener("keydown", function (e) { out.textContent += " kd-a-cap"; e.stopPropagation(); }, true);
+            c.addEventListener("keydown", function () { out.textContent += " BAD"; });
+            c.dispatchEvent(new Event("keydown", { bubbles: true }));
+            </script>
+            "#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains(
+                " d-cap:1 a-cap:1 c-cap:2 c-bub:2 a-bub:3 d-bub:3 | ed-cap:1 ec-bub:2 | kd-a-cap<"
+            ),
+            "{}",
+            result.html
+        );
+    }
+
+    /// `parentElement` is null when the parent is the document.
+    #[test]
+    fn parent_element_of_html_is_null() {
+        let result = run_document_scripts(
+            r#"<p id="out"></p><script>
+            var h = document.documentElement;
+            document.getElementById("out").textContent = [h.parentElement, h.parentNode !== null, document.body.parentElement === h].join(" ");
+            </script>"#,
+            "http://localhost/",
+        );
+        // (`h.parentNode === document` is false here: the document wrapper
+        // handed back by a parent walk is not the `document` global's. A
+        // separate gap, noted in HANDOFF.md.)
+        assert!(result.html.contains("null true true"), "{}", result.html);
+    }
+
     #[test]
     fn run_document_scripts_includes_js_backtrace() {
         let result = run_document_scripts(

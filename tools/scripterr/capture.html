@@ -1,0 +1,31 @@
+<html><body><div id="a"><div id="b"><button id="c">c</button></div></div><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+var a=document.getElementById('a'), b=document.getElementById('b'), c=document.getElementById('c');
+function L(el, name, cap){ el.addEventListener('click', function(e){ log(name+':'+e.eventPhase+':'+(e.currentTarget===window?'w':e.currentTarget.id||e.currentTarget.nodeName.toLowerCase())); }, cap); }
+// registration order at target: bubble-flag first, then capture-flag
+L(c,'c-bub',false); L(c,'c-cap',true);
+L(b,'b-cap',true); L(b,'b-bub',false);
+L(a,'a-bub',false); L(a,'a-cap',true);
+L(document,'doc-cap',true); L(document,'doc-bub',false);
+L(window,'win-cap',true); L(window,'win-bub',false);
+b.onclick=function(e){ log('b-onprop:'+e.eventPhase); };
+c.click();
+log('|');
+// non-bubbling event: capture still runs, bubble does not
+function E(el,name,cap){ el.addEventListener('error', function(e){ log(name+':'+e.eventPhase); }, cap); }
+E(window,'ew-cap',true); E(window,'ew-bub',false); E(document,'ed-cap',true); E(document,'ed-bub',false); E(b,'eb-cap',true); E(b,'eb-bub',false); E(c,'ec-bub',false); E(c,'ec-cap',true);
+c.dispatchEvent(new Event('error'));
+log('|');
+// stopPropagation in capture at document stops everything below
+a.addEventListener('keydown', function(e){ log('kd-a-cap'); e.stopPropagation(); }, true);
+c.addEventListener('keydown', function(e){ log('BAD-kd-c'); });
+c.dispatchEvent(new Event('keydown', {bubbles:true}));
+log('|');
+// a real resource error reaching window via capture
+var img=document.createElement('img');
+window.addEventListener('error', function(e){ if(e.target && e.target.tagName==='IMG') log('img-err-at-window:'+e.eventPhase); }, true);
+window.addEventListener('error', function(e){ if(e.target && e.target.tagName==='IMG') log('BAD-img-err-bubble'); }, false);
+img.onerror=function(){ log('img-onerror'); };
+img.src='/nope.png'; document.body.appendChild(img);
+</script></body></html>

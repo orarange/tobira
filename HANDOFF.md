@@ -34,7 +34,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   先の本物の腕に食われとる stub）、deprecated `boa_ast` `ImportCall::argument` 4、
   unused mut 2、残りは dead_code 系。数が増えたら中身を見ること。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1182 通過 / 0 落ち**（2026-09-18）。
+- `cargo test --release` → **1184 通過 / 0 落ち**（2026-09-18）。
   JS のコンパイラを触ったら `TOBIRA_VERIFY_BYTECODE=1` で実頁を一枚読んで
   `[verify] ok` の行と `verification failed` の行を数えること。
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
@@ -699,6 +699,35 @@ react.dev だけ撮らんかった一枚が退化しとった。
   | lobste.rs | 2 | 237 | 14,117 | 0 |
 
 - テスト 1181 → **1182 / 0**。
+
+**続き: parentElement と、イベントの capture 段。**
+
+- `parentElement` が親が document でも document を返しとった（`vm.rs` の
+  `"parentNode" | "parentElement"`）。親のノード名が `#` で始まるなら null。
+  実頁の maxdepth が常に Chrome +1 やったのはこれ。ついでに見つけた別の穴:
+  `h.parentNode === document` が **false**。親を辿って返る document の
+  wrapper が `document` グローバルのと別物。未修正。
+- **イベントは三段になった**（`propagate_event` → `deliver_event`）。
+  経路は bubbles に関係なく必ず作り、capture 段は root から target の親まで
+  capture listener だけ（eventPhase 1）、target では capture listener → 残りと
+  `on<type>`（2）、bubble 段は bubbles のときだけ（3）。`addEventListener` の
+  第三引数（`true` / `{capture:true}`）を `capture_listeners` に分けて持つ。
+  同じ関数の二重登録は一回。`stopPropagation` は次のノードで止まり、
+  `stopImmediatePropagation` はその場で止まる。
+  **これで `window.addEventListener("error", fn, true)` が script の失敗を
+  見れる**（845f104 で撃つようにした `error` は、capture 無しやと頁から
+  「撃っとらんのと同じ」やった。Mac 側の読みどおり）。
+  検体 `tools/scripterr/capture.html`、Chrome と段・順・非 bubble の
+  `error` が一致。残る差三つ: window と document が同じ handle 0 なので
+  両方 `#document` で登録順が混ざる、`on<type>` は登録位置やのうて
+  そのノードの listener の前、**`<img>` の読み込み失敗が `error` を
+  一切撃たん**（次の穴）。
+- MDN の console に 8 行「couldn't load code for <user-menu> …
+  Failed to resolve dynamically imported module」。前からあった（console の
+  Error 整形で中身が見えるようになっただけ）。custom element が相対 URL の
+  `import()` をしとって解決できとらん。次の候補。
+- テスト 1182 → **1184 / 0**、GC verify 同数。六枚の console に新しい
+  行なし、react.dev と HN の一枚は変わらず。
 
 ### 2026-09-10 - Claude (自走ループ二晩目: 8535535..c16844e, 23 コミット)
 
