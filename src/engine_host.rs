@@ -7842,7 +7842,7 @@ mod tests {
         let result = run_document_scripts(
             r#"<p id="out"></p><script>
             var h = document.documentElement;
-            document.getElementById("out").textContent = [h.parentElement, h.parentNode !== null, document.body.parentElement === h].join(" ");
+            document.getElementById("out").textContent = [String(h.parentElement), h.parentNode !== null, document.body.parentElement === h].join(" ");
             </script>"#,
             "http://localhost/",
         );
@@ -8089,6 +8089,41 @@ mod tests {
         assert!(
             result.html.contains(
                 "NaN NaN NaN Infinity -Infinity 2 -Infinity Infinity true true false true false TypeError TypeError TypeError true /a+/gi symbol"
+            ),
+            "{}",
+            result.html
+        );
+    }
+
+    /// Where Rust's numbers and JavaScript's differ, JavaScript's answer.
+    /// `as i32` from a float saturates where ToInt32 wraps (a string hash
+    /// collapsed to 2147483647), `f64::round` sends halves away from zero,
+    /// `powf(1, NaN)` is 1, `{:.0}` rounds halves to even, `parse::<f64>`
+    /// takes "inf" and no "0x", and `to_number` cannot call `valueOf`.
+    #[test]
+    fn numbers_follow_javascript_not_rust() {
+        let result = run_document_scripts(
+            r##"<p id="out"></p><script>
+            function z(v) { return v === 0 && 1 / v < 0 ? "-0" : String(v); }
+            var h = 0, s = "the quick brown fox jumps over the lazy dog";
+            for (var i = 0; i < s.length; i++) { h = (h << 5) - h + s.charCodeAt(i) | 0; }
+            document.getElementById("out").textContent = [
+              (2 ** 31) | 0, (4294967296 + 5) | 0, -1 >>> 0, Infinity | 0, 1e21 | 0, h,
+              z(Math.round(-0.5)), z(Math.round(-1.5)), Math.round(2.5),
+              z(Math.pow(1, NaN)), z((-1) ** Infinity), z(Math.hypot()), Math.hypot(NaN, Infinity),
+              (0.5).toFixed(0), (2.5).toFixed(0), (1.005).toFixed(2), (1e21).toFixed(2), (-0.0001).toFixed(2),
+              (1e21).toPrecision(3), (123456).toPrecision(2), (0.00001234).toPrecision(2),
+              String(123456789012345680000), String(1e21),
+              Number("0x10"), Number("0b11"), Number("inf"), Number("Infinity"), Number(" 7 "), Number(new Date(7)), Number([5]),
+              Math.max(new Date(5), 3), isNaN([]), [1, undefined, null, 2].join("-"), [1, 2].join(undefined),
+            ].join(" ");
+            </script>"##,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains(
+                "-2147483648 5 4294967295 0 -559939584 -2082818701 -0 -1 3 NaN NaN 0 Infinity 1 3 1.00 1e+21 -0.00 1.00e+21 1.2e+5 0.000012 123456789012345680000 1e+21 16 3 NaN Infinity 7 7 5 5 false 1---2 1,2"
             ),
             "{}",
             result.html

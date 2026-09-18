@@ -1,0 +1,12 @@
+<html><body><pre id="out">start</pre><script>
+var out=document.getElementById('out'), R=[]; function t(l,f){ var r; try{ r=f(); }catch(x){ r='ERR:'+x.name; } R.push(l+'='+r); }
+t('+date', ()=>(+new Date(5))+'/'+(new Date(9)-new Date(4))+'/'+Number(new Date(7))+'/'+(new Date(3)*1));
+t('+array', ()=>(+[])+'/'+(+[5])+'/'+(+[1,2])+'/'+Number(['0x10']));
+t('+obj', ()=>(+{})+'/'+(+{valueOf:function(){return 42}})+'/'+(+{toString:function(){return '7'}}));
+t('boxed', ()=>(+new Number(3))+'/'+(+new String('4'))+'/'+(+new Boolean(true)));
+t('strings', ()=>[Number('0x10'),Number('0b11'),Number('0o17'),Number('-0x10'),Number('inf'),Number('infinity'),Number('Infinity'),Number('-Infinity'),Number('+5'),Number('5.'),Number('.5'),Number('1e3'),Number('1_0'),Number('12px'),Number('\n 7 \t'),Number('nan'),Number('NaN'),Number('0x'),Number('1e'),Number('١')].join('/'));
+t('math-on-obj', ()=>Math.max(new Date(5), 3)+'/'+Math.abs([-4])+'/'+([2]*[3])+'/'+('3'*'4')+'/'+(null+1)+'/'+(undefined+1)+'/'+(true+true));
+t('compare', ()=>(new Date(5)>new Date(4))+'/'+([2]>1)+'/'+('10'>'9')+'/'+('10'>9)+'/'+(null>=0)+'/'+(undefined==0));
+t('isNaN', ()=>isNaN('x')+'/'+isNaN([])+'/'+isNaN({})+'/'+Number.isNaN('x')+'/'+isFinite('5')+'/'+isFinite([]));
+out.textContent=R.join('\n');
+</script></body></html>

@@ -220,6 +220,29 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
 
 ## 設計判断とその理由
 
+- **native を足すか、polyfill に任せるかの線引き**（2026-09-19）。
+  頁は最初に core-js の類を読み、**native の検査に落ちた built-in を
+  自前の実装に差し替える**。差し替えが起きるたびに、頁は tobira が一度も
+  試したことのないコードを走る（react.dev は差し替えられた `startsWith` が
+  `Math.min` の穴を踏んで 482 要素を失うた）。方針は二つに分かれる:
+  - **検査に通るなら native を直す。** 「有るが間違うとる」ものは、polyfill を
+    呼び込む上に、呼び込んだ先でも別の穴を踏む。`startsWith` が RegExp を
+    拒む、`String(/a/g)`、`Math.min` の NaN はこの側。`Symbol` の
+    `Object(Symbol()) instanceof Symbol` / 説明を落とす `String(Symbol("x"))`
+    / `.description` もこの側で、**直すと core-js の `NATIVE_SYMBOL` が通って
+    差し替えが減る**（未着手、`tools/scripterr/nativesymbol.html`）。
+  - **半端に足すと検査に落ちるものは、足さん。** well-known symbol の
+    `species` / `replace` / `split` / `search` / `matchAll` /
+    `isConcatSpreadable` / `unscopables` は**わざと無い**。`Symbol.species` が
+    在ると core-js は配列メソッドの species 対応を**動かして**検査し、
+    tobira の `map` / `filter` / `slice` / `splice` / `concat` は species を
+    見んので落ちて、全部差し替えられる。足すなら、その symbol を使う側の
+    挙動まで一緒に実装して、検査に通る形で入れる。`Symbol.match` だけ
+    足してあるのは、`startsWith` の検査がそれを読むから。
+  - **確かめ方**: `poly.html` の形（差し替え前の関数を先に控えて、polyfill の
+    後で `!==` を見る）。native を一つ足したら、差し替えが**増えとらんか**を
+    これで見る。
+
 - **スクリプトを走らせる前にレイアウトを済ませる**（`engine_host.rs:4465 start_with_styles`）
   `getBoundingClientRect` が 0 を返すと、寸法を見て分岐する現代の頁は軒並み死ぬ。
   そこで HTML と stylesheet から先に `layout_geometry` を回し、その矩形と計算済み
@@ -997,6 +1020,42 @@ react.dev だけ撮らんかった一枚が退化しとった。
   - **教訓**: 「頁の JS が読んで壊れる」の前に、**頁が最初に入れる polyfill が
     native を差し替えとらんか**を見る。`poly.html` の形（差し替え前の関数を
     先に控えて、polyfill の後で `!==` を見る）で一発。
+- **`Math.min` は一件やのうて面やった: Rust の数と JS の数が違う所**
+  （2026-09-19、Mac 側の読み）。根は「`Math.min` を間違えた」やのうて
+  「Rust の数値の意味論を JS のつもりで使うた」。`tools/scripterr/numerics.html`
+  （73 項目）と `tonumber.html`（8 項目）を Chrome と並べた。出たもの:
+  - **`ToInt32` / `ToUint32` が飽和しとった**（一番危ない）。float からの
+    `as i32` は Rust 1.45 以降**飽和**、JS は 2^32 で**回り込む**。
+    `(2**31)|0` が 2147483647（正 -2147483648）、`-1 >>> 0` が **0**
+    （正 4294967295）、`Infinity|0` が 2147483647（正 0）。
+    **`h = (h << 5) - h + c | 0` の文字列 hash が、溢れた瞬間から
+    2147483647 に潰れとった。** 正しい `to_int32` は typed array 用に
+    `value.rs` に既にあって、vm の演算子だけが `as` を直に使うとった。
+  - `Math.round`: 半分は +∞ 方向（`-0.5` → `-0`、`-1.5` → `-1`）。
+    `f64::round` はゼロから遠い方。
+  - `Math.pow` / `**`: 指数が NaN なら NaN（底が 1 でも）、底が ±1 で指数が
+    ±∞ なら NaN。`powf` は IEEE どおり 1。
+  - `Math.hypot()` は +0、∞ は NaN に勝つ。
+  - `toFixed` は**正確な値**を半分切り上げ（`(0.5).toFixed(0)` "1"、
+    `(2.5).toFixed(0)` "3"、`(1.005).toFixed(2)` は "1.00" — 1.005 の実体は
+    1.00499…）。`{:.N}` は半分を偶数へ。1e21 以上は指数表記。
+    `toPrecision` は指数が -6 未満か桁に収まらんとき指数表記。
+  - 2^53 を超える整数の文字列化は**最短で往復する桁**（"…680000"）。
+    Rust は正確な整数値（"…683968"）を出す。
+  - `StringToNumber`: `0x` / `0o` / `0b`、`Infinity` は綴りどおりだけ。
+    `parse::<f64>` は "inf" / "infinity" / "nan" を大文字小文字問わず取り、
+    基数の接頭辞を知らん。
+  - **builtin の引数は ToPrimitive を通っとらんかった**: `Number(new Date(7))`
+    / `Math.max(date, 3)` / `Math.abs([-4])` / `isNaN([])` が NaN。演算子
+    （`+x`、`a*b`）は通っとった。`to_number(&self)` は `valueOf` を呼べんので、
+    builtin の入口で Math* / Number / isNaN / isFinite の object 引数を
+    先に primitive にする。
+  - **`Array.prototype.join` が undefined / null を "undefined" / "null" と
+    出しとった**（JS は空文字）。`[cls, undefined].join(" ")` の形。
+    区切りが undefined のときも "," になる。既存のテストが一本、この誤動作に
+    依存しとった（`[null, true].join(" ")` は " true"）。
+  - 残り: `new Date(8.64e15 + 1)` は NaN（範囲外）、`2020-02-30` の繰り上げ。
+  - 六枚は DOM も console も動かず。テスト 1193 → 1194。
 - **`ai-branch-merge-loop.yml` は作られた日から YAML が壊れとった**
   （2026-09-19 に判明）。merge の step の複数行コミットメッセージが `run: |` の
   字下げから出とって、ファイルごと無効。一度も job を作れたことが無く、GitHub は

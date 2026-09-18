@@ -875,9 +875,30 @@ fn number_to_precision(number: f64, precision: usize) -> String {
             "-Infinity".to_string()
         };
     }
-    let exponent = number.abs().log10().floor() as i32;
-    let decimals = (precision as i32 - 1 - exponent).max(0) as usize;
-    format!("{number:.decimals$}")
+    // `precision` significant digits, halves up; the exponent is that of the
+    // rounded value. Exponential form when it is below -6 or does not fit.
+    let negative = number < 0.0;
+    let (digits, exponent) = js_round_to_significant(number.abs(), precision);
+    let sign = if negative { "-" } else { "" };
+    if exponent < -6 || exponent >= precision as i32 {
+        let mantissa = if digits.len() > 1 {
+            format!("{}.{}", &digits[..1], &digits[1..])
+        } else {
+            digits.clone()
+        };
+        let exp_sign = if exponent < 0 { "-" } else { "+" };
+        return format!("{sign}{mantissa}e{exp_sign}{}", exponent.abs());
+    }
+    if exponent >= 0 {
+        let int_len = exponent as usize + 1;
+        if int_len >= digits.len() {
+            format!("{sign}{digits}{}", "0".repeat(int_len - digits.len()))
+        } else {
+            format!("{sign}{}.{}", &digits[..int_len], &digits[int_len..])
+        }
+    } else {
+        format!("{sign}0.{}{digits}", "0".repeat((-exponent - 1) as usize))
+    }
 }
 
 /// JSON.stringify pretty-printer with a custom indent string. serde_json's
@@ -3664,7 +3685,7 @@ impl Vm {
             Opcode::Mul => self.binary_numeric(|lhs, rhs| lhs * rhs)?,
             Opcode::Div => self.binary_numeric(|lhs, rhs| lhs / rhs)?,
             Opcode::Rem => self.binary_numeric(|lhs, rhs| lhs % rhs)?,
-            Opcode::Exp => self.binary_numeric(|lhs, rhs| lhs.powf(rhs))?,
+            Opcode::Exp => self.binary_numeric(js_pow)?,
             Opcode::Eq => self.binary_compare(|vm, lhs, rhs| vm.abstract_equal(lhs, rhs))?,
             Opcode::StrictEq => self.binary_compare(|vm, lhs, rhs| vm.strict_equal(lhs, rhs))?,
             Opcode::Ne => self.binary_compare(|vm, lhs, rhs| !vm.abstract_equal(lhs, rhs))?,
@@ -8561,24 +8582,23 @@ impl Vm {
             Value::Bool(true) => 1.0,
             Value::Number(number) => *number,
             Value::String(string) => {
-                let text = self.string_text(*string);
-                let trimmed = text.trim();
-                if trimmed.is_empty() {
-                    0.0
-                } else {
-                    trimmed.parse::<f64>().unwrap_or(f64::NAN)
-                }
+                js_string_to_number(&self.string_text(*string))
             }
             Value::Object(_) | Value::Symbol(_) => f64::NAN,
         }
     }
 
+    /// ECMAScript `ToInt32`: truncate, then wrap modulo 2^32 into the signed
+    /// range; NaN and the infinities are 0. A Rust `as i32` from a float
+    /// *saturates* instead, which made `(2 ** 31) | 0` 2147483647, `-1 >>> 0`
+    /// 0, and every `h = (h << 5) - h + c | 0` string hash collapse to
+    /// 2147483647 once it overflowed.
     fn to_int32(&self, value: &Value) -> i32 {
-        self.to_number(value) as i32
+        js_to_uint32(self.to_number(value)) as i32
     }
 
     fn to_uint32(&self, value: &Value) -> u32 {
-        self.to_number(value) as u32
+        js_to_uint32(self.to_number(value))
     }
 
     /// Read a data property by walking the prototype chain (immutably).
@@ -8725,7 +8745,7 @@ impl Vm {
         Ok(self.to_string(&primitive))
     }
 
-    fn format_number(number: f64) -> String {
+    pub(crate) fn format_number(number: f64) -> String {
         if number.is_nan() {
             return "NaN".to_string();
         }
@@ -8740,7 +8760,7 @@ impl Vm {
         }
         // Fast path: integers below the 1e21 exponential threshold print plainly
         // (covers the overwhelmingly common case without the parsing below).
-        if number.fract() == 0.0 && number.abs() < 1e21 {
+        if number.fract() == 0.0 && number.abs() < 9_007_199_254_740_992.0 {
             return format!("{number:.0}");
         }
         Self::format_number_general(number)
@@ -11551,6 +11571,23 @@ impl Vm {
         this_value: Value,
         args: Vec<Value>,
     ) -> Result<Value, VmError> {
+        // A builtin that takes numbers takes them through ToPrimitive, as the
+        // operators do: `Number(new Date(7))` is 7, `Math.max(date, 3)` and
+        // `isNaN([])` see the primitive. `to_number` alone answers NaN for
+        // every object, because it cannot call `valueOf`.
+        let mut args = args;
+        if args.iter().any(|arg| matches!(arg, Value::Object(_)))
+            && (matches!(
+                builtin,
+                BuiltinId::NumberConstructor | BuiltinId::GlobalIsNaN | BuiltinId::GlobalIsFinite
+            ) || format!("{builtin:?}").starts_with("Math"))
+        {
+            for arg in args.iter_mut() {
+                if matches!(arg, Value::Object(_)) {
+                    *arg = self.to_primitive(arg, Some(false))?;
+                }
+            }
+        }
         match builtin {
             BuiltinId::Assert => {
                 let condition = args.first().cloned().unwrap_or(Value::Undefined);
@@ -12698,13 +12735,19 @@ impl Vm {
             }
             BuiltinId::ArrayProtoJoin => {
                 let values = self.array_like_to_vec(&this_value)?;
-                let separator = args
-                    .first()
-                    .map(|value| self.to_string(value))
-                    .unwrap_or_else(|| ",".to_string());
+                // An undefined separator is ",", and an undefined or null
+                // element is the empty string: `[cls, undefined].join(" ")` is
+                // "cls ", not "cls undefined".
+                let separator = match args.first() {
+                    None | Some(Value::Undefined) => ",".to_string(),
+                    Some(value) => self.to_string(value),
+                };
                 let joined = values
                     .iter()
-                    .map(|value| self.to_string(value))
+                    .map(|value| match value {
+                        Value::Undefined | Value::Null => String::new(),
+                        other => self.to_string(other),
+                    })
                     .collect::<Vec<_>>()
                     .join(&separator);
                 Ok(self.make_string_value(&joined))
@@ -13025,7 +13068,7 @@ impl Vm {
                 } else {
                     (digits as usize).min(100)
                 };
-                Ok(self.make_string_value(&format!("{number:.digits$}")))
+                Ok(self.make_string_value(&js_to_fixed(number, digits)))
             }
             BuiltinId::NumberProtoToPrecision => {
                 let number = self.to_number(&this_value);
@@ -13137,14 +13180,13 @@ impl Vm {
                 Ok(Value::Number(result))
             }
             BuiltinId::MathHypot => {
-                let sum: f64 = args
-                    .iter()
-                    .map(|value| {
-                        let n = self.to_number(value);
-                        n * n
-                    })
-                    .sum();
-                Ok(Value::Number(sum.sqrt()))
+                // An infinity wins over a NaN, and no arguments is +0.
+                let numbers: Vec<f64> = args.iter().map(|value| self.to_number(value)).collect();
+                if numbers.iter().any(|n| n.is_infinite()) {
+                    return Ok(Value::Number(f64::INFINITY));
+                }
+                let sum: f64 = numbers.iter().map(|n| n * n).sum();
+                Ok(Value::Number(if numbers.is_empty() { 0.0 } else { sum.sqrt() }))
             }
             BuiltinId::MathImul => {
                 // C-style 32-bit integer multiply, wrapping on overflow. Minified
@@ -14629,7 +14671,7 @@ impl Vm {
             }
             BuiltinId::MathFloor => Ok(Value::Number(self.number_arg(&args, 0).floor())),
             BuiltinId::MathCeil => Ok(Value::Number(self.number_arg(&args, 0).ceil())),
-            BuiltinId::MathRound => Ok(Value::Number(self.number_arg(&args, 0).round())),
+            BuiltinId::MathRound => Ok(Value::Number(js_round(self.number_arg(&args, 0)))),
             BuiltinId::MathTrunc => Ok(Value::Number(self.number_arg(&args, 0).trunc())),
             BuiltinId::MathAbs => Ok(Value::Number(self.number_arg(&args, 0).abs())),
             // One NaN makes the answer NaN, and -0 is below +0. Rust's
@@ -14654,9 +14696,10 @@ impl Vm {
                 }
                 Ok(Value::Number(if saw_nan { f64::NAN } else { best }))
             }
-            BuiltinId::MathPow => Ok(Value::Number(
-                self.number_arg(&args, 0).powf(self.number_arg(&args, 1)),
-            )),
+            BuiltinId::MathPow => Ok(Value::Number(js_pow(
+                self.number_arg(&args, 0),
+                self.number_arg(&args, 1),
+            ))),
             BuiltinId::MathSqrt => Ok(Value::Number(self.number_arg(&args, 0).sqrt())),
             BuiltinId::MathCbrt => Ok(Value::Number(self.number_arg(&args, 0).cbrt())),
             BuiltinId::MathExpm1 => Ok(Value::Number(self.number_arg(&args, 0).exp_m1())),
@@ -22647,4 +22690,154 @@ fn is_svg_tag(tag: &str) -> bool {
             | "femerge" | "femergenode" | "feflood" | "marker" | "foreignobject" | "animate"
             | "animatetransform" | "set" | "desc" | "metadata" | "switch" | "view"
     )
+}
+
+/// ECMAScript `ToUint32`: NaN and the infinities are 0; anything else is
+/// truncated toward zero and reduced modulo 2^32. `ToInt32` is this, read as
+/// signed.
+fn js_to_uint32(value: f64) -> u32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    value.trunc().rem_euclid(4_294_967_296.0) as u32
+}
+
+/// `Math.round`: halves go toward +Infinity (`-0.5` is `-0`, `-1.5` is `-1`,
+/// `2.5` is `3`). Rust's `f64::round` sends halves away from zero.
+fn js_round(value: f64) -> f64 {
+    if !value.is_finite() || value == 0.0 {
+        return value;
+    }
+    let floor = value.floor();
+    let rounded = if value - floor >= 0.5 { floor + 1.0 } else { floor };
+    if rounded == 0.0 && value < 0.0 { -0.0 } else { rounded }
+}
+
+/// `**` and `Math.pow`: IEEE `pow`, except that a NaN exponent is NaN even
+/// for a base of 1, and a base of +/-1 to an infinite exponent is NaN.
+fn js_pow(base: f64, exponent: f64) -> f64 {
+    if exponent.is_nan() {
+        return f64::NAN;
+    }
+    if exponent.is_infinite() && base.abs() == 1.0 {
+        return f64::NAN;
+    }
+    base.powf(exponent)
+}
+
+
+/// The exact decimal expansion of a non-negative finite number, as integer
+/// digits and fraction digits. Rust prints a float's exact value when asked
+/// for enough places, and 1100 covers the smallest subnormal.
+fn js_exact_decimal(abs: f64) -> (String, String) {
+    let text = format!("{abs:.1100}");
+    let (int_part, frac_part) = text.split_once('.').unwrap_or((text.as_str(), ""));
+    (int_part.to_string(), frac_part.trim_end_matches('0').to_string())
+}
+
+/// Add one to a string of decimal digits.
+fn js_increment_digits(digits: &mut Vec<u8>) {
+    for d in digits.iter_mut().rev() {
+        if *d == b'9' {
+            *d = b'0';
+        } else {
+            *d += 1;
+            return;
+        }
+    }
+    digits.insert(0, b'1');
+}
+
+/// `Number.prototype.toFixed`: the exact value rounded to `places`, halves
+/// up (`(0.5).toFixed(0)` is "1", `(2.5).toFixed(0)` is "3"; `(1.005)
+/// .toFixed(2)` is "1.00" because 1.005 is really 1.00499...). Rust's `{:.N}`
+/// rounds halves to even. At 1e21 and above it is the plain string form.
+fn js_to_fixed(number: f64, places: usize) -> String {
+    if !number.is_finite() || number.abs() >= 1e21 {
+        return Vm::format_number(number);
+    }
+    let negative = number < 0.0 || (number == 0.0 && number.is_sign_negative());
+    let (int_part, frac_part) = js_exact_decimal(number.abs());
+    let mut digits: Vec<u8> = int_part.bytes().collect();
+    let int_len = digits.len();
+    let frac: Vec<u8> = frac_part.bytes().collect();
+    for i in 0..places {
+        digits.push(*frac.get(i).unwrap_or(&b'0'));
+    }
+    if frac.get(places).is_some_and(|d| *d >= b'5') {
+        let before = digits.len();
+        js_increment_digits(&mut digits);
+        if digits.len() > before {
+            // carried into a new leading digit
+        }
+    }
+    let int_len = int_len + (digits.len() - (int_len + places));
+    let text = String::from_utf8(digits).unwrap_or_default();
+    let body = if places == 0 {
+        text
+    } else {
+        format!("{}.{}", &text[..int_len], &text[int_len..])
+    };
+    // `(-0.0001).toFixed(2)` is "-0.00", but `(-0).toFixed(2)` is "0.00".
+    if negative && number != 0.0 {
+        format!("-{body}")
+    } else {
+        body
+    }
+}
+
+/// A positive finite number rounded to `precision` significant digits,
+/// halves up: the digits, and the decimal exponent of the first of them.
+fn js_round_to_significant(abs: f64, precision: usize) -> (String, i32) {
+    let (int_part, frac_part) = js_exact_decimal(abs);
+    let all: Vec<u8> = int_part.bytes().chain(frac_part.bytes()).collect();
+    let first = all.iter().position(|d| *d != b'0').unwrap_or(0);
+    let mut exponent = int_part.len() as i32 - 1 - first as i32;
+    let mut digits: Vec<u8> = (0..precision)
+        .map(|i| *all.get(first + i).unwrap_or(&b'0'))
+        .collect();
+    if all.get(first + precision).is_some_and(|d| *d >= b'5') {
+        let before = digits.len();
+        js_increment_digits(&mut digits);
+        if digits.len() > before {
+            digits.pop();
+            exponent += 1;
+        }
+    }
+    (String::from_utf8(digits).unwrap_or_default(), exponent)
+}
+
+/// `StringToNumber`: surrounding white space is dropped, the empty string is
+/// 0, `0x` / `0o` / `0b` are unsigned integer literals, `Infinity` is spelled
+/// exactly so, and anything else that is not a decimal literal is NaN. Rust's
+/// `str::parse::<f64>` alone takes "inf", "infinity" and "nan" in any case and
+/// knows no radix prefix.
+fn js_string_to_number(text: &str) -> f64 {
+    let t = text.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    if t.is_empty() {
+        return 0.0;
+    }
+    for (prefix, radix) in [("0x", 16), ("0X", 16), ("0o", 8), ("0O", 8), ("0b", 2), ("0B", 2)] {
+        if let Some(digits) = t.strip_prefix(prefix) {
+            if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+                return f64::NAN;
+            }
+            return digits
+                .chars()
+                .fold(0.0, |acc, c| acc * radix as f64 + c.to_digit(radix).unwrap_or(0) as f64);
+        }
+    }
+    let unsigned = t.strip_prefix(['+', '-']).unwrap_or(t);
+    if unsigned == "Infinity" {
+        return if t.starts_with('-') { f64::NEG_INFINITY } else { f64::INFINITY };
+    }
+    // Digits, one dot, an exponent -- and nothing else Rust would take.
+    let decimal = unsigned
+        .bytes()
+        .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'e' | b'E' | b'+' | b'-'))
+        && unsigned.bytes().any(|b| b.is_ascii_digit());
+    if !decimal {
+        return f64::NAN;
+    }
+    t.parse::<f64>().unwrap_or(f64::NAN)
 }

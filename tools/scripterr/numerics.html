@@ -1,0 +1,39 @@
+<html><body><pre id="out">start</pre><script>
+var out=document.getElementById('out'), R=[];
+function z(v){ return (v===0 && 1/v<0) ? '-0' : String(v); }
+function t(l,f){ var r; try{ r=f(); }catch(x){ r='ERR:'+x.name; } R.push(l+'='+r); }
+// rounding and sign
+t('round(-0.5)', ()=>z(Math.round(-0.5))); t('round(-1.5)', ()=>z(Math.round(-1.5))); t('round(2.5)', ()=>z(Math.round(2.5))); t('round(0.49999999999999994)', ()=>z(Math.round(0.49999999999999994))); t('round(-0.2)', ()=>z(Math.round(-0.2)));
+t('sign(-0)', ()=>z(Math.sign(-0))); t('sign(0)', ()=>z(Math.sign(0))); t('sign(NaN)', ()=>z(Math.sign(NaN))); t('sign(-3)', ()=>z(Math.sign(-3)));
+t('ceil(-0.5)', ()=>z(Math.ceil(-0.5))); t('trunc(-0.5)', ()=>z(Math.trunc(-0.5))); t('floor(-0)', ()=>z(Math.floor(-0))); t('abs(-0)', ()=>z(Math.abs(-0)));
+// powers
+t('pow(1,NaN)', ()=>z(Math.pow(1,NaN))); t('pow(NaN,0)', ()=>z(Math.pow(NaN,0))); t('pow(-1,Inf)', ()=>z(Math.pow(-1,Infinity))); t('1**NaN', ()=>z(1**NaN)); t('(-1)**Inf', ()=>z((-1)**Infinity)); t('pow(-8,1/3)', ()=>z(Math.pow(-8,1/3))); t('2**-1074', ()=>z(2**-1074));
+t('hypot()', ()=>z(Math.hypot())); t('hypot(NaN,Inf)', ()=>z(Math.hypot(NaN,Infinity))); t('atan2(-0,-0)', ()=>z(Math.atan2(-0,-0)));
+// integer conversion
+t('2**31|0', ()=>(2**31)|0); t('2**32|0', ()=>4294967296|0); t('2**32+5|0', ()=>(4294967296+5)|0); t('-1>>>0', ()=>-1>>>0); t('1<<31', ()=>1<<31); t('1<<32', ()=>1<<32); t('-2**31-1|0', ()=>(-2147483649)|0);
+t('NaN|0', ()=>NaN|0); t('Inf|0', ()=>Infinity|0); t('1e21|0', ()=>1e21|0); t('~~3.7', ()=>~~3.7); t('~~-3.7', ()=>~~-3.7); t('5>>>33', ()=>5>>>33); t('-5>>1', ()=>-5>>1);
+t('hash', ()=>{ var h=0,s='the quick brown fox jumps over the lazy dog'; for(var i=0;i<s.length;i++){ h=(h<<5)-h+s.charCodeAt(i)|0; } return h; });
+t('imul', ()=>Math.imul(0xffffffff,5)+'/'+Math.imul(2**31,2)); t('clz32', ()=>Math.clz32(1)+'/'+Math.clz32(0)+'/'+Math.clz32(-1)); t('fround', ()=>Math.fround(5.5)+'/'+Math.fround(5.05));
+t('parseInt', ()=>parseInt('0x1f')+'/'+parseInt('08')+'/'+parseInt('1e3')+'/'+parseInt('')+'/'+parseInt('12px')+'/'+parseInt('101',2));
+t('parseFloat', ()=>parseFloat('1e3x')+'/'+parseFloat('.5')+'/'+parseFloat('-.5e-2')+'/'+parseFloat('Infinityx'));
+t('Number()', ()=>Number('')+'/'+Number(' 12 ')+'/'+Number('0b11')+'/'+Number('1_0')+'/'+Number(null)+'/'+Number(undefined)+'/'+Number([5])+'/'+Number('0x10'));
+// number to string
+t('String(1e21)', ()=>String(1e21)); t('String(1e20)', ()=>String(1e20)); t('String(1e-7)', ()=>String(1e-7)); t('String(1e-6)', ()=>String(1e-6)); t('0.1+0.2', ()=>String(0.1+0.2)); t('String(-0)', ()=>String(-0)); t('123456789012345680000', ()=>String(123456789012345680000)); t('1/3', ()=>String(1/3)); t('5e-324', ()=>String(5e-324)); t('1.7976931348623157e308', ()=>String(1.7976931348623157e308));
+t('toFixed', ()=>[(1234.5678).toFixed(2),(0.5).toFixed(0),(1.5).toFixed(0),(2.5).toFixed(0),(1.005).toFixed(2),(1e21).toFixed(2),(-0.0001).toFixed(2),(0).toFixed(2)].join('/'));
+t('toPrecision', ()=>[(123.456).toPrecision(4),(0.00001234).toPrecision(2),(1e21).toPrecision(3),(123456).toPrecision(2)].join('/'));
+t('toExponential', ()=>[(12345).toExponential(2),(0).toExponential(1),(0.00015).toExponential()].join('/'));
+t('toString(radix)', ()=>[(255).toString(16),(255).toString(2),(-255).toString(36),(0.5).toString(2),(3.75).toString(8)].join('/'));
+t('toLocaleString', ()=>(1234567.891).toLocaleString('en-US'));
+// comparison, sorting, misc
+t('sort-nan', ()=>[3,NaN,1].sort().join(',')); t('sort-default', ()=>[10,9,1,100].sort().join(',')); t('sort-num', ()=>[10,9,1,100].sort(function(a,b){return a-b}).join(',')); t('sort-undef', ()=>[3,undefined,1].sort().join(','));
+t('max()', ()=>z(Math.max())); t('min()', ()=>z(Math.min()));
+t('%', ()=>[z(-5%3),z(5%-3),z(-0%1),z(5.5%2),z(1%0),z(Infinity%2)].join('/'));
+t('isInteger', ()=>Number.isInteger(5.0)+'/'+Number.isInteger(2**53)+'/'+Number.isSafeInteger(2**53));
+t('Object.is', ()=>Object.is(-0,0)+'/'+Object.is(NaN,NaN)+'/'+(0===-0));
+t('indexOf-nan', ()=>[NaN].indexOf(NaN)+'/'+[NaN].includes(NaN)+'/'+[-0].includes(0));
+t('Date', ()=>new Date(2020,0,31,12).getDate()+'/'+new Date(NaN).getTime()+'/'+new Date(8.64e15+1).getTime()+'/'+new Date('2020-02-30T00:00:00Z').getTime());
+t('str-idx', ()=>'abc'.slice(-0,2)+'/'+'abc'.substring(2,NaN)+'/'+'abc'.substr(-2,1)+'/'+'abc'.at(-1)+'/'+'abc'.charAt(1.9)+'/'+'abc'.padStart(5.9,'x'));
+t('arr-idx', ()=>[1,2,3].slice(-0,2).join('')+'/'+[1,2,3].at(-1.5)+'/'+[1,2,3].fill(9,1.7).join('')+'/'+new Array(2.0).length);
+t('repeat', ()=>'ab'.repeat(2.9)+'/'+(function(){try{'a'.repeat(-1)}catch(e){return e.name}})());
+out.textContent=R.join('\n');
+</script></body></html>
