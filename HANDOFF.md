@@ -733,6 +733,22 @@ react.dev だけ撮らんかった一枚が退化しとった。
 - テスト 1182 → **1184 / 0**、GC verify 同数。六枚の console に新しい
   行なし、react.dev と HN の一枚は変わらず。
 
+**続き: 六枚の DOM 差の棚卸し（Chrome `--dump-dom` 対 tobira）。**
+最初に測ったら、tobira 側は **load 直後 1ms の姿**やった: GUI 以外は
+`tick` を一度も回しとらん。`TOBIRA_SETTLE_MS` を足して測り直した。
+
+| 頁 | Chrome | tobira 1ms | tobira settle | 差の中身 |
+|---|---|---|---|---|
+| react.dev | 1846 | 1362 | 1362（8000ms でも pending のまま） | Sandpack の**プレビュー**一つ（`data-hover="ConferenceLayout"`、"19 Videos" の例）が丸ごと無い。h3 が 19 個、select、ellipse の絵。timer やない。React #418 あり |
+| ja.wikipedia | 809 | 730 | **807** | client-prefs の panel、centralNotice の枠、全部 timer の先に居った。**settle で片付いた** |
+| MDN | 724 | 838 | 838 | tobira のほうが多い: `<template shadowrootmode>` 17 個を**そのまま light DOM に**置いとる（Chrome は shadow root に畳むので dump に出ん）。**declarative shadow DOM 未対応**。custom element 8 個が相対 URL の `import()` に失敗（console 8 行）。button 8・a 11・li 13 足りん |
+| vuejs.org | 657 | 598 | 599 | スポンサー欄（`<picture>` 8 組）が空。`fetch()` 自体は Chrome と同じ動き（検体で確認）。`bb-vp-fallback`（広告 script）も無い。要調査 |
+| HN | 817 | 817 | 817 | 一致 |
+| lobste.rs | 827 | 827 | 827 | 要素は一致。**文字が違う**: Chrome は "9 hours ago"、tobira は "2026-09-17 11:44:39"。`<time>` を相対時刻に書き換える JS が効いとらん |
+
+`tools/scripterr/domstat.py` の使い方は README。Chrome 側は
+`--virtual-time-budget=8000`、tobira 側は `TOBIRA_SETTLE_MS=8000` で揃える。
+
 ### 2026-09-10 - Claude (自走ループ二晩目: 8535535..c16844e, 23 コミット)
 
 一晩目と同じ「次の一手を上から順に、09:00 まで自分で回せ」。一覧を

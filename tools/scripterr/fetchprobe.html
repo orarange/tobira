@@ -1,0 +1,9 @@
+<html><body><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+fetch('/ok.js').then(r=>{ log('same:'+r.status); return r.text(); }).then(t=>log('same-len:'+t.length)).catch(e=>log('same-ERR:'+e.message));
+fetch('https://sponsors.vuejs.org/vuejs.json').then(r=>{ log('cross:'+r.status); return r.json(); }).then(j=>log('cross-keys:'+Object.keys(j).length)).catch(e=>log('cross-ERR:'+e.message));
+Promise.resolve().then(()=>log('micro'));
+setTimeout(()=>log('t50'),50);
+new Promise(r=>setTimeout(r,100)).then(()=>log('t100-then'));
+</script></body></html>
