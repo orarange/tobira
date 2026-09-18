@@ -22,7 +22,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 - ブランチ `master`。この文書を書いた時点の HEAD は `c16844e`
   （この文書のコミットが直後に乗る）。
-- `cargo build --release` 通る。警告は dead_code のみ。
+- `cargo build --release` 通る。警告は 35 件（2026-09-18 実測）で、全部無害:
+  unreachable pattern 10（`html.rs` の `is_block_like` の重複リテラル 8、
+  `compiler/expressions.rs` の網羅済み match の `_`、`vm.rs` の `createComment` が
+  先の本物の腕に食われとる stub）、deprecated `boa_ast` `ImportCall::argument` 4、
+  unused mut 2、残りは dead_code 系。数が増えたら中身を見ること。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
 - `cargo test --release` → **1176 通過 / 0 落ち**。
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
