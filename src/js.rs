@@ -244,7 +244,10 @@ fn engine_result_to_processed(result: crate::engine_host::EngineRunResult) -> Pr
     }
     // The document as the scripts left it, to put next to Chrome's
     // `--dump-dom` or next to itself with a switch flipped.
-    if let Some(path) = std::env::var_os("TOBIRA_DUMP_DOM") {
+    // A no-op tick's snapshot has no html; keep the last real one.
+    if let Some(path) = std::env::var_os("TOBIRA_DUMP_DOM")
+        && !result.html.is_empty()
+    {
         if let Err(e) = std::fs::write(&path, &result.html) {
             eprintln!("[js] TOBIRA_DUMP_DOM: could not write {}: {e}", path.to_string_lossy());
         }

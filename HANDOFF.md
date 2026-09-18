@@ -83,6 +83,10 @@ width/height）、`mask=`。`bg=none bgimg=<url>` なら「規則は当たっと
 `TOBIRA_DYNAMIC_SCRIPTS=0`（script が足した script を走らせん。切り分け用）、
 `TOBIRA_DUMP_DOM=<path>`（script 実行後の文書を書き出す。Chrome の `--dump-dom` と
 `tools/scripterr/domstat.py` で突き合わせる）、
+`TOBIRA_SETTLE_MS=<n>`（load 後に仮想時計を 16ms 刻みで進めて timer / rAF を
+回し切る。**GUI 以外は tick を一度も回さんので、これ無しの `--cli` / `--screenshot` /
+`--dump-styled` は load 直後 1ms の姿**。Chrome の `--virtual-time-budget` に
+揃えるならこれを付ける）、
 `TOBIRA_TRACE_STACK`、
 `TOBIRA_DUMP_BOXES` / `TOBIRA_DUMP_DEPTH` / `TOBIRA_DUMP_WIDTH`、`TOBIRA_SHOT_HEIGHT`、
 `TOBIRA_DEBUG_IMAGES` / `_ATOMIC` / `_FLEX` / `_PAINT` / `_TABLE` / `_CSS`、

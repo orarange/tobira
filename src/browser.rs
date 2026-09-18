@@ -414,6 +414,31 @@ fn load_page_with_options(url: &Url, include_rendered_output: bool) -> Result<Br
     );
     page.scroll_y = source.processed_html.scroll_y;
     page.engine_pending = source.processed_html.has_pending_work;
+    // Only the GUI ticks the engine's clock. Everything else -- `--cli`,
+    // `--screenshot`, `--dump-styled`, the DOM dump -- used to stop at the
+    // 1ms window after load, so a section a page draws from a timer, an
+    // idle callback or a fetch's promise was never there, while the Chrome
+    // it was compared with had run its virtual time out. TOBIRA_SETTLE_MS
+    // advances a virtual clock in frames until nothing is pending or the
+    // budget is spent, like Chrome's --virtual-time-budget.
+    if let Some(budget_ms) = std::env::var_os("TOBIRA_SETTLE_MS")
+        .and_then(|v| v.to_str().and_then(|s| s.parse::<u64>().ok()))
+        .filter(|&ms| ms > 0)
+    {
+        let mut now_ms = 0u64;
+        let mut frames = 0u32;
+        while page.engine_pending() && now_ms < budget_ms {
+            now_ms += 16;
+            page.tick(now_ms);
+            frames += 1;
+        }
+        if std::env::var_os("TOBIRA_DEBUG_SCRIPTS").is_some() {
+            eprintln!(
+                "[settle] {frames} frames, {now_ms} ms virtual, pending after: {}",
+                page.engine_pending()
+            );
+        }
+    }
     if let Some(soft_target) = source
         .processed_html
         .soft_navigation_target
