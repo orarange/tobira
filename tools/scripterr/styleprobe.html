@@ -1,0 +1,34 @@
+<html><body><div id="e" style="color: red; margin-top: 4px"></div><div id="f"></div><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(label, fn){ try { log(label+'='+fn()); } catch(x){ log(label+'=ERR:'+x.name); } }
+var e=document.getElementById('e'), f=document.getElementById('f'), s=e.style;
+t('length', ()=>s.length);
+t('item0', ()=>s.item(0));
+t('idx1', ()=>s[1]);
+t('gpv', ()=>s.getPropertyValue('margin-top'));
+t('setProperty', ()=>{ s.setProperty('padding-left','3px'); return s.paddingLeft; });
+t('priority', ()=>{ s.setProperty('width','5px','important'); return s.getPropertyPriority('width')+'/'+e.getAttribute('style').includes('important'); });
+t('removeProperty', ()=>{ var r=s.removeProperty('width'); return r+'/'+s.width+'/'+(e.getAttribute('style').indexOf('width')<0); });
+t('parentRule', ()=>String(s.parentRule));
+t('cssFloat', ()=>{ s.cssFloat='left'; return e.getAttribute('style').includes('float: left')+'/'+s.cssFloat; });
+t('webkitTransform', ()=>{ s.webkitTransform='scale(1)'; return e.getAttribute('style').includes('-webkit-transform')+'/'+(s.webkitTransform||'')+'/'+(s.WebkitTransform||''); });
+t('custom-set', ()=>{ s.setProperty('--my-Var','7px'); return s.getPropertyValue('--my-Var')+'/'+e.getAttribute('style').includes('--my-Var: 7px'); });
+t('custom-get-case', ()=>s.getPropertyValue('--my-var')===''?'distinct':'folded');
+t('cssText-get', ()=>typeof s.cssText+'/'+(s.cssText.indexOf('color')>=0));
+t('cssText-set', ()=>{ f.style.cssText='height:40px; color:blue'; return f.getAttribute('style')+'|'+f.style.height; });
+t('attr->style', ()=>{ f.setAttribute('style','width: 9px'); return f.style.width+'/'+f.style.height; });
+t('style->attr', ()=>{ f.style.top='1px'; return f.getAttribute('style'); });
+t('bg-shorthand', ()=>{ f.style.background='red'; return f.style.backgroundColor; });
+t('remove-attr', ()=>{ f.removeAttribute('style'); return f.style.top+'/'+f.style.length; });
+t('in', ()=>('color' in s)+'/'+('setProperty' in s)+'/'+('nope' in s));
+t('typeof-methods', ()=>typeof s.setProperty+typeof s.item+typeof s.getPropertyValue);
+// dataset
+f.setAttribute('data-foo-bar','1'); f.setAttribute('data-x','2');
+t('dataset-read', ()=>f.dataset.fooBar+'/'+f.dataset.x+'/'+typeof f.dataset.nope);
+t('dataset-write', ()=>{ f.dataset.abcDef='3'; return f.getAttribute('data-abc-def'); });
+t('dataset-in', ()=>('fooBar' in f.dataset)+'/'+('nope' in f.dataset));
+t('dataset-delete', ()=>{ delete f.dataset.fooBar; return f.hasAttribute('data-foo-bar'); });
+t('dataset-keys', ()=>Object.keys(f.dataset).join(','));
+t('dataset-toString', ()=>String(f.dataset));
+</script></body></html>

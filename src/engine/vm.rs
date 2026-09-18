@@ -354,6 +354,8 @@ enum BuiltinId {
     DomStyleGetProperty,
     DomStyleSetProperty,
     DomStyleRemoveProperty,
+    DomStyleItem,
+    DomStyleGetPriority,
     // getComputedStyle snapshot
     DomComputedStyleGetProperty,
     DomComputedStyleGetPriority,
@@ -3214,6 +3216,60 @@ impl Vm {
     /// Whether the event loop has outstanding work (pending timers, RAF
     /// callbacks, or queued tasks/microtasks). Lets a host decide whether to
     /// keep pumping `event_loop_tick` over time.
+    /// What is keeping the event loop busy, in a line: how many timers (and
+    /// how many of them repeat), animation frames and tasks are queued, and
+    /// the callbacks' names. For a page that never settles.
+    pub fn describe_pending_work(&self) -> String {
+        let timers = self.event_loop.timer_heap.len();
+        let intervals = self
+            .event_loop
+            .timer_heap
+            .iter()
+            .filter(|entry| entry.0.interval_ms.is_some())
+            .count();
+        let rafs = self.event_loop.raf_callbacks.len();
+        let tasks = self.event_loop.macrotask_queue.len();
+        let name_of = |callback: GcRef<JsObject>| -> String {
+            self.callables
+                .get(&callback.raw())
+                .and_then(|callable| match callable {
+                    Callable::Closure(closure) => closure.proto.name.clone(),
+                    _ => None,
+                })
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "<anonymous>".to_string())
+        };
+        let mut names: Vec<String> = self
+            .event_loop
+            .timer_heap
+            .iter()
+            .take(4)
+            .map(|entry| {
+                format!(
+                    "timer {}{} at {}ms",
+                    name_of(entry.0.callback),
+                    entry
+                        .0
+                        .interval_ms
+                        .map(|ms| format!(" every {ms}ms"))
+                        .unwrap_or_default(),
+                    entry.0.due_ms
+                )
+            })
+            .collect();
+        names.extend(
+            self.event_loop
+                .raf_callbacks
+                .values()
+                .take(4)
+                .map(|entry| format!("raf {}", name_of(entry.callback))),
+        );
+        format!(
+            "{timers} timers ({intervals} repeating), {rafs} rafs, {tasks} tasks: {}",
+            names.join(", ")
+        )
+    }
+
     pub fn has_pending_event_loop_work(&self) -> bool {
         !self.event_loop.timer_heap.is_empty()
             || !self.event_loop.raf_callbacks.is_empty()
@@ -3555,6 +3611,21 @@ impl Vm {
                 let key = self.pop_value()?;
                 let object = self.pop_value()?;
                 let key = self.to_property_key(&key)?;
+                // `delete el.dataset.fooBar` removes the attribute.
+                if let (Value::Object(object), PropertyKey::String(name)) = (&object, &key)
+                    && self.dataset_keys(*object).is_some()
+                {
+                    let handle = match self.heap.objects().get(*object).map(|d| &d.kind) {
+                        Some(ObjectKind::Host(slot)) => slot.handle,
+                        _ => 0,
+                    };
+                    let _ = self.host.mutate_dom(DomMutation::RemoveAttribute {
+                        node: NodeId(handle as u32),
+                        name: format!("data-{}", camel_to_css_prop(name)),
+                    });
+                    self.stack.push(Value::Bool(true));
+                    return Ok(());
+                }
                 let result = match object {
                     Value::Object(object) => self.delete_property(object, &key),
                     _ => true,
@@ -9579,6 +9650,10 @@ impl Vm {
     }
 
     fn object_own_enumerable_keys(&self, object: GcRef<JsObject>) -> Vec<PropertyKey> {
+        // `Object.keys(el.dataset)` is the `data-*` attributes, camel-cased.
+        if let Some(keys) = self.dataset_keys(object) {
+            return keys;
+        }
         self.heap
             .objects()
             .get(object)
@@ -11136,6 +11211,45 @@ impl Vm {
                 is_dom_managed_node_property(name)
             }
             HostObjectClass::Window => Self::is_window_global(name),
+            // `"grid" in el.style` is how a page asks whether a property is
+            // known; a declared one and the interface's own members are in.
+            HostObjectClass::Other("CSSStyleDeclaration") => {
+                if matches!(
+                    name.as_str(),
+                    "cssText"
+                        | "length"
+                        | "item"
+                        | "parentRule"
+                        | "getPropertyValue"
+                        | "getPropertyPriority"
+                        | "setProperty"
+                        | "removeProperty"
+                ) {
+                    return true;
+                }
+                let existing = match self.host.read_dom(DomRead::Attribute {
+                    node: NodeId(slot.handle as u32),
+                    name: "style".to_string(),
+                }) {
+                    Ok(DomReadResult::String(s)) => s,
+                    _ => String::new(),
+                };
+                let css_prop = camel_to_css_prop(name);
+                inline_style_declarations(&existing)
+                    .iter()
+                    .any(|(k, _)| same_css_prop(k, &css_prop))
+                    || is_known_css_property(&css_prop)
+            }
+            HostObjectClass::Other("Dataset") => {
+                let attr = format!("data-{}", camel_to_css_prop(name));
+                matches!(
+                    self.host.read_dom(DomRead::Attribute {
+                        node: NodeId(slot.handle as u32),
+                        name: attr,
+                    }),
+                    Ok(DomReadResult::String(_))
+                )
+            }
             _ => false,
         }
     }
@@ -15865,10 +15979,31 @@ impl Vm {
                 let value = get_inline_style_prop(&existing, &prop);
                 Ok(self.make_string_value(&value))
             }
+            BuiltinId::DomStyleItem => {
+                let node_id = self.this_node_id(&this_value);
+                let index = args.first().map(|v| self.to_number(v)).unwrap_or(0.0);
+                let existing = self.get_dom_attribute(node_id, "style");
+                let name = inline_style_declarations(&existing)
+                    .get(index.max(0.0) as usize)
+                    .map(|(k, _)| k.clone())
+                    .unwrap_or_default();
+                Ok(self.make_string_value(&name))
+            }
+            BuiltinId::DomStyleGetPriority => {
+                let node_id = self.this_node_id(&this_value);
+                let prop = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let existing = self.get_dom_attribute(node_id, "style");
+                let priority = get_inline_style_priority(&existing, &prop);
+                Ok(self.make_string_value(&priority))
+            }
             BuiltinId::DomStyleSetProperty => {
                 let node_id = self.this_node_id(&this_value);
                 let prop = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let val = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+                let mut val = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
+                let priority = args.get(2).map(|v| self.to_string(v)).unwrap_or_default();
+                if priority.trim().eq_ignore_ascii_case("important") && !val.is_empty() {
+                    val.push_str(" !important");
+                }
                 let existing = self.get_dom_attribute(node_id, "style");
                 let updated = set_inline_style_prop(&existing, &prop, &val);
                 let _ = self.host.mutate_dom(DomMutation::SetAttribute {
@@ -17994,6 +18129,12 @@ impl Vm {
         }
         let name = match key {
             PropertyKey::String(s) => s.clone(),
+            // `style[1]` is the name of the second declaration.
+            PropertyKey::Index(index)
+                if slot.class == HostObjectClass::Other("CSSStyleDeclaration") =>
+            {
+                index.to_string()
+            }
             _ => return Ok(Value::Undefined),
         };
         match slot.class {
@@ -20085,9 +20226,15 @@ impl Vm {
             "getPropertyValue" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleGetProperty)),
             "setProperty" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleSetProperty)),
             "removeProperty" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleRemoveProperty)),
+            "item" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleItem)),
+            "getPropertyPriority" => Ok(self.allocate_builtin_method(BuiltinId::DomStyleGetPriority)),
+            // An inline style belongs to no rule.
+            "parentRule" => Ok(Value::Null),
             _ => {
                 // Read a camelCase CSS property back from the inline style attr
                 // (`el.style.color`), or the whole declaration via `cssText`.
+                // Until 2026-09-18 every other name was read as a property
+                // too, so `style.length` was "" and `style[0]` undefined.
                 let node_id = NodeId(slot.handle as u32);
                 let existing = match self.host.read_dom(DomRead::Attribute {
                     node: node_id,
@@ -20099,11 +20246,45 @@ impl Vm {
                 if name == "cssText" {
                     return Ok(self.make_string_value(&existing));
                 }
+                if name == "length" {
+                    return Ok(Value::Number(inline_style_declarations(&existing).len() as f64));
+                }
+                if let Ok(index) = name.parse::<usize>() {
+                    return Ok(match inline_style_declarations(&existing).get(index) {
+                        Some((k, _)) => self.make_string_value(k),
+                        None => Value::Undefined,
+                    });
+                }
                 let css_prop = camel_to_css_prop(&name);
                 let value = get_inline_style_prop(&existing, &css_prop);
                 Ok(self.make_string_value(&value))
             }
         }
+    }
+
+    /// The dataset's keys, when `object` is a dataset: every `data-*`
+    /// attribute of its element, as `fooBar` for `data-foo-bar`.
+    fn dataset_keys(&self, object: GcRef<JsObject>) -> Option<Vec<PropertyKey>> {
+        let data = self.heap.objects().get(object)?;
+        let ObjectKind::Host(slot) = &data.kind else {
+            return None;
+        };
+        if slot.class != HostObjectClass::Other("Dataset") {
+            return None;
+        }
+        let names = match self.host.read_dom(DomRead::AttributeNames {
+            node: NodeId(slot.handle as u32),
+        }) {
+            Ok(DomReadResult::StringList(names)) => names,
+            _ => Vec::new(),
+        };
+        Some(
+            names
+                .iter()
+                .filter_map(|name| name.strip_prefix("data-"))
+                .map(|rest| PropertyKey::from(data_attr_to_camel(rest).as_str()))
+                .collect(),
+        )
     }
 
     /// `el.dataset.fooBar` reads the `data-foo-bar` attribute.
@@ -20454,11 +20635,17 @@ impl Vm {
                 // attribute read `style="css-text: height:40px"` and none of
                 // it applied; vuejs.org's ad banner set its size this way.
                 if name == "cssText" {
+                    // Stored the way a browser serializes it: `k: v; k: v;`.
                     let text = self.to_string(&value);
+                    let normalized: String = inline_style_declarations(&text)
+                        .iter()
+                        .map(|(k, v)| format!("{k}: {v};"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     let _ = self.host.mutate_dom(DomMutation::SetAttribute {
                         node: node_id,
                         name: "style".to_string(),
-                        value: text,
+                        value: normalized,
                     });
                     return Ok(());
                 }
@@ -21766,7 +21953,24 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 }
 
 fn camel_to_css_prop(camel: &str) -> String {
+    // A custom property is already a CSS name, case and all.
+    if camel.starts_with("--") {
+        return camel.to_string();
+    }
+    if camel == "cssFloat" {
+        return "float".to_string();
+    }
     let mut out = String::new();
+    // `webkitTransform` is `-webkit-transform`: the vendor prefix carries a
+    // leading dash that a plain camel-to-kebab walk does not produce.
+    for prefix in ["webkit", "moz", "ms", "o"] {
+        if let Some(rest) = camel.strip_prefix(prefix)
+            && rest.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        {
+            out.push('-');
+            break;
+        }
+    }
     for ch in camel.chars() {
         if ch.is_uppercase() {
             out.push('-');
@@ -21848,18 +22052,56 @@ fn is_dom_managed_document_property(name: &str) -> bool {
 }
 
 /// Read one declaration value out of an inline `style` attribute string.
-fn get_inline_style_prop(existing: &str, prop: &str) -> String {
+/// Whether two property names are the same property. A custom property
+/// (`--x`) is compared as written; everything else without regard to case.
+fn same_css_prop(a: &str, b: &str) -> bool {
+    if a.starts_with("--") || b.starts_with("--") {
+        a == b
+    } else {
+        a.eq_ignore_ascii_case(b)
+    }
+}
+
+/// The declarations of an inline style, in order, as (name, value with any
+/// `!important` still on it).
+fn inline_style_declarations(existing: &str) -> Vec<(String, String)> {
     existing
         .split(';')
-        .find_map(|part| {
-            let mut iter = part.splitn(2, ':');
-            let k = iter.next()?.trim();
-            if k.eq_ignore_ascii_case(prop) {
-                Some(iter.next().unwrap_or("").trim().to_string())
-            } else {
-                None
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                return None;
             }
+            let mut iter = part.splitn(2, ':');
+            let k = iter.next()?.trim().to_string();
+            let v = iter.next().unwrap_or("").trim().to_string();
+            Some((k, v))
         })
+        .collect()
+}
+
+fn split_important(value: &str) -> (&str, bool) {
+    let trimmed = value.trim();
+    match trimmed.strip_suffix("!important") {
+        Some(rest) => (rest.trim_end(), true),
+        None => (trimmed, false),
+    }
+}
+
+fn get_inline_style_prop(existing: &str, prop: &str) -> String {
+    inline_style_declarations(existing)
+        .into_iter()
+        .find(|(k, _)| same_css_prop(k, prop))
+        .map(|(_, v)| split_important(&v).0.to_string())
+        .unwrap_or_default()
+}
+
+fn get_inline_style_priority(existing: &str, prop: &str) -> String {
+    inline_style_declarations(existing)
+        .into_iter()
+        .find(|(k, _)| same_css_prop(k, prop))
+        .filter(|(_, v)| split_important(v).1)
+        .map(|_| "important".to_string())
         .unwrap_or_default()
 }
 
@@ -21935,8 +22177,8 @@ fn remove_inline_style_prop(existing: &str, prop: &str) -> (String, String) {
             let mut iter = part.splitn(2, ':');
             let k = iter.next()?.trim();
             let v = iter.next().unwrap_or("").trim();
-            if k.eq_ignore_ascii_case(prop) {
-                removed = v.to_string();
+            if same_css_prop(k, prop) {
+                removed = split_important(v).0.to_string();
                 None
             } else {
                 Some(format!("{k}: {v}"))
@@ -21962,7 +22204,7 @@ fn set_inline_style_prop(existing: &str, prop: &str, value: &str) -> String {
         })
         .collect();
 
-    let found = props.iter_mut().find(|(k, _)| k == prop);
+    let found = props.iter_mut().find(|(k, _)| same_css_prop(k, prop));
     if let Some(entry) = found {
         entry.1 = value.to_string();
     } else if !value.is_empty() {
@@ -21974,4 +22216,54 @@ fn set_inline_style_prop(existing: &str, prop: &str, value: &str) -> String {
         .map(|(k, v)| format!("{k}: {v}"))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// `foo-bar` (after `data-`) as `fooBar`.
+fn data_attr_to_camel(kebab: &str) -> String {
+    let mut out = String::new();
+    let mut upper = false;
+    for ch in kebab.chars() {
+        if ch == '-' {
+            upper = true;
+        } else if upper {
+            out.push(ch.to_ascii_uppercase());
+            upper = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Whether a CSS property name is one this browser knows, for `in`. The
+/// list is what feature detection asks about; an unknown name is a page's
+/// own idea, and `false` is the right answer for it.
+fn is_known_css_property(name: &str) -> bool {
+    name.starts_with("--")
+        || matches!(
+            name,
+            "align-content" | "align-items" | "align-self" | "animation" | "appearance"
+                | "aspect-ratio" | "backdrop-filter" | "background" | "background-color"
+                | "background-image" | "background-position" | "background-repeat"
+                | "background-size" | "border" | "border-radius" | "bottom" | "box-shadow"
+                | "box-sizing" | "clip-path" | "color" | "column-gap" | "columns" | "contain"
+                | "content" | "cursor" | "display" | "filter" | "flex" | "flex-basis"
+                | "flex-direction" | "flex-grow" | "flex-shrink" | "flex-wrap" | "float"
+                | "font" | "font-family" | "font-size" | "font-weight" | "gap" | "grid"
+                | "grid-area" | "grid-column" | "grid-row" | "grid-template"
+                | "grid-template-areas" | "grid-template-columns" | "grid-template-rows"
+                | "height" | "inset" | "justify-content" | "justify-items" | "justify-self"
+                | "left" | "letter-spacing" | "line-height" | "margin" | "mask" | "mask-image"
+                | "max-height" | "max-width" | "min-height" | "min-width" | "object-fit"
+                | "opacity" | "order" | "outline" | "overflow" | "overflow-x" | "overflow-y"
+                | "overscroll-behavior" | "padding" | "perspective" | "pointer-events"
+                | "position" | "resize" | "right" | "row-gap" | "scroll-behavior"
+                | "scroll-snap-type" | "text-align" | "text-decoration" | "text-overflow"
+                | "text-transform" | "top" | "touch-action" | "transform" | "transform-origin"
+                | "transition" | "translate" | "user-select" | "vertical-align" | "visibility"
+                | "white-space" | "width" | "will-change" | "word-break" | "z-index"
+                | "-webkit-transform" | "-webkit-appearance" | "-webkit-backdrop-filter"
+                | "-webkit-line-clamp" | "-webkit-mask" | "-webkit-mask-image"
+                | "-webkit-overflow-scrolling" | "-webkit-text-size-adjust"
+        )
 }

@@ -791,8 +791,32 @@ react.dev だけ撮らんかった一枚が退化しとった。
   効いとらんかった**（vue の DOM dump に `css-text:` が出とったのはこれ）。
   cssText への代入は style 属性の丸ごと置き換えに直した。
 - 反省: b30462f はテストが一本落ちたまま push した（コマンドを `;` で繋いで
-  結果を見ずに進めた）。次の a コミットで直しとる。**テスト → コミット → push は
+  結果を見ずに進めた）。次のコミットで直しとる。**テスト → コミット → push は
   `&&` で繋ぐ。**
+
+**続き: `cssText` は一件やのうて面やった。** Mac 側の読みどおり、style
+オブジェクトは「知らん名前を全部 CSS プロパティとして扱う」作りで、隣が
+軒並み壊れとった。`tools/scripterr/styleprobe.html` で 27 項目を Chrome と並べた:
+
+- 無かった: `style.length`（"" が返る）、`item()`（文字列 "" で呼ぶと死ぬ）、
+  `style[1]`、`getPropertyPriority`、`setProperty` の第三引数 `important`、
+  `parentRule`。
+- **`"color" in el.style` が false**（`"grid" in style` の機能検出が全滅）、
+  `"fooBar" in el.dataset` も false。
+- カスタムプロパティの大文字小文字を畳んどった（`--my-Var` と `--my-var` が同一）。
+  vue が `--vp-layout-top-height` を使うので生きとる経路。
+- `cssFloat` → `float`、`webkitTransform` → `-webkit-transform`（先頭のハイフン）。
+- dataset: `delete` が属性を消さん、`Object.keys()` が空。
+- 全部直した（vm.rs: `get_style_property`、`host_manages_property`、
+  `object_own_enumerable_keys` に dataset、`DeleteProp` に dataset、
+  `same_css_prop` / `inline_style_declarations` / `split_important` の補助）。
+  残る差は `background` 短縮形の展開（`style.background="red"` で
+  `backgroundColor` が空）、`webkitTransform` の `transform` への別名、
+  dataset のキー順（属性が BTreeMap なので辞書順）。
+- react.dev の pending の中身: **頁自身の `setInterval` 60ms が 5 本**
+  （例のプレビューの時計）と 20 秒・29 秒の timer。tobira 側の収束の問題やない。
+  `TOBIRA_DEBUG_SCRIPTS=1` で pump が 1 秒ごとに `[pump] N timers (M repeating),
+  R rafs, T tasks: ...` を出す（`Vm::describe_pending_work`）。
 
 ### 2026-09-10 - Claude (自走ループ二晩目: 8535535..c16844e, 23 コミット)
 

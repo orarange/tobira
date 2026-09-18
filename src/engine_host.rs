@@ -5302,6 +5302,11 @@ impl EngineSession {
     pub fn pump(&mut self, now_ms: u64) -> bool {
         let ran = self.vm.pump_event_loop(now_ms, 10_000);
         let added = self.settle_dynamic_scripts();
+        // Every second of virtual time, say what is still queued, so a page
+        // that never settles says why.
+        if now_ms % 1000 < 16 && std::env::var_os("TOBIRA_DEBUG_SCRIPTS").is_some() {
+            eprintln!("[pump] {now_ms}ms: {}", self.vm.describe_pending_work());
+        }
         ran || added
     }
 
@@ -7680,6 +7685,41 @@ mod tests {
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         assert!(result.html.contains("30 40 40 72"), "{}", result.html);
+    }
+
+    /// The rest of CSSStyleDeclaration and DOMStringMap, next to `cssText`:
+    /// `length` / `item` / `style[i]`, priorities, `parentRule`, `cssFloat`,
+    /// vendor prefixes, custom properties kept as written, `in`, and a
+    /// dataset's keys and `delete`. Every other name used to be read as a
+    /// CSS property, so `style.length` was "" and `"color" in style` false.
+    #[test]
+    fn style_declaration_and_dataset_surface() {
+        let result = run_document_scripts(
+            r#"<div id="e" style="color: red; margin-top: 4px"></div><div id="f"></div><p id="out"></p>
+            <script>
+            var e = document.getElementById("e"), f = document.getElementById("f"), s = e.style, r = [];
+            r.push(s.length, s.item(0), s[1], typeof s.item, String(s.parentRule));
+            s.setProperty("width", "5px", "important"); r.push(s.getPropertyPriority("width"), s.width);
+            s.cssFloat = "left"; r.push(e.getAttribute("style").indexOf("float: left") >= 0);
+            s.webkitTransform = "scale(1)"; r.push(e.getAttribute("style").indexOf("-webkit-transform") >= 0);
+            s.setProperty("--my-Var", "7px"); r.push(s.getPropertyValue("--my-Var"), s.getPropertyValue("--my-var") === "");
+            r.push("color" in s, "setProperty" in s, "grid" in s, "nope" in s);
+            f.style.cssText = "height:40px; color:blue"; r.push(f.getAttribute("style"), f.style.height);
+            f.setAttribute("data-foo-bar", "1"); f.dataset.abcDef = "3";
+            r.push(f.dataset.fooBar, f.getAttribute("data-abc-def"), "fooBar" in f.dataset, "nope" in f.dataset, Object.keys(f.dataset).sort().join(","));
+            delete f.dataset.fooBar; r.push(f.hasAttribute("data-foo-bar"));
+            document.getElementById("out").textContent = r.join(" ");
+            </script>"#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains(
+                "2 color margin-top function null important 5px true true 7px true true true true false height: 40px; color: blue; 40px 1 3 true false abcDef,fooBar false"
+            ),
+            "{}",
+            result.html
+        );
     }
 
     #[test]

@@ -29,6 +29,7 @@ TOBIRA_DEBUG_CONSOLE=1 TOBIRA_DEBUG_SCRIPTS=1 ./target/release/tobira --cli http
 | `capture.html` | the three phases of propagation, a non-bubbling `error`, `stopPropagation` in capture, an `<img>` failure reaching `window` | see below |
 | `fetchprobe.html`, `fetchfail.html` | `fetch()` same-origin / cross-origin / refused / unknown host / 404 / 500, `Promise.all` with a failure, XHR, an `<img>` that fails | every line matches Chrome except `img-onerror` |
 | `geomprobe.html` | `offsetHeight` / `getBoundingClientRect` of elements a script just made, before any frame | `fixed 72 / plain 18 (Chrome 24: line height) / inline-fixed 50`, was all 0 |
+| `styleprobe.html` | the whole CSSStyleDeclaration and DOMStringMap surface: `length` / `item` / `style[i]`, priorities, `cssFloat`, vendor prefixes, custom properties, `cssText` both ways, `in`, dataset keys / delete | every line matches Chrome except `background` shorthand expansion, `webkitTransform` aliasing to `transform`, and dataset key order (sorted here) |
 
 `capture.html`, Chrome: `start win-cap:1:w doc-cap:1:#document a-cap:1:a
 b-cap:1:b c-cap:2:c c-bub:2:c b-bub:3:b b-onprop:3 a-bub:3:a doc-bub:3:#document
