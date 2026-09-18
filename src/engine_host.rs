@@ -1087,6 +1087,11 @@ impl BrowserHost {
         std::mem::take(&mut self.console)
     }
 
+    /// Put a line of the engine's own on the console, next to the page's.
+    pub fn note(&mut self, line: String) {
+        self.console.push(line);
+    }
+
     /// The document's `<title>` text, if any.
     pub fn title(&self) -> Option<String> {
         self.find_descendant_tag(self.document, "title")
@@ -4558,7 +4563,16 @@ impl EngineSession {
         let base_href = host.base_href();
         let mut vm = Vm::with_host(Heap::new(), Box::new(host));
 
-        let mut error = None;
+        // One entry per script that failed. Each classic script is its own
+        // unit: a parse error or an uncaught throw kills that script and no
+        // other, exactly as a browser does. Until 2026-09-18 the first
+        // failure broke out of the loop, so one broken analytics snippet
+        // silenced every script after it -- and made "no uncaught errors"
+        // mean "nothing after the first one was even tried". The first
+        // failure stays the headline; the rest follow it, one per line.
+        let mut errors: Vec<String> = Vec::new();
+        let debug_scripts = std::env::var_os("TOBIRA_DEBUG_SCRIPTS").is_some();
+        let script_count = scripts.len();
         // Runtime prelude: a small JS polyfill for MessageChannel, which the engine
         // doesn't implement natively but React's scheduler uses to flush deferred
         // work (e.g. passive effects / useEffect on update). Built on setTimeout,
@@ -4570,151 +4584,119 @@ impl EngineSession {
                 let _ = vm.execute(&chunk);
             }
         }
-        'scripts: for (script_index, script) in scripts.iter().enumerate() {
+        for (script_index, script) in scripts.iter().enumerate() {
             let script_node_id = script.node_id().map(NodeId);
+            let script_label = match script {
+                ScriptSource::External { src, .. } => format!("external script {src}"),
+                ScriptSource::Inline { .. } => format!("inline script #{script_index}"),
+            };
             // Resolve the source: inline text is used directly; an external `src`
-            // is resolved against the document URL and fetched over HTTP (just like
-            // a real browser loading `<script src>`). A fetch failure aborts the
-            // remaining scripts, mirroring a hard load error.
+            // is resolved against the document URL and fetched over HTTP, like a
+            // real browser loading `<script src>`. A fetch that fails, or that
+            // answers with anything but 2xx, runs nothing: a 404 page is HTML,
+            // not the script, and a browser fires `error` on the element
+            // instead of executing the body. It is noted on the console and
+            // the next script goes ahead.
             let (source, current_script_src) = match script {
                 ScriptSource::Inline { text, .. } => (text.clone(), None),
                 ScriptSource::External { src, .. } => {
                     let resolved = Url::parse(&base_href)
                         .and_then(|base| base.resolve(src))
                         .or_else(|_| Url::parse(src));
-                    match resolved {
+                    let fetched = match resolved {
                         Ok(url) => match crate::http::fetch(&url) {
-                            Ok(response) => (
+                            Ok(response) if (200..300).contains(&response.status_code) => Ok((
                                 String::from_utf8_lossy(&response.body).into_owned(),
                                 Some(url.to_string()),
-                            ),
-                            Err(e) => {
-                                error = Some(format!("failed to fetch script {src}: {e}"));
-                                break 'scripts;
-                            }
+                            )),
+                            Ok(response) => Err(format!(
+                                "script {src} not run: HTTP {} {}",
+                                response.status_code, response.reason_phrase
+                            )),
+                            Err(e) => Err(format!("script {src} not run: fetch failed: {e}")),
                         },
-                        Err(e) => {
-                            error = Some(format!("invalid script url {src}: {e:?}"));
-                            break 'scripts;
+                        Err(e) => Err(format!("script {src} not run: invalid url: {e:?}")),
+                    };
+                    match fetched {
+                        Ok(pair) => pair,
+                        Err(note) => {
+                            if debug_scripts {
+                                eprintln!(
+                                    "[scripts] {}/{script_count} {script_label}: {note}",
+                                    script_index + 1
+                                );
+                            }
+                            Self::host_of(&mut vm).note(format!("[tobira-engine] {note}"));
+                            continue;
                         }
                     }
                 }
             };
-            if script.is_module() {
-                let mut registry = HashMap::new();
-                let mut post_order = Vec::new();
-                let mut in_progress = std::collections::HashSet::new();
-                let base_url = current_script_src.as_deref().unwrap_or(&base_href);
-                let entry_url = current_script_src
-                    .clone()
-                    .unwrap_or_else(|| base_href.clone());
-                let module_src = source.clone();
-                if let Err(e) = Self::load_module_graph(
-                    &entry_url,
-                    &module_src,
-                    base_url,
-                    &mut registry,
-                    &mut post_order,
-                    &mut in_progress,
-                ) {
-                    error = Some(format!("{e} (in module {entry_url})"));
-                    break 'scripts;
-                }
-                for url in post_order {
-                    let Some(record) = registry.get(&url) else {
-                        continue;
-                    };
-                    let mut imports: HashMap<String, String> = HashMap::new();
-                    for (specifier, dep_url) in &record.imports {
-                        imports.insert(specifier.clone(), format!("\u{0}module:{dep_url}"));
-                    }
-                    let mut dynamic_imports: HashMap<String, String> = HashMap::new();
-                    for (specifier, dep_url) in &record.dyn_imports {
-                        dynamic_imports.insert(specifier.clone(), format!("\u{0}module:{dep_url}"));
-                    }
-                    vm.set_global_object(record.key.clone());
-                    let module_ctx = ModuleContext {
-                        self_key: record.key.clone(),
-                        meta_url: record.src_url.clone(),
-                        imports,
-                        dynamic_imports,
-                    };
-                    match Compiler::new(&record.program)
-                        .with_module_context(module_ctx)
-                        .compile()
-                    {
-                        Ok(chunk) => {
-                            vm.set_current_script_src(Some(record.src_url.clone()));
-                            vm.set_current_script_node(script_node_id);
-                            if let Err(e) = vm.execute_module(&chunk) {
-                                let backtrace = vm.take_last_backtrace();
-                                error = Some(match backtrace {
-                                    Some(backtrace) if !backtrace.is_empty() => {
-                                        format!("{e} (in module {url})\n{backtrace}")
-                                    }
-                                    _ => format!("{e} (in module {url})"),
-                                });
-                                break 'scripts;
-                            }
-                        }
-                        Err(e) => {
-                            error = Some(format!("compile: {e:?} (in module {url})"));
-                            break 'scripts;
-                        }
-                    }
-                }
+            let outcome: Result<(), String> = if script.is_module() {
+                Self::run_module_script(
+                    &mut vm,
+                    &source,
+                    current_script_src.as_deref(),
+                    &base_href,
+                    script_node_id,
+                )
             } else {
-                let parse_result = Parser::new(&source).parse();
-                match parse_result {
+                match Parser::new(&source).parse() {
                     Ok(program) => match Compiler::new(&program).compile() {
                         Ok(chunk) => {
                             vm.set_current_script_src(current_script_src.clone());
                             vm.set_current_script_node(script_node_id);
-                            if let Err(e) = vm.execute(&chunk) {
-                                let script_label = match script {
-                                    ScriptSource::External { src, .. } => {
-                                        format!("external script {src}")
-                                    }
-                                    ScriptSource::Inline { .. } => {
-                                        format!("inline script #{script_index}")
-                                    }
-                                };
-                                let backtrace = vm.take_last_backtrace();
-                                error = Some(match backtrace {
-                                    Some(backtrace) if !backtrace.is_empty() => {
-                                        format!("{e} (in {script_label})\n{backtrace}")
-                                    }
-                                    _ => format!("{e} (in {script_label})"),
-                                });
-                                break 'scripts;
+                            match vm.execute(&chunk) {
+                                Ok(_) => Ok(()),
+                                Err(e) => {
+                                    let backtrace = vm.take_last_backtrace();
+                                    Err(match backtrace {
+                                        Some(backtrace) if !backtrace.is_empty() => {
+                                            format!("{e} (in {script_label})\n{backtrace}")
+                                        }
+                                        _ => format!("{e} (in {script_label})"),
+                                    })
+                                }
                             }
                         }
-                        Err(e) => {
-                            let script_label = match script {
-                                ScriptSource::External { src, .. } => {
-                                    format!("external script {src}")
-                                }
-                                ScriptSource::Inline { .. } => {
-                                    format!("inline script #{script_index}")
-                                }
-                            };
-                            error = Some(format!("compile: {e:?} (in {script_label})"));
-                            break 'scripts;
-                        }
+                        Err(e) => Err(format!("compile: {e:?} (in {script_label})")),
                     },
-                    Err(e) => {
-                        let script_label = match script {
-                            ScriptSource::External { src, .. } => {
-                                format!("external script {src}")
-                            }
-                            ScriptSource::Inline { .. } => format!("inline script #{script_index}"),
-                        };
-                        error = Some(format!("parse: {e:?} (in {script_label})"));
-                        break 'scripts;
-                    }
+                    Err(e) => Err(format!("parse: {e:?} (in {script_label})")),
+                }
+            };
+            if debug_scripts {
+                match &outcome {
+                    Ok(()) => eprintln!(
+                        "[scripts] {}/{script_count} {script_label}: ok",
+                        script_index + 1
+                    ),
+                    Err(e) => eprintln!(
+                        "[scripts] {}/{script_count} {script_label}: {}",
+                        script_index + 1,
+                        e.lines().next().unwrap_or("")
+                    ),
                 }
             }
+            if let Err(e) = outcome {
+                errors.push(e);
+            }
         }
+        let error = match errors.len() {
+            0 => None,
+            1 => errors.pop(),
+            n => {
+                let mut joined = errors.remove(0);
+                joined.push_str(&format!(
+                    "\n[tobira-engine] {} more script(s) failed:",
+                    n - 1
+                ));
+                for e in errors {
+                    joined.push('\n');
+                    joined.push_str(&e);
+                }
+                Some(joined)
+            }
+        };
 
         // The document is parsed and its scripts ran: fire the initial load
         // events on the document/window (handle 0), like boa's
@@ -4740,6 +4722,76 @@ impl EngineSession {
             .as_any_mut()
             .downcast_mut::<BrowserHost>()
             .expect("host is a BrowserHost")
+    }
+
+    fn host_of(vm: &mut Vm) -> &mut BrowserHost {
+        vm.host_mut()
+            .as_any_mut()
+            .downcast_mut::<BrowserHost>()
+            .expect("host is a BrowserHost")
+    }
+
+    /// Load and run one `<script type=module>` with its import graph. An
+    /// error anywhere in the graph is that script's error and nobody else's.
+    fn run_module_script(
+        vm: &mut Vm,
+        source: &str,
+        current_script_src: Option<&str>,
+        base_href: &str,
+        script_node_id: Option<NodeId>,
+    ) -> Result<(), String> {
+        let mut registry = HashMap::new();
+        let mut post_order = Vec::new();
+        let mut in_progress = std::collections::HashSet::new();
+        let base_url = current_script_src.unwrap_or(base_href);
+        let entry_url = current_script_src
+            .map(str::to_string)
+            .unwrap_or_else(|| base_href.to_string());
+        Self::load_module_graph(
+            &entry_url,
+            source,
+            base_url,
+            &mut registry,
+            &mut post_order,
+            &mut in_progress,
+        )
+        .map_err(|e| format!("{e} (in module {entry_url})"))?;
+        for url in post_order {
+            let Some(record) = registry.get(&url) else {
+                continue;
+            };
+            let mut imports: HashMap<String, String> = HashMap::new();
+            for (specifier, dep_url) in &record.imports {
+                imports.insert(specifier.clone(), format!("\u{0}module:{dep_url}"));
+            }
+            let mut dynamic_imports: HashMap<String, String> = HashMap::new();
+            for (specifier, dep_url) in &record.dyn_imports {
+                dynamic_imports.insert(specifier.clone(), format!("\u{0}module:{dep_url}"));
+            }
+            vm.set_global_object(record.key.clone());
+            let module_ctx = ModuleContext {
+                self_key: record.key.clone(),
+                meta_url: record.src_url.clone(),
+                imports,
+                dynamic_imports,
+            };
+            let chunk = Compiler::new(&record.program)
+                .with_module_context(module_ctx)
+                .compile()
+                .map_err(|e| format!("compile: {e:?} (in module {url})"))?;
+            vm.set_current_script_src(Some(record.src_url.clone()));
+            vm.set_current_script_node(script_node_id);
+            if let Err(e) = vm.execute_module(&chunk) {
+                let backtrace = vm.take_last_backtrace();
+                return Err(match backtrace {
+                    Some(backtrace) if !backtrace.is_empty() => {
+                        format!("{e} (in module {url})\n{backtrace}")
+                    }
+                    _ => format!("{e} (in module {url})"),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn load_module_graph(
@@ -7043,6 +7095,29 @@ mod tests {
             "every host-backed name should answer `in`: {}",
             &result.html[..result.html.len().min(300)]
         );
+    }
+
+    /// One script's failure is its own. A parse error in the second script
+    /// and a throw in the fourth leave the third and fifth running; the
+    /// headline is the first failure and the other one follows it.
+    #[test]
+    fn a_failing_script_does_not_stop_the_ones_after_it() {
+        let result = run_document_scripts(
+            r#"
+            <p id="out">start</p>
+            <script>document.getElementById('out').textContent += ' s1';</script>
+            <script>syntax error here(((</script>
+            <script>document.getElementById('out').textContent += ' s3';</script>
+            <script>throw new Error('runtime');</script>
+            <script>document.getElementById('out').textContent += ' s5';</script>
+            "#,
+            "http://localhost/",
+        );
+        assert!(result.html.contains("start s1 s3 s5"), "{}", result.html);
+        let error = result.error.expect("expected uncaught error");
+        assert!(error.contains("inline script #1"), "{error}");
+        assert!(error.contains("1 more script(s) failed"), "{error}");
+        assert!(error.contains("runtime"), "{error}");
     }
 
     #[test]

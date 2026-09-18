@@ -1,0 +1,5 @@
+<html><body><pre id="out">start</pre>
+<script>document.getElementById('out').textContent += ' s1';</script>
+<script>throw new Error('runtime');</script>
+<script>document.getElementById('out').textContent += ' s3';</script>
+</body></html>

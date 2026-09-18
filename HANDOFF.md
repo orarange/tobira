@@ -20,15 +20,17 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 
 ## いまの状態（2026-09-18）
 
-- ブランチ `master`。この文書を書いた時点の HEAD は `3b09958`
+- ブランチ `master`。この文書を書いた時点の HEAD は `64deda1`
   （この文書のコミットが直後に乗る）。origin/master と同期しとる。
+- script は一本ずつ独立（2026-09-18）。一本の失敗で以降が止まる、
+  404 の本体を実行する、の二つを直した。`tools/scripterr/` が検体。
 - `cargo build --release` 通る。警告は 35 件（2026-09-18 実測）で、全部無害:
   unreachable pattern 10（`html.rs` の `is_block_like` の重複リテラル 8、
   `compiler/expressions.rs` の網羅済み match の `_`、`vm.rs` の `createComment` が
   先の本物の腕に食われとる stub）、deprecated `boa_ast` `ImportCall::argument` 4、
   unused mut 2、残りは dead_code 系。数が増えたら中身を見ること。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1176 通過 / 0 落ち**。
+- `cargo test --release` → **1177 通過 / 0 落ち**（2026-09-18）。
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
   数え方: `cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result" | awk '{p+=$4; f+=$6} END {print p, f}'`
   （`tr -d '\000'` は必須。出力に NUL が混ざって grep が binary 扱いする）
@@ -60,7 +62,9 @@ TOBIRA_DUMP_DEPTH=40 ./target/release/tobira --dump-styled <url>   # 深いと�
 width/height）、`mask=`。`bg=none bgimg=<url>` なら「規則は当たっとって画像も
 決まっとる」ので、外れとるのは塗りかレイアウトの側や。
 
-主な環境変数: `TOBIRA_DEBUG_CONSOLE`（console と未捕捉エラー）、`TOBIRA_TRACE_STACK`、
+主な環境変数: `TOBIRA_DEBUG_CONSOLE`（console と未捕捉エラー）、
+`TOBIRA_DEBUG_SCRIPTS`（script 一本ごとに ok / 失敗を一行。何本走ったかはこれで数える）、
+`TOBIRA_TRACE_STACK`、
 `TOBIRA_DUMP_BOXES` / `TOBIRA_DUMP_DEPTH` / `TOBIRA_DUMP_WIDTH`、`TOBIRA_SHOT_HEIGHT`、
 `TOBIRA_DEBUG_IMAGES` / `_ATOMIC` / `_FLEX` / `_PAINT` / `_TABLE` / `_CSS`、
 `TOBIRA_H5_FILE`、`TOBIRA_INCREMENTAL_RESTYLE`。
@@ -515,9 +519,27 @@ tests23（2/5）を Mac 側が Noah's Ark 条項の未実装と読み、こち�
 - 途中で見つけた別の穴（未修正）: `<script>` の中身に活性整形要素が
   再構築されて巻き付く。`noah.html` の stray 行で `script>font` と出る。
   Chrome は出さん。raw text の挿入で `reconstruct_formatting` を呼んどる筋。
-- `--cli` で外部 `<script src>` が 404（HTML が返る）やと parse error になり、
-  **それ以降の inline script が走らん**ように見えた（HN の保存頁で再現）。
-  Chrome は外部の失敗を無視して次へ進む。要確認。
+  `<style>` でも同じ形になるが Chrome も同じ（body の中の `<style>` は普通の
+  要素）で、幅 333 は両方で取れた。空振り。
+
+**同じ日の後半: 一本の script の失敗が以降を全部止めとった。** 上の
+「要確認」を切り分けたら、三つ重なっとった（`tools/scripterr/` に検体）:
+
+- **(b) 構文エラー・実行時の throw 一本で、以降の script が走らん。**
+  `engine_host.rs` の script ループが最初の失敗で `break` しとった。
+  仕様では classic script は一本ずつ独立。直した: 失敗は記録して次へ、
+  見出しは最初の失敗、残りは同じ文字列に続く。
+- **(a) 外部 script の 404 / 500 の本体を JS として実行しとった。**
+  status を見とらんかった。直した: 2xx 以外は走らせず console に
+  `script <src> not run: HTTP 404 ...` を残す。
+- **(c) 接続拒否・DNS 失敗でも以降が死んどった。** (b) と同じ break。同じ直し。
+
+**「未捕捉 JS エラー 0」の計器は、この修正の前でも壊れとらんかった。**
+`TOBIRA_DEBUG_SCRIPTS=1`（新設。script 一本ごとに ok / 失敗を出す）で
+数えたら、react.dev 14/14、vuejs.org 8/8、MDN 6/6、HN 1/1、lobste.rs 1/1 で
+全部走っとった。「最初の一本で止まって以降を試しとらんだけ」やなかった。
+ただし実頁で外部 script が一本でも落ちたら（広告・解析・CDN）その先が
+全滅する状態やったので、直す価値は数字より大きい。テスト 1176 → 1177。
 
 ### 2026-09-10 - Claude (自走ループ二晩目: 8535535..c16844e, 23 コミット)
 
