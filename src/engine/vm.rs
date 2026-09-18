@@ -20099,6 +20099,12 @@ impl Vm {
             "remove" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeRemove)),
             "querySelector" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeQuerySelector)),
             "querySelectorAll" => Ok(self.allocate_builtin_method(BuiltinId::DomNodeQuerySelectorAll)),
+            // A fragment -- a shadow root above all -- has `getElementById`;
+            // an element does not. It searches from the receiver, so the
+            // document's implementation serves.
+            "getElementById" if self.get_node_name(node_id) == "#document-fragment" => {
+                Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementById))
+            }
             // These search a subtree rooted at the receiver, so the document's
             // implementations serve elements unchanged -- they were simply not
             // exposed here, and `element.getElementsByTagName(...)` threw.

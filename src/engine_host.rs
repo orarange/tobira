@@ -429,13 +429,36 @@ impl BrowserHost {
                 for (key, value) in &element.attributes {
                     self.nodes[idx].attrs.insert(key.clone(), value.clone());
                 }
-                let child_indices: Vec<usize> = element
-                    .children
-                    .iter()
-                    .filter_map(|child| self.build_from_node(child))
-                    .collect();
-                for child in child_indices {
-                    self.attach(idx, child);
+                for child in &element.children {
+                    // A declarative shadow root: `<template shadowrootmode>`
+                    // as a child becomes the element's shadow tree, and is
+                    // not a child. Its `<slot>`s take the light children.
+                    if let Node::Element(template) = child
+                        && template.tag_name.eq_ignore_ascii_case("template")
+                        && let Some(mode) = template.attributes.get("shadowrootmode")
+                        && !self.shadow_root_by_host.contains_key(&idx)
+                    {
+                        let open = !mode.eq_ignore_ascii_case("closed");
+                        let shadow_idx = self.push(DomNode {
+                            kind: DomNodeKind::ShadowRoot { host: idx, open },
+                            parent: None,
+                            children: Vec::new(),
+                            attrs: BTreeMap::new(),
+                        });
+                        self.shadow_root_by_host.insert(idx, shadow_idx);
+                        let content: Vec<usize> = template
+                            .children
+                            .iter()
+                            .filter_map(|grandchild| self.build_from_node(grandchild))
+                            .collect();
+                        for node in content {
+                            self.attach(shadow_idx, node);
+                        }
+                        continue;
+                    }
+                    if let Some(built) = self.build_from_node(child) {
+                        self.attach(idx, built);
+                    }
                 }
                 Some(idx)
             }
@@ -781,8 +804,89 @@ impl BrowserHost {
     }
 
     /// Serialize the whole document back to HTML (for the page snapshot).
+    /// The document as the layout sees it: a host with a shadow root shows
+    /// its shadow tree, a `<slot>` in it shows the light children assigned
+    /// to it (or its own fallback), a `<template>` shows nothing. Every
+    /// element rendered from a shadow tree carries
+    /// `data-tobira-shadow="<root>"` and the host `data-tobira-shadow-host`,
+    /// which is what the shadow tree's `<style>` rules are rewritten to
+    /// select, so they reach their own tree and nothing else.
     pub fn serialize_document(&self) -> String {
+        self.render_node(self.document)
+    }
+
+    /// The document as a page's script sees it: light children only, no
+    /// shadow content. This is what Chrome's `--dump-dom` prints, so it is
+    /// what a DOM comparison reads.
+    pub fn serialize_document_light(&self) -> String {
         self.serialize_node(self.document)
+    }
+
+    /// The children a node has in the rendered (flattened) tree.
+    fn render_children(&self, idx: usize) -> Vec<usize> {
+        if let Some(&shadow_idx) = self.shadow_root_by_host.get(&idx) {
+            return self.nodes[shadow_idx].children.clone();
+        }
+        match self.nodes[idx].tag_name() {
+            Some("template") => Vec::new(),
+            Some("slot") if self.enclosing_shadow_root(idx).is_some() => {
+                let assigned = self.slot_assigned_nodes_flattened(idx);
+                if assigned.is_empty() {
+                    self.nodes[idx].children.clone()
+                } else {
+                    assigned
+                }
+            }
+            _ => self.nodes[idx].children.clone(),
+        }
+    }
+
+    fn render_node(&self, idx: usize) -> String {
+        match &self.nodes[idx].kind {
+            DomNodeKind::Text(text) => escape_text(text),
+            DomNodeKind::Element(tag) => {
+                let scope = self.enclosing_shadow_root(idx);
+                let mut out = format!("<{tag}");
+                for (key, value) in &self.nodes[idx].attrs {
+                    out.push_str(&format!(" {key}=\"{}\"", escape_attr(value)));
+                }
+                if let Some(scope) = scope {
+                    out.push_str(&format!(" data-tobira-shadow=\"{scope}\""));
+                }
+                if let Some(shadow_idx) = self.shadow_root_by_host.get(&idx) {
+                    out.push_str(&format!(" data-tobira-shadow-host=\"{shadow_idx}\""));
+                }
+                out.push('>');
+                if VOID_ELEMENTS.contains(&tag.as_str()) {
+                    return out;
+                }
+                if tag == "script" {
+                    // Scripts already ran; the snapshot must not re-expose their
+                    // source (matches the boa snapshot behavior).
+                } else if RAW_TEXT_ELEMENTS.contains(&tag.as_str()) {
+                    let text = self.collect_text(idx);
+                    match (tag.as_str(), scope) {
+                        ("style", Some(scope)) => out.push_str(&scope_shadow_css(&text, scope)),
+                        _ => out.push_str(&text),
+                    }
+                } else {
+                    for child in self.render_children(idx) {
+                        out.push_str(&self.render_node(child));
+                    }
+                }
+                out.push_str(&format!("</{tag}>"));
+                out
+            }
+            DomNodeKind::Comment(text) => format!("<!--{text}-->"),
+            DomNodeKind::ShadowRoot { .. } => String::new(),
+            DomNodeKind::Document | DomNodeKind::Fragment => {
+                let mut out = String::new();
+                for child in self.render_children(idx) {
+                    out.push_str(&self.render_node(child));
+                }
+                out
+            }
+        }
     }
 
     /// Map a browser `data-tobira-node-id` to this arena's node index.
@@ -823,7 +927,7 @@ impl BrowserHost {
         ) {
             order.push(NodeId(idx as u32));
         }
-        for &child in &self.nodes[idx].children {
+        for child in self.render_children(idx) {
             self.collect_node_order(child, order);
         }
     }
@@ -838,8 +942,7 @@ impl BrowserHost {
                 return Some(*counter);
             }
         }
-        for i in 0..self.nodes[idx].children.len() {
-            let child = self.nodes[idx].children[i];
+        for child in self.render_children(idx) {
             if let Some(found) = self.find_tobira_id(child, target_idx, counter) {
                 return Some(found);
             }
@@ -1159,8 +1262,7 @@ impl BrowserHost {
                 return Some(idx);
             }
         }
-        for i in 0..self.nodes[idx].children.len() {
-            let child = self.nodes[idx].children[i];
+        for child in self.render_children(idx) {
             if let Some(found) = self.find_by_tobira_id(child, target, counter) {
                 return Some(found);
             }
@@ -4669,7 +4771,13 @@ impl EngineSession {
         let mut document = crate::html::parse_document(html);
         crate::browser::annotate_node_ids(&mut document);
         let viewport = crate::browser::style_viewport_width();
-        let stylesheet = crate::css::parse_stylesheet(stylesheet_text);
+        // The browser collected the page's stylesheet from the document it
+        // loaded. A shadow tree's `<style>` is not in it -- the browser saw a
+        // template -- and reaches the rendered tree rewritten to its scope,
+        // so those are read from the html here and put after the rest.
+        let mut css = stylesheet_text.to_string();
+        collect_shadow_styles(&document, &mut css);
+        let stylesheet = crate::css::parse_stylesheet(&css);
         let styled = crate::css::build_styled_tree(
             &document,
             &stylesheet,
@@ -4726,7 +4834,11 @@ impl EngineSession {
     ) -> (Self, EngineRunResult) {
         let mut host = BrowserHost::from_html(html, url);
         host.set_stylesheet_text(stylesheet_text);
-        let (rects, styles, root_vars) = Self::layout_geometry(html, stylesheet_text);
+        // Laid out from the host's rendered tree, not the source: a
+        // declarative shadow root has been folded by now, and its `<style>`
+        // rewritten to reach only its own tree.
+        let (rects, styles, root_vars) =
+            Self::layout_geometry(&host.serialize_document(), stylesheet_text);
         host.set_geometry(&rects);
         host.set_computed_styles(styles, root_vars);
         // Collect scripts in document order (inline + external `src`) and the base
@@ -5283,6 +5395,16 @@ impl EngineSession {
         let (html, node_order) = if is_noop {
             (String::new(), Vec::new())
         } else {
+            // The document as the scripts left it, light tree only, to put
+            // next to Chrome's `--dump-dom`.
+            if let Some(path) = std::env::var_os("TOBIRA_DUMP_DOM") {
+                let _ = std::fs::write(&path, host.serialize_document_light());
+            }
+            // And the tree as the layout gets it, shadow content folded in,
+            // for when a shadow tree's rule does not seem to reach.
+            if let Some(path) = std::env::var_os("TOBIRA_DUMP_RENDER") {
+                let _ = std::fs::write(&path, host.serialize_document());
+            }
             (host.serialize_document(), host.node_order())
         };
         EngineRunResult {
@@ -7779,6 +7901,43 @@ mod tests {
         );
     }
 
+    /// A declarative shadow root: `<template shadowrootmode>` becomes the
+    /// element's shadow tree, its `<slot>`s take the light children (or show
+    /// their fallback), the document does not see into it, and its `<style>`
+    /// reaches its own tree only: `:host`, `::slotted()`, and a class that
+    /// the document also uses.
+    #[test]
+    fn declarative_shadow_root_is_folded_slotted_and_scoped() {
+        let result = run_document_scripts_with_styles(
+            r##"<x-card id="host"><template shadowrootmode="open"><style>.inner{width:100px;height:10px} .leak{width:50px} :host{display:block;width:200px} ::slotted(p){height:30px}</style><div class="inner" id="inner">shadow</div><slot name="title"><i id="fb">fallback</i></slot><slot></slot></template><p slot="title" id="t">title</p><p id="d">default</p><span id="u" slot="nope">unslotted</span></x-card>
+            <div class="leak" id="light">light</div>
+            <x-empty id="empty"><template shadowrootmode="open"><slot><b id="fb2">only fallback</b></slot></template></x-empty>
+            <p id="out"></p>
+            <script>
+            var host = document.getElementById("host"), sr = host.shadowRoot;
+            function w(e) { return Math.round(e.getBoundingClientRect().width); }
+            function h(e) { return Math.round(e.getBoundingClientRect().height); }
+            document.getElementById("out").textContent = [
+              sr ? "sr" : "no-sr", document.getElementById("inner") ? "leaks" : "sealed", sr.querySelector("#inner") ? "seen" : "unseen",
+              host.children.length, host.querySelectorAll("template").length,
+              w(sr.getElementById("inner")), w(host), w(document.getElementById("light")),
+              h(document.getElementById("t")), h(document.getElementById("d")), h(document.getElementById("u")),
+              h(sr.getElementById("fb")), h(document.getElementById("empty").shadowRoot.getElementById("fb2")) > 0,
+            ].join(" ");
+            </script>"##,
+            "http://localhost/",
+            "body{margin:0;font:16px Arial} .leak{width:333px} #light{width:20px;height:20px}",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains("sr sealed seen 3 0 100 200 20 30 30 0 0 true"),
+            "{}",
+            result.html
+        );
+        // The light tree shows no shadow content and no template.
+        assert!(!result.html.contains("shadowrootmode") && !result.html.contains(r#"id="inner""#), "{}", result.html);
+    }
+
     #[test]
     fn run_document_scripts_includes_js_backtrace() {
         let result = run_document_scripts(
@@ -10209,6 +10368,196 @@ mod tests {
                 html[start..end].to_string()
             }
             None => html.chars().take(400).collect(),
+        }
+    }
+}
+
+
+/// Rewrite a shadow tree's stylesheet so its rules reach that tree only.
+/// Every element rendered from shadow root `scope` carries
+/// `data-tobira-shadow="scope"` and the host `data-tobira-shadow-host`;
+/// each selector gets the attribute on its last compound, `:host` becomes
+/// the host attribute and `::slotted(x)` the host's light child `x`.
+/// Conditional at-rules are entered; other at-rules are copied whole.
+/// Document rules still reach into the tree (nothing stops them yet).
+fn scope_shadow_css(css: &str, scope: usize) -> String {
+    let mut out = String::new();
+    scope_shadow_block(css, scope, &mut out);
+    out
+}
+
+fn scope_shadow_block(css: &str, scope: usize, out: &mut String) {
+    let bytes = css.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Whitespace and comments pass through.
+        if bytes[i].is_ascii_whitespace() {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        if css[i..].starts_with("/*") {
+            let end = css[i..].find("*/").map(|e| i + e + 2).unwrap_or(bytes.len());
+            out.push_str(&css[i..end]);
+            i = end;
+            continue;
+        }
+        // The prelude runs to the next `{` or `;` outside strings/parens.
+        let mut j = i;
+        let mut depth = 0i32;
+        let mut quote: Option<u8> = None;
+        while j < bytes.len() {
+            let b = bytes[j];
+            if let Some(q) = quote {
+                if b == q {
+                    quote = None;
+                }
+            } else if b == b'"' || b == b'\'' {
+                quote = Some(b);
+            } else if b == b'(' {
+                depth += 1;
+            } else if b == b')' {
+                depth -= 1;
+            } else if depth <= 0 && (b == b'{' || b == b';') {
+                break;
+            }
+            j += 1;
+        }
+        let prelude = &css[i..j];
+        if j >= bytes.len() || bytes[j] == b';' {
+            // A statement at-rule (`@import`), or trailing junk.
+            out.push_str(prelude);
+            if j < bytes.len() {
+                out.push(';');
+            }
+            i = j + 1;
+            continue;
+        }
+        // Find the matching `}` for the block starting at j.
+        let mut k = j + 1;
+        let mut level = 1i32;
+        let mut quote: Option<u8> = None;
+        while k < bytes.len() && level > 0 {
+            let b = bytes[k];
+            if let Some(q) = quote {
+                if b == q {
+                    quote = None;
+                }
+            } else if b == b'"' || b == b'\'' {
+                quote = Some(b);
+            } else if b == b'{' {
+                level += 1;
+            } else if b == b'}' {
+                level -= 1;
+            }
+            k += 1;
+        }
+        let body_end = if level == 0 { k - 1 } else { bytes.len() };
+        let body = &css[j + 1..body_end];
+        let trimmed = prelude.trim_start();
+        if trimmed.starts_with('@') {
+            let name: String = trimmed[1..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            out.push_str(prelude);
+            out.push('{');
+            if matches!(
+                name.as_str(),
+                "media" | "supports" | "container" | "layer" | "scope" | "document"
+            ) {
+                scope_shadow_block(body, scope, out);
+            } else {
+                out.push_str(body);
+            }
+            out.push('}');
+        } else {
+            out.push_str(&scope_shadow_selector_list(prelude, scope));
+            out.push('{');
+            out.push_str(body);
+            out.push('}');
+        }
+        i = k;
+    }
+}
+
+fn scope_shadow_selector_list(list: &str, scope: usize) -> String {
+    // Split on commas outside parentheses.
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (index, ch) in list.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth <= 0 => {
+                parts.push(&list[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&list[start..]);
+    parts
+        .iter()
+        .map(|part| scope_shadow_selector(part.trim(), scope))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn scope_shadow_selector(selector: &str, scope: usize) -> String {
+    let host_attr = format!("[data-tobira-shadow-host=\"{scope}\"]");
+    let tree_attr = format!("[data-tobira-shadow=\"{scope}\"]");
+    if selector.is_empty() {
+        return String::new();
+    }
+    if let Some(rest) = selector.strip_prefix(":host") {
+        // `:host(.x) .y` -> `[host].x .y`; `:host` alone -> `[host]`.
+        if let Some(inner) = rest.strip_prefix('(') {
+            if let Some(close) = inner.find(')') {
+                return format!("{host_attr}{}{}", &inner[..close], &inner[close + 1..]);
+            }
+        }
+        return format!("{host_attr}{rest}");
+    }
+    if let Some(at) = selector.find("::slotted(") {
+        let inner = &selector[at + "::slotted(".len()..];
+        if let Some(close) = inner.find(')') {
+            // In the rendered tree a slotted light child sits under the
+            // `<slot>` it was assigned to, so it is the slot's child.
+            let before = selector[..at].trim_end();
+            let head = if before.is_empty() {
+                format!("{host_attr} slot{tree_attr}")
+            } else {
+                format!("{}{tree_attr}", before)
+            };
+            return format!("{head} > {}{}", &inner[..close], &inner[close + 1..]);
+        }
+    }
+    // The attribute goes on the last compound, before any pseudo-element.
+    match selector.find("::") {
+        Some(at) => format!("{}{tree_attr}{}", &selector[..at], &selector[at..]),
+        None => format!("{selector}{tree_attr}"),
+    }
+}
+
+/// The text of every `<style data-tobira-shadow>` in a rendered tree: the
+/// shadow trees' stylesheets, already rewritten to their scopes.
+fn collect_shadow_styles(node: &Node, out: &mut String) {
+    if let Node::Element(element) = node {
+        if element.tag_name.eq_ignore_ascii_case("style")
+            && element.attributes.contains_key("data-tobira-shadow")
+        {
+            for child in &element.children {
+                if let Node::Text(text) = child {
+                    out.push('\n');
+                    out.push_str(text);
+                }
+            }
+            return;
+        }
+        for child in &element.children {
+            collect_shadow_styles(child, out);
         }
     }
 }

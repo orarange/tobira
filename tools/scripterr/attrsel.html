@@ -1,0 +1,21 @@
+<html><head><style>
+[data-x="1"]{width:200px;display:block}
+div[data-y="2"]{width:210px}
+x-tag{width:220px;display:block}
+[data-z]{width:230px;display:block}
+span > p{height:30px}
+slot > p.q{height:40px}
+</style></head><body>
+<x-tag id="a" data-x="1">a</x-tag>
+<div id="b" data-y="2">b</div>
+<x-tag id="c">c</x-tag>
+<x-tag id="d" data-z="">d</x-tag>
+<span id="e"><p id="p1">x</p></span>
+<slot id="f"><p id="p2" class="q">y</p></slot>
+<pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function w(id){ return Math.round(document.getElementById(id).getBoundingClientRect().width); }
+function h(id){ return Math.round(document.getElementById(id).getBoundingClientRect().height); }
+log('attr-only:'+w('a')); log('tag+attr:'+w('b')); log('custom-tag:'+w('c')); log('attr-presence:'+w('d')); log('span>p:'+h('p1')); log('slot>p.q:'+h('p2'));
+</script></body></html>

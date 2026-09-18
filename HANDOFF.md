@@ -830,6 +830,29 @@ react.dev だけ撮らんかった一枚が退化しとった。
   "interactive" → load で "complete"。（Chrome は module script の中では
   "interactive"。tobira は module も parser の script と同じ位置で走らせるので
   "loading"。差として記録。）lobste.rs の文字差が相対時刻ぶんは消えた。
+- **declarative shadow DOM**（`<template shadowrootmode>`）を畳んだ。
+  `build_from_node` で template を親の shadow root にして中身を移す（light の
+  子にはせん）。描画用の直列化 `render_node` は host の下に shadow tree を出し、
+  `<slot>` の下に割り当てられた light の子（無ければ fallback）、`<template>` は
+  空。id の前順走査三つ（`find_by_tobira_id` / `find_tobira_id` /
+  `collect_node_order`）も同じ `render_children` を辿る。**shadow の `<style>` は
+  境界を作る**: shadow tree の要素に `data-tobira-shadow="<root>"`、host に
+  `data-tobira-shadow-host`、selector の最後の compound に属性を足す
+  （`.x` → `.x[data-tobira-shadow="8"]`）、`:host` → host 属性、
+  `::slotted(p)` → `[host] slot[...] > p`。条件付き at-rule は中に入る。
+  **文書側の規則が中に入るのは止めとらん**（Chrome も継承分は入るが、
+  tobira は全部入る）。
+  - 探索の境界は元から守られとる（shadow root は children に居らん）。
+    `shadowRoot.getElementById` が無かったので fragment に足した。
+  - 踏んだ穴: JS が測る geometry は engine 側の `layout_geometry` で、
+    browser が集めた**元文書の stylesheet** しか使わんかった。shadow の style は
+    template の中の生の `:host` で入っとって効かん。描画用 HTML の
+    `<style data-tobira-shadow>` を拾うようにし、初回の layout も元 HTML やのうて
+    `serialize_document()`（畳んだ後）から取る。`TOBIRA_DUMP_RENDER=<path>` で
+    描画用 HTML を覗ける。
+  - 検体 `tools/scripterr/dsd.html` が 13 項目 Chrome と一致。MDN: light DOM は
+    724 のまま Chrome と一致、ヘッダに "Theme" / "English (US)" / 検索欄が出た。
+    本文は動かず。六枚の light DOM も動かず。
 - react.dev の pending の中身: **頁自身の `setInterval` 60ms が 5 本**
   （例のプレビューの時計）と 20 秒・29 秒の timer。tobira 側の収束の問題やない。
   `TOBIRA_DEBUG_SCRIPTS=1` で pump が 1 秒ごとに `[pump] N timers (M repeating),

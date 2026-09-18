@@ -242,16 +242,9 @@ fn engine_result_to_processed(result: crate::engine_host::EngineRunResult) -> Pr
     if let Some(error) = result.error {
         console_logs.push(format!("[tobira-engine] uncaught error: {error}"));
     }
-    // The document as the scripts left it, to put next to Chrome's
-    // `--dump-dom` or next to itself with a switch flipped.
-    // A no-op tick's snapshot has no html; keep the last real one.
-    if let Some(path) = std::env::var_os("TOBIRA_DUMP_DOM")
-        && !result.html.is_empty()
-    {
-        if let Err(e) = std::fs::write(&path, &result.html) {
-            eprintln!("[js] TOBIRA_DUMP_DOM: could not write {}: {e}", path.to_string_lossy());
-        }
-    }
+    // TOBIRA_DUMP_DOM is written by the engine host itself (the light tree,
+    // without shadow content, which is what Chrome's --dump-dom prints);
+    // `result.html` here is the rendered tree and would not compare.
     ProcessedScriptHtml {
         html: result.html,
         title_override: result.title,

@@ -1,0 +1,24 @@
+<html><head><style>body{margin:0;font:16px Arial} .leak{width:333px} #light{width:20px;height:20px}</style></head><body>
+<x-card id="host"><template shadowrootmode="open"><style>.inner{width:100px;height:10px} .leak{width:50px} :host{display:block;width:200px} ::slotted(p){height:30px}</style><div class="inner" id="inner">shadow</div><slot name="title"><i id="fb">fallback</i></slot><slot></slot></template><p slot="title" id="t">title</p><p id="d">default</p><span id="unslotted" slot="nope">unslotted</span></x-card>
+<div class="leak" id="light">light</div>
+<x-empty id="empty"><template shadowrootmode="open"><slot><b id="fb2">only fallback</b></slot></template></x-empty>
+<pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function w(id){ var e=document.getElementById(id); return e? Math.round(e.getBoundingClientRect().width) : 'none'; }
+function h(id){ var e=document.getElementById(id); return e? Math.round(e.getBoundingClientRect().height) : 'none'; }
+var host=document.getElementById('host');
+log('shadowRoot:'+(host.shadowRoot?'yes':'no'));
+log('doc-sees-inner:'+(document.getElementById('inner')?'yes':'no'));
+log('sr-sees-inner:'+(host.shadowRoot && host.shadowRoot.querySelector('#inner')?'yes':'no'));
+log('host-children:'+host.children.length);
+log('template-left:'+host.querySelectorAll('template').length);
+log('inner-w:'+(host.shadowRoot?Math.round(host.shadowRoot.getElementById('inner').getBoundingClientRect().width):'?'));
+log('host-w:'+w('host'));
+log('light-leak-w:'+w('light'));
+log('slotted-title-h:'+h('t'));
+log('default-h:'+h('d'));
+log('unslotted-h:'+h('unslotted'));
+log('fb2-h:'+(document.getElementById('empty').shadowRoot? Math.round(document.getElementById('empty').shadowRoot.getElementById('fb2').getBoundingClientRect().height):'?'));
+log('fb-rendered:'+(host.shadowRoot? Math.round(host.shadowRoot.getElementById('fb').getBoundingClientRect().height):'?'));
+</script></body></html>

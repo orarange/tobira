@@ -1,0 +1,10 @@
+<html><head><style>body{margin:0;font:16px Arial}</style></head><body>
+<x-card id="host" data-tobira-shadow-host="8"><style data-tobira-shadow="8">.inner[data-tobira-shadow="8"]{width:100px;height:10px} [data-tobira-shadow-host="8"]{display:block;width:200px} [data-tobira-shadow-host="8"] slot[data-tobira-shadow="8"] > p{height:30px}</style><div class="inner" id="inner" data-tobira-shadow="8">shadow</div><slot name="title" data-tobira-shadow="8"><p id="t" slot="title">title</p></slot></x-card>
+<x-card2 id="host2"><style>[id="host2"]{display:block;width:200px} #host2 slot > p{height:30px}</style><slot><p id="t2">title</p></slot></x-card2>
+<pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function w(id){ return Math.round(document.getElementById(id).getBoundingClientRect().width); }
+function h(id){ return Math.round(document.getElementById(id).getBoundingClientRect().height); }
+log('inner:'+w('inner')+' host:'+w('host')+' p:'+h('t')+' host2:'+w('host2')+' p2:'+h('t2'));
+</script></body></html>
