@@ -1,18 +1,15 @@
 name: AI Branch Auto-Merge
 
-# Trigger: when a push lands on codex/* or claude/* branches,
-# or on a schedule every 10 minutes to catch branches that were
-# already there when this workflow was first added.
-# The ten-minute schedule is gone (2026-09-18): the codex/* and claude/*
-# branches it was for stopped in June, and every scheduled run since had
-# failed before making a job -- 29 red runs in a row, which buried the
-# `test` workflow's real verdict. It still runs on a push to those
-# branches and by hand.
+# By hand only (2026-09-19). This file never ran: the commit message in the
+# merge step broke out of its `run: |` block, so the YAML was invalid from the
+# day it was added, and GitHub filed a failed run for every push to any
+# branch and every ten-minute tick -- dozens of red runs that buried the
+# `test` workflow's verdict. The YAML is valid now. The push and schedule
+# triggers are gone on purpose: mending the file would otherwise switch on,
+# for the first time, a bot that merges codex/* and claude/* branches into
+# master and pushes. Those branches stopped in June. Put a trigger back only
+# after deciding that is wanted.
 on:
-  push:
-    branches:
-      - "codex/**"
-      - "claude/**"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -130,11 +127,7 @@ jobs:
           git config user.email "merge-loop@tobira"
           git checkout master
           git merge --no-ff ${{ matrix.branch }} \
-            -m "Auto-merge ${{ matrix.branch }} via AI branch merge loop
-
-Tests: passed
-Branch: ${{ matrix.branch }}
-Triggered by: ${{ github.event_name }}"
+            -m "Auto-merge ${{ matrix.branch }} via AI branch merge loop"             -m "Tests: passed"             -m "Branch: ${{ matrix.branch }}"             -m "Triggered by: ${{ github.event_name }}"
           git push origin master
 
       - name: Push nothing (dry-run mode)

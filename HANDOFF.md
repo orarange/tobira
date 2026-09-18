@@ -947,6 +947,15 @@ react.dev だけ撮らんかった一枚が退化しとった。
     17 個の shadow root 全部に `<style>` がある（SSR が入れとる）。Lit の判定
     `"adoptedStyleSheets" in Document.prototype` は tobira で false なので、
     Lit は `<style>` 要素に落ちる。それで正しい。
+- **`ai-branch-merge-loop.yml` は作られた日から YAML が壊れとった**
+  （2026-09-19 に判明）。merge の step の複数行コミットメッセージが `run: |` の
+  字下げから出とって、ファイルごと無効。一度も job を作れたことが無く、GitHub は
+  **どのブランチへの push でも、十分おきの cron でも**失敗 run を立てとった
+  （0 秒で赤、"workflow file issue"）。`schedule` を外しただけでは push ごとの赤が
+  残った。YAML を直し、trigger は `workflow_dispatch` だけにした。**直すと
+  「codex/* claude/* を master に自動マージして push する bot」が初めて動き出す**
+  ので、push と schedule は意図して戻しとらん。要るかどうか決めてから戻すこと。
+  CI の赤を見るのは `test` workflow だけでええ状態になった。
 - `src/engine/lexer.rs` が untracked で復活しとった（2026-09-19）。8c081ee で
   消した版と同一、`mod lexer` の参照なし、mtime 2026-07-23。**OneDrive の
   復元。** 消した。`scripts/ship.sh` は staged しか commit せんが、untracked が
