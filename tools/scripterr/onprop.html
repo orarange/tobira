@@ -1,0 +1,1 @@
+<html><body><button id="b">b</button><pre id="out">start</pre><script>var b=document.getElementById("b");b.onclick=function(){document.getElementById("out").textContent+=" onclick-prop";};b.addEventListener("click",function(){document.getElementById("out").textContent+=" click-listener";});b.click();b.dispatchEvent(new Event("click"));</script></body></html>

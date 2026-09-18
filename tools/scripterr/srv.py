@@ -1,7 +1,7 @@
 import http.server, os
 class H(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path.startswith('/missing.js'):
+        if self.path.startswith('/missing'):
             body = b"document.getElementById('out').textContent += ' BAD404';"
             self.send_response(404); self.send_header('Content-Type','application/javascript')
             self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body); return

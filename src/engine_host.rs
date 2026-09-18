@@ -4627,6 +4627,9 @@ impl EngineSession {
                                 );
                             }
                             Self::host_of(&mut vm).note(format!("[tobira-engine] {note}"));
+                            // The element hears about it: `onerror` is how a
+                            // page falls back to another CDN.
+                            Self::fire_on_script(&mut vm, script_node_id, "error");
                             continue;
                         }
                     }
@@ -4680,6 +4683,11 @@ impl EngineSession {
             if let Err(e) = outcome {
                 errors.push(e);
             }
+            // An external script fires `load` once it has run, whether or not
+            // it threw. An inline one never does.
+            if matches!(script, ScriptSource::External { .. }) {
+                Self::fire_on_script(&mut vm, script_node_id, "load");
+            }
         }
         let error = match errors.len() {
             0 => None,
@@ -4722,6 +4730,21 @@ impl EngineSession {
             .as_any_mut()
             .downcast_mut::<BrowserHost>()
             .expect("host is a BrowserHost")
+    }
+
+    /// Fire `load` or `error` on a `<script>` element the parser put there.
+    /// Listeners it registers are run to completion, as they would be in a
+    /// browser before the next script starts.
+    fn fire_on_script(vm: &mut Vm, node: Option<NodeId>, event_type: &str) {
+        let Some(node) = node else {
+            return;
+        };
+        // `ScriptSource::node_id` is the arena index, which is the handle.
+        if std::env::var_os("TOBIRA_DEBUG_SCRIPTS").is_some() {
+            eprintln!("[scripts] fire {event_type} on node {}", node.0);
+        }
+        let _ = vm.fire_dom_event(node.0, event_type);
+        vm.run_due_jobs(10_000);
     }
 
     fn host_of(vm: &mut Vm) -> &mut BrowserHost {
@@ -7118,6 +7141,70 @@ mod tests {
         assert!(error.contains("inline script #1"), "{error}");
         assert!(error.contains("1 more script(s) failed"), "{error}");
         assert!(error.contains("runtime"), "{error}");
+    }
+
+    /// `el.onclick = fn` is heard, before the listeners, on both `click()`
+    /// and `dispatchEvent`. Only `addEventListener` was, until 2026-09-18.
+    #[test]
+    fn on_property_handler_runs_before_listeners() {
+        let result = run_document_scripts(
+            r#"
+            <button id="b">b</button><p id="out">start</p>
+            <script>
+            var b = document.getElementById("b"), out = document.getElementById("out");
+            b.onclick = function () { out.textContent += " prop"; };
+            b.addEventListener("click", function () { out.textContent += " listener"; });
+            b.click();
+            b.dispatchEvent(new Event("click"));
+            </script>
+            "#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains("start prop listener prop listener"),
+            "{}",
+            result.html
+        );
+    }
+
+    /// A `<script src>` that cannot be fetched fires `error` on its element
+    /// and runs nothing; one that ran fires `load`. Both the property and the
+    /// listener forms hear it. The listeners are attached by an earlier
+    /// inline script, which can see later script elements because this host
+    /// parses the whole document before any script runs.
+    #[test]
+    fn external_script_fires_load_or_error_on_its_element() {
+        let result = run_document_scripts(
+            r#"
+            <p id="out">start</p>
+            <script>
+            var out = document.getElementById("out");
+            var ss = document.querySelectorAll("script[src]");
+            for (var i = 0; i < ss.length; i++) (function (el) {
+              el.onerror = function () { out.textContent += " onerror:" + el.getAttribute("src"); };
+              el.addEventListener("load", function () { out.textContent += " load:" + el.getAttribute("src"); });
+            })(ss[i]);
+            </script>
+            <script src="http://127.0.0.1:1/unreachable.js"></script>
+            <script>out.textContent += " end";</script>
+            "#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains("start onerror:http://127.0.0.1:1/unreachable.js end"),
+            "{}",
+            result.html
+        );
+        assert!(
+            result
+                .console_logs
+                .iter()
+                .any(|line| line.contains("unreachable.js not run")),
+            "{:?}",
+            result.console_logs
+        );
     }
 
     #[test]

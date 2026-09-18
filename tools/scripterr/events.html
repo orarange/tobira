@@ -1,0 +1,24 @@
+<html><body><pre id="out">start</pre>
+<script>
+document.addEventListener("error", function(e){ document.getElementById("out").textContent += " cap-err:"+e.target.tagName.toLowerCase(); }, true);
+document.addEventListener("load", function(e){ document.getElementById("out").textContent += " cap-load:"+e.target.tagName.toLowerCase(); }, true);
+var ss=document.querySelectorAll("script[src]");
+for (var i=0;i<ss.length;i++){ (function(el){
+  el.addEventListener("load", function(){ document.getElementById("out").textContent += " el-load:"+el.getAttribute("src"); });
+  el.addEventListener("error", function(){ document.getElementById("out").textContent += " el-error:"+el.getAttribute("src"); });
+  el.onerror = function(){ document.getElementById("out").textContent += " el-onerror:"+el.getAttribute("src"); };
+  el.onload = function(){ document.getElementById("out").textContent += " el-onload:"+el.getAttribute("src"); };
+})(ss[i]); }
+</script>
+<script src="/missing.js" onerror="document.getElementById('out').textContent += ' err-attr'" onload="document.getElementById('out').textContent += ' BAD-load-on-404'"></script>
+<script src="/ok.js" onload="document.getElementById('out').textContent += ' load-attr'" onerror="document.getElementById('out').textContent += ' BAD-err-on-ok'"></script>
+<script>
+var s=document.createElement('script'); s.src='/ok2.js';
+s.addEventListener('load', function(){ document.getElementById('out').textContent += ' load-dyn'; });
+document.body.appendChild(s);
+var f=document.createElement('script'); f.src='/missing2.js';
+f.onerror=function(){ document.getElementById('out').textContent += ' err-dyn'; };
+document.body.appendChild(f);
+</script>
+<script>document.getElementById('out').textContent += ' end';</script>
+</body></html>

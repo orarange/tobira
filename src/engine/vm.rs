@@ -2294,6 +2294,34 @@ impl Vm {
                 true,
                 true,
             );
+            // The `on<type>` property handler, `el.onclick = fn`. Until
+            // 2026-09-18 only `addEventListener` was heard: the property was
+            // stored on the wrapper like any other and never read back, so
+            // `s.onerror = fallback` on a script tag, and `onclick` set by
+            // hand, did nothing. It runs first, as it usually was set first.
+            // Returning `false` from it is `preventDefault()`.
+            let handler_key = PropertyKey::from(format!("on{event_type}").as_str());
+            let handler = self
+                .get_property_value(&current_target, &handler_key)
+                .unwrap_or(Value::Undefined);
+            if self.is_callable_value(&handler) {
+                let result = self.call_value_sync(
+                    handler,
+                    current_target.clone(),
+                    vec![event_val.clone()],
+                )?;
+                self.drain_microtasks();
+                if matches!(result, Value::Bool(false)) {
+                    self.define_data_property(
+                        event_ref,
+                        PropertyKey::from("defaultPrevented"),
+                        Value::Bool(true),
+                        true,
+                        true,
+                        true,
+                    );
+                }
+            }
             let listeners: Vec<GcRef<JsObject>> = self
                 .event_listeners
                 .get(&node_handle)

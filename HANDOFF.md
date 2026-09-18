@@ -30,7 +30,7 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   先の本物の腕に食われとる stub）、deprecated `boa_ast` `ImportCall::argument` 4、
   unused mut 2、残りは dead_code 系。数が増えたら中身を見ること。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1177 通過 / 0 落ち**（2026-09-18）。
+- `cargo test --release` → **1179 通過 / 0 落ち**（2026-09-18）。
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
   数え方: `cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result" | awk '{p+=$4; f+=$6} END {print p, f}'`
   （`tr -d '\000'` は必須。出力に NUL が混ざって grep が binary 扱いする）
@@ -540,6 +540,38 @@ tests23（2/5）を Mac 側が Noah's Ark 条項の未実装と読み、こち�
 全部走っとった。「最初の一本で止まって以降を試しとらんだけ」やなかった。
 ただし実頁で外部 script が一本でも落ちたら（広告・解析・CDN）その先が
 全滅する状態やったので、直す価値は数字より大きい。テスト 1176 → 1177。
+
+**続き: raw text の再構築、script の load / error、そして `el.onclick = fn`。**
+
+- Mac 側の指摘で `<style>` の検体を作り直した（`</p>` の直後に `<style>`、
+  間に空白を挟まん。空白があると再構築が先に走って踏まん）。踏んだ:
+  style の直下が `font` になっとった。CSS は消えとらんかった（幅 333 は
+  取れた）が、根の「raw text の中で `reconstruct_formatting` を呼ぶ」を
+  `html.rs` の Text トークンの段で止めた。`noah.html` が Chrome と同数（96）。
+- script 要素に `load` / `error` を撃つようにした（外部 script だけ。
+  失敗は `error` で本体は走らせん、走ったら `load`、throw しとっても）。
+  検体 `tools/scripterr/events.html`。
+- **そこで見つけた、もっと広い穴: `el.onclick = fn` 型のハンドラが
+  click でも何でも一切呼ばれとらんかった。** `addEventListener` だけが
+  効いとった。プロパティは wrapper に置かれるだけで `propagate_event`
+  （`vm.rs`）が読み返しとらんかった。直した: 各ノードで `on<type>` を
+  読んで callable なら listener より先に呼ぶ。`false` を返したら
+  `defaultPrevented`。`tools/scripterr/onprop.html` が Chrome と一致。
+  `TOBIRA_GC_VERIFY=1` で 1179 / 0、実頁六枚（react.dev、vuejs.org、MDN、
+  HN、lobste.rs、ja.wikipedia）で新しい uncaught error 無し。
+- **まだ空いとる穴（events.html で見える）:**
+  - `onerror="..."` の **HTML 属性**はハンドラとして読んどらん（属性を
+    関数にコンパイルする経路が無い）。`<body onload>` や `<img onerror>` も
+    同じはず。
+  - **script が `appendChild` した `<script src>` は走らん。** 動的に
+    足した script を拾って実行する経路が無い。ローダーの類（CDN の
+    フォールバック、遅延読み込み）はここに乗るので、大きい。
+  - bubble せんイベントは capture 段を通らん（`propagate_event` は
+    `bubbles` のときだけ祖先を辿る）。document の capture listener が
+    script の `error` を見れん。
+  - tobira は文書を全部 parse してから script を走らせる。Chrome は
+    parse しながら走らせるので、先の inline script が後の要素を見れる
+    のは tobira だけ。events.html の `el-*` 行の差はこれで、バグやない。
 
 ### 2026-09-10 - Claude (自走ループ二晩目: 8535535..c16844e, 23 コミット)
 

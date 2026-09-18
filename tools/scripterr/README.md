@@ -19,6 +19,20 @@ TOBIRA_DEBUG_CONSOLE=1 TOBIRA_DEBUG_SCRIPTS=1 ./target/release/tobira --cli http
 | `b2.html` | an uncaught throw only | `start s1 s3` |
 | `a.html` | `src` answered 404 / 500 / 404 (HTML body) | `start s1 s3 s5 s7` |
 | `net.html` | `src` refused / unknown host | `start s1 s3 s5` |
+| `events.html` | `load` / `error` on script elements, four ways | see below |
+| `onprop.html` | `el.onclick = fn` next to `addEventListener` | `start onclick-prop click-listener onclick-prop click-listener` |
+| `style3.html` | `<style>` right after `</p>` with `<font>` still active | `style-parent body child #text ...` |
+
+`events.html` is the one page where Chrome and tobira legitimately differ.
+Chrome prints `start cap-err:script err-attr ran-ok cap-load:script load-attr
+end cap-err:script err-dyn ran-ok2 cap-load:script load-dyn`; tobira prints
+`start el-onerror:/missing.js el-error:/missing.js ran-ok el-onload:/ok.js
+el-load:/ok.js end cap-load:#document`. The `el-*` lines are listeners an
+earlier inline script attached straight to the later script elements, which
+only works in tobira because it parses the whole document before any script
+runs. The three gaps the page shows are real: `onerror="..."` **attributes**
+are not handlers at all, a script element appended by script (`ran-ok2`)
+**never runs**, and non-bubbling events skip the capture phase (`cap-err`).
 
 Until 2026-09-18 tobira printed `start s1` for all four: the first failure
 broke out of the script loop, and a non-2xx body was executed as script
