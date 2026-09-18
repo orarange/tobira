@@ -239,16 +239,13 @@ impl<'a> super::FunctionCompiler<'a> {
                 let name = self.identifier_name(&identifier);
                 let resolved = self.resolve_binding(&name);
                 self.emit_load_binding(&name, resolved)?;
-                self.emit(Opcode::Dup);
-                let jump = match assign.op() {
-                    AssignOpNode::BoolAnd => self.emit_jump(Opcode::JumpIfFalsePop(0)),
-                    AssignOpNode::BoolOr => self.emit_jump(Opcode::JumpIfTruePop(0)),
-                    AssignOpNode::Coalesce => self.emit_jump(Opcode::JumpIfNullish(0)),
-                    _ => unreachable!(),
-                };
-                self.emit(Opcode::Pop);
                 if matches!(assign.op(), AssignOpNode::Coalesce) {
-                    self.emit_load_binding(&name, resolved)?;
+                    // `JumpIfNullish` peeks and pops nothing, so the value
+                    // stays as the result when it is not nullish, and is
+                    // popped before the right side replaces it. This used to
+                    // `Dup` and read the binding again, leaving two values
+                    // on both paths; `f(a ??= 1)` then called the wrong slot.
+                    let jump = self.emit_jump(Opcode::JumpIfNullish(0));
                     let skip = self.emit_jump(Opcode::Jump(0));
                     let assign_start = self.code.len();
                     self.patch_jump(jump, assign_start)?;
@@ -260,6 +257,13 @@ impl<'a> super::FunctionCompiler<'a> {
                     self.patch_jump(skip, end)?;
                     return Ok(());
                 }
+                self.emit(Opcode::Dup);
+                let jump = match assign.op() {
+                    AssignOpNode::BoolAnd => self.emit_jump(Opcode::JumpIfFalsePop(0)),
+                    AssignOpNode::BoolOr => self.emit_jump(Opcode::JumpIfTruePop(0)),
+                    _ => unreachable!(),
+                };
+                self.emit(Opcode::Pop);
                 self.compile_expression(assign.rhs())?;
                 self.emit(Opcode::Dup);
                 self.emit_store_binding(&name, resolved)?;
@@ -274,18 +278,11 @@ impl<'a> super::FunctionCompiler<'a> {
                 self.emit(Opcode::GetLocal(obj_temp));
                 self.emit(Opcode::GetLocal(key_temp));
                 self.emit_property_get(kind);
-                self.emit(Opcode::Dup);
-                let jump = match assign.op() {
-                    AssignOpNode::BoolAnd => self.emit_jump(Opcode::JumpIfFalsePop(0)),
-                    AssignOpNode::BoolOr => self.emit_jump(Opcode::JumpIfTruePop(0)),
-                    AssignOpNode::Coalesce => self.emit_jump(Opcode::JumpIfNullish(0)),
-                    _ => unreachable!(),
-                };
-                self.emit(Opcode::Pop);
                 if matches!(assign.op(), AssignOpNode::Coalesce) {
-                    self.emit(Opcode::GetLocal(obj_temp));
-                    self.emit(Opcode::GetLocal(key_temp));
-                    self.emit_property_get(kind);
+                    // Same shape as the identifier case above: no `Dup`, no
+                    // second read; the value on the stack is the result
+                    // unless it is nullish.
+                    let jump = self.emit_jump(Opcode::JumpIfNullish(0));
                     let skip = self.emit_jump(Opcode::Jump(0));
                     let assign_start = self.code.len();
                     self.patch_jump(jump, assign_start)?;
@@ -302,6 +299,13 @@ impl<'a> super::FunctionCompiler<'a> {
                     self.patch_jump(skip, end)?;
                     return Ok(());
                 }
+                self.emit(Opcode::Dup);
+                let jump = match assign.op() {
+                    AssignOpNode::BoolAnd => self.emit_jump(Opcode::JumpIfFalsePop(0)),
+                    AssignOpNode::BoolOr => self.emit_jump(Opcode::JumpIfTruePop(0)),
+                    _ => unreachable!(),
+                };
+                self.emit(Opcode::Pop);
                 self.compile_expression(assign.rhs())?;
                 self.emit(Opcode::Dup);
                 let value_slot = self.allocate_hidden_local()?;

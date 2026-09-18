@@ -83,6 +83,19 @@ impl StackDepthMode {
         }
     }
 
+    fn surplus(
+        &mut self,
+        label: &str,
+        ip: usize,
+        opcode: &Opcode,
+        message: String,
+    ) -> Result<(), StackVerifyError> {
+        match self {
+            StackDepthMode::Verify => Err(error(label, ip, opcode, message)),
+            StackDepthMode::Compute => Ok(()),
+        }
+    }
+
     fn out_of_range(
         &mut self,
         label: &str,
@@ -130,6 +143,20 @@ fn analyze_stack_depths(
             continue;
         }
         let next_depth = depth - pops + pushes;
+
+        // A return takes exactly the value it returns. Anything under it is
+        // a value some expression pushed and never consumed -- an extra
+        // `Dup`, say -- and only shows up here, since it never underflows and
+        // every path leaves the same amount behind. The class expression that
+        // left two values under `f(class {})` passed the other two checks.
+        if matches!(opcode, Opcode::Return | Opcode::AsyncReturn) && depth != 1 {
+            mode.surplus(
+                label,
+                ip,
+                opcode,
+                format!("stack surplus at return: depth {depth}, expected 1"),
+            )?;
+        }
 
         match flow {
             ControlFlow::FallThrough => {
@@ -356,6 +383,8 @@ fn stack_effect(op: &Opcode) -> (i64, i64, ControlFlow) {
             let pops = match op {
                 Opcode::GetProp => 2,
                 Opcode::GetIndex => 2,
+                // `import(x)` takes the specifier and leaves the promise.
+                Opcode::DynamicImport => 1,
                 Opcode::GetForInKeys => 1,
                 Opcode::GetForOfIterator => 1,
                 Opcode::GetForAwaitIterator => 1,

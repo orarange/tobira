@@ -1,0 +1,20 @@
+<html><body><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(label, fn){ try { log(label+'='+fn()); } catch(e){ log(label+'=ERR:'+e.message); } }
+function f(x,y){ return typeof x+','+typeof y; }
+t('l1-f(a||=1)', ()=>{ var a=0; return f(a||=1); });
+t('l2-f(a&&=1)', ()=>{ var a=2; return f(a&&=1); });
+t('l3-f(a??=1)', ()=>{ var a=null; return f(a??=1); });
+t('l4-f(a||=1) short', ()=>{ var a=5; return f(a||=1); });
+t('l5-[a||=1]', ()=>{ var a=0; return [a||=1].length; });
+t('l6-f(o.p||=1)', ()=>{ var o={p:0}; return f(o.p||=1); });
+t('l7-f(o[k]||=1)', ()=>{ var o={p:0},k='p'; return f(o[k]||=1); });
+t('l8-f(1, a||=1)', ()=>{ var a=0; return f(1, a||=1); });
+t('l9-f(a=1)', ()=>{ var a=0; return f(a=1); });
+t('l10-f(a+=1)', ()=>{ var a=0; return f(a+=1); });
+t('l11-f(import(x))', ()=>{ try { return f(import('./nope.js')); } catch(e) { return 'ERR:'+e.message; } });
+t('l12-f(a++)', ()=>{ var a=0; return f(a++); });
+t('l13-f(++a)', ()=>{ var a=0; return f(++a); });
+t('l14-f(o.p++)', ()=>{ var o={p:0}; return f(o.p++); });
+</script></body></html>

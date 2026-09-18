@@ -34,7 +34,9 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   先の本物の腕に食われとる stub）、deprecated `boa_ast` `ImportCall::argument` 4、
   unused mut 2、残りは dead_code 系。数が増えたら中身を見ること。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1181 通過 / 0 落ち**（2026-09-18）。
+- `cargo test --release` → **1182 通過 / 0 落ち**（2026-09-18）。
+  JS のコンパイラを触ったら `TOBIRA_VERIFY_BYTECODE=1` で実頁を一枚読んで
+  `[verify] ok` の行と `verification failed` の行を数えること。
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
   数え方: `cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result" | awk '{p+=$4; f+=$6} END {print p, f}'`
   （`tr -d '\000'` は必須。出力に NUL が混ざって grep が binary 扱いする）
@@ -44,7 +46,17 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - 動作確認できとる範囲（`--screenshot` で目視、JS エラーは `TOBIRA_DEBUG_CONSOLE=1`）:
   - **一致に近い**: ja.wikipedia.org、abehiroshi.la.coocan.jp、news.ycombinator.com（投票矢印を除く）
   - **中身は出るが意匠が甘い**: react.dev、vuejs.org、developer.mozilla.org
-  - 上記いずれも未捕捉 JS エラー 0。
+  - 上記いずれも未捕捉 JS エラー 0。**ただし「未捕捉 0」は React の頁では
+    何も保証せん**（2026-09-18 に二度外れた）。error boundary が拾うと
+    console.error にしか出ん（react.dev が真っ白でも uncaught 0 やった）。
+    JS を触ったら `TOBIRA_DUMP_DOM` で Chrome の `--dump-dom` と突き合わせる
+    （`tools/scripterr/domstat.py`）のを正規の手順にする。console の
+    `Error:` 行の数も見る。
+  - react.dev は React error #418（hydration の文字不一致）が console に
+    出る。tobira 側の些細な差（空白・数値の書式）で出る種類で、追うと沼。
+    ただし #418 が出とる間は hydration が部分的に捨てられとるので、
+    react.dev の DOM が Chrome の 1846 に対して 1362 のままなのはこれが
+    理由の一部かもしれん。気になったときに戻る印。
   - 確認しとらん: 認証の要る頁、フォーム POST、動画、Google/YouTube の実経路
     （`src/browser.rs` に synthetic fallback が残っとる。実物とは別物と思うこと）
 
@@ -652,6 +664,41 @@ Mac 側が「Noah's Ark と同じ形に片足を突っ込んどる」と言う�
 静止画は「押せる」を測れんし、error boundary の中の死は uncaught error に
 出ん。②参照頁を触る変更の後は、参照頁を**全部**一枚ずつ撮る。今回は
 react.dev だけ撮らんかった一枚が退化しとった。
+
+**続き: 一件で終わらせんで、種類ごと掃いた。** Mac 側の指摘で
+`src/engine/verifier.rs` を見たら、検査は underflow と合流点の深さ不一致の
+二つだけで、**余った値の検査が無かった**。余分な `Dup` は下回らんし、
+どの経路でも同じだけ余るので静かに通る。
+
+- `Return` / `AsyncReturn` の直前の深さは厳密に 1、という検査を足した
+  （`stack surplus at return`）。`tests/bytecode_verifier.rs` の corpus を
+  class 式・関数式・論理代入・`import()`・`new.target`・tagged template・
+  for-of / for-in / switch / try-finally からの return など約 50 形に広げ、
+  一件目で止まらず全件集める harness にした。
+- **すぐ二件出た。** (1) `import(x)` は verifier の表が pops 0 になっとった
+  （VM は指定子を pop する）。表の誤り、動作は正しい。直した。
+  (2) **`a ??= v` が式一つに値二つ残す本物のバグ**（`||=` `&&=` は無事）。
+  `JumpIfNullish` は peek で pop せんのに `Dup` して読み直しとった。
+  `f(a ??= 1)` で a が null やと callee が消えて "non-function" になる。
+  識別子と `o.p` / `o[k]` の両方で同じ形。直した（`statements.rs` の
+  `compile_logical_assignment_expression`）。回帰テスト二本。
+- **本命: 実物の minified JS に verifier を当てた。** `TOBIRA_VERIFY_BYTECODE=1`
+  はコンパイルした全 chunk（入れ子の関数も）を検査して、通ったら
+  `[verify] ok: N functions, M opcodes` を出すようにした（黙って通ったのか
+  読んどらんのかを区別するため）。react.dev で **18 chunk、9,042 関数、
+  732,750 opcode、失敗 0**。他五枚も 0（下の表）。**この種類はこれで
+  一掃と言える。** class 式と `??=` の二件だけやった。
+
+  | 頁 | chunk | 関数 | opcode | 失敗 |
+  |---|---|---|---|---|
+  | react.dev | 18 | 9,042 | 732,750 | 0 |
+  | ja.wikipedia (ブラウザ) | 12 | 4,502 | 288,127 | 0 |
+  | developer.mozilla.org | 11 | 1,870 | 124,184 | 0 |
+  | vuejs.org | 18 | 1,666 | 104,769 | 0 |
+  | news.ycombinator.com | 2 | 277 | 15,277 | 0 |
+  | lobste.rs | 2 | 237 | 14,117 | 0 |
+
+- テスト 1181 → **1182 / 0**。
 
 ### 2026-09-10 - Claude (自走ループ二晩目: 8535535..c16844e, 23 コミット)
 

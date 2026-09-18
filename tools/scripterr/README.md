@@ -25,6 +25,7 @@ TOBIRA_DEBUG_CONSOLE=1 TOBIRA_DEBUG_SCRIPTS=1 ./target/release/tobira --cli http
 | `dyn.html` | scripts that script adds: seven ways | see below |
 | `repro_classarg.html`, `repro_classarg2.html` | a class expression as a call argument, in every call shape | every line names the right types |
 | `repro_new.html` .. `repro_new4.html` | the bisection that led there, from CodeMirror's `ViewPlugin.fromClass` | kept as the record |
+| `repro_logical.html` | `a ||= v`, `a &&= v`, `a ??= v`, `import()`, `a++` as call arguments | every line names the right types (`??=` used to lose the callee) |
 
 `domstat.py` counts elements, text and tags in a serialized DOM and diffs two
 of them. With `TOBIRA_DUMP_DOM=<path>` (the document as the scripts left it)

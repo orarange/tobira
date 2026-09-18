@@ -7498,6 +7498,35 @@ mod tests {
         );
     }
 
+    /// `a ??= v` is one value too, on both paths and both target shapes. It
+    /// used to `Dup` and read the target again, so `f(a ??= 1)` with `a`
+    /// null called the wrong slot. Found by the verifier's return-depth check.
+    #[test]
+    fn nullish_assignment_as_call_argument_is_one_value() {
+        let result = run_document_scripts(
+            r#"
+            <p id="out"></p>
+            <script>
+            function f(x, y) { return typeof x + "," + typeof y; }
+            var a = null, b = 2, o = { p: null, q: 3 }, k = "p";
+            document.getElementById("out").textContent = [
+              f(a ??= 1), f(b ??= 1), f(o.p ??= 1), f(o.q ??= 1), f(o[k] ??= 1),
+              a, b, o.p, o.q,
+            ].join(" ");
+            </script>
+            "#,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains(
+                "number,undefined number,undefined number,undefined number,undefined number,undefined 1 2 1 3"
+            ),
+            "{}",
+            result.html
+        );
+    }
+
     #[test]
     fn run_document_scripts_includes_js_backtrace() {
         let result = run_document_scripts(

@@ -2,15 +2,24 @@ use tobira_engine::engine::{
     Compiler, Opcode, Parser, SourceType, compute_stack_depths, verify_stack_balance,
 };
 
-fn verify_script(source: &str) {
-    let program = Parser::new(source).parse().expect("script should parse");
-    let chunk = Compiler::new(&program)
-        .compile()
-        .expect("script should compile");
-    verify_stack_balance(&chunk.top_level).expect(source);
+fn verify_script(source: &str) -> Option<String> {
+    let program = match Parser::new(source).parse() {
+        Ok(program) => program,
+        Err(e) => return Some(format!("{source}
+    -> parse: {e:?}")),
+    };
+    let chunk = match Compiler::new(&program).compile() {
+        Ok(chunk) => chunk,
+        Err(e) => return Some(format!("{source}
+    -> compile: {e:?}")),
+    };
+    verify_stack_balance(&chunk.top_level)
+        .err()
+        .map(|e| format!("{source}
+    -> {e:?}"))
 }
 
-fn verify_module(source: &str) {
+fn verify_module(source: &str) -> Option<String> {
     let program = Parser::new(source)
         .with_source_type(SourceType::Module)
         .parse()
@@ -18,7 +27,10 @@ fn verify_module(source: &str) {
     let chunk = Compiler::new(&program)
         .compile()
         .expect("module should compile");
-    verify_stack_balance(&chunk.top_level).expect(source);
+    verify_stack_balance(&chunk.top_level)
+        .err()
+        .map(|e| format!("{source}
+    -> {e:?}"))
 }
 
 fn assert_linear_depths(proto: &tobira_engine::engine::FunctionProto) {
@@ -90,6 +102,7 @@ fn linear_effect(opcode: &Opcode) -> Option<(i64, i64)> {
         | Opcode::GetProto => {
             let pops = match opcode {
                 Opcode::GetProp | Opcode::GetIndex => 2,
+                Opcode::DynamicImport => 1,
                 Opcode::GetForInKeys
                 | Opcode::GetForOfIterator
                 | Opcode::GetForAwaitIterator
@@ -195,10 +208,64 @@ fn corpus_verifies_stack_balance() {
         "async function af() { await g(); return 1; }",
         "function* gen() { yield 1; return 2; }",
         "const m = import('./mod.js');",
+        // A value-producing expression in every place an expression can go.
+        // The class expression as a call argument left two values on the
+        // stack (an extra `Dup`), which underflow and merge checks never see;
+        // the return-depth check does. Each shape below is tried with a
+        // class, a function, an arrow, an object and an array, so the same
+        // slip in any other `compile_*_value` shows up too.
+        "f(class {});",
+        "f(1, class {}, 2);",
+        "o.m(class {});",
+        "o['m'](class {});",
+        "new F(class {});",
+        "f(...[class {}]);",
+        "var a1 = [class {}, 1];",
+        "var o1 = { k: class {}, n: 1 };",
+        "var o2 = { [class {}]: 1 };",
+        "function r() { return class {}; }",
+        "var d = (x = class {}) => x;",
+        "var t = cond ? class {} : 1;",
+        "var c = (0, class {});",
+        "var s = `${class {}}`;",
+        "var b = typeof class {} + '';",
+        "var n = new (class {})();",
+        "var e = class extends Base {};",
+        "var e2 = class X { static s = 1; #p = 2; static { init(); } m() {} get g() { return 1; } static sm() {} };",
+        "f(class { constructor(a) { this.a = a; } });",
+        "f(function () {}, () => 1, { k: 1 }, [1]);",
+        "var q = f(f(class {}));",
+        "function g1(it) { for (const x of it) { if (x) return x; } }",
+        "function g2(it) { for (const x of it) { if (x) break; } return 1; }",
+        "function g3() { try { return f(); } finally { h(); } }",
+        "function g4() { try { throw e; } catch (x) { return x; } }",
+        "function g5(o) { for (const k in o) { return k; } }",
+        "function g6(a) { switch (a) { case 1: return 2; default: return 3; } }",
+        "function g7() { label: for (;;) { for (;;) { break label; } } return 1; }",
+        "async function g8(it) { for await (const x of it) { return x; } }",
+        "function* g9() { const x = yield 1; return x; }",
+        "function g10(o) { const { a = f(class {}) } = o; return a; }",
+        "function g11(a) { return a?.b?.(class {}); }",
+        "function g12() { return tag`x${class {}}y`; }",
+        "function g13(a) { a ||= class {}; a &&= 1; a ??= 2; return a; }",
+        "function g14() { return [...f(class {})]; }",
+        "function g15() { return { ...f(class {}) }; }",
+        "function g16() { return new.target; }",
+        "function g17() { return delete o[f(class {})]; }",
+        "function g18(a) { return a instanceof class {} && 'x' in class {}; }",
+        "function g19() { return (class {}).name; }",
+        "function g20(x) { return x = class {}; }",
+        "function g21(o) { return o.p = class {}; }",
+        "function g22(o) { return o[f()] = class {}; }",
+        "function g23() { return [class {}][0]; }",
+        "function g24() { return (function () { return class {}; })(); }",
+        "function g25() { return f(class {}) + f(class {}); }",
     ];
 
+    // Every failure, not the first: a table slip usually shows in several.
+    let mut failures = Vec::new();
     for source in scripts {
-        verify_script(source);
+        failures.extend(verify_script(source));
     }
 
     let modules = [
@@ -208,8 +275,16 @@ fn corpus_verifies_stack_balance() {
     ];
 
     for source in modules {
-        verify_module(source);
+        failures.extend(verify_module(source));
     }
+    assert!(
+        failures.is_empty(),
+        "{} of the corpus failed to verify:
+{}",
+        failures.len(),
+        failures.join("
+")
+    );
 }
 
 #[test]

@@ -161,16 +161,31 @@ impl<'a> Compiler<'a> {
             function.emit_implicit_return();
         }
         let chunk = Chunk::new(function.finish());
-        if env::var_os("TOBIRA_VERIFY_BYTECODE").is_some()
-            && let Err(error) = verify_stack_balance(&chunk.top_level)
-        {
-            eprintln!(
-                "bytecode verification failed: function={:?} ip={} opcode={} message={}",
-                error.function_label, error.ip, error.opcode, error.message
-            );
+        if env::var_os("TOBIRA_VERIFY_BYTECODE").is_some() {
+            match verify_stack_balance(&chunk.top_level) {
+                Err(error) => eprintln!(
+                    "bytecode verification failed: function={:?} ip={} opcode={} message={}",
+                    error.function_label, error.ip, error.opcode, error.message
+                ),
+                // Say so when it passed, with the size, so a run over a real
+                // page shows the verifier was there and how much it read.
+                Ok(()) => eprintln!(
+                    "[verify] ok: {} functions, {} opcodes",
+                    count_functions(&chunk.top_level),
+                    count_opcodes(&chunk.top_level)
+                ),
+            }
         }
         Ok(chunk)
     }
+}
+
+fn count_functions(proto: &FunctionProto) -> usize {
+    1 + proto.nested_functions.iter().map(count_functions).sum::<usize>()
+}
+
+fn count_opcodes(proto: &FunctionProto) -> usize {
+    proto.code.len() + proto.nested_functions.iter().map(count_opcodes).sum::<usize>()
 }
 
 pub fn compile(program: &Program) -> Result<Chunk, CompileError> {
