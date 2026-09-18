@@ -1,0 +1,24 @@
+<html><body><div id="d"></div><svg id="s"><ellipse id="e"></ellipse></svg><img id="i"><input id="c" type="checkbox" checked value="v"><p id="ce" contenteditable></p><input name="nm"><pre id="out">start</pre>
+<script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(label, fn){ try { log(label+'='+fn()); } catch(x){ log(label+'=ERR:'+x.name); } }
+var d=document.getElementById('d');
+t('onclick-unset', ()=>String(d.onclick)+'/'+String(document.onclick)+'/'+String(window.onload));
+t('onclick-set', ()=>{ d.onclick=function(){}; return typeof d.onclick; });
+t('onfoo', ()=>String(d.onDOMContentLoaded));
+t('defaultView', ()=>document.defaultView===window);
+t('ownerDoc-dv', ()=>typeof d.ownerDocument.defaultView.getComputedStyle);
+t('ns-div', ()=>d.namespaceURI);
+t('ns-svg', ()=>document.getElementById('s').namespaceURI+'|'+document.getElementById('e').namespaceURI);
+t('ns-created', ()=>document.createElementNS('http://www.w3.org/2000/svg','circle').namespaceURI);
+t('event', ()=>String(window.event));
+t('frames', ()=>(window.frames===window)+'/'+window.length);
+t('fonts', ()=>typeof document.fonts+'/'+document.fonts.status+'/'+document.fonts.check('12px Arial')+'/'+(document.fonts.ready===document.fonts.ready));
+t('adopted', ()=>typeof document.adoptedStyleSheets);
+t('contentEditable', ()=>d.contentEditable+'/'+document.getElementById('ce').contentEditable+'/'+document.getElementById('ce').isContentEditable);
+t('complete', ()=>document.getElementById('i').complete);
+t('checked', ()=>document.getElementById('c').checked+'/'+document.getElementById('c').defaultValue+'/'+d.checked);
+t('byName', ()=>document.getElementsByName('nm').length);
+t('scripts', ()=>document.scripts.length);
+document.fonts.ready.then(function(){ log('fonts-ready'); });
+</script></body></html>

@@ -905,6 +905,52 @@ react.dev だけ撮らんかった一枚が退化しとった。
     有るのに）、`Option` / `Audio`、`CustomElementRegistry`、`BigInt`、
     `Atomics` / `BigInt64Array`、canvas 系（`CanvasRenderingContext2D` /
     `ImageData` / `Path2D`）。
+- **`TOBIRA_DEBUG_MISSING=1`: 頁が読んで、無かった member を数える計器**
+  （2026-09-18〜19）。`get_host_property` が Undefined を返した読みを
+  `<phase> Interface.name` で数え、snapshot のたびに総数が増えとったら多い順に
+  60 行出す。`TOBIRA_DEBUG_CSS` の「黙って既定に落ちた宣言」と同じ仕掛け。
+  数えんもの: `typeof obj.x`（GetProp の次の opcode が `Typeof`）、`in`（別経路）、
+  wrapper に own property がある名前、**tobira 自身の読み**、未設定の `on*`
+  （null を返すので無いわけやない）。phase は最初の頁 script が走るまで
+  `prelude`、以後 `page`。**読むのは `page` の行だけ。**
+  Chrome に在る名前だけに絞るには `domsurface_names.json` と突き合わせる
+  （`__reactEvents$…` や `window.QUnit` は Chrome でも undefined）。
+  - **最初の順位表は計器が自分を測っとった。** 一位 `Element.onload` 31（六枚
+    全部）、`onslotchange` 22、`onreadystatechange` 6、`document.fonts` 6、
+    `adoptedStyleSheets` 6。Mac 側が六枚の script を全部取って grep し、
+    **HN と lobste.rs（script 1 本ずつ、5KB と 1.7KB）にその名前が一つも無い**
+    と示した。読んどったのは tobira: `propagate_event` が各ノードで
+    `on<type>` を読む（845f104 で足した）のと、RUNTIME_PRELUDE の
+    `if (!document.fonts)` の存在確認。**見分け方: 「全頁でちょうど 1 回ずつ」は
+    頁の性質やのうて、実行のたびに必ず通る経路の印。**
+  - 作り直した表（`page` のみ、六枚、Chrome に在る名前）: `window.event` 10
+    （react。**Chrome も dispatch の外では undefined**、穴やない）、
+    `document.defaultView` 8（react）、`Element.namespaceURI` 8（react, wiki）、
+    `contentEditable` 4、`on*` 7、`window.frames` 3、`trustedTypes` 3
+    （mdn, vue。探り）、`complete` 2、`checked` 2、`relList` 2、あとは 1 回ずつ。
+    **ほぼ react.dev 一枚。** こちらが本命と思うとった Document の子要素・
+    フォーム部品・Anchor の URL 分解は 0〜2。
+  - 直した: 未設定の `on*` は null（Element / Document / Window）、
+    `document.defaultView`、`namespaceURI`（名前空間は node に持っとらんので
+    tag から）、`contentEditable` / `isContentEditable`、img の `complete`、
+    input の `checked` / `defaultChecked` / `defaultValue`、`window.frames` /
+    `length`、`document.getElementsByName` / `scripts` / `prerendering`。
+    `tools/scripterr/batchprobe.html` が Chrome と一致。当て直したら上位は消えた。
+  - **足しかけてやめたもの**: `document.fonts` と `adoptedStyleSheets` の
+    native 実装。**どちらも RUNTIME_PRELUDE が既に入れとる**（頁からは元から
+    見えとった）。native の腕は prelude の `if (!document.fonts)` を先回りして
+    polyfill を潰すだけやった。`window.event` に null を返すのも間違い。
+  - **外れた読み二つ**: 「`namespaceURI` が undefined やから react.dev の
+    ellipse のプレビューが出ん」→ 直しても 1362 要素・ellipse 9 のまま。
+    別の原因。「MDN の shadow 部品は style が当たっとらんかも
+    （Lit は `adoptedStyleSheets` で入れる）」→ `TOBIRA_DUMP_RENDER` で見たら
+    17 個の shadow root 全部に `<style>` がある（SSR が入れとる）。Lit の判定
+    `"adoptedStyleSheets" in Document.prototype` は tobira で false なので、
+    Lit は `<style>` 要素に落ちる。それで正しい。
+- `src/engine/lexer.rs` が untracked で復活しとった（2026-09-19）。8c081ee で
+  消した版と同一、`mod lexer` の参照なし、mtime 2026-07-23。**OneDrive の
+  復元。** 消した。`scripts/ship.sh` は staged しか commit せんが、untracked が
+  あったら止まるようにした（`SHIP_ALLOW_UNTRACKED=1` で通す）。
 - react.dev の pending の中身: **頁自身の `setInterval` 60ms が 5 本**
   （例のプレビューの時計）と 20 秒・29 秒の timer。tobira 側の収束の問題やない。
   `TOBIRA_DEBUG_SCRIPTS=1` で pump が 1 秒ごとに `[pump] N timers (M repeating),

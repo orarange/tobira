@@ -217,6 +217,7 @@ enum BuiltinId {
     DomDocGetElementById,
     DomDocGetElementsByClassName,
     DomDocGetElementsByTagName,
+    DomDocGetElementsByName,
     DomDocCreateElement,
     DomDocCreateTextNode,
     DomDocCreateComment,
@@ -1531,6 +1532,9 @@ pub struct Vm {
     /// (`typeof obj.x`, `"x" in obj`) is not a read and is not counted.
     debug_missing: bool,
     probe_read: bool,
+    /// Who is running while a read is counted: "prelude" until the
+    /// page's first script starts, "page" from then on.
+    missing_phase: &'static str,
     missing_reads: HashMap<String, u32>,
     /// `document.readyState`: "loading" while the parser's scripts run,
     /// "interactive" once they have, "complete" after `load`.
@@ -2104,6 +2108,7 @@ impl Vm {
             event_loop: EventLoop::new(),
             debug_missing: env::var_os("TOBIRA_DEBUG_MISSING").is_some(),
             probe_read: false,
+            missing_phase: "prelude",
             missing_reads: HashMap::new(),
             document_ready_state: "loading",
             random_state,
@@ -2437,9 +2442,15 @@ impl Vm {
             // hand, did nothing. It runs first, as it usually was set first.
             // Returning `false` from it is `preventDefault()`.
             let handler_key = PropertyKey::from(format!("on{event_type}").as_str());
+            // This read is the browser's, not the page's: TOBIRA_DEBUG_MISSING
+            // must not count it. It did, and `Element.onload` topped a table
+            // of "what pages read" on pages that never mention it.
+            let was_probing = self.probe_read;
+            self.probe_read = true;
             let handler = self
                 .get_property_value(&current_target, &handler_key)
                 .unwrap_or(Value::Undefined);
+            self.probe_read = was_probing;
             if self.is_callable_value(&handler) {
                 let result = self.call_value_sync(
                     handler,
@@ -2921,6 +2932,7 @@ impl Vm {
             document_ready_state: _,
             debug_missing: _,
             probe_read: _,
+            missing_phase: _,
             missing_reads: _,
         } = self;
 
@@ -3238,6 +3250,10 @@ impl Vm {
     /// the callbacks' names. For a page that never settles.
     /// The missing-member counts so far, most read first. Empty unless
     /// TOBIRA_DEBUG_MISSING is set.
+    pub fn set_missing_phase(&mut self, phase: &'static str) {
+        self.missing_phase = phase;
+    }
+
     pub fn missing_report(&self) -> Vec<(String, u32)> {
         let mut rows: Vec<(String, u32)> = self
             .missing_reads
@@ -9114,11 +9130,23 @@ impl Vm {
                 && matches!(value, Value::Undefined)
                 && let PropertyKey::String(name) = key
                 && self.get_own_property_descriptor(object, key).is_none()
+                && !self.host_has_event_handler_property(object, key)
             {
+                // Keyed by who was running: the runtime prelude and the host's
+                // own setup read members too, and those are not the page.
                 *self
                     .missing_reads
-                    .entry(format!("{}.{}", slot.interface_name, name))
+                    .entry(format!("{} {}.{}", self.missing_phase, slot.interface_name, name))
                     .or_insert(0) += 1;
+            }
+            // `window.onload` nobody set is null as well; the window's own
+            // properties live in the globals, so a set one was found above.
+            if matches!(value, Value::Undefined)
+                && slot.class == HostObjectClass::Window
+                && self.host_has_event_handler_property(object, key)
+                && self.get_own_property_descriptor(object, key).is_none()
+            {
+                return Ok(Value::Null);
             }
             // Fall back to an own expando property for Node names the DOM doesn't
             // expose (mirrors the set path above).
@@ -9134,6 +9162,11 @@ impl Vm {
                     self.get_own_property_descriptor(object, key)
                 {
                     return Ok(value);
+                }
+                // An event handler property nobody set reads as null, not
+                // undefined; the spec says so, and react.dev compares against it.
+                if self.host_has_event_handler_property(object, key) {
+                    return Ok(Value::Null);
                 }
                 // Upgraded custom elements get their class prototype linked, so
                 // walk it for methods like `connectedCallback` / user methods.
@@ -14864,6 +14897,11 @@ impl Vm {
                 let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 self.query_all_to_array(self.this_node_id(&this_value), tag)
             }
+            BuiltinId::DomDocGetElementsByName => {
+                let name = args.first().map(|v| self.to_string(v)).unwrap_or_default();
+                let sel = format!("[name=\"{}\"]", name.replace('"', "\\\""));
+                self.query_all_to_array(self.this_node_id(&this_value), sel)
+            }
             BuiltinId::DomDocCreateElement => {
                 let tag = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let lower = tag.to_ascii_lowercase();
@@ -18997,6 +19035,10 @@ impl Vm {
                 .get("document")
                 .cloned()
                 .unwrap_or(Value::Undefined)),
+            // The one frame there is. (`window.event` is undefined outside a
+            // dispatch in Chrome too, so it is left that way.)
+            "frames" => Ok(self.globals.get("window").cloned().unwrap_or(Value::Undefined)),
+            "length" => Ok(Value::Number(0.0)),
             "window" | "self" | "globalThis" | "top" | "parent" => Ok(self
                 .globals
                 .get("window")
@@ -19628,6 +19670,16 @@ impl Vm {
                     .insert("implementation", value.clone());
                 Ok(value)
             }
+            // The window this document is shown in.
+            "defaultView" => Ok(self.globals.get("window").cloned().unwrap_or(Value::Null)),
+            // `document.fonts` and `document.adoptedStyleSheets` are not here on
+            // purpose: the runtime prelude in `engine_host.rs` puts both on the
+            // document (a FontFaceSet that is already loaded, and an array the
+            // constructed-stylesheet shim reads). A native arm would answer
+            // first and the prelude's `if (!document.fonts)` would skip itself.
+            "getElementsByName" => Ok(self.allocate_builtin_method(BuiltinId::DomDocGetElementsByName)),
+            "scripts" => self.query_all_to_array(NodeId(0), "script".to_string()),
+            "prerendering" => Ok(Value::Bool(false)),
             _ => Ok(Value::Undefined),
         }
     }
@@ -20139,6 +20191,50 @@ impl Vm {
             }
             "offsetParent" => Ok(Value::Null),
             "isConnected" => Ok(Value::Bool(true)),
+            // The namespace is not kept on the node; the tag says which it is.
+            "namespaceURI" => {
+                let tag = self.get_node_name(node_id).to_ascii_lowercase();
+                let ns = if is_svg_tag(&tag) {
+                    "http://www.w3.org/2000/svg"
+                } else if tag == "math" {
+                    "http://www.w3.org/1998/Math/MathML"
+                } else {
+                    "http://www.w3.org/1999/xhtml"
+                };
+                Ok(self.make_string_value(ns))
+            }
+            "contentEditable" => {
+                let present = self.has_dom_attribute(node_id, "contenteditable");
+                let attr = self.get_dom_attribute(node_id, "contenteditable");
+                let value = match (present, attr.trim().to_ascii_lowercase().as_str()) {
+                    (false, _) => "inherit",
+                    (true, "" | "true") => "true",
+                    (true, "false") => "false",
+                    (true, "plaintext-only") => "plaintext-only",
+                    _ => "inherit",
+                };
+                Ok(self.make_string_value(value))
+            }
+            "isContentEditable" => {
+                let attr = self.get_dom_attribute(node_id, "contenteditable");
+                Ok(Value::Bool(self.has_dom_attribute(node_id, "contenteditable") && attr != "false"))
+            }
+            // An image here is either decoded or not coming; either way, done.
+            "complete" if self.get_node_name(node_id).eq_ignore_ascii_case("img") => Ok(Value::Bool(true)),
+            "checked" | "defaultChecked"
+                if self.get_node_name(node_id).eq_ignore_ascii_case("input") =>
+            {
+                Ok(Value::Bool(self.has_dom_attribute(node_id, "checked")))
+            }
+            "defaultValue"
+                if matches!(
+                    self.get_node_name(node_id).to_ascii_lowercase().as_str(),
+                    "input" | "textarea"
+                ) =>
+            {
+                let value = self.get_dom_attribute(node_id, "value");
+                Ok(self.make_string_value(&value))
+            }
             "ownerDocument" => Ok(self.globals.get("document").cloned().unwrap_or(Value::Undefined)),
             "baseURI" => {
                 let res = self.host.location(WindowId(0));
@@ -22384,4 +22480,17 @@ fn is_known_css_property(name: &str) -> bool {
                 | "-webkit-line-clamp" | "-webkit-mask" | "-webkit-mask-image"
                 | "-webkit-overflow-scrolling" | "-webkit-text-size-adjust"
         )
+}
+
+/// Tags that live in the SVG namespace when they appear in HTML.
+fn is_svg_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "svg" | "path" | "circle" | "ellipse" | "line" | "polyline" | "polygon" | "rect" | "g"
+            | "defs" | "use" | "symbol" | "text" | "tspan" | "textpath" | "image" | "clippath"
+            | "mask" | "pattern" | "lineargradient" | "radialgradient" | "stop" | "filter"
+            | "fegaussianblur" | "feoffset" | "feblend" | "fecolormatrix" | "fecomposite"
+            | "femerge" | "femergenode" | "feflood" | "marker" | "foreignobject" | "animate"
+            | "animatetransform" | "set" | "desc" | "metadata" | "switch" | "view"
+    )
 }

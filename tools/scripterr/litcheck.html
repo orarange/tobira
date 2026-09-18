@@ -1,0 +1,10 @@
+<html><body><pre id="out">start</pre><script>
+var out=document.getElementById('out'); function log(s){ out.textContent += ' ' + s; }
+function t(l,f){ try{ log(l+'='+f()); }catch(x){ log(l+'=ERR:'+x.name); } }
+t('ShadowRoot', ()=>typeof ShadowRoot);
+t('adopted-in-DocProto', ()=>'adoptedStyleSheets' in Document.prototype);
+t('CSSStyleSheet', ()=>typeof CSSStyleSheet);
+t('replace-in-proto', ()=>typeof CSSStyleSheet!=='undefined' && 'replace' in CSSStyleSheet.prototype);
+t('lit-supportsAdopting', ()=>!!(window.ShadowRoot && 'adoptedStyleSheets' in Document.prototype && 'replace' in CSSStyleSheet.prototype));
+t('new-sheet', ()=>{ var s=new CSSStyleSheet(); return typeof s.replaceSync; });
+</script></body></html>

@@ -4876,6 +4876,8 @@ impl EngineSession {
         // it; here it is arrival order, which is one of the orders a
         // browser can produce. The budget is for pages whose scripts add
         // scripts without end.
+        // From here on a counted read is the page's, not the prelude's.
+        vm.set_missing_phase("page");
         let mut dynamic_budget = DYNAMIC_SCRIPT_BUDGET;
         for (script_index, script) in scripts.iter().enumerate() {
             let label = Self::script_label(script, script_index);
@@ -7982,6 +7984,36 @@ mod tests {
         // are still missing; noted in HANDOFF.md.)
         assert!(
             result.html.contains("true true true true true true true true false false 1 3 4"),
+            "{}",
+            result.html
+        );
+    }
+
+    /// The members TOBIRA_DEBUG_MISSING ranked, as Chrome answers them: an
+    /// unset `on*` is null on an element, the document and the window,
+    /// `defaultView` is the window, `namespaceURI` follows the tag,
+    /// `document.fonts.ready` resolves, and `checked` is an input's.
+    #[test]
+    fn members_pages_read_answer_as_chrome_does() {
+        let result = run_document_scripts(
+            r##"<div id="d"></div><svg id="s"><ellipse id="e"></ellipse></svg><img id="i"><input id="c" type="checkbox" checked value="v"><input name="nm"><p id="out"></p>
+            <script>
+            var d = document.getElementById("d"), r = [];
+            r.push(String(d.onclick), String(document.onclick), String(window.onload), String(d.onDOMContentLoaded));
+            d.onclick = function () {}; r.push(typeof d.onclick);
+            r.push(document.defaultView === window, d.namespaceURI.slice(-5), document.getElementById("e").namespaceURI.slice(-3));
+            r.push(String(window.event), window.frames === window, window.length);
+            r.push(document.fonts.status, document.fonts.check("12px Arial"), document.fonts.ready === document.fonts.ready, typeof document.adoptedStyleSheets);
+            r.push(d.contentEditable, document.getElementById("i").complete, document.getElementById("c").checked, String(d.checked), document.getElementsByName("nm").length);
+            document.fonts.ready.then(function () { document.getElementById("out").textContent = r.join(" ") + " ready"; });
+            </script>"##,
+            "http://localhost/",
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(
+            result.html.contains(
+                "null null null undefined function true xhtml svg undefined true 0 loaded true true object inherit true true undefined 1 ready"
+            ),
             "{}",
             result.html
         );

@@ -14,6 +14,16 @@ if [ $# -lt 1 ]; then
 fi
 cd "$(dirname "$0")/.."
 
+# An untracked file is either something that should have been staged or
+# something that should not be here (OneDrive once restored a source file a
+# commit had deleted). Either way, look before shipping.
+untracked="$(git ls-files --others --exclude-standard)"
+if [ -n "$untracked" ] && [ "${SHIP_ALLOW_UNTRACKED:-0}" != "1" ]; then
+  echo "untracked files; stage them, remove them, or set SHIP_ALLOW_UNTRACKED=1:" >&2
+  echo "$untracked" >&2
+  exit 3
+fi
+
 cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result|FAILED|panicked" \
   | awk '/^test result/{p+=$4; f+=$6; next} {print} END {print "passed=" p, "failed=" f; exit (f > 0)}'
 TOBIRA_GC_VERIFY=1 cargo test --release 2>&1 | tr -d '\000' | grep -aE "^test result|gc-verify" \
