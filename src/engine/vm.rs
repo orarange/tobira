@@ -94,6 +94,7 @@ enum BuiltinId {
     ObjectProtoHasOwnProperty,
     ObjectProtoPropertyIsEnumerable,
     ObjectProtoToString,
+    ErrorProtoToString,
     ObjectProtoValueOf,
     ObjectProtoIsPrototypeOf,
     FunctionProtoCall,
@@ -1545,6 +1546,10 @@ pub struct Vm {
     text_decoder_prototype: Option<GcRef<JsObject>>,
     url_prototype: Option<GcRef<JsObject>>,
     error_prototype: Option<GcRef<JsObject>>,
+    /// `TypeError.prototype` and its six siblings, by name. Each one's
+    /// prototype is `Error.prototype`, and it carries the `name` and the
+    /// `constructor` that `catch (e)` code reads.
+    error_prototypes: std::collections::HashMap<&'static str, GcRef<JsObject>>,
     promise_prototype: Option<GcRef<JsObject>>,
     map_prototype: Option<GcRef<JsObject>>,
     set_prototype: Option<GcRef<JsObject>>,
@@ -2081,6 +2086,108 @@ const MAX_ARRAY_BUFFER_LENGTH: usize = 1 << 31;
 /// its JSON to be read nests tens of levels, not hundreds.
 const MAX_JSON_DEPTH: usize = 500;
 
+/// Built-ins whose declared argument count is not 1, by the property name
+/// they are installed under. Everything absent from here declares one.
+///
+/// A function's `length` is read far more than it looks: `Object.assign
+/// .length === 2` is how core-js decides `assign` is native, curry and
+/// dependency-injection helpers branch on it, and test262 checks every one.
+/// Keyed by name because that is what every call site already passes. Where
+/// two functions share a name and differ in arity the commoner one wins; this
+/// table is where to fix that when a test says so.
+const BUILTIN_ARITIES: &[(&str, u32)] = &[
+    // Nothing declared.
+    ("toString", 0),
+    ("valueOf", 0),
+    ("toLocaleString", 0),
+    ("keys", 0),
+    ("values", 0),
+    ("entries", 0),
+    ("pop", 0),
+    ("shift", 0),
+    ("reverse", 0),
+    ("trim", 0),
+    ("trimStart", 0),
+    ("trimEnd", 0),
+    ("trimLeft", 0),
+    ("trimRight", 0),
+    ("toUpperCase", 0),
+    ("toLowerCase", 0),
+    ("toLocaleUpperCase", 0),
+    ("toLocaleLowerCase", 0),
+    ("random", 0),
+    ("now", 0),
+    ("clear", 0),
+    ("next", 0),
+    ("flat", 0),
+    ("getTime", 0),
+    ("getFullYear", 0),
+    ("getMonth", 0),
+    ("getDate", 0),
+    ("getDay", 0),
+    ("getHours", 0),
+    ("getMinutes", 0),
+    ("getSeconds", 0),
+    ("getMilliseconds", 0),
+    ("getTimezoneOffset", 0),
+    ("getUTCFullYear", 0),
+    ("getUTCMonth", 0),
+    ("getUTCDate", 0),
+    ("getUTCDay", 0),
+    ("getUTCHours", 0),
+    ("getUTCMinutes", 0),
+    ("getUTCSeconds", 0),
+    ("getUTCMilliseconds", 0),
+    ("toISOString", 0),
+    ("toJSON", 0),
+    ("toDateString", 0),
+    ("toTimeString", 0),
+    ("toUTCString", 0),
+    ("toLocaleDateString", 0),
+    ("toLocaleTimeString", 0),
+    ("getPrototypeOf", 1),
+    // Two.
+    ("assign", 2),
+    ("max", 2),
+    ("min", 2),
+    ("hypot", 2),
+    ("atan2", 2),
+    ("imul", 2),
+    ("pow", 2),
+    ("parseInt", 2),
+    ("defineProperty", 3),
+    ("defineProperties", 2),
+    ("getOwnPropertyDescriptor", 2),
+    ("create", 2),
+    ("setPrototypeOf", 2),
+    ("apply", 2),
+    ("slice", 2),
+    ("substring", 2),
+    ("substr", 2),
+    ("split", 2),
+    ("replace", 2),
+    ("replaceAll", 2),
+    ("copyWithin", 2),
+    ("set", 2),
+    ("addEventListener", 2),
+    ("removeEventListener", 2),
+    ("setItem", 2),
+    ("insertBefore", 2),
+    ("replaceChild", 2),
+    ("setAttribute", 2),
+    ("getAttributeNS", 2),
+    // Three.
+    ("setAttributeNS", 3),
+    ("splice", 2),
+];
+
+fn builtin_arity(name: &str) -> u32 {
+    BUILTIN_ARITIES
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+        .map_or(1, |(_, arity)| *arity)
+}
+
 fn invalid_string_length() -> VmError {
     VmError::RangeError("Invalid string length".to_string())
 }
@@ -2149,6 +2256,7 @@ impl Vm {
             text_decoder_prototype: None,
             url_prototype: None,
             error_prototype: None,
+            error_prototypes: std::collections::HashMap::new(),
             promise_prototype: None,
             map_prototype: None,
             set_prototype: None,
@@ -2916,6 +3024,7 @@ impl Vm {
             text_decoder_prototype,
             url_prototype,
             error_prototype,
+            error_prototypes,
             promise_prototype,
             map_prototype,
             set_prototype,
@@ -3019,6 +3128,9 @@ impl Vm {
         text_decoder_prototype.trace(tracer);
         url_prototype.trace(tracer);
         error_prototype.trace(tracer);
+        for prototype in error_prototypes.values() {
+            prototype.trace(tracer);
+        }
         promise_prototype.trace(tracer);
         map_prototype.trace(tracer);
         set_prototype.trace(tracer);
@@ -4359,6 +4471,27 @@ impl Vm {
         self.text_decoder_prototype = Some(text_decoder_prototype);
         self.url_prototype = Some(url_prototype);
         self.error_prototype = Some(error_prototype);
+        // `Error.prototype.name` is "Error" and lives on the prototype, not on
+        // each error: that is where `catch (e) { e.name }` reads it from, and
+        // an instance has no own `name` at all.
+        self.define_error_prototype_fields(error_prototype, "Error");
+        self.define_builtin_method(error_prototype, "toString", BuiltinId::ErrorProtoToString);
+        for name in [
+            "TypeError",
+            "RangeError",
+            "ReferenceError",
+            "SyntaxError",
+            "URIError",
+            "EvalError",
+        ] {
+            let prototype = self.heap.allocate_object(JsObject {
+                kind: ObjectKind::Error,
+                prototype: Some(error_prototype),
+                ..JsObject::default()
+            });
+            self.define_error_prototype_fields(prototype, name);
+            self.error_prototypes.insert(name, prototype);
+        }
         self.promise_prototype = Some(promise_prototype);
         self.map_prototype = Some(map_prototype);
         self.set_prototype = Some(set_prototype);
@@ -4408,32 +4541,32 @@ impl Vm {
         let type_error_ctor = self.allocate_builtin_value(
             BuiltinId::TypeErrorConstructor,
             true,
-            Some(error_prototype),
+            Some(self.error_prototype_for("TypeError")),
         );
         let range_error_ctor = self.allocate_builtin_value(
             BuiltinId::RangeErrorConstructor,
             true,
-            Some(error_prototype),
+            Some(self.error_prototype_for("RangeError")),
         );
         let reference_error_ctor = self.allocate_builtin_value(
             BuiltinId::ReferenceErrorConstructor,
             true,
-            Some(error_prototype),
+            Some(self.error_prototype_for("ReferenceError")),
         );
         let syntax_error_ctor = self.allocate_builtin_value(
             BuiltinId::SyntaxErrorConstructor,
             true,
-            Some(error_prototype),
+            Some(self.error_prototype_for("SyntaxError")),
         );
         let uri_error_ctor = self.allocate_builtin_value(
             BuiltinId::UriErrorConstructor,
             true,
-            Some(error_prototype),
+            Some(self.error_prototype_for("URIError")),
         );
         let eval_error_ctor = self.allocate_builtin_value(
             BuiltinId::EvalErrorConstructor,
             true,
-            Some(error_prototype),
+            Some(self.error_prototype_for("EvalError")),
         );
         let map_ctor =
             self.allocate_builtin_value(BuiltinId::MapConstructor, true, Some(map_prototype));
@@ -5663,8 +5796,9 @@ impl Vm {
             {
                 continue;
             }
-            let value = self.make_string_value(&name);
-            self.define_data_property(object, PropertyKey::from("name"), value, false, false, true);
+            let function = Value::Object(object);
+            self.set_function_length(&function, builtin_arity(&name));
+            self.set_function_name(&function, &name);
         }
     }
 
@@ -6378,6 +6512,22 @@ impl Vm {
             .expect("string prototype should be installed")
     }
 
+    /// `Error.prototype.name` / `.message`, in the shape the spec gives them:
+    /// on the prototype, writable and configurable but not enumerable.
+    fn define_error_prototype_fields(&mut self, prototype: GcRef<JsObject>, name: &str) {
+        let name_value = self.make_string_value(name);
+        self.define_data_property(prototype, PropertyKey::from("name"), name_value, true, false, true);
+        let empty = self.make_string_value("");
+        self.define_data_property(prototype, PropertyKey::from("message"), empty, true, false, true);
+    }
+
+    fn error_prototype_for(&self, name: &str) -> GcRef<JsObject> {
+        self.error_prototypes
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| self.error_prototype_ref())
+    }
+
     fn error_prototype_ref(&self) -> GcRef<JsObject> {
         self.error_prototype
             .expect("error prototype should be installed")
@@ -6870,7 +7020,51 @@ impl Vm {
 
     fn define_builtin_method(&mut self, object: GcRef<JsObject>, name: &str, builtin: BuiltinId) {
         let value = self.allocate_builtin_value(builtin, false, None);
+        // `length` before `name`: which order the two were defined in is
+        // observable through `Object.getOwnPropertyNames`, and test262 checks
+        // it.
+        self.set_function_length(&value, builtin_arity(name));
+        self.set_function_name(&value, name);
         self.define_data_property(object, PropertyKey::from(name), value, true, false, true);
+    }
+
+    /// A function's own `length`, with the same attributes as `name`.
+    fn set_function_length(&mut self, value: &Value, length: u32) {
+        let Value::Object(object) = value else {
+            return;
+        };
+        if self
+            .get_own_property_descriptor(*object, &PropertyKey::from("length"))
+            .is_some()
+        {
+            return;
+        }
+        self.define_data_property(
+            *object,
+            PropertyKey::from("length"),
+            Value::Number(f64::from(length)),
+            false,
+            false,
+            true,
+        );
+    }
+
+    /// A function's own `name`: not writable, not enumerable, configurable.
+    /// Engine functions had none at all, so `fn.name` was undefined -- which
+    /// React's devtools, error messages and every `length`/`name` feature
+    /// check read.
+    fn set_function_name(&mut self, value: &Value, name: &str) {
+        let Value::Object(object) = value else {
+            return;
+        };
+        if self
+            .get_own_property_descriptor(*object, &PropertyKey::from("name"))
+            .is_some()
+        {
+            return;
+        }
+        let name_value = self.make_string_value(name);
+        self.define_data_property(*object, PropertyKey::from("name"), name_value, false, false, true);
     }
 
     /// Define `alias` as the *same function object* already stored under
@@ -6924,22 +7118,34 @@ impl Vm {
     }
 
     fn create_named_error_object(&mut self, name: &str, message: impl Into<String>) -> Value {
+        // `new TypeError(m)` is a TypeError, not an Error with a `name`:
+        // `e instanceof TypeError`, `e.constructor === TypeError` and
+        // `e.constructor.name` all read the prototype, and library code
+        // branches on all three. Names this engine invents for itself, which
+        // have no constructor, keep an own `name` on the instance.
+        let prototype = self
+            .error_prototypes
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| self.error_prototype_ref());
         let object = self.heap.allocate_object(JsObject {
             kind: ObjectKind::Error,
-            prototype: Some(self.error_prototype_ref()),
+            prototype: Some(prototype),
             ..JsObject::default()
         });
-        let name_value = self.make_string_value(name);
         let message_text = message.into();
         let message_value = self.make_string_value(&message_text);
-        self.define_data_property(
-            object,
-            PropertyKey::from("name"),
-            name_value,
-            true,
-            false,
-            true,
-        );
+        if !self.error_prototypes.contains_key(name) && name != "Error" {
+            let name_value = self.make_string_value(name);
+            self.define_data_property(
+                object,
+                PropertyKey::from("name"),
+                name_value,
+                true,
+                false,
+                true,
+            );
+        }
         self.define_data_property(
             object,
             PropertyKey::from("message"),
@@ -12031,6 +12237,24 @@ impl Vm {
                     None => false,
                 };
                 Ok(Value::Bool(enumerable))
+            }
+            BuiltinId::ErrorProtoToString => {
+                // `name: message`, either half alone when the other is empty.
+                let name = match self.get_property_value(&this_value, &PropertyKey::from("name"))? {
+                    Value::Undefined => "Error".to_string(),
+                    value => self.to_string_coerced(&value)?,
+                };
+                let message =
+                    match self.get_property_value(&this_value, &PropertyKey::from("message"))? {
+                        Value::Undefined => String::new(),
+                        value => self.to_string_coerced(&value)?,
+                    };
+                let text = match (name.is_empty(), message.is_empty()) {
+                    (true, _) => message,
+                    (false, true) => name,
+                    (false, false) => format!("{name}: {message}"),
+                };
+                Ok(self.make_string_value(&text))
             }
             BuiltinId::ObjectProtoToString => {
                 let tag = self.object_to_string_tag(&this_value);
@@ -21703,6 +21927,67 @@ mod tests {
             assert(JSON.stringify({ a: [1, 2] }) === '{"a":[1,2]}');
             "#,
         );
+    }
+
+    /// Every error was an `Error` with a `name` written on it, so
+    /// `e instanceof TypeError` was true for all of them, `e.constructor` was
+    /// `Error`, and `catch (e) { if (e instanceof TypeError) ... }` -- which
+    /// pages write constantly -- took the wrong branch. Each subclass now has
+    /// its own prototype, and `name` lives there, as the spec has it.
+    #[test]
+    fn each_error_kind_is_its_own_kind() {
+        run_script(r#"
+            var e = new TypeError("m");
+            assert(e instanceof TypeError);
+            assert(e instanceof Error);
+            assert(e.constructor === TypeError);
+            assert(e.constructor.name === "TypeError");
+            assert(e.name === "TypeError");
+            assert(e.message === "m");
+            assert(Object.prototype.hasOwnProperty.call(e, "name") === false);
+            assert(Object.prototype.hasOwnProperty.call(e, "message") === true);
+            assert(TypeError.prototype.name === "TypeError");
+            assert(TypeError.prototype.message === "");
+            assert(Object.getPrototypeOf(TypeError.prototype) === Error.prototype);
+            assert(new RangeError("r") instanceof TypeError === false);
+            assert(new Error("x").constructor === Error);
+            assert(String(new TypeError("m")) === "TypeError: m");
+
+            // The errors the engine itself throws are the same kind.
+            var caught = null;
+            try { null.x; } catch (err) { caught = err; }
+            assert(caught instanceof TypeError);
+            try { (1).toFixed(1e9); } catch (err) { caught = err; }
+            assert(caught instanceof RangeError);
+            assert(caught.constructor === RangeError);
+        "#);
+    }
+
+    /// `fn.length` and `fn.name` were not there at all on engine functions.
+    /// `Object.assign.length === 2` is how core-js decides `assign` is native,
+    /// and `fn.name` is what devtools and error messages print.
+    #[test]
+    fn built_in_functions_declare_their_length_and_name() {
+        run_script(r#"
+            assert(Object.assign.length === 2);
+            assert(Object.assign.name === "assign");
+            assert(Math.max.length === 2);
+            assert(Math.abs.length === 1);
+            assert(Math.abs.name === "abs");
+            assert([].join.length === 1);
+            assert([].pop.length === 0);
+            assert("".startsWith.length === 1);
+            assert("".toUpperCase.length === 0);
+            assert(Object.name === "Object");
+            assert(TypeError.name === "TypeError");
+            var d = Object.getOwnPropertyDescriptor(Math, "abs");
+            assert(d.enumerable === false && d.writable === true && d.configurable === true);
+            var n = Object.getOwnPropertyDescriptor(Math.abs, "name");
+            assert(n.writable === false && n.enumerable === false && n.configurable === true);
+            // `length` is defined before `name`, and the order is observable.
+            var own = Object.getOwnPropertyNames(Math.abs);
+            assert(own.indexOf("length") < own.indexOf("name"));
+        "#);
     }
 
     /// test262's first find: 2^32 - 1 is not an array index. `length` became

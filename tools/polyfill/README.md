@@ -26,5 +26,7 @@ gets replacements too (proposals it does not ship, the URL classes).
 | react.dev's polyfills chunk | 45 | 32 |
 | core-js-bundle 3.38.1 | 79 | 66 |
 
+After the errors and `length` / `name` (2026-09-20): 31 and 64.
+
 A fix must not make either number grow. Adding a half-implemented well-known
 symbol does exactly that (see HANDOFF.md, 設計判断).

@@ -1163,6 +1163,37 @@ react.dev だけ撮らんかった一枚が退化しとった。
     （Chrome は普通に parse する）。落ちはせんので後回し。
   - test262 は 614 → **617**（`toFixed` の引数範囲で 3 本）、落ちたものは無し。
     baseline.txt の diff が +3 行だけ、という形で確認できた。
+- **エラーの種類と、関数の `length` / `name`**（2026-09-20、test262 の失敗
+  上位三つ、186 本ぶん）。
+  - **エラーが全部「`name` を書いた `Error`」やった**。七つの constructor が
+    `Error.prototype` を共有しとって、`e instanceof TypeError` は**どのエラー
+    でも true**、`e.constructor` は `Error`、`e.constructor.name` も "Error"。
+    `catch (e) { if (e instanceof TypeError) ... }` は実頁が普通に書く形で、
+    そこが全部おかしかった。各 subclass に専用の prototype を持たせ、
+    **`name` は prototype 側**（spec どおり。instance に own `name` は無い）、
+    `constructor` も各型を指すようにした。`Error.prototype.toString` が
+    そもそも無くて `String(err)` が "[object Error]" やったのも直した
+    （"TypeError: m"）。エンジン自身が投げる TypeError / RangeError も同じ型に
+    なる。→ test262 617 → **695**。
+  - **builtin 関数に own の `length` / `name` が無かった**。`fn.name` は
+    undefined、`Object.assign.length` も undefined。`Object.assign.length === 2`
+    は **core-js が assign を native と認める条件**で、`fn.name` は React の
+    devtools とエラー文言が読む。`define_builtin_method` で両方を定義する
+    （**`length` を先に**。定義順は `getOwnPropertyNames` で見えて、test262 が
+    それを見とる）。arity は `BUILTIN_ARITIES` 表（1 でないものだけ並べる。
+    property 名で引く。同名で arity が違うものは多い方を採る、と割り切り）。
+    → 695 → **810**（73.4%）。
+  - 六枚を**その日の Chrome と並べ直した**（前回うっかり前日の tobira と
+    比べて、MDN の 724 → 736 を「微増」と書いてもうた。Mac の指摘で修正）:
+    react 1846/1846、MDN 736/736、HN 810/810、lobste.rs 840/840 が**一致**、
+    wikipedia 807/810、**vuejs 599/603**（前は 599/657 で -58 やった塊が -4 に
+    なっとる）。MDN の 736 は頁側が変わっただけで、text run も 6097 で一致。
+  - poly 計器: tobira-only **32 → 31**（react.dev chunk）/ **66 → 64**
+    （core-js 全部入り）。`Math.imul` と `String.fromCodePoint` が arity で
+    落ちた。`Object.assign` はまだ差し替えられる（getter の順の件）。
+  - 残りの塊: `Object.getOwnPropertyDescriptor` / `hasOwnProperty` が primitive を
+    ToObject せん（22 本。`ObjectKind::Primitive` があるので繋ぐだけ）、
+    bigint literal（5 本）、`Math.sumPrecise`（5 本）。
 - **`ai-branch-merge-loop.yml` は作られた日から YAML が壊れとった**
   （2026-09-19 に判明）。merge の step の複数行コミットメッセージが `run: |` の
   字下げから出とって、ファイルごと無効。一度も job を作れたことが無く、GitHub は
