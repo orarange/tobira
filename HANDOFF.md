@@ -1245,7 +1245,13 @@ react.dev だけ撮らんかった一枚が退化しとった。
       `DomRead::Attribute{name:"style"}` と
       `DomMutation::SetAttribute` に直結しとる（`vm.rs` の
       `get_style_property` / `DomStyleSetProperty`）。
-    - **先にやること**: 宣言の「裏」を差し替えられるよう一段抽象する。
+    - **足場は入れた**（2026-09-20、b7fa39d の次）: `declaration_text()` /
+      `set_declaration_text()` / `DeclarationBacking` を `vm.rs` に新設して、
+      `setProperty` / `removeProperty` / 読み取りを全部そこ経由にした。
+      いま variant は `StyleAttribute(NodeId)` 一つだけ。**規則側は
+      `DeclarationBacking::Rule(..)` を足して二箇所を埋めるだけ**になる。
+      挙動は不変（`styleprobe` 0 MISMATCH、`css/cssom` 1598 のまま）。
+    - **元の指示**: 宣言の「裏」を差し替えられるよう一段抽象する。
       `declaration_text(slot)` / `set_declaration_text(slot, text)` を作って、
       裏が **要素の style 属性** か **stylesheet の中の規則** かを slot が
       決める形に。規則側は `DomRead::RuleStyleText{rule}` /

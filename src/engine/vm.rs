@@ -2113,6 +2113,12 @@ const MAX_ARRAY_BUFFER_LENGTH: usize = 1 << 31;
 /// its JSON to be read nests tens of levels, not hundreds.
 const MAX_JSON_DEPTH: usize = 200;
 
+/// Where a `CSSStyleDeclaration` object keeps its text: an element's `style`
+/// attribute today, a stylesheet rule's body once the CSSOM lands.
+enum DeclarationBacking {
+    StyleAttribute(NodeId),
+}
+
 /// Built-ins whose declared argument count is not 1, by the property name
 /// they are installed under. Everything absent from here declares one.
 ///
@@ -17306,20 +17312,15 @@ impl Vm {
                 Ok(self.make_string_value(&priority))
             }
             BuiltinId::DomStyleSetProperty => {
-                let node_id = self.this_node_id(&this_value);
                 let prop = args.first().map(|v| self.to_string(v)).unwrap_or_default();
                 let mut val = args.get(1).map(|v| self.to_string(v)).unwrap_or_default();
                 let priority = args.get(2).map(|v| self.to_string(v)).unwrap_or_default();
                 if priority.trim().eq_ignore_ascii_case("important") && !val.is_empty() {
                     val.push_str(" !important");
                 }
-                let existing = self.get_dom_attribute(node_id, "style");
+                let existing = self.declaration_text(&this_value);
                 let updated = set_inline_style_prop(&existing, &prop, &val);
-                let _ = self.host.mutate_dom(DomMutation::SetAttribute {
-                    node: node_id,
-                    name: "style".to_string(),
-                    value: updated,
-                });
+                self.set_declaration_text(&this_value, updated);
                 Ok(Value::Undefined)
             }
             BuiltinId::DomComputedStyleGetProperty => {
@@ -17331,15 +17332,10 @@ impl Vm {
             }
             BuiltinId::DomComputedStyleGetPriority => Ok(self.make_string_value("")),
             BuiltinId::DomStyleRemoveProperty => {
-                let node_id = self.this_node_id(&this_value);
                 let prop = args.first().map(|v| self.to_string(v)).unwrap_or_default();
-                let existing = self.get_dom_attribute(node_id, "style");
+                let existing = self.declaration_text(&this_value);
                 let (updated, removed) = remove_inline_style_prop(&existing, &prop);
-                let _ = self.host.mutate_dom(DomMutation::SetAttribute {
-                    node: node_id,
-                    name: "style".to_string(),
-                    value: updated,
-                });
+                self.set_declaration_text(&this_value, updated);
                 Ok(self.make_string_value(&removed))
             }
             // performance.now()
@@ -19255,6 +19251,8 @@ impl Vm {
         None
     }
 
+    /// What a declaration object writes through. One variant today; the
+    /// rule-backed one arrives with `document.styleSheets`.
     fn this_node_id(&self, this_value: &Value) -> NodeId {
         self.node_id_from_host_val(this_value).unwrap_or(NodeId(0))
     }
@@ -19419,6 +19417,36 @@ impl Vm {
             Ok(DomReadResult::String(text)) => text.trim().to_string(),
             _ => String::new(),
         }
+    }
+
+    /// Where a `CSSStyleDeclaration` keeps its text.
+    ///
+    /// The same object serves `el.style`, whose text is the element's `style`
+    /// attribute, and (once the CSSOM lands) `rule.style`, whose text is a
+    /// rule's body inside a stylesheet. Everything about reading and writing
+    /// a declaration is identical; only where the text lives differs, so that
+    /// is the one thing this decides. Writing the two separately is how one
+    /// of them ends up with the fixes and the other does not.
+    fn declaration_text(&mut self, this_value: &Value) -> String {
+        match self.declaration_backing(this_value) {
+            DeclarationBacking::StyleAttribute(node) => self.get_dom_attribute(node, "style"),
+        }
+    }
+
+    fn set_declaration_text(&mut self, this_value: &Value, text: String) {
+        match self.declaration_backing(this_value) {
+            DeclarationBacking::StyleAttribute(node) => {
+                let _ = self.host.mutate_dom(DomMutation::SetAttribute {
+                    node,
+                    name: "style".to_string(),
+                    value: text,
+                });
+            }
+        }
+    }
+
+    fn declaration_backing(&self, this_value: &Value) -> DeclarationBacking {
+        DeclarationBacking::StyleAttribute(self.this_node_id(this_value))
     }
 
     fn get_dom_attribute(&self, node_id: NodeId, name: &str) -> String {
@@ -21696,14 +21724,7 @@ impl Vm {
                 // (`el.style.color`), or the whole declaration via `cssText`.
                 // Until 2026-09-18 every other name was read as a property
                 // too, so `style.length` was "" and `style[0]` undefined.
-                let node_id = NodeId(slot.handle as u32);
-                let existing = match self.host.read_dom(DomRead::Attribute {
-                    node: node_id,
-                    name: "style".to_string(),
-                }) {
-                    Ok(DomReadResult::String(s)) => s,
-                    _ => String::new(),
-                };
+                let existing = self.get_dom_attribute(NodeId(slot.handle as u32), "style");
                 if name == "cssText" {
                     return Ok(self.make_string_value(&existing));
                 }
