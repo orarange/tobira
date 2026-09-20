@@ -6948,6 +6948,12 @@ impl Vm {
             Value::Symbol(_) => return "Symbol".to_string(),
             Value::Object(object) => *object,
         };
+        // A boxed primitive reports the tag of what it holds.
+        if let Some(ObjectKind::Primitive(primitive)) =
+            self.heap.objects().get(object).map(|o| &o.kind)
+        {
+            return self.object_tag_without_to_string_tag(&primitive.clone());
+        }
 
         let builtin = self
             .heap
@@ -8361,6 +8367,18 @@ impl Vm {
                 if builtin == BuiltinId::DomInterfaceConstructor {
                     return self.construct_this_value(&new_target).map(Some);
                 }
+                // `new Number(3)` is an object that holds 3; `Number(3)` is 3.
+                // Called as functions these three convert, constructed they
+                // box, and `typeof new Number(3)` is "object".
+                if matches!(
+                    builtin,
+                    BuiltinId::NumberConstructor
+                        | BuiltinId::StringConstructor
+                        | BuiltinId::BooleanConstructor
+                ) {
+                    let primitive = self.invoke_builtin(builtin, Value::Undefined, args)?;
+                    return Ok(Some(self.box_primitive(&primitive)));
+                }
                 Ok(Some(self.invoke_builtin(
                     builtin,
                     Value::Undefined,
@@ -9229,6 +9247,20 @@ impl Vm {
                 PropertyKey::Index(*number as u32)
             }
             Value::Symbol(symbol) => PropertyKey::Symbol(*symbol),
+            // `x[new Number(0)]` is `x[0]`, and `x[new String("a")]` is `x.a`.
+            Value::Object(object)
+                if matches!(
+                    self.heap.objects().get(*object).map(|o| &o.kind),
+                    Some(ObjectKind::Primitive(_))
+                ) =>
+            {
+                let Some(ObjectKind::Primitive(primitive)) =
+                    self.heap.objects().get(*object).map(|o| &o.kind)
+                else {
+                    unreachable!()
+                };
+                return self.to_property_key(&primitive.clone());
+            }
             _ => Self::property_key_from_text(&self.to_string(value)),
         })
     }
@@ -9354,6 +9386,57 @@ impl Vm {
         }
     }
 
+    /// `new String("ab")[0]` and `.length`, which live on the wrapper itself.
+    fn string_wrapper_own_property(
+        &mut self,
+        object: GcRef<JsObject>,
+        key: &PropertyKey,
+    ) -> Option<Value> {
+        let text = match self.heap.objects().get(object).map(|o| &o.kind) {
+            Some(ObjectKind::Primitive(Value::String(string))) => self.string_text(*string),
+            _ => return None,
+        };
+        match key {
+            PropertyKey::Index(index) => text
+                .chars()
+                .nth(*index as usize)
+                .map(|character| self.make_string_value(&character.to_string())),
+            PropertyKey::String(name) if name == "length" => {
+                Some(Value::Number(text.chars().count() as f64))
+            }
+            _ => None,
+        }
+    }
+
+    /// `thisNumberValue`: `Number.prototype.valueOf` and friends work on a
+    /// number or a boxed number and refuse everything else, rather than
+    /// coercing it. `new String().valueOf = Number.prototype.valueOf` has to
+    /// throw, because that is how a page tells the two apart.
+    fn this_number_value(&mut self, this_value: &Value, context: &str) -> Result<f64, VmError> {
+        match this_value {
+            Value::Number(number) => Ok(*number),
+            value => match self.wrapped_primitive(value) {
+                Some(Value::Number(number)) => Ok(number),
+                _ => Err(VmError::TypeError(format!(
+                    "Number.prototype.{context} requires a number"
+                ))),
+            },
+        }
+    }
+
+    /// A wrapper object holding `primitive`, with that type's prototype.
+    fn box_primitive(&mut self, primitive: &Value) -> Value {
+        if matches!(primitive, Value::Object(_)) {
+            return primitive.clone();
+        }
+        let prototype = self.object_introspection_primitive_prototype_ref(primitive);
+        Value::Object(self.heap.allocate_object(JsObject {
+            kind: ObjectKind::Primitive(primitive.clone()),
+            prototype: Some(prototype),
+            ..JsObject::default()
+        }))
+    }
+
     /// The primitive inside a wrapper made by `Object(primitive)`.
     fn wrapped_primitive(&self, value: &Value) -> Option<Value> {
         let Value::Object(object) = value else {
@@ -9459,6 +9542,11 @@ impl Vm {
         receiver: &Value,
         key: &PropertyKey,
     ) -> Result<Value, VmError> {
+        // A boxed string is a String exotic object: its characters and its
+        // `length` are own properties, not something on the prototype.
+        if let Some(value) = self.string_wrapper_own_property(object, key) {
+            return Ok(value);
+        }
         // Proxy objects route through the handler's `get` trap.
         let proxy = self.heap.objects().get(object).and_then(|o| match &o.kind {
             ObjectKind::Proxy { target, handler } => Some((*target, *handler)),
@@ -10155,12 +10243,28 @@ impl Vm {
         }
     }
 
+    /// `ToObject(this)`: `Object.prototype`'s methods work on a primitive
+    /// receiver, which is how `(5).hasOwnProperty("x")` and every
+    /// `Object.prototype.toString.call("")` reach them.
     fn builtin_object_this(
-        &self,
+        &mut self,
         this_value: &Value,
         context: &str,
     ) -> Result<GcRef<JsObject>, VmError> {
-        self.require_object_ref(this_value, context)
+        match this_value {
+            Value::Object(object) => Ok(*object),
+            Value::Null | Value::Undefined => Err(VmError::TypeError(format!(
+                "{context} requires an object (got {})",
+                self.typeof_name(this_value)
+            ))),
+            primitive => {
+                let primitive = primitive.clone();
+                match self.box_primitive(&primitive) {
+                    Value::Object(object) => Ok(object),
+                    _ => self.require_object_ref(&primitive, context),
+                }
+            }
+        }
     }
 
     fn array_like_length(&mut self, value: &Value) -> Result<u32, VmError> {
@@ -10178,6 +10282,21 @@ impl Vm {
                     let n = self.to_number(&v);
                     return Ok(if n.is_finite() && n > 0.0 {
                         n as u32
+                    } else {
+                        0
+                    });
+                }
+                // `obj.length = new Number(4.5)` is a length of 4: ToLength
+                // runs ToNumber first, and a wrapper is not a number until it
+                // does. `array_length` only reads a plain one.
+                if let Some(JsPropertyDescriptor::Data {
+                    value: length @ Value::Object(_),
+                    ..
+                }) = self.get_own_property_descriptor(*object, &PropertyKey::from("length"))
+                {
+                    let number = self.to_number_coerced(&length)?;
+                    return Ok(if number.is_finite() && number > 0.0 {
+                        number as u32
                     } else {
                         0
                     });
@@ -12079,12 +12198,8 @@ impl Vm {
                     | Value::Bool(_)
                     | Value::Symbol(_)),
                 ) => {
-                    let prototype = self.object_introspection_primitive_prototype_ref(primitive);
-                    Value::Object(self.heap.allocate_object(JsObject {
-                        kind: ObjectKind::Primitive(primitive.clone()),
-                        prototype: Some(prototype),
-                        ..JsObject::default()
-                    }))
+                    let primitive = primitive.clone();
+                    self.box_primitive(&primitive)
                 }
                 _ => {
                     Value::Object(self.allocate_ordinary_object(Some(self.object_prototype_ref())))
@@ -13379,7 +13494,9 @@ impl Vm {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
                 Ok(Value::Bool(self.is_truthy(&value)))
             }
-            BuiltinId::NumberProtoValueOf => Ok(Value::Number(self.to_number(&this_value))),
+            BuiltinId::NumberProtoValueOf => {
+                Ok(Value::Number(self.this_number_value(&this_value, "valueOf")?))
+            }
             BuiltinId::NumberProtoToFixed => {
                 let number = self.to_number(&this_value);
                 let digits = self.number_arg(&args, 0);
@@ -13416,7 +13533,7 @@ impl Vm {
                 }
             }
             BuiltinId::NumberProtoToString => {
-                let number = self.to_number(&this_value);
+                let number = self.this_number_value(&this_value, "toString")?;
                 let radix = match args.first() {
                     None | Some(Value::Undefined) => 10,
                     Some(value) => {

@@ -18,9 +18,9 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
 - **PR title** — When opening a pull request, always include the agent's name in the title.
   Example: `[Claude] fix CSS calc() precedence` / `[Codex] add image lazy-loading`
 
-## いまの状態（2026-09-18）
+## いまの状態（2026-09-20）
 
-- ブランチ `master`。この文書を書いた時点の HEAD は `845f104`
+- ブランチ `master`。この文書を書いた時点の HEAD は `948aaf2`
   （この文書のコミットが直後に乗る）。origin/master と同期しとる。
 - script は一本ずつ独立（2026-09-18）。一本の失敗で以降が止まる、
   404 の本体を実行する、の二つを直した。`tools/scripterr/` が検体。
@@ -34,7 +34,11 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
   先の本物の腕に食われとる stub）、deprecated `boa_ast` `ImportCall::argument` 4、
   unused mut 2、残りは dead_code 系。数が増えたら中身を見ること。
   OneDrive が PDB を掴んで失敗することがある。そのときは `RUSTFLAGS='-C debuginfo=0'`。
-- `cargo test --release` → **1188 通過 / 0 落ち**（2026-09-18）。
+- `cargo test --release` → **1200 通過 / 0 落ち**（2026-09-20）。
+  外の物差しが二つ: html5lib-tests **98.7%**、test262 の部分集合
+  **pass 834 / fail 269（75.6%）**（2026-09-20。09-19 の導入時は 55.7%）。
+  test262 は `cargo test --release --lib test262_subset -- --nocapture`、
+  門は率やのうて `tests/fixtures/test262/baseline.txt` の集合。
   JS のコンパイラを触ったら `TOBIRA_VERIFY_BYTECODE=1` で実頁を一枚読んで
   `[verify] ok` の行と `verification failed` の行を数えること。
   `TOBIRA_GC_VERIFY=1` を付けても同じ数が通る（GC のルート漏れ監査。下記）。
@@ -51,23 +55,26 @@ Update it whenever work switches between Codex, Claude, Gemini, Copilot, or a fr
     コード欄は CodeMirror で色付き、四つの例のプレビューも全部出る。
     意匠はまだ甘い）**、news.ycombinator.com（DOM 完全一致、投票矢印を除く）、
     lobste.rs（要素は完全一致、`<time>` の相対時刻の書き換えだけ効いとらん）、
-    ja.wikipedia.org（settle 込みで 807/809 要素。外観パネルも出るが右端に
-    細く崩れる）、abehiroshi.la.coocan.jp
-  - **中身は出るが意匠が甘い**: vuejs.org（599/657。スポンサー欄が
-    空。settle で一度真っ白になったのは geometry の問題で、直した）、
-    developer.mozilla.org（light DOM は完全一致。declarative shadow DOM 17 個を
-    畳んどらんのでヘッダの部品が無い）
+    ja.wikipedia.org（807/810。外観パネルも出るが右端に細く崩れる）、
+    abehiroshi.la.coocan.jp、developer.mozilla.org（736/736 で完全一致。
+    declarative shadow DOM 17 個は 28f9271 で畳むようにしたので、ヘッダの
+    部品も出る）
+  - **中身は出るが意匠が甘い**: vuejs.org（599/603。2026-09-19 まで
+    599/657 で、スポンサー欄が丸ごと空いとった塊は消えた。Chrome 側も
+    657 → 603 に減っとるので頁の改修も混じっとる）
+  - **六枚の数字はその日の Chrome と並べること**。前日の tobira と比べると、
+    頁側の変化を自分の退行と読み違える（2026-09-20 に MDN でやらかした。
+    724 → 736 は頁が変わっただけで、その日の Chrome も 736 やった）
   - 上記いずれも未捕捉 JS エラー 0。**ただし「未捕捉 0」は React の頁では
     何も保証せん**（2026-09-18 に二度外れた）。error boundary が拾うと
     console.error にしか出ん（react.dev が真っ白でも uncaught 0 やった）。
     JS を触ったら `TOBIRA_DUMP_DOM` で Chrome の `--dump-dom` と突き合わせる
     （`tools/scripterr/domstat.py`）のを正規の手順にする。console の
     `Error:` 行の数も見る。
-  - react.dev は React error #418（hydration の文字不一致）が console に
-    出る。tobira 側の些細な差（空白・数値の書式）で出る種類で、追うと沼。
-    ただし #418 が出とる間は hydration が部分的に捨てられとるので、
-    react.dev の DOM が Chrome の 1846 に対して 1362 のままなのはこれが
-    理由の一部かもしれん。気になったときに戻る印。
+  - react.dev の #418（hydration の文字不一致）は **6d563fa で解決**した。
+    原因は `Math.min(undefined, 3)` が 3 を返しとったことで、core-js の
+    `startsWith` が常に false を返し、Thumbnail が画像無しの枝に入って
+    hydration が捨てられとった。DOM は 1846/1846。
   - 確認しとらん: 認証の要る頁、フォーム POST、動画、Google/YouTube の実経路
     （`src/browser.rs` に synthetic fallback が残っとる。実物とは別物と思うこと）
 
@@ -1194,6 +1201,21 @@ react.dev だけ撮らんかった一枚が退化しとった。
   - 残りの塊: `Object.getOwnPropertyDescriptor` / `hasOwnProperty` が primitive を
     ToObject せん（22 本。`ObjectKind::Primitive` があるので繋ぐだけ）、
     bigint literal（5 本）、`Math.sumPrecise`（5 本）。
+- **primitive の wrapper を最後まで繋いだ**（2026-09-20）。`new Number(3)` /
+  `new String("a")` / `new Boolean(x)` が **primitive を返しとった**
+  （`typeof new Number(3)` が "number"）。`ObjectKind::Primitive` は 09-19 に
+  入れてあったので、construct の経路で箱に入れるだけ。併せて:
+  - `Object.prototype` のメソッドが primitive の `this` を ToObject する
+    （`(5).hasOwnProperty("x")` が TypeError やった）
+  - boxed string が自分の文字と `length` を own property として答える
+  - `Object.prototype.toString.call(new Number(1))` が `[object Number]`
+  - `x[new Number(0)]` が `x[0]`、`obj.length = new Number(4.5)` が長さ 4
+  - `Number.prototype.valueOf` / `toString` が number 以外の `this` を
+    **拒む**（前は黙って NaN にしとった。`new String()` に付け替えて呼ぶと
+    TypeError、というのが仕様で、頁が型を見分ける手口）
+  → test262 810 → **834**。最初の一回で 9 本退行させたのを baseline の門が
+  止めてくれた（key 変換・length 変換・toString タグ・`this` 検査の四つ）。
+  **率だけ見とったら気付かんかった**: pass は増えとったので。
 - **`ai-branch-merge-loop.yml` は作られた日から YAML が壊れとった**
   （2026-09-19 に判明）。merge の step の複数行コミットメッセージが `run: |` の
   字下げから出とって、ファイルごと無効。一度も job を作れたことが無く、GitHub は

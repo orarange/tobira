@@ -50,6 +50,7 @@ built-ins/Array/prototype/join/S15.4.4.5_A1.3_T1.js
 built-ins/Array/prototype/join/S15.4.4.5_A2_T1.js
 built-ins/Array/prototype/join/S15.4.4.5_A2_T2.js
 built-ins/Array/prototype/join/S15.4.4.5_A2_T3.js
+built-ins/Array/prototype/join/S15.4.4.5_A2_T4.js
 built-ins/Array/prototype/join/S15.4.4.5_A3.1_T1.js
 built-ins/Array/prototype/join/S15.4.4.5_A3.2_T1.js
 built-ins/Array/prototype/join/S15.4.4.5_A6.6.js
@@ -379,6 +380,8 @@ built-ins/Number/POSITIVE_INFINITY/prop-desc.js
 built-ins/Number/POSITIVE_INFINITY/value.js
 built-ins/Number/S15.7.1.1_A1.js
 built-ins/Number/S15.7.1.1_A2.js
+built-ins/Number/S15.7.2.1_A1.js
+built-ins/Number/S15.7.2.1_A2.js
 built-ins/Number/S15.7.2.1_A3.js
 built-ins/Number/S15.7.2.1_A4.js
 built-ins/Number/S15.7.3_A1.js
@@ -389,6 +392,13 @@ built-ins/Number/S15.7.3_A5.js
 built-ins/Number/S15.7.3_A6.js
 built-ins/Number/S15.7.3_A7.js
 built-ins/Number/S15.7.3_A8.js
+built-ins/Number/S15.7.5_A1_T01.js
+built-ins/Number/S15.7.5_A1_T02.js
+built-ins/Number/S15.7.5_A1_T03.js
+built-ins/Number/S15.7.5_A1_T04.js
+built-ins/Number/S15.7.5_A1_T05.js
+built-ins/Number/S15.7.5_A1_T06.js
+built-ins/Number/S15.7.5_A1_T07.js
 built-ins/Number/S8.12.8_A3.js
 built-ins/Number/S8.12.8_A4.js
 built-ins/Number/S9.1_A1_T1.js
@@ -439,6 +449,7 @@ built-ins/Number/S9.3_A4.1_T1.js
 built-ins/Number/S9.3_A4.2_T1.js
 built-ins/Number/S9.3_A5_T1.js
 built-ins/Number/is-a-constructor.js
+built-ins/Number/isFinite/arg-is-not-number.js
 built-ins/Number/isFinite/finite-numbers.js
 built-ins/Number/isFinite/infinity.js
 built-ins/Number/isFinite/length.js
@@ -446,6 +457,7 @@ built-ins/Number/isFinite/name.js
 built-ins/Number/isFinite/nan.js
 built-ins/Number/isFinite/not-a-constructor.js
 built-ins/Number/isFinite/prop-desc.js
+built-ins/Number/isInteger/arg-is-not-number.js
 built-ins/Number/isInteger/infinity.js
 built-ins/Number/isInteger/integers.js
 built-ins/Number/isInteger/length.js
@@ -454,12 +466,14 @@ built-ins/Number/isInteger/nan.js
 built-ins/Number/isInteger/non-integers.js
 built-ins/Number/isInteger/not-a-constructor.js
 built-ins/Number/isInteger/prop-desc.js
+built-ins/Number/isNaN/arg-is-not-number.js
 built-ins/Number/isNaN/length.js
 built-ins/Number/isNaN/name.js
 built-ins/Number/isNaN/nan.js
 built-ins/Number/isNaN/not-a-constructor.js
 built-ins/Number/isNaN/not-nan.js
 built-ins/Number/isNaN/prop-desc.js
+built-ins/Number/isSafeInteger/arg-is-not-number.js
 built-ins/Number/isSafeInteger/infinity.js
 built-ins/Number/isSafeInteger/length.js
 built-ins/Number/isSafeInteger/name.js
@@ -519,6 +533,9 @@ built-ins/Number/prototype/toString/S15.7.4.2_A3_T03.js
 built-ins/Number/prototype/toString/S15.7.4.2_A3_T04.js
 built-ins/Number/prototype/toString/S15.7.4.2_A4_T01.js
 built-ins/Number/prototype/toString/S15.7.4.2_A4_T02.js
+built-ins/Number/prototype/toString/S15.7.4.2_A4_T03.js
+built-ins/Number/prototype/toString/S15.7.4.2_A4_T04.js
+built-ins/Number/prototype/toString/S15.7.4.2_A4_T05.js
 built-ins/Number/prototype/toString/a-z.js
 built-ins/Number/prototype/toString/name.js
 built-ins/Number/prototype/toString/not-a-constructor.js
@@ -563,6 +580,9 @@ built-ins/Number/prototype/toString/numeric-literal-tostring-radix-9.js
 built-ins/Number/prototype/toString/prop-desc.js
 built-ins/Number/prototype/valueOf/S15.7.4.4_A2_T01.js
 built-ins/Number/prototype/valueOf/S15.7.4.4_A2_T02.js
+built-ins/Number/prototype/valueOf/S15.7.4.4_A2_T03.js
+built-ins/Number/prototype/valueOf/S15.7.4.4_A2_T04.js
+built-ins/Number/prototype/valueOf/S15.7.4.4_A2_T05.js
 built-ins/Number/prototype/valueOf/length.js
 built-ins/Number/prototype/valueOf/name.js
 built-ins/Number/prototype/valueOf/not-a-constructor.js
@@ -684,6 +704,7 @@ built-ins/Promise/reject-function-prototype.js
 built-ins/Promise/resolve-function-extensible.js
 built-ins/Promise/resolve-function-nonconstructor.js
 built-ins/Promise/resolve-function-prototype.js
+built-ins/String/15.5.5.5.2-1-1.js
 built-ins/String/15.5.5.5.2-1-2.js
 built-ins/String/15.5.5.5.2-3-1.js
 built-ins/String/15.5.5.5.2-3-2.js
@@ -719,7 +740,9 @@ built-ins/String/S15.5.1.1_A1_T9.js
 built-ins/String/S15.5.1.1_A2_T1.js
 built-ins/String/S15.5.2.1_A1_T12.js
 built-ins/String/S15.5.2.1_A1_T13.js
+built-ins/String/S15.5.2.1_A2_T1.js
 built-ins/String/S15.5.2.1_A2_T2.js
+built-ins/String/S15.5.2.1_A3.js
 built-ins/String/S15.5.3_A1.js
 built-ins/String/S15.5.3_A2_T1.js
 built-ins/String/S15.5.3_A2_T2.js
@@ -793,6 +816,7 @@ built-ins/Symbol/prototype/Symbol.toPrimitive/this-val-obj-non-symbol-wrapper.js
 built-ins/Symbol/prototype/constructor.js
 built-ins/Symbol/prototype/description/description-symboldescriptivestring.js
 built-ins/Symbol/prototype/description/get.js
+built-ins/Symbol/prototype/description/is-not-own-property.js
 built-ins/Symbol/prototype/intrinsic.js
 built-ins/Symbol/prototype/toString/length.js
 built-ins/Symbol/prototype/toString/name.js
