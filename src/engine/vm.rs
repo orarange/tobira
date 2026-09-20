@@ -554,6 +554,9 @@ enum BuiltinId {
     /// Inside a worker: `postMessage` and `close` on its own global.
     WorkerSelfPostMessage,
     WorkerSelfClose,
+    DomDocCreateEvent,
+    EventInitEvent,
+    EventInitCustomEvent,
     ProxyConstructor,
     UrlSearchParamsConstructor,
     HeadersConstructor,
@@ -2665,12 +2668,18 @@ impl Vm {
             .cloned()
             .unwrap_or_default();
         for listener in listeners {
-            // A listener's `this` is the node it is attached to (currentTarget).
-            self.call_value_sync(
-                Value::Object(listener),
-                current_target.clone(),
-                vec![event_val.clone()],
-            )?;
+            // A listener's `this` is the node it is attached to
+            // (currentTarget) -- unless the listener is an object with a
+            // `handleEvent` method, in which case that is called with the
+            // object itself as `this`. The object form is ordinary in
+            // hand-written code and in libraries, and calling it as a
+            // function threw "object is not callable" on 68 of WPT's
+            // `dom/events` assertions.
+            let (callee, this_value) = self.resolve_listener(listener, &current_target)?;
+            let Some(callee) = callee else {
+                continue;
+            };
+            self.call_value_sync(callee, this_value, vec![event_val.clone()])?;
             self.drain_microtasks();
             let stop_immediate = self
                 .get_property_value(event_val, &PropertyKey::from("__stopImmediate"))
@@ -2683,6 +2692,30 @@ impl Vm {
             .get_property_value(event_val, &PropertyKey::from("cancelBubble"))
             .unwrap_or(Value::Undefined);
         Ok(self.is_truthy(&cancel))
+    }
+
+    /// What to call for a listener, and what its `this` is.
+    ///
+    /// A function is called with the target as `this`. An object is asked for
+    /// `handleEvent` and called with itself as `this`. Anything else -- an
+    /// object without the method -- is **not an error**: a browser ignores
+    /// it, and so must this, or a page that registers a plain object stops
+    /// dead instead of doing nothing.
+    fn resolve_listener(
+        &mut self,
+        listener: GcRef<JsObject>,
+        target: &Value,
+    ) -> Result<(Option<Value>, Value), VmError> {
+        let listener_value = Value::Object(listener);
+        if self.is_callable_value(&listener_value) {
+            return Ok((Some(listener_value), target.clone()));
+        }
+        let handler =
+            self.get_property_value(&listener_value, &PropertyKey::from("handleEvent"))?;
+        if self.is_callable_value(&handler) {
+            return Ok((Some(handler), listener_value));
+        }
+        Ok((None, target.clone()))
     }
 
     /// Build the Event object delivered to host-event listeners.
@@ -14684,6 +14717,74 @@ impl Vm {
                 self.worker_closed = true;
                 Ok(Value::Undefined)
             }
+            BuiltinId::DomDocCreateEvent => {
+                // The event starts untyped and uninitialised; `initEvent`
+                // names it. Every interface name makes the same object here.
+                let init = DomEventInit {
+                    bubbles: false,
+                    cancelable: false,
+                    ..DomEventInit::default()
+                };
+                let event = self.build_host_event("", &Value::Null, &init);
+                self.define_data_property(
+                    event,
+                    PropertyKey::from("detail"),
+                    Value::Null,
+                    true,
+                    true,
+                    true,
+                );
+                self.define_builtin_method(event, "initEvent", BuiltinId::EventInitEvent);
+                self.define_builtin_method(
+                    event,
+                    "initCustomEvent",
+                    BuiltinId::EventInitCustomEvent,
+                );
+                Ok(Value::Object(event))
+            }
+            BuiltinId::EventInitEvent | BuiltinId::EventInitCustomEvent => {
+                let Value::Object(event) = this_value else {
+                    return Err(VmError::TypeError("not an Event".to_string()));
+                };
+                if args.is_empty() {
+                    return Err(VmError::TypeError(
+                        "initEvent requires a type".to_string(),
+                    ));
+                }
+                let event_type = self.to_string_coerced(&args[0])?;
+                let type_value = self.make_string_value(&event_type);
+                self.define_data_property(
+                    event,
+                    PropertyKey::from("type"),
+                    type_value,
+                    true,
+                    true,
+                    true,
+                );
+                for (index, name) in [(1, "bubbles"), (2, "cancelable")] {
+                    let flag = args.get(index).map(|v| self.is_truthy(v)).unwrap_or(false);
+                    self.define_data_property(
+                        event,
+                        PropertyKey::from(name),
+                        Value::Bool(flag),
+                        true,
+                        true,
+                        true,
+                    );
+                }
+                if builtin == BuiltinId::EventInitCustomEvent {
+                    let detail = args.get(3).cloned().unwrap_or(Value::Null);
+                    self.define_data_property(
+                        event,
+                        PropertyKey::from("detail"),
+                        detail,
+                        true,
+                        true,
+                        true,
+                    );
+                }
+                Ok(Value::Undefined)
+            }
             BuiltinId::UrlSearchParamsConstructor => {
                 let pairs = match args.first() {
                     None | Some(Value::Undefined) | Some(Value::Null) => Vec::new(),
@@ -20713,8 +20814,13 @@ impl Vm {
                     _ => Value::Null,
                 })
             }
-            "createEvent" | "createComment" => {
-                // Return a stub event/comment object
+            // `createEvent` is a method, and was an object: every
+            // `document.createEvent("CustomEvent")` threw "object is not
+            // callable" instead of making an event. It is the old way of
+            // making one, and test suites and older libraries both use it.
+            "createEvent" => Ok(self.allocate_builtin_method(BuiltinId::DomDocCreateEvent)),
+            "createComment" => {
+                // Still a stub object, unlike `createEvent` above.
                 Ok(Value::Object(self.allocate_ordinary_object(None)))
             }
             "implementation" => {

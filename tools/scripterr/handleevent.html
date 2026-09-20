@@ -1,0 +1,13 @@
+<div id="t">x</div><pre id="out"></pre><script>
+var L=[]; function t(n,f){ try{ L.push(n+"="+f()); }catch(e){ L.push(n+"!"+e.name+":"+String(e.message).slice(0,40)); } }
+var el = document.getElementById("t");
+var n = 0;
+var obj = { handleEvent: function (e) { n++; this.seen = e.type; } };
+t("add-object", function(){ el.addEventListener("click", obj); return "ok"; });
+t("dispatch", function(){ el.dispatchEvent(new Event("click")); return "ok"; });
+t("count", function(){ return n; });
+t("this-is-obj", function(){ return obj.seen; });
+t("remove", function(){ el.removeEventListener("click", obj); el.dispatchEvent(new Event("click")); return n; });
+var plain = { }; t("no-handleEvent", function(){ el.addEventListener("x", plain); el.dispatchEvent(new Event("x")); return "no-throw"; });
+document.getElementById("out").textContent = L.join(" | ");
+</script>

@@ -1209,6 +1209,20 @@ react.dev だけ撮らんかった一枚が退化しとった。
   持つ頁なら要素名まで出る。実頁には `out` が無いので、**HN の該当部分だけ
   切り出した検体を作る**のが早い。行間か padding か表の行の高さかが、
   推測やのうて名指しで出る。作ってあるのに、まだこの問いに使うてない。
+- **`handleEvent` のオブジェクト形式のリスナー**（2026-09-20）。
+  `addEventListener(type, { handleEvent(e){} })` は仕様どおりの形やのに、
+  tobira は関数しか受け付けず **呼ぶ瞬間に「object is not callable」**を
+  投げとった。`handleEvent` を持つなら**それを、オブジェクト自身を `this`
+  にして**呼ぶ。持たんオブジェクトは**無視**（投げん。browser がそうする）。
+- **`document.createEvent` が関数やのうてオブジェクトやった**（同日）。
+  `createEvent` と `createComment` が同じ腕で「stub の object を返す」に
+  なっとって、`document.createEvent("CustomEvent")` が丸ごと落ちとった。
+  本物のメソッドにして `initEvent` / `initCustomEvent` を付けた
+  （`createComment` は stub のまま）。
+  - この二つで WPT `dom/events` が **79 → 105 assertions**、
+    「object is not callable」68 本が **0 本**。
+  - 次に大きいのは `lengths differ, expected array` 131 本
+    （`composedPath()` 系と思われる。未調査）。
 - **Worker（dedicated）を入れた**（2026-09-20）。`src/worker.rs`。
   **本物の OS スレッド**で、各 worker が自分の `Vm` を持つ。`js.rs` の engine
   スレッドと同じ形（`Vm: !Send` なのでスレッドの中で作る）。

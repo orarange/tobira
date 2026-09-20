@@ -1610,6 +1610,12 @@ css/cssom/style-set-custom-property.html::Setting value for custom property
 css/cssom/system-color-inherit.html::Test color inheritance
 dom/events/AddEventListenerOptions-once.any.html::Multiple once listeners should be invoked even if the stopImmediatePropagation is set
 dom/events/AddEventListenerOptions-passive.any.html::Equivalence of option values
+dom/events/CustomEvent.html::CustomEvent dispatching.
+dom/events/CustomEvent.html::initCustomEvent's default parameter values.
+dom/events/Event-cancelBubble.html::Event.cancelBubble=true must set the stop propagation flag.
+dom/events/Event-cancelBubble.html::cancelBubble must be false when an event is initially created.
+dom/events/Event-cancelBubble.html::stopImmediatePropagation() must set cancelBubble to true.
+dom/events/Event-cancelBubble.html::stopPropagation() must set cancelBubble to true.
 dom/events/Event-constructors.any.html::Event-constructors 10
 dom/events/Event-constructors.any.html::Event-constructors 11
 dom/events/Event-constructors.any.html::Event-constructors 12
@@ -1618,11 +1624,21 @@ dom/events/Event-constructors.any.html::Event-constructors 6
 dom/events/Event-constructors.any.html::Event-constructors 7
 dom/events/Event-constructors.any.html::Event-constructors 8
 dom/events/Event-constructors.any.html::Event-constructors 9
+dom/events/Event-defaultPrevented-after-dispatch.html::Default prevention via preventDefault
+dom/events/Event-defaultPrevented.html::When an event is created, defaultPrevented should be initialized to false.
+dom/events/Event-defaultPrevented.html::initEvent should work correctly (cancelable).
+dom/events/Event-defaultPrevented.html::initEvent should work correctly (not cancelable).
+dom/events/Event-defaultPrevented.html::preventDefault() should change defaultPrevented if cancelable is true.
+dom/events/Event-defaultPrevented.html::preventDefault() should not change defaultPrevented if cancelable is false.
+dom/events/Event-defaultPrevented.html::returnValue should change defaultPrevented if cancelable is true.
+dom/events/Event-defaultPrevented.html::returnValue should not change defaultPrevented if cancelable is false.
 dom/events/Event-dispatch-click.tentative.html::checkbox morphed into another type should not mutate checked state
 dom/events/Event-dispatch-click.tentative.html::disabled checkbox should not be checked from label click
 dom/events/Event-dispatch-click.tentative.html::disabled checkbox should not be checked from label click by dispatchEvent
 dom/events/Event-dispatch-click.tentative.html::disabled radio should not be checked from label click
 dom/events/Event-dispatch-click.tentative.html::disabled radio should not be checked from label click by dispatchEvent
+dom/events/Event-dispatch-detached-click.html::Click event can be dispatched to an element that is not in the document.
+dom/events/Event-dispatch-detached-click.html::Click event on an element not in the document
 dom/events/Event-dispatch-detached-input-and-change.html::detached checkbox should not emit input or change events on click().
 dom/events/Event-dispatch-detached-input-and-change.html::detached checkbox should not emit input or change events on dispatchEvent(new MouseEvent('click')).
 dom/events/Event-dispatch-detached-input-and-change.html::detached radio should not emit input or change events on click().
@@ -1640,6 +1656,10 @@ dom/events/Event-dispatch-single-activation-behavior.html::When clicking child <
 dom/events/Event-dispatch-single-activation-behavior.html::When clicking child <LABEL><BUTTON type=button></BUTTON></LABEL> of parent <INPUT type=checkbox></INPUT>, only child should be activated.
 dom/events/Event-dispatch-single-activation-behavior.html::When clicking child <LABEL><BUTTON type=button></BUTTON></LABEL> of parent <INPUT type=radio></INPUT>, only child should be activated.
 dom/events/Event-dispatch-single-activation-behavior.html::When clicking child <LABEL><BUTTON type=button></BUTTON></LABEL> of parent <LABEL><INPUT type=checkbox></INPUT><SPAN></SPAN></LABEL>, only child should be activated.
+dom/events/Event-initEvent.html::Calling initEvent multiple times (getting type).
+dom/events/Event-initEvent.html::Calling initEvent multiple times (not getting type).
+dom/events/Event-initEvent.html::Tests initEvent's default parameter values.
+dom/events/Event-propagation.html::Newly-created Event
 dom/events/Event-returnValue.html::returnValue should change returnValue if cancelable is true.
 dom/events/Event-stopImmediatePropagation.html::Event's stopImmediatePropagation
 dom/events/Event-subclasses-constructors.html::Event constructor (argument with default values)
@@ -1649,17 +1669,23 @@ dom/events/Event-subclasses-constructors.html::Event constructor (no argument)
 dom/events/Event-subclasses-constructors.html::Event constructor (null argument)
 dom/events/Event-subclasses-constructors.html::Event constructor (undefined argument)
 dom/events/Event-type-empty.html::Constructor
+dom/events/Event-type-empty.html::initEvent
+dom/events/Event-type.html::Event.type should be initialized by initEvent
 dom/events/Event-type.html::Event.type should be initialized by the constructor
+dom/events/Event-type.html::Event.type should initially be the empty string
+dom/events/EventListener-handleEvent.html::calls `handleEvent` method of `EventListener`
 dom/events/EventListener-handleEvent.html::doesn't call `handleEvent` method on callable `EventListener`
+dom/events/EventListener-handleEvent.html::performs `Get` every time event is dispatched
+dom/events/EventListener-handleEvent.html::rethrows errors when getting `handleEvent`
 dom/events/EventListenerOptions-capture.html::Supports capture option
+dom/events/EventTarget-add-listener-platform-object.html::addEventListener with a platform object
 dom/events/EventTarget-add-remove-listener.any.html::Removing an event listener without explicit capture arg should succeed
 dom/events/EventTarget-addEventListener.any.html::Adding a null event listener should succeed
 dom/events/EventTarget-constructible.any.html::A constructed EventTarget can be used as expected
-dom/events/EventTarget-dispatchEvent.html::Capturing event listeners should be called before non-capturing ones
-dom/events/EventTarget-dispatchEvent.html::Event listeners added during dispatch should be called
 dom/events/EventTarget-removeEventListener.any.html::removing a null event listener should succeed
 dom/events/EventTarget-window-constructor.html::Modifying window.constructor does not affect event dispatch
 dom/events/KeyEvent-initKeyEvent.html::KeyboardEvent.initKeyEvent shouldn't be defined (created by constructor)
+dom/events/KeyEvent-initKeyEvent.html::KeyboardEvent.initKeyEvent shouldn't be defined (created by createEvent("KeyboardEvent")
 dom/events/KeyEvent-initKeyEvent.html::KeyboardEvent.prototype.initKeyEvent shouldn't be defined
 dom/events/element-click.html::dynamic querySelectorAll, toggle async
 dom/events/element-click.html::dynamic querySelectorAll, toggle sync
