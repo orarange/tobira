@@ -395,6 +395,18 @@ receiver の own property 数 1 / 20 / 100 / 400 で回すと、O(幅) の処理
       ③ せんかったら `build_styled_tree` の残り（`ComputedStyle` の intern /
       117 フィールドのハッシュ / カスケード / `Arc` 複製）か
       `parse_document`。**そこで初めて三つに割る**。
+      - **属性の量も無罪**（同日、react.dev の保存 HTML で実測）。
+        HTML 266KB の **87% が属性**（4176 個、class は平均 68 文字・最長
+        515 文字の Tailwind）なので容疑者に挙がったが、剥いでも変わらん:
+        ```
+        そのまま          266 KB   1.86 s
+        class を 1 文字に 186 KB   1.84 s
+        class を全部剥ぐ  175 KB   1.83 s   (--cli, SETTLE_MS=0, 3 回の最速)
+        ```
+        **91KB と class の照合を丸ごと落として 1.5%。** 属性の `String` 確保
+        （4176 × 2 回）も `BTreeMap` 挿入も、ここでは効いとらん。
+        ついでに **初回読み込みの 1.8 秒は parse でも styling でもない**
+        （全部剥いでも 1.83 秒）。process 起動とフォント読み込みを疑う所。
       検体二枚（`restyle.html` / `restyle_spread.html`）は**残す** —
       react.dev の再現としては間違いやったが、**索引が効く形と効かん形を
       並べて持っとる**ので索引をいじるときの回帰検体になる。
