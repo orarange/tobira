@@ -1201,6 +1201,14 @@ react.dev だけ撮らんかった一枚が退化しとった。
   - 残りの塊: `Object.getOwnPropertyDescriptor` / `hasOwnProperty` が primitive を
     ToObject せん（22 本。`ObjectKind::Primitive` があるので繋ぐだけ）、
     bigint literal（5 本）、`Math.sumPrecise`（5 本）。
+- **HN と lobste.rs の画素差 10〜11% の正体は、まだ誰も知らん**（2026-09-20）。
+  **二回外しとる**: web font のせい（→ 逆相関。woff 0 本の三枚が一番大きい）、
+  行の積算誤差のせい（→ 累算器を入れても動かず 11.65% / 10.59% のまま）。
+  **次は当てずっぽうをやめて、`tools/pixel/diff.py` が出す「差分の外接矩形が
+  どの要素に重なるか」を読むこと。** geom の検体のように `out` ブロックを
+  持つ頁なら要素名まで出る。実頁には `out` が無いので、**HN の該当部分だけ
+  切り出した検体を作る**のが早い。行間か padding か表の行の高さかが、
+  推測やのうて名指しで出る。作ってあるのに、まだこの問いに使うてない。
 - **CI が 12 本続けて赤かった**（2026-09-20、a4261a2 〜 ed1db4d、f5df304 で修正）。
   手元の `cargo test --release` は 1202/0 で通るのに、CI（**debug build**）で
   `JSON.stringify` の深さ試験が**スタックを溢れさせとった**。**debug は frame が
