@@ -1,0 +1,14 @@
+<html><head><style>body{margin:0;width:800px}
+#a{font-family:monospace} #b{font-family:monospace;font-size:16px}
+#c{font-family:monospace;font-size:1em} #d{font-size:16px;font-family:monospace}
+#e{font:16px monospace} #f{font-family:"Courier New"} #g{font-size:medium;font-family:monospace}
+div{background:#eee}</style></head><body>
+<div id="a">Hxy</div><div id="b">Hxy</div><div id="c">Hxy</div>
+<div id="d">Hxy</div><div id="e">Hxy</div><div id="f">Hxy</div><div id="g">Hxy</div>
+<pre id="out"></pre><script>
+document.getElementById('out').textContent='a b c d e f g'.split(' ').map(function(id){
+ var el=document.getElementById(id), r=el.getBoundingClientRect();
+ return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height)+
+   ' size='+getComputedStyle(el).fontSize;
+}).join('\n');
+</script></body></html>

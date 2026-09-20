@@ -1523,6 +1523,13 @@ pub struct ComputedStyle {
     pub height: Option<LengthValue>,
     pub font_size_mpx: u32,
     pub font_family: FontFamilyKind,
+    /// No absolute size has been given to this text: it is `medium`, or a
+    /// multiple of whatever `medium` turned out to be (`1em`, `90%`,
+    /// `smaller`). Monospace text in that state is sized from 13px rather
+    /// than 16px in every browser -- a quirk old enough that pages are built
+    /// around it, and `<pre>` and `<code>` read a size too large without it.
+    /// An explicit `12px` or `0.75rem` ends it.
+    pub font_size_is_medium: bool,
     pub text_align: TextAlign,
     /// `text-wrap: balance` -- spread the run over the same number of lines,
     /// but as evenly as they will go.
@@ -1783,6 +1790,7 @@ impl ComputedStyle {
             width: None,
             height: None,
             font_size_mpx: parent_font_size_mpx,
+            font_size_is_medium: parent.map(|s| s.font_size_is_medium).unwrap_or(true),
             font_family: parent
                 .map(|s| s.font_family)
                 .unwrap_or(FontFamilyKind::Sans),
@@ -3166,6 +3174,9 @@ pub const INITIAL_FONT_SIZE_MPX: u32 = 16 * MPX;
 /// layout stays in whole pixels -- only the type size carries the fraction.
 pub const MPX: u32 = 10_000;
 
+/// What `medium` means for monospace text: 13px, not 16.
+pub const MONOSPACE_MEDIUM_FONT_SIZE_MPX: u32 = 13 * MPX;
+
 /// A length in [`MPX`]ths as CSS writes it: "13.3333px", "16px".
 pub fn css_px_string(value_mpx: u32) -> String {
     if value_mpx % MPX == 0 {
@@ -4465,8 +4476,40 @@ fn compute_style_with_rules(
     }
 
     blockify(&mut style, parent_style);
+    apply_monospace_default_size(&mut style);
 
     style
+}
+
+/// Monospace text nobody has given a size to is 13px, not 16px.
+///
+/// Every browser does this, and has since Netscape: a `<pre>` or `<code>`
+/// block set in the generic monospace family comes out a size smaller than
+/// the surrounding prose, and pages are built expecting it. Without it every
+/// code listing on the web reads one step too large, and the block is taller
+/// than the page's author drew it.
+///
+/// The condition is that nothing has *said* a size: an explicit `font-size`,
+/// in any unit, wins, and so does one inherited from an element that had one.
+fn apply_monospace_default_size(style: &mut ComputedStyle) {
+    if style.font_family == FontFamilyKind::Monospace && style.font_size_is_medium {
+        // Rebased, not replaced: `font-size: 90%` on monospace is 90% of 13px,
+        // because the percentage was of a `medium` that should have been 13
+        // all along.
+        style.font_size_mpx = (style.font_size_mpx as u64
+            * MONOSPACE_MEDIUM_FONT_SIZE_MPX as u64
+            / INITIAL_FONT_SIZE_MPX as u64) as u32;
+    }
+}
+
+/// Whether a `font-size` value leaves the text still measured from whatever
+/// `medium` is -- which is what the monospace default hangs on. A multiple
+/// (`1em`, `90%`, `smaller`) does; a length in absolute units does not.
+fn font_size_keeps_the_default_basis(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    matches!(value.as_str(), "medium" | "smaller" | "larger")
+        || value.ends_with('%')
+        || (value.ends_with("em") && !value.ends_with("rem"))
 }
 
 /// Some contexts force a box to be block-level whatever `display` asked for
@@ -5203,6 +5246,7 @@ fn apply_declaration(style: &mut ComputedStyle, declaration: &Declaration, paren
         "font-size" => {
             if let Some(font_size) = parse_font_size(value, parent_font_size_mpx) {
                 style.font_size_mpx = font_size.max(8 * MPX);
+                style.font_size_is_medium = font_size_keeps_the_default_basis(value);
             }
         }
         "font-family" => {
@@ -8250,6 +8294,7 @@ fn parse_font_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size
             let parts: Vec<&str> = token.splitn(2, '/').collect();
             if let Some(size) = parse_font_size(parts[0], parent_font_size_mpx) {
                 style.font_size_mpx = size.max(8 * MPX);
+                style.font_size_is_medium = font_size_keeps_the_default_basis(parts[0]);
             }
             if parts.len() > 1 {
                 style.line_height = parse_line_height(parts[1], style.font_size_mpx);
@@ -8259,6 +8304,7 @@ fn parse_font_shorthand(style: &mut ComputedStyle, value: &str, parent_font_size
         // plain size
         if let Some(size) = parse_font_size(token, parent_font_size_mpx) {
             style.font_size_mpx = size.max(8 * MPX);
+            style.font_size_is_medium = font_size_keeps_the_default_basis(token);
             continue;
         }
         // Everything from here on is the family list, and it is read whole:
