@@ -113,8 +113,13 @@ pub enum WorkerEvent {
     Message(HostData),
     /// The worker threw, or its script would not load. The document sees an
     /// `error` event; a failure that is never reported is a page that waits
-    /// for a reply forever.
-    Error(String),
+    /// for a reply forever. `filename` is the worker's script URL, which is
+    /// what `ErrorEvent.filename` reports.
+    Error {
+        message: String,
+        filename: String,
+        lineno: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

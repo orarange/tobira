@@ -1230,6 +1230,14 @@ react.dev だけ撮らんかった一枚が退化しとった。
     detach したスレッドを終了時に待つ者はおらん。上限 32 本。
   - 数字: WPT `workers` **17 → 51 assertions**、検体
     `tools/scripterr/worker.html` が **Chrome と一致**（`SharedWorker` 以外）。
+  - worker の失敗は **`ErrorEvent`**（`message` / `filename` / `lineno` /
+    `colno` / `error` と `Symbol.toStringTag = "ErrorEvent"`）。
+    WPT workers 51 → **56**。
+  - **やって戻した**: 仕様では `new Worker("does-not-exist.js")` は**成功して
+    後で `error` が飛ぶ**（構築では投げん）。そう直したら **54 → 41 に落ちた** —
+    それまで throw で止まっとった頁が先へ進んで別の所で死ぬようになった。
+    **誰も拾わんエラーがどうなるか**を先に解かんと直せん。`worker.rs` の
+    `spawn_failed` は残してある（呼ばれとらん）。
   - 残り: `Worker could not start: Network` 21 本（data:/blob: の URL）、
     `SharedWorker` 57 本、報告せず死ぬ頁 68 本。
 - **CI が 12 本続けて赤かった**（2026-09-20、a4261a2 〜 ed1db4d、f5df304 で修正）。

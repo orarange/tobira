@@ -6617,15 +6617,62 @@ impl Vm {
             let Some(object) = self.worker_objects.get(&worker.0).copied() else {
                 continue;
             };
-            let (event_type, payload) = match event {
-                WorkerEvent::Message(data) => ("message", self.host_data_to_value(data)),
-                WorkerEvent::Error(message) => {
-                    ("error", self.make_string_value(&message))
+            let (event_type, payload, failure) = match event {
+                WorkerEvent::Message(data) => {
+                    ("message", self.host_data_to_value(data), None)
+                }
+                WorkerEvent::Error {
+                    message,
+                    filename,
+                    lineno,
+                } => {
+                    let text = self.make_string_value(&message);
+                    ("error", text, Some((filename, lineno)))
                 }
             };
             let key = if event_type == "message" { "data" } else { "message" };
             let event_object =
                 self.build_message_event(event_type, key, payload, Value::Object(object));
+            if let Some((filename, lineno)) = failure {
+                // An `error` event is an ErrorEvent: a page reads `filename`
+                // and `lineno` to say where, and `'' + event` to say what.
+                let name = self.make_string_value(&filename);
+                self.define_data_property(
+                    event_object,
+                    PropertyKey::from("filename"),
+                    name,
+                    true,
+                    true,
+                    true,
+                );
+                for (field, number) in [("lineno", lineno), ("colno", 0)] {
+                    self.define_data_property(
+                        event_object,
+                        PropertyKey::from(field),
+                        Value::Number(f64::from(number)),
+                        true,
+                        true,
+                        true,
+                    );
+                }
+                self.define_data_property(
+                    event_object,
+                    PropertyKey::from("error"),
+                    Value::Null,
+                    true,
+                    true,
+                    true,
+                );
+                let tag = self.make_string_value("ErrorEvent");
+                self.define_data_property(
+                    event_object,
+                    PropertyKey::Symbol(SymbolId(SYMBOL_TO_STRING_TAG_ID)),
+                    tag,
+                    false,
+                    false,
+                    true,
+                );
+            }
             let argument = Value::Object(event_object);
 
             // `onmessage` first, then anything `addEventListener` added.
@@ -14543,8 +14590,18 @@ impl Vm {
                     }
                     Some(value) => self.to_string_coerced(value)?,
                 };
+                // A URL that will not parse is a SyntaxError from the
+                // constructor; anything else about the script -- missing,
+                // refused, throwing -- is an `error` event later, and the
+                // object is handed back either way.
                 let id = self.host.spawn_worker(&url).map_err(|error| {
-                    VmError::TypeError(format!("Worker could not start: {error:?}"))
+                    // A URL that will not parse: the constructor throws.
+                    // Everything else is reported as an `error` event.
+                    let thrown = self.create_error_object(
+                        "SyntaxError",
+                        format!("Worker: {url} is not a URL ({error:?})"),
+                    );
+                    VmError::Thrown(thrown)
                 })?;
                 let prototype = self.worker_prototype_ref();
                 let object = self.heap.allocate_object(JsObject {

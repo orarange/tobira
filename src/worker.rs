@@ -80,9 +80,38 @@ impl WorkerPool {
         Ok(id)
     }
 
+    /// A worker whose script could not be fetched at all.
+    ///
+    /// `new Worker("does-not-exist.js")` **succeeds**: the page gets a
+    /// `Worker` object and hears about the failure as an `error` event, the
+    /// same way it would hear about the script throwing. Refusing in the
+    /// constructor instead -- which is what a synchronous fetch tempts you
+    /// into -- breaks every page that starts a worker inside a `try` and
+    /// expects `onerror` rather than a throw.
+    pub fn spawn_failed(&mut self, url: String, why: String) -> HostResult<WorkerId> {
+        if self.sender.is_none() {
+            let (sender, receiver) = channel();
+            self.sender = Some(sender);
+            self.from_workers = Some(receiver);
+        }
+        self.next_id += 1;
+        let id = WorkerId(self.next_id);
+        let _ = self.sender.as_ref().expect("just made").send((
+            id,
+            WorkerEvent::Error {
+                message: why,
+                filename: url,
+                lineno: 0,
+            },
+        ));
+        Ok(id)
+    }
+
     pub fn post(&mut self, worker: WorkerId, data: HostData) -> HostResult<()> {
         let Some((_, thread)) = self.workers.iter().find(|(id, _)| *id == worker) else {
-            return Err(HostError::Unsupported);
+            // A worker that never started: the page may still post to it,
+            // and the message goes nowhere, as it does in a browser.
+            return Ok(());
         };
         thread
             .to_worker
@@ -227,7 +256,11 @@ fn run_worker(
     if let Err(error) = vm.eval_source(&source) {
         let _ = back.send((
             id,
-            WorkerEvent::Error(format!("{url}: {error}")),
+            WorkerEvent::Error {
+                message: format!("{error}"),
+                filename: url.clone(),
+                lineno: 0,
+            },
         ));
         return;
     }
@@ -239,7 +272,14 @@ fn run_worker(
                     continue;
                 }
                 if let Err(error) = vm.dispatch_worker_message(data) {
-                    let _ = back.send((id, WorkerEvent::Error(format!("{error}"))));
+                    let _ = back.send((
+                        id,
+                        WorkerEvent::Error {
+                            message: format!("{error}"),
+                            filename: url.clone(),
+                            lineno: 0,
+                        },
+                    ));
                 }
                 // Timers and promises the handler queued, before the next
                 // message is taken: a worker has its own event loop.
@@ -280,7 +320,7 @@ mod tests {
             for (_, event) in pool.take_events() {
                 match event {
                     WorkerEvent::Message(data) => seen.push(data),
-                    WorkerEvent::Error(message) => panic!("worker failed: {message}"),
+                    WorkerEvent::Error { message, .. } => panic!("worker failed: {message}"),
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -306,7 +346,7 @@ mod tests {
         let mut reported = None;
         while reported.is_none() && std::time::Instant::now() < deadline {
             for (_, event) in pool.take_events() {
-                if let WorkerEvent::Error(message) = event {
+                if let WorkerEvent::Error { message, .. } = event {
                     reported = Some(message);
                 }
             }

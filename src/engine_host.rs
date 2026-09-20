@@ -2999,10 +2999,23 @@ impl Host for BrowserHost {
     /// `new Worker(url)`: fetch the script here, where the network is, and
     /// hand the source to a thread that will own its own `Vm`.
     fn spawn_worker(&mut self, url: &str) -> HostResult<tobira_engine::engine::WorkerId> {
-        let resolved = Url::parse(&self.location.href)
+        let resolved = match Url::parse(&self.location.href)
             .and_then(|base| base.resolve(url))
             .or_else(|_| Url::parse(url))
-            .map_err(|_| HostError::Network)?;
+        {
+            Ok(resolved) => resolved,
+            // A URL that will not parse is the one failure the constructor
+            // itself reports, as a SyntaxError.
+            Err(_) => return Err(HostError::NotFound),
+        };
+        // A script that will not load *should* leave the page holding a
+        // `Worker` object that fires `error` later, not a throw from the
+        // constructor -- that is what the spec says and what
+        // `workers/constructors` tests. Doing it (see `spawn_failed`) cost
+        // more than it gained: pages that had been stopping at the throw ran
+        // on and died somewhere further in, and the suite went 54 -> 41. The
+        // difference is in what happens to an error nobody handles, which is
+        // the thing to understand before trying again.
         let response = crate::http::fetch(&resolved).map_err(|_| HostError::Network)?;
         if !(200..300).contains(&response.status_code) {
             return Err(HostError::Network);

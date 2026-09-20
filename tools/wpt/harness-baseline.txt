@@ -3190,7 +3190,12 @@ workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-messa
 workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::string
 workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::structured clone of message
 workers/interfaces/DedicatedWorkerGlobalScope/postMessage/structured-clone-message.html::true
+workers/interfaces/WorkerGlobalScope/close/incoming-message.html::close() and incoming message
 workers/interfaces/WorkerGlobalScope/close/sending-messages.html::close() and sending messages
+workers/interfaces/WorkerGlobalScope/close/setInterval.html::close() and setInterval
+workers/interfaces/WorkerGlobalScope/close/setTimeout.html::close() and setTimeout
+workers/interfaces/WorkerGlobalScope/onerror/not-handled.html::Not handled evaluation error => Worker error listener
+workers/interfaces/WorkerGlobalScope/onerror/not-handled.html::Not handled evaluation error => Worker.onerror handler
 workers/interfaces/WorkerUtils/WindowTimers/002.html::clearTimeout
 workers/interfaces/WorkerUtils/WindowTimers/004.html::clearInterval
 workers/interfaces/WorkerUtils/navigator/002.html::navigator.appName
