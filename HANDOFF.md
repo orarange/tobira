@@ -1201,6 +1201,31 @@ react.dev だけ撮らんかった一枚が退化しとった。
   - 残りの塊: `Object.getOwnPropertyDescriptor` / `hasOwnProperty` が primitive を
     ToObject せん（22 本。`ObjectKind::Primitive` があるので繋ぐだけ）、
     bigint literal（5 本）、`Math.sumPrecise`（5 本）。
+- **`@font-face` が無い**（2026-09-20 に判明。Mac が気付いた）。`src/` 全体を
+  `font-face` / `woff` で grep して **0 件**。`font.rs` は
+  `WINDOWS_FAMILY_FILES` と `family_is_installed` で `C:\Windows\Fonts` の中
+  だけを引く。**web font は一つも読んどらん。** 意図して落としたのか、たまたま
+  無いのかも記録されとらんかったので、ここに書く。**いまは「未実装」。**
+  直すなら WOFF2 の展開（brotli）と字体の読み込みが要るので小さい仕事やない。
+  - 分かっとる症状: MDN の装飾が **icon font の元文字のまま**出る
+    （`/////// +++++ {{{{{}}}}` の塊。Chrome は点線の円の模様）。
+  - **ただし「画素差分の底」ではない**（Mac の仮説、測って否定）。六枚の
+    woff 参照の数と画素差分を並べると **逆相関**: react.dev は woff 9 本で
+    5.83%、MDN 2 本で 82%（theme の件）、**Wikipedia と HN と lobste.rs は
+    woff 0 本なのに 11.5% / 11.4% / 10.6%**。
+  - HN（web font 無し）の差分マスクを見たら、**一行ずつ下にずれて二重写し**に
+    なっとった。行の高さの累積誤差で、下に行くほど開く。つまり底は
+    **行の高さと leading**。いま追っとる `sup` / `g2` / `g4` の束と同じ根。
+- **WPT の reftest を走らせる計器**（2026-09-20、`tools/wpt/reftest.py`）。
+  reftest は「test と ref が同じ絵になるか」なので **browser は一つで足りる**。
+  tobira に両方描かせて画素完全一致を見る（同じエンジンが両方描くので
+  アンチエイリアスの言い訳が要らん。閾値 0）。`tools/pixel` が「Chrome に
+  似とるか」を % で答えるのに対し、こっちは「仕様どおりか」を yes/no で答える。
+  - 最初の対象は `css/CSS2/linebox/`（11 本の reftest）。**6/11**。
+    落ちとる 5 本が全部 leading と vertical-align の族。
+    `fractional-line-height` は頁が ref より **8px 高い**。
+  - baseline.txt 方式。`tests/fixtures/wpt/` に vendoring（1.3MB、commit は
+    README）。
 - **font-size を整数 px から 1/10000 px の固定小数にした**（2026-09-20）。
   `ComputedStyle::font_size_mpx`（旧 `font_size_px`）。`font-size: 0.8333em` を
   Chrome は 13.3333px で持つのに、tobira は **13px に丸めてから字を測っとった**。
