@@ -38,6 +38,7 @@ python tools/geom/cmp.py g4.html
 | `fsize.html` | text width at fractional type sizes | 8/12 |
 | `lineheight2.html` | line height at fractional type sizes | 14/14 |
 | `sup.html` | superscripts and `vertical-align` | 2/10 |
+| `drift.html` | twenty one-line blocks and one ten-line block at `line-height: 1.15`, where 18.4px a line either accumulates or is lost | 1/6 |
 | `leading.html` | half-leading: `line-height` against the face's own content area, at nine sizes, in three families, with a taller inline inside a shorter line, and eight identical rows to show drift | 9/22 |
 | `details.html` | a closed `<details>` folds its contents away | 3/6 |
 | `hidden.html` | the `hidden` attribute | 7/7 |

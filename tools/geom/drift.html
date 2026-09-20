@@ -1,0 +1,14 @@
+<html><head><style>body{margin:0;font:16px Arial;width:800px}
+p{margin:0;line-height:1.15}
+</style></head><body>
+<p id="p1">line</p><p>line</p><p>line</p><p>line</p><p id="p5">line</p>
+<p>line</p><p>line</p><p>line</p><p>line</p><p id="p10">line</p>
+<p>line</p><p>line</p><p>line</p><p>line</p><p id="p15">line</p>
+<p>line</p><p>line</p><p>line</p><p>line</p><p id="p20">line</p>
+<div id="block" style="line-height:1.15">a<br>b<br>c<br>d<br>e<br>f<br>g<br>h<br>i<br>j</div>
+<pre id="out"></pre><script>
+document.getElementById('out').textContent='p1 p5 p10 p15 p20 block'.split(' ').map(function(id){
+ var r=document.getElementById(id).getBoundingClientRect();
+ return id+' '+Math.round(r.x)+','+Math.round(r.y)+' '+Math.round(r.width)+'x'+Math.round(r.height);
+}).join('\n');
+</script></body></html>
