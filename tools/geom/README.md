@@ -27,7 +27,10 @@ python tools/geom/cmp.py g4.html
 | `layer.html` | opacity / transform layers | 5/5 |
 | `radius.html` | `border-radius` shorthand forms | 5/6 |
 | `radius2.html` | each corner read back separately | 7/8 |
-| `mask.html` | `mask-image` | Chrome writes nothing — probe is broken |
+| `faces.html` | which font file each family actually loads | 4/8 |
+| `units.html` | every length unit, resolved | 4/9 |
+| `xform.html` | `transform` boxes | 5/6 |
+| `mask.html` | `mask-image` | a picture, not a score: no `<pre id="out">`, look at it |
 | `scrollbar.html` | when a scrollbar takes room | 7/7 |
 | `overflow.html` | overflow in a narrow parent | 10/17 |
 | `overflow2.html` | `overflow-x` / `-y` set apart | 12/12 |
@@ -40,10 +43,24 @@ python tools/geom/cmp.py g4.html
 | `carousel.html` | a horizontally scrolling strip of cards | 11/13 |
 | `flexgap.html` | `gap` on a flex row, and the row's own box | 9/9 |
 | `visuallyhidden.html` | screen-reader-only text, and where it sits | 4/7 |
-| `noah.html` | fifty unclosed `<font>`: the Noah's Ark clause caps them at three per paragraph | counts, not geometry — 99 vs Chrome 96 |
+| `noah.html` | fifty unclosed `<font>`: the Noah's Ark clause caps them at three per paragraph | 5/5 |
 
-Scores are from 2026-09-10 (late) at 1280px. They are not asserted anywhere — this is
-a hand-run tool, not a test.
+Scores are from **2026-09-20** at 1280px, every page rescored the same day
+against the Chrome of that day: **283 / 368 = 76.9%** over the 31 pages that
+carry an `out` block. They are not asserted anywhere — this is a hand-run
+tool, not a test. Re-run the lot and put today's numbers here rather than
+trusting the column; the old ones had drifted by ten days.
+
+`arrow.html`, `arrow2.html`, `arrow3.html`, `arrow4.html` and `mask.html`
+write no `out` block. They are pictures to look at with `--screenshot`, not
+probes `cmp.py` can score, and it says "chrome: no output" for them.
+
+Weakest first, which is where to work: `sup` 2/10, `fsize` 3/12, `details`
+3/6, `faces` 4/8, `units` 4/9, `visuallyhidden` 4/7, `g6b` 17/32,
+`overflow` 10/17, `lineheight2` 7/14, `g2` 14/22. **`fsize` and
+`lineheight2` share one cause**: `ComputedStyle::font_size_px` is a `u32`, so
+`font-size: 0.8333em` computes 13 where Chrome keeps 13.3333, and every text
+width downstream drifts.
 
 **Read which axis is wrong before deciding what a page is telling you.** Three
 of these were misread that way. `tablew` sat at 0/6 and looked like a table
